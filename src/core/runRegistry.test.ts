@@ -241,11 +241,12 @@ describe("RunRegistry.subscribe — replay budget", () => {
     expect("elided" in got).toBe(false);
   });
 
-  it("a finished run replays within the budget, reports the range, then fires onSealed (the end frame)", () => {
+  it("a sealed run replays within the budget, reports the range, then fires onSealed (the end frame)", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     for (let i = 1; i <= 5; i++) reg.publish(id, call(`e${i}`));
     reg.finish(id);
+    reg.seal(id);
     const seen: RunEvent[] = [];
     let finished = false;
     const got = reg.subscribe(id, token, {
@@ -274,7 +275,7 @@ describe("RunRegistry.unsubscribe", () => {
 });
 
 describe("RunRegistry.finish", () => {
-  it("notifies a live subscriber via onSealed (the end frame) and stops forwarding content events", () => {
+  it("notifies a live subscriber via onSealed (the end frame) once the finished run is sealed, and stops forwarding content events at finish", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
@@ -282,16 +283,19 @@ describe("RunRegistry.finish", () => {
     reg.subscribe(id, token, { onEvent: (e) => seen.push(e), onSealed: () => (finished = true) });
     reg.publish(id, call("during"));
     reg.finish(id);
+    expect(finished).toBe(false);
+    reg.seal(id);
     expect(finished).toBe(true);
     reg.publish(id, call("after-finish")); // no-op after finish
     expect(seen).toEqual([seq(1, call("during"))]);
   });
 
-  it("a subscriber that arrives after finish (within TTL) replays the backlog then gets onSealed immediately", () => {
+  it("a subscriber that arrives after the seal (within TTL) replays the backlog then gets onSealed immediately", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     reg.publish(id, call("happened"));
     reg.finish(id);
+    reg.seal(id);
     const seen: RunEvent[] = [];
     let finished = false;
     const unsub = reg.subscribe(id, token, { onEvent: (e) => seen.push(e), onSealed: () => (finished = true) });
@@ -308,7 +312,7 @@ describe("RunRegistry.finish", () => {
 
 // Feature: features/live-view.md item 4, features/tracing.md — finish and seal.
 describe("RunRegistry — finish and seal", () => {
-  it("finish sends `finished` to attached subscribers and, under `sealAtFinish`, seals from the same clock read: one index upsert, `finished` then `end`, sealedAt === finishedAt even when the clock ticks between statements", () => {
+  it("finish sends `finished` to attached subscribers and leaves them attached; the seal, later, sends `end` from its own clock read — two index upserts per run, one each", () => {
     let t = 1000;
     const reg = new RunRegistry({ genId: () => "id-1", genToken: () => "tok-1", now: () => t++ }); // every read ticks
     const { id, token } = reg.create();
@@ -325,13 +329,17 @@ describe("RunRegistry — finish and seal", () => {
     expect(index.length - before).toBe(1); // one index event per finish
     const row = reg.getById(id)!;
     expect(row.finishedAt).toBeDefined();
-    expect(row.sealedAt).toBe(row.finishedAt);
-    expect(row.replyOk).toBeUndefined();
-    expect(order).toEqual([`finished@${row.finishedAt}`, `end@${row.sealedAt}:undefined`]);
+    expect(row.sealedAt).toBeUndefined();
+    expect(order).toEqual([`finished@${row.finishedAt}`]);
+    reg.seal(id, { replyOk: true });
+    expect(index.length - before).toBe(2); // and one per seal
+    const sealed = reg.getById(id)!;
+    expect(sealed.sealedAt).toBeGreaterThan(sealed.finishedAt!);
+    expect(order).toEqual([`finished@${row.finishedAt}`, `end@${sealed.sealedAt}:true`]);
   });
 
-  it("without `sealAtFinish`: finish keeps subscribers attached; span records publish after finish (forwarded, counted, no index repaint); content after finish is dropped; seal detaches with the `end` frame, upserts once and returns the events since finish", () => {
-    const { reg } = testRegistry({ sealAtFinish: false });
+  it("finish keeps subscribers attached; span records publish after finish (forwarded, counted, no index repaint); content after finish is dropped; seal detaches with the `end` frame, upserts once and returns the events since finish", () => {
+    const { reg } = testRegistry();
     const { id, token } = reg.create();
     reg.publish(id, call("x"));
     const seen: RunEvent[] = [];
@@ -368,7 +376,7 @@ describe("RunRegistry — finish and seal", () => {
   });
 
   it("a late subscriber to a finished-unsealed run gets the replay and `finished` and stays attached until the seal's `end`; to a sealed run it gets `finished` then `end` at once and never attaches", () => {
-    const { reg } = testRegistry({ sealAtFinish: false });
+    const { reg } = testRegistry();
     const { id, token } = reg.create();
     reg.publish(id, call("x"));
     reg.finish(id);
@@ -398,7 +406,7 @@ describe("RunRegistry — finish and seal", () => {
   });
 
   it("seal on a live run is a no-op with no stamps; on an unknown run, the empty result", () => {
-    const { reg } = testRegistry({ sealAtFinish: false });
+    const { reg } = testRegistry();
     const { id, token } = reg.create();
     expect(reg.seal(id, { replyOk: true })).toEqual({ events: [], eventCount: 0 });
     const seen: RunEvent[] = [];
@@ -410,7 +418,7 @@ describe("RunRegistry — finish and seal", () => {
   });
 
   it("the sweep evicts a sealed run at sealedAt + TTL, and holds a finished-unsealed run for UNSEALED_HOLD_MS before sealing it (its subscriber gets `end`, no replyOk) and evicting it", () => {
-    const { reg, tick } = testRegistry({ ttlMs: 60_000, sealAtFinish: false });
+    const { reg, tick } = testRegistry({ ttlMs: 60_000 });
     const removed: string[] = [];
     reg.subscribeIndex((e) => {
       if (e.type === "removed") removed.push(e.id);
@@ -433,7 +441,7 @@ describe("RunRegistry — finish and seal", () => {
   });
 
   it("sealAllFinished seals every finished-unsealed run with the given replyOk, leaves live and sealed runs alone, and returns the count", () => {
-    const { reg } = testRegistry({ sealAtFinish: false });
+    const { reg } = testRegistry();
     const live = reg.create("live");
     const done = reg.create("done");
     const sealed = reg.create("sealed");
@@ -530,6 +538,7 @@ describe("RunRegistry.listActive", () => {
     const { id } = reg.create("done-soon");
     reg.publish(id, call("x"));
     reg.finish(id);
+    reg.seal(id); // the TTL runs from the seal
 
     tick(59_000); // still within TTL
     const still = reg.listActive();
@@ -553,6 +562,7 @@ describe("RunRegistry — finished-run eviction after TTL", () => {
     const { id, token } = reg.create();
     reg.publish(id, call("x"));
     reg.finish(id);
+    reg.seal(id); // the TTL runs from the seal
 
     tick(59_000); // still within TTL
     expect(reg.has(id, token)).toBe(true);
@@ -673,6 +683,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     const { reg, tick } = testRegistry({ ttlMs: 60_000 });
     const { id } = reg.create();
     reg.finish(id);
+    reg.seal(id); // the TTL runs from the seal
     const events: IndexEvent[] = [];
     reg.subscribeIndex((ev) => events.push(ev));
     events.length = 0; // drop the replay upsert
@@ -767,7 +778,6 @@ describe("RunRegistry.markPersisted", () => {
           finished: true,
           startedAt: 1000,
           finishedAt: 1000,
-          sealedAt: 1000, // sealAtFinish: the seal stamp is the finish stamp
           eventCount: 0,
           persisted: true,
         },
@@ -780,6 +790,7 @@ describe("RunRegistry.markPersisted", () => {
     const { reg, tick } = testRegistry({ ttlMs: 10 });
     const { id } = reg.create();
     reg.finish(id);
+    reg.seal(id); // the TTL runs from the seal
     tick(20);
     reg.listActive(); // sweep → evicted
     const events: IndexEvent[] = [];
@@ -1036,6 +1047,7 @@ describe("RunRegistry — token-free operator reads (#157 U5, KTD7)", () => {
     expect(reg.getById("nope")).toBeNull();
     expect(reg.snapshotById("nope")).toBeNull();
     reg.finish(id);
+    reg.seal(id); // the TTL runs from the seal
     tick(60_001);
     expect(reg.getById(id)).toBeNull();
     expect(reg.snapshotById(id)).toBeNull();

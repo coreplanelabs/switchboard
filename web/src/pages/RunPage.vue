@@ -13,6 +13,8 @@ import {
   createRunPageModel,
   liveWait,
   modelName,
+  deliveryCaption,
+  parseEndFrame,
   parseFinishedFrame,
   parseReplayElided,
   runnerNow,
@@ -48,7 +50,9 @@ const model = createRunPageModel({
 const state = model.state;
 
 // ---- header state ----------------------------------------------------------
-type Phase = "connecting" | "running" | "stopping" | "disconnected" | "ended";
+/** `finished`: the agent stopped (the `finished` frame); the reply is on its way
+ *  and the stream stays open until `end` (features/tracing.md). */
+type Phase = "connecting" | "running" | "stopping" | "finished" | "disconnected" | "ended";
 const phase = ref<Phase>(isHistory ? "ended" : "connecting");
 const stopError = ref("");
 const nowWall = ref(Date.now());
@@ -57,6 +61,9 @@ const nowWall = ref(Date.now());
 // server stamp minus the browser's clock. Frozen at `end` at the value it had.
 const runClock = seed?.mode === "live" ? createRunClock(seed, nowWall.value) : null;
 const frozenMs = ref<number | undefined>(undefined);
+/** The stamps a live page learns from the `finished` and `end` frames — the
+ *  delivery caption's inputs. A history page reads the seed's. */
+const liveStamps = ref<{ finishedAt?: number; sealedAt?: number; replyOk?: boolean }>({});
 
 /** The outcome chip once ended: the history seed's record status, or — on a
  *  live page — the stop the viewer knows about; an unstopped end is the honest
@@ -81,6 +88,14 @@ const endChip = computed(() => {
   };
 });
 const endMs = computed(() => (isHistory && seed?.mode === "history" ? seed.durationMs : frozenMs.value));
+/** `delivered in 2s` / `reply failed` / nothing (live-view item 22; tracing.md). */
+const delivery = computed(() =>
+  deliveryCaption(
+    isHistory && seed?.mode === "history"
+      ? { finishedAt: seed.finishedAt, sealedAt: seed.sealedAt, replyOk: seed.replyOk }
+      : liveStamps.value,
+  ),
+);
 const endDuration = computed(() => (endMs.value === undefined ? "" : formatDuration(endMs.value, "clock")));
 // The header's total is painted on the run scale (item 24): a 40-minute run
 // announces itself before the reader scrolls to find where the time went.
@@ -97,6 +112,9 @@ const headerText = computed(() => {
   if (phase.value === "connecting") return "connecting…";
   if (phase.value === "disconnected") return "disconnected";
   if (phase.value === "stopping") return `stopping (${state.stopMode ?? "soft"})`;
+  // The agent stopped: the total is frozen at the finish stamp; the reply is in flight.
+  if (phase.value === "finished")
+    return frozenMs.value === undefined ? "delivering…" : `delivering… · ${formatDuration(frozenMs.value, "clock")}`;
   return runClock ? `running · ${formatDuration(runClock.elapsedMs(nowWall.value), "clock")}` : "running";
 });
 const pulseCls = computed(() =>
@@ -104,7 +122,9 @@ const pulseCls = computed(() =>
     ? "text-bad"
     : phase.value === "running"
       ? "text-ok motion-safe:animate-pulse"
-      : "text-warn motion-safe:animate-pulse",
+      : phase.value === "finished"
+        ? "text-ok" // connected, nothing running: the pulse stops
+        : "text-warn motion-safe:animate-pulse",
 );
 
 // ---- stop control (#101) -----------------------------------------------------
@@ -136,7 +156,8 @@ function markStopping(mode: "soft" | "hard"): void {
 watch(
   () => state.stopMode,
   (mode) => {
-    if (mode && phase.value !== "ended" && phase.value !== "disconnected") markStopping(mode);
+    if (mode && phase.value !== "ended" && phase.value !== "disconnected" && phase.value !== "finished")
+      markStopping(mode);
   },
 );
 
@@ -144,9 +165,11 @@ watch(
 // gray once it ended or the stream dropped. A history page is idle by
 // definition — the shell's gray dot already says so.
 if (!isHistory) {
-  watch(phase, (p) => browser.setFavicon(p === "ended" || p === "disconnected" ? FAVICON_IDLE : FAVICON_LIVE), {
-    immediate: true,
-  });
+  watch(
+    phase,
+    (p) => browser.setFavicon(p === "ended" || p === "disconnected" || p === "finished" ? FAVICON_IDLE : FAVICON_LIVE),
+    { immediate: true },
+  );
 }
 
 // ---- what is happening now ------------------------------------------------------
@@ -157,7 +180,9 @@ if (!isHistory) {
 // the last stamped event) that the real step replaces when the turn lands.
 // The header times the WHOLE run. There is no separate "tail": the timeline
 // is live, and its last row is now.
-const live = computed(() => !isHistory && phase.value !== "ended" && phase.value !== "disconnected");
+const live = computed(
+  () => !isHistory && phase.value !== "ended" && phase.value !== "disconnected" && phase.value !== "finished",
+);
 const runnerClock = computed(() => (live.value ? runnerNow(state, nowWall.value) : null));
 provide(RunnerClockKey, runnerClock);
 const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall(), nowWall.value) : null));
@@ -261,11 +286,17 @@ onMounted(() => {
   es.addEventListener("finished", (data) => {
     const frame = parseFinishedFrame(data);
     if (frame && runClock) frozenMs.value = runClock.elapsedAt(frame.finishedAt);
+    if (frame) liveStamps.value = { ...liveStamps.value, finishedAt: frame.finishedAt };
+    // The agent stopped: nothing runs, the actions go, the reply is on its way.
+    // A stop in flight keeps its word (like `markStopping`).
+    actionsHidden.value = true;
+    if (phase.value === "connecting" || phase.value === "running") phase.value = "finished";
   });
-  es.addEventListener("end", () => {
+  es.addEventListener("end", (data) => {
     model.flushPendingTurn("the run ended here"); // a run that ended without an answer still shows its last turn
     actionsHidden.value = true;
     frozenMs.value ??= runClock?.elapsedMs(nowWall.value); // an `end` with no `finished` before it (a stored stream) freezes here
+    liveStamps.value = { ...liveStamps.value, ...parseEndFrame(data) };
     phase.value = "ended";
     es?.close();
   });
@@ -318,6 +349,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             :data-heat="endHeat.level"
             >{{ endDuration }}</span
           >
+          <span v-if="delivery" id="delivery" class="text-xs text-muted">· {{ delivery }}</span>
         </template>
         <template v-else>
           <span id="statedot" class="pulse text-[1.1em] leading-none" :class="pulseCls">∿</span>
@@ -326,7 +358,11 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             class="text-xs tabular-nums"
             :class="stopError ? 'text-bad' : 'text-muted'"
             :title="
-              phase === 'running' && !stopError ? 'the whole run, since its first event (runner clock)' : undefined
+              phase === 'running' && !stopError
+                ? 'the whole run, since we received the message'
+                : phase === 'finished'
+                  ? 'the agent stopped; the reply is being posted'
+                  : undefined
             "
             >{{ headerText }}</span
           >

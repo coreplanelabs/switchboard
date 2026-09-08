@@ -16,7 +16,7 @@ const base: IndexRow = {
 };
 const row = (over: Partial<IndexRow> = {}): IndexRow => ({ ...base, ...over });
 const finished = (status: IndexRow["status"], over: Partial<IndexRow> = {}) =>
-  row({ finished: true, finishedAt: 1_000_000 + 63_000, status, ...over });
+  row({ finished: true, finishedAt: 1_000_000 + 63_000, sealedAt: 1_000_000 + 65_000, status, ...over });
 const NOW = 1_000_000 + 252_000;
 
 const mountRow = (run: IndexRow, retentionMs?: number, now = NOW) =>

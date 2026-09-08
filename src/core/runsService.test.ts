@@ -139,6 +139,7 @@ describe("RunsService.listRuns — read merge", () => {
     for (let i = 0; i < 3; i++) reg.publish(id, call(`$ step ${i}`));
     reg.requestStop(id, token, "soft");
     reg.finish(id);
+    reg.seal(id); // the TTL runs from the seal
     await store!.put(record(id, NOW, { eventCount: 4, storedEventCount: 4, status: "stopped_soft" }));
     reg.markPersisted(id);
 
@@ -320,6 +321,7 @@ describe("RunsService.listRuns — read merge", () => {
     const { id } = reg.create("coding · acme/x", meta);
     reg.publish(id, { type: "input", text: "go" });
     reg.finish(id);
+    reg.seal(id, { replyOk: true });
     await store!.put(
       record(id, NOW + 1, {
         ...meta,
@@ -333,7 +335,16 @@ describe("RunsService.listRuns — read merge", () => {
     tick(61_000);
     const persistedRow = await svc.getRun(id);
     if (!liveRow || !liveRow.ok || !persistedRow.ok) throw new Error("both reads must succeed");
-    const finishOnly = ["finishedAt", "sealedAt", "status", "storedEventCount", "truncated", "diagnosis", "bytes"];
+    const finishOnly = [
+      "finishedAt",
+      "sealedAt",
+      "replyOk",
+      "status",
+      "storedEventCount",
+      "truncated",
+      "diagnosis",
+      "bytes",
+    ];
     const strip = (v: Record<string, unknown>) =>
       Object.fromEntries(Object.entries(v).filter(([k]) => !finishOnly.includes(k)));
     expect(strip(liveRow.value as unknown as Record<string, unknown>)).toEqual(
@@ -788,6 +799,7 @@ describe("RunsService.authorizeLive", () => {
     expect(seen.map((e) => e.seq)).toEqual([1, 2]);
     expect(live!.snapshot()).toMatchObject({ finished: false, eventCount: 2 });
     reg.finish(id);
+    reg.seal(id); // the end frame comes with the seal
     expect(finished).toBe(true);
   });
 });

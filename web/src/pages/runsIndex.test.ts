@@ -22,6 +22,7 @@ const done = (id: string, over: Partial<RunIndexRowSeed> = {}): RunIndexRowSeed 
   token: undefined,
   finished: true,
   finishedAt: 1_063_000,
+  sealedAt: 1_065_000, // delivered: the row is past the amber "delivering" window
   status: "completed",
   ...over,
 });

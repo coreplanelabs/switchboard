@@ -46,6 +46,10 @@ export interface CardShell {
   setLabel(label: string): void;
   /** The run's live page link, once the run exists; carried by every later live and done frame. */
   setLink(link: StatusUpdate["link"]): void;
+  /** The run finished at this clock stamp: every later frame's elapsed time
+   *  ends here, so the closed card's total is the run's, not the moment of the
+   *  close (features/tracing.md — the card is one of the duration surfaces). */
+  freeze(finishedAt: number): void;
   /** The 👀 frame posted before anything is known. */
   ack(): StatusUpdate;
   /** A live frame: the next spinner glyph, the label, the elapsed seconds, the parts. */
@@ -66,7 +70,8 @@ export function createCardShell(opts: CardShellOptions): CardShell {
   let label = opts.label;
   let link = opts.link;
   let frame = 0;
-  const elapsed = () => `${Math.round((opts.now() - opts.startedAt) / 1000)}s`;
+  let finishedAt: number | undefined;
+  const elapsed = () => `${Math.round(((finishedAt ?? opts.now()) - opts.startedAt) / 1000)}s`;
   const headline = (icon: string) => `${icon} ${label} · ${elapsed()}`;
   return {
     get label() {
@@ -77,6 +82,9 @@ export function createCardShell(opts: CardShellOptions): CardShell {
     },
     setLink(next) {
       link = next;
+    },
+    freeze(at) {
+      finishedAt = at;
     },
     ack() {
       return { title: `👀 ${label} · preparing workspace…` };

@@ -9,7 +9,7 @@ Everything below sits behind your org's Cloudflare Access — only signed-in tea
 Every run Switchboard starts — from Slack, the CLI, or anywhere else — gets a page. The status card in Slack links to it directly; you can also browse to it:
 
 - `/runs` — every currently active run, newest first. Click any row.
-- `/runs/<id>` — that run's page: the request, a live-updating list of steps (files read, commands run, tool calls with their results), and the answer once it's done. While it's running, this streams over SSE — leave the tab open and watch it work.
+- `/runs/<id>` — that run's page: the request, a live-updating list of steps (files read, commands run, tool calls with their results), and the answer once it's done. While it's running, this streams over SSE — leave the tab open and watch it work. The header counts the whole run from the moment Switchboard received your message. When the agent stops it reads `delivering… · <total>` while the reply is posted, and then `delivered in 2s` — how long the reply took to land — or `reply failed`. On the index the row stays amber for that stretch, with `delivering the reply` on its dot.
 
 ## Stop one
 
@@ -27,7 +27,7 @@ npx tsx src/cli.ts runs stop <id> --mode hard   # abort mid-tool-call
 If your deployment has `runHistory` configured (see [reference: configuration](../reference/configuration.md)), finished runs stay readable for a retention window instead of disappearing:
 
 - `/runs?all=1` — include finished runs in the index, not just active ones.
-- A finished run's page is the *same* page, served without a live token — no capability leaks once a run is done.
+- A finished run's page is the *same* page, served without a live token — no capability leaks once a run is done. It shows the same total and the same `delivered in` caption the live page ended on; a run with no caption had no reply measured (a command that fell through to the agent, a run cut down by a restart).
 
 Without `runHistory` configured, runs are live-only: once finished, a run drops off the dashboard within a minute (though the Slack thread it replied in still has the answer). See [explanation: runs, live and after](../explanation/runs-live-and-history.md) for why this is a deliberate on/off switch, not a bug.
 

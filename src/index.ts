@@ -755,6 +755,13 @@ async function main() {
     while (stillHere() > 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 500));
     }
+    // Every finished run whose reply never settled is sealed now, with no
+    // `replyOk` (features/tracing.md): its viewers get their `end` frame, and
+    // one event-loop turn hands those frames to the sockets before the exit
+    // (best effort — the process is going away).
+    const sealed = defaultRunRegistry.sealAllFinished();
+    if (sealed > 0) console.log(`[drain] sealed ${sealed} finished run(s) whose reply never settled`);
+    await new Promise((r) => setImmediate(r));
     // Tombstone upgrade (#375): the deadline passed with runs still in flight —
     // they are about to be killed by process.exit. Each still-active registry
     // run already has its provisional `interrupted` tombstone (written at

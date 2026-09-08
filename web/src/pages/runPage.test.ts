@@ -461,20 +461,60 @@ describe("RunPage — live mode", () => {
     expect(wrapper.findAll("#log .note")).toHaveLength(1);
   });
 
-  it("a `finished` frame freezes the duration at the server's finish stamp; the `end` that follows keeps it, however long the page waited", async () => {
+  it("a `finished` frame freezes the duration at the server's finish stamp and moves the page to `delivering…` (actions gone, pulse still, tab idle); the `end` that follows keeps the total and adds `delivered in Ns` from its stamps, however long the page waited", async () => {
     vi.useFakeTimers();
     try {
+      const setFavicon = vi.spyOn(browser, "setFavicon").mockImplementation(() => {});
       const { wrapper, es } = mountLive();
       es().emitOpen();
-      es().emitNamed("finished", JSON.stringify({ finishedAt: liveSeed.startedAt + 42_000 }));
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#actions").exists()).toBe(true);
+      const finishedAt = liveSeed.startedAt + 42_000;
+      es().emitNamed("finished", JSON.stringify({ finishedAt }));
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#state").text()).toBe("delivering… · 42s");
+      expect(wrapper.find("#actions").exists()).toBe(false); // the agent stopped: nothing to stop
+      expect(wrapper.find("#statedot").classes()).not.toContain("motion-safe:animate-pulse"); // nothing running
+      expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_IDLE);
       vi.advanceTimersByTime(27_000); // the page keeps waiting for the seal
-      es().emitNamed("end");
+      es().emitNamed("end", JSON.stringify({ sealedAt: finishedAt + 3_000, replyOk: true }));
       await wrapper.vm.$nextTick();
       expect(wrapper.find(".conn .chip").text()).toBe("ended");
       expect(wrapper.find(".conn .dur").text()).toBe("42s"); // the stamp, not the page's own clock (which would read 1m 09s)
+      expect(wrapper.find("#delivery").text()).toBe("· delivered in 3s");
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("an `end` whose reply threw reads `reply failed`; an `end` with no stamps (or no `finished` before it) shows no caption", async () => {
+    const a = mountLive();
+    a.es().emitOpen();
+    a.es().emitNamed("finished", JSON.stringify({ finishedAt: liveSeed.startedAt + 10_000 }));
+    a.es().emitNamed("end", JSON.stringify({ sealedAt: liveSeed.startedAt + 12_000, replyOk: false }));
+    await a.wrapper.vm.$nextTick();
+    expect(a.wrapper.find("#delivery").text()).toBe("· reply failed");
+    const b = mountLive();
+    b.es().emitOpen();
+    b.es().emitNamed("end", "{}");
+    await b.wrapper.vm.$nextTick();
+    expect(b.wrapper.find(".conn .chip").text()).toBe("ended");
+    expect(b.wrapper.find("#delivery").exists()).toBe(false);
+  });
+
+  it("a history page reads the caption from the record's stamps", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([], {
+        status: "completed",
+        finishedAt: 1_000_000,
+        sealedAt: 1_002_400,
+        replyOk: true,
+        durationMs: 60_000,
+      }),
+    });
+    expect(w.find("#delivery").text()).toBe("· delivered in 2s");
+    const none = mountApp(RunPage, { seed: historySeed([], { status: "completed", durationMs: 60_000 }) });
+    expect(none.find("#delivery").exists()).toBe(false);
   });
 
   it("a replay_elided frame renders as a replay row naming the range the record still has; a malformed or empty one marks nothing", async () => {

@@ -328,13 +328,6 @@ export interface Subscribed {
 export interface RunRegistryOptions {
   /** Max events retained per run (oldest dropped past it). Default 5000. */
   backlogLimit?: number;
-  /** Transitional (features/tracing.md): while the dispatcher does not yet
-   *  seal after the reply, `finish()` seals the run as its last statement with
-   *  `sealedAt = finishedAt` and no `replyOk`, so the stream closes at finish
-   *  exactly as before the seal existed and the index sees one event per
-   *  finish. Default true; tests pass false to exercise the finished-unsealed
-   *  state. Deleted with the flip. */
-  sealAtFinish?: boolean;
   /** Max bytes retained per run, measured as each event's UTF-8 JSON size; the
    *  oldest events are dropped until under budget (the newest always stays).
    *  Default 4 MiB. */
@@ -441,7 +434,6 @@ export class RunRegistry {
   private readonly backlogLimit: number;
   private readonly backlogBytes: number;
   private readonly ttlMs: number;
-  private readonly sealAtFinish: boolean;
   private readonly genId: () => string;
   private readonly genToken: () => string;
   private readonly now: () => number;
@@ -452,7 +444,6 @@ export class RunRegistry {
     this.backlogLimit = opts.backlogLimit ?? DEFAULT_BACKLOG_LIMIT;
     this.backlogBytes = opts.backlogBytes ?? DEFAULT_BACKLOG_BYTES;
     this.ttlMs = opts.ttlMs ?? 60_000;
-    this.sealAtFinish = opts.sealAtFinish ?? true;
     this.genId = opts.genId ?? (() => randomUUID());
     this.genToken = opts.genToken ?? (() => randomBytes(32).toString("hex"));
     this.now = opts.now ?? Date.now;
@@ -598,9 +589,8 @@ export class RunRegistry {
    *  still flow until the seal), and upsert the index. `status` is the terminal
    *  status the caller computed (the dispatcher's), stored so every summary
    *  projects it — consumers never re-derive it. Idempotent; a no-op for an
-   *  unknown run. Under `sealAtFinish` the run is then sealed at once, from the
-   *  same clock read (one index event per finish is a property of this path,
-   *  never of two timestamps agreeing). */
+   *  unknown run. The seal comes later, from the dispatcher once the first
+   *  reply attempt has completed (`seal`), or from the sweep. */
   finish(id: string, status?: RunStatus): void {
     const run = this.runs.get(id);
     if (!run || run.finished) return;
@@ -619,7 +609,6 @@ export class RunRegistry {
     // A finished run stays on the index (marked finished) until the TTL evicts
     // it — so finish is an upsert, not a removal. Eviction emits the removal.
     this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
-    if (this.sealAtFinish) this.sealRun(run, { replyOk: undefined, upsert: false, sealedAt: run.finishedAt });
   }
 
   /**
@@ -633,6 +622,7 @@ export class RunRegistry {
    * result. Never throws.
    */
   seal(id: string, opts: { replyOk?: boolean } = {}): SealResult {
+    this.sweep();
     const run = this.runs.get(id);
     if (!run) return { events: [] };
     return this.sealRun(run, { replyOk: opts.replyOk, upsert: true });
@@ -641,6 +631,7 @@ export class RunRegistry {
   /** Seal every finished-but-unsealed run (the drain, before exit); returns how
    *  many it sealed. */
   sealAllFinished(opts: { replyOk?: boolean } = {}): number {
+    this.sweep();
     let sealed = 0;
     for (const run of this.runs.values()) {
       if (!run.finished || run.sealedAt !== undefined) continue;
@@ -650,17 +641,13 @@ export class RunRegistry {
     return sealed;
   }
 
-  /** The one seal: `finish()` (from its own clock read, no upsert), the public
-   *  `seal()` (now, upsert) and the sweep (now, no upsert) all come here.
-   *  `sealedAt` is stamped and the subscriber set copied-and-cleared BEFORE any
-   *  callback fires, so a re-entrant call is a no-op. */
-  private sealRun(
-    run: RunState,
-    opts: { replyOk: boolean | undefined; upsert: boolean; sealedAt?: number },
-  ): SealResult {
+  /** The one seal: the public `seal()` (upsert) and the sweep (no upsert) both
+   *  come here. `sealedAt` is stamped and the subscriber set copied-and-cleared
+   *  BEFORE any callback fires, so a re-entrant call is a no-op. */
+  private sealRun(run: RunState, opts: { replyOk: boolean | undefined; upsert: boolean }): SealResult {
     if (!run.finished) return { events: [], eventCount: run.eventCount };
     if (run.sealedAt === undefined) {
-      run.sealedAt = opts.sealedAt ?? this.now();
+      run.sealedAt = this.now();
       if (opts.replyOk !== undefined) run.replyOk = opts.replyOk;
       const subs = [...run.subscribers];
       run.subscribers.clear();

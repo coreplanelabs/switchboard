@@ -32,8 +32,17 @@ export function statusWord(run: IndexRow): string {
 
 export type DotTone = "green" | "red" | "amber" | "grey";
 
+/** A finished run whose stream has not been sealed yet: the agent stopped and
+ *  the reply is in flight (features/tracing.md). A persisted row is past that
+ *  (its record was written after the seal); a row that never gets a seal — the
+ *  process died, the reply hung — stays amber until the registry evicts it. */
+export function delivering(run: IndexRow): boolean {
+  return run.finished && !run.persisted && run.sealedAt === undefined;
+}
+
 export function statusDot(run: IndexRow): DotTone {
   if (!run.finished) return "green";
+  if (delivering(run)) return "amber";
   // `interrupted` (#375): the run was cut down before finish (container
   // replaced or crashed) — as red as a failure. The word itself passes through
   // `statusLabel` unchanged.
@@ -101,6 +110,7 @@ export function dotTip(run: IndexRow): string {
   let t = statusWord(run);
   const ms = runDurationMs(run);
   if (ms !== undefined) t += ` in ${formatDuration(ms, "clock")}${basisNote(run)}`;
+  if (delivering(run)) t += " · delivering the reply";
   if (run.status && run.status !== "completed" && run.activity) t += `\n${run.activity}`;
   return t;
 }
