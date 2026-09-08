@@ -11,7 +11,7 @@
 //   X-Thread-Key: <threadKey>               (one sandbox per conversation thread)
 // and the body's optional `env` ({ NAME: value }) is forwarded into the sandbox
 // for that one command — in the body, never in headers, because Workers Logs
-// record request headers (features/execution.md item 5, #447).
+// record request headers (features/execution.md item 5).
 //
 // The Sandbox SDK only runs inside Workers — that's why this proxy exists.
 // Verify method names against https://developers.cloudflare.com/sandbox/ on
@@ -58,22 +58,22 @@ export class SwitchboardSandbox extends Sandbox {
   // Idle lifetime of a thread's container (the SDK's own default is 10 min on
   // 0.12.x, 20 on 0.3.x). On the 0.0.28 containers base the activity clock was
   // renewed once per proxied fetch and the alarm loop SIGTERMed the container
-  // the moment it expired, in-flight request or not — so on 2026-09-07 the
-  // #521 review's first command (a 20-minute budget under a 20-minute default)
-  // was killed at 20:00 exactly, surfaced as "Command execution failed", and
+  // the moment it expired, in-flight request or not — so a review's first
+  // command (a 20-minute budget under a 20-minute default) was once
+  // killed at 20:00 exactly, surfaced as "Command execution failed", and
   // the next command found a fresh container with an empty /workspace. `exec`
   // below renews the clock every minute while a command runs, which makes
   // this a true idle timeout (features/execution.md item 2). The 0.3.x
   // containers base tracks in-flight requests itself, so the keepalive is now
-  // belt-and-braces — kept until the live long-command receipt (#228). 5
+  // belt-and-braces — kept until a live long-command receipt retires it. 5
   // minutes of idle frees the slot sooner while a prompt follow-up still
   // reuses the warm workspace.
   sleepAfter = SANDBOX_SLEEP_AFTER;
 
   // A Worker and its image deploy as two artifacts; until the rollout finishes
   // this Worker can be handed a container still on the PREVIOUS image
-  // (features/execution.md item 6; 2026-09-07, #569: a 0.3.7 container under
-  // the 0.12.9 SDK, every command a message-less 400 for 90 s). The SDK's own
+  // (features/execution.md item 6; seen live: a 0.3.7 container under the
+  // 0.12.9 SDK, every command a message-less 400 for 90 s). The SDK's own
   // check logs `container=unknown` at info and does nothing else; this one
   // names the skew at warn so the rollout is visible in the logs.
   //
@@ -155,8 +155,8 @@ export class SwitchboardSandbox extends Sandbox {
     return result;
   }
 
-  // A fence from the 0.3.x days, kept until the live container-restart receipt
-  // (#228) retires it: 0.3.x cached its default ExecutionSession in Durable
+  // A fence from the 0.3.x days, kept until a live container-restart receipt
+  // retires it: 0.3.x cached its default ExecutionSession in Durable
   // Object memory while the session lived in the container, so a container
   // restart under a live DO (image rollout, crash, sleep/wake) made every later
   // call fail with "Session '<id>' not found" forever. 0.12.x persists the
@@ -267,16 +267,16 @@ export default {
     // `env` option, which the container applies to that one command and
     // restores afterwards (0.12.x; 0.3.7 ignored it, so the value used to be
     // an inline base64 `export` prefix — which put the live GH_TOKEN into every
-    // "Command executed" line the SDK logs, #447). Nothing persists in the
+    // "Command executed" line the SDK logs). Nothing persists in the
     // sandbox beyond the command's lifetime, and the command text the SDK
     // logs never carries a credential.
     //
     // Body, never headers: Workers Logs record this invocation's request
-    // headers and redact them by a name heuristic only — the 2026-09-07
-    // receipt probe's per-variable env header was logged in clear. Bodies are
-    // not recorded. The one-release per-variable-header fallback that carried a
-    // body-only bot against a header-only Worker during the #597 rollout is
-    // gone now that the body reader is live everywhere (#447), so the
+    // headers and redact them by a name heuristic only — a receipt probe's
+    // per-variable env header was once logged in clear. Bodies are not
+    // recorded. The one-release per-variable-header fallback that carried a
+    // body-only bot against a header-only Worker during that rollout is
+    // gone now that the body reader is live everywhere, so the
     // credential rides only in the body and no request header is read as env.
     const envVars = envFromRequest({ body });
 
@@ -338,7 +338,7 @@ export default {
       }
     } catch (err) {
       // Never an empty text (item 3): a message-less SDK error is named as
-      // such, with the rollout hint (#569).
+      // such, with the rollout hint.
       const msg = thrownText(thrownShape(err));
       // A full fleet (features/execution.md item 14): the SDK could not get a
       // container instance for this thread's Durable Object, so no session
@@ -424,8 +424,8 @@ function streamExec(
           root.end("error");
           const shape = thrownShape(err);
           // The text that leaves the Worker is never empty (item 3): a
-          // message-less SDK error — the legacy-image 400 of #569 after the
-          // one-shot heal above failed too — is named, with the rollout hint.
+          // message-less SDK error — the legacy-image 400 after the one-shot
+          // heal above failed too — is named, with the rollout hint.
           // The classifiers below still read the raw `shape`.
           const raw = thrownText(shape);
           // A full fleet (features/execution.md item 14): session creation

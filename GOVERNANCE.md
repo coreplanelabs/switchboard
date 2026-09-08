@@ -13,7 +13,7 @@ roadmap more than anything else.
 
 **Maintainers** review and merge changes, triage issues, cut releases, and
 decide the roadmap. Maintainers are listed in [`.github/CODEOWNERS`](.github/CODEOWNERS).
-Today they are Coreplane Labs engineers.
+Today they are the steward's engineers.
 
 ## How decisions are made
 
@@ -24,7 +24,7 @@ Today they are Coreplane Labs engineers.
   survives the code. A pull request that contradicts a recorded decision either
   updates the record or is not merged.
 - Disagreements are resolved by discussion in the pull request or a Discussions
-  thread. If maintainers cannot agree, Coreplane Labs decides.
+  thread. If maintainers cannot agree, the steward decides.
 - The roadmap lives in GitHub Discussions and the milestones on the issue
   tracker, not in a private document.
 

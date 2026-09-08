@@ -7,15 +7,14 @@
 # The release PR itself shows that plan before anyone merges it: the
 # release-pr-deploy-targets job below posts it on every push to main.
 #
-# release-please acts as the coreplane-infra GitHub App, not as GITHUB_TOKEN —
-# the same identity nominal and cli release with. A release PR opened with
-# GITHUB_TOKEN gets `pull_request` runs that sit at `action_required` until a
-# person clicks "Approve and run" on every head (v0.2.0–v0.4.0 each cost that
-# click); one opened by the App runs its CI like any other PR, so the required
-# checks report and the release merges unattended. The App's credentials live
-# in 1Password (CI vault, item `coreplane-bot`), read with the org's
-# OP_SERVICE_ACCOUNT_TOKEN; the token minted here is scoped to this repository
-# and to the two permissions release-please needs.
+# release-please acts as our GitHub App, not as GITHUB_TOKEN. A release PR
+# opened with GITHUB_TOKEN gets `pull_request` runs that sit at
+# `action_required` until a person clicks "Approve and run" on every head; one
+# opened by the App runs its CI like any other PR, so the required checks
+# report and the release merges unattended. The App's credentials live in the
+# secrets manager the step below reads with OP_SERVICE_ACCOUNT_TOKEN; the token
+# minted here is scoped to this repository and to the two permissions
+# release-please needs.
 name: release-please
 
 on:
@@ -37,7 +36,7 @@ jobs:
       prs_created: ${{ steps.release.outputs.prs_created }}
       pr: ${{ steps.release.outputs.pr }}
     steps:
-      - name: load the App's credentials from 1Password
+      - name: load the App's credentials
         uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
         with:
           export-env: true
@@ -45,15 +44,14 @@ jobs:
           version: 2.39.0
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          # op://<vault>/<item>/<field>
-          COREPLANE_CLIENT_ID: op://CI/coreplane-bot/client-id
-          COREPLANE_PRIVATE_SIGNING_KEY: op://CI/coreplane-bot/private-key
+          APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+          APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
       - name: mint the App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ env.COREPLANE_CLIENT_ID }}
-          private-key: ${{ env.COREPLANE_PRIVATE_SIGNING_KEY }}
+          client-id: ${{ env.APP_CLIENT_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
           # No owner/repositories: the token is scoped to this repository.
           # contents for the release branch, tag and GitHub release;
           # pull-requests for the release PR and its labels.
@@ -109,23 +107,23 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       # Judging against PRODUCTION needs production's profile (each Worker's
-      # live /healthz) — it lives in coreplanelabs/infrastructure, read with a
+      # live /healthz) — it lives in our infrastructure repository, read with a
       # read-only App token minted for that repository alone.
-      - name: load the App's credentials from 1Password
+      - name: load the App's credentials
         uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
         with:
           export-env: true
           version: 2.39.0
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          COREPLANE_CLIENT_ID: op://CI/coreplane-bot/client-id
-          COREPLANE_PRIVATE_SIGNING_KEY: op://CI/coreplane-bot/private-key
+          APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+          APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
       - name: mint the App token that reads the infrastructure repository
         id: infra-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ env.COREPLANE_CLIENT_ID }}
-          private-key: ${{ env.COREPLANE_PRIVATE_SIGNING_KEY }}
+          client-id: ${{ env.APP_CLIENT_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
           owner: coreplanelabs
           repositories: infrastructure
           permission-contents: read

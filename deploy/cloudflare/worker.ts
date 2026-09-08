@@ -1,14 +1,14 @@
 // Cloudflare Containers shim: runs the unchanged Switchboard image as a single
-// always-on container instance. Follows the house pattern proven by
-// coreplanelabs/infrastructure `terrateam/` (long-lived server in a container,
-// singleton DO, cron keep-alive).
+// always-on container instance — the shape of any long-lived server on
+// Cloudflare Containers (singleton DO, cron keep-alive;
+// docs/decisions/0016-long-lived-process-not-serverless.md).
 //
 // The Worker exists to (re)start the container, run health checks, restart the
 // container on request (`POST /admin/restart` — `deploy restart`), and fire
 // the scheduled jobs — all Slack traffic is the container's own outbound Socket
 // Mode websocket, so nothing user-facing flows through here. Scheduled jobs are
 // NOT special: a `run` schedule is POSTed to the bot's generic /ingress as the
-// `cron` identity, so it becomes an ordinary run (#244).
+// `cron` identity, so it becomes an ordinary run.
 import { Container, getContainer } from "@cloudflare/containers";
 import { parseHealthz } from "../../src/deploy/liveGate.ts";
 import {
@@ -67,8 +67,8 @@ interface Env {
   CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
   ANTHROPIC_ADMIN_KEY?: string; // costs dash (optional): Anthropic Admin API key for the LLM cost report
   MEMORY_TOKEN?: string; // durable memory + friction ledger + schedule firings + MCP registry: bearer for the state Worker
-  MCP_CREDENTIAL_KEY?: string; // MCP registry (#394): the bot-only key that seals server credentials before they reach the McpDO
-  STATE_WORKER_URL?: string; // var: the state Worker's base URL — where this shim records each scheduled firing (#244)
+  MCP_CREDENTIAL_KEY?: string; // MCP registry: the bot-only key that seals server credentials before they reach the McpDO
+  STATE_WORKER_URL?: string; // var: the state Worker's base URL — where this shim records each scheduled firing
 }
 
 /** Every secret/var the Worker forwards into the container. Optional entries

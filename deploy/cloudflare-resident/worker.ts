@@ -4,7 +4,7 @@
 // resource, plus one singleton ResidentRegistryDO holding the onboarded set,
 // the command table, and the cap.
 //
-// Residency is a generic resource-typed primitive (KTD1): every route contract
+// Residency is a generic resource-typed primitive: every route contract
 // carries a `resource` id of the form "<type>:<id>"; "repo" is the first (and
 // currently only) supported type, with id "<owner>/<name>" (the GitHub slug —
 // the clone URL derives from it). The Durable Object name IS the resource id
@@ -38,7 +38,7 @@
 // `resource` field alongside `threadKey` — the service hosts many residents,
 // and the resource picks the DO exactly as GET /status does.
 //
-// POST /op is the deterministic modelless path (KTD8): a name from a fixed
+// POST /op is the deterministic modelless path: a name from a fixed
 // enum {test, build, status} resolves through the onboard-time command table
 // only, gated by per-entry `effects` profiles (readonly runs, mutating
 // refused by name), executed in a DISPOSABLE per-op checkout under
@@ -58,11 +58,12 @@
 //      resident. The ONLY env the resident itself injects into a command is
 //      GIT_TERMINAL_PROMPT=0 (validated through validateEnvNames); GitHub
 //      tokens travel via a root-only one-shot credential file, never env and
-//      never argv (KTD12).
+//      never argv.
 //   4. The GitHub App PRIVATE KEY exists only in Worker/DO scope. The
 //      container sees nothing but 1-hour installation tokens scoped to the
 //      resident's own repo, injected per command. Install/build executions
-//      (untrusted repo code) run unprivileged (worker1) and token-free (KTD7).
+//      (untrusted repo code) run unprivileged (worker1) and token-free
+//      (docs/decisions/0009-residents-second-credential-domain.md).
 import {
   getSandbox,
   isDurableObjectCodeUpdateReset,
@@ -260,11 +261,11 @@ interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
   REGISTRY: DurableObjectNamespace<ResidentRegistryDO>;
   BACKUP_BUCKET: R2Bucket;
-  // Presigned snapshot transfers (item 61, #614): with all four present the
-  // container moves archive bytes itself over presigned R2 URLs and the DO
-  // stays out of the data path; any one absent → the SDK's local-bucket mode
-  // (the DO pumps the bytes — a 1.16 GB restore exceeded the isolate's memory
-  // live 2026-09-08). Read exactly as `requirePresignedURLSupport` reads them.
+  // Presigned snapshot transfers (features/resident-repos.md item 61): with all
+  // four present the container moves archive bytes itself over presigned R2
+  // URLs and the DO stays out of the data path; any one absent → the SDK's
+  // local-bucket mode (the DO pumps the bytes — a 1.16 GB restore exceeds the
+  // isolate's memory). Read exactly as `requirePresignedURLSupport` reads them.
   // The first two are wrangler vars; the keys are secrets (secrets.manifest.json).
   CLOUDFLARE_ACCOUNT_ID?: string;
   BACKUP_BUCKET_NAME?: string;
@@ -280,12 +281,12 @@ interface Env {
   // (provisioned via `npm run secrets` from deploy/secrets.manifest.json; when
   // unset, clones/fetches run anonymously —
   // fine for public repos — and any explicit mint attempt is a command-level
-  // error that never flips lifecycle state, per KTD12).
+  // error that never flips lifecycle state).
   GITHUB_APP_ID: string;
   GITHUB_APP_INSTALLATION_ID: string;
   GITHUB_APP_PRIVATE_KEY: string;
   // Where the watchdog cron records each firing for the bot's /runs Scheduled
-  // panel (#244): the state Worker's base URL (var) + bearer (secret). Optional:
+  // panel: the state Worker's base URL (var) + bearer (secret). Optional:
   // unset → the pass still runs, the firing is only logged.
   STATE_WORKER_URL?: string;
   MEMORY_TOKEN?: string;
@@ -299,19 +300,19 @@ interface Env {
  *  Deliberately BELOW wrangler.jsonc's containers max_instances (10) so an
  *  over-cap onboard is always refused by the registry, never by a platform
  *  scheduling failure. Bump the two together. */
-// 6 = the number of repos the team works concurrently (Justin, 2026-08-29);
-// was 8 through 2026-08-29 and briefly 2 while the #50 LRU-eviction path was
-// proven on prod. Past the cap, `evictColdest:true` makes room (item 46).
+// 6 = the number of repos one team works on concurrently. Past the cap,
+// `evictColdest:true` makes room (features/resident-repos.md item 46).
 const RESIDENT_CAP = 6;
 
 /** Container sleep window, passed to every getSandbox() for ResidentDO.
- *  KTD4 invariant: REFRESH_INTERVAL_S and the watchdog cron (wrangler.jsonc,
+ *  Invariant: REFRESH_INTERVAL_S and the watchdog cron (wrangler.jsonc,
  *  every 10 minutes) MUST both stay SHORTER than this window, so a healthy
  *  resident is re-warmed before the platform can sleep it. Bump together. */
 const SLEEP_AFTER = "20m";
 
 /** Refresh alarm cadence (seconds). Each resident DO self-reschedules this
- *  alarm (KTD4); it doubles as the keep-warm heartbeat, so it must stay below
+ *  alarm (per-resident alarms own freshness; the sparse cron is only the
+ *  watchdog); it doubles as the keep-warm heartbeat, so it must stay below
  *  SLEEP_AFTER. Matches the watchdog cron so a killed chain is re-armed
  *  within one refresh interval. */
 const REFRESH_INTERVAL_S = 600;
@@ -336,8 +337,8 @@ const REFRESH_BUILD_TIMEOUT_MS = 5 * 60_000;
 /** The refresh install budget. Twice the build's: a full `npm install` of the
  *  switchboard lockfile takes ~4 min on the resident's 1 vCPU when nothing
  *  else runs, and thread runs (tests, a review's greps) share that vCPU —
- *  live 2026-09-07 it crossed 5 min four cycles in a row while main kept
- *  moving. A timed-out install is worse than a slow one: the cycle's whole
+ *  under load it crosses 5 min several cycles in a row while the default
+ *  branch keeps moving. A timed-out install is worse than a slow one: the cycle's whole
  *  budget is spent and the checkout is left without deps, so the next cycle
  *  starts the same install over. The cycle runs in the background (runs keep
  *  attaching to the last snapshot); the cost of a longer budget is a longer
@@ -347,25 +348,25 @@ const REFRESH_INSTALL_TIMEOUT_MS = 10 * 60_000;
  *  killed at `timeout`, how long to wait for the exit status of OUR kill
  *  before reporting the step without one. */
 const KILL_EXIT_WAIT_MS = 10_000;
-/** Budget per R2 SNAPSHOT upload (#356 item 7a). The SDK's createBackup
+/** Budget per R2 SNAPSHOT upload. The SDK's createBackup
  *  accepts no timeout or AbortSignal, so each call is raced against this
  *  (withTimeout): a hung upload fails the cycle into the existing degrade
  *  handling with a named error, instead of stranding `refreshing` until the
  *  30-min watchdog. Restores are NOT on this budget any more: a download is
- *  judged by the bytes arriving in its target (restoreWithProgress, #572) —
+ *  judged by the bytes arriving in its target (restoreWithProgress) —
  *  a fixed budget abandoned a 481 s restore that then completed.
  *  Same class as the other network budgets (observed live transfers run
  *  seconds, recorded in `lastRestore.ms`). */
 const R2_TRANSFER_TIMEOUT_MS = 5 * 60_000;
 
 /** On-disk layout inside the resident container (disk is cache, never truth —
- *  KTD3). U4's worktrees hang off the same mirror; keep these paths stable. */
+ *  DO storage is). Thread worktrees hang off the same mirror; keep these paths stable. */
 const MIRROR_DIR = "/workspace/mirror"; // bare mirror, owned by root
 const CHECKOUT_DIR = "/workspace/checkout"; // default-branch working tree + deps + build, owned by BUILD_USER
 const RESIDENT_STATE_DIR = "/workspace/.resident"; // mode 700 root:root — worker users cannot traverse
-const CRED_FILE = `${RESIDENT_STATE_DIR}/git-credentials`; // one-shot token file (KTD12), deleted after each git command
+const CRED_FILE = `${RESIDENT_STATE_DIR}/git-credentials`; // one-shot token file, deleted after each git command
 const READY_MARKER = `${RESIDENT_STATE_DIR}/ready`; // holds the sha the disk was hydrated to
-/** Refresh checkpoints (#163): the lockfile key whose install fully completed
+/** Refresh checkpoints: the lockfile key whose install fully completed
  *  into CHECKOUT_DIR/node_modules, and the sha whose build fully completed.
  *  Written as each step lands, removed before the step is redone; the next
  *  cycle reads them (plus the checkout's real HEAD) to skip work the disk
@@ -379,24 +380,24 @@ const INSTALLING_MARKER = `${RESIDENT_STATE_DIR}/deps-installing`;
 const BUILT_MARKER = `${RESIDENT_STATE_DIR}/built`;
 const DISK_MARKERS = [READY_MARKER, DEPS_MARKER, INSTALLING_MARKER, BUILT_MARKER];
 
-/** Unprivileged user for default-branch install/build (KTD5: repo code never
- *  runs as root). worker2..worker17 stay free for U4's per-thread users. */
+/** Unprivileged user for default-branch install/build (repo code never
+ *  runs as root). worker2..worker17 stay free for the per-thread users. */
 const BUILD_USER = "worker1";
 
-/** Per-thread worktrees (U4) hang here: one 700 thread dir per threadKey
+/** Per-thread worktrees hang here: one 700 thread dir per threadKey
  *  (owned by that thread's OS user — other thread users cannot even
  *  traverse), one worktree per bound ref beneath it. Disk is cache: a slept
  *  container loses these, and the next attach recreates them. */
 const THREADS_DIR = "/workspace/threads";
 
-/** Disposable per-op checkouts (U6, KTD8) hang here: one 700 uuid dir per
+/** Disposable per-op checkouts hang here: one 700 uuid dir per
  *  in-flight op, owned by a transiently-held pool user, DELETED when the op
  *  completes (success or failure). Ops never touch a thread's attached
  *  worktree. An orphan from a mid-op DO restart dies with the container disk
  *  at the latest (disk is cache). */
 const OPS_DIR = "/workspace/ops";
 
-/** The thread-user pool (KTD5). worker1 is the engine's build user; each
+/** The thread-user pool. worker1 is the engine's build user; each
  *  attach allocates one of these to the thread (persisted in the binding)
  *  and every /exec /read /write for that thread runs privilege-dropped as
  *  that user. The pool is released by the inactivity sweep. */
@@ -408,7 +409,7 @@ const OPS_DIR = "/workspace/ops";
  *  in the Dockerfile. */
 const THREAD_USERS = Array.from({ length: 16 }, (_, i) => `worker${i + 2}`);
 
-/** Force-detach (#159): after killing the thread user's processes, how long
+/** Force-detach: after killing the thread user's processes, how long
  *  to wait for the in-flight op counter to drain (polled every
  *  FORCE_DETACH_DRAIN_POLL_MS). The bot bounds the whole `/detach` at 10 s
  *  (`DETACH_TIMEOUT_MS` in src/execution/resident.ts): the kill is a syscall
@@ -424,7 +425,7 @@ const FORCE_DETACH_KILL_TIMEOUT_MS = 2_000;
 
 /** Inactivity eviction: worktrees whose binding lastAttachAt is older than
  *  this many days are removed and their user returned to the pool; the
- *  binding record is KEPT (KTD6) so the next attach recreates with the same
+ *  binding record is KEPT so the next attach recreates with the same
  *  ref. Overridable per resident via the onboard-time `worktreeTtlDays`. */
 const WORKTREE_TTL_DAYS_DEFAULT = 7;
 /** The sweep self-reschedules hourly (armed by attach when no sweep pends). */
@@ -444,7 +445,7 @@ const SWEEP_DRIFT_SLACK_S = 5 * 60;
  *  first if the mirror is stale (refresh-on-attach). */
 const IDLE_AFTER_S = 60 * 60;
 const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
-/** LRU eviction floor (#50): an over-cap onboard with `evictColdest:true` may
+/** LRU eviction floor: an over-cap onboard with `evictColdest:true` may
  *  offboard the coldest eligible warm resident, but never one whose last
  *  activity (attach or provisioning) is younger than this — a repo used
  *  minutes ago must not go cold to make room. Same window as idle sleep. */
@@ -465,28 +466,28 @@ const DEGRADED_STREAK_KEY = "resident:degradedStreak";
 /** Degraded reasons stamped by the WATCHDOG rather than by an attempted refresh
  *  (`watchdogCheck`: `alarm-missed: …`, `stale-mid-flight: …` — both always
  *  carry a `: detail` suffix). They mean "a cycle must run", so they never
- *  count toward the park streak (#177). Deliberate trade-off: a resident that
+ *  count toward the park streak. Deliberate trade-off: a resident that
  *  oscillates between a refresh-produced failure and watchdog stamps (e.g.
  *  `install-failed` → DO eviction → `stale-mid-flight` → `install-failed` …)
  *  keeps resetting the streak and never parks — full 10-min cadence for a
  *  chronically broken repo. Accepted: a watchdog stamp means the previous
  *  "same reason" observation is not trustworthy, and preserving the streak
  *  across it would re-open the parked-degraded hole this fixes. */
-/** Plus (#216) a cycle whose step was killed from OUTSIDE by a deploy
+/** Plus a cycle whose step was killed from OUTSIDE by a deploy
  *  (`refresh-interrupted: …`, classified by `classifyRefreshFailure`): equally
  *  not evidence about the repository, equally never counted. */
 const NON_EVIDENCE_REASON = /^(?:alarm-missed|stale-mid-flight|refresh-interrupted):/;
-/** Consecutive cycles that ended `refresh-interrupted` (#216): feeds the
+/** Consecutive cycles that ended `refresh-interrupted`: feeds the
  *  short-re-arm cap in `nextRefreshDelayS`; cleared by any other outcome. */
 const INTERRUPTED_STREAK_KEY = "resident:interruptedStreak";
-/** When the disk-full recovery last stopped the container (#457, item 54):
+/** When the disk-full recovery last stopped the container (features/resident-repos.md item 54):
  *  feeds `planDiskFullRecovery`'s cooldown so a working set that refills the
  *  disk is named, not recycled in a loop. */
 const DISK_FULL_RECYCLE_KEY = "resident:diskFullRecycleAt";
 /** A disk-full attach pulls the refresh cycle this close (seconds) so the
  *  recovery decision runs now, not at the next 600 s alarm. */
 const DISK_FULL_REARM_S = 1;
-/** The last disk measurement (#448, item 55; `residentDiskBudget.ts`): one
+/** The last disk measurement (features/resident-repos.md item 55; `residentDiskBudget.ts`): one
  *  `df` + one `du` over the parts, taken at the end of every refresh cycle and
  *  (deferred by DISK_MEASURE_DELAY_S, off the hot path) after every attach,
  *  detach and sweep eviction. Surfaced as the live view's `disk`; the attach
@@ -505,7 +506,7 @@ function isNonEvidenceReason(reason: string): boolean {
  *  503 {state, reason: "mirror-busy"} instead of queueing forever. */
 const ATTACH_MUTEX_WAIT_MS = 60_000;
 
-/** Watchdog auto-rebuild (U8): a resident down with a REHYDRATION-flavored
+/** Watchdog auto-rebuild: a resident down with a REHYDRATION-flavored
  *  reason (bad/unreadable snapshots — states only a rebuild can escape, since
  *  down chains never retry hydration) accumulates one strike per watchdog
  *  pass; at N strikes the watchdog triggers the same down→onboarding rebuild
@@ -516,7 +517,7 @@ const ATTACH_MUTEX_WAIT_MS = 60_000;
 const AUTO_REBUILD_AFTER_STRIKES = 3;
 const REHYDRATION_FAILURE_RE = /^(r2-restore-failed|snapshot-stamp-mismatch|no-snapshot)/;
 
-/** /exec budget (U4 contract): the shared 5-minute default (`BASH_TIMEOUT_MS`);
+/** /exec budget: the shared 5-minute default (`BASH_TIMEOUT_MS`);
  *  a caller may raise it per call via the body's `timeoutMs` up to the shared
  *  20-minute ceiling (`BASH_TIMEOUT_MAX_MS`) — clamped server-side by
  *  `clampBashTimeout` in handleExec, never trusting the client's number. The
@@ -542,7 +543,7 @@ const EXEC_OUTPUT_CAP = 100_000;
 const READ_CONTENT_CAP = 262_144;
 const MAX_WRITE_CONTENT = 524_288;
 
-/** Files whose COMMITTED content keys the dependency/build cache (KTD7).
+/** Files whose COMMITTED content keys the dependency/build cache.
  *  The key hashes `git ls-tree <sha> -- <these>` output from the mirror —
  *  never the working directory, because installs GENERATE lockfiles (npm
  *  writes an uncommitted package-lock.json), which would poison a disk-based
@@ -581,8 +582,8 @@ const errMsg = (err: unknown): string => (err instanceof Error ? err.message : S
 
 /** The resident runtime (the Sandbox SDK's control session to the container)
  *  was replaced while a command was in flight — in practice a `wrangler deploy`
- *  swapping this DO's isolate mid-run (2026-08-29: three deploys aborted a
- *  review run as a fake "OOM"). `phase` says where the SDK failed: `"spawn"`
+ *  swapping this DO's isolate mid-run (which otherwise surfaces as a fake
+ *  "OOM" on the run). `phase` says where the SDK failed: `"spawn"`
  *  (the start RPC itself; the SDK never proves the process did NOT start) or
  *  `"collect"` (a `StaleProcessHandleError` on an already-running process). In
  *  both cases the command may have run, so the resident never re-issues it;
@@ -608,10 +609,10 @@ class RuntimeReplacedError extends Error {
  *  (`SandboxLifetimeChangedError`) or throws raw before its adapter translates
  *  them (`RuntimeIdentityInactiveError` at ~10 process/exec sites), so a typed
  *  check alone would miss them. */
-// RUNTIME_REPLACEMENT_WORDING moved to src/execution/residentRefresh.ts (#335)
+// RUNTIME_REPLACEMENT_WORDING lives in src/execution/residentRefresh.ts
 // so the refresh classifier and this file's isRuntimeReplacement share ONE
 // message-wording list. It carries both "Process supervisor is closed" (the
-// spawn-refusal a stopped container answers until it restarts) and, since #566,
+// spawn-refusal a stopped container answers until it restarts) and
 // "The container is not running, consider calling start()" — the raw workerd
 // binding refusal a deploy that ROLLS the container (not just swaps the isolate)
 // surfaces, which the SDK re-throws untyped when the roll outlasts its own
@@ -686,12 +687,13 @@ function runtimeReplacedErr(err: RuntimeReplacedError): ThreadErr {
 const tail = (s: string, n: number): string => s.trim().slice(-n);
 
 // ---------------------------------------------------------------------------
-// GitHub App auth (KTD12) — Worker/DO scope only; the private key never
+// GitHub App auth (docs/decisions/0009-residents-second-credential-domain.md)
+// — Worker/DO scope only; the private key never
 // enters the container. RS256 App JWT on WebCrypto (node:crypto is not
 // available here), then POST /app/installations/:id/access_tokens with
 // `repositories: [<own repo name>]` so a minted token never grants more than
 // the resident's one repo. Cache per slug, but only serve a cached token while
-// it has more than `CREDENTIAL_EXPIRY_MARGIN_MS` of life left (#528), so a new
+// it has more than `CREDENTIAL_EXPIRY_MARGIN_MS` of life left, so a new
 // attach never inherits a near-expiry token minted for an earlier thread.
 // ---------------------------------------------------------------------------
 
@@ -707,10 +709,10 @@ const githubTokenCache = new Map<string, MintedToken>(); // key: repo slug ("own
 
 /** Mint a 1-hour installation token scoped to exactly `slug`'s repository,
  *  returning it with its expiry so callers can persist `expiresAtMs` and refresh
- *  off the token's own life (#528). `fresh` bypasses (and clears) the per-slug
- *  cache — for a token GitHub REJECTED, whose cached copy must not be re-served
- *  (#528 review). Throws a command-level Error on any failure — callers MUST NOT
- *  translate that into a lifecycle transition (KTD12). */
+ *  off the token's own life. `fresh` bypasses (and clears) the per-slug
+ *  cache — for a token GitHub REJECTED, whose cached copy must not be re-served.
+ *  Throws a command-level Error on any failure — callers MUST NOT
+ *  translate that into a lifecycle transition. */
 export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh?: boolean }): Promise<MintedToken> {
   if (!githubAppConfigured(env)) {
     throw new Error(
@@ -719,7 +721,7 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
   }
   // A repudiated token must never be re-served: drop the slug's cache entry and
   // mint anew. Otherwise serve a cached token while it has more than the refresh
-  // margin left (#528): the same threshold `shouldRefreshThreadCredentials`
+  // margin left: the same threshold `shouldRefreshThreadCredentials`
   // refreshes at, so a token the cache hands out is never one a fresh attach
   // would immediately have to re-mint. Was 5 min — too little for a 20-minute
   // exec to run under.
@@ -743,12 +745,12 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
       },
       body: JSON.stringify({ repositories: [repoName] }),
       // A slow GitHub must not hang attach/refresh. The 10s abort surfaces as a
-      // command-level Error (below), never a lifecycle transition (KTD12).
+      // command-level Error (below), never a lifecycle transition.
       signal: AbortSignal.timeout(10_000),
     });
   } catch (err) {
     // AbortSignal.timeout aborts with a "TimeoutError" DOMException; any other
-    // fetch throw (network/DNS) lands here too. Both are command-level per KTD12.
+    // fetch throw (network/DNS) lands here too. Both are command-level errors.
     const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
     throw new Error(
       `github-token-mint-failed: ${aborted ? "timed out after 10s contacting api.github.com" : errMsg(err)}`,
@@ -858,16 +860,16 @@ interface ResidentStatus {
   reason: string; // non-empty whenever state is degraded or down
 }
 
-/** Registry record: the onboarded set + command table (KTD9: writable only via
+/** Registry record: the onboarded set + command table (writable only via
  *  the admin routes onboard/reconfigure). */
 interface ResidentRecord {
   resource: string;
   /** Command table. Always contains "test" and "build"; extra named commands
    *  are allowed ("install" is honored by the provisioning/refresh engine).
    *  Commands execute inside the resident as BUILD_USER — never on the
-   *  Worker, never as root, never with a GitHub token in env (KTD5/KTD7). */
+   *  Worker, never as root, never with a GitHub token in env. */
   commands: Record<string, string>;
-  /** Execution profile per command-table entry (U6, KTD8): the modelless /op
+  /** Execution profile per command-table entry: the modelless /op
    *  path executes "readonly" entries and refuses "mutating" ones BY NAME.
    *  An absent entry means readonly — test/build/status are readonly by
    *  construction; the refusal is the guard rail for future mutating entries.
@@ -878,13 +880,13 @@ interface ResidentRecord {
   diskBudgetMb?: number;
   provisioningTimeoutMs: number;
   /** Inactivity window (days) before the sweep evicts a thread's worktree
-   *  and releases its user; the binding record survives (KTD6). */
+   *  and releases its user; the binding record survives. */
   worktreeTtlDays?: number;
   onboardedAt: string;
   updatedAt: string;
 }
 
-/** Per-thread binding (KTD6): persisted in the resident DO keyed by
+/** Per-thread binding: persisted in the resident DO keyed by
  *  threadKey; survives restarts and eviction. `user`/`evicted` describe the
  *  current allocation; `ref` is sticky for the thread's whole life. */
 interface ThreadBinding {
@@ -897,10 +899,10 @@ interface ThreadBinding {
   lastAttachAt: string;
   evicted?: boolean;
   evictedAt?: string;
-  /** Why the last eviction happened (#50 audit trail): `ttl`, `clean-idle`,
+  /** Why the last eviction happened (the audit trail): `ttl`, `clean-idle`,
    *  `detach`, or a reclamation fate — `merged #N` / `closed #N` / `gone`. */
   evictedWhy?: string;
-  /** How deps were last materialized (evidence for KTD7). */
+  /** How deps were last materialized (evidence that the per-branch reconciliation ran). */
   deps?: ThreadDepsMechanism;
   /** Commit the worktree was last attached at (the ref's tip in the mirror
    *  at that moment). Display only — the tree itself is authoritative. */
@@ -913,7 +915,7 @@ interface ThreadBinding {
    *  per-exec refresh). Absent = unknown → the next writable exec re-mints
    *  (`shouldRefreshThreadCredentials`); cleared by a read-only attach. */
   credentialsWrittenAt?: number;
-  /** Epoch ms when the written token expires (#528). The per-exec refresh keys
+  /** Epoch ms when the written token expires. The per-exec refresh keys
    *  on this — not `credentialsWrittenAt` — so a near-expiry token inherited
    *  from an earlier thread's mint is re-minted before the first writable exec.
    *  Absent (pre-field binding) → the next writable exec falls back to the
@@ -965,7 +967,7 @@ interface AttachOk {
   trace: ResidentStep[];
 }
 
-/** Result of one /op test/build execution (U6, KTD8). `ok` is the command's
+/** Result of one /op test/build execution. `ok` is the command's
  *  verdict — a failing test run is a RESULT with ok:false, never an error. */
 interface OpRunOk {
   ok: boolean;
@@ -978,7 +980,7 @@ interface OpRunOk {
   stderr: string;
   exitCode: number;
   truncated: boolean;
-  /** dep materialization evidence (KTD7) — shared with the attach mechanism */
+  /** dep materialization evidence — shared with the attach mechanism */
   deps: ThreadDepsMechanism;
   reconciled: boolean;
   durationMs: number;
@@ -986,20 +988,20 @@ interface OpRunOk {
   trace: ResidentStep[];
 }
 
-/** DO-recorded repo facts — the truth the disk is rehydrated against (KTD3). */
+/** DO-recorded repo facts — the truth the disk is rehydrated against. */
 interface RepoFacts {
   defaultRef: string; // resolved default branch (configured ref if it exists, else the mirror's HEAD)
   sha: string; // last-fetched default-branch commit
-  lockfileHash: string; // dependency/build cache key (KTD7)
+  lockfileHash: string; // dependency/build cache key
   provisionedAt: string;
   lastRefreshAt: string;
-  lastRefreshError?: string; // last cycle's failure reason: command-level (e.g. token mint, no lifecycle flip) or the classified reason of a failed/interrupted cycle (#335 — survives a concurrent state overwrite); cleared by the next completed cycle
+  lastRefreshError?: string; // last cycle's failure reason: command-level (e.g. token mint, no lifecycle flip) or the classified reason of a failed/interrupted cycle (survives a concurrent state overwrite); cleared by the next completed cycle
   lastRestore?: { at: string; ms: number }; // proof of restore-not-reclone on the wake path
   /** Set while the resident is in idle mode (refresh alarm parked far out so the container may sleep). */
   idleSince?: string;
 }
 
-/** Stamped snapshot record (KTD3/KTD7): handles into R2 plus the {ref, sha,
+/** Stamped snapshot record: handles into R2 plus the {ref, sha,
  *  lockfileHash} stamp. Snapshots are written ONLY by onboarding provisioning
  *  and default-branch refresh; restore refuses a mismatched stamp. */
 interface SnapshotRecord {
@@ -1015,7 +1017,7 @@ interface SnapshotRecord {
   checkout: DirectoryBackup;
 }
 
-/** One immutable archive per deps-store entry (item 61, #614 PR B), keyed by
+/** One immutable archive per deps-store entry (features/resident-repos.md item 61), keyed by
  *  lockfile key under DEPS_BACKUP_KEY_PREFIX. Taken once, right after the
  *  entry is committed; the handle's `dir` is the entry's node_modules, and a
  *  restore overrides `dir` to a scratch tree so the commit script — not the
@@ -1086,7 +1088,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     return this.limits();
   }
 
-  /** LRU eviction (#50): release `evict`'s slot and insert `record` in ONE
+  /** LRU eviction: release `evict`'s slot and insert `record` in ONE
    *  input-gated section, so the freed slot can never be taken by a
    *  concurrent onboard between the two — the evicted resident is torn down
    *  only after its replacement holds the slot. Refuses (409) if `evict` is
@@ -1159,7 +1161,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 const PROVISIONING_CALLBACK = "onProvisioningDeadline"; // fail-closed deadline
 const PROVISION_RUN_CALLBACK = "runProvisioning"; // the actual provisioning work
 const REFRESH_CALLBACK = "onRefreshAlarm"; // self-rescheduling freshness chain
-const SWEEP_CALLBACK = "onWorktreeSweep"; // hourly worktree inactivity eviction (U4)
+const SWEEP_CALLBACK = "onWorktreeSweep"; // hourly worktree inactivity eviction
 
 const STATE_KEY = "resident:state";
 const REASON_KEY = "resident:reason";
@@ -1168,9 +1170,9 @@ const UPDATED_KEY = "resident:updatedAt";
 const FACTS_KEY = "resident:facts";
 const SNAPSHOT_KEY = "resident:snapshot";
 const DEADLINE_AT_KEY = "resident:provisionDeadlineAt";
-const REBUILD_STRIKES_KEY = "resident:rebuildStrikes"; // watchdog auto-rebuild counter (U8)
+const REBUILD_STRIKES_KEY = "resident:rebuildStrikes"; // watchdog auto-rebuild counter
 
-/** Thread bindings live under their own prefix, keyed by threadKey (KTD6). */
+/** Thread bindings live under their own prefix, keyed by threadKey. */
 const THREAD_KEY_PREFIX = "thread:";
 const threadBindingKey = (threadKey: string) => `${THREAD_KEY_PREFIX}${threadKey}`;
 
@@ -1248,8 +1250,8 @@ export class ResidentDO extends Sandbox<Env> {
   /** R2 restores this incarnation started and has not seen settle. The SDK's
    *  restoreBackup cannot be cancelled: a restore the wake path gave up on
    *  keeps writing into its target directory, so the next hydrate must not
-   *  `rm -rf` that directory until these have settled (#572 — live 2026-09-07
-   *  the second attempt's clean ran over the first attempt's still-filling
+   *  `rm -rf` that directory until these have settled (otherwise the second
+   *  attempt's clean runs over the first attempt's still-filling
    *  checkout). A DO reset drops the set together with the transfers it named:
    *  the restore is driven from this isolate, so nothing outlives it. */
   private readonly pendingRestores = new Set<Promise<unknown>>();
@@ -1257,7 +1259,7 @@ export class ResidentDO extends Sandbox<Env> {
   /** Run one R2 restore and judge it by the bytes arriving in its target
    *  directory (judgeRestoreProgress): the SDK call takes no timeout, progress
    *  callback or AbortSignal, and a fixed budget abandoned a restore that then
-   *  completed (481 s against 300 s, #572). While `du` of the target keeps
+   *  completed (481 s against 300 s). While `du` of the target keeps
    *  growing the wait continues; it ends on a stall (no growth for
    *  RESTORE_STALL_MS) or the RESTORE_MAX_MS cap, with the bytes and the timing
    *  in the error. On success the observed size and rate are logged so the
@@ -1295,10 +1297,10 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Restore a backup INTO `targetDir` as a plain directory on the resident's
-   *  disk (item 61, #614). In presigned mode the SDK's restore MOUNTS the
+   *  disk (features/resident-repos.md item 61). In presigned mode the SDK's restore MOUNTS the
    *  archive (squashfuse + fuse-overlayfs) at the handle's `dir` instead of
-   *  extracting it, which broke every step that treats the mirror, checkout
-   *  or a store entry as a directory on one ext4 filesystem (live 2026-09-08:
+   *  extracting it, which breaks every step that treats the mirror, checkout
+   *  or a store entry as a directory on one ext4 filesystem (
    *  `rm -rf` → Device or resource busy, `chown -R` → a full copy-up, `du -x`
    *  → ~1 MiB, hardlinks and renames across devices). So the handle is
    *  re-pointed at a staging mount beside the target, judged by bytes arriving
@@ -1348,10 +1350,9 @@ export class ResidentDO extends Sandbox<Env> {
   /** Where a running restore's bytes actually land, in KiB: the SDK downloads
    *  the whole archive to `/var/backups/<backupId>.sqsh` FIRST and only then
    *  extracts it into the target directory (`downloadBackupParallel` →
-   *  `restoreArchive`), so during the download the target stays empty. Live
-   *  2026-09-08 00:51–00:53 UTC, the first hydrate on #576's build: eight `du`
-   *  samples of `/workspace/checkout` read 0 while the 2 GiB archive was
-   *  downloading, the judge called it stalled at 123 s, and the resident went
+   *  `restoreArchive`), so during the download the target stays empty. Judging
+   *  the target alone reads 0 for every sample while a 2 GiB archive
+   *  downloads, calls the restore stalled at ~2 minutes, and takes the resident
    *  down — a false stall. Summing the archive and the target covers both
    *  phases (the total only ever grows until the SDK deletes the archive,
    *  which the judge's high-water mark ignores). One `du` for both paths;
@@ -1388,7 +1389,7 @@ export class ResidentDO extends Sandbox<Env> {
   // (`setResidentState`) clears too, and a sleep cannot race the TTL — the
   // container sleeps only after SLEEP_AFTER (20 min) of idleness, while the
   // hydration memo lives `hydrationMemoTtlMs` (60 s) past the last activity
-  // that set it. KTD3 still holds: the memo caches a verdict PROBED from
+  // that set it. Storage stays the truth: the memo caches a verdict PROBED from
   // disk, never assumes one.
   private hydratedVerdictAt = 0;
   private readonly hydrationMemoTtlMs = 60_000;
@@ -1403,7 +1404,7 @@ export class ResidentDO extends Sandbox<Env> {
     this.depsInstallSlots = null;
   }
 
-  /** Mirror mutex (KTD5): a DO yields at every await, so two in-flight
+  /** Mirror mutex: a DO yields at every await, so two in-flight
    *  requests CAN interleave mid-handler — every mirror mutation (fetch,
    *  worktree add/remove) runs under this explicit promise-chain lock. The
    *  chain lives in DO memory only; that is sufficient because all mirror
@@ -1509,10 +1510,10 @@ export class ResidentDO extends Sandbox<Env> {
       if (err instanceof ProcessWaitTimeoutError) {
         // The supervisor should have killed the process at `timeout`; 30 s
         // later it still had not exited (a starved container kills late).
-        // Rejecting here used to abandon a LIVE process — live 2026-09-07 an
-        // `npm install` kept extracting into the checkout while the next
-        // cycle's `git clean -fdx` ran over it (`Directory not empty`) and
-        // the resident spiralled. Kill it, then report the step's own timeout.
+        // Rejecting here would abandon a LIVE process — an `npm install`
+        // keeps extracting into the checkout while the next cycle's
+        // `git clean -fdx` runs over it (`Directory not empty`) and the
+        // resident spirals. Kill it, then report the step's own timeout.
         let exitCode: number | null = null;
         try {
           await proc.kill(9);
@@ -1557,7 +1558,7 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Run one command-table entry as the unprivileged build user in the warm
-   *  checkout. KTD5: never root. KTD7/KTD12: never a GitHub token — the env
+   *  checkout. Never root. Never a GitHub token — the env
    *  is whatever `su` grants the target user, nothing injected. */
   private async buildUserRun(command: string, step: ResidentStepLabelKey, timeoutMs: number): Promise<string> {
     // Steps on the checkout are sequential, so a live build-user process
@@ -1576,7 +1577,7 @@ export class ResidentDO extends Sandbox<Env> {
   /** Run a git command with an optional repo-scoped token, injected via a
    *  one-shot credential file under the root-only state dir — never
    *  process-wide env, never argv (which every user could read from the
-   *  shared process list), per KTD12. The leading `credential.helper=`
+   *  shared process list). The leading `credential.helper=`
    *  clears inherited helpers (the image configures gh's). */
   private async gitWithCred(
     token: string | null,
@@ -1617,7 +1618,7 @@ export class ResidentDO extends Sandbox<Env> {
     // the mirror mutex, extending every peer's wait. One fork now, and only
     // when the incarnation hasn't run it yet (cleared with the other memos).
     if (this.gitSetupDone) return;
-    // U4 isolation (the chown/chmod half): thread users must not read the
+    // Thread isolation (the chown/chmod half): thread users must not read the
     // mirror directly (its config/refs are engine plumbing; repo content
     // reaches threads only through their own worktrees). worker1 still needs
     // read access — the warm checkout fetches from the mirror during refresh —
@@ -1657,7 +1658,7 @@ export class ResidentDO extends Sandbox<Env> {
     return mirrorNeedsFetch({ refExists, mirrorSha, wantSha });
   }
 
-  /** Dependency/build cache key (KTD7): sha256 over the ls-tree lines (mode,
+  /** Dependency/build cache key: sha256 over the ls-tree lines (mode,
    *  blob oid, name) of the lockfile candidates AS COMMITTED at `sha` in the
    *  bare mirror. Fully determined by the commit — generated/uncommitted
    *  lockfiles on disk can never shift it. */
@@ -1718,9 +1719,9 @@ export class ResidentDO extends Sandbox<Env> {
   /** Snapshot mirror + checkout to R2 (localBucket: the SDK resolves the
    *  BACKUP_BUCKET binding from this DO's env; objects land under
    *  backups/<uuid>/). gitignore stays false: node_modules and build output
-   *  in the checkout ARE the cache being persisted (KTD3). The pair runs
+   *  in the checkout ARE the cache being persisted. The pair runs
    *  concurrently — disjoint directories, independent uploads — and each is
-   *  bounded by R2_TRANSFER_TIMEOUT_MS (#356 item 7a): a hang becomes this
+   *  bounded by R2_TRANSFER_TIMEOUT_MS: a hang becomes this
    *  StepError, which the cycle's existing failure handling degrades with
    *  the step named. */
   private async takeSnapshot(
@@ -1730,7 +1731,7 @@ export class ResidentDO extends Sandbox<Env> {
     lockfileHash: string,
   ): Promise<SnapshotRecord> {
     try {
-      // Item 61 (#614): presigned transfers when the env allows — the
+      // Presigned transfers when the env allows (features/resident-repos.md item 61) — the
       // container moves the bytes, the DO only signs — else the SDK's
       // local-bucket mode (the DO in the data path). The handle records the
       // mode, so the restore of THIS snapshot travels the same way.
@@ -1826,7 +1827,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  onboard-time command table → stamped snapshot → record facts → warm.
    *  On failure: down(provision-failed at <step>) — the registry slot is
    *  deliberately KEPT so /status shows the named reason (only a stuck
-   *  onboarding releases the slot, via the deadline/watchdog — KTD4). */
+   *  onboarding releases the slot, via the deadline/watchdog). */
   async runProvisioning(payload: string): Promise<void> {
     const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
     if ((await this.ctx.storage.get<ResidentState>(STATE_KEY)) !== "onboarding") return; // stale schedule
@@ -1836,7 +1837,7 @@ export class ResidentDO extends Sandbox<Env> {
       const slug = resource.slice("repo:".length);
       const stepBudget = record.provisioningTimeoutMs;
 
-      // KTD12: a mint failure is command-level — fall back to an anonymous
+      // A mint failure is command-level — fall back to an anonymous
       // clone (works for public repos); a private repo then fails AT CLONE
       // with the real, named signal.
       let token: string | null = null;
@@ -1851,7 +1852,7 @@ export class ResidentDO extends Sandbox<Env> {
       }
 
       // A restore an earlier hydrate gave up on may still be writing into these
-      // directories (#573: the SDK call cannot be cancelled, and a rebuild is
+      // directories (the SDK call cannot be cancelled, and a rebuild is
       // exactly what follows a restore that went `down`). The hydrate path
       // waits for `pendingRestores` before its clean; provisioning must too, or
       // the clone races a writer. Bounded like the hydrate's wait; a stream
@@ -1903,7 +1904,7 @@ export class ResidentDO extends Sandbox<Env> {
       await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
 
       // Deps into the store (item 59), the checkout a hardlink view of the
-      // entry; then the build, unprivileged and token-free (KTD5/KTD7). The
+      // entry; then the build, unprivileged and token-free. The
       // install budget is at least the refresh's: a provisioning budget below
       // a real install time just fails the onboarding.
       if (record.commands.install) {
@@ -1945,7 +1946,7 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Fail-closed deadline (armed at onboard): a resident still `onboarding`
    *  when this fires is stuck → down(provision-timeout) and the cap slot is
-   *  released (KTD4). The watchdog is the backstop when this schedule itself
+   *  released. The watchdog is the backstop when this schedule itself
    *  died. */
   async onProvisioningDeadline(_payload: string): Promise<void> {
     const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
@@ -1968,14 +1969,14 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  // -- wake path (rehydration, KTD3/KTD10) ------------------------------------
+  // -- wake path (rehydration: storage is truth, the disk is a cache) ----------
 
   /** Ensure the container disk holds the stamped snapshot state. `restoring`
-   *  is persisted BEFORE any restore work (KTD10) — DO storage would
+   *  is persisted BEFORE any restore work — DO storage would
    *  otherwise still say warm while the R2 restore runs. Refuses mismatched
    *  stamps → down(snapshot-stamp-mismatch); restore failures →
    *  down(r2-restore-failed). Throws ResidentDownError after those
-   *  transitions. Called by the refresh alarm (and U4's attach path). */
+   *  transitions. Called by the refresh alarm (and the attach path). */
   async ensureHydrated(): Promise<void> {
     // Fresh positive verdict for this incarnation → nothing to probe. See the
     // per-incarnation memo block for why this is safe; the refresh alarm's
@@ -1996,8 +1997,8 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** When the in-flight hydration began — lets the watchdog distinguish a
    *  restore that is genuinely running from one whose promise will never
-   *  settle (an SDK call hung on a container that was replaced under it,
-   *  #335). Only meaningful while `this.hydration` is non-null. */
+   *  settle (an SDK call hung on a container that was replaced under it).
+   *  Only meaningful while `this.hydration` is non-null. */
   private hydrationStartedAt = 0;
 
   private async doHydrate(): Promise<void> {
@@ -2014,7 +2015,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (!snap || !facts) {
       throw await this.goDown("no-snapshot: resident has no recorded snapshot to rehydrate from");
     }
-    // DO-side stamp consistency (KTD3: storage is truth) — checked before any
+    // DO-side stamp consistency (storage is truth) — checked before any
     // container work.
     if (snap.ref !== facts.defaultRef || snap.sha !== facts.sha || snap.lockfileHash !== facts.lockfileHash) {
       throw await this.goDown(
@@ -2024,7 +2025,7 @@ export class ResidentDO extends Sandbox<Env> {
 
     // Cheap short-circuit only when the runtime is already up AND the disk
     // matches; a dead runtime goes straight to `restoring` so /status never
-    // says warm while the wake actually runs (KTD10).
+    // says warm while the wake actually runs.
     const active = await this.isRuntimeActive().catch(() => false);
     if (active && (await this.diskMatches(snap.sha))) return;
 
@@ -2037,7 +2038,7 @@ export class ResidentDO extends Sandbox<Env> {
 
     const t0 = systemClock();
     // A restore a previous attempt gave up on may still be writing into these
-    // directories (the SDK call cannot be cancelled, #572): wait for it to
+    // directories (the SDK call cannot be cancelled): wait for it to
     // settle before the clean, bounded by the same cap the restores get. A
     // restore that will not settle even then leaves the disk alone — a named
     // `down`, not a clean racing a writer.
@@ -2071,7 +2072,7 @@ export class ResidentDO extends Sandbox<Env> {
       // The restore pair IS the cold-wake critical path. Sequential on purpose:
       // the SDK serializes backup operations anyway (one queue), so a
       // concurrent pair only made the second one's clock run while it waited —
-      // and each is judged by its own bytes (restoreWithProgress, #572), not by
+      // and each is judged by its own bytes (restoreWithProgress), not by
       // a fixed budget: a slow transfer waits, a stalled one goes down with
       // the bytes and the idle span named instead of stranding `restoring` for
       // the watchdog.
@@ -2087,10 +2088,10 @@ export class ResidentDO extends Sandbox<Env> {
       // A stalled or capped restore is STILL STREAMING (the SDK call cannot be
       // cancelled); `pendingRestores` keeps the next hydrate off its directory,
       // but a `down` resident's only exit is a REBUILD, and provisioning owns
-      // the same directories. Live 2026-09-07 23:52 (#573): the restore the
-      // wake path had given up on landed into the checkout the rebuild had just
-      // cloned and linked — tar overwrote in place through the deps store's
-      // hardlinks, resetting every hardened entry file from 444 to 644. Stop
+      // the same directories. Left running, the restore the wake path gave up
+      // on lands into the checkout the rebuild has just cloned and linked —
+      // tar overwrites in place through the deps store's hardlinks, resetting
+      // every hardened entry file from 444 to 644. Stop
       // the container on the way down: the disk is ephemeral, the stream dies
       // with it, and the rebuild starts on an empty one.
       this.clearIncarnationMemos(); // deliberate incarnation swap
@@ -2102,7 +2103,7 @@ export class ResidentDO extends Sandbox<Env> {
     await this.ensureGitSetup();
 
     // Verify the restored disk against the stamp — a snapshot that does not
-    // prove its own {ref, sha, lockfileHash} is refused (KTD7). Both values
+    // prove its own {ref, sha, lockfileHash} is refused. Both values
     // derive from the restored MIRROR (the source of truth the checkout was
     // built from); the checkout's presence was proven by restoreBackup + the
     // chown below failing loudly if it is missing.
@@ -2183,12 +2184,12 @@ export class ResidentDO extends Sandbox<Env> {
     await this.setResidentState("warm");
   }
 
-  // -- freshness (refresh alarm, KTD4/KTD7/KTD12) ------------------------------
+  // -- freshness (the self-rescheduling refresh alarm) --------------------------
 
   /** Self-rescheduling refresh: rehydrate if the container slept → mint a
    *  repo-scoped token (mint failure is command-level: recorded, never a
    *  lifecycle flip) → fetch into the bare mirror → when the default branch
-   *  moved: plan against the disk checkpoints (planRefresh, #163) — reuse a
+   *  moved: plan against the disk checkpoints (planRefresh) — reuse a
    *  checkout an interrupted cycle already materialized, else update the
    *  checkout and reinstall ONLY if the committed lockfile key changed, then
    *  rebuild — write a new stamped snapshot, delete the replaced backup
@@ -2215,7 +2216,7 @@ export class ResidentDO extends Sandbox<Env> {
     const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
     let refreshCounted = false;
     const before = await this.getStatus();
-    // down chains stay down (U8's rebuild is the escape hatch); onboarding is
+    // down chains stay down (a rebuild is the escape hatch); onboarding is
     // owned by provisioning, which arms the first refresh itself.
     if (before.state === "onboarding" || before.state === "down") return;
     try {
@@ -2231,7 +2232,7 @@ export class ResidentDO extends Sandbox<Env> {
       // reconcileImage — so a rollout self-applies within one refresh.
       if (await this.reconcileImage("refresh")) {
         // Container stopping; it restarts on the new image in seconds. Re-arm
-        // SHORT (#216) so the resident is re-warmed within a minute instead of
+        // SHORT so the resident is re-warmed within a minute instead of
         // sitting on the old cadence for a full 600 s.
         this.rearmOutcome = "image-stale-restart";
         return; // finally re-arms
@@ -2244,16 +2245,16 @@ export class ResidentDO extends Sandbox<Env> {
       // uncommitted work is not snapshotted.
       // Only a SETTLED resident may park: a cycle that finds `refreshing`/
       // `restoring` at entry is looking at a marker left by a cycle that died
-      // mid-flight (a deploy evicting the DO, live 2026-08-29: stuck
-      // `refreshing` + parked → every run fell back cold because the bot's
-      // warm-gate probe never saw `warm` again). Run the full cycle instead; it
+      // mid-flight (a deploy evicting the DO: stuck `refreshing` + parked →
+      // every run falls back cold because the bot's warm-gate probe never
+      // sees `warm` again). Run the full cycle instead; it
       // ends warm or degraded, and the next one may park.
       // Decide off a FRESH state read — `before` predates several awaits
       // (hydration, registry, facts, reconcile) — same re-read discipline as
       // every other state decision in this file.
       const entry = await this.getStatus();
       if (entry.state === "degraded" && isDiskFullReason(entry.reason)) {
-        // The cycle owns the disk-full verdict (#457, item 54): re-probe before
+        // The cycle owns the disk-full verdict (features/resident-repos.md item 54): re-probe before
         // fetching. Still full → nothing a fetch can do; decide whether the
         // container may be recycled and stop here (a fetch that happened to fit
         // would flip the resident `warm`, the bot would attach, git-setup would
@@ -2280,14 +2281,14 @@ export class ResidentDO extends Sandbox<Env> {
         settled = streak.count >= DEGRADED_PARK_AFTER_CYCLES;
       } else {
         // Warm, or a degraded stamped by the WATCHDOG (alarm-missed /
-        // stale-mid-flight) or by an INTERRUPTED cycle (refresh-interrupted, #216 —
+        // stale-mid-flight) or by an INTERRUPTED cycle (refresh-interrupted —
         // a deploy killed the step; it says nothing about the repo): the
         // watchdog pulled this cycle to +5s precisely so a refresh RUNS, and the
         // interrupted cycle re-armed short for the same reason.
-        // Counting those toward the streak was self-fulfilling —
-        // each cycle that found the reason parked without attempting anything,
-        // and after three the resident sat parked-degraded for 6h at a time
-        // (live 2026-08-29: repo:jshttp/vary, #177). Never settled; streak reset.
+        // Counting those toward the streak would be self-fulfilling —
+        // each cycle that found the reason would park without attempting anything,
+        // and after three the resident would sit parked-degraded for 6h at a
+        // time. Never settled; streak reset.
         await this.ctx.storage.delete(DEGRADED_STREAK_KEY);
       }
       if (settled && (await this.isIdle())) {
@@ -2311,16 +2312,16 @@ export class ResidentDO extends Sandbox<Env> {
       this.refreshesInFlight++;
       refreshCounted = true;
 
-      // KTD12: token-mint failure is a command-level error — the resident
+      // Token-mint failure is a command-level error — the resident
       // keeps serving the last snapshot and lifecycle state is NOT flipped by
       // it. It is recorded, and the cycle then CONTINUES with an anonymous
       // fetch (exactly what an unconfigured App does): a public repo outside
       // the installation stays fresh, and a private one fails at the fetch
       // below into a visible `degraded(github-unreachable: …)`. Returning here
-      // instead (the pre-#171 behavior) froze whatever state the resident was
-      // in — live 2026-08-29: `repo:jshttp/vary` sat in the watchdog's
-      // `degraded(alarm-missed)` forever with a 24h-stale mirror, because the
-      // App cannot mint for a repo it is not installed on.
+      // instead would freeze whatever state the resident was in — a public
+      // repo the App is not installed on would sit in the watchdog's
+      // `degraded(alarm-missed)` forever with an ever-staler mirror, because
+      // the App cannot mint for a repo it is not installed on.
       let token: string | null = null;
       // This cycle's mint error, kept so it survives the warm facts write below
       // (which clears errors from PRIOR cycles) and prefixes a fetch failure's
@@ -2338,7 +2339,7 @@ export class ResidentDO extends Sandbox<Env> {
 
       await this.setResidentState("refreshing");
       try {
-        // Same mirror mutex as attach's fetch/worktree work (KTD5): the
+        // Same mirror mutex as attach's fetch/worktree work: the
         // refresh alarm and an in-flight attach serialize instead of racing
         // a prune against a worktree clone.
         await this.withMirrorLock(() =>
@@ -2350,9 +2351,9 @@ export class ResidentDO extends Sandbox<Env> {
         const cause = mintError ? `${mintError}; then ` : "";
         const message = `${cause}${errMsg(err)}`;
         // A full disk fails this step too — the credential file is written
-        // here (live 2026-09-04: `ENOSPC` on /workspace/.resident/git-credentials,
-        // recorded as github-unreachable, a SERVICEABLE reason, so every run
-        // attached and died at git-setup, #457). Name the disk instead: not
+        // here (`ENOSPC` on /workspace/.resident/git-credentials would read as
+        // github-unreachable, a SERVICEABLE reason, so every run would attach
+        // and die at git-setup). Name the disk instead: not
         // serviceable, and the recovery below can free it.
         const failure = await this.classifyFailure("fetch", message);
         if (failure.diskFull) {
@@ -2365,7 +2366,7 @@ export class ResidentDO extends Sandbox<Env> {
       }
 
       const sha = await this.readMirrorSha(facts.defaultRef);
-      // Pure function of the commit (KTD7) — computed from the mirror before
+      // Pure function of the commit — computed from the mirror before
       // any checkout work so the planner can compare it to the deps marker.
       const lockfileHash = sha === facts.sha ? facts.lockfileHash : await this.lockfileKey(sha);
       const plan = planRefresh({
@@ -2386,12 +2387,12 @@ export class ResidentDO extends Sandbox<Env> {
         // No wait timeout, exactly like the fetch lock above: the background
         // refresh queues behind an in-flight attach instead of flipping to
         // degraded on transient lock contention.
-        // Token-free from here on: repo code runs during install/build (KTD7).
+        // Token-free from here on: repo code runs during install/build.
         //
         // Deps come from the store (item 59): a changed lockfile key is
         // materialized ONCE into `/workspace/deps/<key>` — OUTSIDE the mirror
         // lock, because the install runs in its own scratch clone and touches
-        // no consumer's tree (#170's staging step) — and the checkout's
+        // no consumer's tree (the staging step) — and the checkout's
         // node_modules becomes a hardlink view of that entry. An attach that
         // needs the same key joins this very install instead of starting its
         // own. Checkpoint: the deps marker comes off BEFORE the install so an
@@ -2431,7 +2432,7 @@ export class ResidentDO extends Sandbox<Env> {
             // loudly instead of silently reaching the store; the tool caches
             // inside node_modules are the checkout's private copies (item 18).
             //
-            // Install gate (#163): when the committed lockfile key is unchanged,
+            // Install gate: when the committed lockfile key is unchanged,
             // node_modules (the view) is excluded from the clean and no deps
             // work happens; a changed key takes the full clean and re-links the
             // view to the new entry — which is also what drops deps the new
@@ -2468,7 +2469,7 @@ export class ResidentDO extends Sandbox<Env> {
         lockfileHash,
         lastRefreshAt: new Date(systemClock()).toISOString(),
       };
-      // Clear a PRIOR cycle's error; keep THIS cycle's mint error visible (#171).
+      // Clear a PRIOR cycle's error; keep THIS cycle's mint error visible.
       delete updatedFacts.lastRefreshError;
       if (mintError) updatedFacts.lastRefreshError = mintError;
       // A wake cycle cleared idleSince above; `facts` was read at alarm entry and
@@ -2483,7 +2484,7 @@ export class ResidentDO extends Sandbox<Env> {
         await this.ctx.storage.put(FACTS_KEY, updatedFacts);
       }
       await this.setResidentState("warm");
-      // Event-triggered reclamation (#50): the prune above already told the
+      // Event-triggered reclamation: the prune above already told the
       // mirror which branches died; finished refs give their worktree and
       // pool user back now, not at the idle TTL. Housekeeping, never a
       // lifecycle flip — a failure here is a log line.
@@ -2500,19 +2501,19 @@ export class ResidentDO extends Sandbox<Env> {
       if (err instanceof ResidentDownError) return; // already down with reason; chain stops below
       // A step killed from OUTSIDE (the container replaced under it — an
       // image-changing deploy or a container stop; a Worker-only deploy leaves
-      // the container running and interrupts nothing, live 2026-08-30 #335) is
-      // `refresh-interrupted` (#216): it is not evidence about the repo — it
+      // the container running and interrupts nothing) is
+      // `refresh-interrupted`: it is not evidence about the repo — it
       // never counts toward the park streak (the entry gate above) — and the
       // chain re-arms SHORT so the resident is warm again within a minute
-      // instead of after the full cadence (live 2026-08-29:
-      // `degraded(build-failed: exit 143 …)` 22:31 → warm 22:42; live
-      // 2026-08-30 #335: an unclassified mid-snapshot kill cost 9 min 53 s).
+      // instead of after the full cadence (an unclassified kill otherwise
+      // costs the resident the whole 10-minute cadence, e.g.
+      // `degraded(build-failed: exit 143 …)` until the next alarm).
       // Any other failure is the repo's own: `<step>-failed: …` /
       // `refresh-failed: …` as before. Non-StepErrors classify too — an SDK
       // replacement error can surface between steps — with the generic
       // "refresh" step, whose failure reason is the pre-existing
       // `refresh-failed: …` shape.
-      // A full disk (#457) is a third class: `disk-full: …`, never serviceable,
+      // A full disk is a third class: `disk-full: …`, never serviceable,
       // and the one failure the resident can act on itself (recoverFromDiskFull).
       const failure =
         err instanceof StepError
@@ -2524,13 +2525,13 @@ export class ResidentDO extends Sandbox<Env> {
       // The classified reason, always in the log: a StepError logged its own
       // output block above, but a failure between steps (an SDK error, the
       // markers, the snapshot) reached only the state entry — which the next
-      // cycle's failure overwrites (live 2026-09-07: the install timeout that
-      // started an incident left no trace once the follow-up cycle failed).
+      // cycle's failure overwrites (an install timeout that starts an
+      // incident leaves no trace once the follow-up cycle fails).
       console.log(`refresh: cycle failed — ${failure.reason.slice(0, 400)}`);
-      // Record on the facts too (#335): the degraded state write below can be
+      // Record on the facts too: the degraded state write below can be
       // clobbered within seconds by a concurrent attach/exec whose
-      // ensureHydrated flips the state to `restoring · rehydrating` (that is
-      // exactly what the live incident showed — no visible trace of WHY).
+      // ensureHydrated flips the state to `restoring · rehydrating`, leaving
+      // no visible trace of WHY.
       // `lastRefreshError` survives that race and the next completed cycle
       // clears it, same as a mint error.
       await this.recordRefreshError(failure.reason);
@@ -2539,7 +2540,7 @@ export class ResidentDO extends Sandbox<Env> {
     } finally {
       if (refreshCounted) this.refreshesInFlight--;
       const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
-      // Consecutive-interruption count (#216 review): bounds the short re-arm so
+      // Consecutive-interruption count: bounds the short re-arm so
       // a step whose output chronically carries the kill signature falls back to
       // the cadence after INTERRUPTED_REARM_MAX_CONSECUTIVE instead of hot-looping.
       let consecutiveInterrupted: number | undefined;
@@ -2589,13 +2590,13 @@ export class ResidentDO extends Sandbox<Env> {
   private async liveTreesClean(live: ThreadBinding[]): Promise<boolean> {
     if (!(await this.isRuntimeActive().catch(() => false))) return true;
     // Concurrent: each check touches only its own (disjoint) tree, and one
-    // spawn each (#356 item 6) — the idle gate no longer pays a serial
+    // spawn each — the idle gate does not pay a serial
     // 3-probe round-trip per live binding.
     const checks = await Promise.all(live.map((b) => this.worktreeCleanliness(b)));
     return checks.every((c) => c.clean); // any dirty or unknown → not clean
   }
 
-  // -- disk-full (#457, item 54) ------------------------------------------------
+  // -- disk-full (features/resident-repos.md item 54) ---------------------------
 
   /** Free space on the workspace mount in KiB; `null` when df cannot answer.
    *  One fork, run only after a step has already failed — never on the hot path. */
@@ -2611,14 +2612,14 @@ export class ResidentDO extends Sandbox<Env> {
   /** `classifyRefreshFailure` with the disk probe folded in: the probe runs
    *  only when the message alone does not decide (no ENOSPC wording, no kill
    *  signature) — git's `git config` reports its write failure without an
-   *  errno, which is how the 2026-09-04 attaches read like a lock bug. */
+   *  errno, so a full-disk attach reads like a lock bug without the probe. */
   private async classifyFailure(step: string, message: string): Promise<RefreshFailure> {
     const direct = classifyRefreshFailure({ step, message });
     if (direct.diskFull || direct.interrupted) return direct;
     return classifyRefreshFailure({ step, message, freeKiB: await this.freeKiB() });
   }
 
-  /** The disk is a cache (KTD3): stop the container so the next alarm restores
+  /** The disk is a cache: stop the container so the next alarm restores
    *  mirror + checkout from R2 onto an empty disk — the same wake path as a
    *  platform sleep. Only when the pure plan allows it: nothing in flight
    *  (`selfInFlight` excludes the calling refresh cycle from the count), every
@@ -2648,7 +2649,7 @@ export class ResidentDO extends Sandbox<Env> {
     this.rearmOutcome = "disk-full-restart";
   }
 
-  // -- disk budget (#448, item 55) ----------------------------------------------
+  // -- disk budget (features/resident-repos.md item 55) -------------------------
 
   /** The `df` half: total/used/free of the workspace mount; null when df
    *  cannot answer (never 0 — unknown must not read as full or as empty). */
@@ -2747,7 +2748,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  same shape as `mirror-busy`, so the bot falls back cold legibly. Never a
    *  lifecycle flip: the checkout is intact and every existing tree keeps
    *  serving. Runs BEFORE the mirror lock — evictions take the lock themselves.
-   *  No `df` answer → admitted (unknown is never refused, #472's rule). */
+   *  No `df` answer → admitted (unknown is never refused). */
   private async admitThreadDisk(input: {
     threadKey: string;
     binding: ThreadBinding;
@@ -2909,7 +2910,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  lives in the Worker. After a deploy that grows the pool, a still-running
    *  container lacks the new users and `install -o workerN` fails. Check the
    *  last pool user exists; if not and nothing is in flight, stop the container
-   *  so it restarts on the current image (state is DO storage + R2, KTD3 — the
+   *  so it restarts on the current image (state is DO storage + R2 — the
    *  disk is a cache). Returns true when a stop was issued. */
   private async reconcileImage(where: string): Promise<boolean> {
     if (!(await this.isRuntimeActive().catch(() => false))) return false;
@@ -2931,13 +2932,13 @@ export class ResidentDO extends Sandbox<Env> {
     return true;
   }
 
-  // -- watchdog (KTD4) ---------------------------------------------------------
+  // -- watchdog (the sparse cron that re-arms dead alarm chains) ---------------
 
   /** One watchdog pass over this resident (invoked by the Worker cron):
    *  re-arm a dead refresh chain and mark degraded(alarm-missed); time out an
    *  onboarding stuck past its budget → down(provision-timeout) + cap slot
-   *  release; auto-rebuild a resident stuck down on unusable snapshots (U8:
-   *  one strike per pass, rebuild at AUTO_REBUILD_AFTER_STRIKES). Storage/
+   *  release; auto-rebuild a resident stuck down on unusable snapshots (one
+   *  strike per pass, rebuild at AUTO_REBUILD_AFTER_STRIKES). Storage/
    *  schedule reads (plus the strike counter) only — containers start via the
    *  re-armed alarms, never in this pass. */
   async watchdogCheck(): Promise<{
@@ -2970,7 +2971,7 @@ export class ResidentDO extends Sandbox<Env> {
       return { resource, ...status, action: "none" };
     }
     if (status.state === "down") {
-      // Auto-rebuild escape hatch (U8): only rehydration-flavored downs — the
+      // Auto-rebuild escape hatch: only rehydration-flavored downs — the
       // snapshots themselves are the problem, and down chains never retry, so
       // without this the resident would stay down forever.
       if (REHYDRATION_FAILURE_RE.test(status.reason)) {
@@ -2996,7 +2997,7 @@ export class ResidentDO extends Sandbox<Env> {
     // The sweep chain has the same failure mode as the refresh chain (a DO
     // eviction mid-callback kills the self-rescheduling), but nothing re-armed
     // it: only an attach did, so a resident with live bindings and no traffic
-    // never swept again (live 2026-08-29: seven idle bindings, >1h, no sweep).
+    // never swept again (idle bindings sat for hours with no sweep).
     // Re-arm at +5s whenever live bindings exist and none is pending. Not a
     // lifecycle event — the sweep is housekeeping, no state flip. Runs BEFORE
     // the stale-mid-flight check so that branch's early return never skips it.
@@ -3007,8 +3008,8 @@ export class ResidentDO extends Sandbox<Env> {
     // resolves, but that is a library detail we do not lean on).
     if (liveBindings && !this.sweepInFlight) {
       const pendingSweeps = await this.listSchedules(SWEEP_CALLBACK);
-      // Config drift: a row armed by OLDER code (e.g. the pre-#130 daily sweep,
-      // seen live 2026-08-29 due 24h out) is still honored by the runtime, so a
+      // Config drift: a row armed by OLDER code (e.g. a daily sweep from
+      // before the cadence shortened, due 24h out) is still honored by the runtime, so a
       // shorter SWEEP_INTERVAL_S never takes effect until it fires. Treat a row
       // due further out than the current interval (+ slack) as stale and
       // replace it, so a deploy that shortens the cadence applies within one
@@ -3031,12 +3032,12 @@ export class ResidentDO extends Sandbox<Env> {
     // actually running is a marker orphaned by an interrupted cycle (DO evicted
     // by a deploy, platform restart). Left alone it is permanent — the idle gate
     // above only parks from `warm`, but nothing else would ever rewrite it, and
-    // the bot's warm-gate keeps sending runs cold. Mark it degraded (visible,
-    // KTD10) and pull the next cycle to +5s so it normalizes.
+    // the bot's warm-gate keeps sending runs cold. Mark it degraded (visible —
+    // named degradation, never a stall) and pull the next cycle to +5s so it normalizes.
     if (status.state === "refreshing" || status.state === "restoring") {
       const updatedAt = Date.parse((await this.ctx.storage.get<string>(UPDATED_KEY)) ?? "") || 0;
-      // A hydration older than the stale bound counts as DEAD, not in flight
-      // (#335): its promise lives on SDK calls into a container that may have
+      // A hydration older than the stale bound counts as DEAD, not in flight:
+      // its promise lives on SDK calls into a container that may have
       // been replaced under it, and a promise that never settles would
       // otherwise hold `this.hydration` non-null forever — making a stuck
       // `restoring` permanently invisible to this branch. No legitimate
@@ -3077,15 +3078,15 @@ export class ResidentDO extends Sandbox<Env> {
     return { resource, ...status, action: "none" };
   }
 
-  // -- thread data plane (U4: attach / exec / read / write / sweep) ------------
+  // -- thread data plane (attach / exec / read / write / sweep) ----------------
 
   /** Run a shell string privilege-dropped as the thread's OS user with the
-   *  worktree as cwd (KTD5). Never root, never a token in env or argv — the
+   *  worktree as cwd. Never root, never a token in env or argv — the
    *  only injected env var is GIT_TERMINAL_PROMPT, validated like every
    *  injection. The worktree path is built from slugged components, so
    *  embedding it in the -c string is shell-safe.
    *
-   *  `capBytes` (#356 item 8): when set, the command's streams are bounded
+   *  `capBytes`: when set, the command's streams are bounded
    *  INSIDE the container (`capWrappedCommand` — full output to container-disk
    *  temp files, only the capped head crosses the RPC), so a verbose test/build
    *  run can no longer materialize tens of MB inside this 128 MB DO isolate
@@ -3168,7 +3169,7 @@ export class ResidentDO extends Sandbox<Env> {
   /** Storage-only allocation (atomic under the DO input gate: get → list →
    *  put touches nothing but this object's storage, so two concurrent
    *  attaches cannot both claim the same user). Sticky: an existing live
-   *  binding is reused as-is; an evicted binding keeps its ref (KTD6) and
+   *  binding is reused as-is; an evicted binding keeps its ref and
    *  gets a fresh user from the pool. */
   private async allocateThreadUser(
     threadKey: string,
@@ -3188,7 +3189,7 @@ export class ResidentDO extends Sandbox<Env> {
     const now = new Date(systemClock()).toISOString();
     const binding: ThreadBinding = {
       threadKey,
-      ref: existing?.ref ?? ref, // sticky across eviction (KTD6)
+      ref: existing?.ref ?? ref, // sticky across eviction
       user,
       worktreePath: existing?.worktreePath ?? worktreePath,
       boundAt: existing?.boundAt ?? now,
@@ -3203,7 +3204,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  Validated inputs only (the Worker enforces the patterns before this is
    *  ever called). Flow: hydrate → resolve/blind the ref binding → allocate
    *  a pool user → (mirror mutex) verify ref, wipe dirty/stale trees,
-   *  clone → materialize deps (KTD7) → per-attach credential file (KTD12).
+   *  clone → materialize deps → per-attach credential file.
    *  `wantSha` (item 51): the commit the caller expects the ref to be at — a
    *  mirror whose ref tip is not that commit is fetched before the clone. */
   async attachThread(
@@ -3261,7 +3262,7 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** A failed attach step after its rollback: the 500 the caller falls back
-   *  on, named by step. A step that died of a full disk (#457, item 54) also
+   *  on, named by step. A step that died of a full disk (features/resident-repos.md item 54) also
    *  flips the resident `degraded(disk-full: …)` — not serviceable, so the
    *  next dispatch goes cold without attaching (the card names the disk, not
    *  `/etc/gitconfig.lock`) — and pulls the refresh cycle to now, where the
@@ -3305,11 +3306,11 @@ export class ResidentDO extends Sandbox<Env> {
     if (!record || !facts) return { error: "not-serviceable: registry record or repo facts missing", status: 503 };
 
     const prior = stored.get(threadBindingKey(threadKey)) as ThreadBinding | undefined;
-    const ref = prior?.ref ?? refHint; // KTD6: the binding's ref wins for the thread's whole life
+    const ref = prior?.ref ?? refHint; // the binding's ref wins for the thread's whole life
     if (!ref) {
       // Name the default branch so the bot can bind to it (loudly) instead of
       // asking the user when the message named no branch; the binding is still
-      // made by the caller's next attach, never here (KTD6: explicit, no guess).
+      // made by the caller's next attach, never here (explicit, no guess).
       return {
         error: "needs-ref: this thread has no ref binding yet — supply refHint",
         status: 409,
@@ -3378,7 +3379,7 @@ export class ResidentDO extends Sandbox<Env> {
   }): Promise<AttachOk | ThreadErr> {
     const { threadKey, refHint, wantSha, resource, slug, t0, facts, record, binding, mode, rollback } = input;
 
-    // Command-level token mint (KTD12) — before the lock so mint latency
+    // Command-level token mint — before the lock so mint latency
     // never holds the mutex, and failure never blocks the attach.
     let token: string | null = null;
     let tokenExpiresAtMs: number | null = null;
@@ -3467,7 +3468,7 @@ export class ResidentDO extends Sandbox<Env> {
       } else if (token) {
         credentialsWrittenAt = await this.writeThreadCredentials(binding, token);
         // Persist the token's expiry beside the write time so the first writable
-        // exec refreshes off the token's own life, not the file's age (#528).
+        // exec refreshes off the token's own life, not the file's age.
         credentialTokenExpiresAtMs = tokenExpiresAtMs ?? undefined;
         credentials = "ok";
       }
@@ -3525,7 +3526,7 @@ export class ResidentDO extends Sandbox<Env> {
     };
   }
 
-  /** Ensure the worktree exists, wiping dirty/stale trees (KTD5). Returns
+  /** Ensure the worktree exists, wiping dirty/stale trees. Returns
    *  true when the tree was (re)created. MUST be called holding the mirror
    *  mutex — the clone reads the mirror.
    *
@@ -3629,7 +3630,7 @@ export class ResidentDO extends Sandbox<Env> {
     return parsed;
   }
 
-  /** Materialize the dep/build cache (KTD7). Same committed-lockfile key as
+  /** Materialize the dep/build cache. Same committed-lockfile key as
    *  the warm checkout → per-dir mechanism from `depCacheMaterialization`:
    *  node_modules is hardlink-copied (cp -al), chowning only DIRECTORIES to
    *  the thread user: file inodes stay worker1-owned and read-only to the
@@ -3641,16 +3642,16 @@ export class ResidentDO extends Sandbox<Env> {
    *  test runs rewrite in place and so are swapped for real copies. Build output
    *  dirs (dist/build/out/.next) are plain-copied — fresh inodes, fully
    *  chowned — because the review agent and `/op build` rebuild them IN
-   *  PLACE, which a shared read-only inode refuses with EACCES (#315 review).
-   *  The whole per-dir mechanism runs as TWO container forks (#356 item 4):
+   *  PLACE, which a shared read-only inode refuses with EACCES.
+   *  The whole per-dir mechanism runs as TWO container forks:
    *  `depCacheScript` handles all five dirs and emits tagged mechanism +
    *  mutable-listing lines, `mutableCacheSwapScript` performs the swaps —
-   *  instead of the old ~25 sequential spawns, all of which held the mirror
+   *  instead of ~25 sequential spawns, all of which would hold the mirror
    *  mutex. Ownership/permission results are identical (residentDepCache.ts).
    *  A differing key runs the repo's install command in the worktree,
    *  token-free, as the thread user. */
   private async materializeThreadDeps(
-    binding: { user: string; worktreePath: string }, // a ThreadBinding, or U6's per-op checkout
+    binding: { user: string; worktreePath: string }, // a ThreadBinding, or a per-op checkout
     threadLockKey: string,
     sha: string,
     warmLockKey: string,
@@ -3718,8 +3719,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  complete. Hit → touch `.used`, return. An install already running for
    *  the key → join its promise. Miss → install once, outside every lock: the
    *  scratch clone reads the mirror's objects through alternates and touches
-   *  no consumer's tree, so a full install no longer holds every attach
-   *  behind the mirror mutex (#170). `budgetMs` bounds the install step; a
+   *  no consumer's tree, so a full install never holds every attach
+   *  behind the mirror mutex. `budgetMs` bounds the install step; a
    *  joiner inherits the running install's budget. */
   private async materializeDeps(
     key: string,
@@ -3732,7 +3733,7 @@ export class ResidentDO extends Sandbox<Env> {
      *  inode. Ignored when it is the key itself or has no complete entry.
      *  `restoreDeadlineMs`: the absolute deadline the `restore` backing is
      *  judged against — the wake path passes its ONE hydrate deadline so the
-     *  `restoring` span stays under RESTORE_MAX_MS in total (#572's
+     *  `restoring` span stays under RESTORE_MAX_MS in total (the hydrate
      *  invariant); every other caller gets `min(budgetMs, RESTORE_MAX_MS)`
      *  from now, so an attach never waits longer for a download than it
      *  would for an install. */
@@ -3772,11 +3773,12 @@ export class ResidentDO extends Sandbox<Env> {
     return this.ctx.storage.get<DepsBackupRecord>(depsBackupStorageKey(key));
   }
 
-  /** Archive a freshly committed entry to R2, once (item 61 PR B). Runs after
-   *  the commit, off the caller's critical path — the entry is already
-   *  serving — and only in presigned mode: local-bucket mode would put the
-   *  Durable Object in the data path of a deps-sized upload, the very class of
-   *  failure #614 removes. Housekeeping: a failure is a log line; the next
+  /** Archive a freshly committed entry to R2, once (features/resident-repos.md
+   *  item 61). Runs after the commit, off the caller's critical path — the
+   *  entry is already serving — and only in presigned mode: local-bucket mode
+   *  would put the Durable Object in the data path of a deps-sized upload, the
+   *  very class of failure presigned transfers exist to remove. Housekeeping:
+   *  a failure is a log line; the next
    *  wake installs, as before. The key stays protected from eviction while
    *  the upload runs (`depsBackupsInFlight`). */
   private async backupDepsEntry(key: string): Promise<void> {
@@ -3917,7 +3919,7 @@ export class ResidentDO extends Sandbox<Env> {
         }
         console.log(`deps: ${key.slice(0, 8)} seeded from ${seed.slice(0, 8)} (${parsed.mech})`);
       }
-      // Unprivileged and token-free (KTD5/KTD7), in a tree only this attempt
+      // Unprivileged and token-free, in a tree only this attempt
       // knows — no stale sweep needed: nothing else can be running in it.
       await this.runOk(["su", "-s", "/bin/bash", BUILD_USER, "-c", `cd ${scratch} && ${installCmd}`], "deps-install", {
         timeoutMs: budgetMs,
@@ -4115,7 +4117,7 @@ export class ResidentDO extends Sandbox<Env> {
     this.stageDirsReady.add(user);
   }
 
-  /** Per-attach credential file (KTD12): the minted token reaches the
+  /** Per-attach credential file: the minted token reaches the
    *  worktree via the SDK file API into a 700 per-user staging dir, then a
    *  privilege-dropped `cat` into `.git/github-credentials` (0600, owned by
    *  the thread user). The token never appears in argv or process-wide env —
@@ -4142,7 +4144,7 @@ export class ResidentDO extends Sandbox<Env> {
     return systemClock();
   }
 
-  /** Per-exec credential refresh (KTD12): the attach-time token lives one
+  /** Per-exec credential refresh: the attach-time token lives one
    *  hour, a coding run can push later than that, and git's `store` helper
    *  erases a 401'd credential from the file — so before every writable exec,
    *  size the file (one `stat`) and let the pure `shouldRefreshThreadCredentials`
@@ -4171,7 +4173,7 @@ export class ResidentDO extends Sandbox<Env> {
       // An `empty` file means git's `store` helper erased a token GitHub had
       // REJECTED (401) — so the per-slug cache may still hold that same dead
       // token, and serving it would rewrite the rejection and 401 the next
-      // exec too. Force a fresh mint for a repudiated token (#528 review); an
+      // exec too. Force a fresh mint for a repudiated token; an
       // expiry-driven refresh still reuses the cache.
       const minted = await mintRepoScopedToken(this.env, resource.slice("repo:".length), {
         fresh: decision.reason === "empty",
@@ -4277,7 +4279,7 @@ export class ResidentDO extends Sandbox<Env> {
       ...binding,
       lastAttachAt: new Date(systemClock()).toISOString(), // exec counts as activity for the sweep
       // A refresh re-mints and rewrites: persist both the new write time and the
-      // new token expiry (#528) so the next exec's decision keys on this token.
+      // new token expiry so the next exec's decision keys on this token.
       ...(refreshed
         ? { credentialsWrittenAt: refreshed.writtenAtMs, tokenExpiresAtMs: refreshed.tokenExpiresAtMs }
         : {}),
@@ -4391,7 +4393,7 @@ export class ResidentDO extends Sandbox<Env> {
   /** Remove a thread's worktree (when the runtime is up — a slept container
    *  already lost it) and release its pool user; the binding is KEPT, marked
    *  evicted, so the ref stays sticky and the next attach recreates the tree
-   *  (KTD6). Shared by the inactivity sweep and /detach. */
+   *  with it. Shared by the inactivity sweep and /detach. */
   private async evictBinding(
     binding: ThreadBinding,
     runtimeActive: boolean,
@@ -4401,7 +4403,7 @@ export class ResidentDO extends Sandbox<Env> {
     const threadDir = parentDir(binding.worktreePath);
     if (runtimeActive && threadDir.startsWith(`${THREADS_DIR}/`)) {
       try {
-        // Worktree removal counts as a mirror-adjacent mutation — same mutex (KTD5).
+        // Worktree removal counts as a mirror-adjacent mutation — same mutex.
         await this.withMirrorLock(() => this.runOk(["rm", "-rf", threadDir], "evict"));
       } catch (err) {
         console.log(`${logCtx}: rm failed for ${binding.threadKey}: ${errMsg(err)}`);
@@ -4439,7 +4441,7 @@ export class ResidentDO extends Sandbox<Env> {
   /** POST /detach: a run has ended — give the thread's pool user back now
    *  instead of holding it until the TTL sweep (the pool is sized for
    *  simultaneous runs). `force` releases unconditionally (read-only agents,
-   *  hard stops): an op still in flight is KILLED first (#159 — the bot has
+   *  hard stops): an op still in flight is KILLED first (the bot has
    *  already dropped its fetch, the command would otherwise run on and hold
    *  the user until the sweep); otherwise a busy thread, or a worktree with
    *  uncommitted or unpushed work, is KEPT and the caller learns why. No
@@ -4501,7 +4503,7 @@ export class ResidentDO extends Sandbox<Env> {
     return { released: true, user };
   }
 
-  /** Force-detach's kill (#159): end every process owned by the pool user —
+  /** Force-detach's kill: end every process owned by the pool user —
    *  `kill -9 -1` sent AS THAT USER reaches exactly its own processes (the
    *  thread's `su … bash -c` shell, the command, anything it backgrounded),
    *  nothing else in the container, and needs no procps. The shell kills
@@ -4544,7 +4546,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  preserve: releasable, so a post-wake binding does not hold a pool user
    *  for 7 days on behalf of files that are already gone.
    *
-   *  ONE spawn (#356 item 6): the presence test and both git probes fold
+   *  ONE spawn: the presence test and both git probes fold
    *  into the pure `worktreeCleanlinessScript` (test -d as root, both git
    *  commands inside a single privilege-dropped `su`, tagged lines out);
    *  `parseWorktreeCleanliness` encodes the exact decision table above. */
@@ -4577,7 +4579,7 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Hourly inactivity sweep (schedule: onWorktreeSweep). Removes worktrees
    *  whose binding is idle past the TTL, releases the user to the pool, and
-   *  KEEPS the binding record marked evicted (KTD6). Never wakes a slept
+   *  KEEPS the binding record marked evicted. Never wakes a slept
    *  container just to delete files a sleep already destroyed. */
   /** True while onWorktreeSweep is executing (DO memory; a restart clears it
    *  together with the in-flight sweep). The watchdog's re-arm checks it so
@@ -4607,9 +4609,9 @@ export class ResidentDO extends Sandbox<Env> {
           // that used it is over and there is nothing to preserve. A slept
           // container has NO tree any more (sleep destroys the disk), so an
           // idle binding on an inactive runtime is releasable outright: there is
-          // nothing left to protect, only a pool user to give back. (Live
-          // 2026-08-29: seven idle bindings sat on a sleeping resident until the
-          // 7-day TTL because this path kept them.)
+          // nothing left to protect, only a pool user to give back. (Keeping
+          // them would leave idle bindings on a sleeping resident until the
+          // 7-day TTL.)
           const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
           const cleanIdle =
             last < idleCutoff && busy === 0 && (!active || (await this.worktreeCleanliness(binding)).clean);
@@ -4656,7 +4658,7 @@ export class ResidentDO extends Sandbox<Env> {
     return { evicted, kept };
   }
 
-  // -- deterministic ops (U6, KTD8: /op — disposable per-op checkouts) ---------
+  // -- deterministic ops (/op — disposable per-op checkouts) -------------------
 
   /** Pool users transiently held by in-flight ops. DO memory only: an op is
    *  bounded by one request, and a DO restart kills the in-flight op anyway
@@ -4674,16 +4676,16 @@ export class ResidentDO extends Sandbox<Env> {
     return user ?? null;
   }
 
-  /** POST /op work half (U6, KTD8): run ONE readonly command-table entry in a
+  /** POST /op work half: run ONE readonly command-table entry in a
    *  disposable checkout under OPS_DIR — never a thread's attached worktree —
    *  privilege-dropped as a transiently-held pool user, then delete the
    *  checkout whatever happened. The command STRING comes exclusively from
    *  the admin-written table; the ref was pattern-validated by the Worker and
    *  must additionally resolve in the mirror (fetching once if unknown);
    *  request text is never interpolated into a shell command. Deps
-   *  materialize through the exact thread mechanism (KTD7): the shared
+   *  materialize through the exact thread mechanism: the shared
    *  lockfile-keyed cache, scoped token-free install only when the committed
-   *  key differs. No snapshot is ever written here (KTD3). */
+   *  key differs. No snapshot is ever written here. */
   async runOp(op: "test" | "build", refArg: string | null, traceparent?: string): Promise<OpRunOk | ThreadErr> {
     // One step trace per op (features/tracing.md item 19), like an attach.
     const t0 = systemClock();
@@ -4703,7 +4705,7 @@ export class ResidentDO extends Sandbox<Env> {
       return { error: `not-serviceable: ${errMsg(err)}`, status: 503, state: s.state, reason: s.reason };
     }
     // One storage round trip for the two facts; the registry lookup stays (an
-    // op resolves ONLY through the onboard-time command table — KTD8).
+    // op resolves ONLY through the onboard-time command table).
     const stored = await this.ctx.storage.get<string | RepoFacts>([RESOURCE_KEY, FACTS_KEY]);
     const resource = (stored.get(RESOURCE_KEY) as string | undefined) ?? "";
     const facts = stored.get(FACTS_KEY) as RepoFacts | undefined;
@@ -4722,7 +4724,7 @@ export class ResidentDO extends Sandbox<Env> {
     const opDir = `${OPS_DIR}/${crypto.randomUUID()}`;
     const checkout = `${opDir}/checkout`;
     try {
-      // Command-level token mint, attach's discipline (KTD12): only a mirror
+      // Command-level token mint, attach's discipline: only a mirror
       // fetch for an unknown ref would use it; failure never blocks the op.
       let token: string | null = null;
       if (githubAppConfigured(this.env)) {
@@ -4749,7 +4751,7 @@ export class ResidentDO extends Sandbox<Env> {
         const lockKey = await this.lockfileKey(sha);
         await this.runOk(["install", "-d", "-m", "755", "-o", "root", "-g", "root", OPS_DIR], "ops-dir");
         // 700 op dir first, clone beneath it: the tree is unreadable to peer
-        // users for its whole life, exactly like a thread dir (KTD5).
+        // users for its whole life, exactly like a thread dir.
         await this.runOk(["install", "-d", "-m", "700", "-o", user, "-g", user, opDir], "op-dir");
         await this.runOk(["git", "clone", "--no-hardlinks", "--branch", ref, MIRROR_DIR, checkout], "op-clone", {
           timeoutMs: GIT_NETWORK_TIMEOUT_MS,
@@ -4844,7 +4846,7 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Delete the EVICTED bindings whose threadKey starts with `prefix` (item 60):
-   *  eviction keeps a binding on purpose (KTD6), so a load run's synthetic
+   *  eviction keeps a binding on purpose, so a load run's synthetic
    *  threads would otherwise stay on the detail page forever. The decision is
    *  `selectBindingsToPurge` — a whole non-production namespace or longer,
    *  never a live binding. Nothing on disk is touched: an evicted binding has
@@ -4872,7 +4874,7 @@ export class ResidentDO extends Sandbox<Env> {
     return this.onWorktreeSweep("");
   }
 
-  // -- event-triggered reclamation (#50) ---------------------------------------
+  // -- event-triggered reclamation ---------------------------------------------
 
   /** Ask GitHub what happened to a head branch that still exists in the
    *  mirror. One REST call, bounded; any failure is `unknown` (keep), never a
@@ -4924,7 +4926,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (live.length === 0) return { reclaimed, kept };
     const slug = resource.slice("repo:".length);
     const active = await this.isRuntimeActive().catch(() => false);
-    // Fate pre-pass (#356 item 5): resolve every distinct non-default ref's
+    // Fate pre-pass: resolve every distinct non-default ref's
     // fate up front — ONE `for-each-ref` listing answers the "branch gone?"
     // membership test for the whole pass (instead of a rev-parse container
     // spawn per ref), and the PR lookups (independent 10 s REST calls) run
@@ -5092,7 +5094,7 @@ export class ResidentDO extends Sandbox<Env> {
       this.listSchedules(PROVISIONING_CALLBACK),
       this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX }),
     ]);
-    // Thread worktree bindings (U4/KTD6) for the admin view: which refs are
+    // Thread worktree bindings for the admin view: which refs are
     // live on this resident. worktreePath is an internal layout detail and is
     // left out; nothing here is secret (credential files are never persisted).
     const threads = [...bindings.values()]
@@ -5193,7 +5195,7 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  /** Fault injection for the watchdog's auto-rebuild path (U8): persist
+  /** Fault injection for the watchdog's auto-rebuild path: persist
    *  `down` with a rehydration-flavored reason and stop the refresh chain
    *  (mirroring what a real goDown does), so repeated watchdog passes can
    *  strike it up to the auto-rebuild without corrupting real R2 objects.
@@ -5204,7 +5206,7 @@ export class ResidentDO extends Sandbox<Env> {
     return this.getStatus();
   }
 
-  /** Rebuild (U8): the down→onboarding escape hatch — discard the recorded
+  /** Rebuild: the down→onboarding escape hatch — discard the recorded
    *  snapshots (R2 objects included) and reprovision from scratch through the
    *  ordinary alarm-driven pipeline, reusing the registry record's command
    *  table/ref/budget. `dryRun` returns the same itemized plan WITHOUT
@@ -5286,7 +5288,7 @@ export class ResidentDO extends Sandbox<Env> {
     return { ...plan, backupObjectsDeleted, state: "onboarding" as const };
   }
 
-  /** Dry-run itemization for offboard (U8): everything the real teardown
+  /** Dry-run itemization for offboard: everything the real teardown
    *  below would remove, computed READ-ONLY — no schedule, storage,
    *  container, or R2 mutation. */
   async teardownPlan(): Promise<{
@@ -5416,13 +5418,13 @@ const READ_DEBUG_OPS = new Set(["info", "schedules", "threads", "deps-backups"])
 // Request validation
 // ---------------------------------------------------------------------------
 
-/** KTD1: "<type>:<id>", lowercase. The whole resource doubles as the sandbox
+/** A resource id is "<type>:<id>", lowercase. The whole resource doubles as the sandbox
  *  id (≤63 chars, no leading/trailing hyphen; ':' and '/' are accepted by the
  *  SDK's sanitizeSandboxId). */
 const RESOURCE_RE = /^([a-z][a-z0-9-]*):([a-z0-9][a-z0-9._/-]{0,61})$/;
 /** repo ids are GitHub "<owner>/<name>" slugs (lowercased): the clone URL
  *  https://github.com/<owner>/<name>.git derives from the id, and the mint
- *  scope (KTD12) uses the <name> half. */
+ *  scope uses the <name> half. */
 const REPO_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9](?:[a-z0-9._-]{0,98}[a-z0-9])?$/;
 const SUPPORTED_RESOURCE_TYPES = new Set(["repo"]);
 
@@ -5438,8 +5440,7 @@ function parseResource(value: unknown): { resource: string } | { error: string }
   }
   if (match[1] === "repo" && !REPO_ID_RE.test(match[2])) {
     return {
-      error:
-        'repo resource id must be a lowercase GitHub "<owner>/<name>" slug (e.g. "repo:coreplanelabs/switchboard")',
+      error: 'repo resource id must be a lowercase GitHub "<owner>/<name>" slug (e.g. "repo:acme/api")',
     };
   }
   return { resource: value };
@@ -5468,7 +5469,7 @@ function parseCommands(value: unknown): { commands: Record<string, string> } | {
   return { commands };
 }
 
-/** Execution-profile values (U6, KTD8). */
+/** Execution-profile values. */
 const EFFECTS_VALUES = new Set(["readonly", "mutating"]);
 
 function parseEffects(value: unknown): { effects: Record<string, "readonly" | "mutating"> } | { error: string } {
@@ -5625,7 +5626,7 @@ async function deleteR2Prefix(bucket: R2Bucket, prefix: string): Promise<number>
   return deleted;
 }
 
-/** Read-only twin of deleteR2Prefix, for the U8 dry-run itemizations. */
+/** Read-only twin of deleteR2Prefix, for the dry-run itemizations. */
 async function countR2Prefix(bucket: R2Bucket, prefix: string): Promise<number> {
   let count = 0;
   for await (const page of r2PrefixPages(bucket, prefix)) count += page.objects.length;
@@ -5639,7 +5640,7 @@ export default {
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
     // `build` names the commit this bundle was deployed from, so a deploy's
     // propagation is provable from the outside without auth.
-    // `backupTransfer` (item 61, #614): "presigned" when the container moves
+    // `backupTransfer` (features/resident-repos.md item 61): "presigned" when the container moves
     // snapshot bytes itself, "local" when the DO does — the one GET that proves
     // the R2 credentials landed (their names, never their values, on a miss).
     if (url.pathname === "/healthz" && request.method === "GET") {
@@ -5720,7 +5721,7 @@ export default {
     return res;
   },
 
-  /** Watchdog cron (KTD4): one sparse pass that re-arms dead refresh chains
+  /** Watchdog cron: one sparse pass that re-arms dead refresh chains
    *  (marking degraded(alarm-missed)) and times out stuck onboarding. Cadence
    *  invariant: this cron (every 10 minutes) stays SHORTER than SLEEP_AFTER
    *  ("20m"). It reads DO storage/schedules only — containers are started by
@@ -5729,7 +5730,7 @@ export default {
    *  The cron is the `resident` entry of the schedule registry
    *  (src/core/schedules.ts — a unit test keeps wrangler.jsonc equal to it);
    *  each pass is recorded on the state Worker for the bot's /runs Scheduled
-   *  panel (#244), best-effort and off the critical path. */
+   *  panel, best-effort and off the critical path. */
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const schedule = scheduleForCron(controller.cron, "resident");
     if (!schedule) {
@@ -5789,7 +5790,7 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
   const { diskBudgetMb, worktreeTtlDays } = limits;
   const provisioningTimeoutMs = limits.provisioningTimeoutMs ?? DEFAULT_PROVISIONING_TIMEOUT_MS;
 
-  // Installation membership (U8): the GitHub App installation is repository-
+  // Installation membership: the GitHub App installation is repository-
   // scoped and that scoping is a real control — onboard requires the repo to
   // already be in the installation's repository list. A repo-scoped mint
   // proves membership (the token API 422s for a repo outside the
@@ -5829,7 +5830,7 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     updatedAt: now,
   };
 
-  // LRU eviction opt-in (#50): admin-only by route, per-request, default off.
+  // LRU eviction opt-in: admin-only by route, per-request, default off.
   if (body.evictColdest !== undefined && typeof body.evictColdest !== "boolean") {
     return json({ error: "evictColdest must be a boolean" }, 400);
   }
@@ -5924,7 +5925,7 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
   const record = await registry.getRecord(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
 
-  // --dry-run (U8): the itemized plan of what the real teardown below would
+  // --dry-run: the itemized plan of what the real teardown below would
   // remove, computed READ-ONLY — the resident stays fully intact (state,
   // schedules, snapshots, registry slot all untouched). The DO plan and the
   // R2 prefix count touch disjoint data, so they run concurrently.
@@ -6034,7 +6035,7 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
     patch.commands = commands.commands;
   }
   if (body.effects !== undefined) {
-    // U6/KTD8 execution profiles. Like `commands`, the map REPLACES the whole
+    // Execution profiles for /op. Like `commands`, the map REPLACES the whole
     // stored one (admin-writable only; {} clears every override back to the
     // readonly default).
     const effects = parseEffects(body.effects);
@@ -6066,7 +6067,7 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
   return json({ resource: updated.resource, record: updated });
 }
 
-/** U8: down→onboarding rebuild — discard the stamped snapshots and
+/** The down→onboarding rebuild — discard the stamped snapshots and
  *  reprovision from scratch through the ordinary provisioning pipeline,
  *  reusing the registry record (command table, ref, budget) as-is; the cap
  *  slot and thread bindings are untouched. `dryRun:true` answers 200 with the
@@ -6158,7 +6159,7 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   return json({ state: status.state, reason: status.reason, inFlight });
 }
 
-// -- U4 thread data plane handlers --------------------------------------------
+// -- thread data plane handlers -----------------------------------------------
 
 /** Shared front half of the thread routes: validate resource + threadKey (P1:
  *  BEFORE anything derives a path or a git argument) and hand back the stub.
@@ -6217,7 +6218,7 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
   // Post-validation, the answer streams like /exec (item 59): heartbeat
   // whitespace then ONE JSON document over HTTP 200, so an attach that waits
   // on a deps install (minutes) cannot lose the connection the way a plain
-  // response did live 2026-09-07 (`fetch failed` at 272 s, #552). A refusal
+  // response does (`fetch failed` a few minutes in). A refusal
   // carries its `status` in the body; `ResidentExecutor.attach` reads it there.
   return streamHeartbeatJson(
     ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha, ctx.record, traceparent),
@@ -6340,7 +6341,7 @@ async function handleWrite(env: Env, body: Record<string, unknown>): Promise<Res
   return json(result);
 }
 
-// -- U6 deterministic ops handler (KTD8) ---------------------------------------
+// -- deterministic ops handler (/op) -------------------------------------------
 
 const OP_NAMES = ["test", "build", "status"] as const;
 
@@ -6424,7 +6425,7 @@ function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>): R
   );
 }
 
-/** Admin diagnostic surface, used by U3's live validation (kill-refresh /
+/** Admin diagnostic surface, used by the live validation of the freshness engine (kill-refresh /
  *  stop-container simulate dead chains and platform sleeps; mint-token proves
  *  the command-level mint failure shape without exposing token material).
  *  Side-effect-explicit; every op is admin-scope except the pure reads
@@ -6459,7 +6460,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       await mintRepoScopedToken(env, resource.resource.slice("repo:".length));
       return json({ op, ok: true, note: "token minted and cached (value withheld)" });
     } catch (err) {
-      // The command-level failure shape (KTD12): an error result, never a
+      // The command-level failure shape: an error result, never a
       // lifecycle transition — verify via /status that state is untouched.
       return json({ op, ok: false, error: errMsg(err) });
     }
@@ -6482,7 +6483,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     case "force-onboarding":
       return json(await stub.debugForceOnboarding());
     case "force-down": {
-      // Fault injection for the U8 watchdog auto-rebuild path; a
+      // Fault injection for the watchdog auto-rebuild path; a
       // rehydration-flavored default reason makes it strike-eligible.
       const reason =
         typeof body.reason === "string" && body.reason ? body.reason : "r2-restore-failed: injected (debug force-down)";

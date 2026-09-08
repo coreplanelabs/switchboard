@@ -47,7 +47,7 @@ function record(id: string, threadKey: string): RunRecord {
   return {
     id,
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey,
     channelVisibility: "unknown",
     // Inside the retention window, or the finished record is trimmed on write.
@@ -70,7 +70,7 @@ const claimBody = (key: string, runId: string, threadKey: string, gen = "g1", ov
     gen,
     leaseMs: LEASE_MS,
     startedAt: 1_000,
-    meta: { agent: "review", channelId: "slack:C1", userId: "slack:U1", threadKey },
+    meta: { agent: "review", channelId: "slack:C1", userId: "slack:UALICE", threadKey },
     card: { channel: "C1", ts: "1.0" },
     system: "you review",
     tools: [{ name: "bash", description: "run", inputSchema: {} }],

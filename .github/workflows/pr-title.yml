@@ -21,8 +21,8 @@ permissions:
 # `edited` each start a run for the same head; with cancel-in-progress the
 # later one killed the earlier, and GitHub showed the CANCELLED run as the
 # required `title` status — a green release PR read "1 cancelled" and could not
-# merge (release PR #570, 2026-09-08). The job takes seconds; two of them cost
-# nothing, and both report success.
+# merge. The job takes seconds; two of them cost nothing, and both report
+# success.
 concurrency:
   group: pr-title-${{ github.ref }}
   cancel-in-progress: false

@@ -8,12 +8,13 @@
 #
 #   * claude[bot]                — Claude Code's review sessions (verdict
 #                                  contract in REVIEW.md)
-#   * coreplane-switchboard[bot] — Switchboard's `review` agent
-#                                  (github.com/coreplanelabs/switchboard).
-#                                  Its "LGTM" line is written by the bot
-#                                  process from a structured verdict, never by
-#                                  the model's prose (fail-closed: no verdict
-#                                  → not approving).
+#   * this installation's Switchboard App — Switchboard's `review` agent
+#                                  (src/core/reviewVerdict.ts). Its "LGTM"
+#                                  line is written by the bot process from a
+#                                  structured verdict, never by the model's
+#                                  prose (fail-closed: no verdict → not
+#                                  approving). The login and id below are
+#                                  ours; another operator swaps in their App's.
 #
 # Inert until a repo admin enables "Allow GitHub Actions to create and
 # approve pull requests" under Settings -> Actions -> General; without

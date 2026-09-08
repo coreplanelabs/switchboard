@@ -3,13 +3,13 @@
 // container through the @cloudflare/sandbox SDK: one protocol in two
 // artifacts. The image tag lives in the Worker's Dockerfile and the SDK
 // version in its package.json, and nothing else ties them together — a
-// dependency bump that moves one side alone (Dependabot did, #503) ships a
+// dependency bump that moves one side alone (a Dependabot group bump can) ships a
 // Worker speaking a protocol its container does not, on the live execution
 // path, with only a typecheck as the gate.
 //
 // This check reads both files for every such Worker and requires the
 // package.json pin to be exact and equal to the Dockerfile tag. Bump them
-// together, then deploy and validate (#498). Dependabot ignores both sides.
+// together, then deploy and validate. Dependabot ignores both sides.
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -70,7 +70,7 @@ export function pairMismatches(pairs) {
  *  node_modules (null when nothing is installed — a fresh clone before
  *  `npm ci`, which is not a mismatch). The pin and the lockfile can agree
  *  while the tree on disk is something else: the main checkout carried a
- *  nested 0.12.9 install against a 0.3.7 pin (#553), and wrangler bundles
+ *  nested install of another SDK version against the pin, and wrangler bundles
  *  whatever is installed. */
 export function installMismatches(pairs) {
   const problems = [];
@@ -125,7 +125,7 @@ function main() {
   }
   console.error(`check:sandbox-pair FAILED — ${problems.length} Worker(s) whose image and SDK disagree:`);
   for (const p of problems) console.error(`  ${p.label}: ${p.reason}`);
-  console.error("The image and the SDK are one protocol; bump both together, then deploy and validate (#498).");
+  console.error("The image and the SDK are one protocol; bump both together, then deploy and validate.");
   process.exit(1);
 }
 

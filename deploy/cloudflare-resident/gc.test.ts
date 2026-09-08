@@ -12,7 +12,7 @@ import {
 } from "./gc";
 
 // ---------------------------------------------------------------------------
-// Test overrides (#50 follow-up): lower the effective cap / LRU floor for live
+// Test overrides: lower the effective cap / LRU floor for live
 // checks without touching the production constants — admin, deploy-scoped.
 // ---------------------------------------------------------------------------
 
@@ -76,7 +76,7 @@ describe("effectiveLimits — what the registry actually enforces", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Event-triggered reclamation (#50): what happened to a thread's bound ref
+// Event-triggered reclamation: what happened to a thread's bound ref
 // ---------------------------------------------------------------------------
 
 describe("pullsFate — the GitHub pulls list for one head ref", () => {
@@ -177,7 +177,7 @@ describe("reclaimDecision — evict this binding now?", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Resident-level LRU eviction (#50): the coldest warm resident makes room
+// Resident-level LRU eviction: the coldest warm resident makes room
 // ---------------------------------------------------------------------------
 
 const NOW = Date.parse("2026-08-29T12:00:00Z");
@@ -275,7 +275,7 @@ describe("pickEvictionCandidate — coldest eligible warm resident", () => {
   });
 });
 
-describe("parseRefListing — one for-each-ref listing replaces a rev-parse per ref (#356 item 5)", () => {
+describe("parseRefListing — one for-each-ref listing replaces a rev-parse per ref", () => {
   it("parses each line into a branch name, trimming whitespace", () => {
     const refs = parseRefListing("main\nfeat/x\n  perf/y  \n");
     expect(refs).toEqual(new Set(["main", "feat/x", "perf/y"]));

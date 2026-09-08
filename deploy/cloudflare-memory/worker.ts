@@ -72,7 +72,7 @@ const tracer = createTracer({ clock: systemClock });
 const traceSinks = [workerLogSink((line) => console.log(line))];
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
-// (src/core/memory/workerStore.ts) — cross-session memory PR3 (#85). One
+// (src/core/memory/workerStore.ts) — cross-session memory (features/memory.md). One
 // SQLite-backed Durable Object per scopeKey (the DO name IS the scope key), so
 // a scope's records live in one database that survives every bot restart
 // (AGENTS.md invariant 6) and cross-scope reads are impossible by construction.
@@ -87,14 +87,14 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 //   POST /retrieve {scopeKey, query, limit} → {records: MemoryRecord[]}
 //   POST /write    {scopeKey, records: MemoryCandidate[]} → {ok, inserted, deduped, superseded}
 //   GET  /healthz  → {ok:true}  (deploy wake ping; touches no DO)
-// Scheduled-firing routes (#244 — the record behind the /runs Scheduled panel;
+// Scheduled-firing routes (the record behind the /runs Scheduled panel;
 // written by the bot's Worker shim after every cron firing, read by the bot's
 // WorkerScheduleStore, src/core/scheduleStore.ts): ONE ScheduleDO, bounded per schedule.
 //   POST /schedules/record {firing: ScheduleFiring} → {ok:true, retained}
 //   POST /schedules/latest {}                       → {firings: ScheduleFiring[]} (newest per schedule)
-// Run history routes (#157 — the durable RunStore behind the bot's
-// WorkerRunStore, src/core/runStoreWorker.ts): one RunHistoryDO per store key,
-// owning the retention policy (KTD5). Same bearer; /runs/put has its own 2 MiB
+// Run history routes (the durable RunStore behind the bot's WorkerRunStore,
+// src/core/runStoreWorker.ts; features/run-history.md): one RunHistoryDO per
+// store key, owning the retention policy. Same bearer; /runs/put has its own 2 MiB
 // body fence (a record is budgeted to 1.5 MiB upstream), every other route
 // keeps the 512 KB one.
 //   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?} → {ok, retained, stored, rewritten}
@@ -112,9 +112,9 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 
 export interface Env {
   MEMORY: DurableObjectNamespace<MemoryDO>;
-  /** Scheduled firings (#244): ONE ScheduleDO (named "schedules") — the record behind the /runs Scheduled panel. */
+  /** Scheduled firings: ONE ScheduleDO (named "schedules") — the record behind the /runs Scheduled panel. */
   SCHEDULES: DurableObjectNamespace<ScheduleDO>;
-  /** Run history (#157): one RunHistoryDO per store key (`runs:default`). */
+  /** Run history: one RunHistoryDO per store key (`runs:default`). */
   RUNS: DurableObjectNamespace<RunHistoryDO>;
   /** Runtime config documents (routing-and-config item 12): ONE ConfigDO (named "config"). */
   CONFIG: DurableObjectNamespace<ConfigDO>;
@@ -145,7 +145,7 @@ const MAX_KEY_CHARS = 200;
  *  match in a scope with ≤50 hits — small scopes rank exactly as the engine
  *  alone decides. Was a flat 500 recency-ordered rows; ordering candidates by
  *  bm25 instead means a relevant-but-old record can no longer be starved out
- *  of the pool by recent weak matches (#356 item 10). */
+ *  of the pool by recent weak matches. */
 const FTS_CANDIDATES_PER_LIMIT = 5;
 const FTS_CANDIDATES_FLOOR = 50;
 /** MATCH terms per query: the N longest distinct tokens (ties by first
@@ -154,7 +154,7 @@ const FTS_CANDIDATES_FLOOR = 50;
  *  selective ones — the `[a-z0-9]+` tokenizer's 1–3-char tokens are mostly
  *  stopwords ("a", "the", "to"). Realistic queries have far fewer distinct
  *  tokens and are untouched; the engine still ranks with the FULL query, so the
- *  cap only shapes which rows can become candidates (#356 item 10). */
+ *  cap only shapes which rows can become candidates. */
 const MAX_MATCH_TOKENS = 24;
 /** Request body ceiling, checked against Content-Length before parsing. A full
  *  batch (50 × 4000-char texts + keywords + envelope) fits comfortably. */
@@ -195,7 +195,7 @@ export class MemoryDO extends DurableObject<Env> {
     // dedup key (normalizeText) so a dedup lookup is an indexed hit;
     // records_active_seq serves list()'s newest-first page and
     // records_active_used the status-prefixed scans (active count, eviction
-    // fetch) (#356 item 10); records_fts holds text + keywords for the
+    // fetch); records_fts holds text + keywords for the
     // whole-token candidate prefilter (unicode61 tokenizer ≈ the engine's
     // tokenize; the engine re-verifies every hit).
     this.sql.exec(`
@@ -226,7 +226,7 @@ export class MemoryDO extends DurableObject<Env> {
 
   /** Reconcile records_fts down to exactly the active rows. Forget, supersede,
    *  and evict delete their FTS entry inline; this is the one-time cleanup of
-   *  the dead rows deploys before #356 left behind, kept on every start as a
+   *  the dead rows older deploys left behind, kept on every start as a
    *  self-healing invariant. Idempotent, and O(active rows) once clean (the
    *  scan is over the FTS table, which then holds only active rows — bounded by
    *  the scope cap), so it stays cheap forever. Returns rows removed. */
@@ -245,7 +245,7 @@ export class MemoryDO extends DurableObject<Env> {
     // let recent weak matches starve a relevant-but-old record out of the pool
     // before the engine ever saw it. bm25 only chooses which rows reach the
     // engine; the shared rankRecords still decides the final order — one
-    // algorithm with the in-process store (#356 item 10).
+    // algorithm with the in-process store.
     const rows = this.sql
       .exec<Row>(
         `SELECT r.* FROM records r
@@ -299,7 +299,7 @@ export class MemoryDO extends DurableObject<Env> {
       let seq = this.sql.exec<{ next: number }>(`SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM records`).one().next;
       const now = systemClock();
       for (const cand of candidates) {
-        // Targeted lookups, never a full-active scan (#356 item 10): planWrite
+        // Targeted lookups, never a full-active scan: planWrite
         // only ever inspects (a) the active row `supersedes` names — its
         // supersede target AND its whole dedup pool — or (b) the active rows
         // whose norm equals the candidate's (the dedup key, an indexed hit on
@@ -331,7 +331,7 @@ export class MemoryDO extends DurableObject<Env> {
         if (plan.supersede) {
           this.sql.exec(`UPDATE records SET status = 'superseded' WHERE id = ?`, plan.supersede.id);
           // Soft delete for the record row, hard delete for its FTS entry: a
-          // superseded row must stop matching queries at the source (#356).
+          // superseded row must stop matching queries at the source.
           this.sql.exec(`DELETE FROM records_fts WHERE id = ?`, plan.supersede.id);
           counts.superseded++;
         }
@@ -356,11 +356,11 @@ export class MemoryDO extends DurableObject<Env> {
         this.sql.exec(`INSERT INTO records_fts (id, body) VALUES (?, ?)`, r.id, `${r.text} ${r.keywords.join(" ")}`);
         counts.inserted++;
       }
-      // Per-scope cap (#253), inside the same transaction: the batch never
+      // Per-scope cap, inside the same transaction: the batch never
       // commits with the scope over the cap. Soft delete — rows stay (their
-      // FTS entries do not, #356). The full active set is fetched only when
+      // FTS entries do not). The full active set is fetched only when
       // the indexed COUNT says the scope is over the cap — the common
-      // under-cap batch does no full scan (#356 item 10).
+      // under-cap batch does no full scan.
       const activeCount = this.sql
         .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM records WHERE status = 'active'`)
         .one().n;
@@ -376,7 +376,7 @@ export class MemoryDO extends DurableObject<Env> {
     return counts;
   }
 
-  /** Human view (#278/#293): the scope's ACTIVE rows, newest first, no usage
+  /** Human view (features/memory.md item 24): the scope's ACTIVE rows, newest first, no usage
    *  bump. With `query`, only rows an FTS token hits (the same quoted-OR MATCH
    *  as retrieve, so user text never reaches the FTS parser as syntax); a
    *  query with no tokens lists nothing. */
@@ -403,14 +403,14 @@ export class MemoryDO extends DurableObject<Env> {
       .map(toRecord);
   }
 
-  /** Human control (#278): soft-delete one ACTIVE row (`status = 'forgotten'`;
+  /** Human control: soft-delete one ACTIVE row (`status = 'forgotten'`;
    *  the row and its provenance stay). Returns whether a row changed. The DO
    *  IS the scope, so an id from another scope simply matches nothing here. */
   async forget(_scopeKey: string, id: string): Promise<boolean> {
     return this.ctx.storage.transactionSync(() => {
       const flipped =
         this.sql.exec(`UPDATE records SET status = 'forgotten' WHERE id = ? AND status = 'active'`, id).rowsWritten > 0;
-      // Soft delete for the record row, hard delete for its FTS entry (#356):
+      // Soft delete for the record row, hard delete for its FTS entry:
       // one sync transaction, so no crash can strand a dead FTS row (and the
       // start-time reconciliation would heal it anyway).
       if (flipped) this.sql.exec(`DELETE FROM records_fts WHERE id = ?`, id);
@@ -461,7 +461,7 @@ function toRecord(row: Row): MemoryRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Scheduled firings (#244) — the durable record behind the /runs Scheduled panel
+// Scheduled firings — the durable record behind the /runs Scheduled panel
 // ---------------------------------------------------------------------------
 
 /** Firings kept per schedule; the oldest fall off. A weekly job needs ~2 years. */
@@ -785,11 +785,11 @@ function parseScheduleFiring(body: unknown): Validated<ScheduleFiring> {
 }
 
 // ---------------------------------------------------------------------------
-// Durable Object: one run history per store key (#157)
+// Durable Object: one run history per store key
 // ---------------------------------------------------------------------------
 
-// Cloudflare Durable Object SQLite limits (developers.cloudflare.com/durable-objects/platform/limits/,
-// read 2026-08-29): 100 bound parameters per query; 100 KB per SQL statement;
+// Cloudflare Durable Object SQLite limits (developers.cloudflare.com/durable-objects/platform/limits/;
+// re-read them when a bound below looks wrong): 100 bound parameters per query; 100 KB per SQL statement;
 // 2 MB per string/BLOB/row; 100 columns per table; 10 GB storage per object
 // (Workers Paid). Consequences here: event inserts carry 3 parameters per row,
 // so a batch is 33 rows (99 parameters); deletions by id list are batched at
@@ -801,11 +801,11 @@ const DO_MAX_BOUND_PARAMETERS = 100;
 export const RUN_EVENT_INSERT_BATCH = Math.floor(DO_MAX_BOUND_PARAMETERS / 3);
 /** Ids per `DELETE ... WHERE run_id IN (...)` statement. */
 const RUN_DELETE_BATCH = DO_MAX_BOUND_PARAMETERS;
-/** Rows a single `put` may delete while trimming (deletion fence, KTD5): a
+/** Rows a single `put` may delete while trimming (the deletion fence): a
  *  policy shrink dropping thousands of runs is spread over successive puts and
  *  the 6 h alarm, so no single write stalls. Reads hide them immediately. */
 const RUN_TRIM_FENCE = 500;
-/** How often `alarm()` sweeps everything outside policy (KTD5). */
+/** How often `alarm()` sweeps everything outside the retention policy. */
 const RUN_SWEEP_INTERVAL_MS = 6 * 3600_000;
 /** `finishedAt` further ahead of the DO clock than this is clamped (a skewed bot clock). */
 const RUN_MAX_FUTURE_MS = 24 * 3600_000;
@@ -915,7 +915,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         value TEXT NOT NULL
       );
     `);
-    // The one column migration this DO has (authorization KTD7): a table
+    // The one column migration this DO has (the run-visibility stamp): a table
     // created before the visibility stamp gains the column with `unknown` for
     // every existing row — so a run written before the stamp is never public.
     // Then the indexes the visibility predicate's leaves walk (`channel_id IN`,
@@ -1882,7 +1882,7 @@ function invalid<T>(error: string): Validated<T> {
   return { ok: false, error };
 }
 
-/** A scope key is an opaque namespaced id (`org:coreplanelabs`): non-empty,
+/** A scope key is an opaque namespaced id (`org:acme`): non-empty,
  *  bounded, no whitespace or control characters. `fieldName` names the body
  *  field in the error (the run routes call theirs
  *  `storeKey`). */
@@ -1900,7 +1900,7 @@ function parseLimit(v: unknown): Validated<number> {
   return { ok: true, value: v };
 }
 
-/** `POST /list {scopeKey, limit, query?}` (#278, #293). */
+/** `POST /list {scopeKey, limit, query?}`. */
 function parseList(body: unknown): Validated<{ scopeKey: string; limit: number; query?: string }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
@@ -1918,7 +1918,7 @@ function parseList(body: unknown): Validated<{ scopeKey: string; limit: number; 
   };
 }
 
-/** `POST /forget {scopeKey, id}` (#278): the id is an opaque key, same caps as scopeKey. */
+/** `POST /forget {scopeKey, id}`: the id is an opaque key, same caps as scopeKey. */
 function parseForget(body: unknown): Validated<{ scopeKey: string; id: string }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
@@ -1987,7 +1987,7 @@ function parseCandidate(v: unknown, i: number): Validated<MemoryCandidate> {
   return { ok: true, value: out };
 }
 
-/** Upper bound on a caller-supplied per-scope cap (#253). */
+/** Upper bound on a caller-supplied per-scope cap. */
 const MAX_SCOPE_CAP = 10_000;
 
 function parseWrite(body: unknown): Validated<{ scopeKey: string; records: MemoryCandidate[]; cap?: number }> {
@@ -2373,8 +2373,8 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   return json({ error: "not found" }, 404);
 }
 
-/** The `/runs/*` routes (#157). Observability lines carry ids + counts only —
- *  never event text. A bad `id` is 400 before any DO call (R4). */
+/** The `/runs/*` routes. Observability lines carry ids + counts only —
+ *  never event text. A bad `id` is 400 before any DO call. */
 async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Response> {
   const stub = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
   if (LEDGER_ROUTES.has(pathname)) return handleLedger(pathname, body, env);

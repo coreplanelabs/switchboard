@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { MemoryDO } from "./worker.ts";
 
-// Feature: features/memory.md — the Memory Worker (PR3, #85): the durable
+// Feature: features/memory.md — the Memory Worker: the durable
 // backend behind WorkerMemoryStore. Runs in workerd against the real
 // SQLite-backed Durable Object, so FTS5 + persistence are exercised for real.
 
@@ -37,7 +37,7 @@ describe("auth + routing", () => {
   it("GET /healthz is open", async () => {
     const res = await SELF.fetch(`${BASE}/healthz`);
     expect(res.status).toBe(200);
-    // `features` lets the bot's boot probe see which routes this deploy carries (#157);
+    // `features` lets the bot's boot probe see which routes this deploy carries;
     // `build` names the commit the deploy injected (features/execution.md item 13) —
     // this bundle carries no `--define`, so it must say `unknown` rather than break.
     expect(await res.json()).toEqual({
@@ -251,8 +251,8 @@ describe("write → retrieve round trip", () => {
   });
 });
 
-// Feature: features/memory.md §24 (#278) — human controls: /list + /forget.
-describe("list / forget (#278 human controls)", () => {
+// Feature: features/memory.md §24 — human controls: /list + /forget.
+describe("list / forget (human controls)", () => {
   it("/list returns the scope's ACTIVE records newest first, capped at limit, without bumping usage", async () => {
     const s = scope();
     await post("/write", { scopeKey: s, records: [cand("first fact"), cand("second fact"), cand("third fact")] });
@@ -264,7 +264,7 @@ describe("list / forget (#278 human controls)", () => {
     expect((await post("/list", { scopeKey: scope(), limit: 10 })).data).toEqual({ records: [] });
   });
 
-  it("/list with `query` prefilters by whole token (text or keywords), newest first, limit after filter, no usage bump; forgotten rows excluded (#293)", async () => {
+  it("/list with `query` prefilters by whole token (text or keywords), newest first, limit after filter, no usage bump; forgotten rows excluded", async () => {
     const s = scope();
     await post("/write", {
       scopeKey: s,
@@ -417,9 +417,9 @@ describe("dedup / supersede (shared engine rules)", () => {
   });
 });
 
-// Feature: features/memory.md — per-scope cap (#253): applied inside the write
+// Feature: features/memory.md — per-scope cap: applied inside the write
 // transaction; evicted rows are soft-deleted and hidden from retrieve + list.
-describe("per-scope cap (#253)", () => {
+describe("per-scope cap", () => {
   it("an over-cap write evicts the least recently used records down to the cap and reports `evicted`", async () => {
     const s = scope();
     for (const t of ["alpha note", "beta note", "gamma note"]) {
@@ -456,7 +456,7 @@ describe("per-scope cap (#253)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Feature: features/memory.md §15/§17/§18 (#356 item 10) — SQL/FTS efficiency.
+// Feature: features/memory.md §15/§17/§18 — SQL/FTS efficiency.
 // These tests reach inside the DO (runInDurableObject) to observe what the
 // route surface cannot: FTS row counts, index presence, and the exact SQL
 // statements a call runs (the spySql pattern shared with runs.test.ts).
@@ -511,7 +511,7 @@ const seed = (s: string, rows: SeedRow[]) =>
     }
   });
 
-describe("retrieval + write efficiency (#356)", () => {
+describe("retrieval + write efficiency", () => {
   it("bm25 candidate ordering rescues a relevant-but-old record that recency ordering dropped", async () => {
     const s = scope();
     const now = Date.now();
@@ -682,7 +682,7 @@ describe("retrieval + write efficiency (#356)", () => {
   });
 });
 
-describe("FTS hygiene (#356)", () => {
+describe("FTS hygiene", () => {
   it("forget deletes the FTS row; the record row stays (soft delete)", async () => {
     const s = scope();
     await post("/write", { scopeKey: s, records: [cand("keep this fact"), cand("drop this fact")] });
@@ -723,7 +723,7 @@ describe("FTS hygiene (#356)", () => {
   it("reconciliation removes dead FTS rows (non-active or missing records) and keeps active ones", async () => {
     const s = scope();
     await post("/write", { scopeKey: s, records: [cand("live deploy fact")] });
-    // Simulate pre-#356 state: a forgotten record whose FTS row survived, plus
+    // Simulate an older deploy's leftovers: a forgotten record whose FTS row survived, plus
     // an orphan FTS row with no record at all.
     await runInDurableObject(memStub(s), async (_i: MemoryDO, state) => {
       state.storage.sql.exec(

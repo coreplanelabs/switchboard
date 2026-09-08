@@ -136,3 +136,59 @@ src/core/frictionProposals.test.ts	expect(p.body).toContain("#84");
 src/core/commands/schedule.test.ts	"• `self-improvement` — `0 14 * * 1` · bot · `friction propose` as `cron` · next 2026-08-31 14:00 UTC · no firing recorded",
 src/core/commands/schedule.test.ts	"• `resident-watchdog` — `*/10 * * * *` · resident · resident watchdog — not a run · next 2026-08-30 12:10 UTC",
 src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00 UTC → completed (run run-abcd)");
+
+# Our production deployment: the release and docs workflows read this installation's profile from our infrastructure repository with our GitHub App, whose credentials the 1Password action loads; one line each to change for another operator.
+.github/workflows/ci.yml	uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+.github/workflows/ci.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+.github/workflows/ci.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
+.github/workflows/ci.yml	owner: coreplanelabs
+.github/workflows/ci.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
+.github/workflows/deploy-production.yml	uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+.github/workflows/deploy-production.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+.github/workflows/deploy-production.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
+.github/workflows/deploy-production.yml	owner: coreplanelabs
+.github/workflows/deploy-production.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
+.github/workflows/release-please.yml	uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+.github/workflows/release-please.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+.github/workflows/release-please.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
+.github/workflows/release-please.yml	owner: coreplanelabs
+.github/workflows/release-please.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
+
+# Our production deployment's live receipt reads each Worker's /healthz on our zone; one line each to change for another operator.
+.github/workflows/deploy-production.yml	commit=$(curl -s --max-time 20 "https://$w.coreplanelabs.dev/healthz" | jq -r '.build.commit // "?"' 2>/dev/null || echo "?")
+.github/workflows/deploy-production.yml	commit=$(curl -s --max-time 20 -H "authorization: Bearer $SANDBOX_TOKEN" https://switchboard-sandbox.coreplanelabs.dev/healthz | jq -r '.build.commit // "?"' 2>/dev/null || echo "?")
+
+# The review App this installation runs as, matched by login and immutable id; another operator swaps in their App's.
+.github/workflows/auto-approve-claude-lgtm.yml	(github.event.review.user.login == 'coreplane-switchboard[bot]' && github.event.review.user.id == 318072483)
+
+# The agent-env manifest's reference syntax and its two placeholder entries: op:// is the secrets manager's own reference form, which src/agentEnv/bootstrap.ts parses.
+deploy/agent-env.jsonc	// op://<vault>/<item>/<field>. The tool reads these refs with a READ-ONLY
+deploy/agent-env.jsonc	"DATABASE_URL": "op://REPLACE-ME-UAT-VAULT/example-service-uat/database-url",
+deploy/agent-env.jsonc	"SERVICE_BASE_URL": "op://REPLACE-ME-UAT-VAULT/example-service-uat/base-url"
+
+# The project's own home, docs URL, contact address and steward — the facts in project.json, which check:project-facts holds equal everywhere.
+package.json	"homepage": "https://github.com/coreplanelabs/switchboard#readme",
+package.json	"url": "git+https://github.com/coreplanelabs/switchboard.git"
+package.json	"url": "https://github.com/coreplanelabs/switchboard/issues"
+.github/ISSUE_TEMPLATE/config.yml	url: https://github.com/coreplanelabs/switchboard/discussions
+.github/ISSUE_TEMPLATE/config.yml	url: https://github.com/coreplanelabs/switchboard/security/advisories/new
+AGENTS.md	Every agent working here reads this file, as does a person asking how we work: how a change is made, the invariants, where things are, the commands that are the repo's whole interface, and the rules. Detail is a link away: [README.md](README.md) (engineering), [docs/](docs/README.md) (the human-facing tree, published at <https://docs.switchboard.coreplanelabs.dev>), [features/](features/README.md) (the behavioral contract).
+CODE_OF_CONDUCT.md	<dev@coreplane.ai>. All complaints will be reviewed and investigated promptly
+SECURITY.md	repository's Security tab, or email <dev@coreplane.ai> with a description, the
+CONTRIBUTING.md	git clone https://github.com/coreplanelabs/switchboard.git
+SUPPORT.md	[GitHub Discussions](https://github.com/coreplanelabs/switchboard/discussions).
+GOVERNANCE.md	Switchboard is an open-source project stewarded by [Coreplane Labs](https://coreplane.ai).
+
+# Cloudflare's compatibility date is a runtime setting the Worker pins, not a narrative.
+deploy/cloudflare-docs/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+deploy/cloudflare-memory/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+deploy/cloudflare-resident/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+deploy/cloudflare-sandbox/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+deploy/cloudflare/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+
+# The example profile's placeholder account id: src/deploy/profile.ts requires exactly 32 hex characters, so the placeholder keeps the shape.
+deploy/profile.example.json	"account": "00000000000000000000000000000000",
+
+# The profile and the secrets manifest document the op://Vault/Item source form that src/deploy/configSource.ts and src/deploy/secrets.ts parse.
+deploy/profile.example.json	"$comment": "The deployment profile: where THIS installation runs. Copy to deploy/profile.json and fill it in (or run `switchboard deploy init`). The account is your Cloudflare account id; every hostname must be under `zone`, a zone in that account; `workers.bot` is the one required Worker — leave `memory`, `resident`, `sandbox` or `docs` out and `deploy plan` has no step for them (a bot-only profile is a one-step plan; without `memory` the config is not pushed anywhere); `configSource` is where `deploy all` reads the bot's runtime config from before building the image — a path, `github://owner/repo/path@ref` (needs CONFIG_REPO_TOKEN), or `op://Vault/Item/field` (needs OP_SERVICE_ACCOUNT_TOKEN); `secretsSource` is where `secrets put` reads values from — a directory of <NAME> files (the default when absent) or `op://Vault/Item`. `deploy plan` reads this example when no profile exists; `deploy all` refuses it.",
+deploy/secrets.manifest.json	"$comment": "Every Cloudflare Worker secret Switchboard provisions: its name and which Worker(s) hold it. This file is the contract — src/core/secretsManifest.test.ts keeps it equal to each worker.ts `Env` interface and to the bot container's forwarding list. WHERE the values live is the deployment profile's `secretsSource` (a directory of <NAME> files, `~/.secrets/switchboard` by default, or a 1Password item `op://Vault/Item` with one field per name); `deploy secrets <worker>` (`npm run secrets` in each deploy/cloudflare*/) puts them, refusing before any upload when a required value is absent. A shared bearer must carry ONE value on every Worker listed for it. Rotation: new value at the source, `deploy secrets` on EVERY listed Worker, then `deploy restart` for the bot (its running container keeps the env it started with). Public config (URLs, ids of no consequence) is a wrangler.jsonc var, not a secret.",
