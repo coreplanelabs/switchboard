@@ -8,8 +8,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore, MAX_INSTRUCTIONS_LENGTH } from "../config.js";
 import type { ProviderRegistry } from "../providers/registry.js";
-import type { CompletionRequest, CompletionResult, Provider } from "../providers/types.js";
-import { AGENTS } from "../agents/registry.js";
+import type { ChatMessage, CompletionRequest, CompletionResult, Provider } from "../providers/types.js";
+import { AGENTS, getAgent } from "../agents/registry.js";
+import { planResume } from "./runLedger/resume.js";
+import { knownToolsFor, resumeMessage } from "./resumeLaunch.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
@@ -8495,6 +8497,264 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     expect(stateAtReply).toEqual({ finalStatus: "completed" });
     expect(phaseAtReply).toBe("finishing");
     expect(fallbackPuts).toEqual([]);
+  });
+
+  it("a reclaimed run resumes under its own id (item 38): the row is adopted at admission, the transcript is the conversation, the calls in flight are settled before the first model call, the earlier events are replayed under their seqs, and the finish closes the same row", async () => {
+    // The previous generation's run: claimed, seeded, one step in flight (an
+    // update_status the general agent has, and a bash it does not), events 1–4.
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const transcript: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "hello there" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "on it" },
+          { type: "tool_use", id: "s1", name: "update_status", input: { checklist: "○ resumed" } },
+          { type: "tool_use", id: "b1", name: "bash", input: { command: "make" } },
+        ],
+      },
+    ];
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        agent: "general",
+        model: "anthropic/general-model",
+      },
+      card: { channel: "CX", ts: "1.2" },
+      system: "the stored prompt, verbatim",
+      tools: [],
+      state: { checklist: "○ before" },
+    });
+    await ledger.seed("run-old", "gen-OLD", [{ idx: 0, message: transcript[0] }]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      {
+        step: 1,
+        seq: 4,
+        turnIndex: 2,
+        inFlight: [
+          { callId: "s1", tool: "update_status" },
+          { callId: "b1", tool: "bash" },
+        ],
+        inboxConsumedSeq: 0,
+        remainingMs: 240_000,
+        turn: 1,
+        iteration: 0,
+      },
+      [{ idx: 1, message: transcript[1] }],
+    );
+    await ledger.append("run-old", "gen-OLD", [
+      { type: "input", text: "hello there", at: 1, seq: 1 },
+      { type: "run_meta", agent: "general", model: "anthropic/general-model", at: 2, seq: 2 },
+      { type: "tool_call", tool: "update_status", summary: "s", at: 3, seq: 3 },
+      { type: "tool_call", tool: "bash", summary: "make", at: 4, seq: 4 },
+    ]);
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    expect(reclaimed.row.ownerGen).toBe("gen-T");
+
+    let firstRequest: ChatMessage[] | undefined;
+    let stateAtFirstCall: unknown;
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        firstRequest ??= structuredClone(req.messages);
+        stateAtFirstCall ??= structuredClone(ledger.live.get("run-old")?.state);
+        return { content: [{ type: "text", text: "resumed and done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, registry, writer, fallbackPuts, warnings } = wired(provider, { ledger });
+    const plan = planResume({
+      transcript: { complete: true, turns: 2, messages: transcript },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("general")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.why);
+    const events = await ledger.readEvents("run-old");
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
+      resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 4, repoCtx: {} },
+    });
+    await writer.settled();
+
+    expect(replies.at(-1)).toBe("resumed and done");
+    // The model saw the stored prompt and the transcript plus the settlement's results turn:
+    // update_status re-ran (it exists), bash got the not-available result (general has no bash).
+    expect(firstRequest!.slice(0, 2)).toEqual(transcript);
+    expect(firstRequest![2].role).toBe("user");
+    const results = firstRequest![2].content as { toolUseId: string; content: unknown; isError?: boolean }[];
+    expect(results.map((r) => r.toolUseId)).toEqual(["s1", "b1"]);
+    expect(String(results[1].content)).toContain("not available after the bot restarted");
+    expect(stateAtFirstCall).toEqual({ checklist: "○ resumed" }); // the re-run update_status refreshed the row's state
+    // Same run id everywhere; the record carries the replayed events and the new ones as one stream.
+    expect(registry.listActive().map((r) => r.id)).toEqual(["run-old"]);
+    expect(ledger.live.has("run-old")).toBe(false);
+    const record = ledger.finished.get("run-old")!;
+    expect(record.status).toBe("completed");
+    expect(record.events.slice(0, 4).map((e) => e.type)).toEqual(["input", "run_meta", "tool_call", "tool_call"]);
+    expect(record.events.map((e) => e.seq)).toEqual(
+      [...record.events].map((e) => e.seq).sort((a, b) => (a ?? 0) - (b ?? 0)),
+    );
+    expect(record.events.filter((e) => e.type === "input")).toHaveLength(1); // no second request event
+    expect(record.events.some((e) => e.type === "run_note" && e.kind === "resumed")).toBe(true);
+    // Only this generation's events were appended (the earlier ones were on the ledger already).
+    expect(ledger.events.get("run-old")!.map((e) => e.seq)).toEqual([
+      1,
+      2,
+      3,
+      4,
+      ...ledger.events
+        .get("run-old")!
+        .slice(4)
+        .map((e) => e.seq),
+    ]);
+    expect(
+      Math.min(
+        ...ledger.events
+          .get("run-old")!
+          .slice(4)
+          .map((e) => e.seq),
+      ),
+    ).toBeGreaterThan(4);
+    expect(fallbackPuts).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("a resume onto a thread that has a newer run in flight is never steered or refused as a follow-up: the reclaimed row is closed interrupted with no reply and no run", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        agent: "general",
+        model: "anthropic/general-model",
+      },
+      system: "sys",
+      tools: [],
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "hello there" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    await ledger.append("run-old", "gen-OLD", [{ type: "input", text: "hello there", at: 1, seq: 1 }]);
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const { deps, registry, writer } = wired(capturingProvider("must not run"), { ledger });
+    deps.admission = new ThreadAdmission();
+    deps.admission.claim("slack:CX:1.0", { agent: "general" }); // the user re-mentioned the bot after the kill
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        turns: 1,
+        messages: reclaimed.row ? [{ role: "user", content: [{ type: "text", text: "hello there" }] }] : [],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("general")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.why);
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: await ledger.readEvents("run-old"),
+        lastSeq: 1,
+        repoCtx: {},
+      },
+    });
+    await writer.settled();
+    expect(replies).toEqual([]); // no steer-ack, no refusal
+    expect(registry.listActive()).toEqual([]);
+    expect(ledger.live.has("run-old")).toBe(false);
+    expect(ledger.finished.get("run-old")).toMatchObject({ status: "interrupted", eventCount: 1 });
+  });
+
+  it("a resumed dispatch that ends before its run starts (a repo refusal) closes the adopted row interrupted instead of leaving it for the sweep to relaunch forever", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      // UDEV may run the coding agent but is NOT on acme/api's repo allowlist (REPO_PERMS_YAML).
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UDEV",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+      },
+      system: "sys",
+      tools: [],
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("must not run");
+    const { deps, registry, writer } = wired(provider, { ledger, yaml: REPO_PERMS_YAML });
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.why);
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: [],
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api" },
+      },
+    });
+    await writer.settled();
+    expect(replies[0]).toContain("🚫"); // the refusal is still said, as for any dispatch
+    expect(provider.requests).toEqual([]);
+    expect(registry.listActive()).toEqual([]);
+    expect(ledger.live.has("run-old")).toBe(false);
+    expect(ledger.finished.get("run-old")?.status).toBe("interrupted");
   });
 
   it("a review's verdict lands in the run's ledger state as it is submitted", async () => {

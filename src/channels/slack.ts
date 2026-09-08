@@ -766,10 +766,36 @@ export async function fetchDocuments(
 }
 
 /** Exported for tests. */
+/** The channel IO for a run resumed after a restart (features/run-history.md
+ *  item 38): the thread from the ledger row's `threadKey`, the requester from
+ *  its meta, and the card it already has. There is no triggering event — the
+ *  message that started the run was handled by the previous generation. */
+export function resumeSlackIO(
+  client: SlackClient,
+  run: { channel: string; threadTs: string; user: string; cardTs?: string; botUserId?: string },
+): SlackIO {
+  return new SlackIO(
+    client,
+    {
+      channel: run.channel,
+      user: run.user,
+      text: "",
+      ts: run.threadTs,
+      threadTs: run.threadTs,
+      botUserId: run.botUserId,
+    },
+    run.cardTs ? { existingCard: { ts: run.cardTs } } : {},
+  );
+}
+
 export class SlackIO implements ChannelIO {
   constructor(
     private client: SlackClient,
     private ev: SlackEvent,
+    /** `existingCard`: the status message a resumed run already has in the
+     *  thread (features/run-history.md item 38) — `status()` edits it instead
+     *  of posting a second card. */
+    private opts: { existingCard?: { ts: string } } = {},
   ) {}
 
   async reply(text: string): Promise<void> {
@@ -824,15 +850,35 @@ export class SlackIO implements ChannelIO {
 
     // Post the activity card FIRST: any bot message in the thread auto-clears
     // the inline status, so the shimmer must be set after the card exists
-    // (edits to the card don't clear it; only new messages do).
-    const posted = await this.client.chat.postMessage({
-      channel: this.ev.channel,
-      thread_ts: this.ev.threadTs,
-      ...render(initial),
-    });
+    // (edits to the card don't clear it; only new messages do). A resumed run
+    // keeps the card the previous generation posted: edited in place, so the
+    // thread shows one card whose frames carry on.
+    let ts: string | undefined;
+    if (this.opts.existingCard) {
+      // A card the previous generation posted may have been deleted since; a
+      // failed edit falls back to a fresh card rather than a run with none.
+      const existing = this.opts.existingCard.ts;
+      const edited = await this.client.chat
+        .update({ channel: this.ev.channel, ts: existing, ...render(initial) })
+        .then(() => true)
+        .catch((err: Error) => {
+          console.warn(
+            `[slack] resumed run's card ${this.ev.channel}:${existing} not editable (${err.message}) — posting a fresh card`,
+          );
+          return false;
+        });
+      if (edited) ts = existing;
+    }
+    if (ts === undefined) {
+      const posted = await this.client.chat.postMessage({
+        channel: this.ev.channel,
+        thread_ts: this.ev.threadTs,
+        ...render(initial),
+      });
+      ts = posted.ts as string;
+    }
     await setShimmer();
     const shimmerTimer = setInterval(() => void setShimmer(), 75_000);
-    const ts = posted.ts as string;
     liveCards.add(liveCardKey(this.ev.channel, ts));
     const edit = (frame: StatusUpdate) =>
       this.client.chat.update({ channel: this.ev.channel, ts, ...render(frame) }).catch(() => {});

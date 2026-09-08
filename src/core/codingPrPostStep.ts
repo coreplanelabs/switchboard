@@ -223,11 +223,13 @@ const PUSH_COMMAND_RE = /(?:^\$?|[\n;&|(])\s*git\b[^\n;&|'"]*\bpush\b/;
  * own `refs/heads/<branch>` to equal that branch's observed local tip, so a
  * phantom degrades to the honest "not found on the remote" note.
  */
-export function trackPushedBranch(): { observe(event: RunEvent): void; branch(): string | undefined } {
+export function trackPushedBranch(initial?: string): { observe(event: RunEvent): void; branch(): string | undefined } {
   // callIds of in-flight bash calls whose command invokes git push; entries
   // leave on their result, so the set never outgrows one turn's tool calls.
   const pushCalls = new Set<string>();
-  let branch: string | undefined;
+  // `initial`: the branch a resumed run had already pushed before the restart
+  // (features/run-history.md item 38), restored from the ledger row's state.
+  let branch: string | undefined = initial;
   return {
     observe(event) {
       if (event.type === "tool_call") {

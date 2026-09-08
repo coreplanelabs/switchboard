@@ -2,23 +2,32 @@
 // the Slack socket opens, this generation takes over every run the previous
 // one left on the ledger — an expired lease (the owner died), a handoff (the
 // owner drained), or a `finishing` row (the owner replied and died before
-// `finish`) — and closes each with a proper record, so no run ever ends as a
-// card spinning forever with a tombstone for a record. Resuming a run's model
-// loop from its transcript is the next step of the plan; until then every
-// reclaimed run that had not replied closes `interrupted`, and the verdict
-// the transcript-completeness rule WOULD have given is logged so the receipt
-// can count how often a resume would have been possible.
+// `finish`) — and either hands it to the resume launcher (item 38: a row from
+// `live`/`handoff` whose transcript and last step record the completeness
+// rule accepts) or closes it with a proper record, so no run ever ends as a
+// card spinning forever with a tombstone for a record.
 //
-// Ordering: awaited by `src/index.ts` before `app.start()` (D7). The catch-up's
-// orphan sweep then finds the closed runs' cards unowned and closes them as
-// interrupted; the rows another generation still holds a current lease on are
-// handed back so the sweep leaves THEIR cards alone (`liveElsewhere`).
+// Ordering: awaited by `src/index.ts` before `app.start()` (D7), then repeated
+// every lease interval (`startReclaimSweep`): a row whose lease was still
+// current at boot — the owner died seconds before — expires shortly after, and
+// nothing else would ever take it. The catch-up's orphan sweep finds the closed
+// runs' cards unowned and closes them as interrupted; the rows another
+// generation still holds a current lease on are handed back so the sweep leaves
+// THEIR cards alone (`liveElsewhere`).
 
-import type { RunStatus } from "./runRecord.js";
+import type { ChatMessage } from "../providers/types.js";
+import type { RunRecord, RunStatus } from "./runRecord.js";
 import { RouteMissingError } from "./runStoreWorker.js";
 import type { RunLedger } from "./runLedger/ledger.js";
 import { transcriptCompleteness } from "./runLedger/decisions.js";
-import { LEASE_MS, type CardHandle, type LivePhase } from "./runLedger/types.js";
+import {
+  LEASE_MS,
+  type AppendableEvent,
+  type CardHandle,
+  type LivePhase,
+  type LiveRunRow,
+  type StepRecord,
+} from "./runLedger/types.js";
 import { reclaimedRunRecord } from "./dispatcher.js";
 
 export interface ReclaimedClosure {
@@ -41,8 +50,21 @@ export interface LiveElsewhere {
   card: CardHandle | null;
 }
 
+/** A reclaimed run the resume launcher continues (item 38): its row (ours
+ *  now), the last step record, the transcript read whole, and the events it
+ *  published before the restart. */
+export interface ResumableRun {
+  row: LiveRunRow;
+  reclaimedFrom: LivePhase;
+  lastStep: StepRecord;
+  transcript: { complete: true; turns: number; messages: ChatMessage[] };
+  events: AppendableEvent[];
+}
+
 export interface ReclaimOutcome {
   closed: ReclaimedClosure[];
+  /** Runs handed to the resume launcher instead of closed. */
+  resumable: ResumableRun[];
   /** Runs another generation still holds a current lease on (a rollout
    *  overlap): their cards must not be swept as orphans. */
   liveElsewhere: LiveElsewhere[];
@@ -51,7 +73,7 @@ export interface ReclaimOutcome {
   failed: { runId: string; error: string }[];
 }
 
-export interface ReclaimAtBootOptions {
+export interface ReclaimOptions {
   ledger: RunLedger;
   gen: string;
   now?: () => number;
@@ -72,12 +94,12 @@ const describe = (err: unknown): string => (err instanceof Error ? err.message :
 /** Take over and close what the previous generation left. Never throws: a
  *  ledger that cannot be reached (or predates the routes) is a warning and an
  *  empty outcome — the bot boots as before. */
-export async function reclaimAtBoot(opts: ReclaimAtBootOptions): Promise<ReclaimOutcome> {
+export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome> {
   const { ledger, gen } = opts;
   const now = opts.now ?? Date.now;
   const log = opts.log ?? (() => {});
   const warn = opts.warn ?? (() => {});
-  const outcome: ReclaimOutcome = { closed: [], liveElsewhere: [], failed: [] };
+  const outcome: ReclaimOutcome = { closed: [], resumable: [], liveElsewhere: [], failed: [] };
 
   let reclaimed;
   try {
@@ -104,16 +126,32 @@ export async function reclaimAtBoot(opts: ReclaimAtBootOptions): Promise<Reclaim
         status = typeof recorded === "string" && TERMINAL.has(recorded) ? (recorded as RunStatus) : "completed";
         why = "replied before the previous generation died";
       } else {
+        // Resumable (item 38) when the transcript is whole and the completeness
+        // rule accepts it against the last step record; the launcher plans the
+        // settlement once the socket is up. Otherwise closed here.
+        const verdict = await completenessVerdict(ledger, row.runId, run.lastStep);
+        if (verdict.resumable && run.lastStep) {
+          const events = await ledger.readEvents(row.runId);
+          outcome.resumable.push({
+            row,
+            reclaimedFrom: run.reclaimedFrom,
+            lastStep: run.lastStep,
+            transcript: verdict.transcript,
+            events,
+          });
+          log(
+            `[reclaim] ${row.runId} ${row.threadKey} resumable (from ${run.reclaimedFrom}; ${verdict.why}; ${events.length} event(s)) — handed to the launcher`,
+          );
+          continue;
+        }
         status = "interrupted";
-        why = await completenessVerdict(ledger, run.row.runId, run.lastStep);
+        why = verdict.why;
       }
       const events = await ledger.readEvents(row.runId);
-      const finishedAt = now();
-      const record = reclaimedRunRecord({ row, events, status, finishedAt });
-      const result = await ledger.finish(row.runId, gen, record);
-      if (!result.ok) {
-        outcome.failed.push({ runId: row.runId, error: `finish refused (${result.reason})` });
-        warn(`[reclaim] ${row.runId} ${row.threadKey}: finish refused (${result.reason})`);
+      const closed = await closeReclaimed(ledger, gen, { row, events, status, finishedAt: now() });
+      if (!closed.ok) {
+        outcome.failed.push({ runId: row.runId, error: `finish refused (${closed.reason})` });
+        warn(`[reclaim] ${row.runId} ${row.threadKey}: finish refused (${closed.reason})`);
         continue;
       }
       outcome.closed.push({
@@ -146,38 +184,101 @@ export async function reclaimAtBoot(opts: ReclaimAtBootOptions): Promise<Reclaim
 
   if (reclaimed.length > 0 || outcome.liveElsewhere.length > 0) {
     log(
-      `[reclaim] ${gen}: took ${reclaimed.length} run(s) — ${outcome.closed.length} closed, ${outcome.failed.length} failed; ${outcome.liveElsewhere.length} live under another generation`,
+      `[reclaim] ${gen}: took ${reclaimed.length} run(s) — ${outcome.resumable.length} resumable, ${outcome.closed.length} closed, ${outcome.failed.length} failed; ${outcome.liveElsewhere.length} live under another generation`,
     );
   }
   return outcome;
 }
 
-/** What a resume would have found (the transcript-completeness rule, item 31),
- *  as the reason on an `interrupted` closure — logged so the rollover receipt
- *  can say how many runs were resumable. */
+export interface ReclaimSweepOptions extends ReclaimOptions {
+  /** Default `LEASE_MS`: an expired lease is noticed within two intervals. */
+  intervalMs?: number;
+  /** Called with every non-empty outcome — the launcher, the card closer, the sweep guard. */
+  onOutcome: (outcome: ReclaimOutcome) => Promise<void> | void;
+  /** Injectable timer (tests). */
+  setInterval?: (fn: () => void, ms: number) => { unref?(): void };
+  clearInterval?: (timer: { unref?(): void }) => void;
+}
+
+/** The boot reclaim, repeated: every interval, take and close (or hand to the
+ *  launcher) whatever the ledger holds under an expired lease or a handoff.
+ *  One pass at a time; a pass that throws is a warning, never a crash. */
+export function startReclaimSweep(opts: ReclaimSweepOptions): { stop(): void } {
+  const warn = opts.warn ?? (() => {});
+  let running = false;
+  const pass = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try {
+      const outcome = await reclaimRuns(opts);
+      if (outcome.closed.length + outcome.resumable.length + outcome.failed.length + outcome.liveElsewhere.length > 0) {
+        await opts.onOutcome(outcome);
+      }
+    } catch (err) {
+      warn(`[reclaim] sweep failed: ${describe(err)}`);
+    } finally {
+      running = false;
+    }
+  };
+  const start =
+    opts.setInterval ??
+    ((fn: () => void, ms: number) => {
+      const t = setInterval(fn, ms);
+      t.unref?.();
+      return t;
+    });
+  const stop = opts.clearInterval ?? ((t) => clearInterval(t as NodeJS.Timeout));
+  const timer = start(() => void pass(), opts.intervalMs ?? LEASE_MS);
+  return { stop: () => stop(timer) };
+}
+
+/** Close one reclaimed run on the ledger with the record built from its row
+ *  and events (item 36) — the boot's closer, and the launcher's for a run the
+ *  plan refuses. */
+export async function closeReclaimed(
+  ledger: RunLedger,
+  gen: string,
+  input: { row: LiveRunRow; events: AppendableEvent[]; status: RunStatus; finishedAt: number },
+): Promise<{ ok: true; record: RunRecord } | { ok: false; reason: string }> {
+  const record = reclaimedRunRecord(input);
+  const result = await ledger.finish(input.row.runId, gen, record);
+  return result.ok ? { ok: true, record } : { ok: false, reason: result.reason ?? "refused" };
+}
+
+type Verdict =
+  | { resumable: true; transcript: { complete: true; turns: number; messages: ChatMessage[] }; why: string }
+  | { resumable: false; why: string };
+
+/** The transcript-completeness rule (item 31) against the last step record:
+ *  what a resume finds, with the reason in words for the log and the record. */
 async function completenessVerdict(
   ledger: RunLedger,
   runId: string,
   lastStep: { turnIndex: number } | null,
-): Promise<string> {
-  if (!lastStep) return "no step record: killed before its conversation was stored";
-  let turns: number;
-  let gap: string | undefined;
+): Promise<Verdict> {
+  if (!lastStep) return { resumable: false, why: "no step record: killed before its conversation was stored" };
+  let transcript;
   try {
-    const transcript = await ledger.readTranscript(runId);
-    turns = transcript.turns;
-    gap = transcript.complete ? undefined : transcript.gap;
+    transcript = await ledger.readTranscript(runId);
   } catch (err) {
-    return `transcript unreadable (${describe(err)})`;
+    return { resumable: false, why: `transcript unreadable (${describe(err)})` };
   }
-  if (gap) return `transcript incomplete: ${gap}`;
-  const verdict = transcriptCompleteness({ lastStep, seedTurns: lastStep.turnIndex, transcriptTurns: turns });
+  if (!transcript.complete) return { resumable: false, why: `transcript incomplete: ${transcript.gap}` };
+  const verdict = transcriptCompleteness({
+    lastStep,
+    seedTurns: lastStep.turnIndex,
+    transcriptTurns: transcript.turns,
+  });
   switch (verdict.kind) {
     case "resume":
-      return `resumable: the transcript's ${lastStep.turnIndex} turns match the last step record — resume not built yet, closed instead`;
+      return {
+        resumable: true,
+        transcript,
+        why: `the transcript's ${transcript.turns} turns match the last step record`,
+      };
     case "run-step-fresh":
-      return "resumable (next step's turns landed, record did not) — resume not built yet, closed instead";
+      return { resumable: true, transcript, why: "the next step's turns landed, its record did not" };
     default:
-      return verdict.why;
+      return { resumable: false, why: verdict.why };
   }
 }

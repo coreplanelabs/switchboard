@@ -7,7 +7,9 @@ import { lastThreadDirectives, parseDirectives, type RequestDirectives, type Thr
 import { mergeTools, runAgent } from "../runner.js";
 import { TOOLSETS } from "../tools/workspace.js";
 import type { LedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
-import type { AppendableEvent, LiveRunRow } from "./runLedger/types.js";
+import type { AppendableEvent, LiveRunRow, StepRecord } from "./runLedger/types.js";
+import type { ResumePlan } from "./runLedger/resume.js";
+import { systemClock } from "./trace/index.js";
 import { makeWebCapability } from "../tools/web.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
@@ -36,8 +38,8 @@ import {
   type ShipChildSpec,
   type ShipOutcome,
 } from "./shipPipeline.js";
-import type { PrDescription } from "./prDescription.js";
-import type { ReviewVerdict } from "./reviewVerdict.js";
+import { PrDescriptionSchema, type PrDescription } from "./prDescription.js";
+import { parseVerdictInput, type ReviewVerdict } from "./reviewVerdict.js";
 import {
   attachRoundWorkspace,
   checkPrHeadPreflight,
@@ -374,7 +376,49 @@ export function activeRunCount(): number {
   return activeRuns;
 }
 
-export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: ChannelIO): Promise<void> {
+/** A run this generation reclaimed at boot and is continuing (features/
+ *  run-history.md item 38): the ledger row as it stands, the last step record,
+ *  the resume plan built from the transcript, the events published before the
+ *  restart (replayed into the registry under their seqs), and the repo context
+ *  rebuilt from the row's meta. */
+export interface ResumeContext {
+  row: LiveRunRow;
+  lastStep: StepRecord;
+  plan: Extract<ResumePlan, { kind: "resume" }>;
+  events: AppendableEvent[];
+  /** The highest event seq on the ledger; appends continue past it. */
+  lastSeq: number;
+  repoCtx: RepoContext;
+}
+
+export interface DispatchOptions {
+  resume?: ResumeContext;
+}
+
+/** Close a reclaimed row this dispatch adopted but will never finish (item
+ *  38): the record is the row plus the events published before the restart,
+ *  status `interrupted`, through the adopted run's sink so the ledger's finish
+ *  removes the row. Best-effort: a failure is a warning, the sweep's next pass
+ *  finds the row again. */
+async function closeResumedRow(adopted: LedgerRun, resume: ResumeContext, why: string): Promise<void> {
+  try {
+    await adopted.sink.put(
+      reclaimedRunRecord({ row: resume.row, events: resume.events, status: "interrupted", finishedAt: systemClock() }),
+    );
+  } catch (err) {
+    console.warn(
+      `[resume] ${resume.row.runId} could not be closed (${why}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+export async function dispatch(
+  deps: CoreDeps,
+  msg: IncomingMessage,
+  io: ChannelIO,
+  opts: DispatchOptions = {},
+): Promise<void> {
+  const resume = opts.resume;
   // Counted in flight from the first line — before history, repo resolution,
   // the setup card and the executor attach — until the post-run steps (reply,
   // review post, memory reflection scheduling) have run; decremented in the
@@ -519,6 +563,27 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // the live run when a DIFFERENT agent was asked for explicitly. Either way
     // this dispatch ends here: no card, no run, no workspace.
     const claim = admission.claim(msg.threadKey, { agent: agent.name });
+    if (claim.kind === "live" && resume) {
+      // A resume is not a follow-up (run-history item 38): its message is
+      // synthetic, so it must never be steered into — or refuse against — the
+      // run that now holds the thread. A live run here means the user moved on
+      // after the kill (a re-mention started a fresh run); the reclaimed run
+      // is closed `interrupted` on the ledger, with no reply to the thread.
+      if (deps.runLedger) {
+        const adopted = deps.runLedger.adopt({
+          runId: resume.row.runId,
+          threadKey: msg.threadKey,
+          state: resume.row.state,
+          lastStep: resume.lastStep.step,
+          lastSeq: resume.lastSeq,
+        });
+        await closeResumedRow(adopted, resume, "the thread has a newer run in flight");
+      }
+      console.log(
+        `[resume] ${msg.threadKey} run ${resume.row.runId} not resumed: the thread has a newer run in flight — closed interrupted`,
+      );
+      return;
+    }
     if (claim.kind === "live") {
       // The gate above ran against THIS message's resolved agent; a steered
       // follow-up is read by the LIVE agent, so its sender must be allowed to
@@ -556,6 +621,20 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       return;
     }
     admitted = claim.live;
+    // A resumed run (run-history item 38): its ledger row has been this
+    // generation's since the boot reclaim — take it up NOW, before the card,
+    // the repo resolution and the workspace attach, so the heartbeat keeps
+    // the lease through a slow resident attach. No claim, no seed.
+    if (resume && deps.runLedger) {
+      ledgerRun = deps.runLedger.adopt({
+        runId: resume.row.runId,
+        threadKey: msg.threadKey,
+        state: resume.row.state,
+        lastStep: resume.lastStep.step,
+        lastSeq: resume.lastSeq,
+        onStop: (mode) => void liveControl?.requestStop(mode),
+      });
+    }
 
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
@@ -573,18 +652,20 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // resolver (tests) is called as before. STARTED here (a promise) so the
     // GitHub round trip overlaps the memory read below; awaited after the ack.
     const needsRepo = agent.resources?.repo === "required";
-    const repoCtxP: Promise<RepoContext> = needsRepo
-      ? Promise.resolve(
-          deps.resolveRepoContext
-            ? deps.resolveRepoContext(msg, history)
-            : resolveRepoContext(
-                msg,
-                history,
-                residentOnboardedProbe(deps.config.config.execution?.resident),
-                residentSlugsLister(deps.config.config.execution?.resident),
-              ),
-        ).then((ctx) => ctx ?? {})
-      : Promise.resolve({});
+    const repoCtxP: Promise<RepoContext> = resume
+      ? Promise.resolve(resume.repoCtx)
+      : needsRepo
+        ? Promise.resolve(
+            deps.resolveRepoContext
+              ? deps.resolveRepoContext(msg, history)
+              : resolveRepoContext(
+                  msg,
+                  history,
+                  residentOnboardedProbe(deps.config.config.execution?.resident),
+                  residentSlugsLister(deps.config.config.execution?.resident),
+                ),
+          ).then((ctx) => ctx ?? {})
+        : Promise.resolve({});
     repoCtxP.catch(() => {});
 
     // Cross-session memory (Area 7c, #85) — READ path, STARTED here and awaited
@@ -716,7 +797,9 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       return;
     }
 
-    const messages = buildMessages(history, directives.text, msg.images, msg.documents);
+    // A resume continues the exact conversation the ledger held (item 38);
+    // the thread history was folded into it when the run started.
+    const messages = resume ? resume.plan.messages : buildMessages(history, directives.text, msg.images, msg.documents);
 
     // Executor selection is context-aware: the agent's resource declarations
     // decide whether anything is provisioned at all (general gets nothing),
@@ -780,7 +863,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // the worktree was being attached: not started — one named reply, the
     // pool user released, no provider call.
     let verifiedAtAttach = false;
-    if (agent.name === "review" && resident && repoCtx.pr !== undefined && repoCtx.repo) {
+    if (!resume && agent.name === "review" && resident && repoCtx.pr !== undefined && repoCtx.repo) {
       const guard = await guardAttachedHead({
         pr: { repo: repoCtx.repo, number: repoCtx.pr },
         expectedHeadSha: repoCtx.headSha,
@@ -908,7 +991,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     let reviewHead = repoCtx.headSha;
     // The first turn's system, pinned to that head; a re-review recomposes its
     // own inside settleReviewedHead.
-    const system = composeSystem({ sha: reviewHead, verified: verifiedAtAttach });
+    // A resume re-sends the prompt the run started with, verbatim (plan D3):
+    // memory retrieval and MCP discovery are not reproducible, and the model's
+    // cached prefix and thinking blocks are bound to it.
+    const system = resume ? resume.row.system : composeSystem({ sha: reviewHead, verified: verifiedAtAttach });
 
     if (note) label = `${label} · ${oneLine(note)}`;
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
@@ -938,17 +1024,26 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // The registry redacts and caps the label; `run.label` is the one the record
     // and the friction row carry (never `runLabel`, which may hold a pasted secret).
     const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
-    const run = registry.create(runLabel, {
-      agent: agent.name,
-      model: resolved.modelRef,
-      channelId: msg.channelId,
-      userId: msg.userId,
-      threadKey: msg.threadKey,
-      channelVisibility,
-      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-      ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-    });
+    const run = registry.create(
+      runLabel,
+      {
+        agent: agent.name,
+        model: resolved.modelRef,
+        channelId: msg.channelId,
+        userId: msg.userId,
+        threadKey: msg.threadKey,
+        channelVisibility,
+        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      },
+      resume ? { id: resume.row.runId, replay: resume.events } : {},
+    );
+    if (resume) {
+      console.log(
+        `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger?.gen ?? "no ledger"}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
+      );
+    }
     io.runStarted?.({ id: run.id });
     // The narrative events the dispatcher itself publishes — the request, the
     // thread context, the final answer — go straight to the registry: redacted
@@ -989,25 +1084,27 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       ...(msg.userName ? { user: msg.userName } : {}),
     };
     const request = humanize ? humanizeMessageText(directives.text) : directives.text;
-    publishText(
-      "input",
-      attachments ? `${request} ${attachments}` : request,
-      Object.keys(source).length > 0 ? source : undefined,
-    );
+    if (!resume)
+      publishText(
+        "input",
+        attachments ? `${request} ${attachments}` : request,
+        Object.keys(source).length > 0 ? source : undefined,
+      );
     // What the run is about (live-view item 19): agent, model, and the repo
     // context resolved above — so the page can head the record with linked
     // owner/repo · ref · #PR · sha. Once per run, straight after the request.
-    registry.publish(run.id, {
-      type: "run_meta",
-      agent: agent.name,
-      model: resolved.modelRef,
-      ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-      ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
-      ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
-      ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-      at: Date.now(),
-    });
+    if (!resume)
+      registry.publish(run.id, {
+        type: "run_meta",
+        agent: agent.name,
+        model: resolved.modelRef,
+        ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+        ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
+        ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
+        ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
+        at: Date.now(),
+      });
     const liveUrl = liveViewLink(run.id, run.token);
     const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
     // The thread's live slot now names its run: a follow-up's ack/refusal can
@@ -1019,7 +1116,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // The thread context fed to the model follows the request as `context`
     // events (#157, KD1) — text only, attachments as metadata lines, bounded to
     // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
-    if (deps.config.config.runHistory?.includeContext !== false) {
+    if (!resume && deps.config.config.runHistory?.includeContext !== false) {
       for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
     }
     // Tombstone-first (#375): a provisional TERMINAL record — status
@@ -1035,7 +1132,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // `markPersisted` must NOT run — the index's persisted flag means "finished
     // and durably stored". Synchronous assembly over a handful of bounded
     // events; the first model call is not delayed.
-    if (deps.runHistoryWriter) {
+    if (!resume && deps.runHistoryWriter) {
       const startSnap = registry.snapshot(run.id, run.token);
       if (startSnap) {
         deps.runHistoryWriter.write(
@@ -1064,7 +1161,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // first step's record never precedes its claim. An untracked run (a stale
     // row on the thread, no routes, a claim that kept failing) runs exactly as
     // before — the write-through warned once.
-    if (deps.runLedger) {
+    if (deps.runLedger && !resume) {
       const opened = await deps.runLedger.open({
         runId: run.id,
         threadKey: msg.threadKey,
@@ -1104,11 +1201,21 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         registry.subscribe(run.id, run.token, (event, seq) => opened.event(event, seq));
       }
     }
+    if (resume && ledgerRun) {
+      // The events before the restart are on the ledger already (and in the
+      // registry by replay); only what this generation publishes is appended.
+      const adopted = ledgerRun;
+      registry.subscribe(run.id, run.token, (event, seq) => adopted.event(event, seq), undefined, resume.lastSeq);
+    }
     // The card body is the agent's own checklist (via the update_status tool)
     // plus a live one-line activity trace (current tool call + redacted result
     // summary) so the card reflects progress per tool event, not only on the
     // 5s heartbeat. Full command output still goes to stdout for operators.
-    let checklist: string | undefined;
+    // On a resume the dispatcher-local state comes back from the row (item 38):
+    // the checklist the card shows, the verdict/description already submitted,
+    // the branch already pushed.
+    const restored = resume?.row.state ?? {};
+    let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
     let lastActivity: string | undefined;
     // The tool whose call has no result yet — the title says the wait is the
     // tool's (`running bash (Ns)`), not the model's (`thinking …`), #531.
@@ -1146,7 +1253,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // the PR post-step opens from THIS branch, and from the checkout only
     // when no push was observed — the checkout can move between the push and
     // the post. The latest push wins.
-    const pushes = trackPushedBranch();
+    const pushes = trackPushedBranch(typeof restored.pushedBranch === "string" ? restored.pushedBranch : undefined);
     // The registry backlog is the run's ONE event store (#157 KTD9): the live
     // page, the post-run friction diagnosis and the run record all read it back
     // via `registry.snapshot` — there is no second copy to drift from it.
@@ -1226,7 +1333,12 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // Review verdict, set only through the structured submit_verdict tool; the
     // post-step below turns it into the deterministic first line of the GitHub
     // body (fail-closed: no call → not approving). See reviewVerdict.ts.
-    let verdict: ReviewVerdict | undefined;
+    // Ledger state is a system boundary: the row's verdict and description are
+    // re-validated through the same parsers the tools use, never trusted as-is.
+    let verdict: ReviewVerdict | undefined =
+      typeof restored.verdict === "object" && restored.verdict !== null
+        ? (parseVerdictInput(restored.verdict as Record<string, unknown>) ?? undefined)
+        : undefined;
     const onVerdict = (v: ReviewVerdict) => {
       verdict = v;
       ledgerRun?.setState({ verdict: v });
@@ -1236,7 +1348,8 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // a fix-up push supersedes the earlier one); the post-step below renders
     // the GitHub body from it at the observed pushed head and opens/edits the
     // PR. See prDescription.ts.
-    let prDescription: PrDescription | undefined;
+    const restoredDescription = PrDescriptionSchema.safeParse(restored.prDescription);
+    let prDescription: PrDescription | undefined = restoredDescription.success ? restoredDescription.data : undefined;
     const onPrDescription = (d: PrDescription) => {
       prDescription = d;
       ledgerRun?.setState({ prDescription: d });
@@ -1315,6 +1428,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
         // The step record before each step's tools (run-history item 35).
         ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
+        // A resume re-enters the loop from the plan (run-history item 37).
+        ...(resume
+          ? {
+              resume: {
+                settlements: resume.plan.settlements,
+                stepRecorded: resume.plan.stepRecorded,
+                turn: resume.plan.turn,
+                iteration: resume.plan.iteration,
+                remainingMs: resume.plan.remainingMs,
+              },
+            }
+          : {}),
       });
       // Reviewed-head settle (features/agent-review.md items 8 + 12,
       // settleReviewedHead in reviewRound.ts): for a PR review, read the
@@ -1648,6 +1773,16 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // its record is written as `failed`, never `completed`.
     writeHistory(true);
   } finally {
+    // A resumed dispatch that ended before its run was created — an unknown
+    // provider, a refusal, a gate — has adopted a row it will never finish
+    // (item 38). Close it `interrupted` here, or the sweep would relaunch it
+    // every lease interval forever.
+    if (resume && ledgerRun && !liveControl) {
+      await closeResumedRow(ledgerRun, resume, "the resumed dispatch ended before the run started");
+      console.log(
+        `[resume] ${msg.threadKey} run ${resume.row.runId} closed interrupted: the resumed dispatch ended before the run started`,
+      );
+    }
     // Thread admission (features/thread-admission.md item 4): free the thread,
     // and settle what the run never consumed. A run that ended by itself (an
     // answer, a budget, a failure, a dead sandbox) hands its unconsumed
