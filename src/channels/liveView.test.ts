@@ -1863,21 +1863,25 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const stop = await request(h, "/runs/priv/stop?mode=soft", alice, "POST");
       expect([stop.status, stop.body()]).toEqual([404, "run not found"]);
       // Who, which route, why — never the run id, never in the reply.
-      expect(audit.mock.calls.map(([e]) => e)).toEqual(
-        ["page", "events", "friction", "stop"].map((route) => ({
-          route,
-          identity: "access:alice",
-          denied: "not-member",
-        })),
-      );
+      // The read routes deny on the run's attributes (alice is not a member); the
+      // stop denies one question earlier — an unlisted session holds no `runs:write`.
+      expect(audit.mock.calls.map(([e]) => e)).toEqual([
+        ...["page", "events", "friction"].map((route) => ({ route, identity: "access:alice", denied: "not-member" })),
+        { route: "stop", identity: "access:alice", denied: "missing-grant" },
+      ]);
       expect(denied.body()).not.toContain("not-member");
       // A native member and the admin read it; the admin's tokenless stop is the 409 a finished run gives.
       expect((await request(h, "/runs/priv", bob)).status).toBe(200);
       expect((await request(h, "/runs/priv", admin)).status).toBe(200);
       expect((await request(h, "/runs/priv/stop?mode=soft", admin, "POST")).status).toBe(409);
+      // The tokenless stop is a WRITE (`runs.stop` on the command surface asks
+      // `runs:write`): bob may read the run but not stop it — the same 404, with
+      // the missing grant on the audit line.
+      expect((await request(h, "/runs/priv/stop?mode=soft", bob, "POST")).status).toBe(404);
       expect(audit.mock.calls.slice(4).map(([e]) => e)).toEqual([
         { route: "page", runId: "priv", identity: "access:bob" },
         { route: "page", runId: "priv", identity: "access:admin" },
+        { route: "stop", identity: "access:bob", denied: "missing-grant" },
       ]);
     });
 
