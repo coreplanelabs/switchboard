@@ -208,7 +208,6 @@ describe("classifyPath", () => {
       "LICENSE",
       "NOTICE",
       "docker-compose.yml",
-      "fly.toml",
       "tsconfig.scripts.json",
       "release-please-config.json",
       ".release-please-manifest.json",
