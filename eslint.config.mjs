@@ -41,8 +41,8 @@ export default tseslint.config(
     languageOptions: { globals: { ...globals.node } },
   },
   {
-    // The dashboard: Vue SFCs with TypeScript inside, browser globals.
-    files: ["web/**/*.vue", "web/**/*.ts"],
+    // The dashboard and the docs theme: Vue SFCs with TypeScript inside, browser globals.
+    files: ["web/**/*.vue", "web/**/*.ts", "docs/.vitepress/theme/**/*.vue", "docs/.vitepress/theme/**/*.ts"],
     languageOptions: {
       globals: { ...globals.browser },
       parser: vueParser,

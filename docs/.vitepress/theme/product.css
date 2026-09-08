@@ -1,22 +1,144 @@
 /*
- * The docs wear the product's accent, so moving between the dashboard and the
- * docs doesn't feel like moving between two products: green — the same green
- * the live-run dot uses (src/channels/favicon.ts) and the dashboard's Nuxt UI
- * primary. Everything else is VitePress's default theme, untouched.
+ * The site's one visual system: palette, type, and the diagram tokens.
+ *
+ * The palette is the dashboard's (web/src/assets/main.css): the same cool
+ * near-black and paper-white grounds and the same green, so moving between the
+ * dashboard and the docs never feels like moving between two products. Every
+ * value below is a VitePress token override or an `--sb-*` token of our own;
+ * the components read the tokens and never name a colour themselves. The
+ * mermaid renderer (MermaidDiagram.vue) reads the `--sb-diagram-*` set at draw time,
+ * which is what keeps every diagram on the site in this palette in both modes.
+ *
+ * Type: Instrument Serif for titles, Instrument Sans for text, JetBrains Mono
+ * for code — three faces bundled from the docs workspace's own dependencies
+ * (theme/index.ts imports them), so the site builds and serves with no request
+ * to a third party.
  */
+
 :root {
-  --vp-c-brand-1: #1f883d;
-  --vp-c-brand-2: #2ea043;
-  --vp-c-brand-3: #3fb950;
-  --vp-c-brand-soft: rgba(46, 160, 67, 0.14);
+  --sb-font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
+  --vp-font-family-base: "Instrument Sans Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --vp-font-family-mono: "JetBrains Mono Variable", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  /* JetBrains Mono sits wide; a step down keeps a code span level with the prose around it. */
+  --vp-code-font-size: 0.875em;
+
+  /* Grounds. */
+  --vp-c-bg: #f5f7fa;
+  --vp-c-bg-alt: #eef1f5;
+  --vp-c-bg-soft: #e8ecf2;
+  --vp-c-bg-elv: #ffffff;
+  --vp-c-divider: #dbe1ea;
+  --vp-c-border: #cdd5e0;
+  --vp-c-gutter: #e8ecf2;
+
+  /* Ink. */
+  --vp-c-text-1: #141a22;
+  --vp-c-text-2: #4f5966;
+  --vp-c-text-3: #5f6976;
+
+  /* The product green; brand-3 is the solid the buttons wear, and clears 4.5:1 under white text. */
+  --vp-c-brand-1: #176f31;
+  --vp-c-brand-2: #125a27;
+  --vp-c-brand-3: #1a7f37;
+  --vp-c-brand-soft: rgba(26, 127, 55, 0.14);
+
+  /* The one warm accent: "thinking" — the same amber the dashboard uses for a warning. */
+  --sb-c-accent: #9a6700;
+  --sb-c-accent-soft: rgba(154, 103, 0, 0.16);
+
+  --vp-c-tip-1: var(--vp-c-brand-1);
+  --vp-c-tip-2: var(--vp-c-brand-2);
+  --vp-c-tip-3: var(--vp-c-brand-3);
+  --vp-c-tip-soft: var(--vp-c-brand-soft);
+
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-text: #ffffff;
+  --vp-button-brand-bg: var(--vp-c-brand-3);
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-hover-text: #ffffff;
+  --vp-button-brand-hover-bg: var(--vp-c-brand-1);
+  --vp-button-brand-active-border: transparent;
+  --vp-button-brand-active-text: #ffffff;
+  --vp-button-brand-active-bg: var(--vp-c-brand-2);
+
+  --vp-code-block-bg: #eef1f5;
+  --vp-code-bg: #e8ecf2;
+  --vp-code-color: var(--vp-c-text-1);
+
+  /* What the diagrams are drawn with (MermaidDiagram.vue). */
+  --sb-diagram-bg: var(--vp-c-bg);
+  --sb-diagram-node: #ffffff;
+  --sb-diagram-node-alt: #e6f2ea;
+  --sb-diagram-node-border: #1a7f37;
+  --sb-diagram-text: #141a22;
+  --sb-diagram-line: #4f5966;
+  --sb-diagram-cluster: #eef1f5;
+  --sb-diagram-cluster-border: #cdd5e0;
+  --sb-diagram-note: #fff3c4;
+  --sb-diagram-note-border: #9a6700;
 }
 
 .dark {
-  /* Dark needs the lighter end of the ramp to clear the contrast floor. */
-  --vp-c-brand-1: #3fb950;
-  --vp-c-brand-2: #2ea043;
-  --vp-c-brand-3: #238636;
-  --vp-c-brand-soft: rgba(46, 160, 67, 0.16);
+  --vp-c-bg: #0b0d12;
+  --vp-c-bg-alt: #0f1218;
+  --vp-c-bg-soft: #12151c;
+  --vp-c-bg-elv: #181d27;
+  --vp-c-divider: #232836;
+  --vp-c-border: #3b4252;
+  --vp-c-gutter: #1b1f28;
+
+  --vp-c-text-1: #e6e6e6;
+  --vp-c-text-2: #a3abbb;
+  --vp-c-text-3: #8b93a7;
+
+  /* Dark reads the light end of the ramp for text and wears ink on a bright solid. */
+  --vp-c-brand-1: #7ee787;
+  --vp-c-brand-2: #56d364;
+  --vp-c-brand-3: #3fb950;
+  --vp-c-brand-soft: rgba(63, 185, 80, 0.16);
+
+  --sb-c-accent: #d29922;
+  --sb-c-accent-soft: rgba(210, 153, 34, 0.18);
+
+  --vp-button-brand-text: var(--vp-c-bg);
+  --vp-button-brand-hover-text: var(--vp-c-bg);
+  --vp-button-brand-hover-bg: var(--vp-c-brand-2);
+  --vp-button-brand-active-text: var(--vp-c-bg);
+  --vp-button-brand-active-bg: var(--vp-c-brand-1);
+
+  --vp-code-block-bg: #0f1218;
+  --vp-code-bg: #181d27;
+
+  --sb-diagram-node: #181d27;
+  --sb-diagram-node-alt: #12291a;
+  --sb-diagram-node-border: #3fb950;
+  --sb-diagram-text: #e6e6e6;
+  --sb-diagram-line: #a3abbb;
+  --sb-diagram-cluster: #0f1218;
+  --sb-diagram-cluster-border: #3b4252;
+  --sb-diagram-note: #2a2410;
+  --sb-diagram-note-border: #d29922;
+}
+
+/* Titles are the serif; everything under them stays in the sans. */
+.vp-doc h1,
+.VPHome .vp-doc h1 {
+  font-family: var(--sb-font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+.vp-doc h1 {
+  font-size: 2.5rem;
+  line-height: 1.1;
+}
+
+/* Under the landing sections the docs hub's own title is a section title, not a second hero. */
+.VPHome .vp-doc h1 {
+  font-size: 2rem;
+  margin-top: 0;
+  padding-top: 3rem;
+  border-top: 1px solid var(--vp-c-divider);
 }
 
 /* Reference pages are wide tables of commands and flags, and the default 688px
@@ -46,7 +168,7 @@
 }
 
 /* A label lives in a foreignObject, which CLIPS what overflows it. If a label
- * ever measures short (a font that arrives late, a zoom level), the last line
+ * ever measures short (a zoom level, a face that arrives late), the last line
  * of a node would silently disappear — a diagram that lies. Overflowing the
  * box is the better failure. */
 .mermaid foreignObject {
