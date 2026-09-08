@@ -37,7 +37,7 @@ afterEach(() => {
 // executor construction expired while the run's first command ran for 20
 // minutes, and every later command carried the same dead token.
 describe("CloudflareSandboxExecutor credential freshness", () => {
-  const envHeader = (c: { init: RequestInit }) => (c.init.headers as Record<string, string>)["x-env-GH_TOKEN"];
+  const sentEnv = (c: { init: RequestInit }) => sentBody(c).env as Record<string, string>;
 
   it("resolves the sandbox env on EVERY call, so each command carries the credential current at its start", async () => {
     const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
@@ -50,14 +50,55 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
     await ex.exec("gh pr diff 1");
 
     expect(resolveEnvs).toHaveBeenCalledTimes(2);
-    expect(envHeader(calls[0])).toBe("ghs_first");
-    expect(envHeader(calls[1])).toBe("ghs_second");
+    expect(sentEnv(calls[0]).GH_TOKEN).toBe("ghs_first");
+    expect(sentEnv(calls[1]).GH_TOKEN).toBe("ghs_second");
   });
 
   it("resolves nothing at construction — building the executor mints no credential", () => {
     const resolveEnvs = vi.fn(async () => ({ GH_TOKEN: "ghs_x" }));
     new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs });
     expect(resolveEnvs).not.toHaveBeenCalled();
+  });
+});
+
+// Feature: features/execution.md item 5 — the env map rides in the JSON body
+// (authoritative), plus `x-env-*` headers for ONE release as the compatibility
+// path for a sandbox Worker not yet on the body reader (`deploy all` deploys
+// the bot before the sandbox Worker). 2026-09-07 (#447 receipt): Workers Logs
+// record an invocation's request headers and redact by a NAME heuristic — the
+// probe's `x-env-PROBE_VAR: hello-from-env-option` was logged in clear while
+// `x-env-gh_token` happened to be REDACTED. Bodies are not recorded; next
+// release the headers go and the body stands alone.
+describe("CloudflareSandboxExecutor env transport", () => {
+  const sentHeaders = (c: { init: RequestInit }) => c.init.headers as Record<string, string>;
+
+  it("sends the same map in the body and in x-env-* headers on every route", async () => {
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, content: "c" });
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x", OTHER: "v" }) });
+    await ex.exec("gh pr view 1");
+    await ex.readFile("README.md");
+    await ex.writeFile("a.txt", "body");
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://sandbox.example/exec",
+      "https://sandbox.example/read",
+      "https://sandbox.example/write",
+    ]);
+    for (const c of calls) {
+      expect(sentBody(c).env).toEqual({ GH_TOKEN: "ghs_x", OTHER: "v" });
+      expect(sentHeaders(c)).toEqual({
+        authorization: "Bearer t",
+        "content-type": "application/json",
+        "x-thread-key": "slack:CX:1.0",
+        "x-env-GH_TOKEN": "ghs_x",
+        "x-env-OTHER": "v",
+      });
+    }
+  });
+
+  it("an empty env is still the one body shape: `env: {}`, so the Worker reads one field on every route", async () => {
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    await new CloudflareSandboxExecutor(OPTS).exec("ls");
+    expect(sentBody(calls[0])).toEqual({ command: "ls", env: {} });
   });
 });
 
@@ -139,7 +180,7 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
       expect(String(c.init.body)).toBe(String(calls[0].init.body));
       expect(c.init.headers).toEqual(calls[0].init.headers);
     }
-    expect(sentBody(calls[2])).toEqual({ command: "npm test", timeoutMs: 120_000 });
+    expect(sentBody(calls[2])).toEqual({ command: "npm test", timeoutMs: 120_000, env: { GH_TOKEN: "ghs_x" } });
   });
 
   it("gives up once the total wait reaches the command's own budget and throws ExecCapacityError, not ExecInfraError", async () => {
