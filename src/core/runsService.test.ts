@@ -732,7 +732,7 @@ describe("RunsService.stopRun", () => {
     const { reg, svc } = setup();
     const { id, token, control } = reg.create();
     const seen: RunEvent[] = [];
-    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
 
     const res = await svc.stopRun(id, "soft", { kind: "chat", id: "slack:U123" });
     expect(res).toEqual({ ok: true, value: { id, mode: "soft", state: "stopping" } });
@@ -751,7 +751,7 @@ describe("RunsService.stopRun", () => {
     const { reg, svc } = setup();
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
-    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
     await svc.stopRun(id, "hard", { kind: "access", id: `a b<script>@x.y${"z".repeat(300)}` });
     const note = seen.at(-1) as Extract<RunEvent, { type: "run_note" }>;
     expect(note.actor?.id).toMatch(/^[A-Za-z0-9:@._-]{1,128}$/);
@@ -782,10 +782,7 @@ describe("RunsService.authorizeLive", () => {
     expect(live).not.toBeNull();
     const seen: RunEvent[] = [];
     let finished = false;
-    const unsub = live!.subscribe(
-      (e) => seen.push(e),
-      () => (finished = true),
-    );
+    const unsub = live!.subscribe({ onEvent: (e) => seen.push(e), onFinish: () => (finished = true) });
     expect(unsub).not.toBeNull();
     reg.publish(id, call("$ pwd"));
     expect(seen.map((e) => e.seq)).toEqual([1, 2]);

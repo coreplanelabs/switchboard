@@ -514,7 +514,7 @@ export function createLiveViewHandler(
       // route.kind === "events"
       const afterSeq = parseLastEventId(req.headers["last-event-id"]);
       serveEvents(
-        (onEvent, onFinish) => access.subscribe(onEvent, onFinish, afterSeq),
+        (onEvent, onFinish) => access.subscribe({ onEvent, onFinish, afterSeq }),
         nodeSseSink(req, res),
         () => startSseHeartbeat(req, res),
       );

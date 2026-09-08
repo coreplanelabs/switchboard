@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RunControl, RunRegistry, type IndexEvent, type RunRegistryOptions } from "./runRegistry.js";
+import { REPLAY_EVERYTHING, RunControl, RunRegistry, type IndexEvent, type RunRegistryOptions } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 
 // Feature: features/live-view.md — the in-memory, live-only run registry that
@@ -80,7 +80,7 @@ describe("RunRegistry.subscribe — token gate (constant-time capability)", () =
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
-    const unsub = reg.subscribe(id, token, (e) => seen.push(e));
+    const unsub = reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
     expect(unsub).not.toBeNull();
     reg.publish(id, call("$ echo hi"));
     reg.publish(id, result(true, "hi"));
@@ -91,7 +91,7 @@ describe("RunRegistry.subscribe — token gate (constant-time capability)", () =
     const { reg } = testRegistry();
     const { id } = reg.create();
     const seen: RunEvent[] = [];
-    const unsub = reg.subscribe(id, "tok-WRONG", (e) => seen.push(e));
+    const unsub = reg.subscribe(id, "tok-WRONG", { onEvent: (e) => seen.push(e) });
     expect(unsub).toBeNull();
     reg.publish(id, call("secret"));
     expect(seen).toEqual([]);
@@ -100,13 +100,13 @@ describe("RunRegistry.subscribe — token gate (constant-time capability)", () =
   it("rejects a missing/empty token", () => {
     const { reg } = testRegistry();
     const { id } = reg.create();
-    expect(reg.subscribe(id, "", () => {})).toBeNull();
+    expect(reg.subscribe(id, "", { onEvent: () => {} })).toBeNull();
   });
 
   it("rejects an unknown run id without revealing existence (null, like a bad token)", () => {
     const { reg } = testRegistry();
     reg.create();
-    expect(reg.subscribe("id-does-not-exist", "tok-1", () => {})).toBeNull();
+    expect(reg.subscribe("id-does-not-exist", "tok-1", { onEvent: () => {} })).toBeNull();
   });
 
   it("has() mirrors the same constant-time gate the page uses", () => {
@@ -127,7 +127,7 @@ describe("RunRegistry — backlog replay for a late subscriber", () => {
     reg.publish(id, result(true, "first done"));
 
     const seen: RunEvent[] = [];
-    reg.subscribe(id, token, (e) => seen.push(e)); // subscribes AFTER two events
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) }); // subscribes AFTER two events
     expect(seen).toEqual([seq(1, call("first")), seq(2, result(true, "first done"))]); // replayed
 
     reg.publish(id, call("second"));
@@ -139,8 +139,110 @@ describe("RunRegistry — backlog replay for a late subscriber", () => {
     const { id, token } = reg.create();
     for (let i = 1; i <= 5; i++) reg.publish(id, call(`e${i}`));
     const seen: RunEvent[] = [];
-    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
     expect(seen).toEqual([seq(3, call("e3")), seq(4, call("e4")), seq(5, call("e5"))]); // oldest two evicted
+  });
+});
+
+// Feature: features/live-view.md — the replay budget (item 5).
+describe("RunRegistry.subscribe — replay budget", () => {
+  const stampedBytes = (i: number) => Buffer.byteLength(JSON.stringify({ ...call(`e${i}`), seq: i }), "utf8");
+
+  it("replays the newest `limit` offered events and reports the retained range it skipped as `elided`", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 5; i++) reg.publish(id, call(`e${i}`));
+    const seen: RunEvent[] = [];
+    const got = reg.subscribe(id, token, { onEvent: (e) => seen.push(e), limit: 3 })!;
+    expect(seen).toEqual([seq(3, call("e3")), seq(4, call("e4")), seq(5, call("e5"))]);
+    expect(got.replayed).toBe(3);
+    expect(got.elided).toEqual({ fromSeq: 1, toSeq: 2 });
+    reg.publish(id, call("e6")); // live forwarding is never budgeted
+    expect(seen.at(-1)).toEqual(seq(6, call("e6")));
+  });
+
+  it("within the budget nothing is elided: no `elided` key, `replayed` is the count", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 3; i++) reg.publish(id, call(`e${i}`));
+    const got = reg.subscribe(id, token, { onEvent: () => {} })!;
+    expect(got.replayed).toBe(3);
+    expect("elided" in got).toBe(false);
+  });
+
+  it("the byte bound admits events newest-first while the running total fits; the newest is replayed even when it alone exceeds the bound", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 5; i++) reg.publish(id, call(`e${i}`));
+    const two = stampedBytes(4) + stampedBytes(5);
+    const seen: RunEvent[] = [];
+    const got = reg.subscribe(id, token, { onEvent: (e) => seen.push(e), byteLimit: two })!;
+    expect(seen.map((e) => e.seq)).toEqual([4, 5]);
+    expect(got.elided).toEqual({ fromSeq: 1, toSeq: 3 });
+    const seen2: RunEvent[] = [];
+    const got2 = reg.subscribe(id, token, { onEvent: (e) => seen2.push(e), byteLimit: 1 })!;
+    expect(seen2.map((e) => e.seq)).toEqual([5]);
+    expect(got2).toMatchObject({ replayed: 1, elided: { fromSeq: 1, toSeq: 4 } });
+  });
+
+  it("the budget counts from the resume cursor: the elided range starts after `afterSeq`", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 10; i++) reg.publish(id, call(`e${i}`));
+    const seen: RunEvent[] = [];
+    const got = reg.subscribe(id, token, { onEvent: (e) => seen.push(e), afterSeq: 4, limit: 3 })!;
+    expect(seen.map((e) => e.seq)).toEqual([8, 9, 10]);
+    expect(got.elided).toEqual({ fromSeq: 5, toSeq: 7 });
+  });
+
+  it("a cursor at or past the newest event replays nothing and elides nothing", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 10; i++) reg.publish(id, call(`e${i}`));
+    for (const afterSeq of [10, 99]) {
+      const got = reg.subscribe(id, token, { onEvent: () => {}, afterSeq, limit: 3 })!;
+      expect(got.replayed).toBe(0);
+      expect("elided" in got).toBe(false);
+    }
+  });
+
+  it("events the backlog already dropped are not elided — they are a `seq` gap the record keeps", () => {
+    const { reg } = testRegistry({ backlogLimit: 3 });
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 5; i++) reg.publish(id, call(`e${i}`));
+    const seen: RunEvent[] = [];
+    const got = reg.subscribe(id, token, { onEvent: (e) => seen.push(e), limit: 2 })!;
+    expect(seen.map((e) => e.seq)).toEqual([4, 5]);
+    expect(got.elided).toEqual({ fromSeq: 3, toSeq: 3 }); // e1, e2 are gone from the registry, not elided
+  });
+
+  it("REPLAY_EVERYTHING lifts both bounds — the run ledger sees every retained event", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 3000; i++) reg.publish(id, call(`e${i}`));
+    const seen: RunEvent[] = [];
+    const got = reg.subscribe(id, token, { onEvent: (e) => seen.push(e), ...REPLAY_EVERYTHING })!;
+    expect(seen).toHaveLength(3000);
+    expect(got.replayed).toBe(3000);
+    expect("elided" in got).toBe(false);
+  });
+
+  it("a finished run replays within the budget, reports the range, then fires onFinish", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 5; i++) reg.publish(id, call(`e${i}`));
+    reg.finish(id);
+    const seen: RunEvent[] = [];
+    let finished = false;
+    const got = reg.subscribe(id, token, {
+      onEvent: (e) => seen.push(e),
+      onFinish: () => (finished = true),
+      limit: 2,
+    })!;
+    expect(seen.map((e) => e.seq)).toEqual([4, 5]);
+    expect(got).toMatchObject({ replayed: 2, elided: { fromSeq: 1, toSeq: 3 } });
+    expect(finished).toBe(true);
+    expect(() => got.unsubscribe()).not.toThrow();
   });
 });
 
@@ -149,9 +251,9 @@ describe("RunRegistry.unsubscribe", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
-    const unsub = reg.subscribe(id, token, (e) => seen.push(e))!;
+    const { unsubscribe } = reg.subscribe(id, token, { onEvent: (e) => seen.push(e) })!;
     reg.publish(id, call("before"));
-    unsub();
+    unsubscribe();
     reg.publish(id, call("after"));
     expect(seen).toEqual([seq(1, call("before"))]);
   });
@@ -163,12 +265,7 @@ describe("RunRegistry.finish", () => {
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
     let finished = false;
-    reg.subscribe(
-      id,
-      token,
-      (e) => seen.push(e),
-      () => (finished = true),
-    );
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e), onFinish: () => (finished = true) });
     reg.publish(id, call("during"));
     reg.finish(id);
     expect(finished).toBe(true);
@@ -183,12 +280,7 @@ describe("RunRegistry.finish", () => {
     reg.finish(id);
     const seen: RunEvent[] = [];
     let finished = false;
-    const unsub = reg.subscribe(
-      id,
-      token,
-      (e) => seen.push(e),
-      () => (finished = true),
-    );
+    const unsub = reg.subscribe(id, token, { onEvent: (e) => seen.push(e), onFinish: () => (finished = true) });
     expect(unsub).not.toBeNull();
     expect(seen).toEqual([seq(1, call("happened"))]);
     expect(finished).toBe(true);
@@ -307,11 +399,11 @@ describe("RunRegistry — finished-run eviction after TTL", () => {
 
     tick(59_000); // still within TTL
     expect(reg.has(id, token)).toBe(true);
-    expect(reg.subscribe(id, token, () => {})).not.toBeNull();
+    expect(reg.subscribe(id, token, { onEvent: () => {} })).not.toBeNull();
 
     tick(2_000); // now past the 60s TTL
     expect(reg.has(id, token)).toBe(false);
-    expect(reg.subscribe(id, token, () => {})).toBeNull();
+    expect(reg.subscribe(id, token, { onEvent: () => {} })).toBeNull();
   });
 
   it("does NOT evict a still-running (unfinished) run no matter how old", () => {
@@ -320,7 +412,7 @@ describe("RunRegistry — finished-run eviction after TTL", () => {
     tick(1_000_000); // long-running agent
     expect(reg.has(id, token)).toBe(true);
     const seen: RunEvent[] = [];
-    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
     reg.publish(id, call("still going"));
     expect(seen).toEqual([seq(1, call("still going"))]);
   });
@@ -640,7 +732,7 @@ describe("RunRegistry.requestStop — run control (#101)", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     const got: RunEvent[] = [];
-    reg.subscribe(id, token, (e) => got.push(e));
+    reg.subscribe(id, token, { onEvent: (e) => got.push(e) });
     reg.requestStop(id, token, "soft");
     expect(got).toEqual([expect.objectContaining({ type: "run_note", kind: "stop_requested", mode: "soft" })]);
   });
@@ -694,7 +786,7 @@ describe("RunRegistry — text events, seq, label redaction (#157 U1)", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
-    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
     reg.publish(id, text("input", "request"));
     reg.finish(id);
     reg.publish(id, text("answer", "too late"));
@@ -764,10 +856,12 @@ describe("RunRegistry — backlog bounds and subscriber isolation (#157 U11)", (
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
-    reg.subscribe(id, token, () => {
-      throw new Error("dead sink");
+    reg.subscribe(id, token, {
+      onEvent: () => {
+        throw new Error("dead sink");
+      },
     });
-    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
     expect(() => reg.publish(id, call("$ ls"))).not.toThrow();
     expect(seen).toHaveLength(1);
     expect(reg.snapshot(id, token)?.events).toHaveLength(1); // still recorded
@@ -793,7 +887,7 @@ describe("RunRegistry — token-free operator reads (#157 U5, KTD7)", () => {
     const { reg } = testRegistry();
     const { id, token, control } = reg.create();
     const seen: RunEvent[] = [];
-    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
     expect(reg.requestStopById(id, "soft", { kind: "mcp", id: "mcp:agent one!" })).toEqual({ ok: true, mode: "soft" });
     expect(control.requested).toBe("soft");
     expect(seen.at(-1)).toMatchObject({
@@ -821,7 +915,7 @@ describe("RunRegistry — token-free operator reads (#157 U5, KTD7)", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
-    reg.subscribe(id, token, (e) => seen.push(e));
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
     reg.requestStopById(id, "soft", { kind: "chat", id: "   " });
     expect(seen.at(-1)).toMatchObject({ actor: { kind: "chat", id: "unknown" } });
   });

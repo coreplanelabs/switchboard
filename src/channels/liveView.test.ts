@@ -230,7 +230,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
     expect(rec.status).toBe(200);
     expect(rec.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
     expect(rec.headers["cache-control"]).toContain("no-cache");
@@ -254,7 +254,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     reg.publish(id, call("three"));
     const rec = recordingSink();
     const afterSeq = parseLastEventId("2");
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, afterSeq), rec.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish, afterSeq: afterSeq }), rec.sink);
     expect(rec.body()).toBe(PRELUDE + `id: 3\ndata: ${JSON.stringify({ ...call("three"), seq: 3 })}\n\n`);
     reg.publish(id, call("four"));
     expect(rec.body()).toContain(`id: 4\ndata: ${JSON.stringify({ ...call("four"), seq: 4 })}`);
@@ -276,8 +276,8 @@ describe("serveEvents (SSE, transport-free)", () => {
     const { id, token } = reg.create();
     const a = recordingSink();
     const b = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), a.sink);
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), b.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), a.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), b.sink);
     const spy = vi.spyOn(JSON, "stringify");
     reg.publish(id, result(true, "x".repeat(5000)));
     const calls = spy.mock.calls.filter(
@@ -292,7 +292,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
     expect(rec.status).toBe(200);
     expect(rec.body()).toBe(PRELUDE);
   });
@@ -302,7 +302,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     const { id, token } = reg.create();
     reg.publish(id, call("earlier"));
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
     expect(rec.status).toBe(200);
     expect(rec.body()).toContain(`data: ${JSON.stringify({ ...call("earlier"), seq: 1 })}`);
   });
@@ -311,7 +311,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
     reg.publish(id, call("x"));
     reg.finish(id);
     expect(rec.body()).toContain("event: end");
@@ -324,7 +324,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     reg.publish(id, call("done-earlier"));
     reg.finish(id);
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
     expect(rec.status).toBe(200);
     expect(rec.body()).toContain(`data: ${JSON.stringify({ ...call("done-earlier"), seq: 1 })}`);
     expect(rec.body()).toContain("event: end");
@@ -335,7 +335,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
     rec.fireClose();
     reg.publish(id, call("after-close"));
     expect(rec.body()).not.toContain("after-close");
@@ -918,73 +918,92 @@ describe("run control: POST /runs/:id/stop (#101)", () => {
   });
 });
 
-// Feature: features/live-view.md — bounded live replay (#157 U11).
-describe("serveEvents — live replay budget (#157 U11)", () => {
-  it("a late subscriber to a 3000-event run gets a 'replaying last 1000 of 3000' note then the newest 1000 frames; snapshot has all 3000", () => {
+// Feature: features/live-view.md — the live replay budget (item 5).
+describe("serveEvents — live replay budget (item 5)", () => {
+  const elidedFrame = (fromSeq: number, toSeq: number) =>
+    `event: replay_elided\ndata: ${JSON.stringify({ fromSeq, toSeq })}\n\n`;
+  const idFrames = (rec: ReturnType<typeof recordingSink>) => rec.writes.filter((w) => w.startsWith("id: "));
+
+  it("a late subscriber to a 3000-event run gets one replay_elided frame (1–1000) then the newest 2000 frames; live frames stay uncapped; snapshot has all 3000", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     for (let i = 1; i <= 3000; i++) reg.publish(id, call(`$ step ${i}`));
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
-    const frames = rec.writes
-      .filter((w) => w.startsWith("data: ") || w.startsWith("id: "))
-      .map((w) => JSON.parse(w.slice(w.indexOf("data: ") + 6)));
-    expect(frames).toHaveLength(1001);
-    expect(frames[0]).toEqual({ type: "replay_note", summary: "replaying last 1000 of 3000 events" });
-    expect(frames[1]).toMatchObject({ summary: "$ step 2001", seq: 2001 });
-    expect(frames[1000]).toMatchObject({ summary: "$ step 3000", seq: 3000 });
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    expect(rec.writes[0]).toBe(PRELUDE);
+    expect(rec.writes[1]).toBe(elidedFrame(1, 1000));
+    const ids = idFrames(rec);
+    expect(ids).toHaveLength(2000);
+    expect(ids[0]).toMatch(/^id: 1001\n/);
+    expect(ids[0]).toContain('"summary":"$ step 1001"');
+    expect(ids[1999]).toMatch(/^id: 3000\n/);
+    expect(rec.body()).not.toContain("replay_note");
     expect(reg.snapshot(id, token)?.events).toHaveLength(3000);
     reg.publish(id, call("$ step 3001"));
     expect(rec.body()).toContain('"summary":"$ step 3001"');
   });
 
-  it("a run with 1000 or fewer events replays everything with no note (byte-identical to before)", () => {
+  it("a run within the budget replays everything with no elided frame (byte-identical to before)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
-    for (let i = 1; i <= 1000; i++) reg.publish(id, call(`$ step ${i}`));
+    for (let i = 1; i <= 2000; i++) reg.publish(id, call(`$ step ${i}`));
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
-    const frames = rec.writes.filter((w) => w.startsWith("id: "));
-    expect(frames).toHaveLength(1000);
-    expect(rec.body()).not.toContain("replay_note");
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    expect(idFrames(rec)).toHaveLength(2000);
+    expect(rec.body()).not.toContain("replay_elided");
+    expect(rec.writes[1]).toMatch(/^id: 1\n/);
   });
 
-  it("an already-finished long run: note, newest 1000, then the end frame", () => {
+  it("an already-finished long run: the elided frame, the newest 2000, then the end frame", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
-    for (let i = 1; i <= 1500; i++) reg.publish(id, call(`$ step ${i}`));
+    for (let i = 1; i <= 2500; i++) reg.publish(id, call(`$ step ${i}`));
     reg.finish(id);
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish), rec.sink);
-    const data = rec.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
-    expect(data).toHaveLength(1001);
-    expect(data[0]).toContain("replaying last 1000 of 1500 events");
+    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish }), rec.sink);
+    expect(rec.writes[1]).toBe(elidedFrame(1, 500));
+    expect(idFrames(rec)).toHaveLength(2000);
     expect(rec.writes[rec.writes.length - 1]).toBe("event: end\ndata: {}\n\n");
     expect(rec.ended).toBe(true);
   });
 
-  it("a resume cursor and the replay cap compose: the ring holds the newest 1000 AFTER the cursor and the note counts only those", () => {
+  it("a resume cursor and the budget compose: the elided range starts after the cursor and the newest 2000 after it are replayed", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     for (let i = 1; i <= 3000; i++) reg.publish(id, call(`$ step ${i}`));
     const rec = recordingSink();
-    serveEvents((onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, parseLastEventId("500")), rec.sink);
-    const frames = rec.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
-    expect(frames).toHaveLength(1001);
-    expect(frames[0]).toBe(
-      `data: ${JSON.stringify({ type: "replay_note", summary: "replaying last 1000 of 2500 events" })}\n\n`,
+    serveEvents(
+      (onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish, afterSeq: parseLastEventId("500") }),
+      rec.sink,
     );
-    expect(frames[1]).toMatch(/^id: 2001\n/);
-    expect(frames[1000]).toMatch(/^id: 3000\n/);
+    expect(rec.writes[1]).toBe(elidedFrame(501, 1000));
+    const ids = idFrames(rec);
+    expect(ids).toHaveLength(2000);
+    expect(ids[0]).toMatch(/^id: 1001\n/);
+    expect(ids[1999]).toMatch(/^id: 3000\n/);
     const rec2 = recordingSink();
     serveEvents(
-      (onEvent, onFinish) => reg.subscribe(id, token, onEvent, onFinish, parseLastEventId("2500")),
+      (onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish, afterSeq: parseLastEventId("2500") }),
       rec2.sink,
     );
-    const frames2 = rec2.writes.filter((w) => w.startsWith("data: ") || w.startsWith("id: "));
-    expect(frames2).toHaveLength(500);
-    expect(rec2.body()).not.toContain("replay_note");
-    expect(frames2[0]).toMatch(/^id: 2501\n/);
+    const ids2 = idFrames(rec2);
+    expect(ids2).toHaveLength(500);
+    expect(rec2.body()).not.toContain("replay_elided");
+    expect(ids2[0]).toMatch(/^id: 2501\n/);
+  });
+
+  it("the byte bound elides too: the frames replayed are the newest that fit the registry's byteLimit", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    for (let i = 1; i <= 5; i++) reg.publish(id, call(`$ step ${i}`));
+    const bytes = (i: number) => Buffer.byteLength(JSON.stringify({ ...call(`$ step ${i}`), seq: i }), "utf8");
+    const rec = recordingSink();
+    serveEvents(
+      (onEvent, onFinish) => reg.subscribe(id, token, { onEvent, onFinish, byteLimit: bytes(4) + bytes(5) }),
+      rec.sink,
+    );
+    expect(rec.writes[1]).toBe(elidedFrame(1, 3));
+    expect(idFrames(rec).map((w) => w.slice(0, w.indexOf("\n")))).toEqual(["id: 4", "id: 5"]);
   });
 });
 

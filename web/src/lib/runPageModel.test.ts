@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createRunPageModel,
+  elidedText,
   liveWait,
   modelName,
+  parseReplayElided,
   runnerNow,
   createRunClock,
   sameModel,
@@ -320,6 +322,43 @@ describe("notes and stops", () => {
       expect(note.replay).toBe(true);
       expect(note.text).toBe("3 events omitted");
     }
+  });
+});
+
+// Feature: features/live-view.md item 5 — a live replay that skipped retained events.
+describe("replay_elided frames (item 5)", () => {
+  it("parseReplayElided accepts two positive integers in order and rejects everything else", () => {
+    expect(parseReplayElided('{"fromSeq":1,"toSeq":1000}')).toEqual({ fromSeq: 1, toSeq: 1000 });
+    expect(parseReplayElided('{"fromSeq":7,"toSeq":7}')).toEqual({ fromSeq: 7, toSeq: 7 });
+    for (const bad of [
+      undefined,
+      "",
+      "garbage",
+      "[]",
+      "null",
+      '{"fromSeq":0,"toSeq":3}',
+      '{"fromSeq":5,"toSeq":3}',
+      '{"fromSeq":1.5,"toSeq":3}',
+      '{"fromSeq":"1","toSeq":3}',
+      '{"toSeq":3}',
+    ]) {
+      expect(parseReplayElided(bad)).toBeNull();
+    }
+  });
+
+  it("noteElided adds a replay row naming the range and where it still is, and keeps the range for the partition", () => {
+    const m = model();
+    expect(m.state.placeholder).toBe(true);
+    m.noteElided({ fromSeq: 1, toSeq: 1000 });
+    expect(m.state.elided).toEqual([{ fromSeq: 1, toSeq: 1000 }]);
+    expect(m.state.placeholder).toBe(false);
+    const note = m.state.log[0];
+    expect(note.kind).toBe("note");
+    if (note.kind === "note") {
+      expect(note.replay).toBe(true);
+      expect(note.text).toBe("1000 events not loaded (events 1–1000) — the record has them");
+    }
+    expect(elidedText({ fromSeq: 7, toSeq: 7 })).toBe("1 event not loaded (event 7) — the record has them");
   });
 });
 

@@ -13,6 +13,7 @@ import {
   createRunPageModel,
   liveWait,
   modelName,
+  parseReplayElided,
   runnerNow,
   RunnerClockKey,
 } from "../lib/runPageModel";
@@ -249,6 +250,10 @@ onMounted(() => {
     }
     handle(e);
   };
+  es.addEventListener("replay_elided", (data) => {
+    const range = parseReplayElided(data);
+    if (range) model.noteElided(range);
+  });
   es.addEventListener("end", () => {
     model.flushPendingTurn("the run ended here"); // a run that ended without an answer still shows its last turn
     actionsHidden.value = true;

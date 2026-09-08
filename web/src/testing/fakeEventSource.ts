@@ -9,11 +9,11 @@ export class FakeEventSource implements EventSourceLike {
   onerror: (() => void) | null = null;
   readyState = 0;
   closed = false;
-  private listeners = new Map<string, Array<() => void>>();
+  private listeners = new Map<string, Array<(data?: string) => void>>();
 
   constructor(readonly url: string) {}
 
-  addEventListener(name: string, cb: () => void): void {
+  addEventListener(name: string, cb: (data?: string) => void): void {
     const list = this.listeners.get(name) ?? [];
     list.push(cb);
     this.listeners.set(name, list);
@@ -33,8 +33,10 @@ export class FakeEventSource implements EventSourceLike {
     this.onmessage?.({ data: typeof data === "string" ? data : JSON.stringify(data), lastEventId });
   }
 
-  emitNamed(name: string): void {
-    for (const cb of this.listeners.get(name) ?? []) cb();
+  /** Fire a named frame; `data` is the frame's payload string, as the
+   *  production adapter hands it over (see `wrapNativeEventSource`). */
+  emitNamed(name: string, data?: string): void {
+    for (const cb of this.listeners.get(name) ?? []) cb(data);
   }
 
   emitError(closed = false): void {

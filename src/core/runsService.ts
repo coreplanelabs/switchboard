@@ -15,11 +15,10 @@ import type {
   RunRegistry,
   RunSnapshot,
   RunStopStatus,
-  RunSubscriber,
-  RunFinishListener,
   RunSummary,
   StopRequestResult,
-  Unsubscribe,
+  SubscribeOptions,
+  Subscribed,
 } from "./runRegistry.js";
 import type { RunStore } from "./runStore.js";
 
@@ -181,8 +180,10 @@ export interface StopRunView {
  *  checked out: the subscription, the backlog, and the token-gated stop (U8 —
  *  the page's Stop/Kill buttons stay capability-gated, not operator-gated). */
 export interface LiveRunAccess {
-  /** `afterSeq` is the resume cursor (`Last-Event-ID`): only events after it are offered. */
-  subscribe(onEvent: RunSubscriber, onFinish?: RunFinishListener, afterSeq?: number): Unsubscribe | null;
+  /** `RunRegistry.subscribe` with the id and token already bound: the resume
+   *  cursor and the replay budget live in the options, the elided range on the
+   *  result. */
+  subscribe(opts: SubscribeOptions): Subscribed | null;
   snapshot(): RunSnapshot | null;
   requestStop(mode: StopMode): StopRequestResult;
 }
@@ -468,7 +469,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     authorizeLive(id, token) {
       if (!registry.has(id, token)) return null;
       return {
-        subscribe: (onEvent, onFinish, afterSeq) => registry.subscribe(id, token, onEvent, onFinish, afterSeq),
+        subscribe: (opts) => registry.subscribe(id, token, opts),
         snapshot: () => registry.snapshot(id, token),
         requestStop: (mode) => registry.requestStop(id, token, mode),
       };
