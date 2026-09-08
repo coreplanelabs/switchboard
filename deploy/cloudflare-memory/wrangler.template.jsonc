@@ -29,7 +29,12 @@
       { "name": "RUNS", "class_name": "RunHistoryDO" },
       // ONE ConfigDO (named "config"): the bot's runtime config documents — the
       // chat-set `overrides` (features/routing-and-config.md item 12) — versioned.
-      { "name": "CONFIG", "class_name": "ConfigDO" }
+      { "name": "CONFIG", "class_name": "ConfigDO" },
+      // One RunTranscriptDO per LIVE run (the DO name is the run id): the raw
+      // transcript a resumed run continues from (features/run-history.md item
+      // 32). Kept apart from the history object so transcript bytes never queue
+      // behind an admission decision; cleared at finish.
+      { "name": "RUN_TRANSCRIPTS", "class_name": "RunTranscriptDO" }
     ]
   },
   // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
@@ -38,6 +43,7 @@
     { "tag": "v2", "new_sqlite_classes": ["FrictionDO"] },
     { "tag": "v3", "new_sqlite_classes": ["ScheduleDO"] },
     { "tag": "v4", "new_sqlite_classes": ["RunHistoryDO"] },
-    { "tag": "v5", "new_sqlite_classes": ["ConfigDO"] }
+    { "tag": "v5", "new_sqlite_classes": ["ConfigDO"] },
+    { "tag": "v6", "new_sqlite_classes": ["RunTranscriptDO"] }
   ]
 }
