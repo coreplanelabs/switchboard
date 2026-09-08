@@ -14,8 +14,15 @@ import { decideLive, LIVE_GATE_DEADLINE_MS, type HealthzBody } from "./liveGate.
 // a real `echo ok` through a probe thread answers from an instance on that
 // version. Each signal has its own named `waiting` reason, and nothing the
 // rollout can cause (a full fleet, a booting container, an in-body error) is
-// a failure before the deadline. No node:* imports; src/deploy/run.ts does
-// the fetching, the wrangler calls and the clock.
+// a failure before the deadline. The rollout signal has a TARGET: 2026-09-08
+// (#589) the first production gate passed 7 s after the 0.5.0 upload with
+// "rollout complete (1 running instance(s) on version 11)" — the application
+// still reported the PRE-deploy version because the deploy's version 12 had
+// not registered yet, so every running instance trivially matched it and the
+// probe ran on the old image. Now the runner reads the application before the
+// upload and takes the target from wrangler's own container diff; the rollout
+// counts only once the application has left the pre-deploy version. No node:*
+// imports; src/deploy/run.ts does the fetching, the wrangler calls and the clock.
 
 /** One read of a bearer-gated `/healthz`: the HTTP status with the parsed body, or why the request itself failed. */
 export type HealthRead = { status: number; body: HealthzBody | undefined } | { error: string };
@@ -29,6 +36,21 @@ export interface ContainerInstance {
   name: string | null;
   state: string;
   version: number | null;
+}
+
+/** The container application as `wrangler containers info <id> --json` reports it: its `version`
+ *  (bumped by every modification Cloudflare rolls out) and the image reference in `configuration.image`. */
+export interface AppState {
+  version: number;
+  image: string | null;
+}
+
+/** What `wrangler deploy` said the container application moves to, read from its `Container application
+ *  changes` diff: `image` is the reference a `+ "image"` line added, `null` when the diff changed other
+ *  configuration only (a new version is still coming, its image unknown). The runner passes `null` in
+ *  place of the whole target when wrangler printed no change — a Worker-only deploy rolls no container. */
+export interface RolloutTarget {
+  image: string | null;
 }
 
 /** The one JSON document a streamed `/exec` answer ends with (features/execution.md item 3). */
@@ -46,12 +68,16 @@ export type ProbeResult = { body: ExecBody } | { error: string };
 export interface SandboxLiveInput {
   health: HealthRead;
   /** `null` when not read this poll (the runner reads the rollout and probes only once the Worker is live). */
-  appVersion: Read<number> | null;
+  app: Read<AppState> | null;
   instances: Read<ContainerInstance[]> | null;
   probe: ProbeResult | null;
   /** The probe's thread key — the instance `name` the probe must be found under. */
   probeThreadKey: string;
   deployedCommit: string;
+  /** The application as read BEFORE the upload — the version the rollout must leave (#589). */
+  before: Read<AppState>;
+  /** wrangler's diff; `null` when it printed no container change (Worker-only deploy, no rollout expected). */
+  target: RolloutTarget | null;
   elapsedMs: number;
 }
 
@@ -96,18 +122,72 @@ export function decideWorker(
 
 const waiting = (reason: string): SandboxLiveDecision => ({ kind: "waiting", reason });
 
+/** An image reference's digest, short: `…@sha256:eb7d4f28…` → `sha256:eb7d4f28`; a reference without one as is. */
+export function shortImage(ref: string): string {
+  const m = /@(sha256):([0-9a-f]+)$/i.exec(ref);
+  return m ? `${m[1]}:${m[2].slice(0, 8)}` : ref;
+}
+
+/**
+ * Has the application left its pre-deploy state? `ok` with how the rollout is
+ * described once complete; otherwise the waiting reason. Two independent
+ * pieces of evidence, either suffices: the version is above the pre-deploy one
+ * (the primary signal — Cloudflare bumps it for every modification it rolls
+ * out), or the application reports the very image wrangler's diff added. With
+ * the pre-deploy read failed AND no image in the diff there is no evidence to
+ * wait for, and the reason says so until the deadline.
+ */
+function rolloutAdvanced(
+  app: AppState,
+  before: Read<AppState>,
+  target: RolloutTarget,
+): { ok: true; from: string } | { ok: false; reason: string } {
+  if ("value" in before) {
+    if (app.version > before.value.version) return { ok: true, from: `up from ${before.value.version}` };
+    const image = app.image === null ? "" : ` / image ${shortImage(app.image)}`;
+    return {
+      ok: false,
+      reason: `rollout: application still at pre-deploy version ${before.value.version}${image} — the deploy's new version is not registered yet`,
+    };
+  }
+  if (target.image !== null && app.image === target.image) return { ok: true, from: `image ${shortImage(app.image)}` };
+  if (target.image === null)
+    return {
+      ok: false,
+      reason: `rollout: pre-deploy version unreadable (${before.error}) and the deploy printed no image — cannot tell when the new version registers`,
+    };
+  return {
+    ok: false,
+    reason: `rollout: pre-deploy version unreadable (${before.error}); application image ${app.image === null ? "?" : shortImage(app.image)} is not the deploy's ${shortImage(target.image)}`,
+  };
+}
+
 function judge(input: SandboxLiveInput): SandboxLiveDecision {
   const worker = decideWorker(input.health, input.deployedCommit);
   if (!worker.ok) return worker.fatal ? { kind: "failed", reason: worker.reason } : waiting(worker.reason);
 
-  // The rollout: every RUNNING instance is on the application's version. Other
+  // The rollout, first its target: when wrangler printed a container change the
+  // application must have LEFT the version read before the upload — instances
+  // "all on the app version" mean nothing while that version is the old one
+  // (#589). A Worker-only deploy (no change printed) rolls no container: the
+  // current version is the one to be on.
+  if (input.app === null || input.instances === null) return waiting("rollout: not read yet");
+  if ("error" in input.app) return waiting(`rollout: ${input.app.error}`);
+  if ("error" in input.instances) return waiting(`rollout: ${input.instances.error}`);
+  const app = input.app.value;
+  const appVersion = app.version;
+  const running = input.instances.value.filter((i) => i.state === "running");
+  let rolloutSummary: string;
+  if (input.target) {
+    const advanced = rolloutAdvanced(app, input.before, input.target);
+    if (!advanced.ok) return waiting(advanced.reason);
+    rolloutSummary = `rollout complete (${running.length} running instance(s) on version ${appVersion}, ${advanced.from})`;
+  } else
+    rolloutSummary = `Worker-only deploy — no container change (${running.length} running instance(s) on version ${appVersion})`;
+
+  // Then the instances: every RUNNING one is on the application's version. Other
   // states are ignored — a stopping old instance is on its way out, a stopped or
   // failed one serves nobody, and a provisioning one is not yet placed.
-  if (input.appVersion === null || input.instances === null) return waiting("rollout: not read yet");
-  if ("error" in input.appVersion) return waiting(`rollout: ${input.appVersion.error}`);
-  if ("error" in input.instances) return waiting(`rollout: ${input.instances.error}`);
-  const appVersion = input.appVersion.value;
-  const running = input.instances.value.filter((i) => i.state === "running");
   const stale = running.filter((i) => i.version !== appVersion);
   if (stale.length > 0) {
     const versions = [...new Set(stale.map((i) => (i.version === null ? "?" : String(i.version))))].join("/");
@@ -151,7 +231,7 @@ function judge(input: SandboxLiveInput): SandboxLiveDecision {
     );
   return {
     kind: "live",
-    summary: `Worker serves ${worker.commit.slice(0, 7)}; rollout complete (${running.length} running instance(s) on version ${appVersion}); probe \`${PROBE_COMMAND}\` exit 0 from ${input.probeThreadKey} (version ${appVersion})`,
+    summary: `Worker serves ${worker.commit.slice(0, 7)}; ${rolloutSummary}; probe \`${PROBE_COMMAND}\` exit 0 from ${input.probeThreadKey} (version ${appVersion})`,
   };
 }
 
@@ -203,9 +283,49 @@ export function containerAppId(listing: unknown, name: string): string | undefin
   return app && isRecord(app) && typeof app.id === "string" ? app.id : undefined;
 }
 
-/** The application's `version` from `wrangler containers info <id> --json`. */
-export function parseAppVersion(info: unknown): number | null {
-  return isRecord(info) ? asVersion(info.version) : null;
+/** The application's `version` and `configuration.image` from `wrangler containers info <id> --json`;
+ *  `null` without a numeric version (the image alone identifies nothing to compare instances against). */
+export function parseAppState(info: unknown): AppState | null {
+  if (!isRecord(info)) return null;
+  const version = asVersion(info.version);
+  if (version === null) return null;
+  const image = isRecord(info.configuration) ? info.configuration.image : undefined;
+  return { version, image: typeof image === "string" ? image : null };
+}
+
+/** ANSI colour sequences (ESC `[` … `m`), built from the code point so the regex literal carries no control character. */
+const ANSI_SEQUENCE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+/** The box-drawing gutter wrangler's sections put before every line (`│ `, `├ `, `╰ `). */
+const SECTION_GUTTER = /^[\s│├╭╰|]+/;
+
+/**
+ * The rollout target in a `wrangler deploy` output. wrangler rebuilds the
+ * container image on every deploy and prints a `Container application changes`
+ * section: under `EDIT <app>` a line diff of the application's configuration
+ * (`+ "image": "…@sha256:…"` when the image changed, other `+` lines for other
+ * fields), under `NEW <app>` the whole configuration as a snippet, or `no
+ * changes` when the rebuilt image has the same digest and nothing else moved.
+ * A change means Cloudflare creates a new application version and rolls it
+ * out; `null` — no section, or no change in it — means no rollout is coming.
+ */
+export function rolloutTargetFromDeployOutput(output: string): RolloutTarget | null {
+  const text = output.replace(ANSI_SEQUENCE, "");
+  const at = text.indexOf("Container application changes");
+  if (at < 0) return null;
+  const lines = text
+    .slice(at)
+    .split("\n")
+    .map((l) => l.replace(SECTION_GUTTER, "").trimEnd());
+  const imageOn = (candidates: string[]) => {
+    for (const l of candidates) {
+      const m = /^\+?\s*"image":\s*"([^"]+)"/.exec(l);
+      if (m) return m[1];
+    }
+    return null;
+  };
+  if (lines.some((l) => /^NEW\s/.test(l))) return { image: imageOn(lines) };
+  const added = lines.filter((l) => /^\+\s/.test(l));
+  return added.length === 0 ? null : { image: imageOn(added) };
 }
 
 /** One page of `wrangler containers instances <id> --json`: a bare array
