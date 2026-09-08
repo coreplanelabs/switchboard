@@ -1,12 +1,13 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ExecCapacityError,
   ExecHealthTracker,
   ExecInfraError,
   LocalExecutor,
+  execDeadline,
   LocalOperations,
   type Executor,
 } from "./executor.js";
@@ -261,5 +262,40 @@ describe("LocalExecutor per-call timeout", () => {
     const text = await ex.exec("exit 3", { timeoutMs: 60_000 });
     expect(text).toMatch(/^exit 3/);
     expect(text).not.toContain("command timeout");
+  });
+});
+
+// Feature: features/execution.md item 11 — the per-call deadline every remote
+// executor joins with the hard-stop signal. Built on a plain timer, not
+// `AbortSignal.timeout`: Node runs that one on an internal timer that neither
+// fake timers nor a test can observe, so a deadline built on it could never be
+// proven to fire (#531 — the sandbox executor's deadline is asserted with fake
+// timers in cloudflareSandbox.test.ts).
+describe("execDeadline", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("fires exactly at timeoutMs with a TimeoutError reason", async () => {
+    const s = execDeadline(10_000);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(s.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(s.aborted).toBe(true);
+    expect((s.reason as Error).name).toBe("TimeoutError");
+  });
+
+  it("joins the hard-stop signal: a stop before the deadline aborts the joined signal at once with the stop's reason", async () => {
+    const ac = new AbortController();
+    const s = execDeadline(10_000, ac.signal);
+    await vi.advanceTimersByTimeAsync(1_000);
+    ac.abort(new Error("stopped by the operator"));
+    expect(s.aborted).toBe(true);
+    expect((s.reason as Error).message).toBe("stopped by the operator");
+    await vi.advanceTimersByTimeAsync(20_000); // the timer must not throw or re-abort later
+    expect((s.reason as Error).message).toBe("stopped by the operator");
   });
 });

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExecHealthTracker, ExecInfraError } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "./resident.js";
 
@@ -740,5 +740,55 @@ describe("ResidentExecutor per-call timeout", () => {
     await expect(ex.exec("npm test", { timeoutMs: 600_000 })).resolves.toBe("ok");
     expect(calls.map(route)).toEqual(["/exec", "/attach", "/exec"]);
     expect(sentBody(calls[2]).timeoutMs).toBe(600_000);
+  });
+});
+
+// #531 (review of #604): the resident bounds every send with a bot-side
+// deadline (execDeadline), and — like the sandbox — the deadline must cover the
+// BODY read, not just the headers. /exec streams heartbeat whitespace, so a
+// resident whose exec promise never settles hangs past the headers; that abort
+// must surface as the legible `ExecInfraError` the runner counts toward
+// fail-fast (#92), never a raw TimeoutError that escapes classification.
+describe("ResidentExecutor per-send deadline (#531)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const rejectOnAbort = (signal: AbortSignal | null | undefined, reject: (reason: unknown) => void) => {
+    if (!signal) return;
+    if (signal.aborted) reject(signal.reason);
+    else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  };
+
+  /** HTTP 200 headers at once, then a heartbeat every 15 s and no JSON ever —
+   *  the incident's shape; the body stream errors when the send's signal aborts. */
+  function heartbeatingFetch() {
+    const fn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const beat = setInterval(() => controller.enqueue(new TextEncoder().encode("\n")), 15_000);
+          rejectOnAbort(init?.signal, (reason) => {
+            clearInterval(beat);
+            controller.error(reason);
+          });
+        },
+      });
+      return new Response(body, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fn);
+    return fn;
+  }
+
+  it("a heartbeating body that never completes is an ExecInfraError at the command budget + margin, not a raw TimeoutError or a hang", async () => {
+    heartbeatingFetch();
+    const ex = new ResidentExecutor(OPTS);
+    const p = ex.exec("sleep 9999", { timeoutMs: 120_000 }).catch((e: unknown) => e);
+    // Nothing before the deadline: budget 120s + EXEC_CALL_MARGIN_MS (30s).
+    await vi.advanceTimersByTimeAsync(149_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toContain("resident worker /exec request failed");
+    // It is an ExecInfraError, so ExecHealthTracker counts it toward fail-fast.
+    expect(err).toBeInstanceOf(ExecInfraError);
   });
 });

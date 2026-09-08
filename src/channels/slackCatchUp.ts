@@ -242,7 +242,9 @@ export function findOrphanedCards(input: FindOrphanedInput): OrphanedCard[] {
 }
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const THINKING_SUFFIX = / — thinking \(\d+s since last tool\)$/u;
+// The dispatcher's transient title suffix (`quietSuffix`): the model's thinking
+// time, or the tool in flight (#531) — either form goes from an interrupted card.
+const ACTIVITY_SUFFIX = / — (?:thinking \(\d+s since last tool\)|running \S+ \(\d+s\))$/u;
 const LIVE_GLYPH_PREFIX = new RegExp(`^(?:${LIVE_CARD_PREFIXES.map(escapeRegExp).join("|")})\\s*`, "u");
 // The drain notice the dispatcher appends after the thinking suffix (#357).
 // Slack history can return the leading ⏸ either as the unicode char or as its
@@ -269,7 +271,7 @@ export function interruptedCardFrame(cardText: string): StatusUpdate {
   const label = cardText
     .replace(LIVE_GLYPH_PREFIX, "")
     .replace(SHUTDOWN_NOTICE_SUFFIX, "")
-    .replace(THINKING_SUFFIX, "")
+    .replace(ACTIVITY_SUFFIX, "")
     .replaceAll("&lt;", "<")
     .replaceAll("&gt;", ">")
     .replaceAll("&amp;", "&")

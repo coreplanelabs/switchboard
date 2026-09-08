@@ -4924,6 +4924,61 @@ describe("shutdown notice on the live status card", () => {
   });
 });
 
+// Feature: features/run-visibility.md item 2 — the live card's title suffix
+// tells model time from tool time. 2026-09-07 (#531): a `pnpm typecheck` in
+// flight for an hour was rendered as `thinking (3601s since last tool)`.
+describe("in-flight tool label on the live status card (#531)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  it("a tool running past 20 s is labelled `running bash (Ns)` on the heartbeat frames — never `thinking` — and the label returns to thinking once its result is in", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let calls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (calls++ === 0) {
+          return {
+            content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "pnpm typecheck" } }],
+            stopReason: "tool_use",
+          };
+        }
+        await vi.advanceTimersByTimeAsync(25_000); // model time after the result: heartbeats tick past 20 s
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { io, statuses } = fakeIO();
+    const fake = {
+      exec: async () => {
+        await vi.advanceTimersByTimeAsync(30_000); // the tool runs for 30 s: heartbeats tick past 20 s
+        return "ok";
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+
+    const running = statuses.flatMap((s, i) => (/ — running bash \(\d+s\)/u.test(s.title) ? [i] : []));
+    const thinking = statuses.flatMap((s, i) => (/ — thinking \(\d+s since last tool\)/u.test(s.title) ? [i] : []));
+    expect(running.length).toBeGreaterThan(0);
+    expect(thinking.length).toBeGreaterThan(0);
+    // Every running frame precedes every thinking frame: while the tool was in
+    // flight the card never claimed the model was thinking.
+    expect(Math.max(...running)).toBeLessThan(Math.min(...thinking));
+    for (const i of running) expect(statuses[i].title).not.toMatch(/thinking/);
+    // The closed card carries neither suffix.
+    expect(statuses.at(-1)!.title).toMatch(/^✅/);
+    expect(statuses.at(-1)!.title).not.toMatch(/running bash|thinking/);
+  });
+});
+
 // Feature: features/self-improvement.md item 7 + features/live-view.md item 13
 // (#244): `friction report|propose` are RUNS \u2014 a registry record (input \u2192
 // answer), listed on /runs, with a receipt to the channel \u2014 so a scheduled

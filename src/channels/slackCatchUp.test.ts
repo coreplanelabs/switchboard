@@ -495,6 +495,20 @@ describe("interruptedCardFrame", () => {
     expect(f.title).toBe("❌ interrupted · *coding* on `m` · 323s");
   });
 
+  // #531 (live 2026-09-07): a card frozen while a tool was in flight carries
+  // the running-tool suffix instead of the thinking one — dropped the same way.
+  it("drops the running-tool suffix (an in-flight tool is labelled running, not thinking)", () => {
+    const f = interruptedCardFrame("◓ *coding* on `anthropic/claude-fable-5` · 3661s — running bash (3601s)");
+    expect(f.title).toBe("❌ interrupted · *coding* on `anthropic/claude-fable-5` · 3661s");
+  });
+
+  it("drops the running-tool suffix and the drain notice when the card carries both", () => {
+    const f = interruptedCardFrame(
+      "◓ *coding* on `m` · 3661s — running bash (3601s) · ⏸ deploy in progress — finishing this run before the bot restarts",
+    );
+    expect(f.title).toBe("❌ interrupted · *coding* on `m` · 3661s");
+  });
+
   it("leaves a label alone that merely mentions a deploy mid-text", () => {
     const f = interruptedCardFrame('◓ *coding* · "fix the deploy in progress banner" · 42s');
     expect(f.title).toBe('❌ interrupted · *coding* · "fix the deploy in progress banner" · 42s');

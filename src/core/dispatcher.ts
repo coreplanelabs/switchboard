@@ -88,6 +88,7 @@ import {
   type RunSnapshot,
   type RunSummary,
 } from "./runRegistry.js";
+import { inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 import { coalesceStatus } from "./statusCoalescer.js";
 import type {
   ChannelIO,
@@ -1026,14 +1027,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // 5s heartbeat. Full command output still goes to stdout for operators.
     let checklist: string | undefined;
     let lastActivity: string | undefined;
+    // The tool whose call has no result yet — the title says the wait is the
+    // tool's (`running bash (Ns)`), not the model's (`thinking …`), #531.
+    let inFlightTool: string | undefined;
     const currentFrame = () => {
-      const quiet = Date.now() - lastActivityAt;
-      const thinking = quiet > 20_000 ? ` — thinking (${Math.round(quiet / 1000)}s since last tool)` : "";
       const detail = [checklist, lastActivity].filter(Boolean).join("\n");
       // The shutdown notice rides on the LIVE frame only: the closed card is
       // built from title()/finalDetail() and never mentions the restart.
       return {
-        title: title() + thinking + (shutdownNotice ? ` · ${shutdownNotice}` : ""),
+        title:
+          title() +
+          quietSuffix(Date.now() - lastActivityAt, inFlightTool) +
+          (shutdownNotice ? ` · ${shutdownNotice}` : ""),
         detail: detail || undefined,
         link: liveLink,
       };
@@ -1066,6 +1071,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       registry.publish(run.id, e); // feed the external live-view stream
       if (e.type === "tool_call") toolCalls++;
       if (isCodingPrRun) pushes.observe(e);
+      inFlightTool = inFlightToolAfter(inFlightTool, e);
       lastActivityAt = Date.now();
       lastActivity = activityLine(e);
       console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
