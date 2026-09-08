@@ -253,39 +253,43 @@ function spanEnd(
  *  the caller names, since a stream belongs to one run. */
 export function spansFromEvents(events: readonly RunEvent[], traceId: string): SpanRecord[] {
   const byId = new Map<string, SpanRecord>();
-  for (const e of events) {
-    if (!isSpanRecord(e)) continue;
-    const prior = byId.get(e.spanId);
-    if (e.type === "span_start") {
-      if (prior) continue; // an end already made the record
-      byId.set(e.spanId, {
-        traceId,
-        spanId: e.spanId,
-        ...(e.parentSpanId !== undefined ? { parentSpanId: e.parentSpanId } : {}),
-        name: e.name,
-        startedAt: e.at ?? 0,
-        attrs: (e.attrs ?? {}) as SpanAttrs,
-      });
-      continue;
-    }
+  for (const e of events) if (isSpanRecord(e)) foldSpanRecord(byId, e, traceId);
+  return [...byId.values()];
+}
+
+/** Fold one span record into the set: a start opens the record (unless an end
+ *  already made it), an end completes it, keeping a start's parent and attrs.
+ *  The per-frame half of `spansFromEvents`, for a page that folds live. */
+export function foldSpanRecord(byId: Map<string, SpanRecord>, e: SpanStartEvent | SpanEndEvent, traceId: string): void {
+  const prior = byId.get(e.spanId);
+  if (e.type === "span_start") {
+    if (prior) return; // an end already made the record
     byId.set(e.spanId, {
       traceId,
       spanId: e.spanId,
-      ...(e.parentSpanId !== undefined
-        ? { parentSpanId: e.parentSpanId }
-        : prior?.parentSpanId !== undefined
-          ? { parentSpanId: prior.parentSpanId }
-          : {}),
+      ...(e.parentSpanId !== undefined ? { parentSpanId: e.parentSpanId } : {}),
       name: e.name,
-      startedAt: e.startedAt,
-      endedAt: e.startedAt + e.durationMs,
-      durationMs: e.durationMs,
-      status: e.status,
-      ...(e.error !== undefined ? { errorMessage: e.error } : {}),
-      attrs: { ...(prior?.attrs ?? {}), ...((e.attrs ?? {}) as SpanAttrs) },
+      startedAt: e.at ?? 0,
+      attrs: (e.attrs ?? {}) as SpanAttrs,
     });
+    return;
   }
-  return [...byId.values()];
+  byId.set(e.spanId, {
+    traceId,
+    spanId: e.spanId,
+    ...(e.parentSpanId !== undefined
+      ? { parentSpanId: e.parentSpanId }
+      : prior?.parentSpanId !== undefined
+        ? { parentSpanId: prior.parentSpanId }
+        : {}),
+    name: e.name,
+    startedAt: e.startedAt,
+    endedAt: e.startedAt + e.durationMs,
+    durationMs: e.durationMs,
+    status: e.status,
+    ...(e.error !== undefined ? { errorMessage: e.error } : {}),
+    attrs: { ...(prior?.attrs ?? {}), ...((e.attrs ?? {}) as SpanAttrs) },
+  });
 }
 
 export interface ElidedRange {
@@ -306,34 +310,79 @@ export function lossesFromStream(
   events: readonly RunEvent[],
   opts: { windowStart?: number; elided?: readonly ElidedRange[] } = {},
 ): LossInterval[] {
-  const out: LossInterval[] = [];
-  const elided = opts.elided ?? [];
-  const inElided = (from: number, to: number) => elided.some((r) => r.fromSeq <= from && to <= r.toSeq);
-  let prev: RunEvent | undefined;
-  let first = true;
-  for (const e of events) {
-    if (first) {
-      first = false;
-      if ((e.seq ?? 1) > 1 && opts.windowStart !== undefined && e.at !== undefined && e.at > opts.windowStart) {
-        out.push({ from: opts.windowStart, to: e.at, kind: "lost" });
+  const tracker = createLossTracker();
+  for (const e of events) tracker.push(e);
+  return tracker.losses(opts);
+}
+
+export interface LossTracker {
+  /** One more event of the stream, in order. */
+  push(event: RunEvent): void;
+  /** The loss intervals so far, for the window's start and the ranges the live
+   *  transport has reported by now. O(gaps), never a rescan of the stream. */
+  losses(opts?: { windowStart?: number; elided?: readonly ElidedRange[] }): LossInterval[];
+}
+
+/** The incremental form of `lossesFromStream`: a live page pushes each frame
+ *  as it arrives and reads the intervals per tick without holding the stream.
+ *  Kept per event: the first event's `seq` and stamp (the head loss), each
+ *  interior `seq` gap with the stamps around it (its kind decided at read time,
+ *  since the `replay_elided` range that covers a gap can arrive after it), and
+ *  every `spans_dropped` note's own interval — in stream order. */
+export function createLossTracker(): LossTracker {
+  let first: { seq: number; at: number | undefined } | undefined;
+  let prev: { seq: number | undefined; at: number | undefined } | undefined;
+  const entries: Array<
+    | { kind: "gap"; fromSeq: number; toSeq: number; from: number; to: number }
+    | { kind: "note"; from: number; to: number }
+  > = [];
+  return {
+    push(e) {
+      if (!first) {
+        first = { seq: e.seq ?? 1, at: e.at };
+      } else if (prev && e.seq !== undefined && prev.seq !== undefined && e.seq > prev.seq + 1) {
+        if (prev.at !== undefined && e.at !== undefined) {
+          entries.push({
+            kind: "gap",
+            fromSeq: prev.seq + 1,
+            toSeq: e.seq - 1,
+            from: Math.min(prev.at, e.at),
+            to: Math.max(prev.at, e.at),
+          });
+        }
       }
-    } else if (prev && e.seq !== undefined && prev.seq !== undefined && e.seq > prev.seq + 1) {
-      if (prev.at !== undefined && e.at !== undefined) {
-        const from = Math.min(prev.at, e.at);
-        const to = Math.max(prev.at, e.at);
-        out.push({ from, to, kind: inElided(prev.seq + 1, e.seq - 1) ? "elided" : "lost" });
+      if (
+        e.type === "run_note" &&
+        e.kind === "spans_dropped" &&
+        e.from !== undefined &&
+        e.to !== undefined &&
+        e.to >= e.from
+      ) {
+        entries.push({ kind: "note", from: e.from, to: e.to });
       }
-    }
-    if (
-      e.type === "run_note" &&
-      e.kind === "spans_dropped" &&
-      e.from !== undefined &&
-      e.to !== undefined &&
-      e.to >= e.from
-    ) {
-      out.push({ from: e.from, to: e.to, kind: "lost" });
-    }
-    prev = e;
-  }
-  return out;
+      prev = { seq: e.seq, at: e.at };
+    },
+    losses(opts = {}) {
+      const elided = opts.elided ?? [];
+      const inElided = (from: number, to: number) => elided.some((r) => r.fromSeq <= from && to <= r.toSeq);
+      const out: LossInterval[] = [];
+      if (
+        first &&
+        first.seq > 1 &&
+        opts.windowStart !== undefined &&
+        first.at !== undefined &&
+        first.at > opts.windowStart
+      ) {
+        out.push({ from: opts.windowStart, to: first.at, kind: "lost" });
+      }
+      for (const g of entries) {
+        out.push(
+          g.kind === "note"
+            ? { from: g.from, to: g.to, kind: "lost" }
+            : { from: g.from, to: g.to, kind: inElided(g.fromSeq, g.toSeq) ? "elided" : "lost" },
+        );
+      }
+      return out;
+    },
+  };
 }

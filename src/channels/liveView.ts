@@ -621,6 +621,7 @@ export function createLiveViewHandler(
             ...(view.sealedAt !== undefined ? { sealedAt: view.sealedAt } : {}),
             ...(view.replyOk !== undefined ? { replyOk: view.replyOk } : {}),
             ...(runDurationMs(view) !== undefined ? { durationMs: runDurationMs(view) } : {}),
+            ...(view.truncated !== undefined ? { truncated: view.truncated } : {}),
           }),
         );
         return;

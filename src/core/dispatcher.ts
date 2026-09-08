@@ -10,6 +10,7 @@ import type { LedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js"
 import type { AppendableEvent, LiveRunRow, StepRecord } from "./runLedger/types.js";
 import type { ResumePlan } from "./runLedger/resume.js";
 import { systemClock } from "./trace/index.js";
+import { COMMAND_RUN_AGENT } from "./runOwner.js";
 import type { Clock, Span, SpanSink, Tracer } from "./trace/types.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
@@ -2594,7 +2595,7 @@ function redactStringLeaves(value: unknown): unknown {
 
 /** The agent name an inline (no-model) command run carries in its `RunMeta` and
  *  record — the one value `runs list agent=command` selects on. */
-export const COMMAND_RUN_AGENT = "command";
+export { COMMAND_RUN_AGENT };
 
 /**
  * Answer one parsed chat command through the registry as the message's user:

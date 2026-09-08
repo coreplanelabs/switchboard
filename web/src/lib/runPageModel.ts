@@ -10,6 +10,10 @@ import {
 } from "@core/channels/runTimeline.js";
 import { runDurationMs } from "@core/core/runDuration.js";
 import { displayNameOf } from "@core/core/trace/displayNames.js";
+import { createLossTracker, foldSpanRecord } from "@core/core/normalizeSpans.js";
+import { isSpanRecord, type RunEvent } from "@core/core/runEvents.js";
+import type { LossInterval } from "@core/core/trace/partition.js";
+import type { SpanRecord } from "@core/core/trace/types.js";
 import { formatDuration } from "./format";
 
 // The run page's view model: the ONE fold for seeded history and live frames
@@ -190,8 +194,17 @@ export interface RunPageModel {
      *  frames, features/live-view.md item 5): the record still has them. Kept
      *  for the partition's `not loaded` term (features/tracing.md). */
     elided: ReplayElidedRange[];
+    /** Bumped on every frame the fold saw: what the timeline recomputes on. */
+    traceVersion: number;
   };
   handle(event: unknown): void;
+  /** The span set so far (features/tracing.md), folded per frame from the same
+   *  stream the log reads — the timeline's input. */
+  spanSet(): SpanRecord[];
+  /** The loss intervals so far — `seq` gaps (lost, or elided when a
+   *  `replay_elided` range covers them) and `spans_dropped` notes — from the
+   *  window's start. Tracked per frame, read per tick without a rescan. */
+  losses(windowStart: number): LossInterval[];
   /** A `replay_elided` frame: note the range in the log (a replay row, like a
    *  stored stream's omission marker) and keep it on the state. */
   noteElided(range: ReplayElidedRange): void;
@@ -297,7 +310,13 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     lastAt: null,
     lastAtWall: null,
     elided: [],
+    traceVersion: 0,
   });
+  /** The loss intervals, tracked per frame; the span records folded. Neither
+   *  holds the stream: a long run costs the page its spans and its gaps, not
+   *  its events. */
+  const losses = createLossTracker();
+  const spans = new Map<string, SpanRecord>();
 
   const stepVms = new Map<number, StepVm>();
   const spanRows = new Map<string, SpanRowVm>();
@@ -508,6 +527,12 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     // Span records (features/tracing.md) are timing, not content: they never
     // move the stream's first/last stamps or the runner clock.
     const isSpan = e?.type === "span_start" || e?.type === "span_end";
+    if (e && typeof e.type === "string") {
+      const ev = event as RunEvent;
+      losses.push(ev);
+      if (isSpanRecord(ev)) foldSpanRecord(spans, ev, "");
+      state.traceVersion++;
+    }
     if (e && !isSpan && typeof e.at === "number") {
       if (state.firstAt === null || e.at < state.firstAt) state.firstAt = e.at;
       if (state.lastAt === null || e.at >= state.lastAt) {
@@ -537,12 +562,15 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     state.elided.push(range);
     state.log.push({ kind: "note", key: key("note"), replay: true, text: elidedText(range) });
     state.placeholder = false;
+    state.traceVersion++;
   }
 
   return {
     state,
     handle,
     noteElided,
+    spanSet: () => [...spans.values()],
+    losses: (windowStart) => losses.losses({ windowStart, elided: state.elided }),
     pendingCall,
     flushPendingTurn: flushTurn,
     setAllOpen,
