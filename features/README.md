@@ -54,6 +54,7 @@ Rename a test and the build is red until the spec changes with it. Adopting the 
 | [agent-general.md](agent-general.md) | The default agent: fast model, `assistant` toolset — GitHub repo reads + issue writes, URL reading, no workspace; redirects code/PR/web-research asks |
 | [github-tools.md](github-tools.md) | The `github_*` tools: repo reads (repos, tree, file, code search) and issue read/write over the App credential from the bot process, per-repo write gate, toolset enablement (`assistant` for general, reads for research/review) |
 | [web-tools.md](web-tools.md) | `web_fetch` (SSRF-hardened URL reading, binary links as model-visible blocks) + `web_search` (Brave/Null seam); the `research` agent |
+| [public-hygiene.md](public-hygiene.md) | The public tree carries no company, person, tracker, plan-id, platform-id or incident-date imprint; a ratchet (`hygiene:check`) counts every hit per file and class and only shrinks, with lines allowed by name |
 | [agent-review.md](agent-review.md) | Code review agent |
 | [agent-coding.md](agent-coding.md) | Coding agent (ships PRs) |
 | [agent-ship.md](agent-ship.md) | Ship pipeline (coding → review → fix to LGTM) |

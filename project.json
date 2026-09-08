@@ -128,6 +128,14 @@
       "does": "Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`.",
       "when": "Part of `check:consistency`; when a record fails it, write a new record and supersede the old one instead of editing it."
     },
+    "hygiene:check": {
+      "does": "The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks.",
+      "when": "Part of `check:consistency`. New hit: rewrite the line or allow it by name in `scripts/public-hygiene.allow`; `-- --list <prefix>` shows the rest."
+    },
+    "hygiene:gen": {
+      "does": "Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`.",
+      "when": "Part of `fix`, safe to run blindly: new imprint fails it like `hygiene:check`."
+    },
     "agents:gen": {
       "does": "Writes the Commands table in AGENTS.md from `package.json` and this file.",
       "when": "After adding or changing a script; part of `fix`."
