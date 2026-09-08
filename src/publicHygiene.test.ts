@@ -20,7 +20,7 @@ import {
 const classNames = Object.keys(CLASSES);
 
 describe("the classes", () => {
-  it("names: company, sibling products, people, the private channel, vault paths — case-insensitive; the English word beside them is left to the line allowlist", () => {
+  it("names: company, sibling products, people, the private channel — case-insensitive; the English word beside them is left to the line allowlist, and 1Password's op:// scheme is an integration, not imprint", () => {
     for (const s of [
       "coreplanelabs/switchboard",
       "CorePlane",
@@ -30,13 +30,13 @@ describe("the classes", () => {
       "Justin merges",
       "Claude Tag",
       "#switchboard-prompting",
-      "op://Employee/x",
-      "1Password",
       "littlebird",
     ])
       expect(CLASSES.names.test(s), s).toBe(true);
-    expect(CLASSES.names.test("a nominally fine backoff")).toBe(false);
-    expect(CLASSES.names.test("justinian")).toBe(false);
+    for (const s of ["a nominally fine backoff", "justinian", "op://Vault/Item/field", "1Password", "op://Employee/x"])
+      expect(CLASSES.names.test(s), s).toBe(false);
+    // A vault path that names the company is still caught — by the company, not the scheme.
+    expect(CLASSES.names.test("op://CI/coreplane-bot/client-id")).toBe(true);
   });
 
   it("trackers: #NNN issue refs and the private org's GitHub URLs; not line anchors, HTML entities, headings or long hex", () => {
@@ -145,6 +145,18 @@ describe("scanText", () => {
     expect(hits).toHaveLength(1);
     expect([...used]).toEqual([...allowed]);
     expect(scanText("docs/decisions/0001-x.md", "cites #43\n", new Set()).counts).toEqual({});
+  });
+
+  it("an allow entry whose line no longer matches any class is not used — it reads as stale, so the allow file cannot carry dead weight", () => {
+    const entry = "src/x.ts\tconst scheme = 'op://Vault/Item'; // plain integration syntax";
+    const { counts, used } = scanText(
+      "src/x.ts",
+      "const scheme = 'op://Vault/Item'; // plain integration syntax\n",
+      new Set([entry]),
+    );
+    expect(counts).toEqual({});
+    expect(used.size).toBe(0);
+    expect(staleAllowEntries(new Set([entry]), used)).toEqual([entry]);
   });
 });
 

@@ -26,8 +26,7 @@ export const ALLOW_LINES_PATH = "scripts/public-hygiene.allow";
 
 /** What must not appear, by class. Each regex is tested per line. */
 export const CLASSES = {
-  names:
-    /coreplane|\bnominal\b|polylane|terrateam|\bjustin\b|claude tag|switchboard-prompting|op:\/\/|1password|littlebird/i,
+  names: /coreplane|\bnominal\b|polylane|terrateam|\bjustin\b|claude tag|switchboard-prompting|littlebird/i,
   trackers: /(?<![\w&`/#])#\d{2,4}\b(?![\w-])|github\.com\/(?:orgs\/)?coreplanelabs\b/i,
   planIds: /\bKTD\d+\b|\bKD\d+\b|\bOQ\d+\b|\bU[1-9]\b|\bR(?!2\b)\d{1,2}\b/,
   ids: /\b[CUD]0[A-Z0-9]{8,10}\b|(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])/,
@@ -87,12 +86,13 @@ export function scanText(path, text, allow) {
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     const key = `${path}\t${trimmed}`;
-    if (allow.has(key)) {
-      used.add(key);
-      continue;
-    }
+    const allowed = allow.has(key);
     for (const cls of classes) {
-      if (CLASSES[cls].test(trimmed)) {
+      if (!CLASSES[cls].test(trimmed)) continue;
+      // An entry is "used" only when its line still needs allowing — an entry
+      // whose line matches no class any more is dead weight and reads as stale.
+      if (allowed) used.add(key);
+      else {
         counts[cls] = (counts[cls] ?? 0) + 1;
         hits.push({ line: i + 1, cls, text: trimmed });
       }
@@ -101,7 +101,7 @@ export function scanText(path, text, allow) {
   return { counts, hits, used };
 }
 
-/** Allow entries no line in the tree matched any more. */
+/** Allow entries no hitting line in the tree used: the line is gone, or it no longer matches any class. */
 export function staleAllowEntries(allow, used) {
   return [...allow].filter((e) => !used.has(e)).sort();
 }
@@ -199,7 +199,7 @@ function main(argv) {
   }
 
   const listed = JSON.parse(readFileSync(join(root, ALLOWLIST_PATH), "utf8"));
-  const staleProblems = stale.map((e) => `stale allow entry (no such line): ${e}`);
+  const staleProblems = stale.map((e) => `stale allow entry (line gone, or it no longer matches any class): ${e}`);
 
   if (argv.includes("--write")) {
     // Recording is for progress. Growth is refused, and nothing is written,
