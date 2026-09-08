@@ -54,7 +54,7 @@
     "format:check": "prettier --check .",
     "check:dist": "npm run build && node scripts/check-dist.mjs",
     "check:site": "node scripts/check-site.mjs",
-    "check:image": "docker build --quiet .",
+    "check:image": "npm run check:image --workspaces --if-present",
     "skills:sync": "tsx scripts/skills-sync.ts",
     "skills:check": "tsx scripts/skills-sync.ts --check",
     "licenses:check": "node scripts/licenses-check.mjs",

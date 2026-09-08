@@ -76,7 +76,7 @@ The whole interface to this repository: deterministic, non-interactive, no crede
 | `npm run format:check` | Prettier in check mode. | Part of `verify:root`. |
 | `npm run check:dist` | Builds, then proves the compiled entry points and the web bundle the image needs exist. | Part of `verify:root`. |
 | `npm run check:site` | The docs site builds with no dead links and the pages the dashboard links to exist. | After a docs change; part of `verify`. |
-| `npm run check:image` | Builds the Docker image. | After touching the Dockerfile or what it copies; needs Docker. Its own CI job. |
+| `npm run check:image` | Builds every Worker's image. | After touching a Dockerfile; needs Docker. One CI leg per image. |
 | `npm run skills:sync` | Vendors the skills listed in `skills/manifest.yaml`. | After changing the manifest; part of `fix`. |
 | `npm run skills:check` | The vendored skills match the manifest byte for byte. | Part of `check:consistency`. |
 | `npm run licenses:check` | Every production dependency's license is on the allowlist. | After adding a dependency. |

@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
@@ -172,8 +173,8 @@ describe("the required status checks and their gates", () => {
 
   const gates = Object.entries(ci.jobs).filter(([, job]) => isGate(job));
 
-  it("the fan-outs end in gates: bot and workers", () => {
-    expect(gates.map(([, j]) => j.name).sort()).toEqual(["bot", "workers"]);
+  it("the fan-outs end in gates: bot, image and workers", () => {
+    expect(gates.map(([, j]) => j.name).sort()).toEqual(["bot", "image", "workers"]);
   });
 
   it.each(gates)(
@@ -268,5 +269,83 @@ describe("the verify scripts", () => {
       }
     }
     expect([...new Set(ran)].sort()).toEqual(local);
+  });
+});
+
+describe("the image check builds every image the deploy builds", () => {
+  // 2026-09-08, release 1.2.0: the resident's Dockerfile gained a RUN whose
+  // last command exited 1, and the first build of that image was the production
+  // deploy — CI's `check:image` built the bot image alone. The rule: an image
+  // is whatever a Worker's wrangler template points `image` at, and every such
+  // Worker builds it with its own `check:image` (from the context wrangler
+  // uses) and has one leg of the fan-out under the `image` gate. The set is
+  // DERIVED from the templates, so a new Worker with an image fails here until
+  // it has both — and a Worker without an image must not claim the script, or
+  // the root `check:image` (every workspace's, `--if-present`) would run it.
+  const workerDirs = readdirSync(new URL("deploy", `file://${root}`), { withFileTypes: true })
+    .filter((d) => d.isDirectory() && existsSync(new URL(`deploy/${d.name}/package.json`, `file://${root}`)))
+    .map((d) => `deploy/${d.name}`);
+  const scriptsOf = (dir: string) =>
+    (JSON.parse(read(`${dir}/package.json`)) as { scripts?: Record<string, string> }).scripts ?? {};
+
+  /** The Workers whose wrangler template names an image, with the Dockerfile's
+   *  directory — what wrangler builds — relative to the Worker's directory. */
+  const images = workerDirs.flatMap((dir) => {
+    const template = `${dir}/wrangler.template.jsonc`;
+    if (!existsSync(new URL(template, `file://${root}`))) return [];
+    const m = /"image":\s*"([^"]+)"/.exec(read(template));
+    if (!m) return [];
+    const dockerfile = path.normalize(path.join(dir, m[1]));
+    const context = path.relative(dir, path.dirname(dockerfile)) || ".";
+    return [{ dir, context, dockerfile }];
+  });
+  const withoutImage = workerDirs.filter((dir) => !images.some((i) => i.dir === dir));
+
+  it("finds the Workers with an image: the bot (the root Dockerfile), the resident and the sandbox", () => {
+    expect(images.map((i) => `${i.dir} ← ${i.context}`).sort()).toEqual([
+      "deploy/cloudflare ← ../..",
+      "deploy/cloudflare-resident ← .",
+      "deploy/cloudflare-sandbox ← .",
+    ]);
+    for (const i of images) expect(existsSync(new URL(i.dockerfile, `file://${root}`)), i.dockerfile).toBe(true);
+    expect(withoutImage).toEqual(["deploy/cloudflare-docs", "deploy/cloudflare-memory"]);
+  });
+
+  it.each(images)(
+    "$dir: `check:image` builds the Dockerfile wrangler deploys, from the same context",
+    ({ dir, context }) => {
+      expect(scriptsOf(dir)["check:image"]).toBe(`docker build --quiet ${context}`);
+    },
+  );
+
+  it.each(withoutImage)("$0 has no image and no `check:image`", (dir) => {
+    expect(scriptsOf(dir)).not.toHaveProperty("check:image");
+  });
+
+  it("the root `check:image` runs every workspace's own — the local command is the whole CI check", () => {
+    expect(rootPkg.scripts["check:image"]).toBe("npm run check:image --workspaces --if-present");
+  });
+
+  it("the `image` gate fans out to one leg per image, and nothing else builds an image", () => {
+    const gate = Object.values(ci.jobs).find((j) => j.name === "image")!;
+    expect(isGate(gate)).toBe(true);
+    const built: string[] = [];
+    for (const id of needsOf(gate)) {
+      const leg = ci.jobs[id];
+      expect(leg.strategy?.matrix?.worker, `${id} is not a matrix over the Workers`).toBeDefined();
+      for (const step of leg.steps) {
+        for (const line of runLines(step, leg)) {
+          const m = /^npm run check:image -w (\S+)$/.exec(line);
+          if (m) built.push(m[1]);
+        }
+      }
+    }
+    expect(built.sort()).toEqual(images.map((i) => i.dir).sort());
+    // No job outside the fan-out builds an image: the gate is the one place.
+    const elsewhere = Object.entries(ci.jobs)
+      .filter(([id]) => !needsOf(gate).includes(id))
+      .flatMap(([, job]) => job.steps.flatMap((s) => runLines(s, job)))
+      .filter((line) => /check:image/.test(line));
+    expect(elsewhere).toEqual([]);
   });
 });
