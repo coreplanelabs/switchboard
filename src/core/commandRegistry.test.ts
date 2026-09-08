@@ -45,7 +45,7 @@ const echo = define({
 
 const fail = define({
   id: "demo.fail",
-  options: z.object({ code: z.enum(["not_found", "conflict", "unavailable", "boom"]) }),
+  options: z.object({ code: z.enum(["not_found", "conflict", "unavailable", "busy", "boom"]) }),
   action: "runs:write",
   effect: "write",
   describe: "throws the named error",
@@ -454,7 +454,7 @@ describe("CommandRegistry.invoke — parse and error mapping", () => {
     });
   });
 
-  it("maps CommandError codes to not_found/conflict/unavailable and swallows unexpected throws as internal", async () => {
+  it("maps CommandError codes to not_found/conflict/unavailable/busy and swallows unexpected throws as internal", async () => {
     const { registry, deps } = setup();
     const errors: unknown[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((...a) => void errors.push(a));
@@ -474,6 +474,15 @@ describe("CommandRegistry.invoke — parse and error mapping", () => {
       error: "unavailable",
       status: 503,
       message: "demo says no",
+    });
+    // `busy`: the same 503 on the wire — the body's `code` tells a transient
+    // refusal (retry unchanged later) from a missing dependency.
+    expect(await registry.invoke("demo.fail", opts({ code: "busy" }), cli, deps)).toMatchObject({
+      ok: false,
+      error: "busy",
+      status: 503,
+      message: "demo says no",
+      decidedBy: "handler",
     });
     const internal = await registry.invoke("demo.fail", opts({ code: "boom" }), cli, deps);
     expect(internal).toMatchObject({ ok: false, error: "internal", status: 500 });

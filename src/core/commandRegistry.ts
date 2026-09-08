@@ -237,16 +237,19 @@ export function acceptsUndefined(schema: z.ZodType): boolean {
 /** A handler's expected failure: `not_found` (404), `conflict` (409),
  *  `unavailable` (503 — a dependency the command needs is not configured or
  *  not reachable; the message says which, and is safe to show the caller),
- *  `invalid_input` (400 — a value that passed its schema but fails a semantic
- *  check only the handler can make: an unknown agent name, a scope with nothing
- *  to set; authored text that names the expectation, never the value) or
- *  `unauthorized` (403 — a refusal the DATA decides, not the caller alone: the
- *  channel scope of `config set`, the org scope of `memory forget`, a repo the
- *  caller may not use). Any other throw is an `internal` 500 whose message is
- *  logged, never returned. */
+ *  `busy` (503 too — the system refused for a reason that clears on its own,
+ *  with nothing for the caller to change: runs in flight a deploy must wait
+ *  out, a fleet at capacity; the same request later may simply succeed, which
+ *  is why the CLI exits 75 for it, not 1), `invalid_input` (400 — a value that
+ *  passed its schema but fails a semantic check only the handler can make: an
+ *  unknown agent name, a scope with nothing to set; authored text that names
+ *  the expectation, never the value) or `unauthorized` (403 — a refusal the
+ *  DATA decides, not the caller alone: the channel scope of `config set`, the
+ *  org scope of `memory forget`, a repo the caller may not use). Any other
+ *  throw is an `internal` 500 whose message is logged, never returned. */
 export class CommandError extends Error {
   constructor(
-    readonly code: "not_found" | "conflict" | "unavailable" | "invalid_input" | "unauthorized",
+    readonly code: "not_found" | "conflict" | "unavailable" | "busy" | "invalid_input" | "unauthorized",
     message: string,
   ) {
     super(message);
@@ -254,7 +257,8 @@ export class CommandError extends Error {
   }
 }
 
-export type InvokeErrorCode = "unauthorized" | "invalid_input" | "not_found" | "conflict" | "unavailable" | "internal";
+export type InvokeErrorCode =
+  "unauthorized" | "invalid_input" | "not_found" | "conflict" | "unavailable" | "busy" | "internal";
 
 export const ERROR_STATUS: Readonly<Record<InvokeErrorCode, number>> = {
   unauthorized: 403,
@@ -262,6 +266,9 @@ export const ERROR_STATUS: Readonly<Record<InvokeErrorCode, number>> = {
   not_found: 404,
   conflict: 409,
   unavailable: 503,
+  // The same status as `unavailable`: over HTTP the body's `code` tells them
+  // apart, and a 503 is what a client's retry policy already understands.
+  busy: 503,
   internal: 500,
 };
 

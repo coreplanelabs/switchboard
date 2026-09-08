@@ -164,11 +164,21 @@ export const deployAll = defineCommand({
     const result = await deps.deploy.run(plan);
     if (result.kind === "refused")
       throw new CommandError("unavailable", `refusing —\n  - ${result.problems.join("\n  - ")}`);
-    if (!result.ok)
-      throw new CommandError(
-        "unavailable",
-        `deploy stopped —\n${formatDeployResults(result.results, result.notAttempted)}`,
-      );
+    if (!result.ok) {
+      // The run stops at its first failure, so at most one result failed. When
+      // that failure is a preflight that never cleared, nothing is broken: the
+      // same deploy succeeds once the runs in flight finish — `busy` (exit 75),
+      // which is what the release workflow re-dispatches on. Any other failure
+      // needs a person.
+      const failed = result.results.filter((r) => r.status.startsWith("FAILED"));
+      const timedOut = failed.length > 0 && failed.every((r) => r.preflightTimedOut);
+      const table = formatDeployResults(result.results, result.notAttempted);
+      if (timedOut) {
+        const waited = failed.map((r) => `${r.name}: ${r.status.replace(/^FAILED: /, "")}`).join("; ");
+        throw new CommandError("busy", `deploy waited out its budget — ${waited}\n${table}`);
+      }
+      throw new CommandError("unavailable", `deploy stopped —\n${table}`);
+    }
     return { plan: planJson(plan), results: result.results as unknown as JsonValue };
   },
 });
