@@ -639,7 +639,7 @@ describe("a command that never touches the config never waits for the open (#409
   });
 });
 
-// Feature: features/command-registry.md item 27 — the CLI's catalogue hides what
+// Feature: features/command-registry.md item 28 — the CLI's catalogue hides what
 // is off, resolved ONCE at startup from the config FILE (a synchronous read; the
 // async store open of #409 is never waited for).
 describe("cliCapabilities — what the CLI's catalogue is bound to", () => {

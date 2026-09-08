@@ -841,9 +841,9 @@ describe("CommandRegistry.invoke — the caller's span (features/tracing.md item
   });
 });
 
-// Feature: features/command-registry.md item 27 — `enabledWhen`: a command
+// Feature: features/command-registry.md item 28 — `enabledWhen`: a command
 // whose capability is off does not exist in this process, on any surface.
-describe("enabledWhen — a capability that is off hides the command (item 27)", () => {
+describe("enabledWhen — a capability that is off hides the command (item 28)", () => {
   const gated = define({
     id: "demo.gated",
     action: "runs:read",
