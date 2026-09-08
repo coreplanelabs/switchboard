@@ -74,6 +74,27 @@ export interface RunOptions {
    *  dispatcher's to run as a fresh turn. Absent (CLI, tests) → the loop is
    *  byte-identical to a run without follow-ups. */
   inbox?: FollowUpInbox;
+  /** Awaited BEFORE each step's tools run, with the transcript turns appended
+   *  since the previous report and the calls about to be dispatched — what the
+   *  run ledger's step write needs (features/run-history.md item 35). A throw
+   *  fails the step before any tool runs: the hook decides whether a refused
+   *  write may proceed, the runner never swallows it. Absent → no report. */
+  onStep?: (step: StepReport) => Promise<void>;
+}
+
+/** One step of the loop as reported to `onStep`, before its tools run. */
+export interface StepReport {
+  /** The messages appended since the previous report (or since `messages`,
+   *  the seed, for the first): the previous step's results turn and this step's
+   *  assistant turn — every turn the model has seen, without gaps. */
+  turns: ChatMessage[];
+  /** The index of `turns[0]` in the run's conversation (`messages` counts from 0). */
+  firstIdx: number;
+  /** The tool calls this step is about to dispatch, by call id. */
+  inFlight: { callId: string; tool: string }[];
+  turn: number;
+  iteration: number;
+  remainingMs: number;
 }
 
 /** The static toolset plus this run's extra tools. A duplicate name is a
@@ -258,6 +279,8 @@ async function runLoop(
     }
     return parts;
   };
+  // How much of `messages` the last step report covered: the seed to begin with.
+  let reportedUpTo = messages.length;
   // A requested stop (soft or hard) ends the loop before the NEXT step — the
   // step already in flight completes (soft) or is abandoned (hard, via the race
   // above). Checked as a loop condition so a stop can never start a new step.
@@ -317,6 +340,21 @@ async function runLoop(
 
     // Echo the assistant turn, run tools, append results as one user turn.
     messages.push({ role: "assistant", content: result.content });
+    // The step report (features/run-history.md item 35): everything appended
+    // since the last report — so the seed plus every report is the exact
+    // conversation — and the calls about to run, awaited before any of them
+    // does. Its order against the tools is the contract a resume rests on.
+    if (opts.onStep) {
+      await opts.onStep({
+        turns: messages.slice(reportedUpTo),
+        firstIdx: reportedUpTo,
+        inFlight: toolUses.map((tu) => ({ callId: tu.id, tool: tu.name })),
+        turn,
+        iteration,
+        remainingMs: deadline - now(),
+      });
+      reportedUpTo = messages.length;
+    }
     // One tool_use → its tool_result part (and the events it produces). Only a
     // hard stop escapes as a rejection; every tool failure is a result.
     const runOne = async (tu: ToolUsePart): Promise<ContentPart> => {

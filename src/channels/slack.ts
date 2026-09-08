@@ -832,6 +832,7 @@ export class SlackIO implements ChannelIO {
     const edit = (frame: StatusUpdate) =>
       this.client.chat.update({ channel: this.ev.channel, ts, ...render(frame) }).catch(() => {});
     return {
+      handle: { channel: this.ev.channel, ts },
       update: (frame) => void edit(frame),
       done: async (frame) => {
         clearInterval(shimmerTimer);

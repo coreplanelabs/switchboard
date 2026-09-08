@@ -96,6 +96,11 @@ export interface StatusUpdate {
 export interface StatusHandle {
   update(frame: StatusUpdate): void;
   done(frame: StatusUpdate): Promise<void>;
+  /** Where the indicator lives, when it is a message another process could
+   *  edit (Slack: channel + ts) — recorded on the run ledger so a resumed run
+   *  closes the same card (features/run-history.md item 35). Absent for a
+   *  no-op handle. */
+  handle?: { channel: string; ts: string };
 }
 
 /** How a run ended, as reported to the channel once its record is closed. */

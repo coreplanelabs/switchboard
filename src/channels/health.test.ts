@@ -48,6 +48,13 @@ describe("startedAt on /healthz", () => {
     );
     expect(healthPayload({ inFlight: 0, draining: false })).not.toHaveProperty("startedAt");
   });
+
+  it("carries the run ledger `generation` when given (run-history item 35), and no key when the ledger is off", () => {
+    expect(healthPayload({ inFlight: 0, draining: false, generation: "20260907T231512Z-3fa9c1d2" }).generation).toBe(
+      "20260907T231512Z-3fa9c1d2",
+    );
+    expect(healthPayload({ inFlight: 0, draining: false })).not.toHaveProperty("generation");
+  });
 });
 
 // Feature: features/slack-channel.md item 8 — `GET /healthz` is the bot deploy

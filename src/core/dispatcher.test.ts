@@ -45,6 +45,8 @@ import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
 import { isRunRecord, type RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter } from "./runHistoryWriter.js";
+import { InMemoryRunLedger } from "./runLedger/inMemory.js";
+import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import type { Operations } from "./operations.js";
@@ -7644,6 +7646,61 @@ workspaceDir: __WORKDIR__
     expect(replies.some((r) => r.includes("PR opened") && r.includes("https://github.com/acme/api/pull/8"))).toBe(true);
   });
 
+  it("a pipeline is claimed on the run ledger without a seed (item 35) and finishes through it: the live row goes, the record lands in the ledger, the plain store is never the fallback", async () => {
+    const registry = new RunRegistry({ genId: () => "rship-l", genToken: () => "tship-l" });
+    const store = new InMemoryRunStore();
+    const ledger = new InMemoryRunLedger();
+    const fallbackPuts: string[] = [];
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-ship",
+      fallback: { put: async (r) => void fallbackPuts.push(r.id) },
+      warn: () => {},
+    });
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+    );
+    let phaseAtReply: string | undefined;
+    let rowSeen: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    const io: ChannelIO = {
+      reply: async () => {
+        rowSeen ??= structuredClone(ledger.live.get("rship-l"));
+        phaseAtReply = ledger.live.get("rship-l")?.phase;
+      },
+      status: async () => ({ handle: { channel: "CX", ts: "9.9" }, update: () => {}, done: async () => {} }),
+      history: async () => [],
+    };
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    await writer.settled();
+    expect(rowSeen).toMatchObject({
+      threadKey: "slack:CX:1.0",
+      ownerGen: "gen-ship",
+      card: { channel: "CX", ts: "9.9" },
+      system: "",
+      tools: [],
+      meta: { agent: "ship", channelId: "slack:CX", userId: "slack:UADMIN" },
+    });
+    expect(phaseAtReply).toBe("finishing"); // the CAS was taken before the final reply
+    expect(ledger.live.has("rship-l")).toBe(false);
+    expect(ledger.finished.get("rship-l")?.status).toBe("completed");
+    expect(fallbackPuts).toEqual([]);
+    expect((await store.get("rship-l"))?.status).toBe("interrupted"); // only the start tombstone went to the plain store
+  });
+
   it("a final reply that throws writes the run record as `failed`, never `completed` (the thread never saw the report)", async () => {
     const registry = new RunRegistry({ genId: () => "rship-w", genToken: () => "tship-w" });
     const store = new InMemoryRunStore();
@@ -8191,5 +8248,205 @@ describe("thread admission (features/thread-admission.md)", () => {
     expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this follow-up/);
     expect(requests).toHaveLength(1); // no fresh turn
     expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
+  });
+});
+
+describe("run ledger write-through (features/run-history.md item 35)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  function wired(provider: Provider, over: { ledger?: InMemoryRunLedger; gen?: string } = {}) {
+    const registry = new RunRegistry({ genId: () => "run-l", genToken: () => "tok" });
+    const store = new InMemoryRunStore();
+    const ledger = over.ledger ?? new InMemoryRunLedger();
+    const warnings: string[] = [];
+    const fallbackPuts: string[] = [];
+    const writer = createRunHistoryWriter({
+      store,
+      warn: (m) => warnings.push(m),
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: over.gen ?? "gen-T",
+      fallback: { put: async (r) => void fallbackPuts.push(r.id) },
+      warn: (m) => warnings.push(m),
+    });
+    return { deps, registry, store, ledger, writer, warnings, fallbackPuts };
+  }
+
+  /** A status handle that names its message, like the Slack adapter's. */
+  function ioWithCard(onReply?: () => void) {
+    const replies: string[] = [];
+    const io: ChannelIO = {
+      reply: async (t) => {
+        onReply?.();
+        replies.push(t);
+      },
+      status: async () => ({ handle: { channel: "CX", ts: "1.2" }, update: () => {}, done: async () => {} }),
+      history: async () => [{ role: "user", text: "earlier question" }],
+    };
+    return { io, replies };
+  }
+
+  it("claims the run once its prompt exists (system, tools, card, meta, seed), records each step before its tools, appends events, takes finishing before the reply and finishes through the ledger", async () => {
+    const seen: {
+      rowAtFirstCall?: ReturnType<InMemoryRunLedger["live"]["get"]>;
+      transcriptAtFirstCall?: number;
+      firstRequestTurns?: number;
+      stepsAtSecondCall?: unknown;
+      transcriptAtSecondCall?: Awaited<ReturnType<InMemoryRunLedger["readTranscript"]>>;
+      stateAtSecondCall?: unknown;
+      phaseAtReply?: string;
+    } = {};
+    let n = 0;
+    const ledger = new InMemoryRunLedger();
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        if (n++ === 0) {
+          seen.rowAtFirstCall = structuredClone(ledger.live.get("run-l"));
+          seen.transcriptAtFirstCall = (await ledger.readTranscript("run-l")).turns;
+          seen.firstRequestTurns = req.messages.length;
+          return {
+            content: [
+              { type: "tool_use", id: "s1", name: "update_status", input: { checklist: "○ look around" } },
+              { type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } },
+            ],
+            stopReason: "tool_use",
+          };
+        }
+        seen.stepsAtSecondCall = structuredClone(ledger.steps.get("run-l"));
+        seen.transcriptAtSecondCall = await ledger.readTranscript("run-l");
+        seen.stateAtSecondCall = structuredClone(ledger.live.get("run-l")?.state);
+        return { content: [{ type: "text", text: "all done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, store, writer, warnings, fallbackPuts } = wired(provider, { ledger });
+    const { io, replies } = ioWithCard(() => {
+      seen.phaseAtReply = ledger.live.get("run-l")?.phase;
+    });
+    await dispatch(deps, msg("hello there"), io);
+    await writer.settled();
+
+    // The claim: everything a resume must hand the model again.
+    const row = seen.rowAtFirstCall!;
+    expect(row).toMatchObject({
+      threadKey: "slack:CX:1.0",
+      ownerGen: "gen-T",
+      phase: "live",
+      card: { channel: "CX", ts: "1.2" },
+      meta: {
+        agent: "general",
+        model: "anthropic/general-model",
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        readonly: false,
+        selection: "sandbox",
+      },
+    });
+    expect(row.system.length).toBeGreaterThan(0);
+    expect(row.tools.map((t) => t.name)).toEqual(expect.arrayContaining(["update_status", "web_fetch"]));
+    expect(row.tools.every((t) => !("run" in t))).toBe(true); // definitions only, never the runnable
+    // The seed: exactly the conversation the first model call carried, before it was made.
+    expect(seen.transcriptAtFirstCall).toBe(seen.firstRequestTurns);
+    const seedTurns = seen.firstRequestTurns!;
+    // The step record, written before the tools ran, names both calls; the
+    // transcript grew by this step's assistant turn (and, by the second call,
+    // its results turn is not yet written — that rides with the next step).
+    expect(seen.stepsAtSecondCall).toEqual([
+      expect.objectContaining({
+        step: 1,
+        turnIndex: seedTurns + 1,
+        inFlight: [
+          { callId: "s1", tool: "update_status" },
+          { callId: "t1", tool: "bash" },
+        ],
+        turn: 1,
+        iteration: 0,
+      }),
+    ]);
+    expect(seen.transcriptAtSecondCall).toMatchObject({ complete: true, turns: seedTurns + 1 });
+    expect(seen.transcriptAtSecondCall!.messages[seedTurns].role).toBe("assistant");
+    // The dispatcher's state: the checklist landed while the run was live.
+    expect(seen.stateAtSecondCall).toEqual({ checklist: "○ look around" });
+    // finishing was taken before anything reached the thread.
+    expect(seen.phaseAtReply).toBe("finishing");
+    expect(replies.at(-1)).toBe("all done");
+    // The finish: live rows gone, the record in the ledger, every event appended in seq order.
+    expect(ledger.live.has("run-l")).toBe(false);
+    expect(ledger.steps.has("run-l")).toBe(false);
+    expect(ledger.finished.get("run-l")).toMatchObject({ id: "run-l", status: "completed" });
+    const appended = ledger.events.get("run-l")!;
+    expect(appended.map((e) => e.type)).toEqual(
+      expect.arrayContaining(["input", "run_meta", "context", "tool_call", "tool_result", "answer"]),
+    );
+    expect(appended.map((e) => e.seq)).toEqual([...appended].map((e) => e.seq).sort((a, b) => a - b));
+    expect(fallbackPuts).toEqual([]);
+    expect((await store.get("run-l"))?.status).toBe("interrupted"); // only the start tombstone went to the plain store
+    expect(warnings).toEqual([]);
+  });
+
+  it("a thread whose ledger row belongs to another run leaves this run untracked: it runs and replies as before, its record goes to the store, one warning", async () => {
+    const ledger = new InMemoryRunLedger();
+    await ledger.claim({
+      runId: "stale",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 1,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" },
+      system: "",
+      tools: [],
+    });
+    const { deps, store, writer, warnings, fallbackPuts } = wired(capturingProvider("still answered"), { ledger });
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, msg("hello there"), io);
+    await writer.settled();
+    expect(replies.at(-1)).toBe("still answered");
+    expect(ledger.live.has("run-l")).toBe(false);
+    expect(ledger.live.has("stale")).toBe(true);
+    expect(ledger.finished.has("run-l")).toBe(false);
+    expect((await store.get("run-l"))?.status).toBe("completed"); // the writer's own store, not the fallback sink
+    expect(fallbackPuts).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("belongs to run stale");
+  });
+
+  it("a review's verdict lands in the run's ledger state as it is submitted", async () => {
+    const ledger = new InMemoryRunLedger();
+    let stateAtSecondCall: unknown;
+    let n = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "v1",
+                name: "submit_verdict",
+                input: { verdict: "request_changes", summary: "two findings" },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        stateAtSecondCall = structuredClone(ledger.live.get("run-l")?.state);
+        return { content: [{ type: "text", text: "findings" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, writer } = wired(provider, { ledger });
+    await dispatch(deps, msg("agent:review look at this", "slack:UADMIN"), ioWithCard().io);
+    await writer.settled();
+    expect(stateAtSecondCall).toEqual({ verdict: { verdict: "request_changes", summary: "two findings" } });
+    expect(ledger.finished.get("run-l")?.status).toBe("completed");
   });
 });
