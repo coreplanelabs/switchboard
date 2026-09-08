@@ -6,6 +6,7 @@ import {
   MANIFEST_PATH,
   parseManifest,
   parseSecretsSource,
+  isOptionalOn,
   planSecretPuts,
   secretRef,
   wranglerFailureLine,
@@ -46,6 +47,16 @@ describe("parseManifest", () => {
         ],
       }),
     ).toEqual({ ok: false, problems: ["secrets: duplicate name(s) A"] });
+  });
+
+  it("an `optional` list may only name Workers the secret is on — a stray name is a problem, never silently meaningless", () => {
+    expect(parseManifest({ secrets: [{ name: "A", workers: ["bot", "sandbox"], optional: ["memory"] }] })).toEqual({
+      ok: false,
+      problems: ["secrets.0.optional: memory is not one of A's workers (bot, sandbox)"],
+    });
+    expect(parseManifest({ secrets: [{ name: "A", workers: ["bot", "sandbox"], optional: ["bot"] }] })).toMatchObject({
+      ok: true,
+    });
   });
 });
 
@@ -88,14 +99,15 @@ describe("planSecretPuts", () => {
       { name: "A", workers: ["bot", "resident"] },
       { name: "B", workers: ["bot"], optional: true },
       { name: "C", workers: ["memory"] },
+      { name: "D", workers: ["bot", "sandbox"], optional: ["bot"] },
     ],
   };
   const present = (...names: string[]) => new Set(names);
 
   it("selects the Worker's secrets in manifest order, bound to the Worker's directory", () => {
-    expect(planSecretPuts(m, "bot", present("A", "B"))).toEqual({
+    expect(planSecretPuts(m, "bot", present("A", "B", "D"))).toEqual({
       ok: true,
-      plan: { worker: "bot", dir: dirOf("bot"), puts: ["A", "B"], skippedOptional: [], missing: [] },
+      plan: { worker: "bot", dir: dirOf("bot"), puts: ["A", "B", "D"], skippedOptional: [], missing: [] },
     });
     expect(planSecretPuts(m, "resident", present("A"))).toEqual({
       ok: true,
@@ -107,19 +119,30 @@ describe("planSecretPuts", () => {
     expect(planSecretPuts(m, "bot", present("B"))).toMatchObject({ ok: true, plan: { puts: ["B"], missing: ["A"] } });
     expect(planSecretPuts(m, "bot", present("A"))).toMatchObject({
       ok: true,
-      plan: { puts: ["A"], skippedOptional: ["B"], missing: [] },
+      plan: { puts: ["A"], skippedOptional: ["B", "D"], missing: [] },
     });
+  });
+
+  it("`optional` as a list: skipped without a value on the Workers it names, required on the rest (a bearer the bot needs only when the sandbox exists is still required on the sandbox Worker)", () => {
+    expect(planSecretPuts(m, "bot", present("A"))).toMatchObject({
+      ok: true,
+      plan: { puts: ["A"], skippedOptional: ["B", "D"], missing: [] },
+    });
+    expect(planSecretPuts(m, "sandbox", present())).toMatchObject({ ok: true, plan: { puts: [], missing: ["D"] } });
+    expect(isOptionalOn(m.secrets[3], "bot")).toBe(true);
+    expect(isOptionalOn(m.secrets[3], "sandbox")).toBe(false);
+    expect(isOptionalOn(m.secrets[0], "bot")).toBe(false);
   });
 
   it("`only` narrows the put; a name that is not one of the Worker's secrets is a problem naming the manifest's", () => {
     expect(planSecretPuts(m, "bot", present("A", "B"), ["B"])).toMatchObject({ ok: true, plan: { puts: ["B"] } });
     expect(planSecretPuts(m, "bot", present("A"), ["C"])).toEqual({
       ok: false,
-      problem: "C is not a bot secret (manifest: A, B)",
+      problem: "C is not a bot secret (manifest: A, B, D)",
     });
     expect(planSecretPuts(m, "bot", present("A"), ["C", "NOPE"])).toEqual({
       ok: false,
-      problem: "C, NOPE are not bot secrets (manifest: A, B)",
+      problem: "C, NOPE are not bot secrets (manifest: A, B, D)",
     });
   });
 });

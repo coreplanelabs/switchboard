@@ -28,6 +28,7 @@
 // `cli:local` holding every scope — whoever can run this process can
 // already read the config and the data directory.
 
+import "./loadEnv.js";
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";

@@ -13,7 +13,7 @@ cp config/config.example.yaml config/config.yaml
 cp .env.example .env
 ```
 
-Open `.env` and set `ANTHROPIC_API_KEY`. Nothing else is required to start — every other block in `config.yaml` is commented out and off by default.
+Open `.env` and set `ANTHROPIC_API_KEY`; the process loads the file at startup. Nothing else is required to start — every other block in `config.yaml` is commented out and off by default.
 
 ## Talk to it
 
@@ -31,11 +31,20 @@ npx tsx src/cli.ts ask "agent:review model:anthropic/claude-opus-5 what would yo
 
 ## See what just happened
 
+Every `ask` is a real run — the same registry that backs the Slack status card and the `/runs` dashboard. A run is kept only while history is on, and the CLI starts cold each time, so turn on the smallest store by appending to `config/config.yaml`:
+
+```yaml
+runHistory:
+  store: file
+```
+
+Ask again, then list:
+
 ```bash
 npx tsx src/cli.ts runs list --status all
 ```
 
-Every `ask` is a real run — the same registry that backs the Slack status card and the `/runs` dashboard. Grab an id from the list and:
+Grab the full id (`runs list --status all --json` prints it) and:
 
 ```bash
 npx tsx src/cli.ts runs get <id>

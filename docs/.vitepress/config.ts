@@ -145,7 +145,6 @@ export default defineConfig({
           { text: "Watch a run and check spend", link: "/how-to/watch-a-run-and-check-spend" },
           { text: "Restrict who can do what", link: "/how-to/restrict-who-can-do-what" },
           { text: "Add a provider or an agent", link: "/how-to/add-a-provider-or-agent" },
-          { text: "Deploy for the first time", link: "/how-to/deploy-for-the-first-time" },
           { text: "Deploy and rotate a secret", link: "/how-to/deploy-and-rotate-a-secret" },
           { text: "Operate production", link: "/how-to/operate-production" },
           { text: "Configure the repository", link: "/how-to/configure-the-repository" },

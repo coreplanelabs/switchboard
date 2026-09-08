@@ -144,7 +144,7 @@ execution:
   #   probeTimeoutMs: 2000               # /status probe budget; timeout = not warm
 
 # Where per-conversation agent workspaces are created (local execution only).
-# On Fly.io set this to ./data/workspaces so checkouts live on the volume.
+# Under docker compose this directory is a named volume, so checkouts survive a restart.
 workspaceDir: ./workspaces
 
 # Cross-session self-learning memory (docs/reference/specs/memory.md). DEFAULT OFF: absent, or

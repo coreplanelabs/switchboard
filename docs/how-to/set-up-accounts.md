@@ -11,7 +11,7 @@ Goal: every external account Switchboard can use, created with exactly the permi
 | E2B | optional | Per-thread sandboxes without a Cloudflare account | `E2B_API_KEY` |
 | Brave Search | optional | The research agent's web search | `BRAVE_SEARCH_API_KEY` |
 
-Credentials are read from environment variables only, never from `config.yaml`; `config.yaml` names the variable (`apiKeyEnv`, `tokenEnv`) and the environment carries the value. Locally that is `.env`, loaded with Node's `--env-file`; on Cloudflare it is a Worker secret ([Deploy](deploy.md)).
+Credentials are read from environment variables only, never from `config.yaml`; `config.yaml` names the variable (`apiKeyEnv`, `tokenEnv`) and the environment carries the value. Locally that is `.env`, which the bot and the CLI load at startup from the directory they run in (a variable your shell exports wins over the file); on Cloudflare it is a Worker secret ([Deploy](deploy.md)).
 
 ## The Slack app
 

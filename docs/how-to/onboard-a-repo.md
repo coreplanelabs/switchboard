@@ -6,7 +6,7 @@ By default, every repo runs cold: a fresh workspace directory per thread, cloned
 
 ## Before you start
 
-Residents live on the resident Worker, so the installation needs one deployed ([Deploy for the first time](deploy-for-the-first-time.md)) and the bot's config pointed at it:
+Residents live on the resident Worker, so the installation needs one deployed ([Deploy](deploy.md)) and the bot's config pointed at it:
 
 ```yaml
 execution:

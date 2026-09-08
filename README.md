@@ -71,7 +71,7 @@ Next steps:
 
 - [Run it locally](docs/tutorials/run-it-locally.md) — the tutorial behind the commands above, then connecting the same process to Slack and GitHub.
 - [Your first request in Slack](docs/tutorials/first-request-in-slack.md) — mention it, follow up, ask for something real.
-- [Deploy for the first time](docs/how-to/deploy-for-the-first-time.md) — the Cloudflare deployment, one Worker at a time.
+- [Deploy](docs/how-to/deploy.md) — the Cloudflare deployment: the profile, the secrets, the first `deploy all`, and the release workflow after that.
 
 ## Learn more
 

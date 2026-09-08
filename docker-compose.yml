@@ -1,4 +1,5 @@
-# VPS / single-host deployment. `docker compose up -d` and you're done.
+# The local loop: the same image on a dev box, or on one host a single trusted operator
+# administers. Production is Cloudflare (docs/how-to/deploy.md). `docker compose up -d`.
 services:
   switchboard:
     build: .
