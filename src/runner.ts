@@ -196,7 +196,11 @@ async function runLoop(
     const at = now();
     emit({
       type: "turn",
-      model: opts.model,
+      // The same `<provider>/<model>` ref `run_meta` names — `opts.model` is
+      // the bare id the provider API takes, and the registry keys providers by
+      // the ref's prefix, so `provider.name` IS that prefix. (v0.4.0 stamped
+      // the bare id, which the page read as a model switch on every run.)
+      model: `${opts.provider.name}/${opts.model}`,
       startedAt,
       durationMs: at - startedAt,
       stopReason: result.stopReason,

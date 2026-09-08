@@ -6,6 +6,7 @@ import {
   runnerNow,
   runningHeader,
   runSpan,
+  sameModel,
   type StepVm,
 } from "./runPageModel";
 
@@ -364,6 +365,27 @@ describe("the run's model — badged on the pending-turn row, flagged when it sw
     nothing.handle(assistant("one", 11));
     expect(step(nothing, 0).turn?.model).toBeUndefined(); // nothing known → no badge, no guess
     expect(step(nothing, 0).turn?.switched).toBe(false);
+  });
+
+  it("a bare stamp (v0.4.0's runner) naming the model run_meta already names by its ref is NOT a switch — the head and the run keep the ref; a bare id for a different model still switches", () => {
+    const m = model();
+    m.handle(meta); // anthropic/claude-fable-5
+    m.handle({ type: "turn", durationMs: 4_900, model: "claude-fable-5", at: 10 });
+    m.handle(assistant("one", 11));
+    expect(step(m, 0).turn).toMatchObject({ model: "anthropic/claude-fable-5", switched: false });
+    expect(m.state.model).toBe("anthropic/claude-fable-5");
+    m.handle({ type: "turn", durationMs: 4_900, model: "claude-opus-5", at: 20 });
+    m.handle(assistant("two", 21));
+    expect(step(m, 1).turn).toMatchObject({ model: "claude-opus-5", switched: true });
+    expect(m.state.model).toBe("claude-opus-5");
+  });
+
+  it("sameModel: equal refs; a bare id against a ref with that name; never two refs with different providers", () => {
+    expect(sameModel("anthropic/claude-fable-5", "anthropic/claude-fable-5")).toBe(true);
+    expect(sameModel("claude-fable-5", "anthropic/claude-fable-5")).toBe(true);
+    expect(sameModel("anthropic/claude-fable-5", "claude-fable-5")).toBe(true);
+    expect(sameModel("openai/claude-fable-5", "anthropic/claude-fable-5")).toBe(false);
+    expect(sameModel("claude-fable-5", "claude-opus-5")).toBe(false);
   });
 
   it("modelName is the part after the provider slash; a bare name is itself; nothing known reads `model`", () => {
