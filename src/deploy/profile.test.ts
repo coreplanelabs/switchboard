@@ -1,14 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import {
-  EXAMPLE_ACCOUNT,
-  isExampleProfile,
-  parseProfile,
-  PROFILE_EXAMPLE_PATH,
-  PROFILE_PATH,
-  profileUrls,
-} from "./profile.js";
+import { EXAMPLE_ACCOUNT, isExampleProfile, parseProfile, PROFILE_EXAMPLE_PATH, profileUrls } from "./profile.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 
 // The deployment profile: where an installation runs, as data the code reads
@@ -19,9 +12,9 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const read = (p: string) => JSON.parse(readFileSync(new URL(p, `file://${root}`), "utf8")) as unknown;
 
 describe("parseProfile", () => {
-  it("accepts the fixture and both committed profiles", () => {
+  it("accepts the fixture and the committed example", () => {
     expect(parseProfile(TEST_PROFILE).ok).toBe(true);
-    for (const p of [PROFILE_PATH, PROFILE_EXAMPLE_PATH]) {
+    for (const p of [PROFILE_EXAMPLE_PATH]) {
       const r = parseProfile(read(p));
       expect(r.ok, p).toBe(true);
     }
@@ -91,28 +84,5 @@ describe("profileUrls", () => {
     expect(u.docsBaseUrl).toBe("https://docs.switchboard.example.test");
     const { docs: _docs, ...runtimeOnly } = TEST_PROFILE.workers;
     expect(profileUrls({ ...TEST_PROFILE, workers: runtimeOnly }).docsBaseUrl).toBeUndefined();
-  });
-});
-
-describe("the repository's own profile", () => {
-  it("names the Workers the committed wrangler configs deploy — the migration proof until the configs are generated from it", () => {
-    const r = parseProfile(read(PROFILE_PATH));
-    if (!r.ok) throw new Error(r.problems.join("; "));
-    const wrangler = (dir: string) =>
-      readFileSync(new URL(`${dir}/wrangler.jsonc`, `file://${root}`), "utf8").replace(/^\s*\/\/.*$/gm, "");
-    const dirs = {
-      memory: "deploy/cloudflare-memory",
-      bot: "deploy/cloudflare",
-      resident: "deploy/cloudflare-resident",
-      sandbox: "deploy/cloudflare-sandbox",
-      docs: "deploy/cloudflare-docs",
-    } as const;
-    for (const [kind, dir] of Object.entries(dirs) as [keyof typeof dirs, string][]) {
-      const ep = r.profile.workers[kind]!;
-      const text = wrangler(dir);
-      expect(text, `${dir}: account`).toContain(`"account_id": "${r.profile.account}"`);
-      expect(text, `${dir}: name`).toContain(`"name": "${ep.script}"`);
-      expect(text, `${dir}: route`).toContain(`"pattern": "${ep.hostname}"`);
-    }
   });
 });

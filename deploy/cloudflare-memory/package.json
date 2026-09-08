@@ -10,7 +10,7 @@
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm test",
+    "verify": "npm --prefix ../.. run --silent deploy:gen && npm run typecheck && npm test",
     "typegen": "wrangler types",
     "tail": "wrangler tail",
     "secrets": "npm --prefix ../.. run --silent cli -- deploy secrets memory"

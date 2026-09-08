@@ -2,7 +2,7 @@
 
 The default — the plain @-mention. A fast model with a small, workspace-free toolset: it answers directly, reads the org's repositories and acts on their issues through Switchboard's GitHub credential, and reads a linked URL — so the everyday asks are answered here, and only code changes, PR reviews, and web research are handed to the other agents.
 
-- **Code**: `src/agents/registry.ts` (`general`, `GENERAL_SYSTEM`), `src/tools/workspace.ts` (the `assistant` toolset), `src/tools/github.ts`, default model in `config/config.production.yaml`
+- **Code**: `src/agents/registry.ts` (`general`, `GENERAL_SYSTEM`), `src/tools/workspace.ts` (the `assistant` toolset), `src/tools/github.ts`, default model in the deployed config (`config/config.example.yaml` documents the key)
 - **Docs**: [README — Agents](../README.md#agents), [github-tools.md](github-tools.md)
 - **Budgets**: 8 turns / 5 min / 16k tokens · toolset `assistant`
 - **Receipts**: https://github.com/coreplanelabs/switchboard/issues/224

@@ -27,7 +27,6 @@ export const CHECKED_FILES = [
   "docs/README.md",
   "features/docs-site.md",
   "src/core/docsLink.ts",
-  "deploy/cloudflare-docs/wrangler.jsonc",
 ];
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
