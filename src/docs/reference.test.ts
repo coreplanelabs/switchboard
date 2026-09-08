@@ -201,15 +201,16 @@ describe("the real catalogue", () => {
   });
 
   it("emits no unescaped pipe inside a table row (each row must have the column count its header declares)", () => {
-    for (const body of [
-      renderCliCommands(real),
-      renderChatCommands(real),
-      renderApiRoutes(real),
-      renderCapabilityCommands(real),
-    ]) {
-      const rows = body.split("\n").filter((l) => l.startsWith("|") && !/^\|[-|]+\|$/.test(l));
+    // One width per renderer: every row of a table — header included — splits into the same number
+    // of cells once the escaped pipes are removed. A stray `|` in a cell would make its row wider.
+    const renderers = { renderCliCommands, renderChatCommands, renderApiRoutes, renderCapabilityCommands };
+    for (const [name, render] of Object.entries(renderers)) {
+      const rows = render(real)
+        .split("\n")
+        .filter((l) => l.startsWith("|") && !/^\|[-|]+\|$/.test(l));
+      expect(rows.length, `${name}: renders table rows`).toBeGreaterThan(1);
       const widths = new Set(rows.map((r) => r.replace(/\\\|/g, "").split("|").length));
-      expect([...widths].every((w) => w === 4 || w === 5 || w === 6)).toBe(true);
+      expect([...widths], `${name}: every row has the header's column count`).toHaveLength(1);
     }
   });
 });
