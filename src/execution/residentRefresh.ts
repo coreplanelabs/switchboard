@@ -307,6 +307,18 @@ export const RESTORE_STALL_MS = 120_000;
  *  runaway wake is still the wake path's own verdict, not the watchdog's. */
 export const RESTORE_MAX_MS = 25 * 60_000;
 
+/** Where the Sandbox SDK stages a backup archive inside the container while it
+ *  downloads (`BACKUP_CONTAINER_DIR` in @cloudflare/sandbox): the restore
+ *  writes `<dir>/<backupId>.sqsh` in full FIRST and extracts into the target
+ *  only afterwards, so a restore's progress lives here during the download and
+ *  in the target during the extraction. Pinned by a test that reads the
+ *  installed SDK's constant, so an SDK bump that moves it fails the build. */
+export const SDK_BACKUP_ARCHIVE_DIR = "/var/backups";
+
+export function restoreArchivePath(backupId: string): string {
+  return `${SDK_BACKUP_ARCHIVE_DIR}/${backupId}.sqsh`;
+}
+
 export interface RestoreSample {
   atMs: number;
   /** `du -xsk <dir>` at that moment; null when du could not answer. */
