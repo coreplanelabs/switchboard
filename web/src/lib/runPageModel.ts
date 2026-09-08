@@ -15,6 +15,7 @@ import { isSpanRecord, type RunEvent } from "@core/core/runEvents.js";
 import type { LossInterval } from "@core/core/trace/partition.js";
 import type { SpanRecord } from "@core/core/trace/types.js";
 import { formatDuration } from "./format";
+import { wallNow } from "./wallClock";
 
 // The run page's view model: the ONE fold for seeded history and live frames
 // (both go through `handle`, exactly like the old inline script — a seeded
@@ -537,7 +538,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
       if (state.firstAt === null || e.at < state.firstAt) state.firstAt = e.at;
       if (state.lastAt === null || e.at >= state.lastAt) {
         state.lastAt = e.at;
-        state.lastAtWall = Date.now();
+        state.lastAtWall = wallNow();
       }
     }
     for (const change of timeline.push(event)) apply(change);

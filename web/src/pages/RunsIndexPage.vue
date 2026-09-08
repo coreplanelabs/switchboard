@@ -5,6 +5,7 @@ import RunsTabs from "../components/runs/RunsTabs.vue";
 import RunRow from "../components/runs/RunRow.vue";
 import StatusDot from "../components/StatusDot.vue";
 import { useSeed } from "../lib/seed";
+import { useWallClock } from "../lib/wallClock";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
 import { expiresAt, feedAction, LEAVING_WINDOW_MS, mergeRow, type IndexRow } from "../lib/indexRow";
@@ -27,7 +28,7 @@ const retention = retentionSentence(retentionDays);
 const rows = reactive(new Map<string, IndexRow>());
 for (const r of seed?.rows ?? []) rows.set(r.id, r);
 
-const now = ref(seed?.now ?? Date.now());
+const now = useWallClock(seed?.now);
 const conn = ref<{ tone: "green" | "amber" | "red"; text: string }>({ tone: "amber", text: "connecting…" });
 
 // Newest-first by start stamp — startedAt is immutable, so an update never
@@ -70,12 +71,8 @@ const olderThanLabel = computed(() => (seed?.olderThan !== undefined ? formatDat
 
 const makeEventSource = useEventSourceFactory();
 let es: EventSourceLike | null = null;
-let tickHandle: ReturnType<typeof setInterval> | null = null;
 
 onMounted(() => {
-  tickHandle = setInterval(() => {
-    now.value = Date.now();
-  }, 1000);
   es = makeEventSource(showAll ? "/runs?stream=1&all=1" : "/runs?stream=1");
   // A RE-connect means the backend may have restarted: rows this page holds
   // may no longer exist there, and nothing will ever send their `removed`
@@ -112,7 +109,6 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  if (tickHandle) clearInterval(tickHandle);
   es?.close();
 });
 </script>

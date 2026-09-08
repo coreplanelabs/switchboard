@@ -711,7 +711,7 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
   // exec to run under.
   if (opts?.fresh) githubTokenCache.delete(slug);
   const cached = opts?.fresh ? undefined : githubTokenCache.get(slug);
-  if (cached && Date.now() < cached.expiresAtMs - CREDENTIAL_EXPIRY_MARGIN_MS) return cached;
+  if (cached && systemClock() < cached.expiresAtMs - CREDENTIAL_EXPIRY_MARGIN_MS) return cached;
 
   const jwt = await githubAppJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
   // The installation-token API scopes by repo NAME within the installation's
@@ -754,7 +754,7 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
 /** Short-lived RS256 JWT proving we are the app (max 10 min per GitHub docs).
  *  iat is backdated 60s to absorb clock drift. */
 async function githubAppJwt(appId: string, privateKeyPem: string): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
+  const now = Math.floor(systemClock() / 1000);
   const header = strToB64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const payload = strToB64url(JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId }));
   const key = await importGithubAppKey(privateKeyPem);
@@ -1050,7 +1050,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     else {
       await this.ctx.storage.put(TEST_OVERRIDES_KEY, {
         ...overrides,
-        setAt: new Date().toISOString(),
+        setAt: new Date(systemClock()).toISOString(),
         build: BUILD_ID,
       } satisfies StoredTestOverrides);
     }
@@ -1107,7 +1107,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     const key = registryKey(resource);
     const record = await this.ctx.storage.get<ResidentRecord>(key);
     if (!record) return null;
-    const updated: ResidentRecord = { ...record, updatedAt: new Date().toISOString() };
+    const updated: ResidentRecord = { ...record, updatedAt: new Date(systemClock()).toISOString() };
     if (patch.commands !== undefined) updated.commands = patch.commands;
     if (patch.effects !== undefined) updated.effects = patch.effects;
     if (patch.defaultRef !== undefined) updated.defaultRef = patch.defaultRef;
@@ -1234,7 +1234,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  in the error. On success the observed size and rate are logged so the
    *  budgets can be revisited from evidence. */
   private async restoreWithProgress(backup: DirectoryBackup, what: string, deadlineMs: number): Promise<void> {
-    const startedMs = Date.now();
+    const startedMs = systemClock();
     const p = this.restoreBackup(backup);
     this.pendingRestores.add(p);
     void p.then(
@@ -1248,15 +1248,15 @@ export class ResidentDO extends Sandbox<Env> {
         new Promise<"tick">((r) => setTimeout(() => r("tick"), RESTORE_POLL_MS)),
       ]);
       if (outcome === "done") {
-        const ms = Date.now() - startedMs;
+        const ms = systemClock() - startedMs;
         const kiB = await this.dirKiB(backup.dir);
         const rate = kiB !== null && ms > 0 ? ` (${((kiB / 1024 / ms) * 1000).toFixed(1)} MiB/s)` : "";
         const size = kiB === null ? "? GiB (du did not answer)" : `${(kiB / 1_048_576).toFixed(2)} GiB`;
         console.log(`${what}: ${size} in ${Math.round(ms / 1000)} s${rate}`);
         return;
       }
-      samples.push({ atMs: Date.now(), kiB: await this.restoreProgressKiB(backup) });
-      const verdict = judgeRestoreProgress({ startedMs, nowMs: Date.now(), samples, deadlineMs });
+      samples.push({ atMs: systemClock(), kiB: await this.restoreProgressKiB(backup) });
+      const verdict = judgeRestoreProgress({ startedMs, nowMs: systemClock(), samples, deadlineMs });
       if (verdict.verdict !== "wait") {
         // The restore itself keeps running (its settle handlers are attached
         // above); pendingRestores keeps the next hydrate off its directory.
@@ -1344,7 +1344,7 @@ export class ResidentDO extends Sandbox<Env> {
       () => slot,
       () => slot,
     );
-    const started = Date.now();
+    const started = systemClock();
     if (waitTimeoutMs > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timedOut = await Promise.race([
@@ -1364,8 +1364,8 @@ export class ResidentDO extends Sandbox<Env> {
     } else {
       await prev.catch(() => {});
     }
-    const waitedMs = Date.now() - started;
-    this.stepTrace.getStore()?.mutexWait(waitedMs, Date.now());
+    const waitedMs = systemClock() - started;
+    this.stepTrace.getStore()?.mutexWait(waitedMs, systemClock());
     try {
       return { value: await fn(), waitedMs };
     } finally {
@@ -1467,12 +1467,12 @@ export class ResidentDO extends Sandbox<Env> {
     step: string,
     opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
   ): Promise<string> {
-    const startedAt = Date.now();
+    const startedAt = systemClock();
     const r = await this.run(argv, opts);
     // The step's own measurement, on the request's trace when one is in flight.
     this.stepTrace
       .getStore()
-      ?.record(step, { startedAt, endedAt: Date.now(), exitCode: r.exitCode, timedOut: r.timedOut });
+      ?.record(step, { startedAt, endedAt: systemClock(), exitCode: r.exitCode, timedOut: r.timedOut });
     return this.assertOk(r, step);
   }
 
@@ -1674,7 +1674,7 @@ export class ResidentDO extends Sandbox<Env> {
           "checkout backup",
         ),
       ]);
-      return { ref, sha, lockfileHash, createdAt: new Date().toISOString(), mirror, checkout };
+      return { ref, sha, lockfileHash, createdAt: new Date(systemClock()).toISOString(), mirror, checkout };
     } catch (err) {
       throw new StepError("snapshot", errMsg(err));
     }
@@ -1725,8 +1725,8 @@ export class ResidentDO extends Sandbox<Env> {
       [RESOURCE_KEY]: resource,
       [STATE_KEY]: "onboarding" satisfies ResidentState,
       [REASON_KEY]: "",
-      [UPDATED_KEY]: new Date().toISOString(),
-      [DEADLINE_AT_KEY]: Date.now() + provisioningTimeoutMs,
+      [UPDATED_KEY]: new Date(systemClock()).toISOString(),
+      [DEADLINE_AT_KEY]: systemClock() + provisioningTimeoutMs,
     });
     await this.ctx.storage.delete([FACTS_KEY, SNAPSHOT_KEY]); // defensive: no stale facts from a past life
     this.deleteSchedules(PROVISIONING_CALLBACK);
@@ -1840,7 +1840,7 @@ export class ResidentDO extends Sandbox<Env> {
         await this.deleteBackupObjects([snap.mirror.id, snap.checkout.id]).catch(() => {});
         return;
       }
-      const now = new Date().toISOString();
+      const now = new Date(systemClock()).toISOString();
       const facts: RepoFacts = { defaultRef: ref, sha, lockfileHash, provisionedAt: now, lastRefreshAt: now };
       await this.ctx.storage.put({ [FACTS_KEY]: facts, [SNAPSHOT_KEY]: snap });
       await this.writeDiskMarkers({ ready: sha, depsKey: lockfileHash, builtSha: sha });
@@ -1895,17 +1895,17 @@ export class ResidentDO extends Sandbox<Env> {
     // Fresh positive verdict for this incarnation → nothing to probe. See the
     // per-incarnation memo block for why this is safe; the refresh alarm's
     // 10-min cadence always outlives the TTL, so a cycle re-probes for real.
-    if (this.hydratedVerdictAt !== 0 && Date.now() - this.hydratedVerdictAt < this.hydrationMemoTtlMs) return;
+    if (this.hydratedVerdictAt !== 0 && systemClock() - this.hydratedVerdictAt < this.hydrationMemoTtlMs) return;
     if (this.hydration) return this.hydration;
     const p = this.doHydrate()
       .then(() => {
-        this.hydratedVerdictAt = Date.now();
+        this.hydratedVerdictAt = systemClock();
       })
       .finally(() => {
         if (this.hydration === p) this.hydration = null;
       });
     this.hydration = p;
-    this.hydrationStartedAt = Date.now();
+    this.hydrationStartedAt = systemClock();
     return p;
   }
 
@@ -1950,7 +1950,7 @@ export class ResidentDO extends Sandbox<Env> {
       return;
     }
 
-    const t0 = Date.now();
+    const t0 = systemClock();
     // A restore a previous attempt gave up on may still be writing into these
     // directories (the SDK call cannot be cancelled, #572): wait for it to
     // settle before the clean, bounded by the same cap the restores get. A
@@ -1959,12 +1959,12 @@ export class ResidentDO extends Sandbox<Env> {
     // One deadline for the whole hydrate: the wait below and both restores
     // judge against it, so the worst-case `restoring` span is RESTORE_MAX_MS,
     // under the watchdog's stale-mid-flight window — not three caps in a row.
-    const deadlineMs = Date.now() + RESTORE_MAX_MS;
+    const deadlineMs = systemClock() + RESTORE_MAX_MS;
     if (this.pendingRestores.size > 0) {
       try {
         await withTimeout(
           Promise.allSettled([...this.pendingRestores]),
-          Math.max(1, deadlineMs - Date.now()),
+          Math.max(1, deadlineMs - systemClock()),
           `${this.pendingRestores.size} earlier restore(s) still running`,
         );
       } catch (err) {
@@ -2035,7 +2035,7 @@ export class ResidentDO extends Sandbox<Env> {
     await this.writeDiskMarkers({ ready: snap.sha, depsKey: snap.lockfileHash, builtSha: snap.sha });
     await this.ctx.storage.put(FACTS_KEY, {
       ...facts,
-      lastRestore: { at: new Date().toISOString(), ms: Date.now() - t0 },
+      lastRestore: { at: new Date(systemClock()).toISOString(), ms: systemClock() - t0 },
     } satisfies RepoFacts);
     await this.setResidentState("warm");
   }
@@ -2134,7 +2134,10 @@ export class ResidentDO extends Sandbox<Env> {
         // isIdle awaited (git status per live tree) — re-read before writing.
         const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
         if (!now.idleSince)
-          await this.ctx.storage.put(FACTS_KEY, { ...now, idleSince: new Date().toISOString() } satisfies RepoFacts);
+          await this.ctx.storage.put(FACTS_KEY, {
+            ...now,
+            idleSince: new Date(systemClock()).toISOString(),
+          } satisfies RepoFacts);
         this.rearmOutcome = "idle";
         return; // finally re-arms at IDLE_REFRESH_INTERVAL_S
       }
@@ -2214,7 +2217,7 @@ export class ResidentDO extends Sandbox<Env> {
       let snap: SnapshotRecord | null = null;
       let previous: SnapshotRecord | undefined;
       if (plan.action !== "unchanged") {
-        const t0 = Date.now();
+        const t0 = systemClock();
         console.log(`refresh: ${facts.sha.slice(0, 8)} → ${sha.slice(0, 8)}: ${plan.action} (${plan.why})`);
         // Serialize the CHECKOUT_DIR mutation on the mirror mutex (FIX 2):
         // materializeThreadDeps reads CHECKOUT_DIR via `cp -al` under the same
@@ -2294,12 +2297,17 @@ export class ResidentDO extends Sandbox<Env> {
           previous = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
           snap = await this.takeSnapshot(resource, facts.defaultRef, sha, lockfileHash);
         });
-        console.log(`refresh: ${sha.slice(0, 8)} ${plan.action} done in ${Date.now() - t0}ms`);
+        console.log(`refresh: ${sha.slice(0, 8)} ${plan.action} done in ${systemClock() - t0}ms`);
       }
 
       // Facts and snapshot move together so the stamp check never sees a
       // half-updated pair.
-      const updatedFacts: RepoFacts = { ...facts, sha, lockfileHash, lastRefreshAt: new Date().toISOString() };
+      const updatedFacts: RepoFacts = {
+        ...facts,
+        sha,
+        lockfileHash,
+        lastRefreshAt: new Date(systemClock()).toISOString(),
+      };
       // Clear a PRIOR cycle's error; keep THIS cycle's mint error visible (#171).
       delete updatedFacts.lastRefreshError;
       if (mintError) updatedFacts.lastRefreshError = mintError;
@@ -2403,7 +2411,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  needs the container — if it is already asleep there is nothing to lose. */
   private async isIdle(): Promise<boolean> {
     const live = await this.liveBindings();
-    const recent = Date.now() - IDLE_AFTER_S * 1000;
+    const recent = systemClock() - IDLE_AFTER_S * 1000;
     if (live.some((b) => Date.parse(b.lastAttachAt) >= recent)) return false;
     if (this.inFlightCount() > 0) return false;
     return this.liveTreesClean(live);
@@ -2460,7 +2468,7 @@ export class ResidentDO extends Sandbox<Env> {
   private async recoverFromDiskFull(reason: string, selfInFlight: number): Promise<void> {
     const lastRecycleAt = await this.ctx.storage.get<number>(DISK_FULL_RECYCLE_KEY);
     const plan = planDiskFullRecovery({
-      now: Date.now(),
+      now: systemClock(),
       lastRecycleAt,
       inFlight: this.inFlightCount() - selfInFlight,
       treesClean: await this.liveTreesClean(await this.liveBindings()),
@@ -2473,7 +2481,7 @@ export class ResidentDO extends Sandbox<Env> {
     console.log(
       `disk-full: recycling the container — the next alarm restores mirror + checkout from R2 onto an empty disk (${reason})`,
     );
-    await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, Date.now());
+    await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, systemClock());
     await this.recordRefreshError(`${reason} — container recycled; restoring from R2 on the next alarm`);
     this.clearIncarnationMemos(); // deliberate incarnation swap
     await this.stop().catch((err) => console.log(`disk-full: stop failed: ${errMsg(err)}`));
@@ -2518,7 +2526,12 @@ export class ResidentDO extends Sandbox<Env> {
       homes: [BUILD_USER, ...THREAD_USERS].map((user) => ({ user, dir: `/home/${user}` })),
     };
     const du = await this.run(duArgv(layout), { timeoutMs: DU_TIMEOUT_MS });
-    const sample = assembleDiskSample({ at: new Date().toISOString(), df, du: parseDu(du.stdout), layout });
+    const sample = assembleDiskSample({
+      at: new Date(systemClock()).toISOString(),
+      df,
+      du: parseDu(du.stdout),
+      layout,
+    });
     await this.ctx.storage.put(DISK_KEY, sample);
     // Item 57: the store's cache upkeep rides on every measurement (the same
     // cadence as the gauge; never on an attach's hot path).
@@ -2633,7 +2646,7 @@ export class ResidentDO extends Sandbox<Env> {
         isDefaultRef: b.ref === input.facts.defaultRef,
         sizeKiB: sample.parts.threads[b.threadKey] ?? null,
       }));
-      const ordered = orderEvictionCandidates({ candidates, now: Date.now(), requestingThreadKey: input.threadKey });
+      const ordered = orderEvictionCandidates({ candidates, now: systemClock(), requestingThreadKey: input.threadKey });
       kept.push(...ordered.kept.map((k) => ({ threadKey: k.threadKey, why: k.why })));
       for (const c of ordered.order) {
         if (verdict.fits) break;
@@ -2695,7 +2708,7 @@ export class ResidentDO extends Sandbox<Env> {
   private async refreshIfStale(resource: string): Promise<void> {
     const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
     if (!facts) return;
-    const age = Date.now() - Date.parse(facts.lastRefreshAt);
+    const age = systemClock() - Date.parse(facts.lastRefreshAt);
     if (!facts.idleSince && age < REFRESH_INTERVAL_S * 1000) return;
     let token: string | null = null;
     if (githubAppConfigured(this.env)) {
@@ -2789,7 +2802,7 @@ export class ResidentDO extends Sandbox<Env> {
     const status = await this.getStatus();
     if (status.state === "onboarding") {
       const deadlineAt = await this.ctx.storage.get<number>(DEADLINE_AT_KEY);
-      if (deadlineAt !== undefined && Date.now() > deadlineAt + 30_000) {
+      if (deadlineAt !== undefined && systemClock() > deadlineAt + 30_000) {
         const reason = "provision-timeout: onboarding stuck past its budget (watchdog)";
         await this.provisionTimedOut(reason);
         return { resource, state: "down", reason, action: "provision-timed-out" };
@@ -2840,7 +2853,7 @@ export class ResidentDO extends Sandbox<Env> {
       // due further out than the current interval (+ slack) as stale and
       // replace it, so a deploy that shortens the cadence applies within one
       // watchdog pass rather than after the old delay elapses.
-      const nowS = Math.floor(Date.now() / 1000);
+      const nowS = Math.floor(systemClock() / 1000);
       const drifted = pendingSweeps.some((row) => (row.time ?? 0) - nowS > SWEEP_INTERVAL_S + SWEEP_DRIFT_SLACK_S);
       // Re-check the guard: listSchedules yielded, and a sweep that started
       // meanwhile owns the row its own `finally` is about to arm.
@@ -2868,13 +2881,14 @@ export class ResidentDO extends Sandbox<Env> {
       // otherwise hold `this.hydration` non-null forever — making a stuck
       // `restoring` permanently invisible to this branch. No legitimate
       // restore approaches STALE_MIDFLIGHT_MS (a full R2 restore is ~1 min).
-      const hydrationLive = this.hydration !== null && Date.now() - this.hydrationStartedAt <= STALE_MIDFLIGHT_MS;
+      const hydrationLive = this.hydration !== null && systemClock() - this.hydrationStartedAt <= STALE_MIDFLIGHT_MS;
       const inFlight = this.refreshesInFlight > 0 || hydrationLive;
-      if (!inFlight && Date.now() - updatedAt > STALE_MIDFLIGHT_MS) {
+      if (!inFlight && systemClock() - updatedAt > STALE_MIDFLIGHT_MS) {
         // The reads above yielded; a cycle that started meanwhile owns the
         // state now — leave it alone rather than stamp `degraded` over it.
         const again = await this.getStatus();
-        const hydrationStillDead = this.hydration === null || Date.now() - this.hydrationStartedAt > STALE_MIDFLIGHT_MS;
+        const hydrationStillDead =
+          this.hydration === null || systemClock() - this.hydrationStartedAt > STALE_MIDFLIGHT_MS;
         if (again.state !== status.state || this.refreshesInFlight > 0 || !hydrationStillDead) {
           return { resource, ...again, action: "none" };
         }
@@ -3011,7 +3025,7 @@ export class ResidentDO extends Sandbox<Env> {
         status: 429,
       };
     }
-    const now = new Date().toISOString();
+    const now = new Date(systemClock()).toISOString();
     const binding: ThreadBinding = {
       threadKey,
       ref: existing?.ref ?? ref, // sticky across eviction (KTD6)
@@ -3042,7 +3056,7 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<AttachOk | ThreadErr> {
     // One step trace per attach (features/tracing.md item 19): every command
     // the attach runs lands on it, and the answer carries it.
-    const t0 = Date.now();
+    const t0 = systemClock();
     const trace = createStepTrace(t0);
     const res = await this.stepTrace.run(trace, () =>
       this.attachThreadTraced(threadKey, refHint, readonly, wantSha, record, t0),
@@ -3316,7 +3330,7 @@ export class ResidentDO extends Sandbox<Env> {
     const { credentialsWrittenAt: _prior, tokenExpiresAtMs: _priorExp, ...bindingSansCred } = binding;
     await this.ctx.storage.put(threadBindingKey(threadKey), {
       ...bindingSansCred,
-      lastAttachAt: new Date().toISOString(),
+      lastAttachAt: new Date(systemClock()).toISOString(),
       deps: deps.deps,
       // A reused tree keeps the key it was linked from (spread above).
       ...(deps.depsKey ? { depsKey: deps.depsKey } : {}),
@@ -3346,7 +3360,7 @@ export class ResidentDO extends Sandbox<Env> {
       ...(credentialsError ? { credentialsError } : {}),
       readonly: mode.readonly,
       mutexWaitMs: locked.waitedMs,
-      attachMs: Date.now() - t0,
+      attachMs: systemClock() - t0,
       trace: this.currentSteps(),
     };
   }
@@ -3580,7 +3594,7 @@ export class ResidentDO extends Sandbox<Env> {
     const attempt = crypto.randomUUID().slice(0, 8);
     const scratch = depsScratchPath(attempt);
     const staging = depsStagingPath(key, attempt);
-    const t0 = Date.now();
+    const t0 = systemClock();
     try {
       await this.ensureDepsStoreDir();
       console.log(`deps: installing ${key.slice(0, 8)} at ${sha.slice(0, 8)} in ${scratch}`);
@@ -3650,7 +3664,7 @@ export class ResidentDO extends Sandbox<Env> {
         "deps-commit",
         { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
       );
-      console.log(`deps: installed ${key.slice(0, 8)} in ${Date.now() - t0}ms`);
+      console.log(`deps: installed ${key.slice(0, 8)} in ${systemClock() - t0}ms`);
       return depsEntryPath(key);
     } catch (err) {
       await this.run(["rm", "-rf", scratch, staging]).catch(() => {});
@@ -3818,7 +3832,7 @@ export class ResidentDO extends Sandbox<Env> {
       "thread-cred",
       DEFAULT_EXEC_TIMEOUT_MS,
     );
-    return Date.now();
+    return systemClock();
   }
 
   /** Per-exec credential refresh (KTD12): the attach-time token lives one
@@ -3840,7 +3854,7 @@ export class ResidentDO extends Sandbox<Env> {
     const decision = shouldRefreshThreadCredentials({
       writtenAtMs: binding.credentialsWrittenAt ?? null,
       tokenExpiresAtMs: binding.tokenExpiresAtMs ?? null,
-      nowMs: Date.now(),
+      nowMs: systemClock(),
       fileBytes: fileBytes === null || Number.isNaN(fileBytes) ? null : fileBytes,
       readonly: binding.readonly ?? false,
     });
@@ -3954,7 +3968,7 @@ export class ResidentDO extends Sandbox<Env> {
     const refreshed = await this.refreshThreadCredentialsIfDue(binding);
     await this.ctx.storage.put(threadBindingKey(threadKey), {
       ...binding,
-      lastAttachAt: new Date().toISOString(), // exec counts as activity for the sweep
+      lastAttachAt: new Date(systemClock()).toISOString(), // exec counts as activity for the sweep
       // A refresh re-mints and rewrites: persist both the new write time and the
       // new token expiry (#528) so the next exec's decision keys on this token.
       ...(refreshed
@@ -4109,7 +4123,7 @@ export class ResidentDO extends Sandbox<Env> {
       ...now,
       user: "",
       evicted: true,
-      evictedAt: new Date().toISOString(),
+      evictedAt: new Date(systemClock()).toISOString(),
       evictedWhy: why,
     } satisfies ThreadBinding);
     return true;
@@ -4206,10 +4220,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  client that has usually already hung up). Returns the count still in
    *  flight when the bound expires (0 = drained). */
   private async waitForThreadDrain(threadKey: string): Promise<number> {
-    const deadline = Date.now() + FORCE_DETACH_DRAIN_MS;
+    const deadline = systemClock() + FORCE_DETACH_DRAIN_MS;
     for (;;) {
       const left = this.threadOpsInFlight.get(threadKey) ?? 0;
-      if (left === 0 || Date.now() >= deadline) return left;
+      if (left === 0 || systemClock() >= deadline) return left;
       await new Promise((r) => setTimeout(r, FORCE_DETACH_DRAIN_POLL_MS));
     }
   }
@@ -4273,10 +4287,10 @@ export class ResidentDO extends Sandbox<Env> {
         .getRecord(resource)
         .catch(() => null);
       const ttlDays = record?.worktreeTtlDays ?? WORKTREE_TTL_DAYS_DEFAULT;
-      const cutoff = Date.now() - ttlDays * 86_400_000;
+      const cutoff = systemClock() - ttlDays * 86_400_000;
       const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
       const active = await this.isRuntimeActive().catch(() => false);
-      const idleCutoff = Date.now() - CLEAN_IDLE_RELEASE_S * 1000;
+      const idleCutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
       for (const binding of all.values()) {
         if (binding.evicted || !binding.user) continue;
         const last = Date.parse(binding.lastAttachAt);
@@ -4365,7 +4379,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  key differs. No snapshot is ever written here (KTD3). */
   async runOp(op: "test" | "build", refArg: string | null, traceparent?: string): Promise<OpRunOk | ThreadErr> {
     // One step trace per op (features/tracing.md item 19), like an attach.
-    const t0 = Date.now();
+    const t0 = systemClock();
     const trace = createStepTrace(t0);
     const res = await this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0));
     emitStepRoot("resident.op", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok", {
@@ -4445,18 +4459,21 @@ export class ResidentDO extends Sandbox<Env> {
         record.commands.install,
       );
 
-      const commandStartedAt = Date.now();
+      const commandStartedAt = systemClock();
       const r = await this.threadRunCapped(user, checkout, command, OP_EXEC_TIMEOUT_MS, EXEC_OUTPUT_CAP);
       // The command itself is the op's step, named for the op (`test`, `build`).
-      this.stepTrace
-        .getStore()
-        ?.record(op, { startedAt: commandStartedAt, endedAt: Date.now(), exitCode: r.exitCode, timedOut: r.timedOut });
+      this.stepTrace.getStore()?.record(op, {
+        startedAt: commandStartedAt,
+        endedAt: systemClock(),
+        exitCode: r.exitCode,
+        timedOut: r.timedOut,
+      });
       const ok = r.exitCode === 0 && !r.timedOut;
       const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP;
       const notes: string[] = [];
       if (r.timedOut) notes.push(`command timed out after ${OP_EXEC_TIMEOUT_MS}ms`);
       if (truncated) notes.push(`output truncated to ${EXEC_OUTPUT_CAP} chars per stream`);
-      const durationMs = Date.now() - t0;
+      const durationMs = systemClock() - t0;
       const sha8 = locked.value.sha.slice(0, 8);
       const exitCode = r.timedOut ? 124 : r.exitCode;
       return {
@@ -4522,7 +4539,7 @@ export class ResidentDO extends Sandbox<Env> {
   async debugBackdateThread(threadKey: string, days: number): Promise<{ ok: boolean; lastAttachAt?: string }> {
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!binding) return { ok: false };
-    const lastAttachAt = new Date(Date.now() - days * 86_400_000).toISOString();
+    const lastAttachAt = new Date(systemClock() - days * 86_400_000).toISOString();
     await this.ctx.storage.put(threadBindingKey(threadKey), { ...binding, lastAttachAt } satisfies ThreadBinding);
     return { ok: true, lastAttachAt };
   }
@@ -4717,7 +4734,7 @@ export class ResidentDO extends Sandbox<Env> {
     await this.ctx.storage.put({
       [STATE_KEY]: state,
       [REASON_KEY]: residentText(reason),
-      [UPDATED_KEY]: new Date().toISOString(),
+      [UPDATED_KEY]: new Date(systemClock()).toISOString(),
     });
   }
 
@@ -5397,7 +5414,7 @@ export default {
       );
       return;
     }
-    const firedAt = controller.scheduledTime || Date.now();
+    const firedAt = controller.scheduledTime || systemClock();
     let firing: ScheduleFiring;
     try {
       const summary = await runWatchdog(env);
@@ -5460,7 +5477,7 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
       "clones/fetches will be anonymous — public repos only, and thread credentials stay unavailable";
   }
 
-  const now = new Date().toISOString();
+  const now = new Date(systemClock()).toISOString();
   const record: ResidentRecord = {
     resource: resource.resource,
     commands: commands.commands,
@@ -5490,7 +5507,7 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     // 429, itemizing why each resident was ineligible, so the admin can
     // offboard by hand with the facts in front of them.
     const { floorS } = await registry.limits(); // the compiled floor, or an active test override (item 50)
-    const pick = pickEvictionCandidate(await collectResidentViews(env), Date.now(), floorS * 1000);
+    const pick = pickEvictionCandidate(await collectResidentViews(env), systemClock(), floorS * 1000);
     if (!pick.candidate) {
       return json({ error: `${result.error}; evictColdest found no eligible resident`, rejected: pick.rejected }, 429);
     }

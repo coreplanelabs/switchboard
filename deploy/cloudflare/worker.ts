@@ -274,7 +274,7 @@ export default {
       return;
     }
 
-    const firedAt = controller.scheduledTime || Date.now();
+    const firedAt = controller.scheduledTime || systemClock();
     const plan = planScheduledFiring(schedule, env.SWITCHBOARD_INGRESS_TOKENS, firedAt);
     if (!plan.ok) {
       console.error(`[schedule] ${schedule.name}: not armed — ${plan.reason}; nothing ran`);

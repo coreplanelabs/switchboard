@@ -1,3 +1,4 @@
+import { systemClock } from "./trace/clock.js";
 // Spend report: what a group of deployed pieces ("switchboard" = the bot
 // Worker + its containers, the resident/sandbox/memory Workers) costs per day,
 // assembled from the providers' own billing datasets and priced at list.
@@ -285,7 +286,7 @@ const DEFAULT_DAYS = 30;
 const MAX_DAYS = 90;
 
 /** `?days=N` → a UTC date range ending today. Garbage → default; clamped 1..90. */
-export function resolveRange(daysParam: string | null, now: Date = new Date()): DateRange {
+export function resolveRange(daysParam: string | null, now: Date = new Date(systemClock())): DateRange {
   const parsed = daysParam === null ? NaN : Number(daysParam);
   const days = Number.isInteger(parsed) ? Math.min(MAX_DAYS, Math.max(1, parsed)) : DEFAULT_DAYS;
   const to = now.toISOString().slice(0, 10);
@@ -453,7 +454,7 @@ export function createCostsService(
   cfg: CostsConfig,
   cloudflare: CloudflareUsageSource,
   llm: LlmCostSource,
-  now: () => Date = () => new Date(),
+  now: () => Date = () => new Date(systemClock()),
 ): CostsService {
   return {
     groups: () => Object.keys(cfg.groups),

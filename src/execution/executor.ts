@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { BASH_TIMEOUT_MS, bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
 import type { Span } from "../core/trace/types.js";
+import { systemClock } from "../core/trace/clock.js";
 
 // The timeout policy (default/floor/ceiling + clamp) lives in bashTimeout.ts
 // so the deploy Workers can bundle it; re-exported here for the many callers
@@ -283,7 +284,7 @@ function runBash(
   timedOut: boolean;
   error: { code?: number | string; message: string } | null;
 }> {
-  const started = Date.now();
+  const started = systemClock();
   return new Promise((res) => {
     execFile(
       "bash",
@@ -303,7 +304,7 @@ function runBash(
             e.signal != null &&
             e.code == null &&
             !(signal?.aborted ?? false) &&
-            Date.now() - started >= timeoutMs,
+            systemClock() - started >= timeoutMs,
           error: e ? { code: e.code, message: e.message } : null,
         });
       },

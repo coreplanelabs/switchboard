@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 import { redactAndCap } from "../core/redact.js";
 import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
+import { systemClock } from "../core/trace/clock.js";
 
 // GitHub App authentication: the idiomatic org-owned bot identity.
 // No machine user, no seat, no long-lived PAT. The bot holds the app's
@@ -152,7 +153,7 @@ async function mintInstallationToken(scope: GithubTokenScope): Promise<string> {
   // Reuse only while the token outlives the longest possible command; the
   // executors call this per command, so no run is ever pinned to one token.
   const cached = cache.get(scope);
-  if (cached && Date.now() < cached.expiresAtMs - TOKEN_REUSE_MARGIN_MS) return cached.token;
+  if (cached && systemClock() < cached.expiresAtMs - TOKEN_REUSE_MARGIN_MS) return cached.token;
 
   const appId = process.env.GITHUB_APP_ID!;
   const installationId = process.env.GITHUB_APP_INSTALLATION_ID!;
@@ -184,7 +185,7 @@ async function mintInstallationToken(scope: GithubTokenScope): Promise<string> {
 
 /** Short-lived RS256 JWT proving we are the app (max 10 min per GitHub docs). */
 function appJwt(appId: string, privateKey: string): string {
-  const now = Math.floor(Date.now() / 1000);
+  const now = Math.floor(systemClock() / 1000);
   const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   // iat backdated 60s to absorb clock drift
   const payload = b64url(JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId }));
