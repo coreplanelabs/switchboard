@@ -3,6 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../config.js";
+import { recordingSink } from "./testing/recordingSink.js";
+import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "./trace/internalHosts.js";
+import { parseTraceparent } from "./trace/traceparent.js";
+import { createTracer } from "./trace/tracer.js";
 import {
   makeResidentAdminClient,
   parseSlug,
@@ -189,5 +193,53 @@ describe("makeResidentAdminClient sanitizes resident text at the parse (item 62)
     expect(String(residents[0].live.reason)).not.toContain("\x1b");
     expect(residents[0].live.state).toBe("degraded");
     expect(String(residents[1].live.error)).not.toContain("ghp_");
+  });
+});
+
+// features/tracing.md item 24: a command binds the admin client to its span;
+// every call the view makes is an `http.client` child with the route literal.
+describe("makeResidentAdminClient trace context", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    configureInternalHosts(NO_INTERNAL_HOSTS);
+  });
+
+  it("a view's calls are http.client children of the span with the route literal (never the status query), method and status, no bearer; traceparent rides for the configured host; the unbound client is a plain fetch", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(JSON.stringify({ state: "warm" }), { status: 200 });
+      }),
+    );
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
+    const cmd = root.start("run.command");
+    configureInternalHosts(internalHostsOf(["https://resident.example"]));
+    const client = makeResidentAdminClient("https://resident.example/", "admin-tok");
+    const view = client.withSpan!(cmd);
+    await view.status("repo:acme/api");
+    await view.rebuild("repo:acme/api", true);
+    const spans = log.ends.filter((e) => e.name === "http.client");
+    expect(spans.map((s) => [s.parentSpanId, s.attrs])).toEqual([
+      [cmd.id, { host: "resident.example", route: "/status", method: "GET", httpStatus: 200 }],
+      [cmd.id, { host: "resident.example", route: "/rebuild", method: "POST", httpStatus: 200 }],
+    ]);
+    expect(JSON.stringify(spans)).not.toMatch(/admin-tok|resource=|acme/);
+    expect(calls.map((c) => new URL(c.url).pathname + new URL(c.url).search)).toEqual([
+      "/status?resource=repo%3Aacme%2Fapi",
+      "/rebuild",
+    ]);
+    for (const [i, c] of calls.entries()) {
+      const h = new Headers(c.init.headers);
+      expect(parseTraceparent(h.get("traceparent"))?.parentId).toBe(spans[i]!.spanId);
+      expect(h.get("authorization")).toBe("Bearer admin-tok");
+    }
+    // The unbound client: the same request, no span, no trace context.
+    await client.residents();
+    expect(log.ends.filter((e) => e.name === "http.client")).toHaveLength(2);
+    expect((calls[2]!.init.headers as Record<string, string>).authorization).toBe("Bearer admin-tok");
+    expect(new Headers(calls[2]!.init.headers).has("traceparent")).toBe(false);
   });
 });

@@ -1,4 +1,6 @@
 import type { MemoryCandidate, MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
+import { tracedFetch } from "../trace/tracedFetch.js";
+import type { Span, TraceOptions } from "../trace/types.js";
 
 // The durable MemoryStore (PR3, #85): an HTTPS client to the Memory Worker
 // (deploy/cloudflare-memory/ — one SQLite-backed Durable Object per scopeKey,
@@ -38,6 +40,9 @@ export interface WorkerMemoryStoreOptions {
   onWarn?: (message: string) => void;
 }
 
+/** The Worker's routes, as a span names them. */
+type MemoryRoute = "/retrieve" | "/write" | "/list" | "/forget";
+
 export class WorkerMemoryStore implements MemoryStore {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -52,13 +57,13 @@ export class WorkerMemoryStore implements MemoryStore {
   /** Memory is advisory context: any failure here (HTTP error, bad body,
    *  transport, timeout) degrades to "nothing remembered" with a warning — it
    *  must never fail or delay the run beyond the timeout. */
-  async retrieve(q: MemoryQuery): Promise<MemoryRecord[]> {
+  async retrieve(q: MemoryQuery, trace?: TraceOptions): Promise<MemoryRecord[]> {
     // Clamp the query under the Worker's cap so no caller can 400 this retrieve
     // into a "no memory" degrade (see MAX_RETRIEVE_QUERY_CHARS).
     const query = q.query.length > MAX_RETRIEVE_QUERY_CHARS ? q.query.slice(0, MAX_RETRIEVE_QUERY_CHARS) : q.query;
     let res: Response;
     try {
-      res = await this.post("/retrieve", { ...q, query });
+      res = await this.post("/retrieve", { ...q, query }, trace?.span);
     } catch (err) {
       this.warn(
         `worker /retrieve failed (${err instanceof Error ? err.message : String(err)}); continuing without memory`,
@@ -113,13 +118,21 @@ export class WorkerMemoryStore implements MemoryStore {
     return data.forgotten === true;
   }
 
-  private post(path: string, body: unknown): Promise<Response> {
-    return this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(MEMORY_WORKER_TIMEOUT_MS),
-    });
+  /** One `http.client` span under `span` when the caller has one (the
+   *  dispatcher's `dispatch.memory_read`; features/tracing.md item 24), the
+   *  route being the path literal; the plain fetch otherwise. */
+  private post(path: MemoryRoute, body: unknown, span?: Span): Promise<Response> {
+    return tracedFetch(
+      span,
+      `${this.baseUrl}${path}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(MEMORY_WORKER_TIMEOUT_MS),
+      },
+      { route: path, fetchImpl: this.fetchImpl },
+    );
   }
 }
 

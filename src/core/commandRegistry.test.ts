@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { createTracer } from "./trace/tracer.js";
 import {
   CommandError,
   CommandRegistry,
   UNTRUSTED_CLOSE,
   UNTRUSTED_OPEN,
   UNTRUSTED_PREAMBLE,
+  bindCommands,
   commandDefiner,
   defineCommand,
   flag,
@@ -811,5 +813,29 @@ describe("settle — the deferred outcome of an accepted command (resident-repos
     reg.register(throwing);
     expect(await reg.settle("demo.unsettled", {}, caller, { hits: [] })).toBeUndefined();
     expect(logged).toEqual([["demo.unsettled", "poll exploded"]]);
+  });
+});
+
+describe("CommandRegistry.invoke — the caller's span (features/tracing.md item 24)", () => {
+  it("the handler's context carries the span invoke was given and has no `span` key without one; bindCommands forwards it", async () => {
+    const seen: unknown[] = [];
+    const registry = new CommandRegistry<Deps>({ audit: () => {} });
+    registry.register(
+      define({
+        id: "demo.span",
+        action: "runs:read",
+        effect: "read",
+        describe: "records its context's span",
+        handler: async (ctx) => {
+          seen.push("span" in ctx ? ctx.span : "absent");
+          return { ok: true };
+        },
+      }),
+    );
+    const span = createTracer({ clock: () => 1 }).start("run.command", { sinks: [] });
+    await registry.invoke("demo.span", {}, cli, { hits: [] }, { span });
+    await registry.invoke("demo.span", {}, cli, { hits: [] });
+    await bindCommands(registry, { hits: [] }).invoke("demo.span", {}, cli, { span });
+    expect(seen).toEqual([span, "absent", span]);
   });
 });

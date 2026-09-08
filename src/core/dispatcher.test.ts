@@ -102,9 +102,9 @@ function wireCommands(deps: TestDeps): { invoked: string[] } {
   const invoked = deps.invoked;
   deps.commands = {
     ...bound,
-    invoke: (id, raw, caller) => {
+    invoke: (id, raw, caller, trace) => {
       invoked.push(id);
-      return bound.invoke(id, raw, caller);
+      return bound.invoke(id, raw, caller, trace);
     },
   };
   return { invoked };
@@ -1134,6 +1134,19 @@ describe("repo management commands (U8)", () => {
     expect(replies).toEqual(["*Resident repos* (1/8):\n• `jshttp/vary` — *warm* · ref `master`"]);
     expect(invoked).toEqual(["repo.list"]);
     expect(provider.requests).toHaveLength(0);
+  });
+
+  it("repo list binds the admin client to the command's run.command span through withSpan (features/tracing.md item 24)", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    const base = mockAdmin();
+    const bound: string[] = [];
+    deps.residentAdmin = { ...base, withSpan: (span) => (bound.push(span.name), base) };
+    wireCommands(deps);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("repo list", "slack:UX"), io);
+    expect(replies).toHaveLength(1);
+    expect(bound).toEqual(["run.command"]);
+    expect(base.residents).toHaveBeenCalledTimes(1);
   });
 
   it("non-admin `repo onboard` → refusal naming admins; no model call, no resident call", async () => {

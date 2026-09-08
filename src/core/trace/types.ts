@@ -57,6 +57,14 @@ export interface SpanOptions {
   startedAt?: number;
 }
 
+/** The one trailing argument a client method takes to join a trace: the
+ *  caller's span, under which the client's outbound call becomes an
+ *  `http.client` span (features/tracing.md item 24). Absent, the call is the
+ *  plain fetch it was. */
+export interface TraceOptions {
+  span?: Span;
+}
+
 export interface Span {
   readonly id: string;
   readonly traceId: string;

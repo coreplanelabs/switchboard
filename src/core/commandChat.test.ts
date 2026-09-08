@@ -1,9 +1,10 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ConfigStore } from "../config.js";
+import { createTracer } from "./trace/tracer.js";
 import { CommandError, CommandRegistry, bindCommands, commandDefiner, type CommandDef } from "./commandRegistry.js";
 import {
   handleChatCommand,
@@ -574,5 +575,18 @@ describe("runs list on chat (KTD18)", () => {
       id: "runs.stop",
       input: { args: ["live0001"], options: { mode: "soft" } },
     });
+  });
+});
+
+describe("invokeChatCommand — the dispatcher's span (features/tracing.md item 24)", () => {
+  it("forwards the run.command span to the registry's invoke, and nothing without one", async () => {
+    const commands = bindCommands(demoRegistry(), { hits: [] });
+    const spy = vi.spyOn(commands, "invoke");
+    const config = configStore(ADMIN_YAML);
+    const span = createTracer({ clock: () => 1 }).start("run.command", { sinks: [] });
+    const parsed = parseChatCommand("demo echo --status all", commands)!;
+    await invokeChatCommand({ commands, parsed, msg: msg("demo echo --status all", "slack:UADMIN"), config, span });
+    await invokeChatCommand({ commands, parsed, msg: msg("demo echo --status all", "slack:UADMIN"), config });
+    expect(spy.mock.calls.map((c) => c[3])).toEqual([{ span }, undefined]);
   });
 });

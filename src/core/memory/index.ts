@@ -2,6 +2,7 @@ import { parseModelRef, type Provider } from "../../providers/types.js";
 import type { Actor, ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryConfig, MemoryStore } from "./types.js";
+import type { Span } from "../trace/types.js";
 import { applyBudget, DEFAULT_MEMORY_LIMIT, DEFAULT_MEMORY_TOKENS, renderMemoryBlock, scoreRecord } from "./scorer.js";
 import { listScopeKeys, requestScopeKeys } from "./scope.js";
 import { selectMemoryStore } from "./stores.js";
@@ -156,8 +157,12 @@ export async function memoryContextBlock(
   query: string,
   userId?: string,
   scopes: MemoryScopeInputs = {},
+  /** The caller's span — the dispatcher's `dispatch.memory_read` — under which
+   *  every scope's retrieve becomes an `http.client` span (features/tracing.md item 24). */
+  span?: Span,
 ): Promise<string | undefined> {
   const store = selectMemoryStore(cfg, injected);
+  const trace = span ? { span } : undefined;
   const limit = cfg?.limit ?? DEFAULT_MEMORY_LIMIT;
   // Org/channel/user are known up front and fetched immediately; the repo may
   // still be resolving (the dispatcher starts this read before its GitHub
@@ -166,11 +171,11 @@ export async function memoryContextBlock(
   // here it just means no repo scope.
   const immediate = requestScopeKeys(organization, userId, { channelId: scopes.channelId });
   const immediateKeys = listScopeKeys(immediate);
-  const immediateP = Promise.all(immediateKeys.map((scopeKey) => store.retrieve({ scopeKey, query, limit })));
+  const immediateP = Promise.all(immediateKeys.map((scopeKey) => store.retrieve({ scopeKey, query, limit }, trace)));
   const repo = await Promise.resolve(scopes.repo).catch(() => undefined);
   const keys = requestScopeKeys(organization, userId, { channelId: scopes.channelId, repo });
   const scopeKeys = listScopeKeys(keys);
-  const repoRecords = keys.repo ? await store.retrieve({ scopeKey: keys.repo, query, limit }) : [];
+  const repoRecords = keys.repo ? await store.retrieve({ scopeKey: keys.repo, query, limit }, trace) : [];
   const perScope = [...(await immediateP), repoRecords];
   // Each store call returns its scope's top `limit`, already ranked; re-scoring
   // the union with the same pure scorer gives one cross-scope order so the
