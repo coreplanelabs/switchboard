@@ -272,7 +272,9 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(spy.calls).toHaveLength(0); // no description → nothing to render, the PR body is left alone
     expect(note).toContain("PR updated by the push: https://github.com/acme/api/pull/700");
     expect(note).toContain(HEAD.slice(0, 7));
-    expect(note).toContain("no PR description was submitted");
+    expect(note).toContain("⚠️"); // a defect of the run, not an accepted outcome (agent-coding.md item 3)
+    expect(note).toContain("description was not resubmitted");
+    expect(note).toContain("earlier state of its branch");
     expect(note).not.toContain("/compare/");
     expect(note).not.toContain("No PR was opened");
     expect(events).toEqual([

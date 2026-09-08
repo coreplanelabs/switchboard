@@ -318,6 +318,22 @@ describe("coding prompts: the PR-description content contract (submitted object)
       expect(sys).toMatch(/never fabricate validation/i); // real results only
     }
   });
+
+  // A follow-up that pushes to a PR that already exists — dependabot's, a
+  // person's, an earlier run's — re-reads the PR's description and resubmits
+  // it on every push. "Someone else's PR" is not a reason to leave a
+  // description that no longer matches its branch.
+  it("both prompts require re-reading and resubmitting the description after every push to an existing PR, whoever opened it", () => {
+    for (const sys of [AGENTS.coding.system, AGENTS.coding.residentSystem!]) {
+      expect(sys).toMatch(/already exists when you push/i);
+      expect(sys).toMatch(/dependabot/i); // the author never exempts the PR
+      expect(sys).toMatch(/after EVERY push/i);
+      expect(sys).toContain("github_issue_get"); // how to read the current title/body without gh (resident)
+      expect(sys).toMatch(/current title and body/i);
+      expect(sys).toMatch(/earlier state of its branch is a bug/i);
+      expect(sys).toMatch(/someone else's PR/i);
+    }
+  });
 });
 
 // Feature: docs/reference/specs/agent-ship.md item 1 — `agent:ship` resolves through the

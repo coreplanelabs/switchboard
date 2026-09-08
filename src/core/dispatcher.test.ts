@@ -3163,6 +3163,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(note).toBeDefined();
     expect(note).toContain("PR updated by the push");
     expect(note).toContain(HEAD.slice(0, 7));
+    expect(note).toContain("description was not resubmitted"); // the missing resubmit is flagged, not accepted
     expect(note).not.toContain("No PR was opened");
     expect(note).not.toContain("/compare/");
     // In the snapshot ⇒ published before finish() (a publish on a finished run is a silent no-op).
