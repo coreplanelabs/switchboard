@@ -14,8 +14,15 @@
 // rejected — see the drain in `src/index.ts`.
 
 /** How long the drain waits for in-flight work after SIGTERM before exiting —
- *  the grace Cloudflare's rollout allows before SIGKILL. */
+ *  the grace Cloudflare's rollout allows before SIGKILL. With the run ledger on,
+ *  the runs a resume can continue are handed off instead of waited for
+ *  (features/run-history.md item 39); this is the wait for the rest. */
 export const DRAIN_DEADLINE_MS = 15 * 60_000;
+
+/** The handoff's own budget (plan D8): after every resumable run is marked
+ *  `handoff`, the drain waits this long for pending history writes and
+ *  reflections, then exits — the next generation takes the runs. */
+export const HANDOFF_BUDGET_MS = 6_000;
 
 /** Time budgeted for the replacement container to boot and reach Socket Mode
  *  `connected` (image pull + Node start + Bolt handshake), when the catch-up

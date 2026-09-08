@@ -53,7 +53,7 @@ import {
   setForeignLiveCardsSource,
 } from "./channels/slack.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
-import { DRAIN_DEADLINE_MS } from "./core/drain.js";
+import { DRAIN_DEADLINE_MS, HANDOFF_BUDGET_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
@@ -734,9 +734,26 @@ async function main() {
     );
     setShutdownNotice(DEPLOY_RESTART_NOTICE);
     await app.stop().catch(() => {});
-    const deadline = drainStartedAt + DRAIN_DEADLINE_MS;
-    while (inFlight() > 0 && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 2000));
+    // The handoff (plan D8, run-history item 39): every run a resume can
+    // continue is marked `handoff` on the ledger, so the next generation takes
+    // it at once — whatever its lease — and carries on from its last step. Those
+    // runs are not waited for: they keep running here until the exit, and their
+    // writes are fenced the moment the next generation reclaims them. Only the
+    // runs a resume cannot continue (a ship pipeline, an untracked run) hold the
+    // drain, up to the old deadline.
+    const handoff = runLedger ? await runLedger.handoff() : { marked: [] as string[] };
+    const handed = new Set(handoff.marked);
+    if (handoff.failed) console.warn(`[drain] handoff failed (${handoff.failed}) — waiting for the runs instead`);
+    if (handed.size > 0)
+      console.log(`[drain] handed ${handed.size} run(s) to the next generation: ${[...handed].join(", ")}`);
+    // Counted by registry id, not by the write-through's live set: a handed run
+    // that gets fenced mid-drain (the next generation took it) leaves that set
+    // but is still handed — it must not start holding the drain again.
+    const runsHeld = () => defaultRunRegistry.listActive().filter((r) => !r.finished && !handed.has(r.id)).length;
+    const stillHere = () => runsHeld() + pendingReflectionCount() + pendingHistoryWrites();
+    const deadline = drainStartedAt + (runsHeld() > 0 ? DRAIN_DEADLINE_MS : HANDOFF_BUDGET_MS);
+    while (stillHere() > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
     }
     // Tombstone upgrade (#375): the deadline passed with runs still in flight —
     // they are about to be killed by process.exit. Each still-active registry
@@ -750,7 +767,7 @@ async function main() {
     // inside the budget), at most INTERRUPTED_WRITE_BUDGET_MS total — never a
     // second drain.
     if (runHistoryWriter && inFlight() > 0) {
-      const written = writeAbandonedRunRecords(defaultRunRegistry, runHistoryWriter, Date.now());
+      const written = writeAbandonedRunRecords(defaultRunRegistry, runHistoryWriter, Date.now(), console.log, handed);
       if (written > 0) {
         await Promise.race([
           runHistoryWriter.settled(),
@@ -759,7 +776,7 @@ async function main() {
       }
     }
     console.log(
-      `[drain] exiting (${activeRunCount()} run(s), ${pendingReflectionCount()} reflection(s), ${pendingHistoryWrites()} history write(s) abandoned` +
+      `[drain] exiting (${activeRunCount()} run(s) of which ${handed.size} handed off, ${pendingReflectionCount()} reflection(s), ${pendingHistoryWrites()} history write(s) abandoned` +
         (runHistoryWriter ? `; ${runHistoryWriter.failures()} history write(s) lost this process)` : ")"),
     );
     process.exit(0);

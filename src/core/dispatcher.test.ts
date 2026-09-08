@@ -4913,7 +4913,7 @@ describe("shutdown notice on the live status card", () => {
       name: "fake",
       async complete(): Promise<CompletionResult> {
         // Mid-run: the drain announces the restart, then a heartbeat tick passes.
-        setShutdownNotice("\u23f8 deploy in progress \u2014 finishing this run before the bot restarts");
+        setShutdownNotice("\u23f8 deploy in progress \u2014 this run continues through the bot restart");
         await vi.advanceTimersByTimeAsync(5_000);
         return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
       },
@@ -8602,6 +8602,7 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     expect(ledger.live.has("run-old")).toBe(false);
     const record = ledger.finished.get("run-old")!;
     expect(record.status).toBe("completed");
+    expect(record.startedAt).toBe(5_000); // the original start, not the resume
     expect(record.events.slice(0, 4).map((e) => e.type)).toEqual(["input", "run_meta", "tool_call", "tool_call"]);
     expect(record.events.map((e) => e.seq)).toEqual(
       [...record.events].map((e) => e.seq).sort((a, b) => (a ?? 0) - (b ?? 0)),
@@ -8752,6 +8753,28 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     expect(registry.listActive()).toEqual([]);
     expect(ledger.live.has("run-old")).toBe(false);
     expect(ledger.finished.get("run-old")?.status).toBe("interrupted");
+  });
+
+  it("a fenced finishing means another generation owns the run: nothing more reaches the thread and no record is written from here — the run is theirs (D9)", async () => {
+    const inner = new InMemoryRunLedger();
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        // The other generation holds the row: finishing AND finish are fenced here.
+        if (prop === "finishing" || prop === "finish") return async () => ({ ok: false, reason: "fenced" });
+        const v = target[prop as keyof InMemoryRunLedger];
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as unknown as InMemoryRunLedger;
+    const { deps, writer, fallbackPuts, warnings } = wired(capturingProvider("the answer"), { ledger });
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, msg("hello there"), io);
+    await writer.settled();
+    expect(replies).toEqual([]); // the other generation answers
+    expect(warnings.some((w) => /another generation owns this run; no reply from here/.test(w))).toBe(true);
+    // No record from here either: the run is the other generation's now, and its record is theirs to write —
+    // a partial record from this process would race (and could clobber) the real finish.
+    expect(fallbackPuts).toEqual([]);
+    expect(inner.finished.has("run-l")).toBe(false);
   });
 
   it("a review's verdict lands in the run's ledger state as it is submitted", async () => {

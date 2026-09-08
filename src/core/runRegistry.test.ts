@@ -52,10 +52,11 @@ describe("RunRegistry.create", () => {
   // Feature: features/run-history.md item 37 — a resumed run keeps its identity
   // and its past: the ledger's run id, and the events published before the
   // restart under their original seqs, so the stream stays one contiguous record.
-  it("a resume creates the run under a given id with its earlier events replayed under their seqs; new events continue past the highest", () => {
+  it("a resume creates the run under a given id, with its original start and its earlier events replayed under their seqs; new events continue past the highest", () => {
     const { reg } = testRegistry();
     const run = reg.create("resumed", undefined, {
       id: "ledger-run-1",
+      startedAt: 4_242, // the original start, from the ledger row
       replay: [
         { type: "tool_call", tool: "bash", summary: "ls", at: 2, seq: 2 },
         { type: "input", text: "go", at: 1, seq: 1 }, // out of order on purpose: replay sorts by seq
@@ -70,6 +71,7 @@ describe("RunRegistry.create", () => {
       [3, "tool_result"],
     ]);
     expect(snap.eventCount).toBe(3);
+    expect(snap.startedAt).toBe(4_242);
     // The next fresh run still mints its own id.
     expect(reg.create().id).toBe("id-1");
   });

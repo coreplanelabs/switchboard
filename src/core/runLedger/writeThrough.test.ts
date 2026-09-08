@@ -503,7 +503,7 @@ describe("finishing and finish", () => {
     const { ledger, wt, fallbackPuts, t } = harness();
     const run = (await wt.open(openReq()))!;
     run.event({ type: "input", text: "go", at: 1 }, 1);
-    expect(await run.finishing()).toBe(true);
+    expect(await run.finishing()).toBe("ok");
     expect(ledger.live.get("r1")!.phase).toBe("finishing");
     await run.sink.put(record("r1"));
     expect(ledger.live.has("r1")).toBe(false);
@@ -513,17 +513,80 @@ describe("finishing and finish", () => {
     expect(t.heartbeats()).toBe(0);
   });
 
-  it("a second finishing is refused (false) — the double-answer protection — and a detached run answers false without asking", async () => {
-    const { ledger, wt, warnings } = harness();
+  it("finishing is the double-answer gate (D9): ok once; a refusal is `fenced` — another generation owns the run, the caller must not reply — and detaches; a detached run answers `unavailable` without asking; an unreachable ledger answers `unavailable`", async () => {
+    const { wt, warnings } = harness();
     const run = (await wt.open(openReq()))!;
-    expect(await run.finishing()).toBe(true);
-    expect(await run.finishing()).toBe(false);
-    expect(warnings.at(-1)).toMatch(/finishing refused/);
-    ledger.live.get("r1")!.ownerGen = "gen-B";
-    await run.step(step()); // detaches
+    expect(await run.finishing()).toBe("ok");
+    expect(await run.finishing()).toBe("fenced"); // a second CAS is refused: someone already took finishing
+    expect(warnings.some((w) => /finishing refused .* no reply from here/.test(w))).toBe(true);
+    expect(run.tracked()).toBe(false);
     warnings.length = 0;
-    expect(await run.finishing()).toBe(false);
+    expect(await run.finishing()).toBe("unavailable");
     expect(warnings).toEqual([]);
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const down = harness({
+      ledger: overriding(inner, {
+        finishing: async () => {
+          throw new TransientStoreError("HTTP 503");
+        },
+      }),
+    });
+    const other = (await down.wt.open(openReq()))!;
+    expect(await other.finishing()).toBe("unavailable"); // the run is still this process's: reply as before
+    expect(other.tracked()).toBe(true);
+  });
+
+  it("a fenced write tells the run once (onFenced) — heartbeat, step or finishing — so it stops driving a run another generation owns", async () => {
+    const { ledger, wt, t } = harness();
+    const fenced: string[] = [];
+    const run = (await wt.open(openReq({ onFenced: () => fenced.push("hard") })))!;
+    ledger.live.get("r1")!.ownerGen = "gen-B"; // reclaimed by another generation
+    await t.beat();
+    expect(fenced).toEqual(["hard"]);
+    await run.step(step()); // already detached: a no-op, no second call
+    expect(fenced).toEqual(["hard"]);
+    const { ledger: l2, wt: w2 } = harness();
+    const told: string[] = [];
+    const r2 = (await w2.open(openReq({ onFenced: () => told.push("hard") })))!;
+    l2.live.get("r1")!.ownerGen = "gen-B";
+    expect(await r2.finishing()).toBe("fenced");
+    expect(told).toEqual(["hard"]);
+  });
+
+  it("liveRuns names the runs this generation drives; handoff marks the resumable ones on the ledger and remembers it — a ship claim (no seed) and a detached run are left out; a handed run that finishes first still replies; a ledger failure is reported, not thrown", async () => {
+    const { ledger, wt } = harness();
+    const a = (await wt.open(openReq()))!;
+    const ship = (await wt.open(openReq({ runId: "r2", threadKey: "t2", seed: undefined, system: "", tools: [] })))!;
+    const c = (await wt.open(openReq({ runId: "r3", threadKey: "t3" })))!;
+    ledger.live.get("r3")!.ownerGen = "gen-B";
+    await c.step(step()); // detached
+    expect(
+      wt
+        .liveRuns()
+        .map((r) => r.runId)
+        .sort(),
+    ).toEqual(["r1", "r2"]);
+    expect([a.resumable, ship.resumable, c.resumable]).toEqual([true, false, false]);
+    expect(await wt.handoff()).toEqual({ marked: ["r1"] });
+    expect(ledger.live.get("r1")!.phase).toBe("handoff");
+    expect(ledger.live.get("r2")!.phase).toBe("live");
+    expect(a.handedOff).toBe(true);
+    expect(await wt.handoff()).toEqual({ marked: [] }); // already handed off
+    // Finished inside its own handoff window, before any reclaim: the owner
+    // replies itself — finishing from `handoff` is allowed for the owner.
+    expect(await a.finishing()).toBe("ok");
+    await a.sink.put(record("r1"));
+    expect(wt.liveRuns().map((r) => r.runId)).toEqual(["r2"]);
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const down = harness({
+      ledger: overriding(inner, {
+        handoff: async () => {
+          throw new TransientStoreError("HTTP 503");
+        },
+      }),
+    });
+    await down.wt.open(openReq());
+    expect(await down.wt.handoff()).toEqual({ marked: [], failed: "HTTP 503" });
   });
 
   it("a finish the ledger refuses (fenced, or a run it never tracked) goes to the fallback store — the record is never dropped", async () => {

@@ -469,28 +469,28 @@ describe("interruptedCardFrame", () => {
   // clause — the run was NOT finished.
   it("drops the trailing drain notice (unicode ⏸ form), keeping label and elapsed", () => {
     const f = interruptedCardFrame(
-      "◐ *coding* on `anthropic/claude-fable-5` · resident · main@7f13a94 · 323s · ⏸ deploy in progress — finishing this run before the bot restarts",
+      "◐ *coding* on `anthropic/claude-fable-5` · resident · main@7f13a94 · 323s · ⏸ deploy in progress — this run continues through the bot restart",
     );
     expect(f.title).toBe("❌ interrupted · *coding* on `anthropic/claude-fable-5` · resident · main@7f13a94 · 323s");
   });
 
   it("drops the drain notice when Slack history returns the glyph as a :shortcode:", () => {
     const f = interruptedCardFrame(
-      "◐ *coding* on `m` · 323s · :double_vertical_bar: deploy in progress — finishing this run before the bot restarts",
+      "◐ *coding* on `m` · 323s · :double_vertical_bar: deploy in progress — this run continues through the bot restart",
     );
     expect(f.title).toBe("❌ interrupted · *coding* on `m` · 323s");
   });
 
   it("drops both the thinking suffix and the drain notice when the card carries both", () => {
     const f = interruptedCardFrame(
-      "◓ *review* on `m` · 153s — thinking (88s since last tool) · ⏸ deploy in progress — finishing this run before the bot restarts",
+      "◓ *review* on `m` · 153s — thinking (88s since last tool) · ⏸ deploy in progress — this run continues through the bot restart",
     );
     expect(f.title).toBe("❌ interrupted · *review* on `m` · 153s");
   });
 
   it("drops the drain notice even when the glyph token is missing entirely", () => {
     const f = interruptedCardFrame(
-      "◐ *coding* on `m` · 323s · deploy in progress — finishing this run before the bot restarts",
+      "◐ *coding* on `m` · 323s · deploy in progress — this run continues through the bot restart",
     );
     expect(f.title).toBe("❌ interrupted · *coding* on `m` · 323s");
   });
@@ -504,7 +504,7 @@ describe("interruptedCardFrame", () => {
 
   it("drops the running-tool suffix and the drain notice when the card carries both", () => {
     const f = interruptedCardFrame(
-      "◓ *coding* on `m` · 3661s — running bash (3601s) · ⏸ deploy in progress — finishing this run before the bot restarts",
+      "◓ *coding* on `m` · 3661s — running bash (3601s) · ⏸ deploy in progress — this run continues through the bot restart",
     );
     expect(f.title).toBe("❌ interrupted · *coding* on `m` · 3661s");
   });
