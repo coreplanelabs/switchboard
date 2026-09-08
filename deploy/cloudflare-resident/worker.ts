@@ -98,7 +98,10 @@ import {
   recoverCapturedOutput,
 } from "../../src/execution/residentExecWrap.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
-import { shouldRefreshThreadCredentials } from "../../src/execution/residentCredentials.js";
+import {
+  CREDENTIAL_EXPIRY_MARGIN_MS,
+  shouldRefreshThreadCredentials,
+} from "../../src/execution/residentCredentials.js";
 import {
   recordFiring,
   scheduleForCron,
@@ -621,7 +624,9 @@ const tail = (s: string, n: number): string => s.trim().slice(-n);
 // enters the container. RS256 App JWT on WebCrypto (node:crypto is not
 // available here), then POST /app/installations/:id/access_tokens with
 // `repositories: [<own repo name>]` so a minted token never grants more than
-// the resident's one repo. Cache per slug until 5 minutes before expiry.
+// the resident's one repo. Cache per slug, but only serve a cached token while
+// it has more than `CREDENTIAL_EXPIRY_MARGIN_MS` of life left (#528), so a new
+// attach never inherits a near-expiry token minted for an earlier thread.
 // ---------------------------------------------------------------------------
 
 export function githubAppConfigured(env: Env): boolean {
@@ -634,17 +639,27 @@ interface MintedToken {
 }
 const githubTokenCache = new Map<string, MintedToken>(); // key: repo slug ("owner/name")
 
-/** Mint a 1-hour installation token scoped to exactly `slug`'s repository.
- *  Throws a command-level Error on any failure — callers MUST NOT translate
- *  that into a lifecycle transition (KTD12). */
-export async function mintRepoScopedToken(env: Env, slug: string): Promise<string> {
+/** Mint a 1-hour installation token scoped to exactly `slug`'s repository,
+ *  returning it with its expiry so callers can persist `expiresAtMs` and refresh
+ *  off the token's own life (#528). `fresh` bypasses (and clears) the per-slug
+ *  cache — for a token GitHub REJECTED, whose cached copy must not be re-served
+ *  (#528 review). Throws a command-level Error on any failure — callers MUST NOT
+ *  translate that into a lifecycle transition (KTD12). */
+export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh?: boolean }): Promise<MintedToken> {
   if (!githubAppConfigured(env)) {
     throw new Error(
       "github-app-not-configured: GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID / GITHUB_APP_PRIVATE_KEY secrets are unset; cannot mint an installation token",
     );
   }
-  const cached = githubTokenCache.get(slug);
-  if (cached && Date.now() < cached.expiresAtMs - 5 * 60_000) return cached.token;
+  // A repudiated token must never be re-served: drop the slug's cache entry and
+  // mint anew. Otherwise serve a cached token while it has more than the refresh
+  // margin left (#528): the same threshold `shouldRefreshThreadCredentials`
+  // refreshes at, so a token the cache hands out is never one a fresh attach
+  // would immediately have to re-mint. Was 5 min — too little for a 20-minute
+  // exec to run under.
+  if (opts?.fresh) githubTokenCache.delete(slug);
+  const cached = opts?.fresh ? undefined : githubTokenCache.get(slug);
+  if (cached && Date.now() < cached.expiresAtMs - CREDENTIAL_EXPIRY_MARGIN_MS) return cached;
 
   const jwt = await githubAppJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY);
   // The installation-token API scopes by repo NAME within the installation's
@@ -679,8 +694,9 @@ export async function mintRepoScopedToken(env: Env, slug: string): Promise<strin
     throw new Error(`github-token-mint-failed: HTTP ${res.status} ${body.slice(0, 300)}`);
   }
   const data = (await res.json()) as { token: string; expires_at: string };
-  githubTokenCache.set(slug, { token: data.token, expiresAtMs: Date.parse(data.expires_at) });
-  return data.token;
+  const minted: MintedToken = { token: data.token, expiresAtMs: Date.parse(data.expires_at) };
+  githubTokenCache.set(slug, minted);
+  return minted;
 }
 
 /** Short-lived RS256 JWT proving we are the app (max 10 min per GitHub docs).
@@ -831,6 +847,12 @@ interface ThreadBinding {
    *  per-exec refresh). Absent = unknown → the next writable exec re-mints
    *  (`shouldRefreshThreadCredentials`); cleared by a read-only attach. */
   credentialsWrittenAt?: number;
+  /** Epoch ms when the written token expires (#528). The per-exec refresh keys
+   *  on this — not `credentialsWrittenAt` — so a near-expiry token inherited
+   *  from an earlier thread's mint is re-minted before the first writable exec.
+   *  Absent (pre-field binding) → the next writable exec falls back to the
+   *  `credentialsWrittenAt` file-age rule; cleared alongside it on attach. */
+  tokenExpiresAtMs?: number;
   /** The deps-store entry this tree's node_modules is a view of (item 59);
    *  protects the entry from eviction while the binding lives. Absent on a
    *  binding made before the store, or on a tree with no deps. */
@@ -1651,7 +1673,7 @@ export class ResidentDO extends Sandbox<Env> {
       let token: string | null = null;
       if (githubAppConfigured(this.env)) {
         try {
-          token = await mintRepoScopedToken(this.env, slug);
+          token = (await mintRepoScopedToken(this.env, slug)).token;
         } catch (err) {
           console.log(
             `provisioning ${resource}: token mint failed (command-level), trying anonymous clone: ${errMsg(err)}`,
@@ -2059,7 +2081,7 @@ export class ResidentDO extends Sandbox<Env> {
       let mintError: string | undefined;
       if (githubAppConfigured(this.env)) {
         try {
-          token = await mintRepoScopedToken(this.env, resource.slice("repo:".length));
+          token = (await mintRepoScopedToken(this.env, resource.slice("repo:".length))).token;
         } catch (err) {
           mintError = `token-mint-failed (command-level, fetching anonymously): ${errMsg(err)}`;
           await this.recordRefreshError(mintError);
@@ -2591,7 +2613,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (!facts.idleSince && age < REFRESH_INTERVAL_S * 1000) return;
     let token: string | null = null;
     if (githubAppConfigured(this.env)) {
-      token = await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null);
+      token = (await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null))?.token ?? null;
     }
     try {
       // Bounded like attach's own clone section: a full checkout rebuild
@@ -3078,12 +3100,15 @@ export class ResidentDO extends Sandbox<Env> {
     // Command-level token mint (KTD12) — before the lock so mint latency
     // never holds the mutex, and failure never blocks the attach.
     let token: string | null = null;
+    let tokenExpiresAtMs: number | null = null;
     let credentialsError: string | undefined;
     if (!mode.credentialFile) {
       // Read-only: no token for the TREE — nothing to leak, nothing to push with.
     } else if (githubAppConfigured(this.env)) {
       try {
-        token = await mintRepoScopedToken(this.env, slug);
+        const minted = await mintRepoScopedToken(this.env, slug);
+        token = minted.token;
+        tokenExpiresAtMs = minted.expiresAtMs;
       } catch (err) {
         credentialsError = errMsg(err);
       }
@@ -3104,7 +3129,7 @@ export class ResidentDO extends Sandbox<Env> {
     const want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
     let fetchToken: string | null = token;
     if (!fetchToken && githubAppConfigured(this.env) && (await this.mirrorNeedsFetchFor(binding.ref, want))) {
-      fetchToken = await mintRepoScopedToken(this.env, slug).catch(() => null);
+      fetchToken = (await mintRepoScopedToken(this.env, slug).catch(() => null))?.token ?? null;
     }
 
     let locked: { value: { sha: string; threadLockKey: string; recreated: boolean }; waitedMs: number };
@@ -3145,6 +3170,7 @@ export class ResidentDO extends Sandbox<Env> {
     let deps: { deps: ThreadDepsMechanism; reconciled: boolean; depsKey?: string };
     let credentials: AttachOk["credentials"] = mode.readonly ? "none" : "unavailable";
     let credentialsWrittenAt: number | undefined;
+    let credentialTokenExpiresAtMs: number | undefined;
     try {
       deps = await this.materializeThreadDeps(
         binding,
@@ -3159,6 +3185,9 @@ export class ResidentDO extends Sandbox<Env> {
         await this.scrubThreadCredentials(binding);
       } else if (token) {
         credentialsWrittenAt = await this.writeThreadCredentials(binding, token);
+        // Persist the token's expiry beside the write time so the first writable
+        // exec refreshes off the token's own life, not the file's age (#528).
+        credentialTokenExpiresAtMs = tokenExpiresAtMs ?? undefined;
         credentials = "ok";
       }
     } catch (err) {
@@ -3173,10 +3202,11 @@ export class ResidentDO extends Sandbox<Env> {
       return this.attachFailed(err, resource);
     }
 
-    // The prior write time never survives an attach: a read-only attach
-    // scrubbed the file, a writable one either rewrote it (stamped below) or
-    // could not — and "unknown" is what makes the next exec re-mint.
-    const { credentialsWrittenAt: _prior, ...bindingSansCred } = binding;
+    // The prior write time and token expiry never survive an attach: a
+    // read-only attach scrubbed the file, a writable one either rewrote it
+    // (stamped below) or could not — and "unknown" is what makes the next exec
+    // re-mint.
+    const { credentialsWrittenAt: _prior, tokenExpiresAtMs: _priorExp, ...bindingSansCred } = binding;
     await this.ctx.storage.put(threadBindingKey(threadKey), {
       ...bindingSansCred,
       lastAttachAt: new Date().toISOString(),
@@ -3188,6 +3218,7 @@ export class ResidentDO extends Sandbox<Env> {
       // A writable attach that could not mint keeps nothing to date: the next
       // exec sees the file missing and re-mints (or logs and runs without).
       ...(credentialsWrittenAt !== undefined ? { credentialsWrittenAt } : {}),
+      ...(credentialTokenExpiresAtMs !== undefined ? { tokenExpiresAtMs: credentialTokenExpiresAtMs } : {}),
     } satisfies ThreadBinding);
     if ((await this.listSchedules(SWEEP_CALLBACK)).length === 0) {
       await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
@@ -3683,13 +3714,16 @@ export class ResidentDO extends Sandbox<Env> {
    *  failure is command-level — logged, and the command runs with whatever the
    *  file holds (never a lifecycle transition). Unconfigured App → nothing to
    *  refresh, silently (attach already reported `credentials:"unavailable"`). */
-  private async refreshThreadCredentialsIfDue(binding: ThreadBinding): Promise<number | undefined> {
+  private async refreshThreadCredentialsIfDue(
+    binding: ThreadBinding,
+  ): Promise<{ writtenAtMs: number; tokenExpiresAtMs: number } | undefined> {
     if (binding.readonly || !githubAppConfigured(this.env)) return undefined;
     const cred = `${binding.worktreePath}/.git/github-credentials`;
     const sized = await this.run(["stat", "-c", "%s", cred]);
     const fileBytes = sized.exitCode === 0 ? Number.parseInt(sized.stdout.trim(), 10) : null;
     const decision = shouldRefreshThreadCredentials({
       writtenAtMs: binding.credentialsWrittenAt ?? null,
+      tokenExpiresAtMs: binding.tokenExpiresAtMs ?? null,
       nowMs: Date.now(),
       fileBytes: fileBytes === null || Number.isNaN(fileBytes) ? null : fileBytes,
       readonly: binding.readonly ?? false,
@@ -3697,10 +3731,17 @@ export class ResidentDO extends Sandbox<Env> {
     if (!decision.refresh) return undefined;
     const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
     try {
-      const token = await mintRepoScopedToken(this.env, resource.slice("repo:".length));
-      const writtenAt = await this.writeThreadCredentials(binding, token);
+      // An `empty` file means git's `store` helper erased a token GitHub had
+      // REJECTED (401) — so the per-slug cache may still hold that same dead
+      // token, and serving it would rewrite the rejection and 401 the next
+      // exec too. Force a fresh mint for a repudiated token (#528 review); an
+      // expiry-driven refresh still reuses the cache.
+      const minted = await mintRepoScopedToken(this.env, resource.slice("repo:".length), {
+        fresh: decision.reason === "empty",
+      });
+      const writtenAt = await this.writeThreadCredentials(binding, minted.token);
       console.log(`credentials: refreshed for ${binding.threadKey} (${decision.reason})`);
-      return writtenAt;
+      return { writtenAtMs: writtenAt, tokenExpiresAtMs: minted.expiresAtMs };
     } catch (err) {
       console.log(
         `credentials: refresh failed (${decision.reason}: ${errMsg(err)}) — command runs without a fresh token`,
@@ -3781,11 +3822,15 @@ export class ResidentDO extends Sandbox<Env> {
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
     const { binding } = pre;
-    const credentialsWrittenAt = await this.refreshThreadCredentialsIfDue(binding);
+    const refreshed = await this.refreshThreadCredentialsIfDue(binding);
     await this.ctx.storage.put(threadBindingKey(threadKey), {
       ...binding,
       lastAttachAt: new Date().toISOString(), // exec counts as activity for the sweep
-      ...(credentialsWrittenAt !== undefined ? { credentialsWrittenAt } : {}),
+      // A refresh re-mints and rewrites: persist both the new write time and the
+      // new token expiry (#528) so the next exec's decision keys on this token.
+      ...(refreshed
+        ? { credentialsWrittenAt: refreshed.writtenAtMs, tokenExpiresAtMs: refreshed.tokenExpiresAtMs }
+        : {}),
     } satisfies ThreadBinding);
 
     let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
@@ -4221,7 +4266,7 @@ export class ResidentDO extends Sandbox<Env> {
       // fetch for an unknown ref would use it; failure never blocks the op.
       let token: string | null = null;
       if (githubAppConfigured(this.env)) {
-        token = await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null);
+        token = (await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null))?.token ?? null;
       }
       const locked = await this.withMirrorLock(async () => {
         await this.ensureGitSetup();
@@ -4488,7 +4533,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (!facts) return { reclaimed: [], kept: [], fetch: "skipped" };
     let token: string | null = null;
     if (githubAppConfigured(this.env))
-      token = await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null);
+      token = (await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null))?.token ?? null;
     let fetchResult = "skipped";
     if (await this.isRuntimeActive().catch(() => false)) {
       try {
