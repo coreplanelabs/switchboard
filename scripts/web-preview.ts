@@ -441,6 +441,8 @@ function page(pathname: string, all: boolean): { title: string; seed: WebSeed; s
         id: "live-1",
         eventsUrl: "/runs/live-1/events?t=tok-live-1",
         stopUrl: "/runs/live-1/stop?t=tok-live-1",
+        serverNow: 1_700_000_090_000,
+        startedAt: 1_700_000_000_000,
       },
     };
   if (pathname === "/runs/hist-1")
@@ -453,6 +455,8 @@ function page(pathname: string, all: boolean): { title: string; seed: WebSeed; s
         events: HIST_EVENTS as never,
         status: "completed",
         eventCount: HIST_EVENTS.length + 3,
+        startedAt: 1_700_000_000_000,
+        finishedAt: 1_700_002_254_000,
         durationMs: 2_254_000,
       },
     };

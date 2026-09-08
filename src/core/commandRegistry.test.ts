@@ -576,14 +576,26 @@ describe("untrusted wrapping and rendering", () => {
             stop: { mode: "soft", state: "stopping" },
             eventCount: 1,
           },
+          {
+            // the one duration definition (features/tracing.md): received → finished
+            id: "receivedfirst0000",
+            agent: "general",
+            status: "completed",
+            receivedAt: now - 110_000,
+            startedAt: now - 95_000,
+            finishedAt: now - 5_000,
+            finished: true,
+            eventCount: 2,
+          },
         ],
       },
       { now },
     );
     const lines = text.split("\n");
-    expect(lines).toHaveLength(2);
+    expect(lines).toHaveLength(3);
     expect(lines[0]).toMatch(/^abcdefgh\s+coding\s+completed\s+1m 30s$/);
     expect(lines[1]).toMatch(/^zyxwvuts\s+review\s+stopping\s+30s$/);
+    expect(lines[2]).toMatch(/^received\s+general\s+completed\s+1m 45s$/);
     expect(text).not.toMatch(/slack:|acme|threadKey|U1/);
   });
 

@@ -546,7 +546,7 @@ describe("runs list on chat (KTD18)", () => {
     });
     expect(reply.split("\n")).toEqual([
       "• `live0001` — review · active · 0s",
-      "• `fin00001` — coding · completed · 1m 5s",
+      "• `fin00001` — coding · completed · 1m 05s",
     ]);
     expect(reply).not.toMatch(/slack:D|UOWNER|threadKey|acme|<!channel>|tok-secret|please do/);
   });

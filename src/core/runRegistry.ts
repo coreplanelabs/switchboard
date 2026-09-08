@@ -113,6 +113,9 @@ export interface RunMeta {
   /** Resolved display name of who started it (`IncomingMessage.userName`) — the
    *  source mark's hover says `via Slack · justin`, never a raw member id. */
   userName?: string;
+  /** Our process saw the message that started this run (features/tracing.md);
+   *  the run's duration opens here, falling back to `startedAt` when absent. */
+  receivedAt?: number;
 }
 
 /** A run's stop status for the index: `stopping` from the request until the run
@@ -172,6 +175,20 @@ export interface RunSummary {
   /** Present (true) once the history writer confirmed the run is in the durable
    *  store (#157 KTD9) — how an index client learns a row outlives eviction. */
   persisted?: boolean;
+  /** The seven stamps and the one duration (features/tracing.md). `receivedAt`:
+   *  our process saw the message, from the adapter's clock (stamped by the
+   *  dispatcher once the adapters carry it; absent until then, so every reader
+   *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
+   *  reply attempt completed or the branch was abandoned; `replyOk` is
+   *  tri-state — `true` a reply was attempted and delivered, `false` attempted
+   *  and threw, absent none was made. `stepCount`: content events only (span
+   *  records excluded). `schema`: the record's stream schema (2 once spans are
+   *  emitted); absent is legacy. All omitted when absent. */
+  receivedAt?: number;
+  sealedAt?: number;
+  replyOk?: boolean;
+  stepCount?: number;
+  schema?: number;
 }
 
 /** What `snapshot`/`snapshotById` return: a COPY of the retained backlog plus the
@@ -183,6 +200,8 @@ export interface RunSnapshot {
   /** The clock time at `finish()`; absent while the run is live. The record's
    *  `finishedAt` is this value, so the registry row and the record agree. */
   finishedAt?: number;
+  /** `RunMeta.receivedAt`, when the run was created with it (features/tracing.md). */
+  receivedAt?: number;
   eventCount: number;
   /** True when the bounded backlog dropped events (`eventCount > events.length`):
    *  a consumer analyzing `events` is looking at a head-truncated stream. */
@@ -602,6 +621,7 @@ export class RunRegistry {
       finished: run.finished,
       startedAt: run.startedAt,
       ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+      ...(run.meta?.receivedAt !== undefined ? { receivedAt: run.meta.receivedAt } : {}),
       eventCount: run.eventCount,
       truncated: run.eventCount > run.backlog.length,
     };
@@ -649,6 +669,7 @@ export class RunRegistry {
       finished: run.finished,
       startedAt: run.startedAt,
       ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
+      ...(m?.receivedAt !== undefined ? { receivedAt: m.receivedAt } : {}),
       ...(run.status !== undefined ? { status: run.status } : {}),
       eventCount: run.eventCount,
       ...(run.activity !== undefined ? { activity: run.activity } : {}),

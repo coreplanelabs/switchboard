@@ -35,6 +35,10 @@ The bot process restarting (a deploy, a crash, a container recycle) has three di
 
 This is why deploy tooling treats "a run is in flight" as something to wait out rather than plow through: not because the bot can't restart safely, but because the one thing that *doesn't* survive is whatever was mid-flight at the exact moment it goes down.
 
+## Why every duration is one definition
+
+A run's duration is printed in six places — the run page header, the runs index row, `runs list`, the history seed, the Slack card, and the friction report — and until recently each computed it from whatever stamps it happened to hold: first event to last event here, `startedAt` to `finishedAt` there. Two surfaces could disagree about the same run, and neither could be called wrong. Now one function, `runDurationMs`, defines it: from the moment the bot received the message (falling back to when the run was registered, for records that predate the stamp) to the moment the agent finished, or to now while live. The live run page projects the server's clock forward from the seed rather than subtracting a server stamp from the browser's clock, so clock skew can never show in a tick. The rule and its stamps are specified in [features/tracing.md](https://github.com/coreplanelabs/switchboard/blob/main/features/tracing.md).
+
 ## See also
 
 - [How-to: watch a run and check spend](../how-to/watch-a-run-and-check-spend.md) — the dashboard surface built on this.

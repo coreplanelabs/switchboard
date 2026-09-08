@@ -571,6 +571,9 @@ describe("createLiveViewHandler (node:http)", () => {
       id,
       eventsUrl: `/runs/${id}/events?t=${token}`,
       stopUrl: `/runs/${id}/stop?t=${token}`,
+      // the header's one duration reads from these (item 22)
+      serverNow: expect.any(Number),
+      startedAt: expect.any(Number),
     });
   });
 
@@ -1071,8 +1074,31 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(seed.status).toBe("completed");
       expect(seed.eventCount).toBe(5);
       expect(seed.durationMs).toBe(10_000);
+      expect(seed.startedAt).toBe(record("r1").startedAt);
+      expect(seed.finishedAt).toBe(record("r1").finishedAt);
       expect(t.body()).not.toContain("?t=");
       expect(t.body()).not.toContain("tok-");
+    });
+
+    it("a record carrying receivedAt seeds a duration that opens there — the one definition (features/tracing.md)", async () => {
+      const h = harness();
+      const base = record("r2");
+      await h.store!.put({
+        ...base,
+        receivedAt: base.startedAt - 5_000,
+        sealedAt: base.finishedAt + 2_000,
+        replyOk: true,
+      });
+      const t = fakeReqRes("GET", "/runs/r2");
+      expect(h.handler(t.req, t.res)).toBe(true);
+      await done(t);
+      const seed = runSeedOf(t.body()) as RunHistorySeed;
+      expect(seed.durationMs).toBe(15_000);
+      expect(seed).toMatchObject({
+        receivedAt: base.startedAt - 5_000,
+        sealedAt: base.finishedAt + 2_000,
+        replyOk: true,
+      });
     });
 
     it("carries the record's terminal status for stopped and failed runs (the page renders the outcome chip from it)", async () => {

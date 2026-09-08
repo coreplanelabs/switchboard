@@ -34,7 +34,7 @@ describe("RunRoutePage (the /runs/:id dispatch)", () => {
 
   it("renders the run page for a run seed", () => {
     const w = mountApp(RunRoutePage, {
-      seed: { page: "run", mode: "history", id: "r1", events: [], eventCount: 0 },
+      seed: { page: "run", mode: "history", id: "r1", events: [], eventCount: 0, startedAt: 1 },
     });
     expect(w.find("h1").text()).toBe("Run");
     expect(w.text()).not.toContain("That run isn't here.");

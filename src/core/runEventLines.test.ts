@@ -39,6 +39,18 @@ describe("parseRunEventLines", () => {
     expect(out.skipped).toBe(0); // the `{}` end payload is transport, not garbage
   });
 
+  it("a payload with no type field is a transport frame, never garbage; an event-shaped payload this reader does not know is skipped and counted (features/tracing.md)", () => {
+    const out = parseRunEventLines(
+      [
+        'data: {"sealedAt":1,"replyOk":true}',
+        'data: {"finishedAt":5}',
+        'data: {"type":"some_future_event","at":1}',
+      ].join("\n"),
+    );
+    expect(out.events).toEqual([]);
+    expect(out.skipped).toBe(1);
+  });
+
   it("skips (and counts) malformed or non-event lines instead of throwing", () => {
     const text = [
       "not json",
@@ -49,7 +61,8 @@ describe("parseRunEventLines", () => {
     ].join("\n");
     const out = parseRunEventLines(text);
     expect(out.events).toHaveLength(1);
-    expect(out.skipped).toBe(4);
+    // `{"no":"type"}` is a transport frame (features/tracing.md), not garbage; the other three are.
+    expect(out.skipped).toBe(3);
   });
 
   it("accepts every declared run_note kind, fleet_busy included (features/execution.md item 14)", () => {

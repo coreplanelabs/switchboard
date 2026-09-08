@@ -249,6 +249,7 @@ describe("RunRegistry.listActive", () => {
       repo: "acme/x",
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
       userName: "justin",
+      receivedAt: 900,
     });
     expect(handle.label).toBe('coding · acme/x · "token «redacted-github-token»"');
     const [row] = reg.listActive();
@@ -260,6 +261,7 @@ describe("RunRegistry.listActive", () => {
       userId: "slack:U1",
       threadKey: "slack:C1:1",
       repo: "acme/x",
+      receivedAt: 900,
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
       userName: "justin",
     }); // sourceUrl + userName: live-view item 21, the index's thread link and its hover identity
@@ -555,6 +557,21 @@ describe("RunRegistry.snapshot — record inputs (#157 U4)", () => {
     expect(snap?.startedAt).toBe(1000);
     expect(snap?.eventCount).toBe(3);
     expect(snap?.events).toHaveLength(2);
+  });
+
+  it("carries receivedAt from the RunMeta onto the summary and the snapshot, and omits it when absent (features/tracing.md)", () => {
+    const { reg } = testRegistry();
+    const stamped = reg.create("x", {
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:1",
+      receivedAt: 900,
+    });
+    const plain = reg.create("y", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:2" });
+    expect(reg.snapshot(stamped.id, stamped.token)?.receivedAt).toBe(900);
+    expect(reg.listActive().find((r) => r.id === stamped.id)?.receivedAt).toBe(900);
+    expect("receivedAt" in (reg.snapshot(plain.id, plain.token) ?? {})).toBe(false);
+    expect("receivedAt" in (reg.listActive().find((r) => r.id === plain.id) ?? {})).toBe(false);
   });
 });
 

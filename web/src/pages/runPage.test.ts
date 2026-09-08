@@ -14,6 +14,10 @@ const liveSeed: RunLiveSeed = {
   id: "run-1",
   eventsUrl: "/runs/run-1/events?t=tok-1",
   stopUrl: "/runs/run-1/stop?t=tok-1",
+  // The seed's stamps (item 22): the header ticks from these, not from event
+  // stamps — 3 s already elapsed when the page opens.
+  serverNow: 4000,
+  startedAt: 1000,
 };
 
 const historySeed = (events: LiveFrame[], over: Partial<RunHistorySeed> = {}): RunHistorySeed => ({
@@ -22,6 +26,7 @@ const historySeed = (events: LiveFrame[], over: Partial<RunHistorySeed> = {}): R
   id: "run-1",
   events,
   eventCount: events.length,
+  startedAt: 1000,
   ...over,
 });
 
@@ -418,7 +423,8 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find("#state").text()).toBe("connecting…");
     es().emitOpen();
     await wrapper.vm.$nextTick();
-    expect(wrapper.find("#state").text()).toBe("running");
+    // the header's stopwatch reads from the seed's stamps the moment it connects
+    expect(wrapper.find("#state").text()).toBe("running · 3s");
     es().emitMessage(input, "1");
     es().emitMessage(assistant("step one", 2000), "2");
     es().emitMessage(call("c1", "$ npm test", 3000), "3");
@@ -578,16 +584,20 @@ describe("RunPage — live mode", () => {
   });
 
   it("at `end`: the outcome chip it can know (grey `ended`, never a guessed success), the duration, actions hidden, stream closed", async () => {
+    vi.useFakeTimers(); // the page's clock tick must be fake so the frozen duration is deterministic
     const { wrapper, es } = mountLive();
     es().emitOpen();
     es().emitMessage(assistant("x", 10_000), "1");
     es().emitMessage({ type: "answer", text: "done", at: 40_000 }, "2");
+    // the duration freezes at `end` on the header's one clock: 3 s at the seed + 27 s of page time
+    vi.advanceTimersByTime(27_000);
     es().emitNamed("end");
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".conn .chip").text()).toBe("ended");
     expect(wrapper.find(".conn .dur").text()).toBe("30s");
     expect(wrapper.find("#actions").exists()).toBe(false);
     expect(es().closed).toBe(true);
+    vi.useRealTimers();
   });
 
   it("reads disconnected when the stream closes for good", async () => {

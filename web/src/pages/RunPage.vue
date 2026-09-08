@@ -8,7 +8,14 @@ import StepBlock from "../components/run/StepBlock.vue";
 import { useSeed } from "../lib/seed";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
-import { createRunPageModel, liveWait, modelName, runnerNow, RunnerClockKey, runningHeader } from "../lib/runPageModel";
+import {
+  createRunClock,
+  createRunPageModel,
+  liveWait,
+  modelName,
+  runnerNow,
+  RunnerClockKey,
+} from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
 import { durationTone, heatStyle } from "../lib/durationTone";
@@ -43,6 +50,11 @@ type Phase = "connecting" | "running" | "stopping" | "disconnected" | "ended";
 const phase = ref<Phase>(isHistory ? "ended" : "connecting");
 const stopError = ref("");
 const nowWall = ref(Date.now());
+// The header's one duration (live-view item 22): the run's stamps from the seed,
+// projected arrival-relative from the server clock the seed carried — never a
+// server stamp minus the browser's clock. Frozen at `end` at the value it had.
+const runClock = seed?.mode === "live" ? createRunClock(seed, nowWall.value) : null;
+const frozenMs = ref<number | undefined>(undefined);
 
 /** The outcome chip once ended: the history seed's record status, or — on a
  *  live page — the stop the viewer knows about; an unstopped end is the honest
@@ -66,13 +78,7 @@ const endChip = computed(() => {
     word: mode === "hard" ? "killed" : mode === "soft" ? "stopped early" : "ended",
   };
 });
-const endMs = computed(() =>
-  isHistory && seed?.mode === "history"
-    ? seed.durationMs
-    : state.firstAt !== null && state.lastAt !== null && state.lastAt > state.firstAt
-      ? state.lastAt - state.firstAt
-      : undefined,
-);
+const endMs = computed(() => (isHistory && seed?.mode === "history" ? seed.durationMs : frozenMs.value));
 const endDuration = computed(() => (endMs.value === undefined ? "" : formatDuration(endMs.value, "clock")));
 // The header's total is painted on the run scale (item 24): a 40-minute run
 // announces itself before the reader scrolls to find where the time went.
@@ -89,7 +95,7 @@ const headerText = computed(() => {
   if (phase.value === "connecting") return "connecting…";
   if (phase.value === "disconnected") return "disconnected";
   if (phase.value === "stopping") return `stopping (${state.stopMode ?? "soft"})`;
-  return runningHeader(state, nowWall.value) ?? "running";
+  return runClock ? `running · ${formatDuration(runClock.elapsedMs(nowWall.value), "clock")}` : "running";
 });
 const pulseCls = computed(() =>
   stopError.value || phase.value === "disconnected"
@@ -246,6 +252,7 @@ onMounted(() => {
   es.addEventListener("end", () => {
     model.flushPendingTurn("the run ended here"); // a run that ended without an answer still shows its last turn
     actionsHidden.value = true;
+    frozenMs.value = runClock?.elapsedMs(nowWall.value);
     phase.value = "ended";
     es?.close();
   });

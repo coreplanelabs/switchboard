@@ -574,3 +574,29 @@ describe("analyzeRunFriction — ship_round is a side fact, invisible to frictio
     expect(b.runMs).toBe(a.runMs);
   });
 });
+
+// Feature: features/tracing.md — reader tolerance: span records on the stream
+// (emitted from PR 4 on) are timing, not steps; they never count as events nor
+// move the stream's first/last stamps.
+describe("analyzeRunFriction — span records are invisible to counts and to the stream clock", () => {
+  it("excludes span_start/span_end from eventCount and from firstAt/lastAt", () => {
+    const spanStart = {
+      type: "span_start",
+      spanId: "s1",
+      name: "dispatch.history",
+      at: T0 - 50_000,
+    } as unknown as RunEvent;
+    const spanEnd = {
+      type: "span_end",
+      spanId: "s1",
+      name: "dispatch.history",
+      startedAt: T0 - 50_000,
+      durationMs: 200_000,
+      status: "ok",
+      at: T0 + 150_000,
+    } as unknown as RunEvent;
+    const d = analyzeRunFriction([spanStart, ...bash("npm test", T0, 5_000), spanEnd]);
+    expect(d.eventCount).toBe(2);
+    expect(d.runMs).toBe(5_000);
+  });
+});

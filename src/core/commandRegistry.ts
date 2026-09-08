@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { runDurationMs } from "./runDuration.js";
+import { formatDuration } from "./time/formatDuration.js";
 import { authorize } from "./authz/authorize.js";
 import type { Actor, Resource } from "./authz/types.js";
 
@@ -608,21 +610,15 @@ function renderRunLine(r: JsonObject, now: number, surface: "chat" | "text"): st
   const agent = typeof r.agent === "string" ? r.agent : "-";
   const startedAt = typeof r.startedAt === "number" ? r.startedAt : undefined;
   const finishedAt = typeof r.finishedAt === "number" ? r.finishedAt : undefined;
+  const receivedAt = typeof r.receivedAt === "number" ? r.receivedAt : undefined;
   const stop = isObject(r.stop) && typeof r.stop.state === "string" ? r.stop.state : undefined;
   const status = r.finished === true ? (typeof r.status === "string" ? r.status : "finished") : (stop ?? "active");
-  const duration = startedAt === undefined ? "-" : formatDuration((finishedAt ?? now) - startedAt);
+  // The one duration definition (features/tracing.md): received (or started) to
+  // finished, or to now while live.
+  const ms = startedAt === undefined ? undefined : runDurationMs({ startedAt, receivedAt, finishedAt }, now);
+  const duration = ms === undefined ? "-" : formatDuration(ms, "clock");
   if (surface === "chat") return `• \`${id}\` — ${agent} · ${status} · ${duration}`;
   return `${id.padEnd(8)}  ${agent.padEnd(8)}  ${status.padEnd(12)}  ${duration}`.trimEnd();
-}
-
-function formatDuration(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${sec}s`;
-  return `${sec}s`;
 }
 
 function isObject(v: unknown): v is JsonObject {

@@ -525,6 +525,17 @@ describe("run history routes", () => {
     expect(got.finishedAt).toBe(row.finished_at);
   });
 
+  it("receivedAt and sealedAt a year ahead are clamped like finishedAt (features/tracing.md)", async () => {
+    const key = storeKey();
+    const before = Date.now();
+    const far = before + 365 * DAY;
+    await post("/runs/put", { storeKey: key, record: record("stamps", before, { receivedAt: far, sealedAt: far }) });
+    const got = (await post("/runs/get", { storeKey: key, id: "stamps" })).data.record as RunRecord;
+    expect(got.receivedAt).toBeLessThanOrEqual(Date.now() + DAY);
+    expect(got.sealedAt).toBeLessThanOrEqual(Date.now() + DAY);
+    expect(got.receivedAt).toBeGreaterThanOrEqual(before + DAY - 1);
+  });
+
   it("the alarm deletes expired rows with no writes, and get is then not-found", async () => {
     const key = storeKey();
     const now = Date.now();

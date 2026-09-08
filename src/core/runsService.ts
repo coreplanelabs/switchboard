@@ -69,6 +69,20 @@ export interface RunView {
   startedAt: number;
   /** Absent while the run is live. */
   finishedAt?: number;
+  /** The seven stamps and the one duration (features/tracing.md). `receivedAt`:
+   *  our process saw the message, from the adapter's clock (stamped by the
+   *  dispatcher once the adapters carry it; absent until then, so every reader
+   *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
+   *  reply attempt completed or the branch was abandoned; `replyOk` is
+   *  tri-state — `true` a reply was attempted and delivered, `false` attempted
+   *  and threw, absent none was made. `stepCount`: content events only (span
+   *  records excluded). `schema`: the record's stream schema (2 once spans are
+   *  emitted); absent is legacy. All omitted when absent. */
+  receivedAt?: number;
+  sealedAt?: number;
+  replyOk?: boolean;
+  stepCount?: number;
+  schema?: number;
   finished: boolean;
   status?: RunRecord["status"];
   /** Total events published (monotonic; the backlog/record may hold fewer). */
@@ -218,6 +232,11 @@ function liveView(s: RunSummary): RunView {
     startedAt: s.startedAt,
     finished: s.finished,
     ...(s.finishedAt !== undefined ? { finishedAt: s.finishedAt } : {}),
+    ...(s.receivedAt !== undefined ? { receivedAt: s.receivedAt } : {}),
+    ...(s.sealedAt !== undefined ? { sealedAt: s.sealedAt } : {}),
+    ...(s.replyOk !== undefined ? { replyOk: s.replyOk } : {}),
+    ...(s.stepCount !== undefined ? { stepCount: s.stepCount } : {}),
+    ...(s.schema !== undefined ? { schema: s.schema } : {}),
     ...(s.status !== undefined ? { status: s.status } : {}),
     eventCount: s.eventCount,
     ...(s.stop ? { stop: s.stop } : {}),

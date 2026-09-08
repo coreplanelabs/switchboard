@@ -1,4 +1,5 @@
 import type { RunIndexRowSeed } from "@core/channels/webSeed.js";
+import { runDurationMs } from "@core/core/runDuration.js";
 import { formatDuration, formatLocalIso } from "./format";
 
 // The runs-index row model, ported from the old isomorphic `indexRowRenderer`:
@@ -61,12 +62,20 @@ export function shortId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
 
-/** The stopwatch cell: a finished row's start→finish, fixed; a live row's
- *  elapsed since `now`. */
+/** The stopwatch cell: the one duration (features/tracing.md) — received (or
+ *  started) to finished, fixed; a live row's to `now`; a tombstone or a live
+ *  row with no clock → empty. */
 export function elapsedText(run: IndexRow, now: number | undefined): string {
-  if (run.finished)
-    return typeof run.finishedAt === "number" ? formatDuration(run.finishedAt - run.startedAt, "clock") : "";
-  return typeof now === "number" ? formatDuration(now - run.startedAt, "clock") : "";
+  const ms = runDurationMs(run, run.finished ? undefined : now);
+  return ms === undefined ? "" : formatDuration(ms, "clock");
+}
+
+/** The tooltips say what the stopwatch measures only once a run carries
+ *  `receivedAt` (` (received to finish)`); a run without the stamp reads as it
+ *  always did. Every tooltip switches on this one predicate, so the row never
+ *  says two different things. */
+export function basisNote(run: IndexRow): string {
+  return typeof run.receivedAt === "number" ? " (received to finish)" : "";
 }
 
 /** The trigger surface: the platform prefix of the ids (AGENTS.md invariant 4)
@@ -90,14 +99,16 @@ export const SURFACE_NAME: Record<string, string> = { slack: "Slack", http: "HTT
 export function dotTip(run: IndexRow): string {
   if (!run.finished) return run.activity ? `now: ${run.activity}` : "starting…";
   let t = statusWord(run);
-  if (typeof run.finishedAt === "number") t += ` in ${formatDuration(run.finishedAt - run.startedAt, "clock")}`;
+  const ms = runDurationMs(run);
+  if (ms !== undefined) t += ` in ${formatDuration(ms, "clock")}${basisNote(run)}`;
   if (run.status && run.status !== "completed" && run.activity) t += `\n${run.activity}`;
   return t;
 }
 
 /** The started column's tooltip: the exact stamps, one per line, in the viewer's zone. */
 export function whenTip(run: IndexRow): string {
-  let t = `started ${formatLocalIso(run.startedAt)}`;
+  let t = typeof run.receivedAt === "number" ? `received ${formatLocalIso(run.receivedAt)}\n` : "";
+  t += `started ${formatLocalIso(run.startedAt)}`;
   if (run.finished && typeof run.finishedAt === "number") t += `\nfinished ${formatLocalIso(run.finishedAt)}`;
   return t;
 }
@@ -147,6 +158,10 @@ export function mergeRow(prev: IndexRow | undefined, run: IndexRow): IndexRow {
   const merged: IndexRow = { ...run };
   if (merged.finishedAt === undefined && prev.finishedAt !== undefined) merged.finishedAt = prev.finishedAt;
   if (merged.status === undefined && prev.status !== undefined) merged.status = prev.status;
+  // The tracing stamps (features/tracing.md) ride the record, not a registry upsert.
+  if (merged.receivedAt === undefined && prev.receivedAt !== undefined) merged.receivedAt = prev.receivedAt;
+  if (merged.sealedAt === undefined && prev.sealedAt !== undefined) merged.sealedAt = prev.sealedAt;
+  if (merged.replyOk === undefined && prev.replyOk !== undefined) merged.replyOk = prev.replyOk;
   return merged;
 }
 

@@ -196,6 +196,16 @@ describe("isRunRecord", () => {
     expect(isRunRecord(JSON.parse(JSON.stringify(record({ label: undefined, agent: undefined }))))).toBe(true);
   });
 
+  it("accepts the tracing stamps when typed (features/tracing.md) and refuses them otherwise", () => {
+    expect(isRunRecord(record({ receivedAt: 1, sealedAt: 2, replyOk: true, stepCount: 3, schema: 2 }))).toBe(true);
+    expect(isRunRecord(record({ replyOk: false, schema: 0 }))).toBe(true);
+    expect(isRunRecord({ ...record(), receivedAt: "1" })).toBe(false);
+    expect(isRunRecord({ ...record(), sealedAt: Number.NaN })).toBe(false);
+    expect(isRunRecord({ ...record(), replyOk: "yes" })).toBe(false);
+    expect(isRunRecord({ ...record(), stepCount: 1.5 })).toBe(false);
+    expect(isRunRecord({ ...record(), schema: -1 })).toBe(false);
+  });
+
   it("accepts every terminal status — `interrupted` (#375, the tombstone/drain status) included — and the Worker shares this validator", () => {
     for (const status of ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"] as const) {
       expect(isRunRecord(record({ status }))).toBe(true);
