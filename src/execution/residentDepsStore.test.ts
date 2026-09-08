@@ -10,7 +10,9 @@ import {
   depsInstallSemaphoreSize,
   depsScratchCloneArgv,
   depsStoreCommitScript,
+  depsHardenScript,
   depsStoreListScript,
+  NO_LOCKFILE_KEY,
   orderDepsEviction,
   parseDepsStoreListing,
   planDepsEviction,
@@ -246,5 +248,81 @@ describe("store listing and eviction (LRU among unreferenced entries, never a pr
       protectedKeys: new Set([KEY_A]),
     });
     expect(plan.remove).toEqual([]);
+  });
+});
+
+describe("deps-harden: the install's node_modules is made owner-read-only, and a tree with no lockfile may hold none", () => {
+  it("NO_LOCKFILE_KEY is the key of an empty lockfile listing (sha256 of no input)", () => {
+    expect(NO_LOCKFILE_KEY).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  });
+
+  it("script: strips owner write from every file; a missing node_modules is created (owned by the build user) when emptyOk, refused otherwise", () => {
+    const strict = depsHardenScript({
+      scratchDir: "/workspace/deps/.scratch-1",
+      owner: "worker1:worker1",
+      emptyOk: false,
+    });
+    expect(strict).toContain("find '/workspace/deps/.scratch-1/node_modules' -type f -perm -u+w -exec chmod u-w {} +");
+    expect(strict).toContain("install produced no node_modules");
+    expect(strict).not.toContain("mkdir");
+    const lenient = depsHardenScript({
+      scratchDir: "/workspace/deps/.scratch-1",
+      owner: "worker1:worker1",
+      emptyOk: true,
+    });
+    expect(lenient).toContain("mkdir '/workspace/deps/.scratch-1/node_modules'");
+    expect(lenient).toContain("chown worker1:worker1 '/workspace/deps/.scratch-1/node_modules'");
+    expect(lenient).not.toContain("install produced no node_modules");
+  });
+
+  it("on a real filesystem: files lose u+w; no node_modules + emptyOk → an empty one exists and the commit succeeds; no node_modules + strict → exit 1 naming the scratch", () => {
+    const root = mkdtempSync(join(tmpdir(), "deps-harden-"));
+    const me = `${spawnSync("id", ["-un"], { encoding: "utf8" }).stdout.trim()}:${spawnSync("id", ["-gn"], { encoding: "utf8" }).stdout.trim()}`;
+    try {
+      const full = join(root, ".scratch-full");
+      mkdirSync(join(full, "node_modules", "pkg"), { recursive: true });
+      writeFileSync(join(full, "node_modules", "pkg", "index.js"), "1", { mode: 0o644 });
+      const r1 = spawnSync("sh", ["-c", depsHardenScript({ scratchDir: full, owner: me, emptyOk: false })], {
+        encoding: "utf8",
+      });
+      expect(r1.status, r1.stderr).toBe(0);
+      expect(spawnSync("test", ["-w", join(full, "node_modules", "pkg", "index.js")]).status).not.toBe(0);
+
+      const bare = join(root, ".scratch-bare");
+      mkdirSync(bare, { recursive: true });
+      const r2 = spawnSync("sh", ["-c", depsHardenScript({ scratchDir: bare, owner: me, emptyOk: true })], {
+        encoding: "utf8",
+      });
+      expect(r2.status, r2.stderr).toBe(0);
+      expect(spawnSync("test", ["-d", join(bare, "node_modules")]).status).toBe(0);
+      const entry = join(root, KEY_A);
+      const r3 = spawnSync(
+        "sh",
+        [
+          "-c",
+          depsStoreCommitScript({
+            scratchDir: bare,
+            stagingDir: join(root, `.staging-${KEY_A}-1`),
+            entryDir: entry,
+            completePath: join(entry, ".complete"),
+          }),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(r3.status, r3.stderr).toBe(0);
+      expect(spawnSync("test", ["-f", join(entry, ".complete")]).status).toBe(0);
+      expect(spawnSync("test", ["-d", join(entry, "node_modules")]).status).toBe(0);
+
+      const strictBare = join(root, ".scratch-strict");
+      mkdirSync(strictBare, { recursive: true });
+      const r4 = spawnSync("sh", ["-c", depsHardenScript({ scratchDir: strictBare, owner: me, emptyOk: false })], {
+        encoding: "utf8",
+      });
+      expect(r4.status).toBe(1);
+      expect(r4.stderr).toContain(`install produced no node_modules in ${strictBare}`);
+      expect(spawnSync("test", ["-e", join(strictBare, "node_modules")]).status).not.toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -104,10 +104,40 @@ export function depsScratchCloneArgv(input: { mirrorDir: string; scratchDir: str
   return ["sh", "-c", script];
 }
 
+/** The key of a commit with NO lockfile: `git ls-tree <sha> -- <candidates>`
+ *  prints nothing, and sha256 of no input is this constant. */
+export const NO_LOCKFILE_KEY = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/** Harden the scratch tree's node_modules before it becomes an entry, as
+ *  root: every file loses owner write, so a consumer's build fails EACCES on
+ *  a write through a shared inode instead of mutating every other consumer's
+ *  tree (item 59). A tree with no node_modules after the install is a failed
+ *  install when the commit HAS a lockfile (there was something to install)
+ *  and an empty entry when it has none — a repo whose install command is a
+ *  no-op (`true`, a terraform tree) keys to NO_LOCKFILE_KEY and gets an empty
+ *  node_modules, owned by the build user like an installed one, so every
+ *  consumer's view links an empty directory and nothing else changes. Live
+ *  2026-09-08 05:03 UTC the infrastructure resident's rebuild failed at this
+ *  step (`find: '…/node_modules': No such file or directory`) for exactly
+ *  that shape. */
+export function depsHardenScript(input: {
+  scratchDir: string;
+  /** chown spec for the created empty directory (`user:group`) — the build user's. */
+  owner: string;
+  emptyOk: boolean;
+}): string {
+  const nm = shellQuote(`${input.scratchDir}/node_modules`);
+  const absent = input.emptyOk
+    ? `mkdir ${nm} && chown ${input.owner} ${nm}`
+    : `echo "install produced no node_modules in ${input.scratchDir}" >&2; exit 1`;
+  return [`set -e`, `test -d ${nm} || { ${absent}; }`, `find ${nm} -type f -perm -u+w -exec chmod u-w {} +`].join("\n");
+}
+
 /** Commit an install to the store, as root, in the order that makes the entry
  *  either absent or complete and never half-there:
- *   1. the scratch tree must actually hold a node_modules (an install that
- *      produced nothing is a failure, not an empty entry);
+ *   1. the scratch tree must hold a node_modules — depsHardenScript ran first
+ *      and either found one, created the empty one a lockfile-less commit is
+ *      allowed, or failed; a tree without one here is a caller bug;
  *   2. MOVE it into the staging dir (same filesystem: a rename, not a copy);
  *   3. rename staging → entry — atomic; a racer that finds the entry already
  *      complete (another attempt won, or a DO reset re-ran the install) drops

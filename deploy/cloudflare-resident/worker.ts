@@ -184,9 +184,11 @@ import {
   depsScratchCloneArgv,
   depsScratchPath,
   depsStagingPath,
+  depsHardenScript,
   depsStoreCommitScript,
   depsStoreListScript,
   depsUsedPath,
+  NO_LOCKFILE_KEY,
   parseDepsStoreListing,
   planDepsEviction,
   planDepsMaterialization,
@@ -3534,12 +3536,20 @@ export class ResidentDO extends Sandbox<Env> {
       // hardlinks these inodes, and worker1 (the checkout's build) owns them —
       // a build writing outside the tool-cache paths must fail EACCES, never
       // mutate the store (review 1b, now with one source instead of three).
+      // A commit with no lockfile may legitimately install nothing (the
+      // infrastructure resident's `true`): its entry is an empty node_modules.
       await this.runOk(
-        ["sh", "-c", `find ${scratch}/node_modules -type f -perm -u+w -exec chmod u-w {} +`],
+        [
+          "sh",
+          "-c",
+          depsHardenScript({
+            scratchDir: scratch,
+            owner: `${BUILD_USER}:${BUILD_USER}`,
+            emptyOk: key === NO_LOCKFILE_KEY,
+          }),
+        ],
         "deps-harden",
-        {
-          timeoutMs: GIT_NETWORK_TIMEOUT_MS,
-        },
+        { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
       );
       await this.runOk(
         [
