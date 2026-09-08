@@ -1,0 +1,54 @@
+# Switchboard's Slack app, as a manifest. api.slack.com/apps → Create New App →
+# From a manifest → paste this file. Every scope and event below is one the Slack
+# adapter uses; docs/how-to/set-up-accounts.md says what each one is for.
+#
+# Two things a manifest cannot do, and you do by hand afterwards: generate the
+# app-level token (Basic Information → App-Level Tokens, scope connections:write)
+# that becomes SLACK_APP_TOKEN, and install the app to the workspace, which
+# yields the bot token (xoxb-) that becomes SLACK_BOT_TOKEN.
+display_information:
+  name: Switchboard
+  description: Agents in Slack — answer questions, review pull requests, ship code.
+  background_color: "#1f2937"
+features:
+  bot_user:
+    display_name: switchboard
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      # Receive mentions; post and edit messages (the status card edits itself in place).
+      - app_mentions:read
+      - chat:write
+      # Read thread history, so a follow-up reply in a thread the bot is part of needs no mention,
+      # and the reconnect catch-up can re-read recent history for anything it missed.
+      - channels:history
+      - groups:history
+      # List channels and their members (the catch-up scans the channels the bot is in), and
+      # resolve channel and user names for run labels.
+      - channels:read
+      - groups:read
+      - users:read
+      # Download attachments (images go to the model); attach long command output as a file
+      # instead of a run of chunked messages.
+      - files:read
+      - files:write
+      # The 👀 receipt on a message the moment it is accepted.
+      - reactions:write
+      # Direct messages to the bot, if you want them: history for the conversation, read for
+      # the channel's metadata. Leave both out to keep the bot channel-only.
+      - im:history
+      - im:read
+settings:
+  event_subscriptions:
+    bot_events:
+      # A mention anywhere the bot is present.
+      - app_mention
+      # Thread follow-ups without a re-mention (public and private channels) and DMs.
+      - message.channels
+      - message.groups
+      - message.im
+  # The bot dials out to Slack over a websocket; no request URL, no inbound port.
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false
