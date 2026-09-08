@@ -61,18 +61,17 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
   });
 });
 
-// Feature: features/execution.md item 5 — the env map rides in the JSON body
-// (authoritative), plus `x-env-*` headers for ONE release as the compatibility
-// path for a sandbox Worker not yet on the body reader (`deploy all` deploys
-// the bot before the sandbox Worker). 2026-09-07 (#447 receipt): Workers Logs
-// record an invocation's request headers and redact by a NAME heuristic — the
-// probe's `x-env-PROBE_VAR: hello-from-env-option` was logged in clear while
-// `x-env-gh_token` happened to be REDACTED. Bodies are not recorded; next
-// release the headers go and the body stands alone.
+// Feature: features/execution.md item 5 — the env map rides ONLY in the JSON
+// body; the request carries no `x-env-*` header on any route. 2026-09-07 (#447
+// receipt): Workers Logs record an invocation's request headers and redact by a
+// NAME heuristic — the probe's `x-env-PROBE_VAR: hello-from-env-option` was
+// logged in clear while `x-env-gh_token` happened to be REDACTED. Bodies are
+// not recorded. The one-release `x-env-*` header fallback (#597) retired once
+// the body reader was live everywhere (#447 closed).
 describe("CloudflareSandboxExecutor env transport", () => {
   const sentHeaders = (c: { init: RequestInit }) => c.init.headers as Record<string, string>;
 
-  it("sends the same map in the body and in x-env-* headers on every route", async () => {
+  it("sends the map in the body and NO x-env-* header on any route", async () => {
     const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, content: "c" });
     const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x", OTHER: "v" }) });
     await ex.exec("gh pr view 1");
@@ -89,9 +88,8 @@ describe("CloudflareSandboxExecutor env transport", () => {
         authorization: "Bearer t",
         "content-type": "application/json",
         "x-thread-key": "slack:CX:1.0",
-        "x-env-GH_TOKEN": "ghs_x",
-        "x-env-OTHER": "v",
       });
+      expect(Object.keys(sentHeaders(c)).some((h) => h.toLowerCase().startsWith("x-env-"))).toBe(false);
     }
   });
 

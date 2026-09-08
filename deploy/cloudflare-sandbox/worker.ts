@@ -256,14 +256,14 @@ export default {
     // sandbox beyond the command's lifetime, and the command text the SDK
     // logs never carries a credential.
     //
-    // Body, not headers: Workers Logs record this invocation's request
+    // Body, never headers: Workers Logs record this invocation's request
     // headers and redact them by a name heuristic only — the 2026-09-07
-    // receipt probe's `X-Env-PROBE_VAR` was logged in clear. Bodies are not
-    // recorded. The per-variable request headers an OLDER bot sends are still
-    // read as a fallback so either deploy order works during the rollout;
-    // that header path RETIRES with the next release — drop it from
-    // `envFromRequest` once every bot in production sends the body shape.
-    const envVars = envFromRequest({ body, headers: request.headers });
+    // receipt probe's per-variable env header was logged in clear. Bodies are
+    // not recorded. The one-release per-variable-header fallback that carried a
+    // body-only bot against a header-only Worker during the #597 rollout is
+    // gone now that the body reader is live everywhere (#447), so the
+    // credential rides only in the body and no request header is read as env.
+    const envVars = envFromRequest({ body });
 
     try {
       switch (url.pathname) {
