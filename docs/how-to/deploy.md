@@ -61,7 +61,7 @@ npx tsx src/cli.ts deploy secrets resident
 npx tsx src/cli.ts deploy secrets sandbox
 ```
 
-Each command asks the source once which of the Worker's names it holds and refuses before any upload when a required one is absent, naming the secret and the path it looked at. Values ride stdin into `wrangler secret put`; none is printed. `--only NAME,NAME` puts a subset — how a first deployment proceeds without the secrets of features it has not set up: the manifest marks the bot's Brave key, Cloudflare-analytics token, ingress map, GitHub App triple and the sandbox and resident bearers as required, so a bot without those features puts what it has with `--only`.
+Each command asks the source once which of the Worker's names it holds and refuses before any upload when a required one is absent, naming the secret and the path it looked at. Values ride stdin into `wrangler secret put`; none is printed. A secret is optional where its feature is: the Brave key, the analytics token and the ingress map everywhere, the sandbox and resident bearers on the bot (required on the Worker that serves them), the GitHub App triple on both the bot and the resident. An absent optional secret is skipped by name and said, so a first deployment puts what it has; `--only NAME,NAME` puts a subset, for a rotation.
 
 Two rules the manifest's notes state and the commands enforce. A **shared bearer** (`MEMORY_TOKEN`, `SANDBOX_TOKEN`, `RESIDENT_OPERATOR_TOKEN`, `RESIDENT_ADMIN_TOKEN`) must carry one value on every Worker listed for it — the bot and the state Worker with different `MEMORY_TOKEN`s fail with 401 on every call. And the GitHub App triple goes on both the bot and the resident Worker: the resident is a second credential domain with its own copy of the key.
 

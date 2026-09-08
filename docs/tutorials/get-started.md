@@ -21,15 +21,15 @@ cp config/config.example.yaml config/config.yaml
 cp .env.example .env
 ```
 
-Open `.env` and replace the placeholder on the `ANTHROPIC_API_KEY` line with your key. Put a `#` in front of the three `GITHUB_APP_` lines for now: they are placeholders, and a set variable counts as configured. Leave the rest alone — nothing reads a line until you turn its feature on.
+Open `.env` and replace the placeholder on the `ANTHROPIC_API_KEY` line with your key. Leave the rest alone — nothing reads a line until you turn its feature on.
 
 Now ask. The CLI is a channel like Slack is: the same dispatcher, the same agents, printing to your terminal instead of a thread.
 
 ```bash
-npx tsx --env-file=.env src/cli.ts ask "what can you do?"
+npx tsx src/cli.ts ask "what can you do?"
 ```
 
-`--env-file` is Node's own flag. Switchboard reads credentials from the environment and from nowhere else, so the file has to be loaded by the thing that starts the process; the flag does that without exporting anything into your shell.
+Switchboard reads credentials from the environment and from nowhere else; the process loads `.env` from the directory you run it in — the repo root here — and a variable your shell already exports wins over the file.
 
 You will see a status line tick (`preparing workspace…`, then `thinking…`), and then the answer: the general agent introduces itself and the agents it can hand work to. That took one model call on the default model, `anthropic/claude-haiku-4-5`.
 
@@ -43,15 +43,15 @@ runHistory:
 Ask once more, then list what happened and open the record:
 
 ```bash
-npx tsx --env-file=.env src/cli.ts ask "in one sentence, what is a lateral join?"
-npx tsx --env-file=.env src/cli.ts runs list --status all
+npx tsx src/cli.ts ask "in one sentence, what is a lateral join?"
+npx tsx src/cli.ts runs list --status all
 ```
 
 The list prints one row per run with a short id, the agent, the outcome and the duration. Copy the full id from `runs list --status all --json` and read the record and its event stream — the same data the dashboard's run page shows:
 
 ```bash
-npx tsx --env-file=.env src/cli.ts runs get <run id>
-npx tsx --env-file=.env src/cli.ts runs events <run id>
+npx tsx src/cli.ts runs get <run id>
+npx tsx src/cli.ts runs events <run id>
 ```
 
 That is the whole product in miniature: a message arrives over a channel, a dispatcher routes it to an agent, the agent runs on a model, and the run is recorded. Everything after this is the same pipeline with a different front door and a different place to run.
@@ -69,10 +69,10 @@ Switchboard connects to Slack over Socket Mode: the bot dials out to Slack and h
 
 Put both values on their lines in `.env`.
 
-**Start the bot.** This is the same process the production container runs, from source:
+**Start the bot.** This is the same process the production container runs, from source (`npm run dev` is the same command):
 
 ```bash
-npx tsx --env-file=.env src/index.ts
+npx tsx src/index.ts
 ```
 
 The startup log states what it computed: the capabilities that are on, where runtime overrides are stored, the dashboard's auth strategy — and, once the socket is up, `switchboard running (providers: anthropic, openai; default agent: general)`. Leave it running.
@@ -140,11 +140,11 @@ mkdir -p -m 700 ~/.secrets/switchboard
 openssl rand -hex 32 > ~/.secrets/switchboard/MEMORY_TOKEN
 ```
 
-Then put them. The state Worker holds one secret; the bot holds many, and `--only` names the ones this deployment uses so the command does not refuse over the ones it does not (a full list is in `deploy/secrets.manifest.json`):
+Then put them. The state Worker holds one secret; the bot holds many, and every one that belongs to a feature you have not turned on is optional — the command skips it by name and says so (the full list, and which are required, is `deploy/secrets.manifest.json`):
 
 ```bash
 npx tsx src/cli.ts deploy secrets memory
-npx tsx src/cli.ts deploy secrets bot --only SLACK_BOT_TOKEN,SLACK_APP_TOKEN,ANTHROPIC_API_KEY,MEMORY_TOKEN
+npx tsx src/cli.ts deploy secrets bot
 ```
 
 **Deploy.** One command runs the plan: it checks that wrangler is logged in to the profile's account and that the tree is clean at `origin/main`, validates your config and pushes it to the state Worker as the document the bot reads at startup, deploys the state Worker, builds and deploys the bot's image, and then waits until the bot's `/healthz` answers from a container running this commit. It needs the state Worker's bearer in its own environment to push the config:

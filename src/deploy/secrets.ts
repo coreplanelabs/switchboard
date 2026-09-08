@@ -1,5 +1,7 @@
 // A Worker's secrets, provisioned from the manifest: WHICH secrets each Worker
-// holds is deploy/secrets.manifest.json (names, Workers, optional — the
+// holds is deploy/secrets.manifest.json (names, Workers, optional — everywhere,
+// or on the Workers a list names: a bearer the bot needs only when the feature
+// behind it is on is required on the Worker that serves the feature — the
 // contract the Worker's `Env` interface and the container's forwarding list are
 // tested against); WHERE the values come from is the deployment profile's
 // `secretsSource` — a directory of `<NAME>` files (the default) or a 1Password
@@ -28,7 +30,10 @@ export const manifestSchema = z.object({
       z.object({
         name: secretName,
         workers: z.array(z.enum(DEPLOY_ORDER as [WorkerName, ...WorkerName[]])).min(1),
-        optional: z.boolean().optional(),
+        /** `true`: skipped without a value on every Worker; a list: skipped on those Workers, required on the rest. */
+        optional: z
+          .union([z.boolean(), z.array(z.enum(DEPLOY_ORDER as [WorkerName, ...WorkerName[]])).min(1)])
+          .optional(),
         note: z.string().optional(),
       }),
     )
@@ -37,6 +42,11 @@ export const manifestSchema = z.object({
 
 export type SecretsManifest = z.infer<typeof manifestSchema>;
 export type SecretDef = SecretsManifest["secrets"][number];
+
+/** Pure: whether a Worker may go without this secret — `optional: true`, or a list naming that Worker. */
+export function isOptionalOn(secret: SecretDef, worker: WorkerName): boolean {
+  return secret.optional === true || (Array.isArray(secret.optional) && secret.optional.includes(worker));
+}
 
 /** Pure: the manifest, or its problems by field. Two entries with one name are a problem too. */
 export function parseManifest(
@@ -49,6 +59,17 @@ export function parseManifest(
   const dupes = names.filter((n, i) => names.indexOf(n) !== i);
   if (dupes.length > 0)
     return { ok: false, problems: [`secrets: duplicate name(s) ${[...new Set(dupes)].join(", ")}`] };
+  // An `optional` list may only name Workers the secret is on: a stray name
+  // would be silently meaningless, and a list that names every Worker is
+  // `optional: true` misspelled.
+  const strays = parsed.data.secrets.flatMap((s, i) =>
+    Array.isArray(s.optional)
+      ? s.optional
+          .filter((w) => !s.workers.includes(w))
+          .map((w) => `secrets.${i}.optional: ${w} is not one of ${s.name}'s workers (${s.workers.join(", ")})`)
+      : [],
+  );
+  if (strays.length > 0) return { ok: false, problems: strays };
   return { ok: true, manifest: parsed.data };
 }
 
@@ -113,7 +134,7 @@ export function planSecretPuts(
   const plan: SecretPutPlan = { worker, dir, puts: [], skippedOptional: [], missing: [] };
   for (const s of wanted) {
     if (present.has(s.name)) plan.puts.push(s.name);
-    else if (s.optional) plan.skippedOptional.push(s.name);
+    else if (isOptionalOn(s, worker)) plan.skippedOptional.push(s.name);
     else plan.missing.push(s.name);
   }
   return { ok: true, plan };
