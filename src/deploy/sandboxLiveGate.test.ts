@@ -4,13 +4,16 @@ import {
   containerAppId,
   decideSandboxLive,
   decideWorker,
-  parseAppVersion,
+  parseAppState,
   parseExecStream,
   parseInstancesPage,
   parseWranglerJson,
   PROBE_COMMAND,
   probeThreadKey,
+  rolloutTargetFromDeployOutput,
+  type AppState,
   type ContainerInstance,
+  type Read,
   type SandboxLiveInput,
 } from "./sandboxLiveGate.js";
 
@@ -18,11 +21,22 @@ import {
 // the rollout and a probe agree. Incident 2026-09-07 (#569): a thread created
 // 111 s after the Worker upload landed on a container still running the
 // previous image and every exec failed with an EMPTY error for 90 s; the
-// deploy had said "deployed" and exited 0.
+// deploy had said "deployed" and exited 0. Then 2026-09-08 (#589): the first
+// production gate passed 7 s after the 0.5.0 upload against the PRE-deploy
+// application version (11) — the deploy's version 12 had not registered yet —
+// so the rollout now has a target: what wrangler's own diff said the
+// application moves to, judged against what it was before the upload.
 
 const HEAD = "e6af1aa0b7c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9";
 const KEY = probeThreadKey(HEAD);
 const APP_VERSION = 12;
+const PRE_VERSION = 11;
+const REGISTRY = "registry.cloudflare.com/3c7b28f23cc93f09e77bb0a9ffcb7e6f/switchboard-sandbox-switchboardsandbox";
+const OLD_IMAGE = `${REGISTRY}@sha256:23e69f9ee5513879b8a44019e9a21b2981cf81bb242236955a0dc59ee96f5367`;
+const NEW_IMAGE = `${REGISTRY}@sha256:eb7d4f2863a3ccd1970d76c5505402bd458ffdaacbb6bf777afdcbedf465ef2f`;
+const BEFORE: Read<AppState> = { value: { version: PRE_VERSION, image: OLD_IMAGE } };
+const PRE_DEPLOY: Read<AppState> = BEFORE;
+const AFTER: Read<AppState> = { value: { version: APP_VERSION, image: NEW_IMAGE } };
 
 const healthy = (commit = HEAD) => ({
   status: 200,
@@ -35,29 +49,37 @@ const inst = (name: string | null, state: string, version: number | null = APP_V
 });
 const fleet = (...extra: ContainerInstance[]) => [
   inst("slack:C0BQS7KPJHK:1788824120.915519", "running"),
-  inst("slack:C0BQS7KPJHK:1788820000.000001", "stopped", 11),
+  inst("slack:C0BQS7KPJHK:1788820000.000001", "stopped", PRE_VERSION),
   inst(KEY, "running"),
+  ...extra,
+];
+/** The fleet as the 0.5.0 gate saw it 7 s after the upload: every instance still on the pre-deploy version. */
+const preDeployFleet = (...extra: ContainerInstance[]) => [
+  inst("slack:C0BQS7KPJHK:1788824120.915519", "running", PRE_VERSION),
+  inst(KEY, "running", PRE_VERSION),
   ...extra,
 ];
 const ok = { body: { stdout: "ok\n", stderr: "", exitCode: 0 } };
 
 const input = (over: Partial<SandboxLiveInput> = {}): SandboxLiveInput => ({
   health: healthy(),
-  appVersion: { value: APP_VERSION },
+  app: AFTER,
   instances: { value: fleet() },
   probe: ok,
   probeThreadKey: KEY,
   deployedCommit: HEAD,
+  before: BEFORE,
+  target: { image: NEW_IMAGE },
   elapsedMs: 30_000,
   ...over,
 });
 
 describe("decideSandboxLive", () => {
-  it("live only when the Worker serves the commit, every running instance is on the app version and the probe answered ok from an instance on it — and says all three", () => {
+  it("live only when the Worker serves the commit, the application left its pre-deploy version, every running instance is on the new version and the probe answered ok from an instance on it — and says all three", () => {
     const d = decideSandboxLive(input());
     expect(d).toEqual({
       kind: "live",
-      summary: `Worker serves e6af1aa; rollout complete (2 running instance(s) on version 12); probe \`echo ok\` exit 0 from ${KEY} (version 12)`,
+      summary: `Worker serves e6af1aa; rollout complete (2 running instance(s) on version 12, up from 11); probe \`echo ok\` exit 0 from ${KEY} (version 12)`,
     });
     // Live is live regardless of elapsed time.
     expect(decideSandboxLive(input({ elapsedMs: LIVE_GATE_DEADLINE_MS * 2 })).kind).toBe("live");
@@ -81,7 +103,7 @@ describe("decideSandboxLive", () => {
     // The same verdict with nothing else read — what the runner passes while the Worker is not live yet.
     expect(
       decideSandboxLive(
-        input({ health: healthy("610682f7abcdef0123456789"), appVersion: null, instances: null, probe: null }),
+        input({ health: healthy("610682f7abcdef0123456789"), app: null, instances: null, probe: null }),
       ),
     ).toMatchObject({ kind: "waiting", reason: expect.stringContaining("Worker: serving commit 610682f") });
   });
@@ -95,6 +117,91 @@ describe("decideSandboxLive", () => {
     }
     expect(decideWorker({ status: 401, body: undefined }, HEAD)).toMatchObject({ ok: false, fatal: true });
     expect(decideWorker(healthy(), HEAD)).toEqual({ ok: true, commit: HEAD });
+  });
+
+  it("a target from wrangler's diff: while the application still reports the pre-deploy version and image the rollout is waiting — running instances all on that version, and a probe ok from one, prove nothing (#589, the 0.5.0 shape)", () => {
+    const stillBefore = input({ app: PRE_DEPLOY, instances: { value: preDeployFleet() } });
+    expect(decideSandboxLive(stillBefore)).toEqual({
+      kind: "waiting",
+      reason:
+        "rollout: application still at pre-deploy version 11 / image sha256:23e69f9e — the deploy's new version is not registered yet",
+    });
+    // The same wait when only the version is known before (image not reported), and when the diff
+    // changed configuration without a new image (target without an image: only the version can advance).
+    expect(
+      decideSandboxLive(input({ app: { value: { version: PRE_VERSION, image: null } }, before: PRE_DEPLOY })),
+    ).toEqual({
+      kind: "waiting",
+      reason: "rollout: application still at pre-deploy version 11 — the deploy's new version is not registered yet",
+    });
+    expect(decideSandboxLive({ ...stillBefore, target: { image: null } })).toMatchObject({
+      kind: "waiting",
+      reason: expect.stringContaining("still at pre-deploy version 11"),
+    });
+    // Never "complete" against the pre-deploy version when a target exists — even at the deadline it is a failure.
+    expect(decideSandboxLive({ ...stillBefore, elapsedMs: LIVE_GATE_DEADLINE_MS })).toMatchObject({
+      kind: "failed",
+      reason: expect.stringContaining("application still at pre-deploy version 11"),
+    });
+  });
+
+  it("live only after the version advanced AND the running instances and the probe's instance are on the new version — each remaining gap named in order", () => {
+    // Version advanced, instances not yet replaced: the rollout is in progress.
+    expect(decideSandboxLive(input({ instances: { value: preDeployFleet() } }))).toEqual({
+      kind: "waiting",
+      reason: "rollout in progress — 2 of 2 running instance(s) still on version 11, app version 12",
+    });
+    // Advanced and replaced, but the probe answered from the old one on its way out.
+    const replaced = fleet().filter((i) => i.name !== KEY);
+    expect(decideSandboxLive(input({ instances: { value: [...replaced, inst(KEY, "stopping", 11)] } }))).toEqual({
+      kind: "waiting",
+      reason: `probe instance ${KEY} is on version 11, app version 12 — the probe landed on a previous image`,
+    });
+    // A configuration-only change (no new image in the diff) advances by version alone.
+    expect(decideSandboxLive(input({ target: { image: null } }))).toMatchObject({
+      kind: "live",
+      summary: expect.stringContaining("rollout complete (2 running instance(s) on version 12, up from 11)"),
+    });
+    // The version is the primary signal: a version above the pre-deploy one is an advance whatever the image reads.
+    expect(decideSandboxLive(input({ app: { value: { version: APP_VERSION, image: null } } })).kind).toBe("live");
+  });
+
+  it("when the pre-deploy read failed, the diff's image is the only evidence: live once the application reports it, waiting (with wrangler's words) while it does not, and with no image printed the advance can never be told", () => {
+    const unread: Read<AppState> = { error: "wrangler containers info failed: exit 1" };
+    expect(decideSandboxLive(input({ before: unread }))).toEqual({
+      kind: "live",
+      summary: `Worker serves e6af1aa; rollout complete (2 running instance(s) on version 12, image sha256:eb7d4f28); probe \`echo ok\` exit 0 from ${KEY} (version 12)`,
+    });
+    expect(
+      decideSandboxLive(input({ before: unread, app: PRE_DEPLOY, instances: { value: preDeployFleet() } })),
+    ).toEqual({
+      kind: "waiting",
+      reason:
+        "rollout: pre-deploy version unreadable (wrangler containers info failed: exit 1); application image sha256:23e69f9e is not the deploy's sha256:eb7d4f28",
+    });
+    expect(decideSandboxLive(input({ before: unread, target: { image: null } }))).toEqual({
+      kind: "waiting",
+      reason:
+        "rollout: pre-deploy version unreadable (wrangler containers info failed: exit 1) and the deploy printed no image — cannot tell when the new version registers",
+    });
+  });
+
+  it("a Worker-only deploy (wrangler printed no container change, target null) expects no advance: every running instance on the current version and a probe from one is live, a straggler is still a rollout in progress", () => {
+    const workerOnly = input({ target: null, app: PRE_DEPLOY, instances: { value: preDeployFleet() } });
+    expect(decideSandboxLive(workerOnly)).toEqual({
+      kind: "live",
+      summary: `Worker serves e6af1aa; Worker-only deploy — no container change (2 running instance(s) on version 11); probe \`echo ok\` exit 0 from ${KEY} (version 11)`,
+    });
+    expect(
+      decideSandboxLive({ ...workerOnly, instances: { value: preDeployFleet(inst("slack:older", "running", 10)) } }),
+    ).toEqual({
+      kind: "waiting",
+      reason: "rollout in progress — 1 of 3 running instance(s) still on version 10, app version 11",
+    });
+    // Whatever `before` read (or failed to), a Worker-only deploy never waits on it.
+    expect(
+      decideSandboxLive({ ...workerOnly, before: { error: "wrangler containers info failed: exit 1" } }).kind,
+    ).toBe("live");
   });
 
   it("rollout in progress: a RUNNING instance on another version (or an unknown one) keeps it waiting, naming the counts and versions; stopped/stopping/failed/provisioning instances on old versions are ignored", () => {
@@ -117,8 +224,8 @@ describe("decideSandboxLive", () => {
     ).toBe("live");
   });
 
-  it("an unreadable app version or instance list is waiting with wrangler's words, never live and never a hard failure", () => {
-    expect(decideSandboxLive(input({ appVersion: { error: "wrangler containers info failed: exit 1" } }))).toEqual({
+  it("an unreadable app state or instance list is waiting with wrangler's words, never live and never a hard failure", () => {
+    expect(decideSandboxLive(input({ app: { error: "wrangler containers info failed: exit 1" } }))).toEqual({
       kind: "waiting",
       reason: "rollout: wrangler containers info failed: exit 1",
     });
@@ -126,7 +233,7 @@ describe("decideSandboxLive", () => {
       kind: "waiting",
       reason: "rollout: containers instances: no JSON",
     });
-    expect(decideSandboxLive(input({ appVersion: null, instances: null }))).toEqual({
+    expect(decideSandboxLive(input({ app: null, instances: null }))).toEqual({
       kind: "waiting",
       reason: "rollout: not read yet",
     });
@@ -210,14 +317,106 @@ describe("wrangler and /exec parsers", () => {
     expect(parseWranglerJson(`${banner}[not json`)).toBeUndefined();
   });
 
-  it("containerAppId finds the application by name; parseAppVersion reads a numeric version (string form accepted)", () => {
+  it("containerAppId finds the application by name; parseAppState reads the numeric version (string form accepted) and configuration.image (null when absent); no numeric version is null", () => {
     expect(containerAppId(listing, "switchboard-sandbox-switchboardsandbox")).toBe("9f8e7d6c");
     expect(containerAppId(listing, "switchboard-nope")).toBeUndefined();
     expect(containerAppId({ not: "an array" }, "x")).toBeUndefined();
-    expect(parseAppVersion({ id: "9f8e7d6c", version: 12, configuration: { image: "registry/…:abc" } })).toBe(12);
-    expect(parseAppVersion({ version: "13" })).toBe(13);
-    expect(parseAppVersion({ version: "v13" })).toBeNull();
-    expect(parseAppVersion(undefined)).toBeNull();
+    // `wrangler containers info a030b6eb-… --json`, live 2026-09-08 after the 0.5.0 rollout (reduced).
+    const info = {
+      id: "a030b6eb-42de-4c30-ad2b-e692327ca813",
+      name: "switchboard-sandbox-switchboardsandbox",
+      version: 12,
+      instances: 7,
+      max_instances: 25,
+      configuration: { image: NEW_IMAGE, vcpu: 2, memory: "8GiB", network: { mode: "private" } },
+      health: { instances: { healthy: 7, scheduling: 0 } },
+    };
+    expect(parseAppState(info)).toEqual({ version: 12, image: NEW_IMAGE });
+    expect(parseAppState({ version: "13" })).toEqual({ version: 13, image: null });
+    expect(parseAppState({ version: 13, configuration: { image: 42 } })).toEqual({ version: 13, image: null });
+    expect(parseAppState({ version: "v13", configuration: { image: NEW_IMAGE } })).toBeNull();
+    expect(parseAppState(undefined)).toBeNull();
+  });
+
+  it("rolloutTargetFromDeployOutput reads the image wrangler's `Container application changes` diff adds (the 0.5.0 log's shape, gutter and colours included); a diff without an image line is a target without one; `no changes`, a NEW application's snippet, or no containers section at all", () => {
+    // The `deploy affected` job of release-please run 34174120389, 2026-09-08T00:47:15Z, verbatim.
+    const edit = [
+      "0c48b341: digest: sha256:eb7d4f2863a3ccd1970d76c5505402bd458ffdaacbb6bf777afdcbedf465ef2f size: 4293",
+      "╭ Deploy a container application deploy changes to your application",
+      "│",
+      "│ Container application changes",
+      "│",
+      "├ EDIT switchboard-sandbox-switchboardsandbox",
+      "│",
+      '│         "configuration": {',
+      '│           "command": [],',
+      '│           "entrypoint": [],',
+      `│ -         "image": "${OLD_IMAGE}",`,
+      `│ +         "image": "${NEW_IMAGE}",`,
+      '│           "instance_type": "standard-3",',
+      '│           "network": {',
+      '│             "assign_ipv4": "none",',
+      "│",
+      "│",
+      "│  SUCCESS  Modified application switchboard-sandbox-switchboardsandbox (Application ID: a030b6eb-42de-4c30-ad2b-e692327ca813)",
+      "│",
+      "╰ Applied changes ",
+      "",
+      "Deployed switchboard-sandbox triggers (0.98 sec)",
+      "  switchboard-sandbox.coreplanelabs.dev (custom domain)",
+      "Current Version ID: 0c48b341-f216-4262-81c0-bc62ecb5669a",
+    ].join("\n");
+    expect(rolloutTargetFromDeployOutput(edit)).toEqual({ image: NEW_IMAGE });
+    // A TTY colours the status and the diff signs; the target is the same.
+    const esc = String.fromCharCode(27);
+    const coloured = edit
+      .replace("EDIT", `${esc}[4m${esc}[38;2;245;130;32mEDIT${esc}[39m${esc}[24m`)
+      .replace(`+         "image"`, `${esc}[32m+         "image"`)
+      .replace(`${NEW_IMAGE}",`, `${NEW_IMAGE}",${esc}[39m`);
+    expect(rolloutTargetFromDeployOutput(coloured)).toEqual({ image: NEW_IMAGE });
+    // Configuration changed without a new image: a new version is coming, its image unknown.
+    const configOnly = edit
+      .replace(`│ -         "image": "${OLD_IMAGE}",\n`, "")
+      .replace(`│ +         "image": "${NEW_IMAGE}",`, `│           "image": "${OLD_IMAGE}",`)
+      .replace(
+        '│           "instance_type": "standard-3",',
+        '│ -         "instance_type": "standard-2",\n│ +         "instance_type": "standard-3",',
+      );
+    expect(rolloutTargetFromDeployOutput(configOnly)).toEqual({ image: null });
+    // The Worker-only deploy: the image rebuilt to the same digest, wrangler prints no diff.
+    const unchanged = [
+      "╭ Deploy a container application deploy changes to your application",
+      "│",
+      "│ Container application changes",
+      "│",
+      "├ no changes switchboard-sandbox-switchboardsandbox",
+      "│",
+      "╰ No changes to be made",
+      "",
+      "Current Version ID: 0c48b341-f216-4262-81c0-bc62ecb5669a",
+    ].join("\n");
+    expect(rolloutTargetFromDeployOutput(unchanged)).toBeNull();
+    // A first deploy prints the whole application as a snippet under NEW — its image is the target.
+    const created = [
+      "│ Container application changes",
+      "│",
+      "├ NEW switchboard-sandbox-switchboardsandbox",
+      '│   "containers": [',
+      "│     {",
+      '│       "configuration": {',
+      `│         "image": "${NEW_IMAGE}",`,
+      '│         "instance_type": "standard-3"',
+      "│       },",
+      '│       "max_instances": 25',
+      "│     }",
+      "│   ]",
+      "│",
+      "╰ Applied changes ",
+    ].join("\n");
+    expect(rolloutTargetFromDeployOutput(created)).toEqual({ image: NEW_IMAGE });
+    // A Worker without containers, or a failed deploy: no section, no target.
+    expect(rolloutTargetFromDeployOutput("Deployed switchboard-memory triggers\nCurrent Version ID: abc")).toBeNull();
+    expect(rolloutTargetFromDeployOutput("")).toBeNull();
   });
 
   it("parseInstancesPage reads the bare array wrangler prints unpaginated AND the {instances, result_info} shape --per-page switches to, keeping name/state/version and the next page token", () => {

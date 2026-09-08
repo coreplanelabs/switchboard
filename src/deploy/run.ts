@@ -39,17 +39,21 @@ import {
   containerAppId,
   decideSandboxLive,
   decideWorker,
-  parseAppVersion,
+  parseAppState,
   parseExecStream,
   parseInstancesPage,
   parseWranglerJson,
   PROBE_COMMAND,
   PROBE_TIMEOUT_MS,
   probeThreadKey,
+  rolloutTargetFromDeployOutput,
+  shortImage,
+  type AppState,
   type ContainerInstance,
   type HealthRead,
   type ProbeResult,
   type Read,
+  type RolloutTarget,
 } from "./sandboxLiveGate.js";
 
 // The production deploy RUNNER behind the registry's `deploy all` (CLI only):
@@ -73,7 +77,7 @@ import {
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
 
-interface RunResult {
+export interface RunResult {
   code: number;
   output: string;
 }
@@ -342,7 +346,7 @@ async function fetchHealthz(url: string): Promise<HealthzBody | undefined> {
   return "body" in r ? r.body : undefined;
 }
 
-interface StepOutcome {
+export interface StepOutcome {
   ok: boolean;
   versionId?: string;
   live: string;
@@ -389,8 +393,8 @@ type GateOutcome = { live: true; detail: string; waitedMs: number } | { live: fa
 export interface SandboxGateDeps {
   env: Record<string, string | undefined>;
   readHealth(url: string, bearer: string): Promise<HealthRead>;
-  /** `wrangler containers info <app> --json` → the application's version, run in `dir`. */
-  readAppVersion(dir: string, containerApp: string): Promise<Read<number>>;
+  /** `wrangler containers info <app> --json` → the application's version and image, run in `dir`. */
+  readAppState(dir: string, containerApp: string): Promise<Read<AppState>>;
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
   readInstances(dir: string, containerApp: string): Promise<Read<ContainerInstance[]>>;
   /** `POST /exec` `echo ok` on the probe thread; the streamed body parsed. */
@@ -432,15 +436,15 @@ const INSTANCES_PER_PAGE = 100;
 export const defaultSandboxGateDeps: SandboxGateDeps = {
   env: process.env,
   readHealth: (url, bearer) => readHealthz(url, bearer),
-  readAppVersion: async (dir, containerApp) => {
+  readAppState: async (dir, containerApp) => {
     const id = await resolveContainerAppId(dir, containerApp);
     if ("error" in id) return id;
     const info = await wranglerJson(dir, ["containers", "info", id.value, "--json"]);
     if ("error" in info) return info;
-    const version = parseAppVersion(info.value);
-    return version === null
+    const state = parseAppState(info.value);
+    return state === null
       ? { error: `wrangler containers info ${id.value}: no numeric version in the output` }
-      : { value: version };
+      : { value: state };
   },
   readInstances: async (dir, containerApp) => {
     const id = await resolveContainerAppId(dir, containerApp);
@@ -479,20 +483,30 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
   sleep,
 };
 
+/** What the sandbox gate knows about the rollout it waits for (#589): the application as read BEFORE
+ *  the upload, and the target wrangler's deploy output named (`null`: no container change printed). */
+export interface SandboxRollout {
+  before: Read<AppState>;
+  target: RolloutTarget | null;
+}
+
 /**
  * After the sandbox deploy: poll until the Worker serves the deployed commit,
- * every running container instance is on the application's version, and an
- * `echo ok` through the gate's probe thread answers from an instance on that
- * version — logging every poll's first unmet signal. The rollout and the probe
- * are read only once the Worker is live (they mean nothing before), and the
- * probe is sent BEFORE the instance list is read so the list includes the
- * probe's own instance. One thread key per deployed commit: the probe holds
- * one fleet slot for the 5-min idle window, not one per poll.
+ * the container application has left its pre-deploy version (when wrangler
+ * printed a container change), every running instance is on the application's
+ * version, and an `echo ok` through the gate's probe thread answers from an
+ * instance on that version — logging every poll's first unmet signal. The
+ * rollout and the probe are read only once the Worker is live (they mean
+ * nothing before), and the probe is sent BEFORE the instance list is read so
+ * the list includes the probe's own instance. One thread key per deployed
+ * commit: the probe holds one fleet slot for the 5-min idle window, not one
+ * per poll.
  */
 export async function waitUntilSandboxLive(
   step: Pick<DeployStep, "name" | "dir">,
   gate: SandboxLiveGate,
   expectedCommit: string,
+  rollout: SandboxRollout,
   io: Pick<DeployRunnerIO, "log">,
   deps: SandboxGateDeps = defaultSandboxGateDeps,
 ): Promise<GateOutcome> {
@@ -511,15 +525,17 @@ export async function waitUntilSandboxLive(
     const rest = decideWorker(health, expectedCommit).ok
       ? {
           probe: await deps.probeExec(execUrl, bearer, threadKey),
-          appVersion: await deps.readAppVersion(step.dir, gate.containerApp),
+          app: await deps.readAppState(step.dir, gate.containerApp),
           instances: await deps.readInstances(step.dir, gate.containerApp),
         }
-      : { probe: null, appVersion: null, instances: null };
+      : { probe: null, app: null, instances: null };
     const d = decideSandboxLive({
       health,
       ...rest,
       probeThreadKey: threadKey,
       deployedCommit: expectedCommit,
+      before: rollout.before,
+      target: rollout.target,
       elapsedMs: elapsed,
     });
     if (d.kind === "live") return { live: true, detail: d.summary, waitedMs: deps.now() - started };
@@ -531,23 +547,58 @@ export async function waitUntilSandboxLive(
   }
 }
 
-async function deployStep(
+/** The sandbox's container application as it stands BEFORE the upload — the version the gate must see
+ *  the rollout leave (#589). A failed read is logged and returned as such: the gate then needs the
+ *  deploy's image to show, and a deploy is never refused over it. */
+async function readAppBeforeUpload(
+  step: Pick<DeployStep, "name" | "dir">,
+  gate: SandboxLiveGate,
+  io: Pick<DeployRunnerIO, "log">,
+  deps: SandboxGateDeps,
+): Promise<Read<AppState>> {
+  const before = await deps.readAppState(step.dir, gate.containerApp);
+  io.log(
+    "value" in before
+      ? `[deploy:all] ${step.name}: container application at version ${before.value.version}${before.value.image ? ` (image ${shortImage(before.value.image)})` : ""} before the upload`
+      : `[deploy:all] ${step.name}: could not read the container application before the upload — ${before.error}; the gate will need the deploy's image to show`,
+  );
+  return before;
+}
+
+/** A step's `npm run deploy` in its dir, output streamed — the one spawn `deployStep` makes, injectable. */
+export type StepExec = (step: DeployStep, io: DeployRunnerIO) => Promise<RunResult>;
+const runStepCommand: StepExec = (step, io) =>
+  run(step.command[0], step.command.slice(1), {
+    cwd: join(REPO_ROOT, step.dir),
+    unset: step.unsetEnv,
+    set: step.setEnv,
+    stream: (c) => io.stream(c),
+  });
+
+/**
+ * One step: its deploy command, then its gate. A sandbox-gated step reads the
+ * container application BEFORE the command runs — the version the rollout must
+ * leave — and takes the rollout target from what wrangler printed (#589); a
+ * failed pre-read is logged and handed to the gate, never a reason not to
+ * deploy. A step whose preflight refuses is waited out and retried.
+ */
+export async function deployStep(
   step: DeployStep,
-  plan: DeployPlan,
+  plan: Pick<DeployPlan, "waitMaxMs" | "pollMs">,
   expectedCommit: string,
   io: DeployRunnerIO,
   deps: SandboxGateDeps,
+  exec: StepExec = runStepCommand,
 ): Promise<StepOutcome> {
   const started = Date.now();
   const deadline = started + plan.waitMaxMs;
   for (;;) {
     io.log(`\n[deploy:all] ▶ ${step.name} (${step.script}) — ${step.dir}: ${step.command.join(" ")}`);
-    const r = await run(step.command[0], step.command.slice(1), {
-      cwd: join(REPO_ROOT, step.dir),
-      unset: step.unsetEnv,
-      set: step.setEnv,
-      stream: (c) => io.stream(c),
-    });
+    const sandbox =
+      step.liveGate?.kind === "sandbox"
+        ? { gate: step.liveGate, before: await readAppBeforeUpload(step, step.liveGate, io, deps) }
+        : undefined;
+    const r = await exec(step, io);
     const outcome = classifyDeployOutput(r.code, r.output);
     if (outcome.kind === "deployed") {
       if (!step.liveGate) {
@@ -557,10 +608,17 @@ async function deployStep(
       io.log(
         `[deploy:all] ${step.name}: version ${outcome.versionId ?? "?"} uploaded — waiting until live (commit ${expectedCommit.slice(0, 7)})`,
       );
-      const gate =
-        step.liveGate.kind === "health"
-          ? await waitUntilLive(step, step.liveGate.healthUrl, expectedCommit, io)
-          : await waitUntilSandboxLive(step, step.liveGate, expectedCommit, io, deps);
+      let gate: GateOutcome;
+      if (sandbox) {
+        const target = rolloutTargetFromDeployOutput(r.output);
+        const from = "value" in sandbox.before ? `version ${sandbox.before.value.version}` : "its pre-deploy version";
+        io.log(
+          target
+            ? `[deploy:all] ${step.name}: wrangler printed a container change — ${target.image ? `image ${shortImage(target.image)}` : "configuration only, image unchanged"}; the application must leave ${from}`
+            : `[deploy:all] ${step.name}: wrangler printed no container change — Worker-only deploy, no rollout expected`,
+        );
+        gate = await waitUntilSandboxLive(step, sandbox.gate, expectedCommit, { ...sandbox, target }, io, deps);
+      } else gate = await waitUntilLive(step, step.liveGate.healthUrl, expectedCommit, io);
       if (gate.live) {
         io.log(
           `[deploy:all] ${step.name}: live (${gate.detail}; ${Math.round(gate.waitedMs / 1000)}s after the upload)`,
