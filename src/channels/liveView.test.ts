@@ -1163,6 +1163,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(seed.durationMs).toBe(10_000);
       expect(seed.startedAt).toBe(record("r1").startedAt);
       expect(seed.finishedAt).toBe(record("r1").finishedAt);
+      expect(seed.truncated).toBe(record("r1").truncated); // the timeline's `(too large)` (live-view item 25)
       expect(t.body()).not.toContain("?t=");
       expect(t.body()).not.toContain("tok-");
     });

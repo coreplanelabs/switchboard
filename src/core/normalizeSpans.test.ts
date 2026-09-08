@@ -1,6 +1,6 @@
 // Feature: features/tracing.md — the one Adapter from a run stream to its span set.
 import { describe, expect, it } from "vitest";
-import { lossesFromStream, normalizeSpans, spansFromEvents } from "./normalizeSpans.js";
+import { createLossTracker, lossesFromStream, normalizeSpans, spansFromEvents } from "./normalizeSpans.js";
 import type { RunEvent } from "./runEvents.js";
 
 const input = (at: number): RunEvent => ({ type: "input", text: "go", at });
@@ -248,6 +248,26 @@ describe("spansFromEvents", () => {
 });
 
 describe("lossesFromStream", () => {
+  it("createLossTracker reads the same intervals frame by frame, and a gap's kind follows a range reported after the gap arrived", () => {
+    const tracker = createLossTracker();
+    const events: RunEvent[] = [
+      { ...call("c1", 10_000), seq: 40 },
+      { ...result("c1", 12_000), seq: 41 },
+      { ...call("c2", 30_000), seq: 60 },
+      { ...result("c2", 33_000), seq: 90 },
+    ];
+    for (const e of events) tracker.push(e);
+    expect(tracker.losses({ windowStart: 0 })).toEqual(lossesFromStream(events, { windowStart: 0 }));
+    expect(tracker.losses({ windowStart: 0 }).map((l) => l.kind)).toEqual(["lost", "lost", "lost"]);
+    // The transport reports the second gap's range afterwards: that gap reads elided now, the others do not.
+    expect(tracker.losses({ windowStart: 0, elided: [{ fromSeq: 61, toSeq: 89 }] }).map((l) => l.kind)).toEqual([
+      "lost",
+      "lost",
+      "elided",
+    ]);
+    expect(createLossTracker().losses({ windowStart: 0 })).toEqual([]);
+  });
+
   it("a head trimmed by the registry (first seq above 1) is a lost interval from the window start; an interior seq gap is lost, or elided when the transport reported it; a spans_dropped note is lost; replay_note markers change nothing", () => {
     const events: RunEvent[] = [
       { ...call("c1", 10_000), seq: 40 },

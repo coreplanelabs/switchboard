@@ -17,4 +17,8 @@ export const browser = {
   setFavicon(href: string): void {
     document.getElementById("favicon")?.setAttribute("href", href);
   },
+  /** Copy text to the clipboard; a browser without one (or a test) does nothing. */
+  copyText(text: string): Promise<void> {
+    return navigator.clipboard?.writeText(text) ?? Promise.resolve();
+  },
 };

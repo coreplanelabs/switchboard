@@ -5,6 +5,8 @@ import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js
 import type { RunIndexRowSeed, WebSeed } from "../src/channels/webSeed.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
+import { normalizeSpans } from "../src/core/normalizeSpans.js";
+import type { RunEvent } from "../src/core/runEvents.js";
 
 // Local visual preview of the web app (web/) with fixture data — no Slack, no
 // config.yaml, no credentials. Build the app first (`npm run build` in web/),
@@ -111,7 +113,9 @@ const HIST_EVENTS = [
   {
     type: "turn",
     model: "anthropic/claude-fable-5",
-    durationMs: 74_000,
+    startedAt: NOW - 2_399_000,
+    durationMs: 9_000,
+    stopReason: "tool_use",
     at: NOW - 2_390_000,
     seq: 4,
     usage: { inputTokens: 12_300, outputTokens: 810, cacheReadTokens: 11_200 },
@@ -192,7 +196,9 @@ const HIST_EVENTS = [
   // the durations that should read warm and over budget on the page.
   {
     type: "turn",
+    startedAt: NOW - 2_324_000,
     durationMs: 304_000,
+    stopReason: "tool_use",
     at: NOW - 2_020_000,
     seq: 16,
     usage: { inputTokens: 48_900, outputTokens: 2_100, cacheReadTokens: 40_200 },
@@ -235,7 +241,15 @@ const HIST_EVENTS = [
   // The answer's own turn, on a DIFFERENT model than the run started on — not
   // something a run does today (it is pinned to one model), but the switch
   // treatment (`⇄ claude-opus-5` on the turn's head) has to be seen somewhere.
-  { type: "turn", model: "anthropic/claude-opus-5", durationMs: 9_000, at: NOW - 751_000, seq: 24 },
+  {
+    type: "turn",
+    model: "anthropic/claude-opus-5",
+    startedAt: NOW - 760_000,
+    durationMs: 9_000,
+    stopReason: "end_turn",
+    at: NOW - 751_000,
+    seq: 24,
+  },
   {
     type: "answer",
     text: "Done — `sendWebhook` now retries with exponential backoff (5 attempts, 4xx gives up immediately). PR updated.",
@@ -243,6 +257,58 @@ const HIST_EVENTS = [
     seq: 25,
   },
 ];
+
+/** The history run as a traced stream (features/tracing.md): the request root
+ *  and the setup spans ahead of the events, the agent loop around them, the
+ *  post step after — and `normalizeSpans` making the legacy `turn`s and the
+ *  tool pairs their spans, exactly as the history route does. */
+const RECEIVED_AT = NOW - 2_405_000;
+const HIST_FINISHED_AT = NOW - 750_000;
+const spanEnd = (
+  spanId: string,
+  name: string,
+  startedAt: number,
+  endedAt: number,
+  parentSpanId: string,
+  attrs: Record<string, unknown> = {},
+) => ({
+  type: "span_end",
+  spanId,
+  parentSpanId,
+  name,
+  startedAt,
+  durationMs: endedAt - startedAt,
+  status: "ok",
+  attrs,
+  at: endedAt,
+});
+const HIST_STREAM = normalizeSpans([
+  {
+    type: "span_start",
+    spanId: "root",
+    name: "request",
+    attrs: { channel: "slack", queuedBeforeMs: 0 },
+    at: RECEIVED_AT,
+  },
+  spanEnd("recv", "slack.receive", RECEIVED_AT, RECEIVED_AT + 1_200, "root"),
+  spanEnd("hist", "dispatch.history", RECEIVED_AT + 1_200, RECEIVED_AT + 2_600, "root"),
+  spanEnd("attach", "dispatch.workspace.attach", RECEIVED_AT + 2_600, RECEIVED_AT + 4_900, "root", {
+    backend: "resident",
+  }),
+  spanEnd("wait", "dispatch.workspace.attach.mutex_wait", RECEIVED_AT + 2_600, RECEIVED_AT + 2_900, "attach", {
+    backend: "resident",
+    waitedMs: 300,
+  }),
+  spanEnd("clone", "dispatch.workspace.attach.clone", RECEIVED_AT + 2_900, RECEIVED_AT + 4_700, "attach", {
+    backend: "resident",
+    exitCode: 0,
+  }),
+  spanEnd("compose", "dispatch.compose", RECEIVED_AT + 4_900, RECEIVED_AT + 5_000, "root"),
+  { type: "span_start", spanId: "agent", parentSpanId: "root", name: "run.agent", at: NOW - 2_399_000 },
+  ...HIST_EVENTS,
+  spanEnd("agent", "run.agent", NOW - 2_399_000, NOW - 750_500, "root"),
+  spanEnd("post", "run.pr_post_step", NOW - 750_500, HIST_FINISHED_AT, "root"),
+] as RunEvent[]);
 
 /** The script's last command — the one the live stream holds out for a while. */
 const LAST_CALL_INDEX = HIST_EVENTS.map((e) => e.type).lastIndexOf("tool_call");
@@ -452,12 +518,15 @@ function page(pathname: string, all: boolean): { title: string; seed: WebSeed; s
         page: "run",
         mode: "history",
         id: "hist-1",
-        events: HIST_EVENTS as never,
+        events: HIST_STREAM as never,
         status: "completed",
-        eventCount: HIST_EVENTS.length + 3,
-        startedAt: 1_700_000_000_000,
-        finishedAt: 1_700_002_254_000,
-        durationMs: 2_254_000,
+        eventCount: HIST_STREAM.length + 3,
+        receivedAt: RECEIVED_AT,
+        startedAt: NOW - 2_400_000,
+        finishedAt: HIST_FINISHED_AT,
+        sealedAt: HIST_FINISHED_AT + 2_100,
+        replyOk: true,
+        durationMs: HIST_FINISHED_AT - RECEIVED_AT,
       },
     };
   if (pathname.startsWith("/runs/"))

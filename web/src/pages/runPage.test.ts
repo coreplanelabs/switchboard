@@ -84,6 +84,148 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// Feature: features/live-view.md item 25 — the timeline reads the spans and the
+// stamps; its lede is the header's total split into the five words.
+const spanEnd = (
+  spanId: string,
+  name: string,
+  startedAt: number,
+  endedAt: number,
+  over: { parentSpanId?: string; attrs?: Record<string, unknown>; seq?: number } = {},
+) => ({
+  type: "span_end",
+  spanId,
+  name,
+  startedAt,
+  durationMs: endedAt - startedAt,
+  status: "ok",
+  at: endedAt,
+  ...over,
+});
+
+describe("RunPage — the timeline (item 25)", () => {
+  it("history: the lede is the record's total split into its buckets, the delivery caption beside it, the raw-events link present, raw span names only in the debug copy", async () => {
+    const copy = vi.spyOn(browser, "copyText").mockResolvedValue();
+    const { factory } = fakeEventSourceFactory();
+    const w = mountApp(RunPage, {
+      seed: historySeed(
+        [
+          { type: "span_start", spanId: "root", name: "request", attrs: { channel: "slack" }, at: 1000 },
+          input,
+          spanEnd("hist", "dispatch.history", 1000, 21_000, { parentSpanId: "root" }),
+          { type: "span_start", spanId: "agent", name: "run.agent", parentSpanId: "root", at: 21_000 },
+          spanEnd("t1", "model.turn", 21_000, 51_000, { parentSpanId: "agent", attrs: { stopReason: "tool_use" } }),
+          call("c1", "$ npm test", 51_000),
+          result("c1", { at: 61_000 }),
+          spanEnd("c1s", "tool.bash", 51_000, 61_000, { parentSpanId: "agent", attrs: { callId: "c1" } }),
+          { type: "answer", text: "done", at: 61_000 },
+        ] as LiveFrame[],
+        {
+          status: "completed",
+          receivedAt: 1000,
+          finishedAt: 61_000,
+          durationMs: 60_000,
+          sealedAt: 63_000,
+          replyOk: true,
+        },
+      ),
+      eventSource: factory,
+    });
+    const tl = w.find("#timeline");
+    expect(tl.exists()).toBe(true);
+    expect(tl.find(".lede .shape").text()).toBe("1m 00s — 20s getting ready · 30s thinking · 10s in tools");
+    expect(tl.find(".lede .current").text()).toBe("· delivered in 2s");
+    expect(tl.findAll(".bar .seg").map((s) => s.attributes("data-term"))).toEqual([
+      "getting ready",
+      "thinking",
+      "in tools",
+    ]);
+    expect(tl.findAll(".ranked li .label").map((l) => l.text())).toEqual([
+      "a model turn",
+      "reading the thread",
+      "bash",
+    ]);
+    expect(tl.find("a").attributes("href")).toBe("/runs/run-1/events");
+    expect(tl.text()).not.toContain("dispatch.history"); // never a raw span name
+    await tl.find("button.debug").trigger("click");
+    expect(copy).toHaveBeenCalledTimes(1);
+    expect(copy.mock.calls[0][0]).toContain("dispatch.history");
+    // The header's total and the lede's total are one number.
+    expect(tl.find(".lede .shape").text().startsWith(w.find(".conn .dur").text())).toBe(true);
+  });
+
+  it("history: a legacy record (no root) shows the total and the one word for its missing setup; a truncated record's lost stretch reads (too large)", () => {
+    const { factory } = fakeEventSourceFactory();
+    const legacy = mountApp(RunPage, {
+      seed: historySeed(
+        [
+          input,
+          modelTurn({ durationMs: 30_000, at: 31_000 }),
+          { type: "answer", text: "ok", at: 31_000 },
+        ] as LiveFrame[],
+        // A seed from before `durationMs`: the total reads the stamps (startedAt 1000 → finishedAt 31 000).
+        { status: "completed", finishedAt: 31_000 },
+      ),
+      eventSource: factory,
+    });
+    expect(legacy.find("#timeline .lede .shape").text()).toBe("30s");
+    expect(legacy.find("#timeline .note").text()).toBe("getting ready: not recorded (too large)");
+    expect(legacy.find("#timeline .bar").exists()).toBe(false);
+    const cut = mountApp(RunPage, {
+      seed: historySeed(
+        [
+          { type: "span_start", spanId: "root", name: "request", at: 1000, seq: 1 },
+          { ...input, seq: 2 },
+          spanEnd("hist", "dispatch.history", 1000, 31_000, { parentSpanId: "root", seq: 3 }),
+          { type: "answer", text: "ok", at: 61_000, seq: 9 }, // seq 4..8 dropped by the record budget
+        ] as LiveFrame[],
+        { status: "completed", receivedAt: 1000, finishedAt: 61_000, durationMs: 60_000, truncated: true },
+      ),
+      eventSource: factory,
+    });
+    expect(cut.find("#timeline .lede .shape").text()).toBe("1m 00s — 30s getting ready · 30s not recorded (too large)");
+  });
+
+  it("live: the lede follows the phases — the open bucket while running, `currently delivering` at the finished frame, the delivery caption at end — on the header's own total", async () => {
+    vi.useFakeTimers();
+    try {
+      const { wrapper, es } = mountLive();
+      es().emitOpen();
+      es().emitMessage(
+        { type: "span_start", spanId: "root", name: "request", attrs: { channel: "slack" }, at: 1000 },
+        "1",
+      );
+      es().emitMessage(input, "2");
+      es().emitMessage(spanEnd("hist", "dispatch.history", 1000, 2000, { parentSpanId: "root" }), "3");
+      es().emitMessage({ type: "span_start", spanId: "agent", name: "run.agent", parentSpanId: "root", at: 2000 }, "4");
+      es().emitMessage({ type: "span_start", spanId: "t1", name: "model.turn", parentSpanId: "agent", at: 2000 }, "5");
+      await wrapper.vm.$nextTick();
+      // serverNow 4000, startedAt 1000: 3 s elapsed at mount, the turn open for 2 s of it —
+      // both buckets already informative (a third of the window), so the shape shows.
+      expect(wrapper.find("#timeline .lede .shape").text()).toBe("3s — 1s getting ready · 2s thinking");
+      expect(wrapper.find("#timeline .lede .current").text()).toBe("· currently thinking 2s");
+      expect(wrapper.find("#timeline .bar .seg.hatched").attributes("data-term")).toBe("thinking"); // the open turn's tail
+      vi.advanceTimersByTime(60_000);
+      await wrapper.vm.$nextTick();
+      // A minute on, the one-second setup is below the gate: the total and the dominant word.
+      expect(wrapper.find("#timeline .lede .shape").text()).toBe("1m 03s — thinking");
+      expect(wrapper.find("#timeline .lede .current").text()).toBe("· currently thinking 1m 02s");
+      expect(wrapper.find("#timeline .bar").exists()).toBe(false);
+      es().emitNamed("finished", JSON.stringify({ finishedAt: liveSeed.startedAt + 63_000 }));
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#timeline .lede .current").text()).toBe("· currently delivering");
+      expect(wrapper.find("#timeline .bar .seg.hatched").exists()).toBe(false);
+      es().emitNamed("end", JSON.stringify({ sealedAt: liveSeed.startedAt + 65_000, replyOk: true }));
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#timeline .lede .current").text()).toBe("· delivered in 2s");
+      expect(wrapper.find("#timeline .lede .shape").text().startsWith(wrapper.find(".conn .dur").text())).toBe(true);
+      expect(wrapper.find("#timeline a").exists()).toBe(false); // no raw-events link on a live page
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("RunPage — history mode", () => {
   // features/thread-admission.md item 2: a steered follow-up is a second `input`
   // on the same run — its own block in the timeline where the run read it,

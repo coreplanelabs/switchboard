@@ -5,6 +5,9 @@ import MarkdownText from "../components/MarkdownText.vue";
 import SlackMark from "../components/SlackMark.vue";
 import GithubMark from "../components/GithubMark.vue";
 import StepBlock from "../components/run/StepBlock.vue";
+import TimelineSection from "../components/run/TimelineSection.vue";
+import { buildTimeline, type TimelinePhase } from "../lib/timelineVm";
+import { runOwnerOf } from "@core/core/runOwner.js";
 import { useSeed } from "../lib/seed";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
@@ -126,6 +129,47 @@ const pulseCls = computed(() =>
         ? "text-ok" // connected, nothing running: the pulse stops
         : "text-warn motion-safe:animate-pulse",
 );
+
+// ---- the timeline (live-view item 25) --------------------------------------------
+// The run's shape from its spans and stamps alone, on the header's own window —
+// `receivedAt` (else `startedAt`) to the finish stamp, or to the projected server
+// clock while live — so its lede closes to the header's total by construction.
+// Recomputed on every frame the fold saw (`traceVersion`) and every tick while live.
+const timeline = computed(() => {
+  if (!seed || (seed.mode !== "live" && seed.mode !== "history")) return null;
+  void state.traceVersion;
+  const start = seed.receivedAt ?? seed.startedAt;
+  const owner = runOwnerOf(state.meta?.agent);
+  if (seed.mode === "history") {
+    // The record's one duration; a seed from before it carried one reads its stamps.
+    const totalMs = seed.durationMs ?? (seed.finishedAt !== undefined ? Math.max(0, seed.finishedAt - start) : 0);
+    return buildTimeline({
+      spans: model.spanSet(),
+      losses: model.losses(start),
+      window: { start, end: start + totalMs },
+      owner,
+      totalMs,
+      phase: "ended",
+      delivery: { finishedAt: seed.finishedAt, sealedAt: seed.sealedAt, replyOk: seed.replyOk },
+      ...(seed.truncated !== undefined ? { truncated: seed.truncated } : {}),
+    });
+  }
+  if (!runClock) return null;
+  const tlPhase: TimelinePhase = phase.value === "ended" ? "ended" : phase.value === "finished" ? "delivering" : "live";
+  const totalMs =
+    tlPhase === "live" ? runClock.elapsedMs(nowWall.value) : (frozenMs.value ?? runClock.elapsedMs(nowWall.value));
+  return buildTimeline({
+    spans: model.spanSet(),
+    losses: model.losses(start),
+    window: { start, end: start + totalMs },
+    owner,
+    totalMs,
+    phase: tlPhase,
+    delivery: liveStamps.value,
+  });
+});
+/** The stored events as JSON lines — history mode only (a live page's URL carries its token). */
+const eventsHref = isHistory && seed?.mode === "history" ? `/runs/${encodeURIComponent(seed.id)}/events` : undefined;
 
 // ---- stop control (#101) -----------------------------------------------------
 const actionsHidden = ref(isHistory);
@@ -484,6 +528,9 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           />
         </div>
       </section>
+
+      <!-- Timeline (live-view item 25): the run's shape from its spans and stamps alone. -->
+      <TimelineSection v-if="timeline" :vm="timeline" :events-href="eventsHref" />
 
       <!-- The log's toolbar: the Context fold (when the run has context) and
            the one ghost toggle share ONE line — the button stays pinned to the

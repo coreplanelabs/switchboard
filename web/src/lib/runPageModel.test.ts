@@ -619,3 +619,35 @@ describe("live wait — what the run is waiting on, and for how long", () => {
     expect(m.pendingCall()?.id).toBe("c1");
   });
 });
+// Feature: features/live-view.md item 25 — the timeline's inputs: the span set
+// and the loss intervals, folded from the same frames the log reads.
+describe("span set and losses (the timeline's inputs)", () => {
+  it("folds span records into one span set, keeps every frame for the loss intervals, bumps traceVersion per frame; an elided range turns a seq gap from lost into not-loaded", () => {
+    const m = createRunPageModel();
+    m.handle({ type: "span_start", spanId: "r", name: "request", attrs: { channel: "slack" }, at: 1000, seq: 1 });
+    m.handle({ ...input, seq: 2 });
+    m.handle({
+      type: "span_end",
+      spanId: "d",
+      parentSpanId: "r",
+      name: "dispatch.history",
+      startedAt: 1000,
+      durationMs: 500,
+      status: "ok",
+      at: 1500,
+      seq: 3,
+    });
+    m.handle({ type: "assistant", text: "x", at: 9000, seq: 10 }); // seq 4..9 never arrived
+    expect(m.spanSet().map((s) => [s.name, s.startedAt, s.endedAt, s.parentSpanId, s.attrs])).toEqual([
+      ["request", 1000, undefined, undefined, { channel: "slack" }],
+      ["dispatch.history", 1000, 1500, "r", {}],
+    ]);
+    expect(m.losses(1000)).toEqual([{ from: 1500, to: 9000, kind: "lost" }]);
+    m.noteElided({ fromSeq: 4, toSeq: 9 });
+    expect(m.losses(1000)).toEqual([{ from: 1500, to: 9000, kind: "elided" }]);
+    expect(m.state.traceVersion).toBe(5);
+    // A frame without a type is not an event and moves nothing.
+    m.handle({});
+    expect(m.state.traceVersion).toBe(5);
+  });
+});

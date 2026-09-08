@@ -86,6 +86,8 @@ export interface RunHistorySeed {
   replyOk?: boolean;
   /** `runDurationMs(record)` — the one duration every surface prints. */
   durationMs?: number;
+  /** The record was cut to its budget: the timeline's `not recorded` reads `(too large)`. */
+  truncated?: boolean;
 }
 
 export interface RunNotFoundSeed {
