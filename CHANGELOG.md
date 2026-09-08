@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.0](https://github.com/coreplanelabs/switchboard/compare/v0.9.0...v0.10.0) (2026-09-08)
+
+
+### Features
+
+* **run-ledger:** a killed run continues on the next generation — resumable rows handed to a launcher, the reclaim repeats every lease interval, the dispatcher resumes a run under its own id from its transcript ([#626](https://github.com/coreplanelabs/switchboard/issues/626)) ([96309c2](https://github.com/coreplanelabs/switchboard/commit/96309c241970eb4e8da219107c59ac67f44ebe8f))
+* **run-ledger:** the pieces of a resume — the D4 settlement plan, the runner's re-entry from a transcript, registry create under an old id with replayed events, ledger adopt ([#622](https://github.com/coreplanelabs/switchboard/issues/622)) ([ee9f626](https://github.com/coreplanelabs/switchboard/commit/ee9f626f32a63b4152792aa6ae8c3af3bc448e46))
+* **trace:** one measurement primitive — spans, sinks, the partition, the clock ratchet, one duration formatter and a span log ([#625](https://github.com/coreplanelabs/switchboard/issues/625)) ([eedb5ca](https://github.com/coreplanelabs/switchboard/commit/eedb5ca523e1faf0045379251778bb66572de628))
+
 ## [0.9.0](https://github.com/coreplanelabs/switchboard/compare/v0.8.0...v0.9.0) (2026-09-08)
 
 
