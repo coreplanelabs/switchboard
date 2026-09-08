@@ -348,6 +348,21 @@ function workspace(answers: Array<[RegExp, string]>) {
 }
 
 describe("observeCodingWorkspace", () => {
+  it("every probe carries the caller's span to the executor, and none without one (features/tracing.md item 17)", async () => {
+    const seen: unknown[] = [];
+    const exec = vi.fn(async (_cmd: string, opts?: { span?: unknown }) => {
+      seen.push(opts?.span);
+      return `${HEAD}\n`;
+    });
+    const span = { id: "s1", name: "run.observe_workspace" } as unknown as import("./trace/types.js").Span;
+    await observeCodingWorkspace({ exec }, { probeRemote: true }, span);
+    expect(seen.length).toBeGreaterThan(2);
+    expect(new Set(seen)).toEqual(new Set([span]));
+    seen.length = 0;
+    await observeCodingWorkspace({ exec }, { probeRemote: false });
+    expect(new Set(seen)).toEqual(new Set([undefined]));
+  });
+
   it("discovers a subdirectory clone when the workspace root is not a repo, and probes the remote inside it too", async () => {
     const exec = vi.fn(async (cmd: string) => {
       if (cmd.startsWith("ls -d */.git")) return "api/.git\n";

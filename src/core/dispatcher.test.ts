@@ -6945,6 +6945,8 @@ workspaceDir: __WORKDIR__
     bindingRef?: string;
     remoteHead?: string | null;
     onHeadProbe?: () => void;
+    /** Fires on release with the span the pipeline handed it (`ship.round`), or `none`. */
+    onRelease?: (spanName: string) => void;
   }) {
     const remoteHead = opts.remoteHead === null ? undefined : (opts.remoteHead ?? opts.head);
     const executor = {
@@ -6962,7 +6964,10 @@ workspaceDir: __WORKDIR__
       },
       readFile: async () => "",
       writeFile: async () => "",
-      release: async () => ({ released: true }),
+      release: async (_mode: string, o?: { span?: { name: string } }) => {
+        opts.onRelease?.(o?.span?.name ?? "none");
+        return { released: true };
+      },
     };
     return {
       executor,
@@ -7104,12 +7109,15 @@ workspaceDir: __WORKDIR__
       review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("Looks great.")],
     });
     const { deps, opened, posts } = shipDeps(provider);
+    const releases: string[] = [];
     queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, onRelease: (n) => releases.push(n) }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, onRelease: (n) => releases.push(n) }),
     );
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    // Each round's workspace was released under its own `ship.round` span (features/tracing.md item 17).
+    expect(releases).toEqual(["ship.round", "ship.round"]);
     // PR opened from typed values: ship-named branch as head, repo default as base.
     expect(opened).toHaveLength(1);
     expect(opened[0]).toMatchObject({

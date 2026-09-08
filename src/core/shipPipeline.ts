@@ -743,7 +743,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     });
     const { executor, resident, binding, note } = ws.selection;
     if (resident !== true) {
-      await ws.release({ hardStopped: false });
+      await ws.release({ hardStopped: false, ...(roundSpan ? { span: roundSpan } : {}) });
       return { answer: "", residentUnavailable: note ?? "no resident worktree attached" };
     }
     // KTD12 honesty (mirrors guardAttachedHead): the resident binds ONE ref
@@ -752,7 +752,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     // the pipeline never looks. Refuse BEFORE any model call, naming both
     // refs; an attach that answered no ref proves nothing and proceeds.
     if (binding?.ref !== undefined && binding.ref !== entry.branch) {
-      await ws.release({ hardStopped: false });
+      await ws.release({ hardStopped: false, ...(roundSpan ? { span: roundSpan } : {}) });
       return {
         answer: "",
         refusal:
@@ -822,12 +822,16 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       // A hard stop tore the work down mid-flight — observe nothing, post nothing.
       const pushedBranch = pushes.branch();
       if (control.requested !== "hard")
-        observed = await observeCodingWorkspace(executor, {
-          probeRemote: false,
-          ...(pushedBranch !== undefined ? { pushedBranch } : {}),
-        });
+        observed = await observeCodingWorkspace(
+          executor,
+          {
+            probeRemote: false,
+            ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+          },
+          roundSpan,
+        );
     } finally {
-      await ws.release({ hardStopped: control.requested === "hard" });
+      await ws.release({ hardStopped: control.requested === "hard", ...(roundSpan ? { span: roundSpan } : {}) });
     }
     if (description)
       input.publish({ type: "pr_description", description: input.redactDescription(description), at: now() });
@@ -892,7 +896,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     });
     const { executor, resident, binding, note } = ws.selection;
     if (resident !== true) {
-      await ws.release({ hardStopped: false });
+      await ws.release({ hardStopped: false, ...(roundSpan ? { span: roundSpan } : {}) });
       return { residentUnavailable: note ?? "no resident worktree attached" };
     }
     let settled: Awaited<ReturnType<typeof settleReviewedHead>> | undefined;
@@ -1001,7 +1005,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         logKey,
       });
     } finally {
-      await ws.release({ hardStopped: control.requested === "hard" });
+      await ws.release({ hardStopped: control.requested === "hard", ...(roundSpan ? { span: roundSpan } : {}) });
     }
     // Unreachable: every path that leaves `settled` unassigned returned above
     // (guard refusal, hard stop) — this narrows the type for what follows.

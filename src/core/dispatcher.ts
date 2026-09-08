@@ -1972,11 +1972,15 @@ export async function dispatch(
       // posted.
       if (isCodingPrRun && run.control.requested !== "hard") {
         const pushedBranch = pushes.branch();
-        const observed = await root.span("run.observe_workspace", () =>
-          observeCodingWorkspace(executor, {
-            probeRemote: repoCtx.repo === undefined,
-            ...(pushedBranch !== undefined ? { pushedBranch } : {}),
-          }),
+        const observed = await root.span("run.observe_workspace", (span) =>
+          observeCodingWorkspace(
+            executor,
+            {
+              probeRemote: repoCtx.repo === undefined,
+              ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+            },
+            span,
+          ),
         );
         observedHead = observed.head;
         observedBranch = observed.branch;
