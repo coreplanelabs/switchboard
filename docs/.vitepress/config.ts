@@ -12,15 +12,27 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
-import { withMermaid } from "vitepress-plugin-mermaid";
+import { MermaidMarkdown } from "vitepress-plugin-mermaid";
 
 // The project's identity — its repository and steward — is stated once in
 // project.json (npm run check:project-facts); the site reads it, never copies it.
+// The licence the footer names is the one package.json declares, for the same reason.
 const project = JSON.parse(readFileSync(new URL("../../project.json", import.meta.url), "utf8")) as {
   repository: string;
   steward: { name: string };
 };
+const { license } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
+  license: string;
+};
 const GITHUB_REPO = project.repository;
+
+// The faces the theme bundles (theme/index.ts), preloaded so the first paint
+// is set in them: the text face and the title face carry everything above the
+// fold, so those two; the code face follows with the stylesheet.
+const PRELOADED_FONTS = [
+  /instrument-sans-latin-wght-normal\.[\w-]+\.woff2$/,
+  /instrument-serif-latin-400-normal\.[\w-]+\.woff2$/,
+];
 
 // The reference specs are one sidebar entry per file, read from the directory
 // at build time so the list cannot drift from the tree; the label is each
@@ -35,149 +47,156 @@ const specItems = readdirSync(SPECS_DIR)
     return { text: h1, link: `/reference/specs/${slug}` };
   });
 
-export default withMermaid(
-  defineConfig({
-    title: "Switchboard",
-    description:
-      "Agents in Slack, on the CLI, over HTTP and MCP — docs for whoever uses, watches, or runs Switchboard.",
-    // Dated implementation plans are working documents for the repo, not pages.
-    srcExclude: ["plans/**"],
-    // GitHub renders a directory's README.md when you browse to the directory;
-    // the site does the same by serving each README.md as that directory's
-    // index. That is what keeps a bare `[Tutorials](tutorials/)` link — the
-    // form GitHub needs — resolvable here too.
-    rewrites: { "README.md": "index.md", ":dir/README.md": ":dir/index.md" },
-    // Default output (docs/.vitepress/dist) — the content tree stays clean and
-    // .gitignore's `dist/` already covers it. deploy/cloudflare-docs/ uploads it.
-    cleanUrls: true,
-    lastUpdated: true,
-    // A dead internal link is a build failure, not a 404 someone finds later.
-    ignoreDeadLinks: false,
-    markdown: {
-      // Inline code is literal text. Fenced blocks already get `v-pre`; without
-      // it on `<code>` too, a `{{placeholder}}` in a code span is compiled as a
-      // Vue interpolation and breaks the build.
-      config(md) {
-        const codeInline = md.renderer.rules.code_inline!;
-        md.renderer.rules.code_inline = (tokens, idx, options, env, self) =>
-          codeInline(tokens, idx, options, env, self).replace(/^<code/, "<code v-pre");
-        // A relative link that leaves this tree (a source file, AGENTS.md, a
-        // plan) has no page here: on the site it points at the repository. The
-        // source stays relative so GitHub follows it to the file.
-        const linkOpen =
-          md.renderer.rules.link_open ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
-        md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-          const token = tokens[idx];
-          const href = token.attrGet("href");
-          if (href && /^\.\.?\//.test(href)) {
-            const [file, hash] = href.split("#");
-            const target = posix.normalize(posix.join(posix.dirname(env.relativePath ?? ""), file));
-            if (target.startsWith("../") || target.startsWith("plans/")) {
-              const repoPath = posix.normalize(posix.join("docs", target));
-              const view = repoPath.endsWith("/") ? "tree" : "blob";
-              token.attrSet("href", `${GITHUB_REPO}/${view}/main/${repoPath}${hash ? `#${hash}` : ""}`);
-            }
+export default defineConfig({
+  title: "Switchboard",
+  description: "Agents in Slack, on the CLI, over HTTP and MCP — docs for whoever uses, watches, or runs Switchboard.",
+  // Dated implementation plans are working documents for the repo, not pages.
+  srcExclude: ["plans/**"],
+  // GitHub renders a directory's README.md when you browse to the directory;
+  // the site does the same by serving each README.md as that directory's
+  // index. That is what keeps a bare `[Tutorials](tutorials/)` link — the
+  // form GitHub needs — resolvable here too.
+  rewrites: { "README.md": "index.md", ":dir/README.md": ":dir/index.md" },
+  // Default output (docs/.vitepress/dist) — the content tree stays clean and
+  // .gitignore's `dist/` already covers it. deploy/cloudflare-docs/ uploads it.
+  cleanUrls: true,
+  lastUpdated: true,
+  // A dead internal link is a build failure, not a 404 someone finds later.
+  ignoreDeadLinks: false,
+  markdown: {
+    // Inline code is literal text. Fenced blocks already get `v-pre`; without
+    // it on `<code>` too, a `{{placeholder}}` in a code span is compiled as a
+    // Vue interpolation and breaks the build.
+    config(md) {
+      // A ```mermaid fence becomes `<Mermaid id graph>`; the theme's own
+      // renderer (theme/MermaidDiagram.vue) draws it in the site's palette. Only the
+      // plugin's markdown rule is used — its Vite half would put the whole
+      // mermaid library in every page's entry chunk, landing page included.
+      MermaidMarkdown(md);
+      const codeInline = md.renderer.rules.code_inline!;
+      md.renderer.rules.code_inline = (tokens, idx, options, env, self) =>
+        codeInline(tokens, idx, options, env, self).replace(/^<code/, "<code v-pre");
+      // A relative link that leaves this tree (a source file, AGENTS.md, a
+      // plan) has no page here: on the site it points at the repository. The
+      // source stays relative so GitHub follows it to the file.
+      const linkOpen =
+        md.renderer.rules.link_open ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+      md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+        const token = tokens[idx];
+        const href = token.attrGet("href");
+        if (href && /^\.\.?\//.test(href)) {
+          const [file, hash] = href.split("#");
+          const target = posix.normalize(posix.join(posix.dirname(env.relativePath ?? ""), file));
+          if (target.startsWith("../") || target.startsWith("plans/")) {
+            const repoPath = posix.normalize(posix.join("docs", target));
+            const view = repoPath.endsWith("/") ? "tree" : "blob";
+            token.attrSet("href", `${GITHUB_REPO}/${view}/main/${repoPath}${hash ? `#${hash}` : ""}`);
           }
-          return linkOpen(tokens, idx, options, env, self);
-        };
-      },
+        }
+        return linkOpen(tokens, idx, options, env, self);
+      };
     },
-    head: [["link", { rel: "icon", href: "/favicon.svg" }]],
-    // Mermaid renders client-side (bundled — nothing is fetched at runtime).
-    // The font is pinned to the system stack ON PURPOSE: mermaid sizes each
-    // label's box at render time, and with a webfont (VitePress's Inter) the
-    // swap lands after the measurement, re-wrapping a `<br/>`-heavy label into
-    // one more line than the box was cut for — the last line then clips off.
-    // A locally-available stack is never re-measured. `.mermaid foreignObject`
-    // also gets `overflow: visible` in product.css as the backstop.
-    mermaid: {
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
-      flowchart: { useMaxWidth: true },
-    },
-    themeConfig: {
-      nav: [
-        { text: "Tutorials", link: "/tutorials/get-started" },
-        { text: "How-to", link: "/how-to/set-up-accounts" },
-        { text: "Reference", link: "/reference/slack-commands" },
-        { text: "Explanation", link: "/explanation/architecture" },
-      ],
-      // Diataxis, one group per kind — the same four the docs/README.md hub
-      // lists, in the same order.
-      sidebar: [
-        {
-          text: "Tutorials",
-          collapsed: false,
-          items: [
-            { text: "Get started", link: "/tutorials/get-started" },
-            { text: "Your first request in Slack", link: "/tutorials/first-request-in-slack" },
-            { text: "Run it locally", link: "/tutorials/run-it-locally" },
-          ],
-        },
-        {
-          text: "How-to guides",
-          collapsed: false,
-          items: [
-            { text: "Set up accounts", link: "/how-to/set-up-accounts" },
-            { text: "Deploy", link: "/how-to/deploy" },
-            { text: "Configure your defaults", link: "/how-to/configure-your-defaults" },
-            { text: "Connect an MCP server", link: "/how-to/connect-an-mcp-server" },
-            { text: "Onboard a repo", link: "/how-to/onboard-a-repo" },
-            { text: "Watch a run and check spend", link: "/how-to/watch-a-run-and-check-spend" },
-            { text: "Restrict who can do what", link: "/how-to/restrict-who-can-do-what" },
-            { text: "Add a provider or an agent", link: "/how-to/add-a-provider-or-agent" },
-            { text: "Deploy for the first time", link: "/how-to/deploy-for-the-first-time" },
-            { text: "Deploy and rotate a secret", link: "/how-to/deploy-and-rotate-a-secret" },
-            { text: "Operate production", link: "/how-to/operate-production" },
-            { text: "Configure the repository", link: "/how-to/configure-the-repository" },
-            { text: "Run a load test", link: "/how-to/run-a-load-test" },
-            { text: "Turn features on and off", link: "/how-to/turn-features-on-and-off" },
-          ],
-        },
-        {
-          text: "Reference",
-          collapsed: false,
-          items: [
-            { text: "Slack commands", link: "/reference/slack-commands" },
-            { text: "CLI", link: "/reference/cli" },
-            { text: "Configuration", link: "/reference/configuration" },
-            { text: "Authorization", link: "/reference/authorization" },
-            { text: "Dashboard routes", link: "/reference/dashboard-routes" },
-            { text: "Code map", link: "/reference/code-map" },
-            { text: "Specs", link: "/reference/specs/", collapsed: true, items: specItems },
-          ],
-        },
-        {
-          text: "Explanation",
-          collapsed: false,
-          items: [
-            { text: "Architecture", link: "/explanation/architecture" },
-            { text: "Security model", link: "/explanation/security-model" },
-            { text: "How a request flows", link: "/explanation/how-a-request-flows" },
-            { text: "The agents and their toolsets", link: "/explanation/agents-and-toolsets" },
-            { text: "Why config is layered", link: "/explanation/config-layers" },
-            { text: "Execution and trust", link: "/explanation/execution-and-trust" },
-            { text: "Worker topology", link: "/explanation/worker-topology" },
-            { text: "One definition, every surface", link: "/explanation/one-command-many-surfaces" },
-            { text: "Runs: live, then remembered", link: "/explanation/runs-live-and-history" },
-            { text: "How Switchboard improves itself", link: "/explanation/how-switchboard-improves-itself" },
-            { text: "Design decisions", link: "/explanation/design-decisions" },
-            { text: "How we work", link: "/explanation/how-we-work" },
-            { text: "Capacity and sizing", link: "/explanation/capacity-and-sizing" },
-            { text: "Known limits", link: "/explanation/known-limits" },
-          ],
-        },
-      ],
-      search: { provider: "local" },
-      socialLinks: [{ icon: "github", link: GITHUB_REPO }],
-      editLink: {
-        pattern: `${GITHUB_REPO}/edit/main/docs/:path`,
-        text: "Edit this page on GitHub",
+  },
+  head: [["link", { rel: "icon", href: "/favicon.svg" }]],
+  transformHead({ assets }) {
+    return assets
+      .filter((asset) => PRELOADED_FONTS.some((font) => font.test(asset)))
+      .map((href) => ["link", { rel: "preload", href, as: "font", type: "font/woff2", crossorigin: "" }]);
+  },
+  // The root README.md is the docs hub GitHub shows for the directory; on the
+  // site the same route is the landing page. Marking it `layout: home` here
+  // — not in frontmatter GitHub would render as a table — makes the default
+  // theme render it as a home page, with the landing (theme/LandingPage.vue) in the
+  // slot before the README's own content. The tab reads the site's name, not
+  // the hub's heading.
+  transformPageData(pageData) {
+    if (pageData.filePath !== "README.md") return;
+    pageData.frontmatter.layout = "home";
+    return { title: "Switchboard" };
+  },
+  themeConfig: {
+    nav: [
+      { text: "Tutorials", link: "/tutorials/get-started" },
+      { text: "How-to", link: "/how-to/set-up-accounts" },
+      { text: "Reference", link: "/reference/slack-commands" },
+      { text: "Explanation", link: "/explanation/architecture" },
+    ],
+    // Diataxis, one group per kind — the same four the docs/README.md hub
+    // lists, in the same order.
+    sidebar: [
+      {
+        text: "Tutorials",
+        collapsed: false,
+        items: [
+          { text: "Get started", link: "/tutorials/get-started" },
+          { text: "Your first request in Slack", link: "/tutorials/first-request-in-slack" },
+          { text: "Run it locally", link: "/tutorials/run-it-locally" },
+        ],
       },
-      outline: { level: [2, 3] },
-      footer: {
-        message: `Built from <a href="${GITHUB_REPO}/tree/main/docs">docs/</a> on every push to main. The behavioral contract is the <a href="/reference/specs/">reference specs</a>.`,
-        copyright: project.steward.name,
+      {
+        text: "How-to guides",
+        collapsed: false,
+        items: [
+          { text: "Set up accounts", link: "/how-to/set-up-accounts" },
+          { text: "Deploy", link: "/how-to/deploy" },
+          { text: "Configure your defaults", link: "/how-to/configure-your-defaults" },
+          { text: "Connect an MCP server", link: "/how-to/connect-an-mcp-server" },
+          { text: "Onboard a repo", link: "/how-to/onboard-a-repo" },
+          { text: "Watch a run and check spend", link: "/how-to/watch-a-run-and-check-spend" },
+          { text: "Restrict who can do what", link: "/how-to/restrict-who-can-do-what" },
+          { text: "Add a provider or an agent", link: "/how-to/add-a-provider-or-agent" },
+          { text: "Deploy for the first time", link: "/how-to/deploy-for-the-first-time" },
+          { text: "Deploy and rotate a secret", link: "/how-to/deploy-and-rotate-a-secret" },
+          { text: "Operate production", link: "/how-to/operate-production" },
+          { text: "Configure the repository", link: "/how-to/configure-the-repository" },
+          { text: "Run a load test", link: "/how-to/run-a-load-test" },
+          { text: "Turn features on and off", link: "/how-to/turn-features-on-and-off" },
+        ],
       },
+      {
+        text: "Reference",
+        collapsed: false,
+        items: [
+          { text: "Slack commands", link: "/reference/slack-commands" },
+          { text: "CLI", link: "/reference/cli" },
+          { text: "Configuration", link: "/reference/configuration" },
+          { text: "Authorization", link: "/reference/authorization" },
+          { text: "Dashboard routes", link: "/reference/dashboard-routes" },
+          { text: "Code map", link: "/reference/code-map" },
+          { text: "Specs", link: "/reference/specs/", collapsed: true, items: specItems },
+        ],
+      },
+      {
+        text: "Explanation",
+        collapsed: false,
+        items: [
+          { text: "Architecture", link: "/explanation/architecture" },
+          { text: "Security model", link: "/explanation/security-model" },
+          { text: "How a request flows", link: "/explanation/how-a-request-flows" },
+          { text: "The agents and their toolsets", link: "/explanation/agents-and-toolsets" },
+          { text: "Why config is layered", link: "/explanation/config-layers" },
+          { text: "Execution and trust", link: "/explanation/execution-and-trust" },
+          { text: "Worker topology", link: "/explanation/worker-topology" },
+          { text: "One definition, every surface", link: "/explanation/one-command-many-surfaces" },
+          { text: "Runs: live, then remembered", link: "/explanation/runs-live-and-history" },
+          { text: "How Switchboard improves itself", link: "/explanation/how-switchboard-improves-itself" },
+          { text: "Design decisions", link: "/explanation/design-decisions" },
+          { text: "How we work", link: "/explanation/how-we-work" },
+          { text: "Capacity and sizing", link: "/explanation/capacity-and-sizing" },
+          { text: "Known limits", link: "/explanation/known-limits" },
+        ],
+      },
+    ],
+    search: { provider: "local" },
+    socialLinks: [{ icon: "github", link: GITHUB_REPO }],
+    editLink: {
+      pattern: `${GITHUB_REPO}/edit/main/docs/:path`,
+      text: "Edit this page on GitHub",
     },
-  }),
-);
+    outline: { level: [2, 3] },
+    footer: {
+      message: `Released under the <a href="${GITHUB_REPO}/blob/main/LICENSE">${license} license</a>. Questions and ideas: <a href="${GITHUB_REPO}/discussions">Discussions</a>. Built from <a href="${GITHUB_REPO}/tree/main/docs">docs/</a> on every push to main; the behavioral contract is the <a href="/reference/specs/">reference specs</a>.`,
+      copyright: project.steward.name,
+    },
+  },
+});

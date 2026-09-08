@@ -39,6 +39,62 @@ function docsPages(): string[] {
   );
 }
 
+const THEME = `${DOCS}/.vitepress/theme`;
+
+/** The heading ids VitePress derives, as `## Add a provider` → `add-a-provider`. */
+function headingIds(markdown: string): Set<string> {
+  return new Set(
+    [...markdown.matchAll(/^#{1,6}\s+(.+?)\s*$/gm)].map(([, text]) =>
+      text
+        .toLowerCase()
+        .replace(/`/g, "")
+        .replace(/[^\p{L}\p{N}\s-]/gu, "")
+        .trim()
+        .replace(/\s+/g, "-"),
+    ),
+  );
+}
+
+/** The markdown file a site path is compiled from, honouring the config's README rewrites. */
+function pageFor(sitePath: string): string | undefined {
+  const rel = sitePath.replace(/^\//, "").replace(/\/$/, "");
+  const candidates = rel === "" ? ["README.md"] : [`${rel}.md`, `${rel}/README.md`];
+  return candidates.find((c) => existsSync(`${DOCS}/${c}`));
+}
+
+describe("site links in the theme's components", () => {
+  // The landing page and the layout are Vue, not markdown: the site's
+  // dead-link check compiles pages and never reads a component's `href`, so a
+  // renamed tutorial would leave the landing page's button pointing at a 404.
+  // Every internal path a component carries — an `href="/…"` attribute or a
+  // `link: "/…"` entry in its data — must be a page in this tree, and a
+  // fragment must be one of that page's headings.
+  const components = globSync("**/*.vue", { cwd: THEME });
+
+  it("finds the components (a glob that matches nothing would pass every assertion below)", () => {
+    expect(components).toContain("LandingPage.vue");
+  });
+
+  it("every internal path names a page, and every fragment one of its headings", () => {
+    const wrong: string[] = [];
+    for (const rel of components) {
+      const source = readFileSync(`${THEME}/${rel}`, "utf8");
+      for (const m of source.matchAll(/\b(?:href|link):?\s*[=:]\s*"(\/[^"]*)"/g)) {
+        const [path, hash] = m[1].split("#");
+        const page = pageFor(path);
+        if (!page) {
+          wrong.push(`${rel}: ${m[1]} — no page`);
+          continue;
+        }
+        if (hash && !headingIds(readFileSync(`${DOCS}/${page}`, "utf8")).has(hash)) {
+          wrong.push(`${rel}: ${m[1]} — ${page} has no heading #${hash}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+});
+
 describe("absolute URLs in docs/", () => {
   const pages = docsPages();
 
