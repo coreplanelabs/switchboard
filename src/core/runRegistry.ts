@@ -6,11 +6,12 @@ import {
   type RunActor,
   type RunEvent,
   type StopMode,
+  isHeadMaterial,
   isSpanRecord,
 } from "./runEvents.js";
 import type { ChannelVisibility } from "./authz/types.js";
 import type { RunStatus } from "./runRecord.js";
-import { utf8ByteLength } from "./runRecord.js";
+import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 
 // The run registry is the unit-testable core of the external live-view page
 // (Area 2 / #43) and the ONE per-run event store while a run is live (#157
@@ -207,6 +208,8 @@ export interface RunSnapshot {
   /** `RunMeta.receivedAt`, when the run was created with it (features/tracing.md). */
   receivedAt?: number;
   eventCount: number;
+  /** Content events published — span records excluded (features/tracing.md). */
+  stepCount: number;
   /** True when the bounded backlog dropped events (`eventCount > events.length`):
    *  a consumer analyzing `events` is looking at a head-truncated stream. */
   truncated: boolean;
@@ -273,8 +276,17 @@ export const RUN_LABEL_MAX = 200;
 /** Default per-run backlog bounds (#157 KTD9): count and bytes. The registry
  *  backlog is the ONLY per-run event store — the friction diagnosis and the run
  *  record are built from it — so it is bounded generously and by both axes. */
-export const DEFAULT_BACKLOG_LIMIT = 5000;
+export const DEFAULT_BACKLOG_LIMIT = 8000;
 export const DEFAULT_BACKLOG_BYTES = 4 * 1024 * 1024;
+
+/** The protected head (features/tracing.md; live-view item 2): the events that
+ *  say what a run is — its request, its context, its meta, the setup spans and
+ *  the notes about missing tools or dropped setup — are never trimmed by the
+ *  count or byte bound, up to this many bytes. Past the budget, or once any
+ *  other event has been published, later head material is ordinary. Head
+ *  events are capped to `MAX_EVENT_BYTES` at publish so one giant `context`
+ *  cannot spend the whole budget. */
+export const HEAD_BUDGET_BYTES = 512 * 1024;
 
 /** The replay budget a late subscriber gets from the retained backlog
  *  (features/live-view.md item 5): at most this many events and at most
@@ -383,6 +395,13 @@ interface RunState {
   activity?: string;
   /** Total events published (monotonic; unlike backlog, never trimmed). */
   eventCount: number;
+  /** Content events published (span records excluded); monotonic like `eventCount`. */
+  stepCount: number;
+  /** The protected head: the first `headLen` backlog entries, never trimmed,
+   *  `headBytes` of them (features/tracing.md). Grows only while the backlog
+   *  holds nothing but head material and the budget allows. */
+  headLen: number;
+  headBytes: number;
   /** Stop control handed to the runner at create(); driven by requestStop(). */
   control: RunControl;
   /** Set by markPersisted() once the durable store confirmed the record. */
@@ -474,6 +493,9 @@ export class RunRegistry {
       startedAt: opts.startedAt ?? this.now(),
       seq: ++this.seq,
       eventCount: 0,
+      stepCount: 0,
+      headLen: 0,
+      headBytes: 0,
       control: new RunControl(),
       persisted: false,
     };
@@ -486,25 +508,42 @@ export class RunRegistry {
     for (const event of [...(opts.replay ?? [])].sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0))) {
       const seq = event.seq ?? run.eventCount + 1;
       run.eventCount = Math.max(run.eventCount, seq);
+      if (!isSpanRecord(event)) run.stepCount++;
       this.appendToBacklog(run, { ...event, seq });
     }
     this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
   }
 
-  /** Append one stamped event to the run's bounded backlog and refresh its activity line. */
-  private appendToBacklog(run: RunState, stamped: RunEvent): void {
+  /** Append one stamped event to the run's bounded backlog and refresh its
+   *  activity line. Head material published while the backlog holds nothing
+   *  but head joins the protected head (capped per event, bounded in total);
+   *  the trim then drops the oldest event AFTER the head, never the head, and
+   *  always keeps the newest. */
+  private appendToBacklog(run: RunState, published: RunEvent): void {
+    const headEligible =
+      run.backlog.length === run.headLen && isHeadMaterial(published) && run.headBytes < HEAD_BUDGET_BYTES;
+    // A head event is capped at publish (features/tracing.md): the cap is the
+    // record's per-event cap, so what the head holds is what a record would.
+    const stamped = headEligible ? capEvent(published, MAX_EVENT_BYTES).event : published;
     const bytes = utf8ByteLength(serializedOnce(stamped)); // memoized: the SSE frame reuses this string
     run.backlog.push(stamped);
     run.backlogSizes.push(bytes);
     run.backlogBytes += bytes;
+    if (headEligible && run.headBytes + bytes <= HEAD_BUDGET_BYTES) {
+      run.headLen++;
+      run.headBytes += bytes;
+    }
     // The one-line "what is it doing" the index shows (item 20). Narration wins
     // over the tool call it explains only until the next call arrives.
     const activity = activityOf(stamped);
     if (activity !== undefined) run.activity = activity;
-    while (run.backlog.length > 1 && (run.backlog.length > this.backlogLimit || run.backlogBytes > this.backlogBytes)) {
-      run.backlog.shift();
-      run.backlogBytes -= run.backlogSizes.shift() ?? 0;
+    while (
+      run.backlog.length > run.headLen + 1 &&
+      (run.backlog.length > this.backlogLimit || run.backlogBytes > this.backlogBytes)
+    ) {
+      run.backlog.splice(run.headLen, 1);
+      run.backlogBytes -= run.backlogSizes.splice(run.headLen, 1)[0] ?? 0;
     }
   }
 
@@ -567,6 +606,7 @@ export class RunRegistry {
     // ONE counter: `eventCount` is the monotonic published total AND the `seq`
     // stamped on the event — the SSE `id:` a client resumes from.
     const seq = ++run.eventCount;
+    if (!span) run.stepCount++;
     const stamped: RunEvent = { ...event, seq };
     this.appendToBacklog(run, stamped);
     for (const sub of run.subscribers) {
@@ -723,24 +763,32 @@ export class RunRegistry {
     const byteLimit = opts.byteLimit ?? DEFAULT_REPLAY_BYTES;
     const { backlog, backlogSizes } = run;
     // The backlog is `seq`-ascending: the offered events are one suffix, and the
-    // replayed ones a suffix of that. Walk newest-first, admitting an event while
-    // both bounds hold; the newest is admitted unconditionally.
+    // replayed ones a suffix of that. A fresh subscribe (no cursor) always gets
+    // the protected head first (features/tracing.md), and the budget then buys
+    // the newest of the rest; a resume re-sends nothing from the head. Walk
+    // newest-first, admitting an event while both bounds hold; the newest is
+    // admitted unconditionally.
     let first = backlog.findIndex((e) => (e.seq ?? 0) > afterSeq);
     if (first === -1) first = backlog.length;
+    const head = afterSeq === 0 ? Math.min(run.headLen, backlog.length) : 0;
+    let headBytes = 0;
+    for (let i = 0; i < head; i++) headBytes += backlogSizes[i] ?? 0;
+    const restFirst = Math.max(first, head);
     let start = backlog.length;
-    let bytes = 0;
-    while (start > first) {
+    let bytes = headBytes;
+    while (start > restFirst) {
       const next = start - 1;
-      const count = backlog.length - next;
+      const count = head + (backlog.length - next);
       const size = backlogSizes[next] ?? 0;
-      if (count > 1 && (count > limit || bytes + size > byteLimit)) break;
+      if (count > head + 1 && (count > limit || bytes + size > byteLimit)) break;
       bytes += size;
       start = next;
     }
     const elided =
-      start > first ? { fromSeq: backlog[first]!.seq ?? 0, toSeq: backlog[start - 1]!.seq ?? 0 } : undefined;
+      start > restFirst ? { fromSeq: backlog[restFirst]!.seq ?? 0, toSeq: backlog[start - 1]!.seq ?? 0 } : undefined;
+    for (let i = 0; i < head; i++) onEvent(backlog[i]!, backlog[i]!.seq ?? 0);
     for (let i = start; i < backlog.length; i++) onEvent(backlog[i]!, backlog[i]!.seq ?? 0);
-    const replayed = backlog.length - start;
+    const replayed = head + (backlog.length - start);
 
     // A finished run says so at once; a sealed run then ends at once and never
     // attaches. A finished-but-unsealed run attaches like a live one, for the
@@ -821,6 +869,7 @@ export class RunRegistry {
       ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
       ...(run.meta?.receivedAt !== undefined ? { receivedAt: run.meta.receivedAt } : {}),
       eventCount: run.eventCount,
+      stepCount: run.stepCount,
       truncated: run.eventCount > run.backlog.length,
     };
   }
@@ -872,6 +921,7 @@ export class RunRegistry {
       ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
       ...(run.status !== undefined ? { status: run.status } : {}),
       eventCount: run.eventCount,
+      stepCount: run.stepCount,
       ...(run.activity !== undefined ? { activity: run.activity } : {}),
       ...(run.control.requested !== undefined
         ? { stop: { mode: run.control.requested, state: run.finished ? ("stopped" as const) : ("stopping" as const) } }

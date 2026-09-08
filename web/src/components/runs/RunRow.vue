@@ -25,6 +25,8 @@ import {
   surfaceOf,
   whenTip,
   type IndexRow,
+  countTip,
+  countText,
 } from "../../lib/indexRow";
 
 // One runs-index row — the ONE renderer for seed rows and live feed repaints
@@ -228,11 +230,13 @@ function onRowClick(ev: MouseEvent): void {
         >
       </UTooltip>
       <span class="hidden text-xs text-dimmed max-sm:order-8 max-sm:inline" aria-hidden="true">·</span>
-      <span
-        class="count shrink-0 text-right text-xs tabular-nums max-sm:order-9 max-sm:text-dimmed sm:min-w-[6em] sm:text-muted"
-      >
-        {{ run.eventCount }} event{{ run.eventCount === 1 ? "" : "s" }}
-      </span>
+      <UTooltip :text="countTip(run)">
+        <span
+          class="count shrink-0 text-right text-xs tabular-nums max-sm:order-9 max-sm:text-dimmed sm:min-w-[6em] sm:text-muted"
+        >
+          {{ countText(run) }}
+        </span>
+      </UTooltip>
       <span class="actions hidden min-w-[7.6em] shrink-0 justify-end gap-1.5 whitespace-nowrap sm:flex">
         <template v-if="stoppable">
           <UTooltip text="Soft stop: no new steps, the agent writes up what it has">

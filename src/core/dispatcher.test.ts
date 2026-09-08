@@ -5882,8 +5882,9 @@ describe("run history write path (#157 U4)", () => {
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 
-  it("more published events than the backlog holds: eventCount is the published total, storedEventCount the backlog length, truncated true", async () => {
-    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", backlogLimit: 5 });
+  it("more published events than the backlog holds: eventCount is the published total, storedEventCount the backlog length, truncated true — and the protected head (input, context, run_meta) is what survives, with the newest events after it", async () => {
+    // 14 head events (the input, 12 context turns, the run meta) + room for two more: the trim drops from after the head.
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", backlogLimit: 16 });
     const { deps, store, writer } = wired(toolThenAnswer(), { registry });
     const history: HistoryItem[] = Array.from({ length: 12 }, (_, i) => ({
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
@@ -5892,11 +5893,17 @@ describe("run history write path (#157 U4)", () => {
     await dispatch(deps, msg("hello there"), fakeIO(history).io);
     await writer.settled();
     const rec = await store.get("run-h");
-    expect(rec!.eventCount).toBeGreaterThan(5);
+    expect(rec!.eventCount).toBeGreaterThan(16);
     expect(rec!.eventCount).toBe(registry.snapshot("run-h", "tok")!.eventCount);
-    expect(rec!.storedEventCount).toBe(5);
-    expect(rec!.events).toHaveLength(5);
+    expect(rec!.storedEventCount).toBe(16);
+    expect(rec!.events).toHaveLength(16);
     expect(rec!.truncated).toBe(true);
+    expect(rec!.events[0]!.type).toBe("input");
+    expect(rec!.events.filter((e) => e.type === "context")).toHaveLength(12);
+    expect(
+      rec!.events.slice(0, 14).every((e) => e.type === "input" || e.type === "context" || e.type === "run_meta"),
+    ).toBe(true);
+    expect(rec!.events.at(-1)!.type).toBe("answer"); // the newest survives; the middle went
   });
 
   it("the record's events equal the registry snapshot taken at finish, even though the record is assembled after the reply", async () => {

@@ -376,6 +376,108 @@ describe("createRunTimeline — run_meta (item 19)", () => {
   });
 });
 
+// Feature: features/tracing.md — span records on the stream: step rows, the
+// model-turn decoration and the tool twin rule.
+describe("createRunTimeline — span records", () => {
+  const start = (spanId: string, name: string, at: number, attrs?: Record<string, unknown>) => ({
+    type: "span_start",
+    spanId,
+    name,
+    ...(attrs ? { attrs } : {}),
+    at,
+  });
+  const end = (
+    spanId: string,
+    name: string,
+    startedAt: number,
+    durationMs: number,
+    over: Record<string, unknown> = {},
+  ) => ({
+    type: "span_end",
+    spanId,
+    name,
+    startedAt,
+    durationMs,
+    status: "ok",
+    at: startedAt + durationMs,
+    ...over,
+  });
+
+  it("a dispatch/run/post span is a step row of its own: open at the start, closed by the end with its duration and status", () => {
+    const t = createRunTimeline();
+    expect(t.push(start("d1", "dispatch.compose", 1_000))).toEqual([
+      { kind: "span", spanId: "d1", name: "dispatch.compose", open: true, at: 1_000 },
+    ]);
+    expect(t.push(end("d1", "dispatch.compose", 1_000, 250, { status: "error", error: "boom" }))).toEqual([
+      {
+        kind: "span",
+        spanId: "d1",
+        name: "dispatch.compose",
+        open: false,
+        durationMs: 250,
+        status: "error",
+        at: 1_250,
+      },
+    ]);
+    expect(t.push(end("p1", "post.reply", 5_000, 40))).toEqual([
+      { kind: "span", spanId: "p1", name: "post.reply", open: false, durationMs: 40, status: "ok", at: 5_040 },
+    ]);
+    expect(t.steps()).toEqual([]); // never a step of the agent's
+    expect(t.push(start("", "dispatch.compose", 1))).toEqual([]);
+    expect(t.push(end("x", "dispatch.compose", 1, Number.NaN))).toEqual([]);
+  });
+
+  it("a model.turn span_end draws the turn row from its attrs and is a step boundary, exactly like the legacy `turn`", () => {
+    const t = createRunTimeline();
+    t.push(call("a", "ls"));
+    const changes = t.push(
+      end("m1", "model.turn", 1_000, 304_000, {
+        attrs: { inputTokens: 12_345, outputTokens: 800, cacheReadTokens: 11_200 },
+      }),
+    );
+    expect(changes).toEqual([
+      {
+        kind: "turn",
+        label: "Thought for 5m 04s",
+        facts: ["12.3k in", "800 out", "11.2k cached"],
+        durationMs: 304_000,
+        at: 305_000,
+      },
+    ]);
+    expect(kinds(t.push(call("b", "pwd")))).toEqual(["step", "call"]);
+    expect(t.push(start("m2", "model.turn", 400_000))).toEqual([]); // the start of a turn opens no row
+  });
+
+  it("a tool span decorates the call card it belongs to (by callId) when the result had no clock; it never opens a row, and an mcp span decorates nothing", () => {
+    const t = createRunTimeline();
+    expect(t.push(start("t1", "tool.bash", 1_000, { callId: "a" }))).toEqual([]);
+    t.push(call("a", "ls")); // no `at`: the result cannot time it
+    t.push(result("a"));
+    expect(t.steps()[0].calls[0].durationMs).toBeUndefined();
+    const decorated = t.push(end("t1", "tool.bash", 1_000, 2_500, { attrs: { callId: "a", ok: true } }));
+    expect(decorated).toHaveLength(1);
+    expect(decorated[0].kind).toBe("result");
+    expect(t.steps()[0].calls[0].durationMs).toBe(2_500);
+    expect(t.steps()[0].calls[0].facts).toContain("2.5s");
+    // a call the result already timed keeps its own clock
+    t.push(call("b", "pwd", 10_000));
+    t.push(result("b", { at: 11_000 }));
+    expect(t.push(end("t2", "tool.bash", 10_000, 9_999, { attrs: { callId: "b" } }))).toEqual([]);
+    expect(t.steps()[0].calls[1].durationMs).toBe(1_000);
+    // no such call, no callId, an mcp span: nothing
+    expect(t.push(end("t3", "tool.bash", 1, 1, { attrs: { callId: "nope" } }))).toEqual([]);
+    expect(t.push(end("t4", "tool.bash", 1, 1))).toEqual([]);
+    expect(t.push(end("m", "mcp.vanta.list", 1, 1, { attrs: { ok: true } }))).toEqual([]);
+  });
+
+  it("run_meta without a model (a command run) is a meta change with no model", () => {
+    const t = createRunTimeline();
+    expect(t.push({ type: "run_meta", agent: "command", at: 5 })).toEqual([
+      { kind: "meta", agent: "command", model: "", at: 5 },
+    ]);
+  });
+});
+
 describe("createRunTimeline — model turns (item 15)", () => {
   const turn = (over: Record<string, unknown> = {}) => ({
     type: "turn",

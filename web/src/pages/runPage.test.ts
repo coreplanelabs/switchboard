@@ -157,8 +157,8 @@ describe("RunPage — history mode", () => {
   });
 
   it("renders AE11 omission markers (replay notes) as quiet rows", () => {
-    const w = mountApp(RunPage, { seed: historySeed([{ type: "replay_note", summary: "3 events omitted" }]) });
-    expect(w.find("#log .note").text()).toContain("3 events omitted");
+    const w = mountApp(RunPage, { seed: historySeed([{ type: "replay_note", summary: "3 records omitted" }]) });
+    expect(w.find("#log .note").text()).toContain("3 records omitted");
   });
 
   it("renders hostile model text as data, never markup", () => {
@@ -515,6 +515,34 @@ describe("RunPage — live mode", () => {
     expect(w.find("#delivery").text()).toBe("· delivered in 2s");
     const none = mountApp(RunPage, { seed: historySeed([], { status: "completed", durationMs: 60_000 }) });
     expect(none.find("#delivery").exists()).toBe(false);
+  });
+
+  it("a streamed span renders as one row: its display name with an open marker, then its duration once it ends — never the raw span name", async () => {
+    const { wrapper, es } = mountLive();
+    es().emitOpen();
+    es().emitMessage({ type: "span_start", spanId: "d1", name: "dispatch.compose", at: 1_000 }, "1");
+    await wrapper.vm.$nextTick();
+    const rows = wrapper.findAll("#log .span");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text()).toContain("preparing the prompt");
+    expect(rows[0].text()).not.toContain("dispatch.compose");
+    expect(rows[0].find(".glyph").text()).toBe("◌");
+    es().emitMessage(
+      {
+        type: "span_end",
+        spanId: "d1",
+        name: "dispatch.compose",
+        startedAt: 1_000,
+        durationMs: 250,
+        status: "ok",
+        at: 1_250,
+      },
+      "2",
+    );
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll("#log .span")).toHaveLength(1);
+    expect(wrapper.find("#log .span .glyph").text()).toBe("◷");
+    expect(wrapper.find("#log .span .dur").text()).toBe("250ms");
   });
 
   it("a replay_elided frame renders as a replay row naming the range the record still has; a malformed or empty one marks nothing", async () => {

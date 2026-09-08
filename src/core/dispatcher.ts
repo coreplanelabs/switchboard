@@ -54,7 +54,7 @@ import { recognizeOperation } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
-import { redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
+import { isSpanRecord, redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
 import { formatDuration } from "./time/formatDuration.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import {
@@ -1272,6 +1272,7 @@ export async function dispatch(
     let recordedPushedBranch: string | undefined;
     const onEvent = (e: RunEvent) => {
       registry.publish(run.id, e); // feed the external live-view stream
+      if (isSpanRecord(e)) return; // timing, not activity (features/tracing.md): the card and its clock ignore it
       if (e.type === "tool_call") toolCalls++;
       if (isCodingPrRun) {
         pushes.observe(e);
@@ -2062,6 +2063,7 @@ async function runShipBranch(
   const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
   const onEvent = (e: RunEvent) => {
     registry.publish(run.id, e);
+    if (isSpanRecord(e)) return; // timing, not activity (features/tracing.md)
     lastActivity = activityLine(e);
     console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
     card.update(currentFrame());
@@ -2549,6 +2551,7 @@ export function reclaimedRunRecord(input: {
     startedAt: row.startedAt,
     finishedAt,
     eventCount: events.reduce((max, e) => Math.max(max, e.seq), 0),
+    stepCount: events.filter((e) => !isSpanRecord(e)).length,
     truncated: false,
   };
   return assembleRunRecord({
@@ -2649,6 +2652,7 @@ function assembleRunRecord(input: {
     finishedAt: input.finishedAt,
     ...(seal?.sealedAt !== undefined ? { sealedAt: seal.sealedAt } : {}),
     ...(seal?.replyOk !== undefined ? { replyOk: seal.replyOk } : {}),
+    ...(snap !== null ? { stepCount: snap.stepCount } : {}),
     status: input.status,
     eventCount: Math.max(snap?.eventCount ?? atFinish.length, seal?.eventCount ?? 0),
     storedEventCount: events.length,
@@ -2885,6 +2889,9 @@ function activityLine(e: RunEvent): string {
       return "PR opened"; // published straight to the registry — never arrives here
     case "ship_round":
       return `round ${e.index} (${e.agent}): ${e.outcome}`; // published straight to the registry — never arrives here
+    case "span_start":
+    case "span_end":
+      return ""; // timing, not activity (features/tracing.md): the card's activity line never shows a span
   }
 }
 

@@ -100,6 +100,105 @@ describe("fitRecordToBudget", () => {
     expect(fitted.storedEventCount).toBe(2);
   });
 
+  // Feature: features/tracing.md — spans displace no content.
+  it("over budget, span records go first — pair by pair from the middle outward, never from the protected head — and the content greedy runs only if that was not enough", () => {
+    const head: RunEvent[] = [
+      { type: "input", text: "go", seq: 1, at: 0 },
+      { type: "span_start", spanId: "d1", name: "dispatch.compose", seq: 2, at: 1 },
+      {
+        type: "span_end",
+        spanId: "d1",
+        name: "dispatch.compose",
+        startedAt: 1,
+        durationMs: 4,
+        status: "ok",
+        seq: 3,
+        at: 5,
+      },
+    ];
+    const body: RunEvent[] = [];
+    for (let i = 0; i < 400; i++) {
+      const seq = head.length + body.length + 1;
+      body.push({
+        type: "span_start",
+        spanId: `t${i}`,
+        name: "tool.bash",
+        attrs: { callId: `c${i}` },
+        seq,
+        at: 10 + i,
+      });
+      body.push({
+        type: "tool_call",
+        tool: "bash",
+        summary: `#${i} ${"x".repeat(2_000)}`,
+        callId: `c${i}`,
+        seq: seq + 1,
+        at: 10 + i,
+      });
+      body.push({
+        type: "tool_result",
+        tool: "bash",
+        ok: true,
+        summary: `ok ${"y".repeat(1_000)}`,
+        callId: `c${i}`,
+        seq: seq + 2,
+        at: 11 + i,
+      });
+      body.push({
+        type: "span_end",
+        spanId: `t${i}`,
+        name: "tool.bash",
+        startedAt: 10 + i,
+        durationMs: 1,
+        status: "ok",
+        attrs: { callId: `c${i}`, ok: true },
+        seq: seq + 3,
+        at: 11 + i,
+      });
+    }
+    const events = [...head, ...body];
+    const rec = record({ events, eventCount: events.length, storedEventCount: events.length });
+    const whole = utf8ByteLength(JSON.stringify(rec));
+    // A budget that the content alone fits but content + spans does not.
+    const contentOnly = utf8ByteLength(
+      JSON.stringify({
+        ...rec,
+        events: events.filter((e) => e.type !== "span_start" && e.type !== "span_end"),
+        truncated: true,
+      }),
+    );
+    const budget = Math.floor((whole + contentOnly) / 2);
+    const fitted = fitRecordToBudget(rec, budget);
+    expect(utf8ByteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(budget);
+    expect(fitted.truncated).toBe(true);
+    // every content event survived; only spans went
+    const content = (evs: RunEvent[]) =>
+      evs.filter((e) => e.type === "tool_call" || e.type === "tool_result" || e.type === "input");
+    expect(content(fitted.events)).toEqual(content(events));
+    // the head's span pair is untouched; the dropped pairs are whole (never a lone start or end)
+    expect(fitted.events.slice(0, 3)).toEqual(head);
+    const spanIds = fitted.events
+      .filter((e) => e.type === "span_start" || e.type === "span_end")
+      .map((e) => (e as { spanId: string }).spanId);
+    const counts = new Map<string, number>();
+    for (const id of spanIds) counts.set(id, (counts.get(id) ?? 0) + 1);
+    for (const [id, n] of counts) if (id !== "d1") expect(n).toBe(2);
+    // the survivors sit at the edges: the middle went first
+    const survivors = fitted.events
+      .map((e, i) => (e.type === "span_end" && e.spanId.startsWith("t") ? i : -1))
+      .filter((i) => i >= 0);
+    expect(survivors.length).toBeGreaterThan(0);
+    expect(survivors.length).toBeLessThan(400);
+    const mid = fitted.events.length / 2;
+    const nearest = Math.min(...survivors.map((i) => Math.abs(i - mid)));
+    expect(nearest).toBeGreaterThan(fitted.events.length / 8);
+    // a budget below the content alone still drops content — from both ends, as before
+    const tiny = fitRecordToBudget(rec, Math.floor(contentOnly / 2));
+    expect(utf8ByteLength(JSON.stringify(tiny))).toBeLessThanOrEqual(Math.floor(contentOnly / 2));
+    expect(content(tiny.events).length).toBeLessThan(content(events).length);
+    expect(tiny.events[0]).toEqual(head[0]);
+  });
+
   it("caps a single 200 KB event to at most 64 KiB, ending its summary with an ellipsis", () => {
     const events = bigEvents(1, 200_000);
     const rec = record({ events, eventCount: 1, storedEventCount: 1 });

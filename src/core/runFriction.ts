@@ -1,4 +1,4 @@
-import type { RunEvent } from "./runEvents.js";
+import type { RunEvent, SpanEndEvent, SpanStartEvent } from "./runEvents.js";
 import { isSpanRecord } from "./runEvents.js";
 import { formatDuration } from "./time/formatDuration.js";
 
@@ -156,7 +156,7 @@ function isNarrative(ev: RunEvent): ev is NarrativeEvent {
 /** A span record on the stream (features/tracing.md; emitted from PR 4 on): the
  *  analyzer reads timing from spans in a later step — until then, and for the
  *  step counts and the stream's first/last stamps always, they are invisible. */
-function isSpanEvent(ev: { type: string }): boolean {
+function isSpanEvent(ev: RunEvent): ev is SpanStartEvent | SpanEndEvent {
   return isSpanRecord(ev);
 }
 

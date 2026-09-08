@@ -19,6 +19,8 @@ import {
   whenTip,
   type IndexRow,
   delivering,
+  countTip,
+  countText,
 } from "./indexRow";
 import { formatLocalIso } from "./format";
 
@@ -52,6 +54,14 @@ describe("status vocabulary", () => {
     expect(statusWord(row())).toBe("live");
     expect(statusWord(finished("completed"))).toBe("succeeded");
     expect(statusWord(row({ finished: true }))).toBe("finished");
+  });
+
+  it("the count cell prints the content-event count when the row carries it, else the published total, always as `events`", () => {
+    expect(countText({ eventCount: 12, stepCount: 8 })).toBe("8 events");
+    expect(countText({ eventCount: 12 })).toBe("12 events");
+    expect(countText({ eventCount: 3, stepCount: 1 })).toBe("1 event");
+    expect(countTip({ stepCount: 8 })).toBe("content events; span records excluded");
+    expect(countTip({})).toBe("events published, span records included"); // a legacy row's fallback counts them
   });
 
   it("a finished row with no seal yet and no record is `delivering`: amber, whatever its status, and its tip says so; a seal or a persisted record ends it", () => {

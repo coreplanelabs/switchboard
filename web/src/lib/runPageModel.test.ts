@@ -318,12 +318,12 @@ describe("notes and stops", () => {
 
   it("replay notes (transport notices) render as replay rows", () => {
     const m = model();
-    m.handle({ type: "replay_note", summary: "3 events omitted" });
+    m.handle({ type: "replay_note", summary: "3 records omitted" });
     const note = m.state.log[0];
     expect(note.kind).toBe("note");
     if (note.kind === "note") {
       expect(note.replay).toBe(true);
-      expect(note.text).toBe("3 events omitted");
+      expect(note.text).toBe("3 records omitted");
     }
   });
 });
@@ -362,6 +362,31 @@ describe("replay_elided frames (item 5)", () => {
       expect(note.text).toBe("1000 events not loaded (events 1–1000) — the record has them");
     }
     expect(elidedText({ fromSeq: 7, toSeq: 7 })).toBe("1 event not loaded (event 7) — the record has them");
+  });
+});
+
+// Feature: features/tracing.md — a streamed span is one row, named through the display table.
+describe("span rows", () => {
+  it("a span_start opens one row under its display name; the matching span_end closes the same row with its duration and status; a tool span opens none", () => {
+    const m = model();
+    m.handle({ type: "span_start", spanId: "d1", name: "dispatch.compose", at: 1_000 });
+    expect(m.state.log).toHaveLength(1);
+    const row = m.state.log[0];
+    expect(row).toMatchObject({ kind: "span", spanId: "d1", text: "preparing the prompt", open: true, at: 1_000 });
+    m.handle({
+      type: "span_end",
+      spanId: "d1",
+      name: "dispatch.compose",
+      startedAt: 1_000,
+      durationMs: 250,
+      status: "error",
+      at: 1_250,
+    });
+    expect(m.state.log).toHaveLength(1);
+    expect(m.state.log[0]).toMatchObject({ kind: "span", open: false, durationMs: 250, status: "error" });
+    m.handle({ type: "span_start", spanId: "t1", name: "tool.bash", attrs: { callId: "c1" }, at: 2_000 });
+    expect(m.state.log).toHaveLength(1);
+    expect(m.state.placeholder).toBe(false);
   });
 });
 
