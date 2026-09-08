@@ -279,6 +279,83 @@ export function nextRefreshDelayS(input: {
  *  until the 30-min watchdog. The losing promise keeps running (nothing can
  *  cancel it) — its eventual rejection is swallowed so it never surfaces as
  *  an unhandled rejection. */
+// -- restore progress (#572) ---------------------------------------------------------
+
+/** How often the wake path samples a restore's target directory. */
+export const RESTORE_POLL_MS = 15_000;
+/** A restore whose target has not grown for this long is stalled. Generous
+ *  against R2's own hiccups, tight against a hung SDK operation: the live
+ *  restores of 2026-09-07 wrote continuously (47 s, 104 s, 481 s for the same
+ *  ~2 GiB checkout snapshot). */
+export const RESTORE_STALL_MS = 120_000;
+/** Absolute cap for ONE HYDRATE — the wait for a previous attempt's restore,
+ *  the mirror restore and the checkout restore share it (one deadline, see
+ *  `deadlineMs`) — under the watchdog's 30-min stale-mid-flight window so a
+ *  runaway wake is still the wake path's own verdict, not the watchdog's. */
+export const RESTORE_MAX_MS = 25 * 60_000;
+
+export interface RestoreSample {
+  atMs: number;
+  /** `du -xsk <dir>` at that moment; null when du could not answer. */
+  kiB: number | null;
+}
+
+export type RestoreVerdict = { verdict: "wait" } | { verdict: "stalled" | "capped"; detail: string };
+
+/** Judge a running restore by its bytes, not by a clock. The Sandbox SDK's
+ *  restoreBackup accepts no timeout, progress callback or AbortSignal, and a
+ *  promise abandoned by a fixed budget keeps writing (live 2026-09-07 23:35–
+ *  23:47 UTC: the checkout restore finished in 481 s, the 300 s budget had
+ *  already gone `down(r2-restore-failed)`, and the next hydrate ran `rm -rf`
+ *  over the tree the first one was still filling). So the wake path polls the
+ *  target directory: while bytes keep arriving it waits — a slow transfer is
+ *  a slow transfer — and it gives up only when nothing has been written for
+ *  RESTORE_STALL_MS (the clock runs from the start until the first byte) or
+ *  the whole thing exceeds RESTORE_MAX_MS. A sample du could not take is no
+ *  evidence either way: it neither counts as growth nor resets the clock. */
+export function judgeRestoreProgress(input: {
+  startedMs: number;
+  nowMs: number;
+  samples: readonly RestoreSample[];
+  stallMs?: number;
+  /** Absolute cap shared by the WHOLE hydrate — the wait for a previous
+   *  attempt's restore, the mirror restore and the checkout restore all judge
+   *  against the same instant, so the sum stays under the watchdog's window.
+   *  Defaults to this restore's start + RESTORE_MAX_MS. */
+  deadlineMs?: number;
+}): RestoreVerdict {
+  const stallMs = input.stallMs ?? RESTORE_STALL_MS;
+  const deadlineMs = input.deadlineMs ?? input.startedMs + RESTORE_MAX_MS;
+  const elapsedMs = input.nowMs - input.startedMs;
+  let highKiB = 0;
+  let lastGrowthMs = input.startedMs;
+  for (const s of input.samples) {
+    if (s.kiB !== null && s.kiB > highKiB) {
+      highKiB = s.kiB;
+      lastGrowthMs = s.atMs;
+    }
+  }
+  const gib = (kiB: number) => `${(kiB / 1_048_576).toFixed(2)} GiB`;
+  const secs = (ms: number) => `${Math.round(ms / 1000)} s`;
+  if (input.nowMs > deadlineMs) {
+    return {
+      verdict: "capped",
+      detail: `still restoring after ${secs(elapsedMs)} (${gib(highKiB)} written) — the hydrate's ${secs(RESTORE_MAX_MS)} cap passed`,
+    };
+  }
+  // Idle runs against NOW from the last observed growth (or the start): a
+  // sample du could not take proves nothing, so it neither resets nor pauses
+  // the clock — a stall window without evidence of progress is a stall.
+  const idleMs = input.nowMs - lastGrowthMs;
+  if (idleMs > stallMs) {
+    return {
+      verdict: "stalled",
+      detail: `no bytes written for ${secs(idleMs)} (${gib(highKiB)} after ${secs(elapsedMs)})`,
+    };
+  }
+  return { verdict: "wait" };
+}
+
 export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {

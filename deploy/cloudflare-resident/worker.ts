@@ -129,8 +129,12 @@ import {
   nextRefreshDelayS,
   planRefresh,
   RUNTIME_REPLACEMENT_WORDING,
+  judgeRestoreProgress,
+  RESTORE_MAX_MS,
+  RESTORE_POLL_MS,
   withTimeout,
   type RefreshDisk,
+  type RestoreSample,
   type RefreshFailure,
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
@@ -273,11 +277,13 @@ const REFRESH_INSTALL_TIMEOUT_MS = 10 * 60_000;
  *  killed at `timeout`, how long to wait for the exit status of OUR kill
  *  before reporting the step without one. */
 const KILL_EXIT_WAIT_MS = 10_000;
-/** Budget per R2 snapshot/restore transfer (#356 item 7a). The SDK's
- *  createBackup/restoreBackup accept no timeout or AbortSignal, so each call
- *  is raced against this (withTimeout): a hung upload/download fails the
- *  cycle into the existing degrade/goDown handling with a named error,
- *  instead of stranding `refreshing`/`restoring` until the 30-min watchdog.
+/** Budget per R2 SNAPSHOT upload (#356 item 7a). The SDK's createBackup
+ *  accepts no timeout or AbortSignal, so each call is raced against this
+ *  (withTimeout): a hung upload fails the cycle into the existing degrade
+ *  handling with a named error, instead of stranding `refreshing` until the
+ *  30-min watchdog. Restores are NOT on this budget any more: a download is
+ *  judged by the bytes arriving in its target (restoreWithProgress, #572) —
+ *  a fixed budget abandoned a 481 s restore that then completed.
  *  Same class as the other network budgets (observed live transfers run
  *  seconds, recorded in `lastRestore.ms`). */
 const R2_TRANSFER_TIMEOUT_MS = 5 * 60_000;
@@ -1111,6 +1117,64 @@ export class ResidentDO extends Sandbox<Env> {
    *  survives, so hydration state is always probed from disk. */
   private hydration: Promise<void> | null = null;
 
+  /** R2 restores this incarnation started and has not seen settle. The SDK's
+   *  restoreBackup cannot be cancelled: a restore the wake path gave up on
+   *  keeps writing into its target directory, so the next hydrate must not
+   *  `rm -rf` that directory until these have settled (#572 — live 2026-09-07
+   *  the second attempt's clean ran over the first attempt's still-filling
+   *  checkout). A DO reset drops the set together with the transfers it named:
+   *  the restore is driven from this isolate, so nothing outlives it. */
+  private readonly pendingRestores = new Set<Promise<unknown>>();
+
+  /** Run one R2 restore and judge it by the bytes arriving in its target
+   *  directory (judgeRestoreProgress): the SDK call takes no timeout, progress
+   *  callback or AbortSignal, and a fixed budget abandoned a restore that then
+   *  completed (481 s against 300 s, #572). While `du` of the target keeps
+   *  growing the wait continues; it ends on a stall (no growth for
+   *  RESTORE_STALL_MS) or the RESTORE_MAX_MS cap, with the bytes and the timing
+   *  in the error. On success the observed size and rate are logged so the
+   *  budgets can be revisited from evidence. */
+  private async restoreWithProgress(backup: DirectoryBackup, what: string, deadlineMs: number): Promise<void> {
+    const startedMs = Date.now();
+    const p = this.restoreBackup(backup);
+    this.pendingRestores.add(p);
+    void p.then(
+      () => this.pendingRestores.delete(p),
+      () => this.pendingRestores.delete(p),
+    );
+    const samples: RestoreSample[] = [];
+    for (;;) {
+      const outcome = await Promise.race([
+        p.then(() => "done" as const),
+        new Promise<"tick">((r) => setTimeout(() => r("tick"), RESTORE_POLL_MS)),
+      ]);
+      if (outcome === "done") {
+        const ms = Date.now() - startedMs;
+        const kiB = await this.dirKiB(backup.dir);
+        const rate = kiB !== null && ms > 0 ? ` (${((kiB / 1024 / ms) * 1000).toFixed(1)} MiB/s)` : "";
+        const size = kiB === null ? "? GiB (du did not answer)" : `${(kiB / 1_048_576).toFixed(2)} GiB`;
+        console.log(`${what}: ${size} in ${Math.round(ms / 1000)} s${rate}`);
+        return;
+      }
+      samples.push({ atMs: Date.now(), kiB: await this.dirKiB(backup.dir) });
+      const verdict = judgeRestoreProgress({ startedMs, nowMs: Date.now(), samples, deadlineMs });
+      if (verdict.verdict !== "wait") {
+        // The restore itself keeps running (its settle handlers are attached
+        // above); pendingRestores keeps the next hydrate off its directory.
+        throw new Error(`${what} ${verdict.verdict}: ${verdict.detail}`);
+      }
+    }
+  }
+
+  /** `du -xsk <dir>` in KiB; null when the directory is not there yet or du
+   *  could not answer — the judge treats null as no evidence, never as 0. */
+  private async dirKiB(dir: string): Promise<number | null> {
+    const r = await this.run(["du", "-xsk", dir]);
+    if (r.exitCode !== 0) return null;
+    const m = /^(\d+)\s/.exec(r.stdout.trim());
+    return m ? Number(m[1]) : null;
+  }
+
   // -- per-incarnation memos ---------------------------------------------------
   // Facts about the CURRENT container incarnation that are expensive to
   // re-derive (a storage multi-get + a runtime probe + a container fork for
@@ -1736,16 +1800,37 @@ export class ResidentDO extends Sandbox<Env> {
     }
 
     const t0 = Date.now();
+    // A restore a previous attempt gave up on may still be writing into these
+    // directories (the SDK call cannot be cancelled, #572): wait for it to
+    // settle before the clean, bounded by the same cap the restores get. A
+    // restore that will not settle even then leaves the disk alone — a named
+    // `down`, not a clean racing a writer.
+    // One deadline for the whole hydrate: the wait below and both restores
+    // judge against it, so the worst-case `restoring` span is RESTORE_MAX_MS,
+    // under the watchdog's stale-mid-flight window — not three caps in a row.
+    const deadlineMs = Date.now() + RESTORE_MAX_MS;
+    if (this.pendingRestores.size > 0) {
+      try {
+        await withTimeout(
+          Promise.allSettled([...this.pendingRestores]),
+          Math.max(1, deadlineMs - Date.now()),
+          `${this.pendingRestores.size} earlier restore(s) still running`,
+        );
+      } catch (err) {
+        throw await this.goDown(`r2-restore-failed: ${errMsg(err)} — the disk was left untouched`);
+      }
+    }
     await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-before-restore");
     try {
-      // The restore pair IS the cold-wake critical path: disjoint target
-      // directories, so both downloads run concurrently, each bounded by
-      // R2_TRANSFER_TIMEOUT_MS (#356 item 7a) — a hang goes down with the
-      // transfer named instead of stranding `restoring` for the watchdog.
-      await Promise.all([
-        withTimeout(this.restoreBackup(snap.mirror), R2_TRANSFER_TIMEOUT_MS, "mirror restore"),
-        withTimeout(this.restoreBackup(snap.checkout), R2_TRANSFER_TIMEOUT_MS, "checkout restore"),
-      ]);
+      // The restore pair IS the cold-wake critical path. Sequential on purpose:
+      // the SDK serializes backup operations anyway (one queue), so a
+      // concurrent pair only made the second one's clock run while it waited —
+      // and each is judged by its own bytes (restoreWithProgress, #572), not by
+      // a fixed budget: a slow transfer waits, a stalled one goes down with
+      // the bytes and the idle span named instead of stranding `restoring` for
+      // the watchdog.
+      await this.restoreWithProgress(snap.mirror, "mirror restore", deadlineMs);
+      await this.restoreWithProgress(snap.checkout, "checkout restore", deadlineMs);
     } catch (err) {
       throw await this.goDown(`r2-restore-failed: ${errMsg(err)}`);
     }

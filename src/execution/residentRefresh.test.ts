@@ -3,10 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   INTERRUPTED_REARM_MAX_CONSECUTIVE,
   INTERRUPTED_REARM_S,
+  RESTORE_MAX_MS,
+  RESTORE_POLL_MS,
+  RESTORE_STALL_MS,
   checkoutUpdateCommand,
   classifyRefreshFailure,
   killStaleBuildProcessesCommand,
   nextRefreshDelayS,
+  judgeRestoreProgress,
   planRefresh,
   withTimeout,
   type RefreshDisk,
@@ -428,5 +432,67 @@ describe("withTimeout (#356 item 7a: R2 snapshot/restore calls get an explicit b
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
+  });
+});
+
+describe("judgeRestoreProgress (#572: an R2 restore is judged by the bytes still arriving, not by a clock)", () => {
+  // Live 2026-09-07 23:35–23:47 UTC, switchboard resident: the checkout restore
+  // (~2 GiB) completed in 481 s; the fixed 300 s budget had already declared it
+  // failed, a second hydrate ran `rm -rf` over the still-writing first one, and
+  // the resident went down(r2-restore-failed) on a disk with 11.5 GiB free.
+  const t0 = 1_000_000;
+  const s = (offsetS: number, kiB: number | null) => ({ atMs: t0 + offsetS * 1000, kiB });
+
+  it("bytes still growing → wait, however long it has been running (well past the old 300 s budget)", () => {
+    const samples = [s(15, 10_000), s(30, 250_000), s(300, 1_500_000), s(480, 2_000_000)];
+    expect(judgeRestoreProgress({ startedMs: t0, nowMs: t0 + 481_000, samples })).toEqual({ verdict: "wait" });
+  });
+
+  it("no growth for RESTORE_STALL_MS → stalled, naming the bytes so far and the idle span", () => {
+    const samples = [s(15, 10_000), s(30, 250_000), s(45, 250_000), s(160, 250_000)];
+    const j = judgeRestoreProgress({ startedMs: t0, nowMs: t0 + 160_000, samples });
+    expect(j.verdict).toBe("stalled");
+    expect(j.verdict === "stalled" && j.detail).toMatch(/no bytes written for 130 s .*0\.24 GiB after 160 s/);
+  });
+
+  it("no byte at all within RESTORE_STALL_MS of the start → stalled (the clock runs from the start until the first byte)", () => {
+    const samples = [s(15, 0), s(60, 0), s(125, 0)];
+    expect(judgeRestoreProgress({ startedMs: t0, nowMs: t0 + 125_000, samples }).verdict).toBe("stalled");
+    // …but a slow start that is still inside the stall window waits.
+    expect(judgeRestoreProgress({ startedMs: t0, nowMs: t0 + 90_000, samples: [s(15, 0), s(60, 0)] }).verdict).toBe(
+      "wait",
+    );
+  });
+
+  it("a sample du could not take (null) neither counts as growth nor resets the stall clock", () => {
+    const samples = [s(15, 10_000), s(30, 250_000), s(60, null), s(100, null), s(160, null)];
+    expect(judgeRestoreProgress({ startedMs: t0, nowMs: t0 + 160_000, samples }).verdict).toBe("stalled");
+    expect(judgeRestoreProgress({ startedMs: t0, nowMs: t0 + 100_000, samples: samples.slice(0, 4) }).verdict).toBe(
+      "wait",
+    );
+  });
+
+  it("past RESTORE_MAX_MS → capped even while bytes still arrive; the cap sits under the watchdog's stale-mid-flight window", () => {
+    const samples = Array.from({ length: 100 }, (_, i) => s(15 * (i + 1), 10_000 * (i + 1)));
+    const j = judgeRestoreProgress({ startedMs: t0, nowMs: t0 + RESTORE_MAX_MS + 1000, samples });
+    expect(j.verdict).toBe("capped");
+    // The cap is the HYDRATE's, not this restore's: a restore that started late
+    // in the hydrate inherits the shared deadline and is capped by it even
+    // though its own elapsed time is short (a wait + two restores never add up
+    // past the window).
+    const late = judgeRestoreProgress({
+      startedMs: t0,
+      nowMs: t0 + 60_000,
+      samples: [s(15, 10_000), s(30, 20_000), s(45, 30_000)],
+      deadlineMs: t0 + 50_000,
+    });
+    expect(late.verdict).toBe("capped");
+    expect(RESTORE_MAX_MS).toBeLessThan(30 * 60_000);
+    expect(RESTORE_STALL_MS).toBeGreaterThanOrEqual(60_000);
+    expect(RESTORE_POLL_MS).toBeLessThan(RESTORE_STALL_MS);
+  });
+
+  it("no samples yet → wait (the first poll has not happened)", () => {
+    expect(judgeRestoreProgress({ startedMs: t0, nowMs: t0 + 5_000, samples: [] })).toEqual({ verdict: "wait" });
   });
 });
