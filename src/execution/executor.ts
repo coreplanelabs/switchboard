@@ -48,10 +48,24 @@ export interface ExecOptions {
 }
 
 /** The per-call deadline for a remote route, joined with an optional hard-stop
- *  signal (#101): whichever fires first aborts the fetch. */
+ *  signal (#101): whichever fires first aborts the fetch — and, because the
+ *  same signal is what `fetch` hands the response body, the body read too.
+ *  A plain timer rather than `AbortSignal.timeout`: Node runs that one on an
+ *  internal timer that neither fake timers nor a test can observe, so a
+ *  deadline built on it could never be proven to fire (#531). The timer is
+ *  unref'd (it never holds the process open) and dropped as soon as the
+ *  hard stop wins the race. */
 export function execDeadline(timeoutMs: number, signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  return signal ? AbortSignal.any([timeout, signal]) : timeout;
+  const deadline = new AbortController();
+  const onStop = () => clearTimeout(timer);
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", onStop);
+    deadline.abort(new DOMException(`the ${Math.round(timeoutMs / 1000)}s call deadline passed`, "TimeoutError"));
+  }, timeoutMs);
+  timer.unref?.();
+  if (!signal) return deadline.signal;
+  signal.addEventListener("abort", onStop, { once: true });
+  return AbortSignal.any([deadline.signal, signal]);
 }
 
 export type ReleaseMode = "always" | "if-clean";

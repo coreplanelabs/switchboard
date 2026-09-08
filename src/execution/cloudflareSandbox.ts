@@ -1,5 +1,12 @@
-import { BASH_TIMEOUT_MS, clampBashTimeout } from "./bashTimeout.js";
-import { ExecCapacityError, ExecInfraError, truncate, type ExecOptions, type Executor } from "./executor.js";
+import { BASH_TIMEOUT_MS, EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
+import {
+  ExecCapacityError,
+  ExecInfraError,
+  execDeadline,
+  truncate,
+  type ExecOptions,
+  type Executor,
+} from "./executor.js";
 import {
   FLEET_BUSY_BACKOFF_MS,
   FLEET_BUSY_REASON,
@@ -40,6 +47,30 @@ function isFleetBusyAnswer(res: Response, data: Record<string, unknown>): boolea
   return (res.ok || res.status === 503) && data.reason === FLEET_BUSY_REASON;
 }
 
+/** The bot-side wait for ONE send: the operation's budget plus the margin
+ *  that lets the Worker's own answer (a streamed exit 124 at the command
+ *  budget) win the race against this deadline (features/execution.md item
+ *  11). Every route has one — 2026-09-07 (#531): a coding run waited 60+
+ *  minutes on a single `/exec` whose sandbox container was gone; the Worker
+ *  kept heartbeating while its exec promise never settled, and the bot's read
+ *  of the body had no deadline at all. */
+function sendDeadlineMs(budgetMs: number): number {
+  return budgetMs + EXEC_CALL_MARGIN_MS;
+}
+
+/** The infra error for a send the Worker never answered inside its deadline:
+ *  names both numbers, so the reader sees which budget the wait was sized
+ *  from, and says what may still be true inside the sandbox. */
+function noAnswerMessage(route: string, budgetMs: number): string {
+  const secs = (ms: number) => Math.round(ms / 1000);
+  const exec = route === "/exec";
+  return (
+    `sandbox worker ${route} gave no answer within ${secs(sendDeadlineMs(budgetMs))}s ` +
+    `(${exec ? "command budget" : "budget"} ${secs(budgetMs)}s + ${secs(EXEC_CALL_MARGIN_MS)}s margin) — ` +
+    `the sandbox may be gone; ${exec ? "the command may still be running in it" : "the operation may still have run in it"}`
+  );
+}
+
 /** Resolve after `ms`, or reject with `ExecCapacityError` the moment `signal`
  *  fires — a hard stop (#101) must not sit out a fleet wait. */
 function waitForSlot(ms: number, waitedMs: number, signal?: AbortSignal): Promise<void> {
@@ -68,17 +99,23 @@ export class CloudflareSandboxExecutor implements Executor {
    *  fleet-busy wait around it: a busy answer re-sends the IDENTICAL request
    *  (same route, body — env included —, headers; the envs resolved once
    *  here, so the wait never mints a new credential mid-command) after 10 s,
-   *  20 s, then 30 s,
-   *  until the total wait reaches `waitBudgetMs` capped at
+   *  20 s, then 30 s, until the total wait reaches `budgetMs` capped at
    *  FLEET_BUSY_WAIT_MAX_MS; then throws `ExecCapacityError` (never
    *  `ExecInfraError` — a full fleet is not a dead sandbox, item 14). Safe to
    *  re-send by construction: the Worker answers busy only when session
-   *  creation failed, before the command or file op ever started. */
+   *  creation failed, before the command or file op ever started.
+   *
+   *  `budgetMs` is the operation's own budget — the command's clamped
+   *  `timeoutMs` for /exec, BASH_TIMEOUT_MS for a file op (the bound the
+   *  resident client gives its file routes) — and sizes two waits: the fleet
+   *  wait above, and the per-SEND deadline (`budgetMs` + EXEC_CALL_MARGIN_MS)
+   *  each send runs under. Time spent waiting for a slot never eats into a
+   *  send's deadline: nothing ran during it. */
   private async call(
     route: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
-    waitBudgetMs: number = BASH_TIMEOUT_MS,
+    budgetMs: number = BASH_TIMEOUT_MS,
   ): Promise<Record<string, unknown>> {
     const envs = await this.opts.resolveEnvs();
     const headers: Record<string, string> = {
@@ -99,10 +136,10 @@ export class CloudflareSandboxExecutor implements Executor {
     for (const [k, v] of Object.entries(envs)) headers[`x-env-${k}`] = v;
     const sent: Record<string, unknown> = { ...body, env: envs };
 
-    const budget = Math.min(waitBudgetMs, FLEET_BUSY_WAIT_MAX_MS);
+    const budget = Math.min(budgetMs, FLEET_BUSY_WAIT_MAX_MS);
     let waited = 0;
     for (let attempt = 0; ; attempt++) {
-      const answer = await this.send(route, sent, headers, signal);
+      const answer = await this.send(route, sent, headers, budgetMs, signal);
       if (answer.kind === "ok") return answer.data;
       if (waited >= budget) throw new ExecCapacityError(fleetBusyExhaustedMessage(waited));
       const delay = Math.min(
@@ -116,11 +153,14 @@ export class CloudflareSandboxExecutor implements Executor {
 
   /** One send with the transport-level retries. Returns the parsed answer, or
    *  `busy` when the Worker named a full fleet; every other failure throws
-   *  `ExecInfraError` here, after exactly one send for an in-body error. */
+   *  `ExecInfraError` here, after exactly one send for an in-body error.
+   *  Each attempt — headers AND body — runs under its own deadline of
+   *  `budgetMs` + EXEC_CALL_MARGIN_MS joined with the hard-stop signal. */
   private async send(
     route: string,
     body: Record<string, unknown>,
     headers: Record<string, string>,
+    budgetMs: number,
     signal?: AbortSignal,
   ): Promise<{ kind: "ok"; data: Record<string, unknown> } | { kind: "busy" }> {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
@@ -129,6 +169,12 @@ export class CloudflareSandboxExecutor implements Executor {
     for (const delay of delays) {
       if (delay > 0) await new Promise((r) => setTimeout(r, delay));
       let res: Response;
+      let text: string;
+      // The deadline covers the whole exchange: `/exec` answers HTTP 200 at
+      // once and streams heartbeat whitespace until the command's outcome, so
+      // a Worker whose sandbox died mid-command keeps the body open forever
+      // (#531) — the body read is where that wait sits, not the headers.
+      const deadline = execDeadline(sendDeadlineMs(budgetMs), signal);
       try {
         res = await fetch(`${this.opts.url.replace(/\/$/, "")}${route}`, {
           method: "POST",
@@ -137,9 +183,16 @@ export class CloudflareSandboxExecutor implements Executor {
           // A hard run stop (#101) drops the bot-side request. The sandbox
           // Worker has no kill route, so the command itself runs on to its own
           // `timeout` inside the sandbox — the runner has already moved on.
-          ...(signal ? { signal } : {}),
+          signal: deadline,
         });
+        text = await res.text();
       } catch (err) {
+        // The Worker gave no answer inside the deadline (and the run was not
+        // stopped): the sandbox may be gone, or its Durable Object hung —
+        // either way an infra failure that fail-fast (#92) counts, never an
+        // indefinite wait. A hard stop takes the generic path below: the
+        // runner has already moved on and does not read the message.
+        if (deadline.aborted && !signal?.aborted) throw new ExecInfraError(noAnswerMessage(route, budgetMs));
         // Network-level failure ("fetch failed"): undici drops the connection
         // after ~300s without response headers, so a command that outlives the
         // sandbox's COMMAND_TIMEOUT_MS margin surfaces here, not as exit 124.
@@ -152,7 +205,14 @@ export class CloudflareSandboxExecutor implements Executor {
             "re-check its effects before re-running it.",
         );
       }
-      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      // Heartbeat whitespace around one JSON document parses unchanged; a
+      // non-JSON body (an edge error page) is {} and the status speaks below.
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(text.trim() || "{}") as Record<string, unknown>;
+      } catch {
+        // fall through with {} — the HTTP status decides
+      }
       // A full fleet is the ONE answer that is re-sent (by `call`): the Worker
       // names it only when no session could be created, so nothing ran.
       if (isFleetBusyAnswer(res, data)) return { kind: "busy" };

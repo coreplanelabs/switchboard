@@ -245,16 +245,21 @@ export class ResidentExecutor implements Executor {
         // bounds the command inside the container.
         signal: execDeadline(timeoutMs, signal),
       });
+      // The body read is under the SAME deadline: /exec streams heartbeats, so
+      // a resident whose exec promise never settles hangs HERE, past the
+      // headers, not on the fetch — read it inside the try so that abort is the
+      // legible request-failed error below and NOT a raw TimeoutError (#531).
+      return { status: res.status, data: await parseResidentBody(res) };
     } catch (err) {
-      // Network-level failure: the command may still be running (or have run)
-      // in the resident — never blind-retry a possibly side-effectful call.
-      // Infra (not a command exit): the runner counts these toward fail-fast (#92).
+      // Network-level failure or a deadline abort mid-body: the command may
+      // still be running (or have run) in the resident — never blind-retry a
+      // possibly side-effectful call. Infra (not a command exit): the runner
+      // counts these toward fail-fast (#92).
       throw new ExecInfraError(
         `resident worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
           "The operation may still have run in the resident; re-check its effects before re-running it.",
       );
     }
-    return { status: res.status, data: await parseResidentBody(res) };
   }
 
   /** Bind/reuse this thread's worktree. Legible errors for every named
