@@ -1,4 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   INTERRUPTED_REARM_MAX_CONSECUTIVE,
@@ -6,6 +9,7 @@ import {
   RESTORE_MAX_MS,
   RESTORE_POLL_MS,
   RESTORE_STALL_MS,
+  SDK_BACKUP_ARCHIVE_DIR,
   RUNTIME_REPLACEMENT_WORDING,
   checkoutUpdateCommand,
   classifyRefreshFailure,
@@ -13,10 +17,13 @@ import {
   nextRefreshDelayS,
   judgeRestoreProgress,
   planRefresh,
+  restoreArchivePath,
   withTimeout,
   type RefreshDisk,
 } from "./residentRefresh.js";
 import { DISK_FULL_FREE_KIB } from "./residentDisk.js";
+
+const require = createRequire(import.meta.url);
 
 const KEY_A = "a".repeat(64);
 const KEY_B = "b".repeat(64);
@@ -534,5 +541,29 @@ describe("judgeRestoreProgress (#572: an R2 restore is judged by the bytes still
 
   it("no samples yet → wait (the first poll has not happened)", () => {
     expect(judgeRestoreProgress({ startedMs: t0, nowMs: t0 + 5_000, samples: [] })).toEqual({ verdict: "wait" });
+  });
+});
+
+describe("restoreArchivePath (#572 follow-up: a restore's bytes land in the SDK's staging archive first, not the target)", () => {
+  // Live 2026-09-08 00:51–00:53 UTC, the first hydrate on #576's build: eight
+  // `du` samples of /workspace/checkout read 0 while the 2 GiB archive was still
+  // downloading to /var/backups/<id>.sqsh; the judge called it stalled at 123 s.
+  it("names the SDK's staging archive for a backup id", () => {
+    expect(restoreArchivePath("21fe85c3-826f-47f1-932a-a4a9b8bb2e04")).toBe(
+      "/var/backups/21fe85c3-826f-47f1-932a-a4a9b8bb2e04.sqsh",
+    );
+  });
+
+  it("the staging dir is the INSTALLED SDK's BACKUP_CONTAINER_DIR — an SDK bump that moves it fails here, not in production", () => {
+    // The package's exports map hides package.json; its main entry lives in dist/.
+    const dist = path.dirname(require.resolve("@cloudflare/sandbox"));
+    const source = readdirSync(dist)
+      .filter((f) => f.endsWith(".js"))
+      .map((f) => readFileSync(path.join(dist, f), "utf8"))
+      .join("\n");
+    const m = /const BACKUP_CONTAINER_DIR = "([^"]+)"/.exec(source);
+    expect(m?.[1]).toBe(SDK_BACKUP_ARCHIVE_DIR);
+    expect(source).toContain('const BACKUP_ARCHIVE_OBJECT_NAME = "data.sqsh"');
+    expect(source).toMatch(/const archivePath = `\$\{BACKUP_CONTAINER_DIR\}\/\$\{id\}\.sqsh`/);
   });
 });

@@ -132,6 +132,7 @@ import {
   judgeRestoreProgress,
   RESTORE_MAX_MS,
   RESTORE_POLL_MS,
+  restoreArchivePath,
   withTimeout,
   type RefreshDisk,
   type RestoreSample,
@@ -1161,7 +1162,7 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`${what}: ${size} in ${Math.round(ms / 1000)} s${rate}`);
         return;
       }
-      samples.push({ atMs: Date.now(), kiB: await this.dirKiB(backup.dir) });
+      samples.push({ atMs: Date.now(), kiB: await this.restoreProgressKiB(backup) });
       const verdict = judgeRestoreProgress({ startedMs, nowMs: Date.now(), samples, deadlineMs });
       if (verdict.verdict !== "wait") {
         // The restore itself keeps running (its settle handlers are attached
@@ -1171,8 +1172,29 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  /** `du -xsk <dir>` in KiB; null when the directory is not there yet or du
-   *  could not answer — the judge treats null as no evidence, never as 0. */
+  /** Where a running restore's bytes actually land, in KiB: the SDK downloads
+   *  the whole archive to `/var/backups/<backupId>.sqsh` FIRST and only then
+   *  extracts it into the target directory (`downloadBackupParallel` →
+   *  `restoreArchive`), so during the download the target stays empty. Live
+   *  2026-09-08 00:51–00:53 UTC, the first hydrate on #576's build: eight `du`
+   *  samples of `/workspace/checkout` read 0 while the 2 GiB archive was
+   *  downloading, the judge called it stalled at 123 s, and the resident went
+   *  down — a false stall. Summing the archive and the target covers both
+   *  phases (the total only ever grows until the SDK deletes the archive,
+   *  which the judge's high-water mark ignores). One `du` for both paths;
+   *  a path that does not exist yet is simply absent from the output
+   *  (`parseDu` skips du's error lines), and no readable path at all is null. */
+  private async restoreProgressKiB(backup: DirectoryBackup): Promise<number | null> {
+    const r = await this.run(["du", "-xsk", restoreArchivePath(backup.id), backup.dir]);
+    const parsed = parseDu(r.stdout);
+    if (parsed.size === 0) return null;
+    let total = 0;
+    for (const kiB of parsed.values()) total += kiB;
+    return total;
+  }
+
+  /** `du -xsk <dir>` in KiB (the success line's size and rate); null when the
+   *  directory is not there or du could not answer — never 0. */
   private async dirKiB(dir: string): Promise<number | null> {
     const r = await this.run(["du", "-xsk", dir]);
     if (r.exitCode !== 0) return null;
