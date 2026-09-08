@@ -22,6 +22,16 @@ on:
 permissions:
   contents: read
 
+env:
+  # actions/cache (inside setup-node's `cache: npm`) downloads the cache in
+  # segments and, by default, waits 10 MINUTES for a segment that stopped
+  # arriving before it gives up and falls through to `npm ci`. Live 2026-09-07:
+  # a job's restore hung for exactly that while its sibling jobs restored the
+  # same key in seconds — ten idle minutes for a cache the job then did without.
+  # One minute is plenty for a segment on a healthy connection; a stalled one
+  # costs 60 s and a full install instead of 600 s.
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+
 # Rapid successive pushes to the same PR cancel the stale run.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -118,8 +128,11 @@ jobs:
 
   workers-each:
     # One job per Worker: the memory Worker's tests run inside workerd and take
-    # ~30 s on a runner; the other three verify in a few seconds each.
-    name: workers / ${{ matrix.worker }}
+    # ~30 s on a runner; the other three verify in a few seconds each. The name
+    # says what the leg does — `verify` — because the matrix values are
+    # `deploy/<worker>` directories, and a check called `workers / deploy/…`
+    # read as a deploy. Nothing here deploys; deploy-production.yml does.
+    name: workers / verify ${{ matrix.worker }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

@@ -85,6 +85,8 @@ jobs:
     # in its release-PR mode: judge against production, upsert the sticky comment.
     env:
       RELEASE_PR: "true"
+      # A stalled npm-cache segment gives up after 1 min, not 10 (see ci.yml).
+      SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
       # Optional: lets the plan read the sandbox's live commit; without it the
       # sandbox is judged against the last release tag (unsure before the first).
       SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
