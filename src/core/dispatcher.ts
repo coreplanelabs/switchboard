@@ -1291,6 +1291,83 @@ export async function dispatch(
     shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
     if (liveUrl) admitted.runLink = liveUrl;
     io.runStarted?.({ id: run.id });
+    // The run's stream is live from here (docs/reference/specs/tracing.md item 6): the
+    // spans so far — the root, the ack card, the repo resolution — are
+    // backfilled, and the attach and the resident's grafted steps stream as
+    // they happen, so the run page and the index's event count move through a
+    // long attach. Every streamed setup span is head material
+    // (`isHeadMaterial`: `request`, `slack.receive`, `dispatch.*`), so the
+    // protected head still runs unbroken from the first event through the
+    // request published next.
+    trace.bindRun(run.id, (e) => registry.publish(run.id, e));
+    // The narrative events the dispatcher itself publishes — the request, the
+    // thread context, the final answer — go straight to the registry: redacted
+    // like every event, uncapped (the run record is the source of truth; the
+    // registry's byte-bounded backlog and the record's per-event budget bound
+    // persistence), never through onEvent (no card refresh, no friction input),
+    // and logged as ONE line of type + byte-length — never the text, which may
+    // span lines or carry what redaction missed.
+    const publishText = (
+      type: "input" | "context" | "answer",
+      text: string,
+      source?: { url?: string; channel?: string; user?: string },
+      raw?: string,
+    ) => {
+      const redacted = redactSecrets(text);
+      const event = { type, text: redacted, ...(source ? { source } : {}), at: clock() };
+      // The model's raw answer rides on the event only when normalization
+      // changed it AND the event still fits the per-event byte budget — the
+      // budget already truncates `text` and must not be starved by a second
+      // copy (docs/reference/specs/llm-output.md item 5).
+      const withRaw = raw !== undefined ? { ...event, raw: redactSecrets(raw) } : event;
+      registry.publish(run.id, utf8ByteLength(JSON.stringify(withRaw)) <= MAX_EVENT_BYTES ? withRaw : event);
+      console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
+    };
+    // The request is the first content event of the run record (live-view item
+    // 12), published NOW — before the attach — so the run page shows what the
+    // run is about while the workspace is still being attached: the
+    // directive-stripped text, humanized (Slack `<url|label>`/mention markup
+    // unwrapped, entities unescaped — it is channel-authored mrkdwn, not prose)
+    // + an attachment count. Every other channel's text is recorded exactly as
+    // it was dispatched to the model, so the record never diverges from the input.
+    const humanize = isMrkdwnChannel(msg.channelId);
+    const attachments = attachmentSuffix(msg.images, msg.documents);
+    const source = {
+      ...(msg.sourceUrl ? { url: msg.sourceUrl } : {}),
+      ...(msg.channelName ? { channel: msg.channelName } : {}),
+      ...(msg.userName ? { user: msg.userName } : {}),
+    };
+    const requestText = humanize ? humanizeMessageText(directives.text) : directives.text;
+    if (!resume)
+      publishText(
+        "input",
+        attachments ? `${requestText} ${attachments}` : requestText,
+        Object.keys(source).length > 0 ? source : undefined,
+      );
+    // What the run is about (live-view item 19): agent, model, and the repo
+    // context as resolved NOW — so the page can head the record with linked
+    // owner/repo · ref · #PR · sha. Straight after the request; published once
+    // more if the attach adopts a moved PR head below (readers take the latest).
+    const publishRunMeta = () =>
+      registry.publish(run.id, {
+        type: "run_meta",
+        agent: agent.name,
+        model: resolved.modelRef,
+        traceId: root.traceId,
+        ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+        ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
+        ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
+        ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
+        at: clock(),
+      });
+    if (!resume) publishRunMeta();
+    // The thread context fed to the model follows the request as `context`
+    // events — text only, attachments as metadata lines, bounded to
+    // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
+    if (!resume && deps.config.config.runHistory?.includeContext !== false) {
+      for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
+    }
     if (!resume && !restart) {
       requestRow = durableInboxMessage(msg, msg.text, receivedAt);
       const request = requestRow;
@@ -1434,6 +1511,9 @@ export async function dispatch(
       } else if (guard.outcome === "adopted") {
         repoCtx = { ...repoCtx, headSha: guard.headSha };
         verifiedAtAttach = true;
+        // The run's meta went out at the reservation with the head as resolved
+        // then; the record and the page must name the head actually reviewed.
+        publishRunMeta();
       } else if (guard.outcome === "refused") {
         const reply = guard.reply;
         await refuse("branch_moved", async () => {
@@ -1570,87 +1650,22 @@ export async function dispatch(
     let lastActivityAt = clock();
     // The run loop owns the run from here: its finally finishes it (the outer
     // finally discards a run that never got this far). Events are fed to the
-    // registry in onEvent below. The run's stream now carries the request's
-    // spans: the setup so far is backfilled, everything from here is live
-    // (docs/reference/specs/tracing.md item 6).
+    // registry in onEvent below; the stream has been live since the reservation.
     runLoopStarted = true;
-    trace.bindRun(run.id, (e) => registry.publish(run.id, e));
     if (resume) {
       console.log(
         `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger.gen}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
       );
     }
-    // The narrative events the dispatcher itself publishes — the request, the
-    // thread context, the final answer — go straight to the registry: redacted
-    // like every event, uncapped (the run record is the source of truth; the
-    // registry's byte-bounded backlog and the record's per-event budget bound
-    // persistence), never through onEvent (no card refresh, no friction input),
-    // and logged as ONE line of type + byte-length — never the text, which may
-    // span lines or carry what redaction missed.
-    const publishText = (
-      type: "input" | "context" | "answer",
-      text: string,
-      source?: { url?: string; channel?: string; user?: string },
-      raw?: string,
-    ) => {
-      const redacted = redactSecrets(text);
-      const event = { type, text: redacted, ...(source ? { source } : {}), at: clock() };
-      // The model's raw answer rides on the event only when normalization
-      // changed it AND the event still fits the per-event byte budget — the
-      // budget already truncates `text` and must not be starved by a second
-      // copy (docs/reference/specs/llm-output.md item 5).
-      const withRaw = raw !== undefined ? { ...event, raw: redactSecrets(raw) } : event;
-      registry.publish(run.id, utf8ByteLength(JSON.stringify(withRaw)) <= MAX_EVENT_BYTES ? withRaw : event);
-      console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
-    };
-    // The request is the first event of the run record (live-view item 12): the
-    // directive-stripped text, humanized (Slack `<url|label>`/mention markup
-    // unwrapped, entities unescaped — it is channel-authored mrkdwn, not prose)
-    // + an attachment count.
-    // Slack-authored text is humanized (`<url>`/mention markup unwrapped,
-    // entities unescaped — it is mrkdwn, not prose); every other channel's text
-    // is recorded exactly as it was dispatched to the model, so the record never
-    // diverges from the input.
-    const humanize = isMrkdwnChannel(msg.channelId);
-    const attachments = attachmentSuffix(msg.images, msg.documents);
-    const source = {
-      ...(msg.sourceUrl ? { url: msg.sourceUrl } : {}),
-      ...(msg.channelName ? { channel: msg.channelName } : {}),
-      ...(msg.userName ? { user: msg.userName } : {}),
-    };
-    const request = humanize ? humanizeMessageText(directives.text) : directives.text;
-    if (!resume)
-      publishText(
-        "input",
-        attachments ? `${request} ${attachments}` : request,
-        Object.keys(source).length > 0 ? source : undefined,
-      );
-    // What the run is about (live-view item 19): agent, model, and the repo
-    // context resolved above — so the page can head the record with linked
-    // owner/repo · ref · #PR · sha. Once per run, straight after the request.
-    if (!resume)
-      registry.publish(run.id, {
-        type: "run_meta",
-        agent: agent.name,
-        model: resolved.modelRef,
-        traceId: root.traceId,
-        ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-        ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
-        ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
-        ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-        at: clock(),
-      });
-    // The thread context fed to the model follows the request as `context`
-    // events — text only, attachments as metadata lines, bounded to
-    // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
-    if (!resume && deps.config.config.runHistory?.includeContext !== false) {
-      for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
-    }
     // Tombstone-first: a provisional TERMINAL record — status
     // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
-    // from the events published so far (request, run_meta, context). Because it
-    // is already terminal, a crash or a drain-abandonment needs NO store-side
+    // from the events published so far (the setup spans, request, run_meta,
+    // context). Written here, once the run loop owns the run, and not at the
+    // reservation: a dispatch that ends before this point leaves NO record
+    // (item 42 — its row is discarded and its reservation abandoned), and a
+    // crash during the attach is the reservation's to restart, not a record's
+    // to remember. Because it is already terminal, a crash or a
+    // drain-abandonment needs NO store-side
     // fixup by the next container: the tombstone is already the truth (its
     // `finishedAt` stays the start time — nobody knows the real death time of a
     // crash). The finish write below replaces it (same-id upsert) for every run
