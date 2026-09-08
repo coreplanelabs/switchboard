@@ -251,6 +251,144 @@ describe("open — claim and seed", () => {
   });
 });
 
+describe("reserve — the row before the prompt (item 42)", () => {
+  const request = {
+    channelId: "slack:C1",
+    userId: "slack:UA",
+    threadKey: "slack:C1:1.0",
+    text: "agent:review go",
+    at: 8_000,
+  };
+  const reserveReq = () => ({
+    runId: "r1",
+    threadKey: "slack:C1:1.0",
+    startedAt: 9_000,
+    meta: { channelId: "slack:C1", userId: "slack:UA", threadKey: "slack:C1:1.0", agent: "review", request },
+    card: { channel: "C1", ts: "1.1" },
+  });
+
+  it("reserves the thread at admission: an attaching row with the request, the card and no prompt; the heartbeat runs from here so a long attach keeps the lease; the run is tracked, live, not resumable, and never handed off", async () => {
+    const { ledger, wt, t, warnings } = harness();
+    const run = await wt.reserve(reserveReq());
+    expect(run?.tracked()).toBe(true);
+    expect(run?.resumable).toBe(false);
+    expect(t.heartbeats()).toBe(1);
+    expect(ledger.live.get("r1")).toMatchObject({
+      ownerGen: "gen-A",
+      phase: "attaching",
+      startedAt: 9_000,
+      card: { channel: "C1", ts: "1.1" },
+      system: "",
+      tools: [],
+      meta: { agent: "review", request },
+    });
+    expect(wt.liveRuns()).toEqual([run]);
+    expect(await wt.handoff()).toEqual({ marked: [] });
+    expect(ledger.live.get("r1")!.phase).toBe("attaching");
+    // The heartbeat keeps the lease.
+    ledger.live.get("r1")!.leaseUntil = 1;
+    await t.beat();
+    expect(ledger.live.get("r1")!.leaseUntil).toBe(10_000 + 30_000);
+    expect(warnings).toEqual([]);
+  });
+
+  it("open with the reservation promotes it in place: the same tracked run, the prompt, tools, card and state on the row, phase live, the seed written, one heartbeat still — and the run is resumable from here", async () => {
+    const { ledger, wt, t, warnings } = harness();
+    const reserved = (await wt.reserve(reserveReq()))!;
+    const run = await wt.open(openReq({ reservation: reserved, state: { checklist: [] } }));
+    expect(run).toBe(reserved);
+    expect(run?.resumable).toBe(true);
+    expect(t.heartbeats()).toBe(1);
+    expect(ledger.live.get("r1")).toMatchObject({
+      phase: "live",
+      system: "you are a reviewer",
+      card: { channel: "C1", ts: "1.1" },
+      state: { checklist: [] },
+      startedAt: 9_000,
+    });
+    expect((await ledger.readTranscript("r1")).turns).toBe(3);
+    expect(wt.liveRuns()).toEqual([run]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("a reservation another generation took (the lease lapsed and it reclaimed the row) is fenced: the heartbeat tells the run once (onFenced) and detaches it; a promotion that finds its own run under another generation does the same and answers undefined — nothing is seeded, this process must not run it", async () => {
+    // Via the heartbeat.
+    {
+      const { ledger, wt, t, warnings } = harness();
+      let fenced = 0;
+      const reserved = (await wt.reserve({ ...reserveReq(), onFenced: () => fenced++ }))!;
+      ledger.live.get("r1")!.leaseUntil = 0;
+      await ledger.reclaim("gen-B", 10_000, 30_000);
+      await t.beat();
+      expect(fenced).toBe(1);
+      expect(reserved.tracked()).toBe(false);
+      expect(await wt.open(openReq({ reservation: reserved }))).toBeUndefined();
+      expect((await ledger.readTranscript("r1")).turns).toBe(0);
+      expect(fenced).toBe(1);
+      expect(warnings.some((w) => w.includes("fenced"))).toBe(true);
+    }
+    // Via the promotion, before any heartbeat noticed.
+    {
+      const { ledger, wt, warnings } = harness();
+      let fenced = 0;
+      const reserved = (await wt.reserve({ ...reserveReq(), onFenced: () => fenced++ }))!;
+      ledger.live.get("r1")!.leaseUntil = 0;
+      await ledger.reclaim("gen-B", 10_000, 30_000);
+      expect(await wt.open(openReq({ reservation: reserved }))).toBeUndefined();
+      expect(fenced).toBe(1);
+      expect(reserved.tracked()).toBe(false);
+      expect((await ledger.readTranscript("r1")).turns).toBe(0);
+      expect(ledger.live.get("r1")!.ownerGen).toBe("gen-B");
+      expect(warnings.some((w) => w.includes("fenced"))).toBe(true);
+    }
+  });
+
+  it("abandon: a reserved run whose dispatch ended before its prompt existed drops its row with NO record — heartbeat stopped, no longer live, the fallback store untouched; a fenced reservation's abandon is a no-op (the row is another generation's); a null run's abandon is nothing", async () => {
+    const { ledger, wt, t, fallbackPuts, warnings } = harness();
+    const reserved = (await wt.reserve(reserveReq()))!;
+    await ledger.pushInbox("r1", { text: "late" });
+    await reserved.abandon();
+    expect(ledger.live.get("r1")).toBeUndefined();
+    expect(await ledger.readInbox("r1", 0)).toEqual([]);
+    expect(ledger.finished.get("r1")).toBeUndefined();
+    expect(fallbackPuts).toEqual([]);
+    expect(wt.liveRuns()).toEqual([]);
+    expect(t.heartbeats()).toBe(0);
+    await reserved.abandon(); // idempotent
+    expect(warnings).toEqual([]);
+    // Fenced: the row was reclaimed by another generation — leave it to them.
+    const other = harness();
+    const taken = (await other.wt.reserve(reserveReq()))!;
+    other.ledger.live.get("r1")!.leaseUntil = 0;
+    await other.ledger.reclaim("gen-B", 10_000, 30_000);
+    await other.t.beat();
+    expect(taken.tracked()).toBe(false);
+    await taken.abandon();
+    expect(other.ledger.live.get("r1")?.ownerGen).toBe("gen-B");
+    const nul = new NullLedgerWriteThrough("gen-N", { put: async () => {} });
+    await nul.adopt({ runId: "x", threadKey: "t", state: {}, lastStep: 0, lastSeq: 0 }).abandon();
+  });
+
+  it("a reservation the ledger refuses (another run's row on the thread, missing routes) is undefined with one warning — the run goes on untracked, as an open would; the null write-through reserves nothing", async () => {
+    const { ledger, wt, warnings } = harness();
+    await ledger.claim({ ...openReq(), runId: "other", gen: "gen-Z", leaseMs: 30_000 });
+    expect(await wt.reserve(reserveReq())).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("other");
+    const missing = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        claim: async () => {
+          throw new RouteMissingError("/runs/claim");
+        },
+      }),
+    });
+    expect(await missing.wt.reserve(reserveReq())).toBeUndefined();
+    expect(missing.warnings).toHaveLength(1);
+    const nul = new NullLedgerWriteThrough("gen-N", { put: async () => {} });
+    expect(await nul.reserve(reserveReq())).toBeUndefined();
+  });
+});
+
 describe("adopt — a reclaimed run continues under this generation (item 37)", () => {
   it("no claim, no seed: the heartbeat starts at once, steps number on from the last record, events continue past the last seq, state merges into the row's", async () => {
     const { ledger, wt, t, warnings } = harness();

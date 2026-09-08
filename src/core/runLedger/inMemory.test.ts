@@ -120,6 +120,88 @@ describe("InMemoryRunLedger", () => {
     expect(await ledger.requestStop("nope", "hard")).toEqual({ ok: false });
   });
 
+  it("a run reserved `attaching` at admission (item 42) holds the thread with its request and no prompt; the owner's claim with the prompt promotes it to live in place (card, prompt, tools, state land; identity and start stay); another run on the thread is refused meanwhile; a reclaim of an expired attaching row keeps the phase and hands the request back", async () => {
+    let t = 0;
+    const ledger = new InMemoryRunLedger(() => t);
+    const request = {
+      channelId: "slack:C1",
+      userId: "slack:UA",
+      threadKey: "slack:C1:1.0",
+      text: "review it",
+      at: 900,
+    };
+    const reserve: ClaimRequest = {
+      ...claimReq("r1", "slack:C1:1.0"),
+      phase: "attaching",
+      system: "",
+      tools: [],
+      card: null,
+      meta: { agent: "review", channelId: "slack:C1", userId: "slack:UA", threadKey: "slack:C1:1.0", request },
+    };
+    expect(await ledger.claim(reserve)).toEqual({ ok: true });
+    expect(ledger.live.get("r1")).toMatchObject({ phase: "attaching", system: "", tools: [], card: null });
+    expect(ledger.live.get("r1")?.meta.request).toEqual(request);
+    expect(await ledger.claim(claimReq("r2", "slack:C1:1.0"))).toMatchObject({ ok: false, reason: "thread-live" });
+    // A re-reserve (a retry after a lost response) only refreshes the lease.
+    t = 5_000;
+    expect(await ledger.claim(reserve)).toEqual({ ok: true });
+    expect(ledger.live.get("r1")).toMatchObject({ phase: "attaching", leaseUntil: 5_000 + LEASE_MS });
+    // The prompt lands: the same claim the dispatcher always made, now a promotion.
+    expect(await ledger.claim({ ...claimReq("r1", "slack:C1:1.0"), state: { checklist: [] } })).toEqual({ ok: true });
+    expect(ledger.live.get("r1")).toMatchObject({
+      phase: "live",
+      system: "you are a reviewer",
+      card: { channel: "C1", ts: "1.0" },
+      state: { checklist: [] },
+      startedAt: 1_000,
+    });
+    expect(ledger.live.get("r1")?.tools.map((x) => x.name)).toEqual(["bash"]);
+    // A re-claim on the live row changes nothing (idempotent, as before).
+    expect(await ledger.claim({ ...claimReq("r1", "slack:C1:1.0"), system: "other" })).toEqual({ ok: true });
+    expect(ledger.live.get("r1")?.system).toBe("you are a reviewer");
+    // A reserved run whose owner died: the reclaim keeps `attaching` so the launcher knows to restart it.
+    await ledger.claim({
+      ...reserve,
+      runId: "r9",
+      threadKey: "slack:C1:9.0",
+      meta: { ...reserve.meta, threadKey: "slack:C1:9.0" },
+    });
+    await ledger.pushInbox("r9", { text: "also this" });
+    t = 5_000 + LEASE_MS + 1;
+    const taken = await ledger.reclaim("g2", t, LEASE_MS);
+    const r9 = taken.find((r) => r.row.runId === "r9")!;
+    expect(r9.reclaimedFrom).toBe("attaching");
+    expect(r9.row).toMatchObject({ ownerGen: "g2", phase: "attaching" });
+    expect(r9.row.meta.request).toEqual(request);
+    expect(r9.inbox.map((i) => i.message.text)).toEqual(["also this"]);
+    // The new generation promotes it when its own attach lands.
+    expect(await ledger.claim({ ...claimReq("r9", "slack:C1:9.0", "g2") })).toEqual({ ok: true });
+    expect(ledger.live.get("r9")).toMatchObject({ phase: "live", ownerGen: "g2" });
+    // An attaching row can finish (a dispatch that fails before its prompt) but never be handed off.
+    await ledger.claim({
+      ...reserve,
+      runId: "r5",
+      threadKey: "slack:C1:5.0",
+      meta: { ...reserve.meta, threadKey: "slack:C1:5.0" },
+    });
+    expect(await ledger.handoff("g1", ["r5"])).toEqual({ marked: [] });
+    expect(await ledger.finishing("r5", "g1")).toEqual({ ok: true });
+    // Abandon: the live rows go with no record — fenced like a finish.
+    await ledger.claim({
+      ...reserve,
+      runId: "r6",
+      threadKey: "slack:C1:6.0",
+      meta: { ...reserve.meta, threadKey: "slack:C1:6.0" },
+    });
+    await ledger.pushInbox("r6", { text: "late" });
+    expect(await ledger.abandon("r6", "g2")).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.abandon("r6", "g1")).toEqual({ ok: true });
+    expect(ledger.live.get("r6")).toBeUndefined();
+    expect(await ledger.readInbox("r6", 0)).toEqual([]);
+    expect(ledger.finished.get("r6")).toBeUndefined();
+    expect(await ledger.abandon("r6", "g1")).toEqual({ ok: false, reason: "unknown-run" });
+  });
+
   it("reclaim takes the expired and handed-off runs, gives them to the new generation with the last step, the unconsumed inbox and the jobs, and re-fences the transcript", async () => {
     let t = 0;
     const ledger = new InMemoryRunLedger(() => t);

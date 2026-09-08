@@ -12,6 +12,7 @@ import type { LedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js"
 import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "./runLedger/types.js";
 import type { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { ResumePlan } from "./runLedger/resume.js";
+import { durableInboxMessage, messageFromInbox } from "./runLedger/inboxMessage.js";
 import { systemClock } from "./trace/index.js";
 import { COMMAND_RUN_AGENT } from "./runOwner.js";
 import type { Clock, Span, SpanSink, Tracer } from "./trace/types.js";
@@ -421,108 +422,31 @@ export interface ResumeContext {
   inbox: InboxItem[];
 }
 
-/** The most a durable inbox row may weigh, serialized: the state Worker caps
- *  `/runs/inbox` bodies at 512 KiB (`MAX_BODY_BYTES`), and the row travels
- *  inside a JSON envelope with the store key and run id. */
-export const DURABLE_INBOX_MAX_BYTES = 400 * 1024;
-
-/** The durable copy of a steered follow-up (run-history item 40): the message,
- *  attachments included when the row stays under `DURABLE_INBOX_MAX_BYTES` —
- *  a follow-up's screenshot must survive a restart as much as its text. Over
- *  the cap the bytes are left with the in-memory copy and the row says how
- *  many attachments it lost, so the resumed run's follow-up can say so too. */
-export function durableInboxMessage(msg: IncomingMessage, text: string, at: number): Record<string, unknown> {
-  const base: Record<string, unknown> = {
-    channelId: msg.channelId,
-    userId: msg.userId,
-    threadKey: msg.threadKey,
-    text,
-    at,
-    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-    ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
-  };
-  const images = msg.images ?? [];
-  const documents = msg.documents ?? [];
-  if (images.length === 0 && documents.length === 0) return base;
-  const withAttachments = {
-    ...base,
-    ...(images.length > 0 ? { images: images.map(attachmentRow) } : {}),
-    ...(documents.length > 0 ? { documents: documents.map(attachmentRow) } : {}),
-  };
-  // Bytes as the Worker counts them (Content-Length), not UTF-16 code units.
-  if (Buffer.byteLength(JSON.stringify(withAttachments), "utf8") <= DURABLE_INBOX_MAX_BYTES) return withAttachments;
-  // All or nothing by design: a partial carry would hand the model some of the
-  // sender's attachments as if they were all of them; the note names the count.
-  return { ...base, attachmentsDropped: { images: images.length, documents: documents.length } };
+/** A run reserved at admission whose owner died while attaching (item 42):
+ *  dispatched again from its request under the row's id and card. The row is
+ *  still `attaching` and this generation's; the inbox holds the follow-ups
+ *  steered in meanwhile. */
+export interface RestartContext {
+  row: LiveRunRow;
+  inbox: InboxItem[];
 }
 
-const attachmentRow = (a: { mediaType: string; data: string; name?: string }) => ({
-  mediaType: a.mediaType,
-  data: a.data,
-  ...(a.name !== undefined ? { name: a.name } : {}),
-});
-
-/** A stored attachment list back as typed attachments; an entry that is not
- *  `{mediaType, data}` strings is dropped, never fatal. */
-function attachmentsFromInbox(v: unknown): { mediaType: string; data: string; name?: string }[] | undefined {
-  if (!Array.isArray(v)) return undefined;
-  const out = v.flatMap((e) => {
-    if (typeof e !== "object" || e === null) return [];
-    const r = e as Record<string, unknown>;
-    if (typeof r.mediaType !== "string" || typeof r.data !== "string") return [];
-    return [{ mediaType: r.mediaType, data: r.data, ...(typeof r.name === "string" ? { name: r.name } : {}) }];
-  });
-  return out.length > 0 ? out : undefined;
-}
-
-/** What a resumed run's follow-up says when its attachments did not fit the durable row. */
-function droppedNote(dropped: unknown): string | undefined {
-  if (typeof dropped !== "object" || dropped === null) return undefined;
-  const d = dropped as Record<string, unknown>;
-  const n = (typeof d.images === "number" ? d.images : 0) + (typeof d.documents === "number" ? d.documents : 0);
-  if (n <= 0) return undefined;
-  return `(${n} attachment${n === 1 ? "" : "s"} from this reply could not be carried across the bot's restart and ${n === 1 ? "is" : "are"} not attached.)`;
-}
+export { DURABLE_INBOX_MAX_BYTES, durableInboxMessage } from "./runLedger/inboxMessage.js";
 
 /** A durable inbox item back as a follow-up for the resumed run, on the
  *  resume's channel handle; undefined when the stored shape is not one this
  *  build wrote (skipped, never fatal). */
 export function followUpFromInbox(item: InboxItem, io: ChannelIO, fallbackAt: number): DispatchFollowUp | undefined {
-  const m = item.message;
-  const str = (k: string): string | undefined => (typeof m[k] === "string" ? (m[k] as string) : undefined);
-  const text = str("text");
-  const userId = str("userId");
-  const threadKey = str("threadKey");
-  const channelId = str("channelId");
-  if (text === undefined || userId === undefined || threadKey === undefined || channelId === undefined)
-    return undefined;
-  const userName = str("userName");
-  const sourceUrl = str("sourceUrl");
-  const channelName = str("channelName");
-  const at = typeof m.at === "number" && Number.isFinite(m.at) ? m.at : fallbackAt;
-  const images = attachmentsFromInbox(m.images);
-  const documents = attachmentsFromInbox(m.documents);
-  const note = droppedNote(m.attachmentsDropped);
-  const fullText = note ? `${text}\n\n${note}` : text;
-  const msg: IncomingMessage = {
-    channelId,
-    userId,
-    threadKey,
-    text: fullText,
-    ...(userName !== undefined ? { userName } : {}),
-    ...(sourceUrl !== undefined ? { sourceUrl } : {}),
-    ...(channelName !== undefined ? { channelName } : {}),
-    ...(images ? { images } : {}),
-    ...(documents ? { documents } : {}),
-  };
+  const restored = messageFromInbox(item.message, fallbackAt);
+  if (!restored) return undefined;
+  const { msg, at } = restored;
   return {
-    text: fullText,
-    userId,
-    ...(userName !== undefined ? { userName } : {}),
-    ...(sourceUrl !== undefined ? { sourceUrl } : {}),
-    ...(images ? { images } : {}),
-    ...(documents ? { documents } : {}),
+    text: msg.text,
+    userId: msg.userId,
+    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+    ...(msg.images !== undefined ? { images: msg.images } : {}),
+    ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
     at,
     ledgerSeq: item.seq,
     msg,
@@ -532,6 +456,7 @@ export function followUpFromInbox(item: InboxItem, io: ChannelIO, fallbackAt: nu
 
 export interface DispatchOptions {
   resume?: ResumeContext;
+  restart?: RestartContext;
   /** The request's root, started by the channel adapter at receipt
    *  (features/tracing.md). Absent (tests, a caller without one) → the
    *  dispatcher starts its own at entry. Ended in the outermost finally. */
@@ -539,6 +464,23 @@ export interface DispatchOptions {
   /** A fresh turn's wait behind the run it was parked on (the `queued …
    *  behind the previous run` caption; a `request` attr; never a duration term). */
   queuedBehindMs?: number;
+}
+
+/** Close a restart's row this dispatch will never run (item 42): the thread
+ *  has a newer run — the user re-mentioned after the kill — so the reserved
+ *  run is closed `interrupted` with a record of its identity and request,
+ *  through an adopted handle so the ledger's finish removes the row.
+ *  Best-effort, like `closeResumedRow` below. */
+async function closeRestartRow(adopted: LedgerRun, restart: RestartContext, why: string): Promise<void> {
+  try {
+    await adopted.sink.put(
+      reclaimedRunRecord({ row: restart.row, events: [], status: "interrupted", finishedAt: systemClock() }),
+    );
+  } catch (err) {
+    console.warn(
+      `[restart] ${restart.row.runId} could not be closed (${why}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 /** Close a reclaimed row this dispatch adopted but will never finish (item
@@ -565,6 +507,7 @@ export async function dispatch(
   opts: DispatchOptions = {},
 ): Promise<void> {
   const resume = opts.resume;
+  const restart = opts.restart;
   const clock = deps.clock ?? systemClock;
   // The request's root (features/tracing.md): the adapter's, started when our
   // process saw the message, or our own now. Every awaited step below is a
@@ -641,12 +584,35 @@ export async function dispatch(
   // control, read in the finally — never cached from a return value, so a run
   // that THREW after a stop was requested still counts as stopped.
   const admission = deps.admission ?? defaultAdmission;
+  const registry = deps.runRegistry ?? defaultRunRegistry;
   let admitted: LiveThread<DispatchFollowUp> | undefined;
   let liveControl: RunControl | undefined;
   // The run's row on the ledger (item 35), once claimed; undefined for an
   // untracked run. Read by the record writer (the finish goes through it) and
   // the outer finally (its heartbeat stops with the run).
   let ledgerRun: LedgerRun | undefined;
+  // The run's reservation on the ledger (item 42): its row from before the
+  // workspace attach, promoted by the claim below (then `ledgerRun` is the
+  // same handle) or abandoned in the outer finally when the dispatch ends
+  // before that. `requestRow` is the request as the row carries it. A fence
+  // during the attach means another generation restarted the run: this one
+  // stops at the attach's end and says nothing. A stop relayed before the run
+  // exists is applied the moment it does.
+  let reserved: LedgerRun | undefined;
+  let requestRow: Record<string, unknown> | undefined;
+  let visibilityAtReserve: Awaited<ReturnType<typeof channelVisibilityOf>> | undefined;
+  let fencedWhileAttaching = false;
+  let earlyStop: StopMode | undefined;
+  const reservationHooks = {
+    onStop: (mode: StopMode) => {
+      if (liveControl) void liveControl.requestStop(mode);
+      else earlyStop = mode;
+    },
+    onFenced: () => {
+      fencedWhileAttaching = true;
+      void liveControl?.requestStop("hard");
+    },
+  };
   try {
     // Stage A — the ONE text-only fast path: a
     // message that names a registered, chat-exposed command (`<group> <verb>
@@ -758,10 +724,32 @@ export async function dispatch(
     // this dispatch ends here: no card, no run, no workspace.
     // A resumed run's slot carries the row's original start (run-history item 38):
     // the steer ack's "N in" is the run's elapsed time, not the resume's.
+    const carriedRow = resume?.row ?? restart?.row;
     let claim = admission.claim(msg.threadKey, {
       agent: agent.name,
-      ...(resume ? { now: resume.row.startedAt } : {}),
+      ...(carriedRow ? { now: carriedRow.startedAt } : {}),
     });
+    if (claim.kind === "live" && restart) {
+      // A restart is not a follow-up either (item 42): a live run here means
+      // the user re-mentioned after the kill; the reserved run is closed
+      // `interrupted` on the ledger with no reply to the thread.
+      const adopted = deps.runLedger.adopt({
+        runId: restart.row.runId,
+        threadKey: msg.threadKey,
+        state: restart.row.state,
+        lastStep: 0,
+        lastSeq: 0,
+      });
+      await root.span(
+        "dispatch.admission",
+        () => closeRestartRow(adopted, restart, "the thread has a newer run in flight"),
+        { attrs: { outcome: "restart_superseded" } },
+      );
+      console.log(
+        `[restart] ${msg.threadKey} run ${restart.row.runId} not restarted: the thread has a newer run in flight — closed interrupted`,
+      );
+      return;
+    }
     if (claim.kind === "live" && resume) {
       // A resume is not a follow-up (run-history item 38): its message is
       // synthetic, so it must never be steered into — or refuse against — the
@@ -849,7 +837,8 @@ export async function dispatch(
     // steer apply (the live agent's allowlist, no agent switch). A push the
     // ledger refuses means the row is gone — the map is stale — so the message
     // runs fresh and the thread is forgotten until the next sweep.
-    const elsewhere = resume ? undefined : deps.threadsElsewhere.get(msg.threadKey);
+    // (A restart's own row is in that map: it is not steered into itself.)
+    const elsewhere = resume || restart ? undefined : deps.threadsElsewhere.get(msg.threadKey);
     const farAgent = elsewhere?.agent;
     if (elsewhere && farAgent === undefined) {
       // No agent on the row: the no-agent-switch gate cannot be judged, so the
@@ -935,7 +924,29 @@ export async function dispatch(
         onFenced: () => void liveControl?.requestStop("hard"),
       });
     }
-    if (resume) {
+    if (restart) {
+      // A restart (item 42): the row is this generation's since the reclaim and
+      // still `attaching` — take it up NOW, as a resume adopts its row, so the
+      // heartbeat keeps the lease through this attach as well. The reserve is
+      // the owner's idempotent re-claim; the request rides on the row already.
+      requestRow = restart.row.meta.request;
+      reserved = await root.span("dispatch.ledger_reserve", () =>
+        deps.runLedger.reserve({
+          runId: restart.row.runId,
+          threadKey: msg.threadKey,
+          startedAt: restart.row.startedAt,
+          meta: restart.row.meta,
+          card: restart.row.card,
+          ...reservationHooks,
+        }),
+      );
+    }
+    const carriedInbox = resume
+      ? { tag: "resume", known: resume.lastStep.inboxConsumedSeq, items: resume.inbox }
+      : restart
+        ? { tag: "restart", known: 0, items: restart.inbox }
+        : undefined;
+    if (carriedInbox && carriedRow) {
       // The follow-ups steered in after the last record (item 40): the reclaim's
       // snapshot PLUS whatever landed since — a boot-gap steer between the
       // reclaim and this claim wrote to the ledger and was acked, so the inbox
@@ -947,17 +958,17 @@ export async function dispatch(
       // whose push lands after the re-read below finds the run it belongs to and
       // hands the item over in memory (the registry row is created seconds later,
       // after the workspace attach, which is too late for that check).
-      admitted.runId = resume.row.runId;
-      const known = Math.max(resume.lastStep.inboxConsumedSeq, ...resume.inbox.map((i) => i.seq));
-      const late = await deps.runLedger.readInbox(resume.row.runId, known);
-      const items = [...resume.inbox, ...late.filter((i) => i.seq > known)];
+      admitted.runId = carriedRow.runId;
+      const known = Math.max(carriedInbox.known, ...carriedInbox.items.map((i) => i.seq));
+      const late = await deps.runLedger.readInbox(carriedRow.runId, known);
+      const items = [...carriedInbox.items, ...late.filter((i) => i.seq > known)];
       const fallbackAt = clock();
       let folded = 0;
       for (const item of items) {
         const followUp = followUpFromInbox(item, io, fallbackAt);
         if (!followUp) {
           console.warn(
-            `[resume] ${msg.threadKey} run ${resume.row.runId}: inbox item ${item.seq} has a shape this build cannot read — skipped`,
+            `[${carriedInbox.tag}] ${msg.threadKey} run ${carriedRow.runId}: inbox item ${item.seq} has a shape this build cannot read — skipped`,
           );
           continue;
         }
@@ -966,7 +977,7 @@ export async function dispatch(
       }
       if (folded > 0)
         console.log(
-          `[resume] ${msg.threadKey} run ${resume.row.runId}: ${folded} follow-up(s) from the durable inbox pending (${late.length} landed after the reclaim)`,
+          `[${carriedInbox.tag}] ${msg.threadKey} run ${carriedRow.runId}: ${folded} follow-up(s) from the durable inbox pending (${late.length} landed after the reclaim)`,
         );
     }
 
@@ -1040,7 +1051,7 @@ export async function dispatch(
     // A resumed run's clock is the original start (its ledger row's), so the
     // card's elapsed time spans the whole run, not the resume.
     // The card's clock is the request's: it ticks from receipt (features/tracing.md).
-    const startedAt = resume?.row.startedAt ?? receivedAt;
+    const startedAt = carriedRow?.startedAt ?? receivedAt;
     // One builder for every paint of this card (statusCardFrame.ts): the ack,
     // the spinner frames, the closes before the run starts, the done frame.
     const shell = createCardShell({
@@ -1200,6 +1211,58 @@ export async function dispatch(
       return;
     }
 
+    // The reservation (item 42): the run's row BEFORE the workspace attach —
+    // identity, request, card, no prompt — so a kill during a slow attach (a
+    // resident's mutex wait, a cold clone) leaves a row the next generation
+    // restarts instead of a run that vanished. Its heartbeat holds the lease
+    // through the attach; the claim after the prompt exists promotes it. A
+    // resume adopted its row above; a restart reserved it above.
+    // The run's id, minted here (item 42) — after the ship fork, which mints
+    // its own — so the row reserved before the attach, the registry row created
+    // after it and the record all share it; a resume or a restart keeps the row's.
+    const runId = carriedRow?.runId ?? registry.mintId();
+    if (!resume && !restart) {
+      requestRow = durableInboxMessage(msg, msg.text, receivedAt);
+      const request = requestRow;
+      // Asked once per run (the authorization spec's channel-visibility rule): the registry row below reuses it.
+      visibilityAtReserve = await root.span("dispatch.channel_visibility", () =>
+        channelVisibilityOf(deps, msg.channelId),
+      );
+      reserved = await root.span("dispatch.ledger_reserve", () =>
+        deps.runLedger.reserve({
+          runId,
+          threadKey: msg.threadKey,
+          startedAt,
+          meta: {
+            agent: agent.name,
+            model: resolved.modelRef,
+            channelId: msg.channelId,
+            userId: msg.userId,
+            threadKey: msg.threadKey,
+            channelVisibility: visibilityAtReserve,
+            ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+            ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+            ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
+            ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
+            ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
+            readonly: agent.toolset === "readonly",
+            request,
+          },
+          card: card.handle ?? null,
+          ...reservationHooks,
+        }),
+      );
+      // Named on the slot from here (the row exists now): a steer's durable
+      // copy lands under it, and the boot-gap hand-off finds it. Deliberately
+      // AFTER the reserve resolves, not before: a steer that lands during the
+      // round trip rides in memory alone (thread-admission item 5 scopes the
+      // durable window "from the reserve on"), where naming the run earlier
+      // would push to a row that may not exist yet and warn for nothing.
+      admitted.runId = runId;
+    }
+
     // The workspace attach is paired with its release on the round's agent
     // (reviewRound.ts): readonly toolset → readonly worktree +
     // release("always"); writable → release("if-clean").
@@ -1265,6 +1328,16 @@ export async function dispatch(
       throw err;
     }
     const { executor, note, resident, binding } = round.selection;
+    if (fencedWhileAttaching) {
+      // The reservation's lease lapsed during the attach and another generation
+      // took the row (item 42): the run is theirs to restart — nothing more
+      // runs or replies here, and the row is left alone.
+      console.log(
+        `[dispatch] ${msg.threadKey} run ${runId}: another generation took the run during the attach — stopping here, it restarts there`,
+      );
+      if (executor.release) await executor.release("always").catch(() => {});
+      return;
+    }
 
     // Attach-head check (features/agent-review.md item 10): for a PR
     // review on the resident path, the sha the resident ATTACHED the worktree
@@ -1434,7 +1507,6 @@ export async function dispatch(
     // run loop's finally that finish()es it). With no PUBLIC_BASE_URL the link
     // is simply omitted — the feature degrades gracefully, the run is otherwise
     // unchanged. Events are fed to the registry in onEvent below.
-    const registry = deps.runRegistry ?? defaultRunRegistry;
     // A human-first label for the Access-gated runs index (`GET /runs`): agent +
     // repo (repo runs) or channel/user (chat runs) + a snippet of the request,
     // so a row reads like `review · #general · alice · "…"` rather
@@ -1451,9 +1523,9 @@ export async function dispatch(
     });
     // The registry redacts and caps the label; `run.label` is the one the record
     // and the friction row carry (never `runLabel`, which may hold a pasted secret).
-    const channelVisibility = await root.span("dispatch.channel_visibility", () =>
-      channelVisibilityOf(deps, msg.channelId),
-    );
+    const channelVisibility =
+      visibilityAtReserve ??
+      (await root.span("dispatch.channel_visibility", () => channelVisibilityOf(deps, msg.channelId)));
     const run = registry.create(
       runLabel,
       {
@@ -1463,13 +1535,19 @@ export async function dispatch(
         userId: msg.userId,
         threadKey: msg.threadKey,
         channelVisibility,
-        ...(resume ? {} : { receivedAt }), // the window opens at receipt (features/tracing.md); a resume keeps its original stamps
+        ...(carriedRow ? {} : { receivedAt }), // the window opens at receipt (features/tracing.md); a resume or restart keeps its original stamps
         ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
         ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
         ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       },
-      resume ? { id: resume.row.runId, replay: resume.events, startedAt: resume.row.startedAt } : {},
+      // Under the id minted at admission (the reserved row's) — a resume replays
+      // its events, a restart starts them afresh at the row's original start.
+      resume
+        ? { id: runId, replay: resume.events, startedAt: resume.row.startedAt }
+        : { id: runId, ...(restart ? { startedAt: restart.row.startedAt } : {}) },
     );
+    // A stop another container asked for while this run was still attaching.
+    if (earlyStop) void run.control.requestStop(earlyStop);
     // The run's stream now carries the request's spans: the setup so far is
     // backfilled, everything from here is live (features/tracing.md item 6).
     trace.bindRun(run.id, (e) => registry.publish(run.id, e));
@@ -1601,7 +1679,11 @@ export async function dispatch(
     // first step's record never precedes its claim. An untracked run (a stale
     // row on the thread, no routes, a claim that kept failing) runs exactly as
     // before — the write-through warned once.
-    if (!resume) {
+    // Only a reserved run is claimed (item 42): a reservation the ledger refused
+    // — another run's row on the thread, no routes, a claim that kept failing —
+    // already made this run untracked, with the one warning; asking again
+    // would only warn again.
+    if (!resume && reserved) {
       const ledger = deps.runLedger;
       const opened = await root.span("dispatch.ledger_claim", () =>
         ledger.open({
@@ -1625,8 +1707,12 @@ export async function dispatch(
             readonly: agent.toolset === "readonly",
             selection: resident === true ? "resident" : "sandbox",
             ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
+            ...(requestRow !== undefined ? { request: requestRow } : {}),
           },
           card: card.handle ?? null,
+          // The row reserved before the attach (item 42), promoted in place;
+          // its hooks (a stop, a fence) were wired at the reservation and stay.
+          ...(reserved ? { reservation: reserved } : {}),
           system,
           tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
             ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
@@ -2376,6 +2462,12 @@ export async function dispatch(
         ),
       );
     }
+    // A reservation never promoted (item 42): the dispatch ended before its
+    // prompt existed — a refusal after the reserve, an attach that failed, a
+    // throw — so the run never started and nothing is recorded; the row goes,
+    // or the sweep would restart it forever. A fenced reservation is another
+    // generation's to restart: `abandon` is a no-op on it.
+    if (reserved && !ledgerRun) await root.span("post.ledger_abandon", () => reserved!.abandon());
     // The ledger heartbeat stops with the run (the finish write, in flight
     // through the writer, closes the row itself).
     void ledgerRun?.close();

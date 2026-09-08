@@ -11,6 +11,7 @@ import type { ChannelIO, IncomingMessage } from "./types.js";
 import type { CoreDeps, DispatchOptions, ResumeContext } from "./dispatcher.js";
 import type { RepoContext } from "./repoContext.js";
 import type { ResumableRun } from "./boot.js";
+import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { planResume, type KnownTool } from "./runLedger/resume.js";
 import type { LiveRunRow } from "./runLedger/types.js";
 import { TOOLSETS } from "../tools/workspace.js";
@@ -100,6 +101,31 @@ export async function launchResumes(
     const agent = opts.agentFor(row.meta.agent);
     if (!agent) {
       await closeWith(run, `agent ${row.meta.agent ?? "(none)"} is unknown to this build`);
+      continue;
+    }
+    if (run.kind === "restart") {
+      // Killed while attaching (item 42): the request itself, dispatched again
+      // as the message it was — directives included, so the dispatcher resolves
+      // the same agent and model — under the row's id and card.
+      const restored = messageFromInbox(row.meta.request ?? {}, row.startedAt);
+      if (!restored) {
+        await closeWith(run, "the row's request has a shape this build cannot read");
+        continue;
+      }
+      const io = opts.ioFor(row);
+      if (!io) {
+        await closeWith(run, `channel ${row.meta.channelId} cannot be resumed on`);
+        continue;
+      }
+      log(
+        `[resume] ${row.runId} ${row.threadKey}: restarting from its request (killed while attaching; ${run.inbox.length} follow-up(s) pending)`,
+      );
+      outcome.launched.push(row.runId);
+      void dispatchFn(deps, restored.msg, io, { restart: { row, inbox: run.inbox } }).catch((err: unknown) =>
+        warn(
+          `[resume] ${row.runId} ${row.threadKey}: restart dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
       continue;
     }
     const plan = planResume({ transcript: run.transcript, lastStep: run.lastStep, tools: knownToolsFor(agent) });

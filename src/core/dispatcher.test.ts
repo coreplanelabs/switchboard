@@ -61,6 +61,7 @@ import { InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
 import { isRunRecord, type RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
+import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { StepRecord } from "./runLedger/types.js";
@@ -3441,6 +3442,7 @@ describe("live run-view wiring (Area 2)", () => {
     const events: RunEvent[] = [];
     const log: string[] = [];
     const spy = {
+      mintId: () => "run-x",
       create() {
         log.push("create");
         return { id: "run-x", token: "tok-x", control: new RunControl() };
@@ -3533,6 +3535,7 @@ describe("live run-view wiring (Area 2)", () => {
       },
     };
     const spy = {
+      mintId: () => "run-a",
       create() {
         return { id: "run-a", token: "tok-a", control: new RunControl() };
       },
@@ -3578,6 +3581,7 @@ describe("live run-view wiring (Area 2)", () => {
   it("publishes the request as a redacted `input` event before any tool event, with an attachment suffix", async () => {
     const events: RunEvent[] = [];
     const spy = {
+      mintId: () => "run-i",
       create() {
         return { id: "run-i", token: "tok-i", control: new RunControl() };
       },
@@ -3677,6 +3681,7 @@ describe("live run-view wiring (Area 2)", () => {
   it("omits `source` from the `input` event entirely when the adapter supplied no origin hints (HTTP/MCP)", async () => {
     const events: RunEvent[] = [];
     const spy = {
+      mintId: () => "run-i",
       create() {
         return { id: "run-i", token: "tok-i", control: new RunControl() };
       },
@@ -3871,6 +3876,7 @@ describe("closed-card checklist and review verdict run link", () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
     const events: RunEvent[] = [];
     const spy = {
+      mintId: () => "run-x",
       create: () => ({ id: "run-x", token: "tok-x", control: new RunControl() }),
       publish: (_id: string, e: RunEvent) => void events.push(e),
       finish: () => {},
@@ -3922,6 +3928,7 @@ describe("typed answer output (features/llm-output.md)", () => {
 
   function spyRegistry(events: RunEvent[]) {
     return {
+      mintId: () => "run-t",
       create: () => ({ id: "run-t", token: "tok-t", control: new RunControl() }),
       publish: (_id: string, e: RunEvent) => void events.push(e),
       finish: () => {},
@@ -8943,6 +8950,204 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     expect(stateAtReply).toEqual({ finalStatus: "completed" });
     expect(phaseAtReply).toBe("finishing");
     expect(fallbackPuts).toEqual([]);
+  });
+
+  it("the run is reserved on the ledger BEFORE the workspace attach (item 42): an attaching row with the request (text, sender, link, attachments), the card and no prompt, under the id the run will have; the claim once the prompt exists promotes that row in place — one row, one id — and the finish clears it", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let rowAtAttach: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    const real = vi.mocked(makeExecutor).getMockImplementation()!;
+    vi.mocked(makeExecutor).mockImplementationOnce(async (...args) => {
+      rowAtAttach = structuredClone(ledger.live.get("run-l"));
+      return real(...args);
+    });
+    let rowAtFirstCall: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        rowAtFirstCall ??= structuredClone(ledger.live.get("run-l"));
+        return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, writer, warnings } = wired(provider, { ledger });
+    const { io, replies } = ioWithCard();
+    await dispatch(
+      deps,
+      {
+        ...msg("hello there"),
+        userName: "ux",
+        sourceUrl: "https://s/1",
+        images: [{ mediaType: "image/png", data: "QUJD", name: "chart.png" }],
+      },
+      io,
+    );
+    await writer.settled();
+    // At the attach: reserved — identity, request, card; no prompt yet.
+    expect(rowAtAttach).toMatchObject({
+      runId: "run-l",
+      threadKey: "slack:CX:1.0",
+      ownerGen: "gen-T",
+      phase: "attaching",
+      system: "",
+      tools: [],
+      card: { channel: "CX", ts: "1.2" },
+      meta: {
+        agent: "general",
+        model: "anthropic/general-model",
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        readonly: false,
+        request: {
+          channelId: "slack:CX",
+          userId: "slack:UX",
+          threadKey: "slack:CX:1.0",
+          text: "hello there",
+          userName: "ux",
+          sourceUrl: "https://s/1",
+          images: [{ mediaType: "image/png", data: "QUJD", name: "chart.png" }],
+        },
+      },
+    });
+    // At the first model call: the same row, promoted — the prompt landed, the request kept, the start unchanged.
+    expect(rowAtFirstCall).toMatchObject({
+      runId: "run-l",
+      phase: "live",
+      startedAt: rowAtAttach!.startedAt,
+      card: { channel: "CX", ts: "1.2" },
+      meta: { selection: "sandbox", request: { text: "hello there" } },
+    });
+    expect(rowAtFirstCall!.system.length).toBeGreaterThan(0);
+    expect(rowAtFirstCall!.tools.length).toBeGreaterThan(0);
+    expect(replies.at(-1)).toBe("done");
+    expect(ledger.live.size).toBe(0);
+    expect(ledger.finished.get("run-l")?.status).toBe("completed");
+    expect(warnings).toEqual([]);
+  });
+
+  it("a dispatch that ends before its prompt exists — here the attach's ask-once branch refusal — abandons its reservation (item 42): the row goes with no record and no warning, so nothing restarts a run that never started", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let rowAtAttach: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => {
+      rowAtAttach = structuredClone(ledger.live.get("run-l"));
+      throw new ResidentNeedsRefError("repo:acme/api");
+    });
+    const { deps, writer, warnings } = wired(capturingProvider("must not run"), { ledger, yaml: REMOTE_YAML_FIXTURE });
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, msg("agent:coding fix it in acme/api", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(rowAtAttach?.phase).toBe("attaching");
+    expect(replies.some((r) => r.includes("Which branch"))).toBe(true);
+    expect(ledger.live.size).toBe(0);
+    expect(ledger.finished.size).toBe(0);
+    expect(warnings).toEqual([]);
+  });
+
+  it("a run reserved at admission whose owner died is restarted under its own id (item 42): the request is dispatched again from the row, the card is the row's, the follow-ups steered in meanwhile are folded in with no second ack, this generation promotes the row and the finish closes it — the record keeps the original start", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = durableInboxMessage({ ...msg("hello there"), userName: "ux" }, "hello there", 5_000);
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      phase: "attaching",
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        agent: "general",
+        model: "anthropic/general-model",
+        request,
+      },
+      card: { channel: "CX", ts: "1.2" },
+      system: "",
+      tools: [],
+    });
+    await ledger.pushInbox(
+      "run-old",
+      durableInboxMessage(msg("and also the numbers", "slack:UY"), "and also the numbers", 6_000),
+    );
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    expect(reclaimed.reclaimedFrom).toBe("attaching");
+    let n = 0;
+    let rowAtFirstCall: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    let secondRequestTail: unknown;
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        if (n++ === 0) {
+          rowAtFirstCall = structuredClone(ledger.live.get("run-old"));
+          return {
+            content: [{ type: "tool_use", id: "s1", name: "update_status", input: { checklist: "○ restarted" } }],
+            stopReason: "tool_use",
+          };
+        }
+        secondRequestTail = structuredClone(req.messages.at(-1));
+        return { content: [{ type: "text", text: "restarted and done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, registry, writer, warnings } = wired(provider, { ledger });
+    const { io, replies } = ioWithCard();
+    const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
+    await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: reclaimed.inbox } });
+    await writer.settled();
+    expect(replies).toEqual(["restarted and done"]); // the carried follow-up gets no second ack
+    expect(rowAtFirstCall).toMatchObject({
+      runId: "run-old",
+      ownerGen: "gen-T",
+      phase: "live",
+      startedAt: 5_000,
+      card: { channel: "CX", ts: "1.2" },
+      meta: { agent: "general", request: { text: "hello there" } },
+    });
+    expect(rowAtFirstCall!.system.length).toBeGreaterThan(0);
+    expect(JSON.stringify(secondRequestTail)).toContain("and also the numbers"); // folded in at the first step boundary
+    expect(registry.listActive().map((r) => r.id)).toEqual(["run-old"]); // one run, the row's id
+    expect(ledger.live.has("run-old")).toBe(false);
+    const record = ledger.finished.get("run-old")!;
+    expect(record.status).toBe("completed");
+    expect(record.startedAt).toBe(5_000);
+    expect(record.events.filter((e) => e.type === "input").map((e) => (e as { text: string }).text)).toEqual([
+      "hello there",
+      "and also the numbers",
+    ]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("a restart onto a thread that has a newer run in flight closes the reserved row interrupted with no reply and no run (item 42)", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      phase: "attaching",
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        agent: "general",
+        request: durableInboxMessage(msg("hello there"), "hello there", 5_000),
+      },
+      system: "",
+      tools: [],
+    });
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const { deps, registry, writer } = wired(capturingProvider("must not run"), { ledger });
+    deps.admission = new ThreadAdmission();
+    deps.admission.claim("slack:CX:1.0", { agent: "general" }); // the user re-mentioned the bot after the kill
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, msg("hello there"), io, { restart: { row: reclaimed.row, inbox: reclaimed.inbox } });
+    await writer.settled();
+    expect(replies).toEqual([]);
+    expect(registry.listActive()).toEqual([]);
+    expect(ledger.live.has("run-old")).toBe(false);
+    expect(ledger.finished.get("run-old")).toMatchObject({ status: "interrupted", startedAt: 5_000 });
   });
 
   it("a reclaimed run resumes under its own id (item 38): the row is adopted at admission, the transcript is the conversation, the calls in flight are settled before the first model call, the earlier events are replayed under their seqs, and the finish closes the same row", async () => {

@@ -104,6 +104,24 @@ export interface OpenRunRequest {
    *  caller must stop the run at once — it must not reply, and its next tool
    *  call would act on a run someone else is driving. Once per run. */
   onFenced?: () => void;
+  /** The run's reservation from admission (item 42), when it has one: the open
+   *  promotes that row in place — same tracked run, same heartbeat — instead
+   *  of claiming a new one. */
+  reservation?: LedgerRun;
+}
+
+/** The row a run leaves at admission, before its prompt exists (item 42): the
+ *  identity, the request it was admitted for, the card — so a kill during the
+ *  workspace attach leaves something to restart from. */
+export interface ReserveRunRequest {
+  runId: string;
+  threadKey: string;
+  startedAt: number;
+  /** With `request` set: the message in the durable inbox row's shape. */
+  meta: LiveRunMeta;
+  card?: CardHandle | null;
+  onStop?: (mode: StopMode) => void;
+  onFenced?: () => void;
 }
 
 /** `finishing()`'s answer: `ok` — reply; `fenced` — another generation owns
@@ -125,6 +143,10 @@ export interface LedgerRun {
   setState(patch: RunState): void;
   /** `live → finishing`, before the reply — the double-answer gate (D9). */
   finishing(): Promise<FinishingGate>;
+  /** A reserved run that never started (item 42): the row goes with no record,
+   *  so nothing restarts it. A no-op for a detached run (fenced: another
+   *  generation owns the row) and for an untracked one. */
+  abandon(): Promise<void>;
   /** True when a resume could continue this run: its seed and seed record
    *  landed (or it was adopted from a resume). A ship pipeline, a detached run
    *  and a run whose seed failed are not. */
@@ -157,9 +179,16 @@ export interface AdoptRunRequest {
 
 export interface LedgerWriteThrough {
   readonly gen: string;
+  /** Reserve the thread at admission (item 42): an `attaching` row with the
+   *  request and no prompt, its heartbeat running. `undefined` when the run is
+   *  not tracked (as `open`). The run is not resumable until `open` promotes
+   *  it; a reclaim of the row restarts the run from its request. */
+  reserve(req: ReserveRunRequest): Promise<LedgerRun | undefined>;
   /** Claim and seed. `undefined` when the run is not tracked: the thread has a
    *  live row already (another generation's — reclaim is the resume phase's),
-   *  the routes are missing, or the claim kept failing. */
+   *  the routes are missing, or the claim kept failing — or, with a
+   *  reservation, the row was taken by another generation (the reservation is
+   *  told through `onFenced`; this process must not run it). */
   open(req: OpenRunRequest): Promise<LedgerRun | undefined>;
   /** Take up a reclaimed run: heartbeat, steps, events and state continue
    *  under this generation with no claim and no seed. Synchronous — the row is
@@ -195,6 +224,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
     readonly gen: string,
     private readonly fallback: RecordSink,
   ) {}
+  async reserve(_req: ReserveRunRequest): Promise<LedgerRun | undefined> {
+    return undefined;
+  }
   async open(_req: OpenRunRequest): Promise<LedgerRun | undefined> {
     return undefined;
   }
@@ -239,6 +271,7 @@ export class NullLedgerRun implements LedgerRun {
   async finishing(): Promise<FinishingGate> {
     return "unavailable";
   }
+  async abandon(): Promise<void> {}
   async close(): Promise<void> {
     // nothing was open
   }
@@ -274,7 +307,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     );
   };
 
-  async function claim(req: OpenRunRequest): Promise<"ok" | "untracked"> {
+  /** `fenced`: the thread's row is THIS run under another generation — the
+   *  reservation's lease lapsed and a reclaim took it (item 42); this process
+   *  must not drive it. */
+  async function claim(
+    req: Omit<OpenRunRequest, "seed" | "reservation">,
+    phase?: "attaching",
+  ): Promise<"ok" | "untracked" | "fenced"> {
     for (let attempt = 1; ; attempt++) {
       try {
         const result = await ledger.claim({
@@ -288,8 +327,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           system: req.system,
           tools: req.tools,
           ...(req.state !== undefined ? { state: req.state } : {}),
+          ...(phase ? { phase } : {}),
         });
         if (result.ok) return "ok";
+        if (result.live.runId === req.runId) return "fenced";
         warn(
           `[ledger] ${req.threadKey} not tracked: the thread's live row belongs to run ${result.live.runId} (started ${new Date(result.live.startedAt).toISOString()}) — reclaim is the resume phase's`,
         );
@@ -387,7 +428,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     /** One warning, then silence: the run continues untracked. */
-    private detach(reason: string): void {
+    detach(reason: string): void {
       if (this.detached) return;
       this.detached = true;
       warn(`[ledger] ${this.threadKey} run ${this.runId} detached: ${reason} — this run is not resumable`);
@@ -519,6 +560,25 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
     }
 
+    async abandon(): Promise<void> {
+      if (this.detached || this.finished) return;
+      this.finished = true; // nothing is written after this
+      live.delete(this);
+      await this.close();
+      try {
+        const result = await ledger.abandon(this.runId, gen);
+        // `unknown-run` is silence: the row is already gone (a stale
+        // reservation never had one of its own); `fenced` names a row another
+        // generation drives now.
+        if (!result.ok && result.reason === "fenced")
+          warn(`[ledger] ${this.threadKey} abandon refused (fenced) — the row is another generation's`);
+      } catch (err) {
+        warn(
+          `[ledger] ${this.threadKey} abandon failed: ${describe(err)} — the sweep will take the row once its lease lapses`,
+        );
+      }
+    }
+
     startHeartbeat(): void {
       if (this.detached || this.heartbeat) return;
       this.heartbeat = startInterval(() => void this.beat(), heartbeatMs);
@@ -556,8 +616,43 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
   return {
     gen,
+    async reserve(req) {
+      const claimed = await claim({ ...req, system: "", tools: [], state: {} }, "attaching");
+      if (claimed !== "ok") return undefined;
+      const run = new TrackedRun(req);
+      run.startHeartbeat();
+      live.add(run);
+      return run;
+    },
     async open(req) {
-      if ((await claim(req)) !== "ok") return undefined;
+      const reserved = req.reservation;
+      if (reserved instanceof TrackedRun) {
+        // The promotion (item 42): the claim the dispatcher always made, now
+        // landing on the row reserved at admission — same tracked run, its
+        // heartbeat already running. A row another generation took meanwhile
+        // fences this run (it is theirs to restart); an untracked answer means
+        // the thread's row is someone else's (a stale reservation) — the run
+        // goes on untracked, as an open without a reservation would.
+        if (!reserved.tracked()) return undefined;
+        const claimed = await claim(req);
+        if (claimed === "fenced") {
+          reserved.detach("promotion refused (fenced)");
+          return undefined;
+        }
+        if (claimed !== "ok") {
+          await reserved.close();
+          live.delete(reserved);
+          return undefined;
+        }
+        if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs);
+        return reserved;
+      }
+      const claimed = await claim(req);
+      if (claimed === "fenced") {
+        warn(`[ledger] ${req.threadKey} not tracked: run ${req.runId} is live under another generation`);
+        return undefined;
+      }
+      if (claimed !== "ok") return undefined;
       const run = new TrackedRun(req);
       if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs);
       run.startHeartbeat();

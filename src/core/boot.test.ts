@@ -103,6 +103,7 @@ describe("reclaimRuns", () => {
     expect(outcome.closed).toEqual([]);
     expect(outcome.resumable).toHaveLength(1);
     const r = outcome.resumable[0];
+    if (r.kind === "restart") throw new Error("a run with a transcript resumes, never restarts");
     expect(r.row).toMatchObject({ runId: "r1", ownerGen: "g2", phase: "live" }); // ours now
     expect(r.reclaimedFrom).toBe("live");
     expect(r.lastStep).toMatchObject({ step: 1, inFlight: [{ callId: "c1", tool: "bash" }] });
@@ -204,6 +205,39 @@ describe("reclaimRuns", () => {
     });
     expect(byId.handed).toBeUndefined(); // resumable, not closed
     expect(outcome.resumable.map((r) => [r.row.runId, r.reclaimedFrom])).toEqual([["handed", "handoff"]]);
+  });
+
+  it("a row reserved at admission (item 42) whose owner died is handed to the launcher as a restart — the row still attaching, its request and unconsumed inbox in hand, nothing closed; one reserved without its request is closed interrupted naming why", async () => {
+    const { ledger, run, logs } = harness();
+    const request = {
+      channelId: "slack:C1",
+      userId: "slack:UA",
+      threadKey: "slack:C1:1.0",
+      text: "agent:review go",
+      at: 900,
+    };
+    await ledger.claim(
+      claim("reserved", "slack:C1:1.0", "g1", {
+        phase: "attaching",
+        system: "",
+        meta: { channelId: "slack:C1", userId: "slack:UA", threadKey: "slack:C1:1.0", agent: "review", request },
+      }),
+    );
+    await ledger.pushInbox("reserved", { text: "and this", userId: "slack:UB" });
+    await ledger.claim(claim("bare", "slack:C1:2.0", "g1", { phase: "attaching", system: "" }));
+    const outcome = await run();
+    expect(outcome.resumable).toHaveLength(1);
+    const restart = outcome.resumable[0];
+    expect(restart.kind).toBe("restart");
+    expect(restart.reclaimedFrom).toBe("attaching");
+    expect(restart.row).toMatchObject({ runId: "reserved", ownerGen: "g2", phase: "attaching" });
+    expect(restart.row.meta.request).toEqual(request);
+    expect(restart.inbox.map((i) => i.message.text)).toEqual(["and this"]);
+    expect(ledger.live.get("reserved")).toBeDefined();
+    expect(logs.some((l) => /reserved slack:C1:1.0 restartable \(from attaching/.test(l))).toBe(true);
+    const bare = outcome.closed.find((c) => c.runId === "bare");
+    expect(bare).toMatchObject({ status: "interrupted", from: "attaching", why: expect.stringMatching(/request/) });
+    expect(ledger.live.get("bare")).toBeUndefined();
   });
 
   it("rows another generation still holds a current lease on are not taken; they come back as liveElsewhere with their cards", async () => {

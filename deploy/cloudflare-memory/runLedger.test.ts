@@ -124,6 +124,73 @@ describe("run ledger — claim and admission (item 29)", () => {
     expect(list.data.items).toEqual([]);
   });
 
+  it("a claim with `phase: attaching` reserves the thread before the prompt exists (item 42): the row lists as attaching with its request and an empty prompt; the owner's later claim with the prompt promotes it to live in place; reclaim keeps an expired attaching row's phase", async () => {
+    const key = storeKey();
+    const request = {
+      channelId: "slack:C1",
+      userId: "slack:UA",
+      threadKey: "slack:C1:1.0",
+      text: "review it",
+      at: 900,
+    };
+    const reserve = claimBody(key, "r1", "slack:C1:1.0", "g1", {
+      phase: "attaching",
+      system: "",
+      tools: [],
+      card: null,
+      meta: { agent: "review", channelId: "slack:C1", userId: "slack:UA", threadKey: "slack:C1:1.0", request },
+    });
+    expect(await post("/runs/claim", reserve)).toMatchObject({ status: 200, data: { ok: true } });
+    let runs = (await post("/runs/live", { storeKey: key })).data.runs as Array<Record<string, unknown>>;
+    expect(runs[0]).toMatchObject({ runId: "r1", phase: "attaching", system: "", tools: [], card: null });
+    expect((runs[0].meta as Record<string, unknown>).request).toEqual(request);
+    expect((await post("/runs/claim", claimBody(key, "r2", "slack:C1:1.0"))).status).toBe(409);
+    // The prompt lands: promoted in place, identity and start unchanged.
+    expect(await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0", "g1", { state: { n: 1 } }))).toMatchObject({
+      status: 200,
+      data: { ok: true },
+    });
+    runs = (await post("/runs/live", { storeKey: key })).data.runs as Array<Record<string, unknown>>;
+    expect(runs[0]).toMatchObject({
+      runId: "r1",
+      phase: "live",
+      system: "you review",
+      card: { channel: "C1", ts: "1.0" },
+      state: { n: 1 },
+      startedAt: 1_000,
+    });
+    // A bad phase is a 400.
+    expect((await post("/runs/claim", claimBody(key, "r3", "slack:C1:3.0", "g1", { phase: "sleeping" }))).status).toBe(
+      400,
+    );
+    // An expired attaching row is reclaimed as attaching, request and inbox in hand.
+    await post(
+      "/runs/claim",
+      claimBody(key, "r9", "slack:C1:9.0", "g1", { ...reserve.run, runId: "r9", threadKey: "slack:C1:9.0" }),
+    );
+    await post("/runs/inbox", { storeKey: key, runId: "r9", message: { text: "also this" } });
+    const future = Date.now() + LEASE_MS + 1_000;
+    const r = await post("/runs/reclaim", { storeKey: key, gen: "g2", now: future, leaseMs: LEASE_MS });
+    const taken = (r.data.runs as Array<Record<string, unknown>>).find(
+      (x) => (x.row as Record<string, unknown>).runId === "r9",
+    )!;
+    expect(taken.reclaimedFrom).toBe("attaching");
+    expect(taken.row).toMatchObject({ ownerGen: "g2", phase: "attaching" });
+    expect(((taken.row as Record<string, unknown>).meta as Record<string, unknown>).request).toEqual(request);
+    expect((taken.inbox as Array<{ message: { text: string } }>).map((i) => i.message.text)).toEqual(["also this"]);
+    // Abandon: the live rows go with no record; fenced from any other generation; unknown afterwards.
+    expect((await post("/runs/abandon", { storeKey: key, runId: "r9", gen: "g1" })).status).toBe(409);
+    expect(await post("/runs/abandon", { storeKey: key, runId: "r9", gen: "g2" })).toMatchObject({
+      status: 200,
+      data: { ok: true },
+    });
+    runs = (await post("/runs/live", { storeKey: key })).data.runs as Array<Record<string, unknown>>;
+    expect(runs.map((x) => x.runId)).toEqual(["r1"]);
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: "r9", afterSeq: 0 })).data.items).toEqual([]);
+    expect((await post("/runs/list", { storeKey: key })).data.items).toEqual([]);
+    expect((await post("/runs/abandon", { storeKey: key, runId: "r9", gen: "g2" })).status).toBe(409);
+  });
+
   it("validates: a bad run id, gen, lease, or missing fields → 400; no bearer → 401", async () => {
     const key = storeKey();
     expect((await post("/runs/claim", claimBody(key, "bad id!", "t"))).status).toBe(400);

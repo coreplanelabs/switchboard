@@ -59,7 +59,8 @@ export interface LiveElsewhere {
 /** A reclaimed run the resume launcher continues (item 38): its row (ours
  *  now), the last step record, the transcript read whole, and the events it
  *  published before the restart. */
-export interface ResumableRun {
+export interface ResumeRun {
+  kind?: "resume";
   row: LiveRunRow;
   reclaimedFrom: LivePhase;
   lastStep: StepRecord;
@@ -69,6 +70,19 @@ export interface ResumableRun {
    *  the resume folds them in at its first boundary. */
   inbox: InboxItem[];
 }
+
+/** A run reserved at admission whose owner died before its prompt existed
+ *  (item 42): nothing to resume from, so the launcher dispatches the row's own
+ *  request again under the same run id and card. The row is still `attaching`
+ *  and ours; the follow-ups steered into it meanwhile ride along. */
+export interface RestartRun {
+  kind: "restart";
+  row: LiveRunRow;
+  reclaimedFrom: "attaching";
+  inbox: InboxItem[];
+}
+
+export type ResumableRun = ResumeRun | RestartRun;
 
 export interface ReclaimOutcome {
   closed: ReclaimedClosure[];
@@ -134,6 +148,19 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         const recorded = row.state.finalStatus;
         status = typeof recorded === "string" && TERMINAL.has(recorded) ? (recorded as RunStatus) : "completed";
         why = "replied before the previous generation died";
+      } else if (run.reclaimedFrom === "attaching") {
+        // Reserved at admission, killed before its prompt existed (item 42):
+        // restarted from the request the row carries — or, without one (a row
+        // this build cannot read), closed like any run with nothing to resume.
+        if (typeof row.meta.request === "object" && row.meta.request !== null) {
+          outcome.resumable.push({ kind: "restart", row, reclaimedFrom: "attaching", inbox: run.inbox });
+          log(
+            `[reclaim] ${row.runId} ${row.threadKey} restartable (from attaching; killed before its prompt existed; ${run.inbox.length} follow-up(s) pending) — handed to the launcher`,
+          );
+          continue;
+        }
+        status = "interrupted";
+        why = "reserved at admission without its request: nothing to restart from";
       } else {
         // Resumable (item 38) when the transcript is whole and the completeness
         // rule accepts it against the last step record; the launcher plans the

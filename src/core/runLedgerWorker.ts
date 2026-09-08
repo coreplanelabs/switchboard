@@ -15,6 +15,7 @@
 //   POST /runs/handoff          {storeKey, gen, runIds}                  → {marked}
 //   POST /runs/finishing        {storeKey, runId, gen}                   → {ok} | 409 fenced
 //   POST /runs/finish           {storeKey, runId, gen, record}           → {ok, stored} | 409 fenced
+//   POST /runs/abandon          {storeKey, runId, gen}                   → {ok} | 409 fenced   (the live rows go, no record)
 //   POST /runs/reclaim          {storeKey, gen, now, leaseMs}            → {runs: ReclaimedRun[]}
 //   POST /runs/live             {storeKey}                               → {runs: LiveRunRow[]}
 //   POST /runs/live-events      {storeKey, runId}                        → {events: AppendableEvent[]}
@@ -257,6 +258,15 @@ export class WorkerRunLedger implements RunLedger {
     // Best-effort: an orphaned transcript is harmless and swept.
     await this.post("/runs/transcript/clear", { runId }).catch(() => {});
     return { ok: true, stored: r.data.stored === true };
+  }
+
+  async abandon(runId: string, gen: string): Promise<FenceResult> {
+    this.checkIds(runId, gen);
+    const f = this.fenceResult(await this.post("/runs/abandon", { storeKey: this.opts.storeKey, runId, gen }));
+    if (!f.ok) return f;
+    // Best-effort, as after a finish: an orphaned transcript is harmless and swept.
+    await this.post("/runs/transcript/clear", { runId }).catch(() => {});
+    return f;
   }
 
   async reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]> {
