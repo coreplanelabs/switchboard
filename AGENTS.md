@@ -25,23 +25,7 @@ Every agent working here reads this file, as does a person asking how we work: h
 
 ## Where things are
 
-| Area | Path | Spec |
-|---|---|---|
-| Orchestration: directives, resolution, gates, history, the run | `src/core/dispatcher.ts` | `routing-and-config.md`, `run-loop.md` |
-| Commands once, every surface (chat, CLI, HTTP, MCP) | `src/core/commandRegistry.ts`, `commands/`, `commandSurface.ts` | `command-registry.md` |
-| Authorization: actors, grants, the policy table, predicates | `src/core/authz/` | `authorization.md` |
-| Runs: live registry, history, tracing, the run page | `src/core/runRegistry.ts`, `runStore.ts`, `runsService.ts`, `trace/`, `src/channels/liveView.ts` | `run-history.md`, `live-view.md`, `tracing.md` |
-| Channels: Slack (transport only), HTTP, MCP ingress | `src/channels/` | `slack-channel.md`, `http-ingress.md`, `mcp-ingress.md` |
-| Agents (data), providers, executors | `src/agents/`, `src/providers/`, `src/execution/` | `agent-*.md`, `execution.md`, `resident-repos.md` |
-| Memory, skills, MCP tools, GitHub tools | `src/core/memory/`, `src/skills/`, `src/mcp/`, `src/tools/` | `memory.md`, `skills.md`, `mcp-tools.md`, `github-tools.md` |
-| The dashboard (Vue) served from the bot's seed | `web/` | `live-view.md` |
-| The runtime Workers and the docs Worker | `deploy/cloudflare*/` | `release-and-deploy.md`, `docs-site.md` |
-| Deploy selection, order, and live gate | `src/deploy/` | `release-and-deploy.md` |
-| Human docs and their generated tables | `docs/`, `src/docs/` | `docs-site.md` |
-
-Specs live in `docs/reference/specs/`.
-
-Module by module: [Code map](docs/reference/code-map.md).
+Area by area and module by module: the [Code map](docs/reference/code-map.md). The behavior each area must keep: its spec under [`docs/reference/specs/`](docs/reference/specs/README.md). Why it is shaped that way: the [decision records](docs/explanation/design-decisions.md). Nothing here duplicates those three; when they disagree with the code, the code is wrong or the doc is, and the checks (`specs:check`, `decisions:check`, `docs:check`) say which.
 
 ## Commands
 
@@ -117,4 +101,4 @@ The rules are written for the product's own agents, who follow them: `agent:revi
 
 ## Working locally
 
-Node from `.nvmrc`, `npm ci`, `npm run verify`. `npm run cli -- ask "agent:review <PR url>"` drives the pipeline without Slack. The `bash` tool runs model-generated commands inside the executor's boundary; keep write-capable credentials out of the model's reach. Production, sizing, deliberate gaps: [Operate production](docs/how-to/operate-production.md), [Capacity and sizing](docs/explanation/capacity-and-sizing.md), [Known limits](docs/explanation/known-limits.md).
+Setup, the three test passes and the PR expectations: [CONTRIBUTING.md](CONTRIBUTING.md). Production, sizing and deliberate gaps: [Operate production](docs/how-to/operate-production.md), [Capacity and sizing](docs/explanation/capacity-and-sizing.md), [Known limits](docs/explanation/known-limits.md). One rule travels with every local run: the `bash` tool executes model-generated commands inside the executor's boundary, so write-capable credentials stay out of the model's reach.
