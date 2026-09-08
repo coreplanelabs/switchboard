@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { OpenedPullRequest, PullRequestTarget, RepoShipInfo } from "../execution/githubPulls.js";
+import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../execution/githubPulls.js";
 import type { RunEvent } from "./runEvents.js";
 import {
   observeCodingWorkspace,
@@ -17,6 +17,10 @@ import {
 const unreachable = async (): Promise<RepoShipInfo | undefined> => {
   throw new Error("fetchRepoInfo must not be called when a base is already known");
 };
+
+// The open-PR lookup for a description-less push: no branch heads an open PR
+// unless a test says otherwise (the "existing PR" cases below supply their own).
+const noOpenPr = async (): Promise<OpenPrRef | null> => null;
 
 // Feature: docs/reference/specs/pr-description.md item 5 — the coding PR post-step as a
 // callable unit: given a workspace observation and the run's submitted
@@ -74,6 +78,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
       fetchRepoInfo,
+      findOpenPr: noOpenPr,
       publish: (e) => events.push(e),
       logKey: "t",
     });
@@ -98,6 +103,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: "main", bindingRef: "feat/x", resolvedRef: "feat/x" },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -122,6 +128,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
       openPullRequest: spy.fn,
       fetchRepoInfo,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -145,6 +152,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
       openPullRequest: spy.fn,
       fetchRepoInfo,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -161,6 +169,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
       openPullRequest: spy.fn,
       fetchRepoInfo: async () => undefined,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -179,6 +188,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       fetchRepoInfo: async () => {
         throw new Error("network down");
       },
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -194,6 +204,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -210,6 +221,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -227,11 +239,116 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toBeUndefined();
+  });
+
+  // A follow-up on an existing PR: the run repushed the PR's OWN head branch
+  // and submitted no description (a dependabot PR whose body should stay, a
+  // fix round that only pushed). The push updated that PR — the note must say
+  // so, and never send the reader to open a duplicate from a compare URL.
+  it("no description + proven push + the branch heads an open PR → note names that PR as updated by the push, pr_opened created:false, no open/edit call, no compare URL", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    const findOpenPr = vi.fn(async (): Promise<OpenPrRef | null> => ({
+      number: 700,
+      htmlUrl: "https://github.com/acme/api/pull/700",
+    }));
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "dependabot/github_actions/actions-4c45254bbe" }),
+      description: undefined,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
+      openPullRequest: spy.fn,
+      findOpenPr,
+      fetchRepoInfo: unreachable,
+      publish: (e) => events.push(e),
+      logKey: "t",
+    });
+    expect(findOpenPr).toHaveBeenCalledWith("acme/api", "dependabot/github_actions/actions-4c45254bbe");
+    expect(spy.calls).toHaveLength(0); // no description → nothing to render, the PR body is left alone
+    expect(note).toContain("PR updated by the push: https://github.com/acme/api/pull/700");
+    expect(note).toContain(HEAD.slice(0, 7));
+    expect(note).toContain("no PR description was submitted");
+    expect(note).not.toContain("/compare/");
+    expect(note).not.toContain("No PR was opened");
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "pr_opened",
+        url: "https://github.com/acme/api/pull/700",
+        number: 700,
+        created: false,
+      }),
+    ]);
+  });
+
+  it("no description + proven push + no open PR heads the branch → the compare-URL note, no event", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    const findOpenPr = vi.fn(noOpenPr);
+    const note = await runCodingPrPostStep({
+      observed: observation(),
+      description: undefined,
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
+      openPullRequest: spy.fn,
+      findOpenPr,
+      fetchRepoInfo: unreachable,
+      publish: (e) => events.push(e),
+      logKey: "t",
+    });
+    expect(findOpenPr).toHaveBeenCalledWith("acme/api", "feat/x");
+    expect(spy.calls).toHaveLength(0);
+    expect(note).toContain("No PR was opened");
+    expect(note).toContain("https://github.com/acme/api/compare/feat/x");
+    expect(events).toEqual([]);
+  });
+
+  it("no description + proven push, the open-PR lookup throws → degrades to the compare-URL note (logged, never thrown)", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation(),
+      description: undefined,
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
+      openPullRequest: spy.fn,
+      findOpenPr: async () => {
+        throw new Error("PR lookup failed: HTTP 502");
+      },
+      fetchRepoInfo: unreachable,
+      publish: (e) => events.push(e),
+      logKey: "t",
+    });
+    expect(spy.calls).toHaveLength(0);
+    expect(note).toContain("No PR was opened");
+    expect(note).toContain("https://github.com/acme/api/compare/feat/x");
+    expect(note).not.toContain("/pull/");
+    expect(events).toEqual([]);
+  });
+
+  it("the open-PR lookup is asked ONLY for a description-less proven push — never when a description was submitted or the push is unproven", async () => {
+    const findOpenPr = vi.fn(noOpenPr);
+    const common = {
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
+      openPullRequest: openSpy().fn,
+      findOpenPr,
+      fetchRepoInfo: unreachable,
+      publish: () => {},
+      logKey: "t",
+    };
+    // a description: open-or-edit does its own lookup
+    await runCodingPrPostStep({ ...common, observed: observation(), description: DESCRIPTION });
+    // no description, but the branch is not on the remote
+    await runCodingPrPostStep({ ...common, observed: observation({ remoteHead: undefined }), description: undefined });
+    // no description, the workspace sat on the base branch
+    await runCodingPrPostStep({
+      ...common,
+      observed: observation({ branch: "main", checkedOut: "main" }),
+      description: undefined,
+    });
+    expect(findOpenPr).not.toHaveBeenCalled();
   });
 
   it("no description submitted, no base signal anywhere → no GitHub fetch (never needed for a run with nothing to open)", async () => {
@@ -243,6 +360,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
       openPullRequest: spy.fn,
       fetchRepoInfo,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -263,6 +381,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -281,6 +400,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -298,6 +418,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });
@@ -316,6 +437,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       target: { repo: undefined, baseRef: undefined, bindingRef: undefined, resolvedRef: "main" },
       openPullRequest: spy.fn,
       fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
       publish: () => {},
       logKey: "t",
     });

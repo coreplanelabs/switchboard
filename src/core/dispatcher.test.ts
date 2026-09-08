@@ -2917,6 +2917,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   function codingDeps(provider: Provider) {
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    // No open PR heads any branch unless a test says otherwise: the
+    // description-less post-step asks this before it offers a compare URL.
+    deps.findOpenPrByHead = vi.fn(async () => null);
     return deps;
   }
 
@@ -3131,9 +3134,63 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(spy.calls).toHaveLength(0);
+    // The compare URL is offered only after GitHub said no open PR heads the branch.
+    expect(deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", "feat/login-fix");
     const note = replies.find((r) => r.includes("https://github.com/acme/api/compare/feat/login-fix"));
     expect(note).toBeDefined();
     expect(note).toContain("no PR description");
+    expect(note).toContain("No PR was opened");
+  });
+
+  // The shape of a follow-up on an existing PR (a dependabot branch, a PR the
+  // thread was bound to): the run repushes the PR's OWN head branch and — by
+  // its own judgement — submits no description, so the PR body is left alone.
+  // The push updated that PR; the reader must be told that, not sent to open
+  // a duplicate from a compare URL.
+  it("no description submitted, the pushed branch already heads an open PR → the reply names that PR as updated by the push, no compare URL, no PR call, pr_opened created:false in the record", async () => {
+    const deps = codingDeps(describeThenAnswer(undefined, "Refreshed the allowlist for the bumped action."));
+    codingExecutor({ head: HEAD, branch: "dependabot/github_actions/actions-4c45254bbe", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/acme/api/pull/700" }));
+    const registry = new RunRegistry({ genId: () => "r700", genToken: () => "t700" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding consistency check failing on acme/api#700", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0); // nothing to render — the body is not touched
+    expect(deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", "dependabot/github_actions/actions-4c45254bbe");
+    const note = replies.find((r) => r.includes("https://github.com/acme/api/pull/700"));
+    expect(note).toBeDefined();
+    expect(note).toContain("PR updated by the push");
+    expect(note).toContain(HEAD.slice(0, 7));
+    expect(note).not.toContain("No PR was opened");
+    expect(note).not.toContain("/compare/");
+    // In the snapshot ⇒ published before finish() (a publish on a finished run is a silent no-op).
+    const opened = registry.snapshot("r700", "t700")?.events.find((e) => e.type === "pr_opened");
+    expect(opened).toMatchObject({
+      type: "pr_opened",
+      number: 700,
+      created: false,
+      url: "https://github.com/acme/api/pull/700",
+    });
+  });
+
+  it("no description submitted and the open-PR lookup fails → the honest compare-URL note stands (never a throw, never a fabricated PR)", async () => {
+    const deps = codingDeps(describeThenAnswer(undefined, "Pushed."));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    deps.findOpenPrByHead = vi.fn(async () => {
+      throw new Error("PR lookup failed: HTTP 502");
+    });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("https://github.com/acme/api/compare/feat/login-fix"));
+    expect(note).toBeDefined();
+    expect(note).toContain("No PR was opened");
+    expect(note).not.toContain("/pull/");
+    expect(statuses[statuses.length - 1].title).toContain("✅"); // the run itself completed
   });
 
   it("openPullRequest throws → the reply reports the failure with the compare URL; the run still completes normally", async () => {

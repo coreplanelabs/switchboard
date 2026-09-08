@@ -35,8 +35,10 @@ import {
   createBranchRef,
   fetchPullRequestFacts,
   fetchRepoShipInfo,
+  findOpenPrByHead,
   openPullRequest,
   type OpenedPullRequest,
+  type OpenPrRef,
   type PullRequestFacts,
   type PullRequestTarget,
   type RepoShipInfo,
@@ -187,6 +189,13 @@ export interface CoreDeps {
    * Injectable so tests assert the typed inputs without a network call.
    */
   openPullRequest?: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /**
+   * The open PR heading a branch, or null (githubPulls.findOpenPrByHead): the
+   * post-step asks it when a proven-pushed branch comes with no description,
+   * so a follow-up that repushed an existing PR's branch is reported as that
+   * PR updated, never as "open one manually". Injectable for the same reason.
+   */
+  findOpenPrByHead?: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   /**
    * Ship round 0's pipeline-branch create (docs/reference/specs/agent-ship.md item 3):
    * `refs/heads/<branch>` at the base ref's tip, so the ref exists on
@@ -2117,6 +2126,7 @@ export async function dispatch(
               resolvedRef: repoCtx.ref,
             },
             openPullRequest: deps.openPullRequest ?? openPullRequest,
+            findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
             fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
             publish: (e) => registry.publish(run.id, e),
             logKey: msg.threadKey,
@@ -2805,6 +2815,7 @@ async function runShipBranch(
       github: {
         createBranchRef: deps.createBranchRef ?? createBranchRef,
         openPullRequest: deps.openPullRequest ?? openPullRequest,
+        findOpenPrByHead: deps.findOpenPrByHead ?? findOpenPrByHead,
         postReviewComment: deps.postReviewComment ?? postReviewComment,
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
