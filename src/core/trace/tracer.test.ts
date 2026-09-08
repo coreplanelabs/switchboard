@@ -84,6 +84,44 @@ describe("createTracer", () => {
     expect(sink.ended("post.history_write")).toMatchObject({ startedAt: 1_005_000, parentSpanId: root.id });
   });
 
+  it("graft records a child with both stamps supplied: start then end reach the sinks at once, the duration is theirs, a classification rides without a message, and an end before the start reads as zero", () => {
+    const clock = createTickingClock(50_000);
+    const log = recordingSink();
+    const root = createTracer({ clock: clock.now }).start("request", { sinks: [log] });
+    const rec = root.graft("dispatch.workspace.attach.install", {
+      startedAt: 10_000,
+      endedAt: 22_500,
+      attrs: { backend: "resident", exitCode: 0 },
+    });
+    expect(rec).toMatchObject({
+      name: "dispatch.workspace.attach.install",
+      parentSpanId: root.id,
+      startedAt: 10_000,
+      endedAt: 22_500,
+      durationMs: 12_500,
+      status: "ok",
+      attrs: { backend: "resident", exitCode: 0 },
+    });
+    expect(log.starts.map((s) => s.name)).toEqual(["request", "dispatch.workspace.attach.install"]);
+    expect(log.ends.map((s) => [s.name, s.durationMs])).toEqual([["dispatch.workspace.attach.install", 12_500]]);
+    const failed = root.graft("dispatch.workspace.attach.clone", {
+      startedAt: 30_000,
+      endedAt: 29_000,
+      status: "error",
+      errorKind: "infra",
+      errorCode: "attach",
+    });
+    expect(failed).toMatchObject({
+      durationMs: 0,
+      endedAt: 30_000,
+      status: "error",
+      errorKind: "infra",
+      errorCode: "attach",
+    });
+    expect(failed.errorMessage).toBeUndefined();
+    expect(clock.now()).toBe(50_000); // the clock was never read for a graft
+  });
+
   it("a throwing sink never reaches traced code; the tracer reports it once per call", async () => {
     const clock = createTickingClock();
     const warnings: string[] = [];

@@ -184,6 +184,11 @@ export interface ChatCommandResult {
    *  same thread once the effect has settled (undefined = nothing to add). The
    *  caller posts `text` first, then awaits this. */
   followUp?: () => Promise<SettledOutcome | undefined>;
+  /** A backend's own step trace, when the command's value carried one (a
+   *  resident op — features/tracing.md item 19): re-validated by the grafter. */
+  trace?: unknown;
+  /** The backend's own total for the work, when the value carried one. */
+  residentMs?: number;
 }
 
 /** One line per error code; the shared wording every chat command uses. A
@@ -231,10 +236,13 @@ export async function invokeChatCommand({
       ...(now === undefined ? {} : { now }),
     });
     const { id } = parsed;
+    const value = typeof res.value === "object" && res.value !== null && !Array.isArray(res.value) ? res.value : {};
     return {
       ok: true,
       text,
       ...(commands.settles(id) ? { followUp: () => commands.settle(id, res.value, caller) } : {}),
+      ...(Array.isArray(value.trace) ? { trace: value.trace } : {}),
+      ...(typeof value.residentMs === "number" ? { residentMs: value.residentMs } : {}),
     };
   }
   return { ok: false, error: res.error, text: chatErrorLine(parsed.id, res.error, res.message, config, res.decidedBy) };

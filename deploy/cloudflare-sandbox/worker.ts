@@ -1,7 +1,7 @@
 // Sandbox proxy Worker: fronts per-thread Cloudflare Sandboxes with a minimal
 // authenticated HTTP API the bot's CloudflareSandboxExecutor calls.
 //
-//   POST /exec   { command, timeoutMs?, env? } -> { stdout, stderr, exitCode }
+//   POST /exec   { command, timeoutMs?, env? } -> { stdout, stderr, exitCode, durationMs }
 //   POST /read   { path, env? }             -> { content }
 //   POST /write  { path, content, env? }    -> { ok: true }
 //   GET  /healthz                           -> { ok: true, build: { commit, builtAt? } }
@@ -390,6 +390,9 @@ function streamExec(
             stdout: result.stdout ?? "",
             stderr: [result.stderr ?? "", note].filter(Boolean).join("\n"),
             exitCode: timedOut ? 124 : exitCode,
+            // The command's wall time in the sandbox, for the bot's `exec.exec`
+            // span (features/tracing.md item 19); an older client ignores it.
+            durationMs: Date.now() - attemptStartedAt,
           });
         })
         .catch((err: unknown) => {

@@ -1,7 +1,7 @@
 {
   "deploy/cloudflare-memory/worker.ts": 13,
-  "deploy/cloudflare-resident/worker.ts": 58,
-  "deploy/cloudflare-sandbox/worker.ts": 3,
+  "deploy/cloudflare-resident/worker.ts": 63,
+  "deploy/cloudflare-sandbox/worker.ts": 4,
   "deploy/cloudflare/worker.ts": 1,
   "scripts/load.ts": 6,
   "scripts/web-preview.ts": 5,

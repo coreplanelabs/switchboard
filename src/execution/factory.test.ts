@@ -238,18 +238,26 @@ describe("makeExecutor resident selection", () => {
           sha: "abc",
           user: "worker2",
           deps: "hardlink",
+          attachMs: 1_900,
+          trace: [{ name: "clone", startMs: 100, durationMs: 1_500, status: "ok", exitCode: 0 }],
         },
       },
     );
-    const { executor, note, resident, binding, backend } = await makeExecutor(residentOpts(), repoCtx());
+    const { executor, note, resident, binding, backend, trace, attachMs } = await makeExecutor(
+      residentOpts(),
+      repoCtx(),
+    );
     expect(executor).toBeInstanceOf(ResidentExecutor);
     expect(backend).toBe("resident");
+    // The resident's own steps and total ride the selection for the dispatcher's attach span (tracing.md item 19).
+    expect(trace).toEqual([{ name: "clone", startMs: 100, durationMs: 1_500, status: "ok", exitCode: 0 }]);
+    expect(attachMs).toBe(1_900);
     // The warm path is POSITIVELY named (never inferable only from the absence
     // of a fallback note): ref@short-sha of the attached worktree.
     expect(note).toBe("resident · jshttp/vary · master@abc");
     // The attach answer rides along for the dispatcher (#282): the worktree
     // path for the prompt, the attached sha for the pre-run head check.
-    expect(binding).toEqual({ ref: "master", sha: "abc", workspace: "/workspace/threads/x/master" });
+    expect(binding).toMatchObject({ ref: "master", sha: "abc", workspace: "/workspace/threads/x/master" });
     // The discriminant is the backend signal the dispatcher branches its
     // resident system-prompt on (never an executor `instanceof`): true ONLY on
     // the warm-resident branch.
@@ -421,12 +429,23 @@ describe("makeExecutor resident selection", () => {
     stubEnvs();
     const { calls } = stubFetch(
       { body: { state: "refreshing", reason: "" } },
-      { status: 503, body: { error: "mirror busy: rebuild in progress", state: "refreshing", reason: "mirror-busy" } },
+      {
+        status: 503,
+        body: {
+          error: "mirror busy: rebuild in progress",
+          state: "refreshing",
+          reason: "mirror-busy",
+          // The steps the resident ran before refusing (tracing.md item 19).
+          trace: [{ name: "mutex_wait", startMs: 0, durationMs: 4_000, status: "ok", waitedMs: 4_000 }],
+        },
+      },
     );
-    const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
+    const { executor, note, resident, trace } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(resident).toBeFalsy();
     expect(note).toMatch(/^resident attach failed \(.*mirror busy.*\) — using fresh sandbox$/);
+    // The failed attach's trace rides the fallback selection so the dispatcher grafts it.
+    expect(trace).toEqual([{ name: "mutex_wait", startMs: 0, durationMs: 4_000, status: "ok", waitedMs: 4_000 }]);
     expect(calls).toEqual(["/status", "/attach"]);
   });
 

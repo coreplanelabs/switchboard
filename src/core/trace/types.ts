@@ -70,6 +70,11 @@ export interface Span {
   /** A handle: a child kept across a suspension point and ended explicitly.
    *  The root is the only handle in the request path. */
   start(name: string, opts?: SpanOptions): Span;
+  /** A child recorded after the fact with BOTH stamps supplied — a step another
+   *  process measured (a resident's attach steps), rebased and clipped by the
+   *  caller: its start and end reach the sinks at once, in the given order,
+   *  never entering the context. */
+  graft(name: string, opts: GraftOptions): SpanRecord;
   /** Idempotent. */
   end(status?: SpanStatus, attrs?: SpanAttrs): void;
   /** Record the failure's classification (or its redacted message) without
@@ -77,6 +82,16 @@ export interface Span {
   fail(err: unknown): void;
   setAttrs(attrs: SpanAttrs): void;
   record(): SpanRecord;
+}
+
+export interface GraftOptions {
+  startedAt: number;
+  endedAt: number;
+  status?: SpanStatus;
+  attrs?: SpanAttrs;
+  /** An error's classification, when the measuring process named one; a graft never carries a message. */
+  errorKind?: ErrorKind;
+  errorCode?: string;
 }
 
 export interface RootOptions {

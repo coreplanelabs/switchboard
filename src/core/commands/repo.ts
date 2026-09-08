@@ -570,6 +570,10 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
             ok: result.ok,
             summary: result.summary,
             ...(result.output !== undefined ? { output: result.output } : {}),
+            // The resident's step trace and total ride the value so the command
+            // run can graft them under its `run.command` span (tracing.md item 19).
+            ...(result.trace !== undefined ? { trace: result.trace } : {}),
+            ...(result.residentMs !== undefined ? { residentMs: result.residentMs } : {}),
           };
         case "refused":
           throw new CommandError("conflict", result.reason);
