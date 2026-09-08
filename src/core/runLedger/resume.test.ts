@@ -42,7 +42,7 @@ const step = (over: Partial<StepRecord>): StepRecord => ({
   seq: 5,
   turnIndex: 2,
   inFlight: [],
-  inboxConsumedSeq: 0,
+  inboxConsumedSeq: 7,
   remainingMs: 500_000,
   turn: 1,
   iteration: 0,
@@ -100,6 +100,7 @@ describe("planResume", () => {
       turn: 1,
       iteration: 0,
       remainingMs: 400_000,
+      inboxConsumedSeq: 7, // the last record's: the runner's counter starts there (item 40)
     });
     if (plan.kind !== "resume") throw new Error("unreachable");
     expect(plan.messages).toBe(messages);
@@ -117,7 +118,14 @@ describe("planResume", () => {
       lastStep: step({ step: 0, turnIndex: 1, turn: 0 }),
       tools: TOOLS,
     });
-    expect(plan).toMatchObject({ kind: "resume", settlements: [], stepRecorded: true, step: 0, turn: 0 });
+    expect(plan).toMatchObject({
+      kind: "resume",
+      settlements: [],
+      stepRecorded: true,
+      step: 0,
+      turn: 0,
+      inboxConsumedSeq: 7,
+    });
   });
 
   it("run-step-fresh: the next step's turns landed but its record did not — all of its calls run fresh, the counters advance, the step is unrecorded", () => {

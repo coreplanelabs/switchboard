@@ -42,6 +42,8 @@ export type ResumePlan =
       /** Whether the step being settled already has its record on the ledger
        *  (`resume`: yes; `run-step-fresh`: its turns landed, the record did not). */
       stepRecorded: boolean;
+      /** The last record's inbox seq: the runner's counter starts there (item 40). */
+      inboxConsumedSeq: number;
       /** The step number of the step being settled (or the seed record's, 0). */
       step: number;
       turn: number;
@@ -126,6 +128,7 @@ export function planResume(input: {
         messages,
         settlements: [],
         stepRecorded: true,
+        inboxConsumedSeq: lastStep.inboxConsumedSeq,
         step: lastStep.step,
         turn: lastStep.turn,
         iteration: lastStep.iteration,
@@ -147,6 +150,7 @@ export function planResume(input: {
       messages,
       settlements: calls.map((c) => settlementFor(c, tools)),
       stepRecorded: true,
+      inboxConsumedSeq: lastStep.inboxConsumedSeq,
       step: lastStep.step,
       turn: lastStep.turn,
       iteration: lastStep.iteration,
@@ -166,6 +170,7 @@ export function planResume(input: {
     messages,
     settlements: calls.map((c) => ({ toolUse: c, action: "rerun" as const })),
     stepRecorded: false,
+    inboxConsumedSeq: lastStep.inboxConsumedSeq,
     step: lastStep.step + 1,
     turn: lastStep.turn + (bookkeepingOnly ? 0 : 1),
     iteration: lastStep.iteration + 1,

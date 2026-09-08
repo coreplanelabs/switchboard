@@ -65,6 +65,7 @@ const resumable = (over: Partial<ResumableRun> = {}): ResumableRun => ({
     { type: "input", text: "please review", at: 1, seq: 1 },
     { type: "tool_call", tool: "read_file", summary: "x", at: 2, seq: 2 },
   ],
+  inbox: [{ seq: 1, message: { text: "also the numbers", userId: "slack:U2" } }],
   ...over,
 });
 const reviewAgent = { toolset: "readonly" } as AgentDef;
@@ -142,6 +143,7 @@ describe("launchResumes", () => {
     expect(ctx.lastStep.step).toBe(1);
     expect(ctx.lastSeq).toBe(2);
     expect(ctx.repoCtx).toEqual({ repo: "acme/api", ref: "feat/x", pr: 12, headSha: "a".repeat(40) });
+    expect(ctx.inbox).toEqual([{ seq: 1, message: { text: "also the numbers", userId: "slack:U2" } }]); // item 40
     expect(ctx.plan).toMatchObject({ kind: "resume", stepRecorded: true, step: 1, remainingMs: 300_000 });
     expect(ctx.plan.settlements.map((s) => [s.toolUse.id, s.action])).toEqual([["c1", "rerun"]]);
     expect(h.logs[0]).toMatch(/r1 slack:C1:1.0: resuming \(settling step 1, 1 call\(s\), 5 min left\)/);

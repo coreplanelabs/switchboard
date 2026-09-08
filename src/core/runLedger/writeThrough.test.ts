@@ -106,6 +106,7 @@ const step = (over: Partial<StepReport> = {}): StepReport => ({
   turns: [assistant("looking")],
   firstIdx: 3,
   inFlight: [{ callId: "c1", tool: "bash" }],
+  inboxConsumedSeq: 0,
   turn: 1,
   iteration: 0,
   remainingMs: 600_000,
@@ -587,6 +588,30 @@ describe("finishing and finish", () => {
     });
     await down.wt.open(openReq());
     expect(await down.wt.handoff()).toEqual({ marked: [], failed: "HTTP 503" });
+  });
+
+  it("the step record carries the inbox seq the run has consumed (run-history item 40); pushInbox hands back the ledger's seq for a live run — undefined, with a warning, when the ledger refuses or fails", async () => {
+    const { ledger, wt, warnings } = harness();
+    const run = (await wt.open(openReq()))!;
+    expect(await wt.pushInbox("r1", { text: "also the numbers" })).toBe(1);
+    expect(await wt.pushInbox("r1", { text: "and the dates" })).toBe(2);
+    expect(ledger.inbox.get("r1")!.map((i) => [i.seq, i.message.text])).toEqual([
+      [1, "also the numbers"],
+      [2, "and the dates"],
+    ]);
+    await run.step(step({ inboxConsumedSeq: 2 }));
+    expect(ledger.steps.get("r1")!.at(-1)!.inboxConsumedSeq).toBe(2);
+    expect(await wt.pushInbox("r-gone", { text: "nobody home" })).toBeUndefined();
+    expect(warnings.at(-1)).toMatch(/inbox push refused .*r-gone/);
+    const down = harness({
+      ledger: overriding(new InMemoryRunLedger(() => 10_000), {
+        pushInbox: async () => {
+          throw new TransientStoreError("HTTP 503");
+        },
+      }),
+    });
+    expect(await down.wt.pushInbox("r1", { text: "x" })).toBeUndefined();
+    expect(down.warnings.at(-1)).toMatch(/inbox push failed .*HTTP 503/);
   });
 
   it("a finish the ledger refuses (fenced, or a run it never tracked) goes to the fallback store — the record is never dropped", async () => {

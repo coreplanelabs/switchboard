@@ -33,6 +33,7 @@ import {
   type StepRecord,
   type StopMode,
   type TranscriptTurn,
+  type InboxItem,
 } from "./types.js";
 
 /** The generation id: the process's fencing token, minted once at boot. Time
@@ -166,6 +167,16 @@ export interface LedgerWriteThrough {
   adopt(req: AdoptRunRequest): LedgerRun;
   /** The runs this generation is driving right now (opened or adopted, not yet finished). */
   liveRuns(): LedgerRun[];
+  /** A durable copy of a steered follow-up (run-history item 40), under the
+   *  run's row whichever generation holds it: the ledger's inbox seq, or
+   *  undefined (with a warning) when the ledger refuses — the row is gone — or
+   *  cannot be reached. Never fenced: a steer arrives on whichever container is
+   *  up. */
+  pushInbox(runId: string, message: Record<string, unknown>): Promise<number | undefined>;
+  /** The run's durable inbox past `afterSeq` (run-history item 40) — the
+   *  resume's re-read at adopt time. Empty, with a warning, when the ledger
+   *  cannot be asked (a state Worker without the route included). */
+  readInbox(runId: string, afterSeq: number): Promise<InboxItem[]>;
   /** SIGTERM (plan D8): mark every resumable live run `handoff` on the ledger so
    *  the next generation takes it at once, whatever its lease. The runs keep
    *  running here until the process exits; their writes are fenced the moment
@@ -373,7 +384,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         seq: this.lastSeq,
         turnIndex: report.firstIdx + report.turns.length,
         inFlight: report.inFlight,
-        inboxConsumedSeq: 0, // the durable inbox is the admission phase's
+        inboxConsumedSeq: report.inboxConsumedSeq,
         remainingMs: report.remainingMs,
         turn: report.turn,
         iteration: report.iteration,
@@ -500,6 +511,31 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       return run;
     },
     liveRuns: () => [...live],
+    async pushInbox(runId, message) {
+      try {
+        const result = await ledger.pushInbox(runId, message);
+        if (result.ok && result.seq !== undefined) return result.seq;
+        warn(`[ledger] inbox push refused for run ${runId}: no live row — the follow-up rides in memory only`);
+        return undefined;
+      } catch (err) {
+        warn(`[ledger] inbox push failed for run ${runId}: ${describe(err)} — the follow-up rides in memory only`);
+        return undefined;
+      }
+    },
+
+    async readInbox(runId, afterSeq) {
+      try {
+        return await ledger.readInbox(runId, afterSeq);
+      } catch (err) {
+        warn(
+          err instanceof RouteMissingError
+            ? `[ledger] state Worker has no inbox read route — run ${runId} resumes with the reclaim's inbox snapshot only`
+            : `[ledger] inbox read failed for run ${runId}: ${describe(err)} — resuming with the reclaim's snapshot only`,
+        );
+        return [];
+      }
+    },
+
     async handoff() {
       const candidates = [...live].filter((r) => r.resumable && r.tracked() && !r.handedOff);
       if (candidates.length === 0) return { marked: [] };

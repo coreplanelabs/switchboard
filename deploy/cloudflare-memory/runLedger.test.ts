@@ -241,6 +241,20 @@ describe("run ledger — steps, events, inbox, state (items 30–31)", () => {
       status: 200,
       data: { ok: false },
     });
+    // Read back past a seq (item 40): the resume's re-read at adopt time.
+    expect(await post("/runs/inbox/read", { storeKey: key, runId: "r1", afterSeq: 1 })).toEqual({
+      status: 200,
+      data: { items: [{ seq: 2, message: { text: "b" } }] },
+    });
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1" })).data).toEqual({
+      items: [
+        { seq: 1, message: { text: "a" } },
+        { seq: 2, message: { text: "b" } },
+      ],
+    });
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: "nope", afterSeq: 0 })).data).toEqual({ items: [] });
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1", afterSeq: -1 })).status).toBe(400);
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1", afterSeq: "2" })).status).toBe(400);
     expect(await post("/runs/state", { storeKey: key, runId: "r1", gen: "g1", state: { verdict: "approve" } })).toEqual(
       { status: 200, data: { ok: true } },
     );

@@ -98,6 +98,7 @@ describe("reclaimRuns", () => {
       { type: "run_meta", agent: "review", model: "p/m", at: 1_001, seq: 2 },
       { type: "tool_call", tool: "bash", summary: "ls", at: 1_002, seq: 3 },
     ]);
+    await ledger.pushInbox("r1", { text: "also the numbers", userId: "slack:U2" }); // steered after the last record
     const outcome = await run();
     expect(outcome.closed).toEqual([]);
     expect(outcome.resumable).toHaveLength(1);
@@ -107,6 +108,7 @@ describe("reclaimRuns", () => {
     expect(r.lastStep).toMatchObject({ step: 1, inFlight: [{ callId: "c1", tool: "bash" }] });
     expect(r.transcript).toEqual({ complete: true, turns: 2, messages: [user("go"), assistant("looking")] });
     expect(r.events.map((e) => e.type)).toEqual(["input", "run_meta", "tool_call"]);
+    expect(r.inbox).toEqual([{ seq: 1, message: { text: "also the numbers", userId: "slack:U2" } }]); // the resume folds it in
     expect(ledger.live.has("r1")).toBe(true);
     expect(ledger.steps.get("r1")).toHaveLength(2);
     expect(ledger.finished.has("r1")).toBe(false);
@@ -210,7 +212,16 @@ describe("reclaimRuns", () => {
     await ledger.claim(claim("dead", "slack:C1:2.0"));
     const outcome = await run();
     expect(outcome.closed.map((c) => c.runId)).toEqual(["dead"]);
-    expect(outcome.liveElsewhere).toEqual([{ runId: "alive", ownerGen: "g1", card: { channel: "C1", ts: "alive.1" } }]);
+    expect(outcome.liveElsewhere).toEqual([
+      expect.objectContaining({
+        runId: "alive",
+        ownerGen: "g1",
+        card: { channel: "C1", ts: "alive.1" },
+        threadKey: "slack:C1:1.0",
+        startedAt: expect.any(Number),
+        meta: { agent: "review" },
+      }),
+    ]);
     expect(ledger.live.get("alive")!.ownerGen).toBe("g1");
   });
 

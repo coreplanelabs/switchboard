@@ -43,6 +43,7 @@ import { buildRunLedger } from "./core/runLedgerWorker.js";
 import { createLedgerWriteThrough, mintGeneration } from "./core/runLedger/writeThrough.js";
 import { reclaimRuns, startReclaimSweep, closeReclaimed, type ReclaimOutcome } from "./core/boot.js";
 import { launchResumes } from "./core/resumeLaunch.js";
+import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
 import { getAgent } from "./agents/registry.js";
 import { systemClock } from "./core/trace/index.js";
@@ -246,6 +247,9 @@ async function main() {
         ),
       );
   }
+  // The threads whose live run is on the ledger but not here (thread-admission
+  // item 5): fed by every reclaim outcome below, read at admission.
+  const threadsElsewhere = new ThreadsElsewhere();
   const deps: CoreDeps = {
     config,
     providers,
@@ -254,6 +258,7 @@ async function main() {
     mcpRegistryOn: mcpWiring.service !== undefined,
     memory,
     runHistoryWriter,
+    threadsElsewhere,
     ...(runLedger ? { runLedger } : {}),
   };
   // --- command registry (#157 U6/U7/U9): the ONE core catalogue (`buildCoreCommands`,
@@ -649,6 +654,11 @@ async function main() {
     // Every outcome comes from a full listing, so an empty `liveElsewhere` is
     // the truth (no other generation holds a row) and replaces the set.
     markForeignLiveCards(outcome.liveElsewhere.flatMap((r) => (r.card ? [r.card] : [])));
+    // …and the threads a follow-up must be steered into rather than run afresh:
+    // rows other generations hold, plus the ones just reclaimed and not yet
+    // launched (the launcher runs after this, and in-process admission takes
+    // over the moment a resume is dispatched).
+    threadsElsewhere.replace([...outcome.liveElsewhere, ...outcome.resumable.map((r) => r.row)]);
     const closedCards = await closeReclaimedCards(
       app.client,
       outcome.closed.map((c) => ({ status: c.status, agent: c.agent, card: c.card })),

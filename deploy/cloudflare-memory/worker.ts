@@ -1096,6 +1096,18 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
+  /** The inbox past a seq (run-history item 40): the resume's re-read at adopt. */
+  async readInbox(runId: string, afterSeq: number): Promise<{ seq: number; message: Record<string, unknown> }[]> {
+    return this.sql
+      .exec<{ seq: number; json: string }>(
+        `SELECT seq, json FROM run_inbox WHERE run_id = ? AND seq > ? ORDER BY seq ASC`,
+        runId,
+        afterSeq,
+      )
+      .toArray()
+      .map((r) => ({ seq: r.seq, message: JSON.parse(r.json) as Record<string, unknown> }));
+  }
+
   async requestStop(runId: string, mode: StopMode, now: number): Promise<{ ok: boolean; ownerLive?: boolean }> {
     let out: { ok: boolean; ownerLive?: boolean } = { ok: false };
     this.ctx.storage.transactionSync(() => {
@@ -2095,6 +2107,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/step",
   "/runs/state",
   "/runs/inbox",
+  "/runs/inbox/read",
   "/runs/stop",
   "/runs/handoff",
   "/runs/finishing",
@@ -2293,6 +2306,13 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     return json(await stub.pushInbox(runId.value, b.message as Record<string, unknown>));
   }
   if (pathname === "/runs/live-events") return json({ events: await stub.liveEvents(runId.value) });
+  if (pathname === "/runs/inbox/read") {
+    const after = b.afterSeq === undefined ? 0 : b.afterSeq;
+    if (typeof after !== "number" || !Number.isInteger(after) || after < 0) {
+      return json({ error: "afterSeq must be a non-negative integer" }, 400);
+    }
+    return json({ items: await stub.readInbox(runId.value, after) });
+  }
   if (pathname === "/runs/stop") {
     if (b.mode !== "soft" && b.mode !== "hard") return json({ error: "mode must be soft or hard" }, 400);
     return json(await stub.requestStop(runId.value, b.mode, now));

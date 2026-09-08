@@ -24,6 +24,7 @@ import {
   LEASE_MS,
   type AppendableEvent,
   type CardHandle,
+  type InboxItem,
   type LivePhase,
   type LiveRunRow,
   type StepRecord,
@@ -48,6 +49,11 @@ export interface LiveElsewhere {
   runId: string;
   ownerGen: string;
   card: CardHandle | null;
+  /** For the admission map (thread-admission item 5): a follow-up on this
+   *  thread is steered into the run's durable inbox, not run afresh. */
+  threadKey: string;
+  startedAt: number;
+  meta: { agent?: string };
 }
 
 /** A reclaimed run the resume launcher continues (item 38): its row (ours
@@ -59,6 +65,9 @@ export interface ResumableRun {
   lastStep: StepRecord;
   transcript: { complete: true; turns: number; messages: ChatMessage[] };
   events: AppendableEvent[];
+  /** Follow-ups steered into the run after its last step record (item 40):
+   *  the resume folds them in at its first boundary. */
+  inbox: InboxItem[];
 }
 
 export interface ReclaimOutcome {
@@ -138,6 +147,7 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
             lastStep: run.lastStep,
             transcript: verdict.transcript,
             events,
+            inbox: run.inbox,
           });
           log(
             `[reclaim] ${row.runId} ${row.threadKey} resumable (from ${run.reclaimedFrom}; ${verdict.why}; ${events.length} event(s)) — handed to the launcher`,
@@ -176,7 +186,14 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
   try {
     for (const row of await ledger.listLive()) {
       if (row.ownerGen !== gen)
-        outcome.liveElsewhere.push({ runId: row.runId, ownerGen: row.ownerGen, card: row.card });
+        outcome.liveElsewhere.push({
+          runId: row.runId,
+          ownerGen: row.ownerGen,
+          card: row.card,
+          threadKey: row.threadKey,
+          startedAt: row.startedAt,
+          meta: { ...(row.meta.agent !== undefined ? { agent: row.meta.agent } : {}) },
+        });
     }
   } catch (err) {
     warn(`[reclaim] listing live runs failed: ${describe(err)} — the card sweep runs without the ledger's guard`);

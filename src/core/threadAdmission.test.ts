@@ -83,6 +83,20 @@ describe("FollowUpInbox", () => {
   });
 });
 
+describe("FollowUpInbox — one durable follow-up folds in once (thread-admission item 5)", () => {
+  it("a second push with a ledger seq the inbox has seen — pending or already drained — is ignored; items without a seq are never deduped", () => {
+    const inbox = new FollowUpInbox();
+    inbox.push(input("a", { at: 1, ledgerSeq: 1 }));
+    inbox.push(input("a again", { at: 2, ledgerSeq: 1 })); // the same durable item, from the other path
+    inbox.push(input("b", { at: 3 }));
+    inbox.push(input("b", { at: 4 }));
+    expect(inbox.drain().map((i) => i.text)).toEqual(["a", "b", "b"]);
+    inbox.push(input("a once more", { at: 5, ledgerSeq: 1 })); // drained already: still ignored
+    inbox.push(input("c", { at: 6, ledgerSeq: 2 }));
+    expect(inbox.drain().map((i) => i.text)).toEqual(["c"]);
+  });
+});
+
 describe("decideFollowUp", () => {
   const live = (agent: string): LiveThread => ({ agent, inbox: new FollowUpInbox(), startedAt: 0 });
 

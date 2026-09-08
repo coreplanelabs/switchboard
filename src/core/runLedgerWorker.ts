@@ -50,6 +50,7 @@ import {
   type TranscriptAttachment,
   type TranscriptRow,
   type TranscriptTurn,
+  type InboxItem,
 } from "./runLedger/types.js";
 
 export interface WorkerRunLedgerOptions {
@@ -221,6 +222,12 @@ export class WorkerRunLedger implements RunLedger {
     this.checkIds(runId);
     const r = await this.post("/runs/inbox", { storeKey: this.opts.storeKey, runId, message });
     return { ok: r.data.ok === true, ...(typeof r.data.seq === "number" ? { seq: r.data.seq } : {}) };
+  }
+
+  async readInbox(runId: string, afterSeq: number): Promise<InboxItem[]> {
+    this.checkIds(runId);
+    const r = await this.post("/runs/inbox/read", { storeKey: this.opts.storeKey, runId, afterSeq });
+    return Array.isArray(r.data.items) ? (r.data.items as InboxItem[]) : [];
   }
 
   async requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }> {
