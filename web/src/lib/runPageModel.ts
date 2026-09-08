@@ -205,7 +205,7 @@ export interface RunPageModel {
     context: ContextTurnVm[];
     log: LogItem[];
     answer: AnswerVm | null;
-    /** True until the first painted change of any kind (#209). */
+    /** True until the first painted change of any kind. */
     placeholder: boolean;
     allOpen: boolean;
     stopMode: "soft" | "hard" | null;
@@ -473,8 +473,8 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
       case "input": {
         const vm: RequestVm = { text: change.text, at: change.at, ...(change.source ? { source: change.source } : {}) };
         // The first input is the request; a later one is a steered follow-up
-        // and must never replace it (live 2026-09-05: the header showed the
-        // follow-up as THE request). It takes its place in the timeline —
+        // and must never replace it, or the header would show the follow-up
+        // as THE request. It takes its place in the timeline —
         // the runner emits it at the step boundary that read it.
         if (state.request) state.log.push({ kind: "followup", key: key("followup"), input: vm });
         else state.request = vm;

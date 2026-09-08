@@ -23,7 +23,7 @@ const input = {
   type: "input",
   text: "fix the build",
   at: 1000,
-  source: { channel: "dev", user: "justin", url: "https://acme.slack.com/x" },
+  source: { channel: "dev", user: "alice", url: "https://acme.slack.com/x" },
 };
 const assistant = (text: string, at: number) => ({ type: "assistant", text, at });
 /** A model turn's timing record (features/tracing.md): the `model.turn` span end the runner emits. */
@@ -69,7 +69,7 @@ function step(m: ReturnType<typeof model>, i = 0): StepVm {
 }
 
 describe("request / context / answer / placeholder", () => {
-  it("paints the request with its source, clears the placeholder on the FIRST change of any kind (#209)", () => {
+  it("paints the request with its source, clears the placeholder on the FIRST change of any kind", () => {
     const m = model();
     expect(m.state.placeholder).toBe(true);
     m.handle(input);

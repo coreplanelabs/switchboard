@@ -8,7 +8,7 @@ const base: IndexRow = {
   id: "run-1",
   label: 'coding · acme/web · "fix the build"',
   channelId: "slack:C1",
-  userId: "slack:U1",
+  userId: "slack:UACME1",
   threadKey: "slack:C1:1.0",
   finished: false,
   startedAt: 1_000_000,
@@ -73,8 +73,8 @@ describe("RunRow", () => {
   });
 
   it("a chat scope stays a scope (no repo link); a hostile repo-shaped label never links", () => {
-    const chat = mountRow(row({ label: 'general · #dev · justin · "hi"' }));
-    expect(chat.find(".scope").text()).toBe("#dev · justin");
+    const chat = mountRow(row({ label: 'general · #dev · alice · "hi"' }));
+    expect(chat.find(".scope").text()).toBe("#dev · alice");
     expect(chat.find("a.repo").exists()).toBe(false);
     const hostile = mountRow(row({ label: 'coding · javascript:alert(1)//x · "y"' }));
     expect(hostile.find("a.repo").exists()).toBe(false);
@@ -116,7 +116,7 @@ describe("RunRow", () => {
   });
 
   it("the source mark is the ↗ link for a run with a thread, the surface glyph otherwise; a javascript: url never links", () => {
-    const linked = mountRow(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "justin" }));
+    const linked = mountRow(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "alice" }));
     const a = linked.find("a.source");
     expect(a.text()).toBe("↗");
     expect(a.attributes("href")).toBe("https://acme.slack.com/archives/C1/p1");
@@ -125,7 +125,7 @@ describe("RunRow", () => {
     const plain = mountRow(row());
     expect(plain.find("span.source").text()).toBe("⁙");
     expect(plain.find("span.source").attributes("aria-label")).toBe("source: Slack");
-    const cli = mountRow(row({ channelId: "cli:local", userId: "cli:justin" }));
+    const cli = mountRow(row({ channelId: "cli:local", userId: "cli:alice" }));
     expect(cli.find("span.source").text()).toBe(">_");
     const hostile = mountRow(row({ sourceUrl: "javascript:alert(1)" }));
     expect(hostile.find("a.source").exists()).toBe(false);

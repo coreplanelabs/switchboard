@@ -355,7 +355,7 @@
   "features/live-view.md": {
     "names": 16,
     "trackers": 30,
-    "planIds": 13,
+    "planIds": 12,
     "dates": 3
   },
   "features/llm-output.md": {
@@ -1653,66 +1653,5 @@
   "src/tools/workspace.ts": {
     "trackers": 3,
     "planIds": 3
-  },
-  "web/src/components/runs/RunRow.test.ts": {
-    "planIds": 1,
-    "names": 4
-  },
-  "web/src/lib/durationTone.test.ts": {
-    "dates": 1
-  },
-  "web/src/lib/indexRow.test.ts": {
-    "planIds": 5,
-    "trackers": 2,
-    "names": 4
-  },
-  "web/src/lib/indexRow.ts": {
-    "trackers": 1,
-    "planIds": 1
-  },
-  "web/src/lib/runPageModel.test.ts": {
-    "names": 1,
-    "trackers": 1
-  },
-  "web/src/lib/runPageModel.ts": {
-    "trackers": 1,
-    "dates": 1
-  },
-  "web/src/modules/pr-review/README.md": {
-    "names": 1
-  },
-  "web/src/modules/pr-review/types.ts": {
-    "names": 1
-  },
-  "web/src/pages/CostsPage.vue": {
-    "dates": 1
-  },
-  "web/src/pages/RunPage.vue": {
-    "trackers": 1
-  },
-  "web/src/pages/RunsIndexPage.vue": {
-    "planIds": 2
-  },
-  "web/src/pages/ScheduledPage.vue": {
-    "trackers": 1
-  },
-  "web/src/pages/costs.test.ts": {
-    "dates": 7
-  },
-  "web/src/pages/residents.test.ts": {
-    "ids": 5,
-    "trackers": 2,
-    "names": 6,
-    "dates": 1
-  },
-  "web/src/pages/runPage.test.ts": {
-    "names": 3,
-    "trackers": 1
-  },
-  "web/src/pages/runsIndex.test.ts": {
-    "planIds": 1
-  },
-  "web/src/pages/scheduled.test.ts": {
-    "ids": 2
   }
 }

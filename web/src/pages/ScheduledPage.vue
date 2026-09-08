@@ -13,7 +13,7 @@ import {
   OUTCOME_LABEL,
 } from "@core/channels/scheduledPanel.js";
 
-// The Scheduled tab (#244): the registry's schedules with each one's last
+// The Scheduled tab: the registry's schedules with each one's last
 // firing — a snapshot per load, no feed. The rows arrive prebuilt from the
 // server (buildScheduledRows), including token'd run hrefs for live firings.
 //

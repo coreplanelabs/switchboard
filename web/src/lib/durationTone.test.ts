@@ -25,7 +25,7 @@ describe("durationTone", () => {
     expect(durationTone(10_000, "turn").level).toBe(0);
   });
 
-  it("the three commands that ate the 2026-09-07 run read hot: 3m 34s and 2m 38s are level 2+, 15 min is level 3", () => {
+  it("three long tool commands from one run read hot: 3m 34s and 2m 38s are level 2+, 15 min is level 3", () => {
     expect(durationTone(214_375, "tool").level).toBeGreaterThanOrEqual(2);
     expect(durationTone(158_472, "tool").level).toBeGreaterThanOrEqual(2);
     expect(durationTone(15 * 60_000, "tool").level).toBe(3);

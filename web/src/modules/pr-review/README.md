@@ -8,7 +8,7 @@ producer such as meat.dev), with links back to the PR. Feature contract:
 ## Boundary — deliberately liftable
 
 This folder is a self-contained module intended to be abstracted out and
-shared (e.g. into nominal) later:
+shared into another product later:
 
 - **Props-only.** `PrReviewPanel` takes one `PrReviewData` object (see
   `types.ts`). Nothing here reads seeds, streams, stores, or routes.

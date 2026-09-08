@@ -31,7 +31,7 @@ const base: IndexRow = {
   id: "run-1",
   label: 'coding · acme/web · "fix the build"',
   channelId: "slack:C1",
-  userId: "slack:U1",
+  userId: "slack:UACME1",
   threadKey: "slack:C1:1.0",
   finished: false,
   startedAt: 1_000_000,
@@ -47,7 +47,7 @@ describe("status vocabulary", () => {
     expect(statusLabel("failed")).toBe("failed");
     expect(statusLabel("stopped_hard")).toBe("killed");
     expect(statusLabel("stopped_soft")).toBe("stopped early");
-    expect(statusLabel("interrupted")).toBe("interrupted"); // #375: already a display word, passes through
+    expect(statusLabel("interrupted")).toBe("interrupted"); // already a display word, passes through
   });
 
   it("statusWord: live, else the status word, else finished", () => {
@@ -89,7 +89,7 @@ describe("status vocabulary", () => {
     expect(statusDot(row())).toBe("green");
     expect(statusDot(finished("failed"))).toBe("red");
     expect(statusDot(finished("stopped_hard"))).toBe("red");
-    expect(statusDot(finished("interrupted"))).toBe("red"); // #375: cut down before finish
+    expect(statusDot(finished("interrupted"))).toBe("red"); // cut down before finish
     expect(statusDot(finished("stopped_soft"))).toBe("amber");
     expect(statusDot(finished("completed"))).toBe("grey");
   });
@@ -102,7 +102,7 @@ describe("status vocabulary", () => {
 });
 
 describe("hrefs", () => {
-  it("a live row links with its capability token; a finished row never does (R10), even while the registry still holds one", () => {
+  it("a live row links with its capability token; a finished row never does, even while the registry still holds one", () => {
     expect(runHref(row({ token: "tok-1" }))).toBe("/runs/run-1?t=tok-1");
     expect(runHref(row({ token: "tok-1", finished: true }))).toBe("/runs/run-1");
     expect(runHref(row())).toBe("/runs/run-1");
@@ -171,10 +171,10 @@ describe("tooltips", () => {
   });
 
   it("the source tip: via <surface> · <resolved identity>, falling back to the id suffix", () => {
-    expect(sourceTip(row({ userName: "justin" }))).toBe("via Slack · justin");
-    expect(sourceTip(row())).toBe("via Slack · U1");
-    expect(sourceTip(row({ channelId: "cli:local", userId: "cli:justin" }))).toBe("via CLI · justin");
-    expect(sourceTip(row({ channelId: "weird" }))).toBe("via unknown · U1");
+    expect(sourceTip(row({ userName: "alice" }))).toBe("via Slack · alice");
+    expect(sourceTip(row())).toBe("via Slack · UACME1");
+    expect(sourceTip(row({ channelId: "cli:local", userId: "cli:alice" }))).toBe("via CLI · alice");
+    expect(sourceTip(row({ channelId: "weird" }))).toBe("via unknown · UACME1");
   });
 });
 
@@ -188,8 +188,8 @@ describe("surface + repo + sourceUrl", () => {
 
   it("repo comes from RunView.repo or a repo-shaped label scope; hostile shapes never qualify", () => {
     expect(repoOf(row(), "acme/web")).toBe("acme/web");
-    expect(repoOf(row({ repo: "acme/web" }), "#dev · justin")).toBe("acme/web");
-    expect(repoOf(row(), "#dev · justin")).toBe("");
+    expect(repoOf(row({ repo: "acme/web" }), "#dev · alice")).toBe("acme/web");
+    expect(repoOf(row(), "#dev · alice")).toBe("");
     expect(repoOf(row(), "javascript:alert(1)//x")).toBe("");
   });
 
@@ -202,7 +202,7 @@ describe("surface + repo + sourceUrl", () => {
   });
 });
 
-describe("feed reconciliation (R11)", () => {
+describe("feed reconciliation", () => {
   it("default view: drops a finished upsert (the row leaves as the run ends), honors every removed", () => {
     expect(feedAction({ type: "upsert", run: finished("completed") }, false, false)).toEqual({
       op: "remove",
