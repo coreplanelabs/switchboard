@@ -1,7 +1,12 @@
 import { extname } from "node:path";
 import { App, SocketModeReceiver, webApi } from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
-import { createStatusBudget, STATUS_EDITS_PER_MINUTE, type StatusBudget } from "../core/statusBudget.js";
+import {
+  createStatusBudget,
+  STATUS_EDITS_PER_MINUTE,
+  TERMINAL_RESENDS,
+  type StatusBudget,
+} from "../core/statusBudget.js";
 import { startRequestRoot, withProcessRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { Span } from "../core/trace/types.js";
@@ -64,9 +69,6 @@ function retryAfterSeconds(err: unknown): number | undefined {
   const e = err as { code?: string; retryAfter?: unknown } | undefined;
   return e?.code === webApi.ErrorCode.RateLimitedError && typeof e.retryAfter === "number" ? e.retryAfter : undefined;
 }
-
-/** How many times a rate-limited terminal frame is re-sent (each after Slack's Retry-After) before it is given up. */
-const TERMINAL_RESENDS = 10;
 
 /** An error's one-line name for a log: the message of an `Error`, the `code` of a
  *  Slack Web API rejection (a plain object, e.g. `slack_webapi_rate_limited_error`), else its JSON. */
