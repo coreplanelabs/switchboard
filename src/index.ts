@@ -268,7 +268,7 @@ async function main() {
   // above (and the same tracker the scheduled trigger uses), `repo.list` on the
   // resident admin client the config names. ---
   // One RunsService for every surface: the command registry (HTTP/MCP/chat) and the /runs pages.
-  const runsService = createRunsService({ registry: defaultRunRegistry, store: runStore });
+  const runsService = createRunsService({ registry: defaultRunRegistry, store: runStore, ledger: ledgerClient });
   // Scheduled firings (#244) are recorded on the state Worker's ScheduleDO;
   // `schedule list` and the /runs "Scheduled" panel read the same store.
   const scheduleStore = buildScheduleStore(config.config.schedules, process.env, (m) =>

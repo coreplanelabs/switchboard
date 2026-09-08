@@ -11,6 +11,7 @@ import type { RunRecord } from "./runRecord.js";
 import { RunRegistry, type RunRegistryOptions } from "./runRegistry.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
 import { createRunsService, type RunActor, type RunsService } from "./runsService.js";
+import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 
 const DAY = 86_400_000;
 const NOW = 1_700_000_000_000;
@@ -594,6 +595,199 @@ describe("RunsService.listRuns — read merge", () => {
     expect(everything.runs.find((r) => r.id === "pub")?.channelVisibility).toBe("public");
     expect(everything.runs.find((r) => r.id === liveOps.id)?.channelVisibility).toBe("machine");
     expect(everything.runs.find((r) => r.id === unstamped.id)).not.toHaveProperty("channelVisibility");
+  });
+});
+
+// One durable registry across container generations (features/run-history.md
+// item 41; #556 criterion 3): a run live on the ledger under another generation
+// — or reclaimed here and not yet launched — lists, reads, pages, diagnoses and
+// stops through the same service as a run in this process's registry.
+describe("RunsService with the run ledger — one registry across generations (run-history item 41)", () => {
+  function ledgerSetup() {
+    const base = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const warnings: string[] = [];
+    const svc = createRunsService({ registry: base.reg, store: base.store, ledger, warn: (m) => warnings.push(m) });
+    return { ...base, svc, ledger, warnings };
+  }
+  async function farRun(ledger: InMemoryRunLedger, id = "far-1", over: { userId?: string; agent?: string } = {}) {
+    await ledger.claim({
+      runId: id,
+      threadKey: `slack:C9:${id}`,
+      gen: "g-OTHER",
+      leaseMs: 30_000,
+      startedAt: NOW - 5_000,
+      meta: {
+        channelId: "slack:C9",
+        userId: over.userId ?? "slack:U9",
+        threadKey: `slack:C9:${id}`,
+        agent: over.agent ?? "coding",
+        model: "anthropic/claude",
+        channelVisibility: "public",
+        repo: "acme/api",
+        userName: "nine",
+        sourceUrl: "https://s/9",
+      },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    await ledger.append(id, "g-OTHER", [
+      { type: "input", text: "do the far thing", at: NOW - 5_000, seq: 1 },
+      { type: "tool_call", tool: "bash", summary: "$ make", at: NOW - 4_000, seq: 2 },
+    ]);
+  }
+
+  it("lists a run live on the ledger under another generation as a live row — its agent, sender, repo, event count and activity from the ledger, its owner generation named — under `all` and `active`, never under `finished`; its store tombstone never surfaces", async () => {
+    const { svc, store, ledger } = ledgerSetup();
+    await farRun(ledger);
+    // The start tombstone (#375) a killed run would leave: terminal in the store while the ledger says live.
+    await store!.put(
+      record("far-1", NOW - 5_000, { status: "interrupted", startedAt: NOW - 5_000, finishedAt: NOW - 5_000 }),
+    );
+    const all = await svc.listRuns({ visibleTo: ALL, status: "all" });
+    expect(all.runs.map((r) => r.id)).toEqual(["far-1"]);
+    expect(all.runs[0]).toMatchObject({
+      finished: false,
+      agent: "coding",
+      model: "anthropic/claude",
+      channelId: "slack:C9",
+      userId: "slack:U9",
+      threadKey: "slack:C9:far-1",
+      channelVisibility: "public",
+      repo: "acme/api",
+      userName: "nine",
+      sourceUrl: "https://s/9",
+      startedAt: NOW - 5_000,
+      eventCount: 2,
+      ownerGen: "g-OTHER",
+    });
+    expect(all.runs[0].activity).toBeDefined();
+    expect(all.runs[0].finishedAt).toBeUndefined();
+    expect(all.runs[0].status).toBeUndefined(); // not the tombstone's `interrupted`
+    expectNoToken(all);
+    const active = await svc.listRuns({ visibleTo: ALL, status: "active" });
+    expect(active.runs.map((r) => r.id)).toEqual(["far-1"]);
+    const finished = await svc.listRuns({ visibleTo: ALL, status: "finished" });
+    expect(finished.runs).toEqual([]); // live on the ledger: its tombstone is not a finished run
+  });
+
+  it("a run in this process's registry is listed once even when the ledger holds its row too (the registry wins); the ledger rows sort with the live ones, newest started first", async () => {
+    const { svc, reg, ledger } = ledgerSetup();
+    const mine = reg.create("coding · mine", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:U1",
+      threadKey: "slack:C1:mine",
+    });
+    await ledger.claim({
+      runId: mine.id,
+      threadKey: "slack:C1:mine",
+      gen: "g-ME",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta: { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:mine", agent: "coding" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    await farRun(ledger);
+    const res = await svc.listRuns({ visibleTo: ALL, status: "active" });
+    expect(res.runs.map((r) => r.id)).toEqual([mine.id, "far-1"]);
+    expect(res.runs[0].ownerGen).toBeUndefined(); // ours: the registry row, not the ledger's
+  });
+
+  it("the viewer's predicate applies to ledger rows as to any row", async () => {
+    const { svc, ledger } = ledgerSetup();
+    await farRun(ledger, "far-1", { userId: "slack:U9" });
+    await farRun(ledger, "far-2", { userId: "slack:U8" });
+    const res = await svc.listRuns({ visibleTo: { kind: "user-is", userId: "slack:U8" }, status: "active" });
+    expect(res.runs.map((r) => r.id)).toEqual(["far-2"]);
+    expect((await svc.listRuns({ visibleTo: { kind: "none" }, status: "active" })).runs).toEqual([]);
+  });
+
+  it("getRun, getRunEvents and getRunFriction answer for a ledger row: the view (with the events on a messages read), a seq page, a live diagnosis", async () => {
+    const { svc, ledger } = ledgerSetup();
+    await farRun(ledger);
+    const view = await svc.getRun("far-1");
+    expect(view.ok && view.value).toMatchObject({ id: "far-1", finished: false, ownerGen: "g-OTHER", eventCount: 2 });
+    expect(view.ok && view.value.events).toBeUndefined();
+    const full = await svc.getRun("far-1", { include: "messages" });
+    expect(full.ok && full.value.events?.map((e) => e.type)).toEqual(["input", "tool_call"]);
+    const page = await svc.getRunEvents("far-1", { afterSeq: 1 });
+    expect(page.ok && page.value.events.map((e) => e.seq)).toEqual([2]);
+    const friction = await svc.getRunFriction("far-1");
+    expect(friction.ok && friction.value).toMatchObject({ id: "far-1", finished: false });
+    expect(await svc.getRun("far-nope")).toEqual({ ok: false, error: "not_found" });
+    expectNoToken([view, full, page, friction]);
+  });
+
+  it("stopRun on a ledger row asks the ledger — the owning generation reads the stop on its next heartbeat — and answers stopping; an unknown id stays not_found", async () => {
+    const { svc, ledger } = ledgerSetup();
+    await farRun(ledger);
+    expect(await svc.stopRun("far-1", "soft", actor)).toEqual({
+      ok: true,
+      value: { id: "far-1", mode: "soft", state: "stopping" },
+    });
+    expect(ledger.live.get("far-1")!.stop).toBe("soft");
+    expect(await svc.stopRun("far-nope", "soft", actor)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("one ledger listing serves every read within the TTL — a page view's run, events and friction reads cost one listLive; the events of several rows are read in parallel; a failed listing is not kept", async () => {
+    let clock = NOW;
+    const base = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const listLive = vi.spyOn(ledger, "listLive");
+    const svc = createRunsService({ registry: base.reg, store: base.store, ledger, clock: () => clock });
+    await farRun(ledger, "far-1");
+    await farRun(ledger, "far-2");
+    await svc.getRun("far-1");
+    await svc.getRunEvents("far-1", {});
+    await svc.getRunFriction("far-1");
+    await svc.listRuns({ visibleTo: ALL, status: "active" });
+    expect(listLive).toHaveBeenCalledTimes(1);
+    clock += 2_001; // past the TTL: listed again
+    expect((await svc.listRuns({ visibleTo: ALL, status: "active" })).runs).toHaveLength(2);
+    expect(listLive).toHaveBeenCalledTimes(2);
+    // A listing that failed is not kept for the TTL: the next read asks again.
+    clock += 2_001;
+    listLive.mockRejectedValueOnce(new Error("HTTP 503"));
+    expect(await svc.getRun("far-1")).toEqual({ ok: false, error: "not_found" });
+    expect((await svc.getRun("far-1")).ok).toBe(true);
+    expect(listLive).toHaveBeenCalledTimes(4);
+  });
+
+  it("a ledger that cannot be read degrades to the registry (and the store): one warning, never a failed list", async () => {
+    const { svc, reg, warnings, ledger } = ledgerSetup();
+    reg.create("coding · mine");
+    ledger.listLive = async () => {
+      throw new Error("HTTP 503");
+    };
+    const res = await svc.listRuns({ visibleTo: ALL, status: "active" });
+    expect(res.runs).toHaveLength(1);
+    expect(warnings).toEqual([expect.stringContaining("HTTP 503")]);
+    expect(await svc.getRun("far-1")).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("liveElsewhere is the ledger's live rows that are not in the registry, under the viewer's predicate — what the default index adds to the registry", async () => {
+    const { svc, reg, ledger } = ledgerSetup();
+    const mine = reg.create("mine");
+    await ledger.claim({
+      runId: mine.id,
+      threadKey: "slack:C1:mine",
+      gen: "g-ME",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta: { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:mine" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    await farRun(ledger);
+    expect((await svc.liveElsewhere(ALL)).map((r) => r.id)).toEqual(["far-1"]);
+    expect(await svc.liveElsewhere({ kind: "none" })).toEqual([]);
+    const plain = createRunsService({ registry: reg, store: null });
+    expect(await plain.liveElsewhere(ALL)).toEqual([]); // no ledger: nothing elsewhere
   });
 });
 

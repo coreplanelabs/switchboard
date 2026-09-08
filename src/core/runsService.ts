@@ -23,6 +23,14 @@ import type {
   Subscribed,
 } from "./runRegistry.js";
 import type { RunStore } from "./runStore.js";
+import type { RunLedger } from "./runLedger/ledger.js";
+import type { LiveRunRow } from "./runLedger/types.js";
+import { activityOfEvents } from "./runRegistry.js";
+
+/** How long one ledger listing serves the service's reads (item 41): a page
+ *  view is a run read, an events read and a friction read within a second, and
+ *  the ledger's live rows change on the order of a run's lifetime. */
+export const LEDGER_LIST_TTL_MS = 2_000;
 
 // Run history (#157, U5): the ONE service behind every `runs.*` command — list,
 // get, events, friction, stop — and the live view's authorization. It owns the
@@ -102,6 +110,10 @@ export interface RunView {
   userName?: string;
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
+  /** The generation driving this run when it is not this process (run-history
+   *  item 41): a row read from the run ledger — live under another container,
+   *  or reclaimed here and not yet launched. Absent on this process's rows. */
+  ownerGen?: string;
 }
 
 /** `getRun`'s shape: the view plus, only with `include: "messages"`, the events. */
@@ -192,6 +204,11 @@ export interface LiveRunAccess {
 
 export interface RunsService {
   listRuns(opts: ListRunsOptions): Promise<ListRunsResult>;
+  /** The ledger's live rows this process does not hold, under the viewer's
+   *  predicate (run-history item 41) — what the default index adds to the
+   *  registry's rows. Empty without a ledger; a ledger that cannot be read is a
+   *  warning and empty. */
+  liveElsewhere(visibleTo: Predicate): Promise<RunView[]>;
   getRun(id: string, opts?: { include?: "messages" }): Promise<Result<RunRecordView>>;
   getRunEvents(id: string, opts: { afterSeq?: number; limit?: number }): Promise<Result<RunEventsPageView>>;
   getRunFriction(id: string): Promise<Result<RunFrictionView>>;
@@ -218,6 +235,36 @@ export interface RunsServiceDeps {
   warn?: (message: string) => void;
   /** The clock a live run's friction window ends at; `systemClock` by default. */
   clock?: () => number;
+  /** The run ledger (run-history item 41): its live rows that are not in this
+   *  process's registry list, read, page, diagnose and stop like any run. Null or
+   *  absent when the ledger is off. */
+  ledger?: Pick<RunLedger, "listLive" | "readEvents" | "requestStop"> | null;
+}
+
+/** A live row of the run ledger as a view (run-history item 41): the row's meta
+ *  and start, the events the ledger holds for it, the generation driving it.
+ *  Never a token — the page token is the other generation's. */
+function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
+  const m = row.meta;
+  const activity = activityOfEvents(events);
+  return {
+    id: row.runId,
+    ...(m.agent !== undefined ? { agent: m.agent } : {}),
+    ...(m.model !== undefined ? { model: m.model } : {}),
+    channelId: m.channelId,
+    userId: m.userId,
+    threadKey: m.threadKey,
+    ...(m.channelVisibility !== undefined ? { channelVisibility: m.channelVisibility } : {}),
+    ...(m.repo !== undefined ? { repo: m.repo } : {}),
+    startedAt: row.startedAt,
+    finished: false,
+    eventCount: events.length,
+    ...(activity !== undefined ? { activity } : {}),
+    ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
+    ...(m.userName !== undefined ? { userName: m.userName } : {}),
+    ...(row.stop ? { stop: { mode: row.stop, state: "stopping" as const } } : {}),
+    ownerGen: row.ownerGen,
+  };
 }
 
 /** A live registry row without its token. A finished registry row carries the
@@ -294,9 +341,68 @@ function pageBounded(events: readonly RunEvent[], limit: number, moreAfter: bool
 
 export function createRunsService(deps: RunsServiceDeps): RunsService {
   const { registry, store } = deps;
+  const ledger = deps.ledger ?? null;
   const analyze = deps.analyze ?? ((events, opts) => analyzeRunFriction(events, opts));
   const clock = deps.clock ?? systemClock;
   const warn = deps.warn ?? ((m: string) => console.warn(m));
+  const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+  /** The ledger's live rows, one listing per `LEDGER_LIST_TTL_MS` (item 41):
+   *  a page view's three reads share it, and a history read of a finished run
+   *  costs at most one ledger call. Concurrent callers share the in-flight
+   *  promise; a failed listing is not kept. Null when the ledger is off. */
+  let listing: { at: number; rows: Promise<LiveRunRow[]> } | undefined;
+  const liveRows = (): Promise<LiveRunRow[]> | null => {
+    if (!ledger) return null;
+    const t = clock();
+    if (listing && t - listing.at < LEDGER_LIST_TTL_MS) return listing.rows;
+    const rows = ledger.listLive();
+    listing = { at: t, rows };
+    rows.catch(() => {
+      if (listing?.rows === rows) listing = undefined;
+    });
+    return rows;
+  };
+  /** The ledger's live rows this process does not hold, as views (item 41). A
+   *  ledger that cannot be read is one warning and no rows — the registry and
+   *  the store still answer. The events are read in parallel, one call per row. */
+  const ledgerLive = async (): Promise<RunView[]> => {
+    const pending = liveRows();
+    if (!pending) return [];
+    let rows: LiveRunRow[];
+    try {
+      rows = await pending;
+    } catch (err) {
+      warn(`[runs] run ledger list failed — showing this process's runs only: ${describe(err)}`);
+      return [];
+    }
+    const foreign = rows.filter((row) => !registry.getById(row.runId)); // ours: the registry row is the truth
+    return Promise.all(
+      foreign.map(async (row) => {
+        let events: RunEvent[] = [];
+        try {
+          events = await ledger!.readEvents(row.runId);
+        } catch (err) {
+          warn(`[runs] run ledger events read failed for ${row.runId}: ${describe(err)}`);
+        }
+        return ledgerView(row, events);
+      }),
+    );
+  };
+  /** One ledger row by id, with its events; null when the ledger is off, the id
+   *  is malformed, the row is not live, or the ledger cannot be read (a warning). */
+  const ledgerRow = async (id: string): Promise<{ row: LiveRunRow; events: RunEvent[] } | null> => {
+    const pending = RUN_ID_PATTERN.test(id) ? liveRows() : null;
+    if (!pending) return null;
+    try {
+      const row = (await pending).find((r) => r.runId === id);
+      if (!row) return null;
+      return { row, events: await ledger!.readEvents(id) };
+    } catch (err) {
+      warn(`[runs] run ledger read failed for ${id}: ${describe(err)}`);
+      return null;
+    }
+  };
 
   /** `store.get` with the id pre-checked (a malformed id never reaches the store). */
   const storeGet = async (id: string): Promise<RunRecord | null> => {
@@ -327,7 +433,15 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             .filter((s) => (opts.status === "active" ? !s.finished : opts.status === "finished" ? s.finished : true))
             .map(liveView)
             .filter(matches);
-      if (opts.status === "active") return { runs: live.slice(0, limit) };
+      // The ledger's live rows this process does not hold (item 41): runs live
+      // under another generation, or reclaimed here and not yet launched. Listed
+      // as live rows — never on a cursor page (live rows all sort ahead of any
+      // cursor), never under `finished` — and, whatever was asked, the ids whose
+      // store row (a tombstone) must not surface.
+      const ledgerRows = await ledgerLive();
+      const elsewhere = paging || opts.status === "finished" ? [] : ledgerRows.filter(matches);
+      const liveRows = [...live, ...elsewhere];
+      if (opts.status === "active") return { runs: liveRows.slice(0, limit) };
 
       const byId = new Map<string, RunView>();
       let storeUnavailable = false;
@@ -335,12 +449,15 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // store row for one of these is its provisional `interrupted` tombstone
       // (#375) — the truth only if the run dies — and must never surface while
       // the run is demonstrably alive.
-      const unfinished = new Set(
-        registry
+      const unfinished = new Set([
+        ...registry
           .listActive()
           .filter((s) => !s.finished)
           .map((s) => s.id),
-      );
+        // …and a run the ledger holds live (item 41): its store row is the same
+        // tombstone, the truth only once the run is dead.
+        ...ledgerRows.map((r) => r.id),
+      ]);
       if (store) {
         try {
           const rows = await store.list({
@@ -375,7 +492,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // An UNFINISHED live row wins whole (its store row — the provisional
       // tombstone, already dropped above — says `interrupted`, which is the
       // truth only once the run is dead; a live run must list as live, #375).
-      for (const row of live) {
+      for (const row of liveRows) {
         const stored = byId.get(row.id);
         if (!row.finished || !stored) {
           byId.set(row.id, row);
@@ -399,12 +516,24 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       return out;
     },
 
+    async liveElsewhere(visibleTo) {
+      if (visibleTo.kind === "none") return [];
+      return (await ledgerLive()).filter((r) => matchesPredicate(visibleTo, r));
+    },
+
     async getRun(id, opts = {}) {
       const summary = registry.getById(id);
       const snap = summary ? registry.snapshotById(id) : null;
       if (summary && snap) {
         const view: RunRecordView = liveView(summary);
         if (opts.include === "messages") view.events = snap.events;
+        return { ok: true, value: view };
+      }
+      // Live on the ledger, not here (item 41): the row and the events it holds.
+      const far = await ledgerRow(id);
+      if (far) {
+        const view: RunRecordView = ledgerView(far.row, far.events);
+        if (opts.include === "messages") view.events = far.events;
         return { ok: true, value: view };
       }
       // Only a `messages` read loads the events; every other caller gets the
@@ -436,8 +565,19 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           ),
         };
       }
-      if (!store || !RUN_ID_PATTERN.test(id)) return notFound;
       const cap = Math.min(MAX_EVENTS_PAGE, Math.max(1, Math.floor(limit)));
+      const far = await ledgerRow(id);
+      if (far) {
+        return {
+          ok: true,
+          value: pageBounded(
+            far.events.filter((e) => (e.seq ?? 0) > afterSeq),
+            cap,
+            false,
+          ),
+        };
+      }
+      if (!store || !RUN_ID_PATTERN.test(id)) return notFound;
       // The store answers an unknown, expired, or malformed id with null (the
       // same not-found `get` gives, R4); an existing run with nothing past
       // `afterSeq` is an empty page and stays `ok`.
@@ -466,6 +606,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             }),
           },
         };
+      const far = await ledgerRow(id);
+      if (far) return { ok: true, value: { id, finished: false, diagnosis: analyze(far.events, { finished: false }) } };
       // The stored diagnosis rides on the summary row — the events are not needed.
       const summary = await storeSummary(id);
       if (!summary) return notFound;
@@ -476,6 +618,16 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       const res = registry.requestStopById(id, mode, actor);
       if (res.ok) return { ok: true, value: { id, mode: res.mode, state: "stopping" } };
       if (res.reason === "finished") return conflict;
+      // Live on the ledger under another generation (item 41): the stop rides the
+      // row; the owner reads it on its next heartbeat.
+      if (ledger && RUN_ID_PATTERN.test(id)) {
+        try {
+          const r = await ledger.requestStop(id, mode);
+          if (r.ok) return { ok: true, value: { id, mode, state: "stopping" } };
+        } catch (err) {
+          warn(`[runs] run ledger stop failed for ${id}: ${describe(err)}`);
+        }
+      }
       // Not in the registry: a persisted run is over (409), anything else is unknown.
       return (await storeSummary(id)) ? conflict : notFound;
     },
