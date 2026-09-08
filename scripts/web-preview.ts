@@ -2,7 +2,8 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
 import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
-import type { RunIndexRowSeed, WebSeed } from "../src/channels/webSeed.js";
+import type { PageSeed, RunIndexRowSeed } from "../src/channels/webSeed.js";
+import { ALL_CAPABILITIES } from "../src/core/capabilities.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
 import { normalizeSpans } from "../src/core/normalizeSpans.js";
@@ -22,7 +23,8 @@ const PORT = Number(process.env.PORT ?? 8788);
 const NOW = systemClock();
 
 const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"));
-const shell = makeShellRenderer(assets.entry);
+// The preview paints every dashboard surface, so the shell stamps every capability on.
+const shell = makeShellRenderer(assets.entry, ALL_CAPABILITIES);
 
 const row = (over: Partial<RunIndexRowSeed>): RunIndexRowSeed => ({
   id: "run-x",
@@ -486,7 +488,7 @@ const SCHEDULED = {
   ],
 };
 
-function page(pathname: string, all: boolean): { title: string; seed: WebSeed; status?: number } | null {
+function page(pathname: string, all: boolean): { title: string; seed: PageSeed; status?: number } | null {
   if (pathname === "/runs")
     return {
       title: all ? "All runs" : "(2) Live runs",

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { ResidentAdminClient, ResidentAdminResponse } from "../core/residentAdmin.js";
+import {
+  NullResidentAdminClient,
+  type ResidentAdminClient,
+  type ResidentAdminResponse,
+} from "../core/residentAdmin.js";
 import {
   createResidentsViewHandler,
   parseResidentsRoute,
@@ -8,6 +12,7 @@ import {
   type ResidentListing,
 } from "./residentsView.js";
 import { makeShellRenderer } from "./webShell.js";
+import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { SEED_ELEMENT_ID, type ResidentDetailSeed, type ResidentsIndexSeed } from "./webSeed.js";
 
 // The residents dash handler: routing, the live-per-request registry read, the
@@ -43,7 +48,7 @@ const DOWN = {
 
 const LISTING: ResidentListing = { cap: 5, count: 2, residents: [WARM, DOWN] };
 
-const shell = makeShellRenderer({ js: "/assets/main-test.js", css: [] });
+const shell = makeShellRenderer({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
 
 function seedOf(html: string): ResidentsIndexSeed | ResidentDetailSeed {
   const m = new RegExp(`<script type="application/json" id="${SEED_ELEMENT_ID}">([\\s\\S]*?)</script>`).exec(html);
@@ -236,12 +241,14 @@ describe("createResidentsViewHandler", () => {
     expect(io.headers.allow).toBe("GET");
   });
 
-  it("503s with a plain explanation when no resident admin client is configured", () => {
-    const h = createResidentsViewHandler(undefined, shell);
+  it("503s with a plain explanation when the process has no residents (the null admin client carries the reason)", async () => {
+    const h = createResidentsViewHandler(new NullResidentAdminClient(), shell);
     const io = fakeReqRes("GET", "/residents");
     expect(h(io.req, io.res)).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
     expect(io.status).toBe(503);
     expect(io.body()).toContain("execution.resident");
+    expect(io.body()).not.toContain("resident Worker answered");
   });
 
   it("502s (never a 500 with a stack) when the resident Worker answers non-200 or the request throws", async () => {

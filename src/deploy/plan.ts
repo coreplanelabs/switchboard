@@ -263,22 +263,28 @@ function bindLiveGate(gate: LiveGateSpec, script: string, healthUrl: string): Li
       };
 }
 
-/** Pure: the Workers of one installation — each spec bound to the script name
- *  and hostname its profile gives it. Health URLs are derived, never typed. */
+/** Pure: the Workers of one installation — each spec the profile has a Worker
+ *  for, in canonical order, bound to the script name and hostname the profile
+ *  gives it. A profile with only the bot is a one-Worker fleet. Health URLs
+ *  are derived, never typed. */
 export function workersFor(profile: DeploymentProfile): WorkerDef[] {
-  const urls = profileUrls(profile);
-  return WORKER_SPECS.map(({ preflight, liveGate, ...spec }) => {
-    const healthUrl = urls.healthUrl(spec.name);
-    const script = profile.workers[spec.name].script;
-    return {
-      ...spec,
-      script,
-      baseUrl: urls.baseUrl(spec.name),
-      healthUrl,
-      // A preflighted step with a health gate reads the same URL for its wait heartbeat.
-      ...(preflight ? { preflight: liveGate?.kind === "health" ? { ...preflight, healthUrl } : preflight } : {}),
-      ...(liveGate ? { liveGate: bindLiveGate(liveGate, script, healthUrl) } : {}),
-    };
+  return WORKER_SPECS.flatMap(({ preflight, liveGate, ...spec }) => {
+    const worker = profile.workers[spec.name];
+    if (!worker) return [];
+    const baseUrl = `https://${worker.hostname}`;
+    const healthUrl = `${baseUrl}/healthz`;
+    const script = worker.script;
+    return [
+      {
+        ...spec,
+        script,
+        baseUrl,
+        healthUrl,
+        // A preflighted step with a health gate reads the same URL for its wait heartbeat.
+        ...(preflight ? { preflight: liveGate?.kind === "health" ? { ...preflight, healthUrl } : preflight } : {}),
+        ...(liveGate ? { liveGate: bindLiveGate(liveGate, script, healthUrl) } : {}),
+      },
+    ];
   });
 }
 
@@ -343,8 +349,9 @@ export interface DeployPlan {
   };
   /** The deployment profile the plan was computed from. `deploy all` refuses a plan from the example. */
   profile: { origin: LoadedProfile["origin"]; path: string };
-  /** The bot's runtime config: where it comes from, and the state Worker document the runner pushes it to before the bot step. */
-  config: { source: string; document: string; stateWorkerUrl: string };
+  /** The bot's runtime config: where it comes from, and the state Worker document the runner pushes it to
+   *  before the bot step — no `stateWorkerUrl` when the profile has no state Worker (nothing is pushed). */
+  config: { source: string; document: string; stateWorkerUrl?: string };
   warnings: string[];
 }
 
@@ -384,6 +391,9 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe, loaded:
     why: w.why,
   }));
   const forcedNames = opts.force ? chosen.filter((w) => w.preflight).map((w) => w.name) : [];
+  // `--only` may name a Worker this profile does not have: nothing to deploy for it, said out loud.
+  const notInProfile = (opts.only ?? []).filter((n) => profile.workers[n] === undefined);
+  const stateWorkerUrl = profileUrls(profile).stateWorkerUrl;
   return {
     steps,
     ...(opts.affected ? { affected: opts.affected } : {}),
@@ -401,13 +411,16 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe, loaded:
     config: {
       source: profile.configSource,
       document: CONFIG_DOCUMENT_KEY,
-      stateWorkerUrl: profileUrls(profile).stateWorkerUrl,
+      ...(stateWorkerUrl !== undefined ? { stateWorkerUrl } : {}),
     },
     warnings: [
       ...(loaded.origin === "example"
         ? [
             `profile: ${loaded.path} is the EXAMPLE — this plan can be read, not deployed; write deploy/profile.json for a real installation`,
           ]
+        : []),
+      ...(notInProfile.length > 0
+        ? [`--only names ${notInProfile.join(", ")}: not among this profile's Workers — nothing to deploy for it`]
         : []),
       ...(forcedNames.length > 0
         ? [
@@ -427,7 +440,11 @@ export function formatPlan(plan: DeployPlan): string {
       : `node_modules missing in ${missing.join(", ")} — the runner will \`npm ci\` there first`;
   const lines = [
     ...(plan.affected ? [formatAffectedText(plan.affected)] : []),
-    `Profile: ${plan.profile.path}${plan.profile.origin === "example" ? " (example)" : ""}; config: ${plan.config.source} → document "${plan.config.document}" on ${plan.config.stateWorkerUrl}`,
+    `Profile: ${plan.profile.path}${plan.profile.origin === "example" ? " (example)" : ""}; config: ${plan.config.source}${
+      plan.config.stateWorkerUrl
+        ? ` → document "${plan.config.document}" on ${plan.config.stateWorkerUrl}`
+        : " (no state Worker in the profile — not pushed anywhere)"
+    }`,
     `Checks: wrangler account = ${plan.checks.account}; clean tree; ${plan.checks.atOriginMain ? "HEAD == origin/main" : "any branch (--allow-branch)"}; ${nodeModules}`,
     ...plan.warnings.map((w) => `WARNING ${w}`),
     plan.steps.length === 0 ? "Steps: none — nothing to deploy" : "Steps:",

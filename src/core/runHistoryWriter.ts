@@ -67,6 +67,28 @@ export interface RunHistoryWriter {
   settled(): Promise<void>;
 }
 
+/** The writer of a process without run history (a Null Object, routing-and-
+ *  config item 16): every record is dropped on the floor, nothing is ever
+ *  pending, failed or degraded, and `onPersisted` is never called — the
+ *  index's persisted flag means "durably stored", which nothing here is. */
+export class NullRunHistoryWriter implements RunHistoryWriter {
+  write(_record: RunRecord, _opts?: { provisional?: boolean; via?: RecordSink; span?: Span }): void {
+    // history is off: nothing to write
+  }
+  pending(): number {
+    return 0;
+  }
+  failures(): number {
+    return 0;
+  }
+  degraded(): boolean {
+    return false;
+  }
+  async settled(): Promise<void> {
+    // nothing was ever in flight
+  }
+}
+
 /** Where a record can be written: the store, or a sink a caller routes one write through. */
 export type RecordSink = Pick<RunStore, "put"> | { put(record: RunRecord, trace?: TraceOptions): Promise<unknown> };
 

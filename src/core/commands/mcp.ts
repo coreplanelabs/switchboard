@@ -178,6 +178,7 @@ function renderShow(output: JsonValue): string {
 
 export const mcpList = defineCommand({
   id: "mcp.list",
+  enabledWhen: (caps) => caps.mcp,
   options: z.object({ channel: channelOption }),
   action: "mcp:read",
   effect: "read",
@@ -194,6 +195,7 @@ export const mcpList = defineCommand({
 
 export const mcpAdd = defineCommand({
   id: "mcp.add",
+  enabledWhen: (caps) => caps.mcp,
   args: [
     {
       name: "name",
@@ -248,6 +250,7 @@ export const mcpAdd = defineCommand({
 
 export const mcpConnect = defineCommand({
   id: "mcp.connect",
+  enabledWhen: (caps) => caps.mcp,
   args: [nameArg],
   options: z.object({ scope: scopeOption, channel: channelOption }),
   action: "mcp:write",
@@ -267,6 +270,7 @@ export const mcpConnect = defineCommand({
 
 export const mcpShow = defineCommand({
   id: "mcp.show",
+  enabledWhen: (caps) => caps.mcp,
   args: [nameArg],
   options: z.object({ scope: scopeOption, channel: channelOption }),
   action: "mcp:read",
@@ -295,6 +299,7 @@ export const mcpShow = defineCommand({
 
 export const mcpRemove = defineCommand({
   id: "mcp.remove",
+  enabledWhen: (caps) => caps.mcp,
   args: [nameArg],
   options: z.object({ scope: scopeOption, channel: channelOption }),
   action: "mcp:write",

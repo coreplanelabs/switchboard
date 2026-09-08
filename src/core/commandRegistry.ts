@@ -5,6 +5,7 @@ import type { Span, TraceOptions } from "./trace/types.js";
 import { formatDuration } from "./time/formatDuration.js";
 import { authorize } from "./authz/authorize.js";
 import type { Actor, Resource } from "./authz/types.js";
+import { ALL_CAPABILITIES, type Capabilities } from "./capabilities.js";
 
 // Command registry (#157, U6 — KD2/KTD1; typed model KTD20): the ONE seam
 // behind every operator surface. The lowest level is plain TypeScript: a
@@ -135,6 +136,13 @@ export interface CommandDef<
   resource?(input: RawInput, caller: Caller): Resource;
   effect: CommandEffect;
   surfaces?: CommandSurfaces;
+  /** The capability this command needs (src/core/capabilities.ts). Absent →
+   *  always on. When the predicate is false for the process's capabilities the
+   *  command is HIDDEN on every surface — absent from `help`, `<group> help`,
+   *  `tools/list`, `/api/<id>`, the CLI catalogue and chat, `not_found` when
+   *  named — instead of answering `unavailable`; the handler's own
+   *  `unavailable` stays as the defence in depth. */
+  enabledWhen?(caps: Capabilities): boolean;
   describe: string;
   handler(ctx: CommandContext<A, O, D>): Promise<JsonValue>;
   /** The command's own plain-text projection for the text surfaces (chat, CLI)
@@ -309,6 +317,12 @@ export interface CommandRegistryOptions {
   audit?: (entry: AuditEntry) => void;
   /** Where an unexpected handler throw is logged. Defaults to console.error. */
   logError?: (commandId: string, err: unknown) => void;
+  /** What is on in this process (src/core/capabilities.ts): a command whose
+   *  `enabledWhen` is false for it does not exist here — absent from `list`,
+   *  undefined from `get`, `not_found` from `invoke`. Default: everything on,
+   *  the view the reference docs and the conformance suite take of the
+   *  catalogue; every real process passes its own. */
+  capabilities?: Capabilities;
 }
 
 const SURFACE_FOR_KIND: Readonly<Record<Caller["kind"], SurfaceName>> = {
@@ -322,10 +336,12 @@ export class CommandRegistry<D> {
   private readonly commands = new Map<string, CommandDef<D>>();
   private readonly audit: (entry: AuditEntry) => void;
   private readonly logError: (commandId: string, err: unknown) => void;
+  private readonly capabilities: Capabilities;
 
   constructor(opts: CommandRegistryOptions = {}) {
     this.audit = opts.audit ?? ((entry) => console.log(JSON.stringify({ audit: "command", ...entry })));
     this.logError = opts.logError ?? ((commandId, err) => console.error(`[command] ${commandId} failed:`, err));
+    this.capabilities = opts.capabilities ?? ALL_CAPABILITIES;
   }
 
   /** Registration is startup-time; a duplicate id is a programming error, not a runtime condition. */
@@ -334,17 +350,25 @@ export class CommandRegistry<D> {
     this.commands.set(cmd.id, cmd as unknown as CommandDef<D>);
   }
 
+  /** The catalogue as this process exposes it: every registration whose capability is on. */
   list(): CommandDef<D>[] {
-    return [...this.commands.values()];
+    return [...this.commands.values()].filter((cmd) => CommandRegistry.enabledFor(cmd, this.capabilities));
   }
 
+  /** A registration whose capability is off does not exist here. */
   get(id: string): CommandDef<D> | undefined {
-    return this.commands.get(id);
+    const cmd = this.commands.get(id);
+    return cmd && CommandRegistry.enabledFor(cmd, this.capabilities) ? cmd : undefined;
   }
 
   /** True when `cmd` is exposed on the surface `kind` maps to. */
   static exposedTo(cmd: CommandDef<unknown>, kind: Caller["kind"]): boolean {
     return cmd.surfaces?.[SURFACE_FOR_KIND[kind]] !== false;
+  }
+
+  /** True when `cmd` exists for a process with these capabilities (`enabledWhen`; absent = always). */
+  static enabledFor(cmd: Pick<CommandDef<unknown>, "enabledWhen">, caps: Capabilities): boolean {
+    return cmd.enabledWhen ? cmd.enabledWhen(caps) : true;
   }
 
   /** True when the policy table refuses this caller the command WHATEVER the
@@ -358,8 +382,9 @@ export class CommandRegistry<D> {
   }
 
   async invoke(id: string, input: CommandInput, caller: Caller, deps: D, trace?: TraceOptions): Promise<InvokeResult> {
-    const cmd = this.commands.get(id);
-    // A command that is not exposed on the caller's surface does not exist there.
+    const cmd = this.get(id);
+    // A command that is not exposed on the caller's surface — or whose
+    // capability is off in this process (`get`) — does not exist there.
     if (!cmd || !CommandRegistry.exposedTo(cmd, caller.kind)) {
       // Unknown ids are audited too: a probe is worth a line.
       this.audit({
@@ -408,7 +433,7 @@ export class CommandRegistry<D> {
 
   /** True when `id` names a command with a deferred outcome (`settle`). */
   settles(id: string): boolean {
-    return typeof this.commands.get(id)?.settle === "function";
+    return typeof this.get(id)?.settle === "function";
   }
 
   /** Wait for an accepted command's effect and report it (see `CommandDef.settle`).
@@ -416,7 +441,7 @@ export class CommandRegistry<D> {
    *  `settle`, or a settle that throws, yields undefined (the throw is logged —
    *  a follow-up that cannot be produced is not an error the caller can act on). */
   async settle(id: string, value: JsonValue, caller: Caller, deps: D): Promise<SettledOutcome | undefined> {
-    const cmd = this.commands.get(id);
+    const cmd = this.get(id);
     if (!cmd?.settle) return undefined;
     try {
       return await cmd.settle(value, { caller, deps });

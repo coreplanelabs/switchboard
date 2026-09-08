@@ -113,6 +113,7 @@ const visibleRuns = (caller: Caller) => predicateFor(caller.actor, "runs:read", 
 
 export const frictionReport = defineCommand({
   id: "friction.report",
+  enabledWhen: (caps) => caps.runHistory,
   options: z.object({
     sinceMs: z.coerce.number().int().nonnegative().optional().describe("only runs finished at or after this epoch ms"),
     limit: positiveInt.optional().describe("newest n runs (default: the ledger's retained window)"),
@@ -145,6 +146,7 @@ export const frictionReport = defineCommand({
 
 export const frictionPropose = defineCommand({
   id: "friction.propose",
+  enabledWhen: (caps) => caps.runHistory,
   options: z.object({
     dryRun: flag.optional().describe("compute and report everything, file nothing"),
     top: positiveInt.optional().describe("proposals filed per pass (default selfImprovement.top, else 3)"),

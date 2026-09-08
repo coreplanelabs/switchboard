@@ -85,6 +85,31 @@ export interface RunStore {
   delete(id: string): Promise<void>;
 }
 
+/** The store of a process without run history (features/routing-and-config.md
+ *  item 16 — a Null Object, so no caller branches on a missing store): every
+ *  read is the not-found shape, `list` is empty, `put` accepts and keeps
+ *  nothing (`stored: false`, the same word a record outside retention gets). */
+export class NullRunStore implements RunStore {
+  async put(_record: RunRecord, _trace?: TraceOptions): Promise<PutResult> {
+    return { ok: true, retained: 0, stored: false, rewritten: false };
+  }
+  async get(_id: string): Promise<RunRecord | null> {
+    return null;
+  }
+  async getSummary(_id: string): Promise<RunListItem | null> {
+    return null;
+  }
+  async list(_opts: RunListOptions): Promise<RunListItem[]> {
+    return [];
+  }
+  async events(_id: string, _opts: RunEventsOptions): Promise<RunEventsPage | null> {
+    return null;
+  }
+  async delete(_id: string): Promise<void> {
+    // nothing is held
+  }
+}
+
 /** How often every store implementation sweeps expired rows (KTD5). */
 export const SWEEP_INTERVAL_MS = 6 * 3600_000;
 /** Directory under the data dir holding `<id>.json` files and `index.jsonl`. */

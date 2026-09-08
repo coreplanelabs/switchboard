@@ -50,18 +50,21 @@ import { matchesPredicate, NO_GRANTS, predicateFor, type Actor, type ChannelDire
 import { SlackChannelDirectory } from "../channels/slackChannelDirectory.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
 import { StaticMcpToolSource, InMemoryMcpClient } from "../mcp/index.js";
+import { NullMcpToolSource } from "../mcp/source.js";
 import { InMemoryFrictionLedger, RunStoreFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
-import { InMemoryRunStore, type RunStore } from "./runStore.js";
+import { InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
 import { isRunRecord, type RunRecord } from "./runRecord.js";
-import { createRunHistoryWriter } from "./runHistoryWriter.js";
+import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
-import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
+import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
+import { capabilitiesFrom } from "./capabilities.js";
+import { NO_FLEET } from "./residentFleet.js";
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
 
@@ -136,7 +139,21 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   writeFileSync(cfgPath, fixtureYaml.replaceAll("__WORKDIR__", join(dir, "workspaces")));
   const config = new ConfigStore(cfgPath, join(dir, "overrides.json"));
   const providers = { get: () => provider } as unknown as ProviderRegistry;
-  const deps: TestDeps = { config, providers, dataDir: dir, invoked: [] };
+  // The Null Objects a process without the subsystem is wired with (routing-and-
+  // config item 16): a test that needs the real thing sets it after `makeDeps`.
+  const deps: TestDeps = {
+    config,
+    providers,
+    capabilities: capabilitiesFrom(config.config, process.env),
+    residentFleet: NO_FLEET,
+    memory: new NullMemoryStore(),
+    mcp: new NullMcpToolSource(),
+    runHistoryWriter: new NullRunHistoryWriter(),
+    runLedger: new NullLedgerWriteThrough("test-gen", new NullRunStore()),
+    threadsElsewhere: new ThreadsElsewhere(),
+    dataDir: dir,
+    invoked: [],
+  };
   wireCommands(deps);
   return deps;
 }
@@ -974,6 +991,8 @@ describe("resident repo dispatch", () => {
   it("fresh thread + rejected bare slug + a repo-needing agent → one not-onboarded reply, no run (#316)", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
+    // The note is a resident installation's (item 16); the fixture names no resident Worker, so say there is one.
+    deps.capabilities = { ...deps.capabilities, residents: true };
     deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UADMIN"), io);
@@ -986,6 +1005,21 @@ describe("resident repo dispatch", () => {
     expect(provider.requests).toHaveLength(0); // no model turn
     expect(makeExecutor).not.toHaveBeenCalled(); // no workspace of any kind
     expect(statuses[statuses.length - 1].title).toContain("not started");
+  });
+
+  // Feature: features/routing-and-config.md item 16 — the note names `repo
+  // onboard`, a command an installation without residents does not have: the
+  // gate reads the capability, and a rejected slug is then no reason to stop.
+  it("the not-onboarded note is a resident installation's: with residents off the same rejected slug starts no such refusal and never mentions `repo onboard`", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.capabilities = { ...deps.capabilities, residents: false };
+    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UADMIN"), io);
+    expect(replies.some((r) => r.includes("not onboarded"))).toBe(false);
+    expect(replies.some((r) => r.includes("repo onboard"))).toBe(false);
+    expect(provider.requests.length).toBeGreaterThan(0); // the run went ahead in a per-thread workspace
   });
 
   // #445 F2: the registry did not ANSWER for the repo the message addressed.
@@ -1012,6 +1046,7 @@ describe("resident repo dispatch", () => {
   it("a non-admin gets the not-onboarded reply with an ask-an-admin hint, never a command they cannot run (#316)", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.capabilities = { ...deps.capabilities, residents: true };
     deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UDEV"), io);
@@ -3471,6 +3506,7 @@ describe("live run-view wiring (Area 2)", () => {
         "dispatch.memory_read",
         "dispatch.ack_card",
         "dispatch.workspace.attach",
+        "dispatch.mcp_discovery",
         "dispatch.compose",
         "dispatch.channel_visibility",
       ]),
@@ -3607,6 +3643,7 @@ describe("live run-view wiring (Area 2)", () => {
         "dispatch.memory_read",
         "dispatch.ack_card",
         "dispatch.workspace.attach",
+        "dispatch.mcp_discovery",
         "dispatch.compose",
         "dispatch.channel_visibility",
       ]),
@@ -3983,10 +4020,18 @@ describe("cross-session memory (Area 7c, #85)", () => {
 
   it("disabled path is byte-identical to memory-off (NullMemoryStore guarantee)", async () => {
     const off = capturingProvider();
-    await dispatch(makeDeps(YAML_FIXTURE, off), msg(ask), fakeIO().io);
+    const offDeps = makeDeps(YAML_FIXTURE, off);
+    await dispatch(offDeps, msg(ask), fakeIO().io);
 
     const on = capturingProvider();
-    const onDeps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, on), memory: new NullMemoryStore() };
+    // The About block names memory when the capability is on — a different,
+    // truthful sentence; what this test pins is that the memory BLOCK
+    // contributes nothing, so both runs describe the same installation.
+    const onDeps: CoreDeps = {
+      ...makeDeps(MEMORY_ON_YAML, on),
+      memory: new NullMemoryStore(),
+      capabilities: offDeps.capabilities,
+    };
     await dispatch(onDeps, msg(ask), fakeIO().io);
 
     expect(off.requests).toHaveLength(1);
@@ -4036,11 +4081,13 @@ describe("cross-session memory (Area 7c, #85)", () => {
 
   it("enabled but nothing relevant → no block, request identical to memory-off", async () => {
     const off = capturingProvider();
-    await dispatch(makeDeps(YAML_FIXTURE, off), msg("tell me a joke"), fakeIO().io);
+    const offDeps = makeDeps(YAML_FIXTURE, off);
+    await dispatch(offDeps, msg("tell me a joke"), fakeIO().io);
 
     const on = capturingProvider();
     const store = new InMemoryMemoryStore([memRecord()]); // has a deploy fact, irrelevant here
-    const onDeps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, on), memory: store };
+    // Same installation described (see above): only the memory block is under test.
+    const onDeps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, on), memory: store, capabilities: offDeps.capabilities };
     await dispatch(onDeps, msg("tell me a joke"), fakeIO().io);
 
     expect(JSON.stringify(on.requests[0])).toBe(JSON.stringify(off.requests[0]));
@@ -4614,12 +4661,30 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
 describe("self-description in the system prompt (routing-and-config behavior 11) and the github_* tools (features/github-tools.md)", () => {
   it("every run's prompt carries the About block right after the config block, naming the agents, residents, and the repo + specs", async () => {
     const provider = capturingProvider();
-    await dispatch(makeDeps(YAML_FIXTURE, provider), msg("how does your resident system work?"), fakeIO().io);
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await dispatch(deps, msg("how does your resident system work?"), fakeIO().io);
     const sys = provider.requests[0].system ?? "";
-    expect(sys).toContain(selfDescriptionBlock(AGENTS, "acme"));
+    expect(sys).toContain(selfDescriptionBlock(AGENTS, "acme", deps.capabilities, undefined));
     expect(sys.indexOf("Switchboard runtime config")).toBeLessThan(sys.indexOf(SELF_DESCRIPTION_HEADER));
     expect(sys.indexOf(SELF_DESCRIPTION_HEADER)).toBeLessThan(sys.indexOf("You are Switchboard"));
     expect(sys.split(SELF_DESCRIPTION_HEADER)).toHaveLength(2); // exactly once
+  });
+
+  it("the About block follows the process's capabilities and the resident Worker's own cap: residents off → no onboarding paragraph; residents on → the fleet facts' number", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.capabilities = { ...deps.capabilities, residents: false };
+    await dispatch(deps, msg("how does your resident system work?"), fakeIO().io);
+    const off = provider.requests[0].system ?? "";
+    expect(off).toContain("no resident (always-warm) repo environments");
+    expect(off).not.toContain("repo onboard");
+    const on = makeDeps(YAML_FIXTURE, provider);
+    on.capabilities = { ...on.capabilities, residents: true };
+    on.residentFleet = { cap: () => 4 };
+    await dispatch(on, msg("how does your resident system work?"), fakeIO().io);
+    const sys = provider.requests[1].system ?? "";
+    expect(sys).toContain("capped at 4 residents");
+    expect(sys).toContain("`repo onboard <owner/name>`");
   });
 
   it("a plain mention opens an issue through github_issue_create on the injected API, and the answer carries the tool's number + URL", async () => {
@@ -7351,7 +7416,7 @@ workspaceDir: __WORKDIR__
     });
     const { deps } = shipDeps(provider);
     deps.mcp = new StaticMcpToolSource([], { factory: () => new InMemoryMcpClient([]) });
-    deps.mcpRegistryOn = true;
+    deps.capabilities = { ...deps.capabilities, mcp: true };
     queueWorkspaces(
       shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
       shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),

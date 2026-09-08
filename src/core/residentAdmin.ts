@@ -36,6 +36,43 @@ export interface ResidentAdminClient {
   withSpan?(span: Span): ResidentAdminClient;
 }
 
+/** Why there is no resident admin plane, when the config names no resident Worker. */
+export const RESIDENTS_OFF_MESSAGE =
+  "Resident repo environments aren't configured — set `execution.resident.baseUrl` in config.yaml.";
+
+/** The admin client of a process without residents (Fowler's Special Case,
+ *  routing-and-config item 16): every route answers 503 with the reason there
+ *  is no fleet, so a view or a command that reaches it renders that reason
+ *  instead of branching on a missing client. The reason is the config's —
+ *  no resident Worker, or one whose admin bearer is unset. */
+export class NullResidentAdminClient implements ResidentAdminClient {
+  constructor(readonly reason: string = RESIDENTS_OFF_MESSAGE) {}
+  private answer(): Promise<ResidentAdminResponse> {
+    return Promise.resolve({ status: 503, data: { error: this.reason } });
+  }
+  onboard(_body: Record<string, unknown>): Promise<ResidentAdminResponse> {
+    return this.answer();
+  }
+  offboard(_resource: string, _dryRun: boolean): Promise<ResidentAdminResponse> {
+    return this.answer();
+  }
+  reconfigure(_body: Record<string, unknown>): Promise<ResidentAdminResponse> {
+    return this.answer();
+  }
+  rebuild(_resource: string, _dryRun: boolean): Promise<ResidentAdminResponse> {
+    return this.answer();
+  }
+  residents(): Promise<ResidentAdminResponse> {
+    return this.answer();
+  }
+  status(_resource: string): Promise<ResidentAdminResponse> {
+    return this.answer();
+  }
+  withSpan(_span: Span): ResidentAdminClient {
+    return this;
+  }
+}
+
 /** The admin routes, as the span names them: the path literal, never a query. */
 type AdminRoute = "/onboard" | "/offboard" | "/reconfigure" | "/rebuild" | "/residents" | "/status";
 

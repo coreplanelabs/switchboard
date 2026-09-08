@@ -50,11 +50,15 @@ export const profileSchema = z.object({
   account: z.string().regex(/^[0-9a-f]{32}$/, "a Cloudflare account id: 32 hex characters"),
   /** The zone the hostnames live under; every hostname must be in it. */
   zone: hostname,
+  /** The Workers this installation runs. The bot is the one every installation
+   *  has; the state Worker (memory), the resident and the sandbox are optional —
+   *  a profile without one has no step for it (`deploy plan` iterates what is
+   *  here) and no URL derived for it. */
   workers: z.object({
-    memory: endpoint,
+    memory: endpoint.optional(),
     bot: endpoint,
-    resident: endpoint,
-    sandbox: endpoint,
+    resident: endpoint.optional(),
+    sandbox: endpoint.optional(),
     docs: endpoint.optional(),
   }),
   /** Where the bot's runtime config comes from at deploy time; `deploy all`
@@ -104,22 +108,31 @@ export interface LoadedProfile {
   path: string;
 }
 
-/** Pure: the URLs the tooling derives — never stored twice, never typed by hand. */
+/** Pure: the URLs the tooling derives — never stored twice, never typed by hand.
+ *  A Worker the profile does not have has no URL (`undefined`); the bot's are
+ *  always there, the bot being the one required Worker. */
 export function profileUrls(p: DeploymentProfile) {
-  const origin = (kind: Exclude<WorkerKind, "docs">) => `https://${p.workers[kind].hostname}`;
+  const origin = (kind: WorkerKind): string | undefined => {
+    const worker = p.workers[kind];
+    return worker ? `https://${worker.hostname}` : undefined;
+  };
+  const bot = `https://${p.workers.bot.hostname}`;
   return {
-    /** A runtime Worker's origin — what its deploy preflight is pointed at. */
+    /** A Worker's origin — what its deploy preflight is pointed at; undefined when the profile lacks it. */
     baseUrl: origin,
-    /** `GET /healthz` of a runtime Worker. */
-    healthUrl: (kind: Exclude<WorkerKind, "docs">) => `${origin(kind)}/healthz`,
+    /** `GET /healthz` of a Worker; undefined when the profile lacks it. */
+    healthUrl: (kind: WorkerKind): string | undefined => {
+      const o = origin(kind);
+      return o === undefined ? undefined : `${o}/healthz`;
+    },
     /** The bot's public origin — live-view links, the dashboards. */
-    publicBaseUrl: origin("bot"),
-    /** The state Worker other Workers record firings on. */
+    publicBaseUrl: bot,
+    /** The state Worker other Workers record firings on and the bot reads its config from; undefined without one. */
     stateWorkerUrl: origin("memory"),
     /** The bot Worker's restart route (`deploy restart`). */
-    botAdminRestartUrl: `${origin("bot")}/admin/restart`,
+    botAdminRestartUrl: `${bot}/admin/restart`,
     /** The docs site's origin, when the installation publishes one. */
-    docsBaseUrl: p.workers.docs ? `https://${p.workers.docs.hostname}` : undefined,
+    docsBaseUrl: origin("docs"),
   };
 }
 

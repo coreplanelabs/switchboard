@@ -33,6 +33,7 @@ const utc = (ms: number) => `${new Date(ms).toISOString().slice(0, 16).replace("
 
 export const scheduleList = defineCommand({
   id: "schedule.list",
+  enabledWhen: (caps) => caps.schedules,
   action: "schedule:read",
   effect: "read",
   describe: "Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did.",

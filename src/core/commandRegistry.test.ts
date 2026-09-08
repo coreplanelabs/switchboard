@@ -20,6 +20,7 @@ import {
   type Caller,
 } from "./commandRegistry.js";
 import { callerWith } from "./testing/callers.js";
+import { ALL_CAPABILITIES, NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
 
 // Feature: features/command-registry.md — the one seam every surface adapts,
 // in its typed form (KTD20): positional `args` + named `options`, both
@@ -837,5 +838,55 @@ describe("CommandRegistry.invoke — the caller's span (features/tracing.md item
     await registry.invoke("demo.span", {}, cli, { hits: [] });
     await bindCommands(registry, { hits: [] }).invoke("demo.span", {}, cli, { span });
     expect(seen).toEqual([span, "absent", span]);
+  });
+});
+
+// Feature: features/command-registry.md item 28 — `enabledWhen`: a command
+// whose capability is off does not exist in this process, on any surface.
+describe("enabledWhen — a capability that is off hides the command (item 28)", () => {
+  const gated = define({
+    id: "demo.gated",
+    action: "runs:read",
+    effect: "read",
+    enabledWhen: (caps) => caps.memory,
+    describe: "needs memory",
+    handler: async () => ({ ok: true }),
+  });
+
+  function withCaps(capabilities?: Capabilities) {
+    const audit = vi.fn<(e: AuditEntry) => void>();
+    const registry = new CommandRegistry<Deps>({ audit, ...(capabilities ? { capabilities } : {}) });
+    registry.register(echo);
+    registry.register(gated);
+    return { registry, audit };
+  }
+
+  it("with the capability on — or with no capabilities given (the full-catalogue default) — the command lists, gets and invokes", async () => {
+    for (const { registry } of [withCaps(ALL_CAPABILITIES), withCaps()]) {
+      expect(registry.list().map((c) => c.id)).toEqual(["demo.echo", "demo.gated"]);
+      expect(registry.get("demo.gated")?.describe).toBe("needs memory");
+      expect(await registry.invoke("demo.gated", {}, cli, { hits: [] })).toEqual({ ok: true, value: { ok: true } });
+    }
+  });
+
+  it("with the capability off the command is absent from list, undefined from get, not_found from invoke (audited like an unknown id) — never `unavailable`; an ungated command is untouched", async () => {
+    const { registry, audit } = withCaps({ ...ALL_CAPABILITIES, memory: false });
+    expect(registry.list().map((c) => c.id)).toEqual(["demo.echo"]);
+    expect(registry.get("demo.gated")).toBeUndefined();
+    expect(registry.settles("demo.gated")).toBe(false);
+    const res = await registry.invoke("demo.gated", {}, cli, { hits: [] });
+    expect(res).toMatchObject({ ok: false, error: "not_found", status: 404, decidedBy: "registry" });
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ commandId: "demo.gated", outcome: "not_found" }));
+    expect(await registry.invoke("demo.echo", opts({ status: "all" }), cli, { hits: [] })).toMatchObject({ ok: true });
+    // The bound invoker every adapter receives sees the same catalogue.
+    const bound = bindCommands(registry, { hits: [] });
+    expect(bound.list().map((c) => c.id)).toEqual(["demo.echo"]);
+    expect(bound.get("demo.gated")).toBeUndefined();
+  });
+
+  it("`enabledFor` is the one predicate: absent `enabledWhen` is always on", () => {
+    expect(CommandRegistry.enabledFor(echo, NO_CAPABILITIES)).toBe(true);
+    expect(CommandRegistry.enabledFor(gated, NO_CAPABILITIES)).toBe(false);
+    expect(CommandRegistry.enabledFor(gated, { ...NO_CAPABILITIES, memory: true })).toBe(true);
   });
 });

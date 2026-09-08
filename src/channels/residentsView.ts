@@ -65,7 +65,7 @@ function plain(res: ServerResponse, status: number, body: string, extra: Record<
  * Access gate — it lists every onboarded repo and its build commands.
  */
 export function createResidentsViewHandler(
-  client: ResidentAdminClient | undefined,
+  client: ResidentAdminClient,
   shell: ShellRenderer,
 ): (req: HttpRequest, res: ServerResponse) => boolean {
   return (req, res) => {
@@ -77,15 +77,6 @@ export function createResidentsViewHandler(
       plain(res, 405, "method not allowed", { allow: "GET" });
       return true;
     }
-    if (!client) {
-      plain(
-        res,
-        503,
-        "Resident repo environments aren't configured — set execution.resident.baseUrl (and the RESIDENT_ADMIN_TOKEN bearer) to enable this view.",
-      );
-      return true;
-    }
-
     client
       .residents()
       .then((r) => {
@@ -96,6 +87,13 @@ export function createResidentsViewHandler(
             0,
             UPSTREAM_REASON_MAX,
           );
+          // A 503 is the admin plane saying it is not there to answer — the
+          // `NullResidentAdminClient` of a process without residents, or a
+          // Worker that is down: it passes through with its reason.
+          if (r.status === 503) {
+            plain(res, 503, reason);
+            return;
+          }
           plain(res, 502, `resident Worker answered ${r.status} to /residents: ${reason}`);
           return;
         }

@@ -25,6 +25,7 @@ import {
   type CommandInvoker,
   type CommandRegistryOptions,
 } from "./commandRegistry.js";
+import type { Capabilities } from "./capabilities.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import { selectFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
 import type { MemoryStore } from "./memory/types.js";
@@ -85,6 +86,10 @@ export interface CoreCommandWiring {
   operations?: (caller: Caller) => Operations | null;
   /** The registry's audit sink; default: the registry's console line. */
   audit?: CommandRegistryOptions["audit"];
+  /** What is on in this process (src/core/capabilities.ts): a command whose
+   *  capability is off is hidden on every surface. Default: everything on —
+   *  the full catalogue, what a test or the docs generator asks for. */
+  capabilities?: Capabilities;
   now?: () => number;
 }
 
@@ -150,7 +155,10 @@ export function buildCoreCommands(
   store: Provided<RunStore | null>,
   wiring: CoreCommandWiring,
 ): CommandInvoker {
-  const registry = new CommandRegistry<CoreCommandDeps>(wiring.audit ? { audit: wiring.audit } : {});
+  const registry = new CommandRegistry<CoreCommandDeps>({
+    ...(wiring.audit ? { audit: wiring.audit } : {}),
+    ...(wiring.capabilities ? { capabilities: wiring.capabilities } : {}),
+  });
   registerCoreCommands(registry);
   const cfg = once(config);
   const runStore = once(store);

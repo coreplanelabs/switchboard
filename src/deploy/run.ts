@@ -844,18 +844,25 @@ export async function runDeployPlan(
   // source or an invalid config is a refusal up front, not a bot that fails to
   // start after the memory Worker has already rolled.
   let configToPush: Extract<ConfigRead, { ok: true }> | undefined;
+  const stateWorkerUrl = plan.config.stateWorkerUrl;
   if (plan.steps.some((s) => s.name === "bot")) {
-    const read = await readConfigForPush(plan.config.source);
-    if (!read.ok) return { kind: "refused", problems: [read.problem] };
-    if (!process.env[STATE_WORKER_TOKEN_ENV])
-      return {
-        kind: "refused",
-        problems: [
-          `${STATE_WORKER_TOKEN_ENV} is not set — the bot step pushes the config to ${plan.config.stateWorkerUrl} with it`,
-        ],
-      };
-    configToPush = read;
-    io.log(`[deploy:all] config: ${read.how} validates; pushed to ${plan.config.stateWorkerUrl} before the bot step`);
+    if (stateWorkerUrl === undefined) {
+      io.warn(
+        "[deploy:all] config: the profile has no state Worker — nothing is pushed; the bot reads SWITCHBOARD_CONFIG",
+      );
+    } else {
+      const read = await readConfigForPush(plan.config.source);
+      if (!read.ok) return { kind: "refused", problems: [read.problem] };
+      if (!process.env[STATE_WORKER_TOKEN_ENV])
+        return {
+          kind: "refused",
+          problems: [
+            `${STATE_WORKER_TOKEN_ENV} is not set — the bot step pushes the config to ${stateWorkerUrl} with it`,
+          ],
+        };
+      configToPush = read;
+      io.log(`[deploy:all] config: ${read.how} validates; pushed to ${stateWorkerUrl} before the bot step`);
+    }
   }
   for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
 
@@ -875,10 +882,10 @@ export async function runDeployPlan(
 
   const results: DeployStepResult[] = [];
   for (const step of plan.steps) {
-    if (step.name === "bot" && configToPush) {
+    if (step.name === "bot" && configToPush && stateWorkerUrl !== undefined) {
       // After the memory step (the document lives there), before the bot rolls (it reads it on start).
       const pushed = await pushConfigDocument(configToPush, {
-        stateWorkerUrl: plan.config.stateWorkerUrl,
+        stateWorkerUrl,
         key: plan.config.document,
         env: process.env,
       });
@@ -892,7 +899,7 @@ export async function runDeployPlan(
         break;
       }
       io.log(
-        `[deploy:all] config: ${pushed.how} → document "${plan.config.document}" v${pushed.version} on ${plan.config.stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
+        `[deploy:all] config: ${pushed.how} → document "${plan.config.document}" v${pushed.version} on ${stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
       );
     }
     if (!(await ensureNodeModules(step, io))) {

@@ -4,6 +4,8 @@ import {
   CLOUDFLARE_PRICES,
   CloudflareGraphqlUsageSource,
   NullLlmCostSource,
+  NullCostsService,
+  COSTS_OFF_MESSAGE,
   buildCostReport,
   containerCostUsd,
   doDurationCostUsd,
@@ -407,5 +409,16 @@ describe("AnthropicCostReportSource", () => {
 describe("NullLlmCostSource", () => {
   it("answers null so the report can say 'not configured' instead of $0", async () => {
     expect(await new NullLlmCostSource().fetchDailyCost(RANGE)).toBeNull();
+  });
+});
+
+// Feature: features/routing-and-config.md item 16 — the Null Object a process
+// without cost reporting is wired with.
+describe("NullCostsService — the service of a process without cost reporting", () => {
+  it("has no groups, and refuses a report with the reason the view shows", async () => {
+    const service = new NullCostsService();
+    expect(service.groups()).toEqual([]);
+    await expect(service.report("switchboard", null)).rejects.toThrow(COSTS_OFF_MESSAGE);
+    expect(COSTS_OFF_MESSAGE).toContain("CF_ANALYTICS_TOKEN");
   });
 });

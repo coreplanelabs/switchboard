@@ -23,6 +23,17 @@ export interface ScheduleStore {
   latest(): Promise<ScheduleFiring[]>;
 }
 
+/** The store of a process without a firing store (a Null Object, routing-and-
+ *  config item 16): a firing is dropped, and nothing has ever fired. */
+export class NullScheduleStore implements ScheduleStore {
+  async record(_firing: ScheduleFiring): Promise<void> {
+    // no store to record on
+  }
+  async latest(): Promise<ScheduleFiring[]> {
+    return [];
+  }
+}
+
 export class InMemoryScheduleStore implements ScheduleStore {
   private readonly firings = new Map<string, ScheduleFiring[]>();
 

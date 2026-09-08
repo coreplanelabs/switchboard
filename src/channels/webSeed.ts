@@ -3,6 +3,7 @@ import type { RunView } from "../core/runsService.js";
 import type { CostReport } from "../core/costs.js";
 import type { ScheduledRow } from "./scheduledPanel.js";
 import type { LiveFrame } from "./liveView/sse.js";
+import type { Capabilities } from "../core/capabilities.js";
 
 // The seed contract between the server and the web app (web/): every HTML
 // route renders the same shell (webShell.ts) with one WebSeed embedded as a
@@ -117,7 +118,8 @@ export interface CostsSeed {
   groups: string[];
 }
 
-export type WebSeed =
+/** One page's data, as its view builds it. */
+export type PageSeed =
   | RunsIndexSeed
   | ScheduledSeed
   | RunLiveSeed
@@ -126,6 +128,12 @@ export type WebSeed =
   | ResidentsIndexSeed
   | ResidentDetailSeed
   | CostsSeed;
+
+/** What the island holds: the page's seed plus what is on in this process
+ *  (src/core/capabilities.ts) — stamped by the shell renderer (webShell.ts),
+ *  never by a view — so the nav, the tabs and the meta lines paint only the
+ *  surfaces that exist in this installation. */
+export type WebSeed = PageSeed & { capabilities: Capabilities };
 
 /** The id of the `<script type="application/json">` seed island. */
 export const SEED_ELEMENT_ID = "sb-seed";

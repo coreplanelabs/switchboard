@@ -37,6 +37,7 @@ You can read this tree here on GitHub or as a site — [docs.switchboard.corepla
 - [Add a provider or an agent](how-to/add-a-provider-or-agent.md) — extend Switchboard without touching the dispatcher.
 - [Deploy and rotate a secret](how-to/deploy-and-rotate-a-secret.md) — the one command to ship, the runbook to rotate a credential.
 - [Run a load test](how-to/run-a-load-test.md) — a number for how Switchboard behaves with many runs at once, before and after a capacity change.
+- [Turn features on and off](how-to/turn-features-on-and-off.md) — the capability matrix: the config block that turns each feature on, what appears, what disappears, what it costs.
 
 ## Reference
 

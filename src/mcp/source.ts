@@ -39,6 +39,20 @@ export interface McpToolSource {
   ): Promise<McpToolsForRun>;
 }
 
+/** The source of a process without MCP (a Null Object, routing-and-config item
+ *  13): no server is scoped to anyone, so a run gets no tools and no block —
+ *  byte-identical to before the feature — and the dispatcher never asks
+ *  whether a source exists. */
+export class NullMcpToolSource implements McpToolSource {
+  async toolsFor(
+    _agentName: string,
+    _caller: { userId: string; channelId?: string },
+    _opts?: { signal?: AbortSignal },
+  ): Promise<McpToolsForRun> {
+    return { tools: [], servers: [] };
+  }
+}
+
 /** A server the subclass resolved for this run — a usable spec, or a named
  *  failure (a credential that would not open, a shadowed name). */
 export type ResolvedServer = { spec: McpServerSpec } | { name: string; unavailable: string };

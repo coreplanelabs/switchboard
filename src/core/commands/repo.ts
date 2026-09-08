@@ -174,6 +174,7 @@ export function renderResidentList(data: Record<string, unknown>): string {
 
 export const repoList = defineCommand({
   id: "repo.list",
+  enabledWhen: (caps) => caps.residents,
   action: "repo:read",
   effect: "read",
   describe: "Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge.",
@@ -193,6 +194,7 @@ export const repoList = defineCommand({
 
 export const repoOnboard = defineCommand({
   id: "repo.onboard",
+  enabledWhen: (caps) => caps.residents,
   args: [slugArg],
   options: z.object({
     ref: gitRef.optional().describe(`default branch to keep warm (default ${DEFAULT_REF})`),
@@ -386,6 +388,7 @@ const dryRunOptions = z.object({
 
 export const repoOffboard = defineCommand({
   id: "repo.offboard",
+  enabledWhen: (caps) => caps.residents,
   args: [slugArg],
   options: dryRunOptions,
   action: "repo:write",
@@ -429,6 +432,7 @@ export const repoOffboard = defineCommand({
 
 export const repoRebuild = defineCommand({
   id: "repo.rebuild",
+  enabledWhen: (caps) => caps.residents,
   args: [slugArg],
   options: dryRunOptions,
   action: "repo:write",
@@ -476,6 +480,7 @@ export const repoRebuild = defineCommand({
 
 export const repoReconfigure = defineCommand({
   id: "repo.reconfigure",
+  enabledWhen: (caps) => caps.residents,
   args: [slugArg],
   options: z.object({
     ref: gitRef.optional().describe("new default branch"),
@@ -540,6 +545,8 @@ function renderOp(output: JsonValue): string {
 function defineOp(op: Extract<OpName, "test" | "build">) {
   return defineCommand({
     id: `repo.${op}`,
+    // The op needs a backend: the resident service, or the local workspace (`defaultOperations`).
+    enabledWhen: (caps) => caps.residents || caps.execution === "local",
     args: [
       slugArg,
       { name: "ref", schema: gitRef.optional(), describe: "branch to run on (default: the resident's default ref)" },

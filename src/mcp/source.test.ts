@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { InMemoryMcpClient } from "./fake.js";
-import { CompositeMcpToolSource, StaticMcpToolSource, mcpGuidanceBlock } from "./source.js";
+import { CompositeMcpToolSource, NullMcpToolSource, StaticMcpToolSource, mcpGuidanceBlock } from "./source.js";
 import type { McpServerSpec } from "./types.js";
 
 const linear: McpServerSpec = { name: "linear", url: "https://mcp.linear.app/mcp", agents: ["general", "research"] };
@@ -148,5 +148,16 @@ describe("CompositeMcpToolSource (config wins over registry, item 1)", () => {
       tools: [],
       servers: [],
     });
+  });
+});
+
+// Feature: features/routing-and-config.md item 16 — the Null Object a process
+// without MCP is wired with: a run gets no tools and no block.
+describe("NullMcpToolSource — the source of a process without MCP", () => {
+  it("scopes no server to any agent or caller, so the guidance block is absent", async () => {
+    const source = new NullMcpToolSource();
+    const forRun = await source.toolsFor("coding", { userId: "slack:U1", channelId: "slack:C1" });
+    expect(forRun).toEqual({ tools: [], servers: [] });
+    expect(mcpGuidanceBlock(forRun.servers)).toBeUndefined();
   });
 });

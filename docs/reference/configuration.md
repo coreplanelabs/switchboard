@@ -1,6 +1,6 @@
 # Reference: config.yaml
 
-Every top-level block, what it's for, and what happens when it's absent. Copy `config/config.example.yaml` to `config/config.yaml` to start — every block below except `organization`, `providers` and `defaults` is optional and off by default.
+Every top-level block, what it's for, and what happens when it's absent. Copy `config/config.example.yaml` to `config/config.yaml` to start — every block below except `organization`, `providers` and `defaults` is optional and off by default. Which blocks (and which environment variables) turn a capability on, what appears when one does, and what it costs to run is the matrix in [Turn features on and off](../how-to/turn-features-on-and-off.md).
 
 | Block | Purpose | When absent |
 |---|---|---|

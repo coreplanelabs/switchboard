@@ -39,7 +39,10 @@
     // {{/if}}
     // The state Worker (deploy/cloudflare-memory/): where worker.ts records each
     // scheduled firing for the /runs Scheduled panel (#244), with MEMORY_TOKEN.
+    // A profile without a memory Worker renders no var: firings go unrecorded.
+    // {{#if urls.stateWorkerUrl}}
     "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}"
+    // {{/if}}
   },
   "observability": { "enabled": true, "traces": { "enabled": true } },
   "containers": [

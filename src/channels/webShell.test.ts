@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { FORM_PAGE_CSP, PAGE_CSP, renderShell, WEB_HTML_HEADERS, type ShellAssets } from "./webShell.js";
 import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
 import { FAVICON_BAD, FAVICON_DEFAULT, FAVICON_IDLE, FAVICON_LIVE, FAVICON_WARN } from "./favicon.js";
+import { ALL_CAPABILITIES } from "../core/capabilities.js";
 
 const assets: ShellAssets = { js: "/assets/main-AbC123.js", css: ["/assets/main-DeF456.css"] };
-const seed: WebSeed = { page: "runNotFound", retentionDays: 14 };
+const seed: WebSeed = { page: "runNotFound", retentionDays: 14, capabilities: ALL_CAPABILITIES };
 
 describe("WEB_HTML_HEADERS", () => {
   it("locks the page down: self-only scripts, no external assets, no framing, no caching", () => {
@@ -32,7 +33,7 @@ describe("WEB_HTML_HEADERS", () => {
 
 describe("serializeSeed", () => {
   it("escapes every <, > and & so no tag — </script> included — survives in the JSON island", () => {
-    const hostile: WebSeed = { page: "runNotFound", retentionDays: null };
+    const hostile: WebSeed = { page: "runNotFound", retentionDays: null, capabilities: ALL_CAPABILITIES };
     const withText = { ...hostile, note: `</script><script>alert(1)</script> & <img>` } as unknown as WebSeed;
     const json = serializeSeed(withText);
     expect(json).not.toContain("<");

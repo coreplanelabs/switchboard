@@ -9,6 +9,8 @@ import { parseTraceparent } from "./trace/traceparent.js";
 import { createTracer } from "./trace/tracer.js";
 import {
   makeResidentAdminClient,
+  NullResidentAdminClient,
+  RESIDENTS_OFF_MESSAGE,
   parseSlug,
   repoResourceId,
   residentAdminFromConfig,
@@ -241,5 +243,26 @@ describe("makeResidentAdminClient trace context", () => {
     expect(log.ends.filter((e) => e.name === "http.client")).toHaveLength(2);
     expect((calls[2]!.init.headers as Record<string, string>).authorization).toBe("Bearer admin-tok");
     expect(new Headers(calls[2]!.init.headers).has("traceparent")).toBe(false);
+  });
+});
+
+// Feature: features/routing-and-config.md item 16 — the Special Case a process
+// without residents is wired with: every route answers 503 with the reason.
+describe("NullResidentAdminClient — the admin plane of a process without residents", () => {
+  it("every route answers 503 with the configured reason (the no-resident sentence by default); withSpan is itself; nothing is fetched", async () => {
+    const client = new NullResidentAdminClient();
+    const off = { status: 503, data: { error: RESIDENTS_OFF_MESSAGE } };
+    expect(await client.residents()).toEqual(off);
+    expect(await client.onboard({ resource: "repo:o/r" })).toEqual(off);
+    expect(await client.offboard("repo:o/r", true)).toEqual(off);
+    expect(await client.reconfigure({ resource: "repo:o/r" })).toEqual(off);
+    expect(await client.rebuild("repo:o/r", false)).toEqual(off);
+    expect(await client.status("repo:o/r")).toEqual(off);
+    expect(client.withSpan({} as never)).toBe(client);
+    const noBearer = new NullResidentAdminClient(
+      "Repo management needs the resident admin bearer — `RESIDENT_ADMIN_TOKEN` is not set.",
+    );
+    expect((await noBearer.residents()).data.error).toContain("RESIDENT_ADMIN_TOKEN");
+    expect(RESIDENTS_OFF_MESSAGE).toContain("execution.resident.baseUrl");
   });
 });

@@ -28,11 +28,12 @@
 
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { openConfigStore, type ConfigStore } from "./config.js";
+import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 import { CLI_ACTOR } from "./core/authz/actor.js";
+import { ALL_CAPABILITIES, capabilitiesFrom, type Capabilities } from "./core/capabilities.js";
 import {
   CommandError,
   CommandRegistry,
@@ -46,13 +47,19 @@ import { catalogueText, chatForm, helpText, parseInvocation, type GrammarRejecti
 import { dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { startRequestRoot } from "./core/requestTrace.js";
 import { systemClock } from "./core/trace/clock.js";
-import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
+import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
-import { buildRunStore, type RunStore } from "./core/runStore.js";
+import { buildRunStore, NullRunStore, type RunStore } from "./core/runStore.js";
+import { mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
+import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
+import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
+import { residentAdminFromConfig } from "./core/residentAdmin.js";
+import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
+import { NullMcpToolSource } from "./mcp/source.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -313,6 +320,29 @@ export function bindBotConfig(
   };
 }
 
+/**
+ * What the CLI's catalogue hides (features/command-registry.md item 28),
+ * resolved ONCE at startup from the config FILE — a synchronous read, so `help`
+ * and the catalogue never wait on the state Worker (#409). A config that is not
+ * a readable file — a `state://` location, a missing or unparsable file — is
+ * the FULL catalogue: hiding is a courtesy, and a command that needs the config
+ * still fails `unavailable` naming the cause. `ask` resolves its own value from
+ * the opened store (the exact one, `state://` included).
+ */
+export function cliCapabilities(
+  configPath: string,
+  env: NodeJS.ProcessEnv,
+  opts: { exists?: (path: string) => boolean; load?: (path: string) => AppConfig } = {},
+): Capabilities {
+  if (parseConfigLocation(configPath).kind !== "file") return ALL_CAPABILITIES;
+  if (!(opts.exists ?? existsSync)(configPath)) return ALL_CAPABILITIES;
+  try {
+    return capabilitiesFrom((opts.load ?? loadAppConfig)(configPath), env);
+  } catch {
+    return ALL_CAPABILITIES;
+  }
+}
+
 async function main(): Promise<void> {
   const warn = (m: string) => console.error(m);
   // The bot config and, from it, the run history store (#157): a CLI `ask`
@@ -324,14 +354,15 @@ async function main(): Promise<void> {
   // state Worker is doing; a command that needs the config and cannot have it
   // gets the `unavailable` error naming the cause.
   const botConfig = bindBotConfig(CONFIG_PATH, "./data/cli-overrides.json");
-  let loaded: Promise<{ config: ConfigStore; runStore: RunStore | null }> | undefined;
+  let loaded: Promise<{ config: ConfigStore; runStore: RunStore }> | undefined;
   const bot = () =>
     (loaded ??= botConfig().then((config) => ({
       config,
-      runStore: buildRunStore(config.config.runHistory, process.env, {
-        dataDir: "./data",
-        warn: (m) => warn(`[run-history] ${m}`),
-      }),
+      runStore:
+        buildRunStore(config.config.runHistory, process.env, {
+          dataDir: "./data",
+          warn: (m) => warn(`[run-history] ${m}`),
+        }) ?? new NullRunStore(),
     })));
   // MCP (#394) rides the same config: entries are config scopes, secrets follow
   // the overrides backing; connect links point at the bot's PUBLIC_BASE_URL.
@@ -361,6 +392,7 @@ async function main(): Promise<void> {
       dataDir: "./data",
       warn,
       audit: () => {},
+      capabilities: cliCapabilities(CONFIG_PATH, process.env),
       mcp: async () => {
         const w = await mcpWiring();
         return w.service ?? { unavailable: w.unavailable ?? "MCP is not enabled" };
@@ -379,20 +411,40 @@ async function main(): Promise<void> {
   const { config, runStore } = await bot();
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
-  const mcpLoadedWiring = await mcpWiring();
-  const mcp = mcpLoadedWiring.source;
-  const runHistoryWriter = runStore
+  // What is on in this process (src/core/capabilities.ts): the CLI's `ask`
+  // resolves it once from the same config the bot would, so a run started here
+  // carries the same prompt blocks and card notes as one started in Slack.
+  const capabilities = capabilitiesFrom(config.config, process.env);
+  // Every optional subsystem is a real implementation or its Null Object
+  // (features/routing-and-config.md item 16), as in the bot. The CLI has no
+  // run ledger: a one-shot process reclaims and resumes nothing.
+  const mcp = (await mcpWiring()).source ?? new NullMcpToolSource();
+  const memory =
+    buildMemoryStore(config.config.memory, process.env, (m) => warn(`[memory] ${m}`)) ?? new NullMemoryStore();
+  const runHistoryWriter = capabilities.runHistory
     ? createRunHistoryWriter({ store: runStore, warn, onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
+    : new NullRunHistoryWriter();
+  // The resident fleet's cap for the About block (routing-and-config item 11):
+  // one read for this one-shot process, from the admin plane the config names;
+  // nothing to know without residents or without the admin bearer.
+  const fleetWatcher = capabilities.residents
+    ? residentFleetWatcherFor(residentAdminFromConfig(config, process.env), { warn })
     : undefined;
+  await fleetWatcher?.refresh();
+  const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;
   // The chat fast path (`runs list`, `friction report`, …) answers from the same
   // catalogue the bot binds — without it those messages would go to the model.
   const deps: CoreDeps = {
     config,
     providers,
+    capabilities,
+    residentFleet,
     skills,
     mcp,
-    mcpRegistryOn: mcpLoadedWiring.service !== undefined,
+    memory,
     runHistoryWriter,
+    runLedger: new NullLedgerWriteThrough(mintGeneration(), runStore),
+    threadsElsewhere: new ThreadsElsewhere(),
     commands,
   };
   // The request's root (features/tracing.md): the CLI's receipt is now.
@@ -405,7 +457,7 @@ async function main(): Promise<void> {
     { trace },
   );
   // Wait for the record write to settle before exiting rather than dropping it.
-  await runHistoryWriter?.settled();
+  await runHistoryWriter.settled();
 }
 
 // Run only when invoked as a script (tsx/node src/cli.ts), never on import

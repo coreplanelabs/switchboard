@@ -1,7 +1,8 @@
 import { escapeHtml } from "./liveView/html.js";
 import { FAVICON_BY_TONE, FAVICON_DEFAULT, FAVICON_IDLE } from "./favicon.js";
 import { residentsFleetTone, type ResidentRecordView } from "./residentsModel.js";
-import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
+import { serializeSeed, SEED_ELEMENT_ID, type PageSeed, type WebSeed } from "./webSeed.js";
+import type { Capabilities } from "../core/capabilities.js";
 
 // The one HTML document the server renders: a shell that mounts the web app
 // (web/, built by Vite into hashed assets under /assets/*) and hands it the
@@ -85,9 +86,10 @@ function pageFavicon(seed: WebSeed): string {
 }
 
 /** A bound shell renderer: what the page handlers receive (they know the title
- *  and the seed; the assets are wired once at startup). */
-export type ShellRenderer = (title: string, seed: WebSeed) => string;
+ *  and the page's seed; the assets and the process's capabilities are wired
+ *  once at startup — a view never stamps `capabilities` itself). */
+export type ShellRenderer = (title: string, seed: PageSeed) => string;
 
-export function makeShellRenderer(assets: ShellAssets): ShellRenderer {
-  return (title, seed) => renderShell(title, seed, assets);
+export function makeShellRenderer(assets: ShellAssets, capabilities: Capabilities): ShellRenderer {
+  return (title, seed) => renderShell(title, { ...seed, capabilities }, assets);
 }

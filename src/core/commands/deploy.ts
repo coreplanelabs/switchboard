@@ -368,6 +368,11 @@ export const deployConfig = defineCommand({
     const loaded = await loadProfile(deps);
     const source = options.source ?? loaded.profile.configSource;
     const stateWorkerUrl = profileUrls(loaded.profile).stateWorkerUrl;
+    if (stateWorkerUrl === undefined)
+      throw new CommandError(
+        "unavailable",
+        `${loaded.path} names no memory (state) Worker — there is no document to push the config to; the bot reads its config from SWITCHBOARD_CONFIG`,
+      );
     const pushed = await deps.deploy.pushConfig({ source, stateWorkerUrl, key: CONFIG_DOCUMENT_KEY });
     if (!pushed.ok) throw new CommandError("unavailable", pushed.problem);
     const output: ConfigPushOutput = {

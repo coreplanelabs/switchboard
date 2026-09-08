@@ -14,6 +14,7 @@ import {
   type SseSink,
 } from "./liveView.js";
 import { makeShellRenderer, type ShellRenderer } from "./webShell.js";
+import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import {
   SEED_ELEMENT_ID,
   type RunHistorySeed,
@@ -55,7 +56,10 @@ const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result
 const PRELUDE = "retry: 3000\n\n";
 
 /** Fixed assets so shell output is deterministic. */
-const shell: ShellRenderer = makeShellRenderer({ js: "/assets/main-test.js", css: ["/assets/main-test.css"] });
+const shell: ShellRenderer = makeShellRenderer(
+  { js: "/assets/main-test.js", css: ["/assets/main-test.css"] },
+  ALL_CAPABILITIES,
+);
 
 /** The seed a rendered shell carries — what the web app will paint. */
 function seedOf(html: string): WebSeed {
@@ -628,6 +632,7 @@ describe("createLiveViewHandler (node:http)", () => {
       // the header's one duration reads from these (item 22)
       serverNow: expect.any(Number),
       startedAt: expect.any(Number),
+      capabilities: ALL_CAPABILITIES,
     });
   });
 
@@ -1428,7 +1433,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         if (/\/(events|friction)$/.test(url)) expect(t.body()).toBe("run not found");
         else {
           const seed = seedOf(t.body()) as RunNotFoundSeed;
-          expect(seed).toEqual({ page: "runNotFound", retentionDays: 30 }); // nothing echoed from the request — a static seed
+          expect(seed).toEqual({ page: "runNotFound", retentionDays: 30, capabilities: ALL_CAPABILITIES }); // nothing echoed from the request — a static seed
           expect(t.body()).not.toContain("nope");
           expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
           pageBodies.add(t.body());
@@ -1448,7 +1453,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       await done(t);
       expect(t.status).toBe(404);
       const seed = seedOf(t.body()) as RunNotFoundSeed;
-      expect(seed).toEqual({ page: "runNotFound", retentionDays: 30 });
+      expect(seed).toEqual({ page: "runNotFound", retentionDays: 30, capabilities: ALL_CAPABILITIES });
     });
   });
 
@@ -1855,7 +1860,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const unknown = await request(h, "/runs/nope", alice);
       expect(denied.status).toBe(404);
       expect(denied.body()).toBe(unknown.body()); // byte-identical: existence never revealed
-      expect(seedOf(denied.body())).toEqual({ page: "runNotFound", retentionDays: 30 });
+      expect(seedOf(denied.body())).toEqual({ page: "runNotFound", retentionDays: 30, capabilities: ALL_CAPABILITIES });
       for (const url of ["/runs/priv/events", "/runs/priv/friction"]) {
         const t = await request(h, url, alice);
         expect([url, t.status, t.body()]).toEqual([url, 404, "run not found"]);

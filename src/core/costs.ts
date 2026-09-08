@@ -450,6 +450,23 @@ export interface CostsService {
   report(group: string, daysParam: string | null): Promise<CostReport>;
 }
 
+/** Why there is no spend report, when the config has no `costs` block or the
+ *  Cloudflare analytics token is not in the env. */
+export const COSTS_OFF_MESSAGE =
+  "Cost reporting isn't configured — set costs.cloudflareAccountId + costs.groups in config and the CF_ANALYTICS_TOKEN secret to enable this view.";
+
+/** The service of a process without cost reporting (a Null Object, routing-and-
+ *  config item 16): no group exists, and a report of one is refused with the
+ *  reason — the view renders that instead of branching on a missing service. */
+export class NullCostsService implements CostsService {
+  groups(): string[] {
+    return [];
+  }
+  report(_group: string, _daysParam: string | null): Promise<CostReport> {
+    return Promise.reject(new Error(COSTS_OFF_MESSAGE));
+  }
+}
+
 export function createCostsService(
   cfg: CostsConfig,
   cloudflare: CloudflareUsageSource,
