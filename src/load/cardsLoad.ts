@@ -7,19 +7,16 @@
 // number: card update lag p50/p95/max, refused edits, frames the budget held
 // back, and whether every terminal frame landed. Two client models: the
 // `budgeted` one is the Slack adapter as shipped (docs/reference/specs/run-visibility.md
-// item 9); `retrying` is the pre-budget adapter on the WebClient's default
+// item 8); `retrying` is the pre-budget adapter on the WebClient's default
 // policy, kept as the baseline the budget is measured against. Deterministic,
 // instant, no I/O.
 
 import { coalesceStatus } from "../core/statusCoalescer.js";
-import { createStatusBudget, STATUS_EDITS_PER_MINUTE } from "../core/statusBudget.js";
+import { createStatusBudget, STATUS_EDITS_PER_MINUTE, TERMINAL_RESENDS } from "../core/statusBudget.js";
 import type { StatusHandle, StatusUpdate } from "../core/types.js";
 import { FakeSlack, type FakeSlackStats } from "./fakeSlack.js";
 
 export type CardsClientModel = "budgeted" | "retrying";
-
-/** The Slack adapter's cap on terminal re-sends (`TERMINAL_RESENDS` in `src/channels/slack.ts`). */
-const TERMINAL_RESENDS = 10;
 
 export interface CardsLoadParams {
   cards: number;

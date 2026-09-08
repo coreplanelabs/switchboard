@@ -1,5 +1,5 @@
 // One status-card edit budget for the whole process (docs/reference/specs/run-visibility.md
-// item 9). Slack rates `chat.update` per app, not per card: N live runs each
+// item 8). Slack rates `chat.update` per app, not per card: N live runs each
 // editing a card every few seconds share ONE allowance of about 50 edits a
 // minute, and past it every edit is a 429 whose retry pauses the client's
 // whole queue. The budget is a token bucket at that published rate, with three
@@ -28,6 +28,9 @@ export const STATUS_EDIT_CHANNEL_SPACING_MS = 1_000;
 
 /** A live card asks for a token at least every heartbeat (5 s); one silent for this long is swept from the share. */
 export const LIVE_CARD_WINDOW_MS = 60_000;
+
+/** How many times a rate-limited terminal frame is re-sent (each after Slack's Retry-After) before it is given up. */
+export const TERMINAL_RESENDS = 10;
 
 export interface StatusBudget {
   /** A card came live: it shares the progress rate from here on. */
@@ -75,7 +78,10 @@ export function createStatusBudget(opts: StatusBudgetOptions): StatusBudget {
 
   const refill = () => {
     const t = now();
-    tokens = Math.min(capacity, tokens + Math.max(0, t - refilledAt) * perMs);
+    // A clock that steps backwards credits nothing now and nothing again when it
+    // recovers: the high-water mark stays, so an interval is only ever credited once.
+    if (t <= refilledAt) return;
+    tokens = Math.min(capacity, tokens + (t - refilledAt) * perMs);
     refilledAt = t;
   };
   const sweep = (t: number) => {

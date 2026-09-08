@@ -137,11 +137,16 @@ describe("process budget", () => {
     expect(b.takeTerminal("C1")).toBe(24_000); // the next token (13 s would clear the channel, 24 s the token)
   });
 
-  it("a clock that goes backwards does not drain the bucket", () => {
+  it("a clock that goes backwards neither drains the bucket nor credits the same interval twice when it recovers", () => {
     let t = 10_000;
-    const b = createStatusBudget({ perMinute: 50, reserve: 0, now: () => t });
-    b.tryProgress("c", "ch");
+    const b = createStatusBudget({ perMinute: 60, reserve: 0, now: () => t }); // one token a second
+    for (let i = 0; i < 10; i++) b.tryProgress(`c${i}`, `ch${i}`);
+    expect(b.tokens()).toBe(50);
     t = 0;
-    expect(b.tokens()).toBe(49);
+    expect(b.tokens()).toBe(50);
+    t = 10_000; // back to where it was: nothing new has elapsed
+    expect(b.tokens()).toBe(50);
+    t = 11_000;
+    expect(b.tokens()).toBe(51);
   });
 });
