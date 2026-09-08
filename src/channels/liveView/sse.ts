@@ -238,7 +238,7 @@ export function serveIndexEvents(
 /**
  * The stored stream with the truncation made visible (R12 / AE11): when the
  * record holds fewer events than the run published (`eventCount`), a
- * `replay_note` — "N events omitted" — marks EVERY gap in `seq` with that gap's
+ * `replay_note` — "N records omitted" (records, since the count includes span records) — marks EVERY gap in `seq` with that gap's
  * own size (a gap at the start puts one first), and whatever the gaps do not
  * account for was cut from the tail, so one more marker goes last. The counts
  * always sum to published − stored. A complete record is returned as-is. The
@@ -249,7 +249,7 @@ export function withOmittedMarkers(events: readonly RunEvent[], eventCount: numb
   if (omitted <= 0) return [...events];
   const marker = (n: number): LiveFrame => ({
     type: "replay_note",
-    summary: `${n} event${n === 1 ? "" : "s"} omitted`,
+    summary: `${n} record${n === 1 ? "" : "s"} omitted`,
   });
   const out: LiveFrame[] = [];
   let expected = 1;

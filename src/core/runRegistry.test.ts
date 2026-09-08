@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_BACKLOG_LIMIT,
   REPLAY_EVERYTHING,
   RunControl,
   RunRegistry,
@@ -10,6 +11,7 @@ import {
   type SealedFrame,
 } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
+import { MAX_EVENT_BYTES } from "./runRecord.js";
 
 // Feature: features/live-view.md — the in-memory, live-only run registry that
 // backs the external live-view page. It mints an unguessable id+token per run,
@@ -475,6 +477,7 @@ describe("RunRegistry.listActive", () => {
       finished: false,
       startedAt: 1010, // clock at create()
       eventCount: 2,
+      stepCount: 2,
       activity: "x", // the latest tool call (item 20)
     });
     expect(list[1]).toEqual({
@@ -484,6 +487,7 @@ describe("RunRegistry.listActive", () => {
       finished: false,
       startedAt: 1000,
       eventCount: 0,
+      stepCount: 0,
     });
     expect(a.id).toBe("id-1");
   });
@@ -526,7 +530,7 @@ describe("RunRegistry.listActive", () => {
     const bare = reg.create();
     const bareRow = reg.listActive().find((r) => r.id === bare.id)!;
     expect(bare.label).toBeUndefined();
-    expect(Object.keys(bareRow).sort()).toEqual(["eventCount", "finished", "id", "startedAt", "token"]);
+    expect(Object.keys(bareRow).sort()).toEqual(["eventCount", "finished", "id", "startedAt", "stepCount", "token"]);
     const chat = reg.create("general · #ch", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:2" });
     expect(reg.getById(chat.id)).not.toHaveProperty("repo");
     expect(reg.getById(chat.id)).not.toHaveProperty("sourceUrl");
@@ -605,6 +609,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           finished: false,
           startedAt: 1010,
           eventCount: 0,
+          stepCount: 0,
         },
       },
       {
@@ -616,6 +621,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           finished: false,
           startedAt: 1000,
           eventCount: 0,
+          stepCount: 0,
         },
       },
     ]);
@@ -636,7 +642,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     expect(events).toEqual([
       {
         type: "upsert",
-        run: { id: "id-1", token: "tok-1", label: "x", finished: false, startedAt: 1000, eventCount: 0 },
+        run: { id: "id-1", token: "tok-1", label: "x", finished: false, startedAt: 1000, eventCount: 0, stepCount: 0 },
       },
     ]);
   });
@@ -651,7 +657,15 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     expect(events).toEqual([
       {
         type: "upsert",
-        run: { id: "id-1", token: "tok-1", finished: false, startedAt: 1000, eventCount: 1, activity: "x" },
+        run: {
+          id: "id-1",
+          token: "tok-1",
+          finished: false,
+          startedAt: 1000,
+          eventCount: 1,
+          stepCount: 1,
+          activity: "x",
+        },
       },
     ]);
   });
@@ -674,6 +688,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           startedAt: 1000,
           finishedAt: 1000,
           eventCount: 0,
+          stepCount: 0,
         },
       },
     ]);
@@ -716,7 +731,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     // the well-behaved subscriber still received the upsert…
     expect(good).toContainEqual({
       type: "upsert",
-      run: { id: "id-1", token: "tok-1", label: "x", finished: false, startedAt: 1000, eventCount: 0 },
+      run: { id: "id-1", token: "tok-1", label: "x", finished: false, startedAt: 1000, eventCount: 0, stepCount: 0 },
     });
     // …and registry state is uncorrupted.
     expect(reg.listActive().map((r) => r.label)).toEqual(["x"]);
@@ -735,6 +750,7 @@ describe("snapshot — token-gated read of a run's backlog (#84)", () => {
       finished: false,
       startedAt: expect.any(Number),
       eventCount: 1,
+      stepCount: 1,
       truncated: false,
     });
     expect("finishedAt" in live!).toBe(false);
@@ -749,6 +765,7 @@ describe("snapshot — token-gated read of a run's backlog (#84)", () => {
       startedAt: expect.any(Number),
       finishedAt: expect.any(Number),
       eventCount: 1,
+      stepCount: 1,
       truncated: false,
     });
     expect(reg.snapshot(id, "wrong")).toBeNull();
@@ -779,6 +796,7 @@ describe("RunRegistry.markPersisted", () => {
           startedAt: 1000,
           finishedAt: 1000,
           eventCount: 0,
+          stepCount: 0,
           persisted: true,
         },
       },
@@ -981,21 +999,22 @@ describe("RunRegistry — text events, seq, label redaction (#157 U1)", () => {
 // separate ring is gone), so its bounds are what the friction diagnosis and the
 // live replay see. A throwing per-run subscriber is isolated like index sinks.
 describe("RunRegistry — backlog bounds and subscriber isolation (#157 U11)", () => {
-  it("defaults to a 5000-event backlog: the 5001st event drops the oldest one; eventCount keeps counting", () => {
+  it("defaults to an 8000-event backlog: the 8001st event drops the oldest one; eventCount keeps counting", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
-    for (let i = 1; i <= 5001; i++) reg.publish(id, call(`$ step ${i}`));
+    for (let i = 1; i <= 8001; i++) reg.publish(id, call(`$ step ${i}`));
     const snap = reg.snapshot(id, token);
-    expect(snap?.events).toHaveLength(5000);
+    expect(snap?.events).toHaveLength(8000);
     expect(snap?.events[0]).toMatchObject({ type: "tool_call", summary: "$ step 2", seq: 2 });
-    expect(snap?.events[4999]).toMatchObject({ summary: "$ step 5001", seq: 5001 });
-    expect(reg.listActive()[0]?.eventCount).toBe(5001);
+    expect(snap?.events[7999]).toMatchObject({ summary: "$ step 8001", seq: 8001 });
+    expect(reg.listActive()[0]?.eventCount).toBe(8001);
   });
 
   const bytesOf = (e: RunEvent) => Buffer.byteLength(JSON.stringify(e), "utf8");
-  const filler = (n: number): RunEvent => ({ type: "context", text: "x".repeat(n) });
+  // Tool results, not `context`: context is head material (protected, capped) — see the head tests below.
+  const filler = (n: number): RunEvent => ({ type: "tool_result", tool: "bash", ok: true, summary: "x".repeat(n) });
 
-  it("bounds the backlog by bytes (default 4 MiB, measured as each event's JSON): 4 × 1 MiB context events exceed it, so the oldest is dropped", () => {
+  it("bounds the backlog by bytes (default 4 MiB, measured as each event's JSON): 4 × 1 MiB tool results exceed it, so the oldest is dropped", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     for (let i = 0; i < 4; i++) reg.publish(id, filler(1024 * 1024));
@@ -1019,6 +1038,84 @@ describe("RunRegistry — backlog bounds and subscriber isolation (#157 U11)", (
     expect(reg.snapshot(id, token)!.events.map((e) => e.seq)).toEqual([5]);
     const used = reg.snapshot(id, token)!.events.reduce((n, e) => n + bytesOf(e), 0);
     expect(used).toBeLessThanOrEqual(3 * stampedSize);
+  });
+
+  // Feature: features/tracing.md; features/live-view.md item 2 — the protected head.
+  describe("the protected head", () => {
+    const ctx = (n: number): RunEvent => ({ type: "context", text: "c".repeat(n) });
+    const big = (n: number): RunEvent => ({ type: "tool_result", tool: "bash", ok: true, summary: "x".repeat(n) });
+
+    it("head material published before any other event survives the count bound and the byte bound; the trim drops the oldest event after the head and always keeps the newest", () => {
+      const { reg } = testRegistry({ backlogLimit: 6 });
+      const { id, token } = reg.create();
+      reg.publish(id, { type: "input", text: "go" });
+      reg.publish(id, { type: "run_meta", agent: "coding", model: "m" });
+      reg.publish(id, ctx(10));
+      for (let i = 1; i <= 10; i++) reg.publish(id, call(`$ step ${i}`));
+      const seqs = reg.snapshot(id, token)!.events.map((e) => e.seq);
+      expect(seqs).toEqual([1, 2, 3, 11, 12, 13]); // the head, then the newest three
+      const byBytes = testRegistry({ backlogBytes: 400 });
+      const r = byBytes.reg.create();
+      byBytes.reg.publish(r.id, { type: "input", text: "go" });
+      byBytes.reg.publish(r.id, big(300));
+      byBytes.reg.publish(r.id, big(300));
+      expect(byBytes.reg.snapshot(r.id, r.token)!.events.map((e) => e.seq)).toEqual([1, 3]); // head + newest, over budget by design
+    });
+
+    it("the head closes at the first non-head event and at HEAD_BUDGET_BYTES; later head material is ordinary", () => {
+      const { reg } = testRegistry({ backlogLimit: 3 });
+      const { id, token } = reg.create();
+      reg.publish(id, { type: "input", text: "go" });
+      reg.publish(id, call("$ first"));
+      reg.publish(id, ctx(5)); // head material, but the head closed at the call
+      for (let i = 1; i <= 5; i++) reg.publish(id, call(`$ step ${i}`));
+      expect(reg.snapshot(id, token)!.events.map((e) => e.seq)).toEqual([1, 7, 8]);
+      const budget = testRegistry({ backlogLimit: 12 });
+      const b = budget.reg.create();
+      for (let i = 0; i < 10; i++) budget.reg.publish(b.id, ctx(60 * 1024)); // 10 × ~60 KiB: the ninth crosses 512 KiB
+      for (let i = 1; i <= 10; i++) budget.reg.publish(b.id, call(`$ step ${i}`));
+      const kept = budget.reg.snapshot(b.id, b.token)!.events.map((e) => e.seq);
+      expect(kept.slice(0, 8)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]); // eight fit the budget
+      expect(kept).toHaveLength(12);
+      expect(kept.at(-1)).toBe(20);
+      expect(kept).not.toContain(9); // the ninth and tenth context events were ordinary and got trimmed
+    });
+
+    it("a head event is capped to MAX_EVENT_BYTES at publish; an ordinary event is not", () => {
+      const { reg } = testRegistry();
+      const { id, token } = reg.create();
+      reg.publish(id, ctx(2 * MAX_EVENT_BYTES));
+      reg.publish(id, big(2 * MAX_EVENT_BYTES));
+      const [head, body] = reg.snapshot(id, token)!.events;
+      expect(Buffer.byteLength(JSON.stringify(head), "utf8")).toBeLessThanOrEqual(MAX_EVENT_BYTES);
+      expect(Buffer.byteLength(JSON.stringify(body), "utf8")).toBeGreaterThan(MAX_EVENT_BYTES);
+    });
+
+    it("a fresh subscribe replays the head first, then the newest within the budget, and elides the range between; a resume re-sends nothing from the head", () => {
+      const { reg } = testRegistry();
+      const { id, token } = reg.create();
+      reg.publish(id, { type: "input", text: "go" });
+      reg.publish(id, ctx(5));
+      for (let i = 1; i <= 10; i++) reg.publish(id, call(`$ step ${i}`));
+      const seen: number[] = [];
+      const got = reg.subscribe(id, token, { onEvent: (e) => seen.push(e.seq ?? 0), limit: 5 })!;
+      expect(seen).toEqual([1, 2, 10, 11, 12]); // the two head events + the newest three
+      expect(got).toMatchObject({ replayed: 5, elided: { fromSeq: 3, toSeq: 9 } });
+      const resumed: number[] = [];
+      reg.subscribe(id, token, { onEvent: (e) => resumed.push(e.seq ?? 0), afterSeq: 8, limit: 5 });
+      expect(resumed).toEqual([9, 10, 11, 12]);
+    });
+
+    it("stepCount counts content events only and rides the summary and the snapshot", () => {
+      const { reg } = testRegistry();
+      const { id, token } = reg.create();
+      reg.publish(id, call("$ x"));
+      reg.publish(id, spanEnd("tool.bash"));
+      reg.publish(id, result(true, "ok"));
+      expect(reg.getById(id)).toMatchObject({ eventCount: 3, stepCount: 2 });
+      expect(reg.snapshot(id, token)).toMatchObject({ eventCount: 3, stepCount: 2 });
+      expect(DEFAULT_BACKLOG_LIMIT).toBe(8000);
+    });
   });
 
   it("a throwing per-run subscriber does not break publish for other subscribers or the publisher", () => {

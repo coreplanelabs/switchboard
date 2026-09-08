@@ -85,7 +85,10 @@ async function getVisibleRun(
   return view;
 }
 
-function wrapEvent(e: RunEvent): RunEvent {
+/** Every free-text field a JSON surface hands out is wrapped as untrusted: the
+ *  narrative texts, the tool summaries and outputs, the notes, and the one
+ *  free-text field a span record carries (`span_end.error`). */
+export function wrapEvent(e: RunEvent): RunEvent {
   switch (e.type) {
     case "input":
     case "context":
@@ -93,10 +96,18 @@ function wrapEvent(e: RunEvent): RunEvent {
     case "answer":
       return { ...e, text: wrapUntrusted(e.text) };
     case "tool_call":
-    case "tool_result":
       return { ...e, summary: wrapUntrusted(e.summary) };
+    case "tool_result":
+      return {
+        ...e,
+        summary: wrapUntrusted(e.summary),
+        ...(e.output !== undefined ? { output: wrapUntrusted(e.output) } : {}),
+      };
     case "run_note":
       return { ...e, summary: wrapUntrusted(e.summary) };
+    case "span_end":
+      // The one free-text field a span record carries (features/tracing.md).
+      return e.error !== undefined ? { ...e, error: wrapUntrusted(e.error) } : e;
     default:
       return e;
   }

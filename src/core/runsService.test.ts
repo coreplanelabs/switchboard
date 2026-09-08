@@ -327,6 +327,7 @@ describe("RunsService.listRuns — read merge", () => {
         ...meta,
         label: "coding · acme/x",
         startedAt: NOW,
+        stepCount: 1,
         events: [{ type: "input", text: "go", seq: 1 }],
       }),
     );

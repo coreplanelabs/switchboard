@@ -104,7 +104,21 @@ export type TimelineChange =
   /** A skill loaded into context (a `skill_use` event): rendered inside the
    *  step whose `use_skill` call it belongs to, as its own row — not a call
    *  card (the call card is the tool's; this is what the tool loaded). */
-  | { kind: "skill"; step: TimelineStep; skill: TimelineSkill };
+  | { kind: "skill"; step: TimelineStep; skill: TimelineSkill }
+  /** A streamed span that is neither a model turn nor a tool call
+   *  (features/tracing.md): a `dispatch.*` / `run.*` / `post.*` / `ship.round`
+   *  step, rendered as its own row. `open` is a start with no end yet; the end
+   *  comes as a second change with the same `spanId`. `name` is the raw span
+   *  name — the page renders it through the display table, never as is. */
+  | {
+      kind: "span";
+      spanId: string;
+      name: string;
+      open: boolean;
+      durationMs?: number;
+      status?: "ok" | "error";
+      at?: number;
+    };
 
 export interface TimelineSkill {
   name: string;
@@ -261,6 +275,13 @@ export function createRunTimeline(): RunTimeline {
     return call;
   }
 
+  function findCallById(id: string): { step: TimelineStep; call: TimelineCall } | null {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      for (const call of steps[i].calls) if (call.id === id) return { step: steps[i], call };
+    }
+    return null;
+  }
+
   function findCall(e: Record<string, unknown>): { step: TimelineStep; call: TimelineCall } | null {
     const id = str(e.callId);
     if (id) {
@@ -298,7 +319,8 @@ export function createRunTimeline(): RunTimeline {
       case "run_meta": {
         // Optional fields ride only when present (and well-typed) — the page
         // shows exactly what was resolved, never an empty slot.
-        if (!str(e.agent) || !str(e.model)) return [];
+        if (!str(e.agent)) return [];
+        // A command run's meta names no model (features/tracing.md).
         const meta: TimelineChange = { kind: "meta", agent: str(e.agent), model: str(e.model), at: num(e.at) };
         if (str(e.effort)) meta.effort = str(e.effort);
         if (str(e.repo)) meta.repo = str(e.repo);
@@ -348,6 +370,60 @@ export function createRunTimeline(): RunTimeline {
         // The reading diff is the review panel's material (features/reading-diff.md
         // roadmap) — the timeline's step story does not change shape for it.
         return [];
+      case "span_start": {
+        const name = str(e.name);
+        const spanId = str(e.spanId);
+        if (!name || !spanId) return [];
+        // A tool's span decorates its call card (twin rule) and a model turn
+        // its step; neither opens a row of its own. Everything else streamed is
+        // a step row, open until its end arrives.
+        if (name.startsWith("tool.") || name.startsWith("mcp.") || name === "model.turn") return [];
+        return [{ kind: "span", spanId, name, open: true, at: num(e.at) }];
+      }
+      case "span_end": {
+        const name = str(e.name);
+        const spanId = str(e.spanId);
+        const durationMs = num(e.durationMs);
+        if (!name || !spanId || durationMs === undefined) return [];
+        const status = e.status === "error" ? "error" : "ok";
+        const attrs = typeof e.attrs === "object" && e.attrs !== null ? (e.attrs as Record<string, unknown>) : {};
+        if (name === "model.turn") {
+          // The model turn's one timing record (features/tracing.md): the same
+          // row the legacy `turn` event draws, from the span's attrs — and the
+          // same step boundary.
+          current = null;
+          const facts: string[] = [];
+          const inTok = num(attrs.inputTokens);
+          const outTok = num(attrs.outputTokens);
+          const cached = num(attrs.cacheReadTokens);
+          if (inTok !== undefined) facts.push(fmtTokens(inTok) + " in");
+          if (outTok !== undefined) facts.push(fmtTokens(outTok) + " out");
+          if (cached !== undefined) facts.push(fmtTokens(cached) + " cached");
+          return [
+            {
+              kind: "turn",
+              label: "Thought for " + formatDuration(durationMs, "precise"),
+              facts,
+              durationMs,
+              at: num(e.at),
+            },
+          ];
+        }
+        if (name.startsWith("tool.") || name.startsWith("mcp.")) {
+          // The twin rule: the span's measured duration decorates the call card
+          // whose `tool_call` carries its callId — when the result had no clock
+          // of its own. An MCP span decorates nothing here (its tool span does).
+          if (!name.startsWith("tool.")) return [];
+          const callId = str(attrs.callId);
+          if (!callId) return [];
+          const found = findCallById(callId);
+          if (!found || found.call.durationMs !== undefined) return [];
+          found.call.durationMs = durationMs;
+          found.call.facts = facts(found.call);
+          return [{ kind: "result", step: found.step, call: found.call }];
+        }
+        return [{ kind: "span", spanId, name, open: false, durationMs, status, at: num(e.at) }];
+      }
       case "skill_use": {
         const name = str(e.skill);
         if (!name) return [];

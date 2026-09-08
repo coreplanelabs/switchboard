@@ -128,10 +128,66 @@ export type ShipRoundOutcome =
  */
 /** A span record (features/tracing.md): timing, not content. The registry
  *  accepts them between a run's finish and its seal, they never repaint the
- *  index, and every reader's counts and clocks skip them. The union gains the
- *  two variants with the emitters; until then the check is by name. */
-export function isSpanRecord(e: { type: string }): boolean {
+ *  index, and every reader's counts and clocks skip them. */
+export function isSpanRecord(e: { type: string }): e is SpanStartEvent | SpanEndEvent {
   return e.type === "span_start" || e.type === "span_end";
+}
+
+/** The protected head (features/tracing.md; live-view item 2) — is this event head material? The root's start, `slack.receive` and the
+ *  `dispatch.*` span pairs, `input`, `context`, `run_meta`, and the
+ *  `mcp_unavailable` / `spans_dropped` notes. */
+export function isHeadMaterial(event: RunEvent): boolean {
+  switch (event.type) {
+    case "input":
+    case "context":
+    case "run_meta":
+      return true;
+    case "run_note":
+      return event.kind === "mcp_unavailable" || event.kind === "spans_dropped";
+    case "span_start":
+      return event.name === "request" || event.name === "slack.receive" || event.name.startsWith("dispatch.");
+    case "span_end":
+      return event.name === "slack.receive" || event.name.startsWith("dispatch.");
+    default:
+      return false;
+  }
+}
+
+/** A span's attributes on the wire: the closed-table values `attrs.ts` admits
+ *  (literal unions, numbers, booleans; a few sanitized strings). Free text
+ *  rides only in `span_end.error`, redacted and capped. */
+export type SpanEventAttrs = Readonly<Record<string, string | number | boolean>>;
+
+/** A span opened (features/tracing.md): the run-stream sink publishes one per
+ *  streamed span so a live page can show the step as it runs. `at` is the
+ *  span's start on the runner clock. */
+export interface SpanStartEvent {
+  type: "span_start";
+  spanId: string;
+  parentSpanId?: string;
+  name: string;
+  attrs?: SpanEventAttrs;
+  seq?: number;
+  at?: number;
+}
+
+/** A span closed: its measured interval, its outcome and — for a span about
+ *  this run's own work whose message we produce — the redacted, capped error
+ *  text; a span whose failure came from a remote body carries the
+ *  classification (`errorKind`/`errorCode`) in `attrs` and no message. `at` is
+ *  the end on the runner clock (`startedAt + durationMs`). */
+export interface SpanEndEvent {
+  type: "span_end";
+  spanId: string;
+  parentSpanId?: string;
+  name: string;
+  startedAt: number;
+  durationMs: number;
+  status: "ok" | "error";
+  error?: string;
+  attrs?: SpanEventAttrs;
+  seq?: number;
+  at?: number;
 }
 
 export type RunEvent =
@@ -144,7 +200,17 @@ export type RunEvent =
    *  `git add … && git commit … && git push …` routinely carries its `push`
    *  past the summary cap. The status card and friction analyzer keep reading
    *  `summary`. */
-  | { type: "tool_call"; tool: string; summary: string; command?: string; callId?: string; seq?: number; at?: number }
+  /** `spanId` (features/tracing.md): the `tool.*` span this call ran under, once the runner emits spans. */
+  | {
+      type: "tool_call";
+      tool: string;
+      summary: string;
+      command?: string;
+      callId?: string;
+      spanId?: string;
+      seq?: number;
+      at?: number;
+    }
   /** `ok` is "the tool succeeded": false when it threw AND (bash) when the
    *  command exited nonzero. `exitCode` rides on bash results (parsed from the
    *  executors' shared `exit N:` prefix, 0 for a clean run; absent when the code
@@ -160,6 +226,7 @@ export type RunEvent =
       exitCode?: number;
       output?: string;
       infra?: true;
+      spanId?: string;
       seq?: number;
       at?: number;
     }
@@ -171,6 +238,11 @@ export type RunEvent =
       summary: string;
       mode?: StopMode;
       actor?: RunActor;
+      /** On a `spans_dropped` note only (features/tracing.md): the runner-clock
+       *  interval the dropped setup records covered — a `not recorded` loss. */
+      from?: number;
+      to?: number;
+      spanId?: string;
       seq?: number;
       at?: number;
     }
@@ -207,8 +279,11 @@ export type RunEvent =
   /** The model's prose BETWEEN tool calls — text content that rode alongside
    *  tool_use in one completion. Emitted by the runner, redacted, uncapped. The
    *  final text-only completion is NOT one of these (that is the `answer`). */
-  | { type: "assistant"; text: string; seq?: number; at?: number }
-  /** One model call, as the runner saw it (live-view item 15): emitted when the
+  | { type: "assistant"; text: string; spanId?: string; seq?: number; at?: number }
+  /** @deprecated as an emitted event (features/tracing.md): the `model.turn` span
+   *  is the one timing record of a model call once the runner emits spans; kept
+   *  as a reader-only variant for stored streams, which `normalizeSpans`
+   *  adapts. One model call, as the runner saw it (live-view item 15): emitted when the
    *  provider returns, BEFORE the `assistant`/`tool_call` events that call
    *  produced — so a reader sees "thought for 5m 04s" above what the thinking
    *  led to, the way Claude Code / ChatGPT / Cursor show it. `at` is when the
@@ -238,7 +313,10 @@ export type RunEvent =
   | {
       type: "run_meta";
       agent: string;
-      model: string;
+      /** Absent on a command run, which resolves no model. */
+      model?: string;
+      /** The request's trace id (features/tracing.md), once the root exists. */
+      traceId?: string;
       effort?: string;
       repo?: string;
       ref?: string;
@@ -267,7 +345,10 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
-  /** One call to an external MCP server's tool (features/mcp-tools.md item
+  /** @deprecated as an emitted event (features/tracing.md): the `mcp.<server>.<tool>`
+   *  span is the one timing record once the bridge emits spans; kept as a
+   *  reader-only variant for stored streams, which `normalizeSpans` adapts. One
+   *  call to an external MCP server's tool (features/mcp-tools.md item
    *  10). Emitted by the bridge beside the runner's generic `tool_call`/
    *  `tool_result` pair so remote time is attributable per service: which
    *  server and remote tool, whether it succeeded (`ok` = not a transport
@@ -329,7 +410,11 @@ export type RunEvent =
    *  round and its fix round share an index. Published by the ship pipeline
    *  straight to the registry (like `pr_opened`), never through the runner.
    *  Additive: unknown → ignored. */
-  | { type: "ship_round"; index: number; agent: string; outcome: ShipRoundOutcome; seq?: number; at?: number };
+  | { type: "ship_round"; index: number; agent: string; outcome: ShipRoundOutcome; seq?: number; at?: number }
+  /** The span records (features/tracing.md): published, counted and stored like
+   *  every other event, read as timing and never as content. */
+  | SpanStartEvent
+  | SpanEndEvent;
 
 // Redaction helpers live in ./redact.ts and are re-exported here so every
 // existing import site keeps working.

@@ -67,7 +67,17 @@ function isRunEvent(v: unknown): v is RunEvent {
     case "turn":
       return typeof o.startedAt === "number" && typeof o.durationMs === "number";
     case "run_meta":
-      return typeof o.agent === "string" && typeof o.model === "string";
+      return typeof o.agent === "string" && (o.model === undefined || typeof o.model === "string");
+    case "span_start":
+      return typeof o.spanId === "string" && typeof o.name === "string";
+    case "span_end":
+      return (
+        typeof o.spanId === "string" &&
+        typeof o.name === "string" &&
+        typeof o.startedAt === "number" &&
+        typeof o.durationMs === "number" &&
+        (o.status === "ok" || o.status === "error")
+      );
     case "skill_use":
       return typeof o.skill === "string" && typeof o.agent === "string" && typeof o.bodyBytes === "number";
     case "mcp_tool_use":

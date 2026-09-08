@@ -1,5 +1,6 @@
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { RunEvent } from "./runEvents.js";
+import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import {
   FRICTION_CATEGORIES,
   type CategoryTotals,
@@ -496,7 +497,7 @@ function textField(e: Record<string, unknown>): "text" | "summary" | undefined {
  *  Each pass shrinks by the measured overshoot (at least one char), so the loop
  *  converges in a handful of iterations even for multi-byte text. Returns the
  *  event with its measured JSON size, so callers never re-serialize it. */
-function capEvent(event: RunEvent, maxBytes: number): { event: RunEvent; bytes: number } {
+export function capEvent(event: RunEvent, maxBytes: number): { event: RunEvent; bytes: number } {
   let size = utf8ByteLength(JSON.stringify(event));
   if (size <= maxBytes) return { event, bytes: size };
   const field = textField(event as unknown as Record<string, unknown>);
@@ -522,12 +523,21 @@ function capEvent(event: RunEvent, maxBytes: number): { event: RunEvent; bytes: 
  * Never mutates `record`.
  */
 export function fitRecordToBudget(record: RunRecord, maxBytes: number = MAX_RECORD_BYTES): RunRecord {
-  const capped = record.events.map((e) => capEvent(e, MAX_EVENT_BYTES));
-  const events = capped.map((c) => c.event);
+  const cappedAll = record.events.map((e) => capEvent(e, MAX_EVENT_BYTES));
   const measure = (evs: RunEvent[]): number =>
     utf8ByteLength(JSON.stringify({ ...record, events: evs, storedEventCount: evs.length, truncated: true }));
-  const whole: RunRecord = { ...record, events, storedEventCount: events.length };
+  const whole: RunRecord = { ...record, events: cappedAll.map((c) => c.event), storedEventCount: cappedAll.length };
   if (utf8ByteLength(JSON.stringify(whole)) <= maxBytes) return whole;
+
+  // Spans displace no content (features/tracing.md): before any content event
+  // goes, span records are dropped pair by pair from the middle of the stream
+  // outward — never from the protected head — until the record fits or none is
+  // left. A dropped `tool.*`/`mcp.*` twin is re-synthesized by `normalizeSpans`
+  // from its content pair; a span with no twin degrades to `not recorded`.
+  const baseline = measure([]);
+  const capped = dropSpanPairsFromTheMiddle(cappedAll, maxBytes - baseline);
+  const events = capped.map((c) => c.event);
+  if (measure(events) <= maxBytes) return { ...record, events, storedEventCount: events.length, truncated: true };
 
   // Budget the events by their own JSON sizes (plus one separator each) against
   // what the record costs with no events, then verify the real serialization.
@@ -549,4 +559,48 @@ export function fitRecordToBudget(record: RunRecord, maxBytes: number = MAX_RECO
     kept.splice(Math.floor(kept.length / 2), 1);
   }
   return { ...record, events: kept, storedEventCount: kept.length, truncated: true };
+}
+
+type Sized = { event: RunEvent; bytes: number };
+
+/** The protected head as a record sees it: the leading run of head material
+ *  (`input`, `context`, `run_meta`, the setup spans, the `mcp_unavailable` /
+ *  `spans_dropped` notes) — the same set the registry protects. */
+function headLength(events: readonly Sized[]): number {
+  let n = 0;
+  while (n < events.length && isHeadMaterial(events[n].event)) n++;
+  return n;
+}
+
+/** Drop span records pair by pair (both records of one `spanId`, or a lone
+ *  one), nearest the middle of the non-head region first, until the events'
+ *  measured sizes (plus one separator each) fit `eventBudget` — the record's
+ *  budget minus what it costs with no events — or no span outside the head
+ *  remains. Budgeted from the sizes already measured, so no record is
+ *  re-serialized per pair; the caller verifies the real serialization once.
+ *  Returns a new array. */
+function dropSpanPairsFromTheMiddle(events: readonly Sized[], eventBudget: number): Sized[] {
+  const head = headLength(events);
+  const spanIndices: number[] = [];
+  for (let i = head; i < events.length; i++) if (isSpanRecord(events[i].event)) spanIndices.push(i);
+  if (spanIndices.length === 0) return [...events];
+  const byId = new Map<string, number[]>();
+  for (const i of spanIndices) {
+    const id = (events[i].event as { spanId: string }).spanId;
+    byId.set(id, [...(byId.get(id) ?? []), i]);
+  }
+  const middle = head + (events.length - head) / 2;
+  const byDistance = [...spanIndices].sort((a, b) => Math.abs(a - middle) - Math.abs(b - middle));
+  let total = events.reduce((n, e) => n + e.bytes + 1, 0);
+  const dropped = new Set<number>();
+  for (const i of byDistance) {
+    if (total <= eventBudget) break;
+    if (dropped.has(i)) continue;
+    for (const j of byId.get((events[i].event as { spanId: string }).spanId) ?? []) {
+      if (dropped.has(j)) continue;
+      dropped.add(j);
+      total -= events[j].bytes + 1;
+    }
+  }
+  return events.filter((_, k) => !dropped.has(k));
 }

@@ -58,6 +58,23 @@ export function agentHue(agent: string): "coding" | "review" | "research" | "gen
   return agent === "coding" || agent === "review" || agent === "research" || agent === "general" ? agent : "other";
 }
 
+/** The count cell (live-view item 18; tracing.md): the content-event count
+ *  when the row carries it — span records excluded — else the published total,
+ *  under the word the cell always used. */
+export function countText(run: Pick<IndexRow, "eventCount" | "stepCount">): string {
+  const n = run.stepCount ?? run.eventCount;
+  return `${n} event${n === 1 ? "" : "s"}`;
+}
+
+/** The count cell's tooltip: what the number counts — content events when the
+ *  row carries `stepCount`, else everything the run published (span records
+ *  included, once a run has them). */
+export function countTip(run: Pick<IndexRow, "stepCount">): string {
+  return run.stepCount !== undefined
+    ? "content events; span records excluded"
+    : "events published, span records included";
+}
+
 /** A live row links with its capability token; a finished row never does (R10). */
 export function runHref(run: IndexRow): string {
   return `/runs/${encodeURIComponent(run.id)}${!run.finished && run.token ? `?t=${encodeURIComponent(run.token)}` : ""}`;

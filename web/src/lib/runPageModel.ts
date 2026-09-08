@@ -9,6 +9,7 @@ import {
   type TimelineStep,
 } from "@core/channels/runTimeline.js";
 import { runDurationMs } from "@core/core/runDuration.js";
+import { displayNameOf } from "@core/core/trace/displayNames.js";
 import { formatDuration } from "./format";
 
 // The run page's view model: the ONE fold for seeded history and live frames
@@ -109,6 +110,20 @@ export interface NoteVm {
   text: string;
 }
 
+/** A streamed span that is a step of its own (features/tracing.md): what it
+ *  was (the display name), how long, and whether it is still open. */
+export interface SpanRowVm {
+  kind: "span";
+  key: string;
+  spanId: string;
+  /** The display name — never the raw span name. */
+  text: string;
+  open: boolean;
+  durationMs?: number;
+  status?: "ok" | "error";
+  at?: number;
+}
+
 /** A thread follow-up steered into this run (features/thread-admission.md
  *  item 2): every `input` after the first, rendered as its own block in the
  *  timeline at the moment the run read it — the Request's visual treatment,
@@ -119,7 +134,7 @@ export interface FollowUpVm {
   input: RequestVm;
 }
 
-export type LogItem = StepVm | TurnRowVm | NoteVm | FollowUpVm;
+export type LogItem = StepVm | TurnRowVm | NoteVm | FollowUpVm | SpanRowVm;
 
 export interface RequestVm {
   text: string;
@@ -285,6 +300,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   });
 
   const stepVms = new Map<number, StepVm>();
+  const spanRows = new Map<string, SpanRowVm>();
   const callVms = new Map<string, CallVm>();
   /** Quiet calls (update_status) render once; their results only refresh the tally. */
   const quietIds = new Set<string>();
@@ -457,6 +473,29 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
       case "replay_note":
         state.log.push({ kind: "note", key: key("note"), replay: true, text: change.text });
         return;
+      case "span": {
+        // One row per span: the start opens it, the end closes the same row.
+        const existing = spanRows.get(change.spanId);
+        if (existing) {
+          existing.open = change.open;
+          if (change.durationMs !== undefined) existing.durationMs = change.durationMs;
+          if (change.status) existing.status = change.status;
+          return;
+        }
+        const row: SpanRowVm = reactive({
+          kind: "span",
+          key: key("span"),
+          spanId: change.spanId,
+          text: displayNameOf(change.name),
+          open: change.open,
+          ...(change.durationMs !== undefined ? { durationMs: change.durationMs } : {}),
+          ...(change.status ? { status: change.status } : {}),
+          at: change.at,
+        });
+        spanRows.set(change.spanId, row);
+        state.log.push(row);
+        return;
+      }
       case "answer":
         flushTurn("wrote the answer below"); // the answer's own thinking has no step to sit on
         state.answer = { text: change.text, at: change.at };

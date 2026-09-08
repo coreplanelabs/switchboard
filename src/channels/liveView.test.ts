@@ -1253,21 +1253,25 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       ];
       expect(withOmittedMarkers(events, 12)).toEqual([
         events[0],
-        { type: "replay_note", summary: "2 events omitted" },
+        { type: "replay_note", summary: "2 records omitted" },
         events[1],
         events[2],
-        { type: "replay_note", summary: "3 events omitted" },
+        { type: "replay_note", summary: "3 records omitted" },
         events[3],
-        { type: "replay_note", summary: "3 events omitted" },
+        { type: "replay_note", summary: "3 records omitted" },
       ]);
       const odd: RunEvent[] = [
         { ...call("x"), seq: 1 },
         { ...call("y"), seq: 50 },
       ];
-      expect(withOmittedMarkers(odd, 3)).toEqual([odd[0], { type: "replay_note", summary: "1 event omitted" }, odd[1]]);
+      expect(withOmittedMarkers(odd, 3)).toEqual([
+        odd[0],
+        { type: "replay_note", summary: "1 record omitted" },
+        odd[1],
+      ]);
     });
 
-    it("withOmittedMarkers puts one 'N events omitted' note at a single seq gap, N = eventCount − stored", () => {
+    it("withOmittedMarkers puts one 'N records omitted' note at a single seq gap, N = eventCount − stored", () => {
       const events: RunEvent[] = [
         text("input", "a", 1),
         { ...call("b"), seq: 2 },
@@ -1277,7 +1281,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       expect(withOmittedMarkers(events, 9)).toEqual([
         events[0],
         events[1],
-        { type: "replay_note", summary: "5 events omitted" },
+        { type: "replay_note", summary: "5 records omitted" },
         events[2],
         events[3],
       ]);
@@ -1288,13 +1292,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         { ...call("x"), seq: 4 },
         { ...call("y"), seq: 5 },
       ];
-      expect(withOmittedMarkers(tail, 5)[0]).toEqual({ type: "replay_note", summary: "3 events omitted" });
+      expect(withOmittedMarkers(tail, 5)[0]).toEqual({ type: "replay_note", summary: "3 records omitted" });
       const full: RunEvent[] = [
         { ...call("x"), seq: 1 },
         { ...call("y"), seq: 2 },
       ];
       expect(withOmittedMarkers(full, 2)).toEqual(full);
-      expect(withOmittedMarkers(full, 3).at(-1)).toEqual({ type: "replay_note", summary: "1 event omitted" });
+      expect(withOmittedMarkers(full, 3).at(-1)).toEqual({ type: "replay_note", summary: "1 record omitted" });
     });
 
     it("the persisted page seeds the marker in place and the events replay carries it too", async () => {
@@ -1314,7 +1318,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const stream = fakeReqRes("GET", "/runs/r1/events");
       h.handler(stream.req, stream.res);
       await done(stream);
-      expect(stream.body()).toContain('data: {"type":"replay_note","summary":"5 events omitted"}\n\n');
+      expect(stream.body()).toContain('data: {"type":"replay_note","summary":"5 records omitted"}\n\n');
     });
   });
 

@@ -17,7 +17,7 @@ import type { RunRecord } from "../runRecord.js";
 import { RunRegistry } from "../runRegistry.js";
 import { InMemoryRunStore } from "../runStore.js";
 import { createRunsService } from "../runsService.js";
-import { registerRunsCommands, runsCommands, type RunReadDenied, type RunsCommandDeps } from "./runs.js";
+import { registerRunsCommands, runsCommands, type RunReadDenied, type RunsCommandDeps, wrapEvent } from "./runs.js";
 
 // Feature: features/command-registry.md — the `runs.*` registrations (R8/R9,
 // KTD17/KTD18) — and features/authorization.md items 5–7 (U3): what a caller
@@ -470,6 +470,34 @@ describe("runs.get / runs.events / runs.friction", () => {
     }
     expect(JSON.stringify(full)).toContain("please do the thing");
     expect(JSON.stringify(full)).not.toMatch(/tok-/);
+  });
+
+  it("wrapEvent wraps a tool result's output and a span end's error too; a span with no error is returned as is", () => {
+    const wrapped = wrapEvent({ type: "tool_result", tool: "bash", ok: true, summary: "ok", output: "raw out" });
+    expect((wrapped as { output: string }).output).toContain(UNTRUSTED_OPEN);
+    expect((wrapped as { summary: string }).summary).toContain(UNTRUSTED_OPEN);
+    const failed = wrapEvent({
+      type: "span_end",
+      spanId: "s1",
+      name: "post.reply",
+      startedAt: 1,
+      durationMs: 2,
+      status: "error",
+      error: "slack said no",
+    });
+    expect((failed as { error: string }).error).toContain(UNTRUSTED_OPEN);
+    expect((failed as { error: string }).error).toContain("slack said no");
+    const clean = {
+      type: "span_end",
+      spanId: "s2",
+      name: "post.reply",
+      startedAt: 1,
+      durationMs: 2,
+      status: "ok",
+    } as const;
+    expect(wrapEvent(clean)).toBe(clean);
+    const start = { type: "span_start", spanId: "s3", name: "dispatch.compose", at: 1 } as const;
+    expect(wrapEvent(start)).toBe(start);
   });
 
   it("runs.events pages with afterSeq/limit (coerced) and wraps text", async () => {

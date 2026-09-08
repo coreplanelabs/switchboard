@@ -109,15 +109,31 @@ describe("parseRunEventLines", () => {
     );
     expect(turns.events.map((e) => e.type)).toEqual(["turn"]);
     expect(turns.skipped).toBe(1);
-    // `run_meta` (live-view item 19) needs its agent and model; the repo fields are optional
+    // `run_meta` (live-view item 19) needs its agent; the model is optional (a
+    // command run resolves none — features/tracing.md) and so are the repo fields
     const metas = parseRunEventLines(
       [
         '{"type":"run_meta","agent":"review","model":"anthropic/claude-fable-5","repo":"acme/web","pr":281,"at":1}',
         '{"type":"run_meta","agent":"review"}',
+        '{"type":"run_meta","model":"anthropic/claude-fable-5"}',
       ].join("\n"),
     );
-    expect(metas.events.map((e) => e.type)).toEqual(["run_meta"]);
+    expect(metas.events.map((e) => e.type)).toEqual(["run_meta", "run_meta"]);
     expect(metas.skipped).toBe(1);
+  });
+
+  it("accepts the span records (features/tracing.md): a start needs spanId + name, an end also numeric startedAt/durationMs and an ok|error status", () => {
+    const out = parseRunEventLines(
+      [
+        '{"type":"span_start","spanId":"s1","name":"dispatch.compose","at":1}',
+        '{"type":"span_end","spanId":"s1","name":"dispatch.compose","startedAt":1,"durationMs":40,"status":"ok","at":41}',
+        '{"type":"span_end","spanId":"s2","name":"tool.bash","startedAt":1,"durationMs":40,"status":"weird"}',
+        '{"type":"span_start","name":"no id"}',
+        '{"type":"span_end","spanId":"s3","name":"x","startedAt":"1","durationMs":40,"status":"ok"}',
+      ].join("\n"),
+    );
+    expect(out.events.map((e) => e.type)).toEqual(["span_start", "span_end"]);
+    expect(out.skipped).toBe(3);
   });
 
   it("accepts `skill_use` when it carries skill + agent + numeric bodyBytes, skips it otherwise", () => {
