@@ -64,6 +64,18 @@ export interface IncomingMessage {
   images?: ImageAttachment[];
   /** Non-image files (PDFs, text/code/CSV/logs) on the triggering message, if any. */
   documents?: DocumentAttachment[];
+  /**
+   * When OUR process saw the message (ms epoch, from the adapter's clock at its
+   * entry — never from a body or a platform stamp): the run's window opens
+   * here (features/tracing.md). Absent (tests, older callers) → the dispatcher
+   * reads its own clock at entry.
+   */
+  receivedAt?: number;
+  /**
+   * When the platform says the message was posted (Slack's `ts`), for the
+   * `queued … before we saw it` caption; a caption, never part of a duration.
+   */
+  originAt?: number;
 }
 
 export interface HistoryItem {

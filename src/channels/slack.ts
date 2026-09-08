@@ -1,6 +1,9 @@
 import { extname } from "node:path";
 import { App, SocketModeReceiver, type webApi } from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
+import { startRequestRoot } from "../core/requestTrace.js";
+import { systemClock } from "../core/trace/clock.js";
+import type { Span } from "../core/trace/types.js";
 import { catchUpWindowWarning } from "../core/drain.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
 import { escapeMrkdwn } from "./slackEscape.js";
@@ -10,6 +13,7 @@ import {
   botRepliedAfter,
   catchUpMissedMentions,
   fetchReplies,
+  tsMs,
   type CatchUpClient,
   type SlackHistoryMessage,
 } from "./slackCatchUp.js";
@@ -21,6 +25,7 @@ import type {
   DocumentAttachment,
   HistoryItem,
   ImageAttachment,
+  IncomingMessage,
   StatusHandle,
   StatusUpdate,
 } from "../core/types.js";
@@ -566,6 +571,36 @@ async function resolveTeamUrl(client: SlackClient): Promise<string | undefined> 
 }
 
 async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Promise<void> {
+  // The request's root (features/tracing.md): our process saw the message NOW,
+  // before the redelivery guard — a dropped redelivery is a root with one
+  // child and no run. Everything the adapter does before `dispatch()` is one
+  // `slack.receive` span; `dispatch()` ends the root, this finally is the
+  // backstop (`end()` is idempotent).
+  const receivedAt = systemClock();
+  const trace = startRequestRoot(deps, { channel: "slack", receivedAt });
+  try {
+    const received = await trace.root.span("slack.receive", (span) => receiveSlackMessage(client, ev, span));
+    if (!received) {
+      trace.root.end("ok", { status: "refused" });
+      return;
+    }
+    await dispatch(deps, { ...received, receivedAt, originAt: tsMs(ev.ts) }, new SlackIO(client, ev), { trace });
+  } finally {
+    // Reached un-ended only when the receive itself threw (a download, a lookup):
+    // `dispatch()` ends the root on every path of its own.
+    if (!trace.root.ended) trace.root.end("error", { status: "failed" });
+  }
+}
+
+/** The adapter's own work before the core sees the message: the redelivery
+ *  guard, the 👀 ack, the catch-up note, the file downloads and the display
+ *  names — the `slack.receive` span's body. `undefined` when the event is a
+ *  redelivery that already ran (the span says `dedupe: duplicate`). */
+async function receiveSlackMessage(
+  client: SlackClient,
+  ev: SlackEvent,
+  span: Span,
+): Promise<Omit<IncomingMessage, "receivedAt" | "originAt"> | undefined> {
   // Redelivery guard (#346): claim (channel, ts) and drop the event when it
   // demonstrably ran already — in this process, or (for a stale delivery)
   // visibly answered in its own thread. Before the ack: a dropped redelivery
@@ -573,8 +608,10 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
   const drop = await dedupeDelivery(client, ev);
   if (drop) {
     console.log(`[redelivery] ${ev.channel}:${ev.ts} dropped: ${drop}`);
-    return;
+    span.setAttrs({ dedupe: "duplicate" });
+    return undefined;
   }
+  span.setAttrs({ dedupe: "fresh", caughtUp: ev.caughtUp === true, files: ev.files?.length ?? 0 });
   // Immediate receipt: react to the triggering message so the sender knows it
   // was accepted, before any model/tool work starts. Fire-and-forget — a
   // missing reactions:write scope (or a re-run reacting twice) must never
@@ -616,21 +653,17 @@ async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Prom
     skipped.length > 0
       ? `\n\n(Note: ${skipped.length} attachment(s) could not be passed through: ${skipped.join(", ")})`
       : "";
-  await dispatch(
-    deps,
-    {
-      channelId: `${PLATFORM}:${ev.channel}`,
-      userId: `${PLATFORM}:${ev.user}`,
-      threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
-      text: ev.text + note,
-      channelName,
-      userName,
-      sourceUrl: team ? slackPermalink(team, ev.channel, ev.ts, ev.threadTs) : undefined,
-      images: images.length > 0 ? images : undefined,
-      documents: documents.length > 0 ? documents : undefined,
-    },
-    new SlackIO(client, ev),
-  );
+  return {
+    channelId: `${PLATFORM}:${ev.channel}`,
+    userId: `${PLATFORM}:${ev.user}`,
+    threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
+    text: ev.text + note,
+    channelName,
+    userName,
+    sourceUrl: team ? slackPermalink(team, ev.channel, ev.ts, ev.threadTs) : undefined,
+    images: images.length > 0 ? images : undefined,
+    documents: documents.length > 0 ? documents : undefined,
+  };
 }
 
 /**

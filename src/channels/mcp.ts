@@ -10,6 +10,8 @@ import {
 } from "../core/commandRegistry.js";
 import { jsonSchemaFor, mcpToolName, namedToInput } from "../core/commandSurface.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
+import { startRequestRoot } from "../core/requestTrace.js";
+import { systemClock } from "../core/trace/clock.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
 import {
   authorizeRequest,
@@ -297,14 +299,20 @@ async function route(
       if (args.thread !== undefined && typeof args.thread !== "string") {
         return err(id, INVALID_PARAMS, "`thread` must be a string");
       }
-      const msg = toIncomingMessage(identity, {
-        text: args.text,
-        channel: args.channel as string | undefined,
-        thread: args.thread as string | undefined,
-      });
+      // The request's root (features/tracing.md), once the caller is known.
+      const receivedAt = systemClock();
+      const trace = startRequestRoot(deps, { channel: "mcp", receivedAt });
+      const msg: IncomingMessage = {
+        ...toIncomingMessage(identity, {
+          text: args.text,
+          channel: args.channel as string | undefined,
+          thread: args.thread as string | undefined,
+        }),
+        receivedAt,
+      };
       const io = new McpIO();
       const dispatchFn = options.dispatch ?? realDispatch;
-      await dispatchFn(deps, msg, io);
+      await dispatchFn(deps, msg, io, { trace });
       return ok(id, { content: [{ type: "text", text: io.collected() }] });
     }
 

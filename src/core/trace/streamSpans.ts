@@ -37,6 +37,7 @@ export const STREAMED_SPANS = [
   "dispatch.memory_read",
   "dispatch.refuse",
   "dispatch.ship_preflight",
+  "dispatch.ledger_claim",
   "run.agent",
   "run.command",
   "run.reading_diff",
@@ -85,6 +86,7 @@ const GETTING_READY: ReadonlySet<string> = new Set([
   "dispatch.memory_read",
   "dispatch.refuse",
   "dispatch.ship_preflight",
+  "dispatch.ledger_claim",
 ]);
 const FINISHING_UP: ReadonlySet<string> = new Set([
   "run.observe_workspace",
@@ -137,6 +139,7 @@ export const PARENTS: Readonly<Record<string, readonly string[]>> = {
   "dispatch.memory_read": ["request"],
   "dispatch.refuse": ["request"],
   "dispatch.ship_preflight": ["request"],
+  "dispatch.ledger_claim": ["request"],
   "run.agent": ["request", "ship.round", "run.settle_reviewed_head"],
   "run.command": ["request"],
   "run.reading_diff": ["request"],

@@ -10,6 +10,7 @@ Every run Switchboard starts — from Slack, the CLI, or anywhere else — gets 
 
 - `/runs` — every currently active run, newest first. Click any row.
 - `/runs/<id>` — that run's page: the request, a live-updating list of steps (files read, commands run, tool calls with their results), and the answer once it's done. While it's running, this streams over SSE — leave the tab open and watch it work. The header counts the whole run from the moment Switchboard received your message. When the agent stops it reads `delivering… · <total>` while the reply is posted, and then `delivered in 2s` — how long the reply took to land — or `reply failed`. On the index the row stays amber for that stretch, with `delivering the reply` on its dot.
+- The Slack card is the same clock: it ticks from the moment Switchboard received your message, names the setup step while the workspace is being prepared (`— attaching the workspace…`), and when it closes its first detail line is the run's shape — how the time split between getting ready, thinking, running tools, finishing up and Switchboard's own overhead — followed, when your message waited a minute or more (a restart, a run ahead of it in the thread), by `queued … before we saw it` or `queued … behind the previous run`. A card that closes without a run (a refusal, a setup failure) still says how long the request took.
 
 ## Stop one
 

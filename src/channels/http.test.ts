@@ -103,6 +103,7 @@ describe("handleIngressRequest (transport gating + dispatch)", () => {
       channelId: "http:ops",
       threadKey: "http:ops:t1",
       text: "hi",
+      receivedAt: expect.any(Number), // stamped at receipt (features/tracing.md)
     });
   });
 
