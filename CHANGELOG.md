@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.0](https://github.com/coreplanelabs/switchboard/compare/v0.8.0...v0.9.0) (2026-09-08)
+
+
+### Features
+
+* **config:** the runtime learns whose installation it is — organization from config, the bot's GitHub identity from GitHub, the docs URL from the profile ([#618](https://github.com/coreplanelabs/switchboard/issues/618)) ([d412f88](https://github.com/coreplanelabs/switchboard/commit/d412f88a736265a59804ffdeebc4289886c14c8d))
+* **resident:** snapshot bytes travel container↔R2 over presigned URLs when the env allows — the Durable Object leaves the data path, fail-closed to local mode ([#617](https://github.com/coreplanelabs/switchboard/issues/617)) ([81a24f3](https://github.com/coreplanelabs/switchboard/commit/81a24f300361c8b0ff608508f5ec47a53b2dcb8b))
+
+
+### Bug fixes
+
+* **admin:** /admin/crash exits hard (137) — the bot is PID 1 and the kernel drops a SIGKILL init sends itself ([#619](https://github.com/coreplanelabs/switchboard/issues/619)) ([e12b450](https://github.com/coreplanelabs/switchboard/commit/e12b45069d29fe0e257bd5f6e08958000a488dcf))
+* **resident:** resident text is made safe at the seams — write, exit and parse — so no card, reply, listing or record shows raw remote output ([#616](https://github.com/coreplanelabs/switchboard/issues/616)) ([c60cfba](https://github.com/coreplanelabs/switchboard/commit/c60cfbad910fe8ef6ce2d5eba0f8d0a60807c6fa))
+* **tools:** a web page reaches the model in 40k-character windows with offset paging, and the runner caps every tool result at 120k characters ([#615](https://github.com/coreplanelabs/switchboard/issues/615)) ([#620](https://github.com/coreplanelabs/switchboard/issues/620)) ([0c38a2f](https://github.com/coreplanelabs/switchboard/commit/0c38a2f2616dd5588f6a36db63b3a92938c3b0e9))
+
 ## [0.8.0](https://github.com/coreplanelabs/switchboard/compare/v0.7.0...v0.8.0) (2026-09-08)
 
 
