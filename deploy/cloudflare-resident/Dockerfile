@@ -62,10 +62,13 @@ RUN npm install -g pnpm@10.34.5 yarn@1.22.22 \
 # local-dev method) so the mirror, the checkout and the deps store stay one
 # filesystem: `rm -rf` works, hardlink views work, `du -x` is right. The
 # Worker falls back to `cp -a` out of the mount while an older image lacks it.
+# The build asserts the binary with the probe the extract script uses at run
+# time (`command -v`): `unsquashfs -version` exits 1 on squashfs-tools 4.5 (this
+# base) when no filesystem is named, and failed the 1.2.0 image build that way.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends squashfs-tools \
   && rm -rf /var/lib/apt/lists/* \
-  && unsquashfs -version >/dev/null 2>&1
+  && command -v unsquashfs >/dev/null
 
 # KTD5: agent commands never run as root. The SDK's exec has no user/uid option
 # (verified against 0.13.0-next.751.1), so the container server itself runs as
