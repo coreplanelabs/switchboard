@@ -30,11 +30,12 @@ jobs:
     # release-please writes with the App token, not GITHUB_TOKEN (see the header).
     permissions:
       contents: read
+    # Whichever attempt succeeded speaks (the first when it did; else the retry).
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      prs_created: ${{ steps.release.outputs.prs_created }}
-      pr: ${{ steps.release.outputs.pr }}
+      release_created: ${{ steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created }}
+      tag_name: ${{ steps.release.outcome == 'success' && steps.release.outputs.tag_name || steps.release-retry.outputs.tag_name }}
+      prs_created: ${{ steps.release.outcome == 'success' && steps.release.outputs.prs_created || steps.release-retry.outputs.prs_created }}
+      pr: ${{ steps.release.outcome == 'success' && steps.release.outputs.pr || steps.release-retry.outputs.pr }}
     steps:
       - name: load the App's credentials
         uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
@@ -57,12 +58,28 @@ jobs:
           # pull-requests for the release PR and its labels.
           permission-contents: write
           permission-pull-requests: write
+      # Two attempts, because GitHub refuses the release-branch ref update now and
+      # then — the identical call succeeded minutes later with nothing changed on
+      # our side (no rule, no permission, no incident), and the action reports only
+      # "Error updating ref", the HTTP reason swallowed. A refusal costs one retry
+      # and leaves a warning on the run; a second refusal is the run's failure.
       - id: release
+        continue-on-error: true
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      - id: release-retry
+        if: steps.release.outcome == 'failure'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - name: the first attempt failed
+        if: steps.release.outcome == 'failure'
+        run: echo "::warning title=release-please retried::the first release-please attempt failed (its step above has the message) and the retry ${{ steps.release-retry.outcome }}. GitHub refused the release-branch update once; the retry's outputs drive this run."
 
   # The release PR carries its deploy plan (docs/reference/specs/release-and-deploy.md
   # item 8). Posted from HERE, on the push to main that opened or updated the
