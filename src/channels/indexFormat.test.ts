@@ -1,25 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { formatDateTime, formatElapsed, formatRelative, splitRunLabel } from "./indexFormat.js";
+import { formatDateTime, formatRelative, splitRunLabel } from "./indexFormat.js";
 
 // Feature: features/live-view.md item 16 — the runs index shows how long each
 // run has been going (live) or took (finished), and renders the run label as
 // agent · scope · request so the eye lands on what matters.
-
-describe("formatElapsed", () => {
-  it("reads like a stopwatch: seconds, then m s, then h m — always two-part above a minute", () => {
-    expect(formatElapsed(0)).toBe("0s");
-    expect(formatElapsed(38_400)).toBe("38s");
-    expect(formatElapsed(252_000)).toBe("4m 12s");
-    expect(formatElapsed(60_000)).toBe("1m 00s");
-    expect(formatElapsed(3_780_000)).toBe("1h 03m");
-    expect(formatElapsed(26 * 3_600_000)).toBe("26h 00m");
-  });
-
-  it("clamps garbage (negative, NaN) to 0s instead of printing nonsense", () => {
-    expect(formatElapsed(-5000)).toBe("0s");
-    expect(formatElapsed(NaN)).toBe("0s");
-  });
-});
 
 describe("formatDateTime (live-view item 21)", () => {
   it("reads Aug 30, 9:12 PM in the runtime's zone; noon and midnight are 12; the year only when it differs from now's", () => {
@@ -82,7 +66,7 @@ describe("splitRunLabel", () => {
   });
 
   it("is inlinable into the index page (no imports, works under `String(fn)`)", () => {
-    for (const fn of [formatElapsed, splitRunLabel]) {
+    for (const fn of [splitRunLabel]) {
       const src = String(fn);
       expect(src).not.toMatch(/\brequire\(|\bimport\b/);
 

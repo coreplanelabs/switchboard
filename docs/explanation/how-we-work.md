@@ -49,3 +49,13 @@ flowchart LR
 | PR titles are conventional | the required `title` check (`npm run check:pr-title`) |
 | Squash-only, title as commit | the repository's merge settings and the `main` ruleset ([Configure the repository](../how-to/configure-the-repository.md)) |
 | Only the changed Workers deploy | `deploy plan --affected`, shown on every PR and on the release PR |
+
+## Switchboard develops Switchboard
+
+The rules in [AGENTS.md](https://github.com/coreplanelabs/switchboard/blob/main/AGENTS.md) are written in terms of the product's own agents, because they are who follows them:
+
+- **`agent:review` reviews every PR.** Read-only, in a warm checkout, one verdict with labeled findings posted at the head it read; it never approves or merges. The auto-approve workflow trusts its `LGTM`; the reviewed-head guard refuses a verdict for a head it did not read.
+- **`agent:coding` implements issues**, with the vendored skills under `skills/` as its house style (the PR-Tour skill shapes PR bodies), pushing a branch and submitting a typed description that Switchboard renders and opens as the PR.
+- **`agent:ship` runs the loop end to end** — coding, review, fixes — to an `LGTM`, in one thread.
+- **Run pages are the audit trail.** Every agent run has a page: what it read, ran, and wrote, with timestamps, kept in run history.
+- **`friction propose` files the process's own improvement issues**, from the recurring delay patterns in run history — proposals only, never PRs.

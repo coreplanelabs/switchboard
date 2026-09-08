@@ -19,9 +19,10 @@
 //     stream's own capped-replay notice) pass through as their own change
 //     kinds — neither opens or joins a step.
 //
-// Like markdownLite.ts, this ships into the page as `String(createRunTimeline)`
-// inlined into the inline <script>: ONE self-contained function, no imports, no
-// module-scope closures, ES2022 syntax only.
+// Pure and DOM-free (the page does DOM only), so it stays unit-testable and the
+// dashboard bundle imports it as an ordinary module.
+
+import { formatDuration } from "../core/time/formatDuration.js";
 
 export interface TimelineResult {
   ok: boolean;
@@ -148,14 +149,6 @@ export function createRunTimeline(): RunTimeline {
     return step;
   }
 
-  function fmtDuration(ms: number): string {
-    if (ms < 1000) return ms + "ms";
-    if (ms < 60_000) return (Math.round(ms / 100) / 10).toFixed(1) + "s";
-    const m = Math.floor(ms / 60_000);
-    const s = Math.round((ms - m * 60_000) / 1000);
-    return m + "m " + (s < 10 ? "0" : "") + s + "s";
-  }
-
   function fmtTokens(n: number): string {
     if (n < 1000) return String(n);
     if (n < 1_000_000) return (Math.round(n / 100) / 10).toFixed(1) + "k";
@@ -180,7 +173,7 @@ export function createRunTimeline(): RunTimeline {
     else if (!r.ok) out.push("error");
     const lines = lineCount(r);
     if (lines !== undefined && lines > 1) out.push(lines + " lines");
-    if (call.durationMs !== undefined) out.push(fmtDuration(call.durationMs));
+    if (call.durationMs !== undefined) out.push(formatDuration(call.durationMs, "precise"));
     return out;
   }
 
@@ -343,7 +336,7 @@ export function createRunTimeline(): RunTimeline {
         return [
           {
             kind: "turn",
-            label: "Thought for " + fmtDuration(durationMs),
+            label: "Thought for " + formatDuration(durationMs, "precise"),
             facts,
             durationMs,
             ...(model ? { model } : {}),

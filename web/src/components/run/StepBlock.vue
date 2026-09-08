@@ -3,7 +3,7 @@ import { computed } from "vue";
 import StepItems from "./StepItems.vue";
 import MarkdownText from "../MarkdownText.vue";
 import { durationTone, heatStyle } from "../../lib/durationTone";
-import { formatClock, formatElapsed, formatLocalIso } from "../../lib/format";
+import { formatClock, formatDuration, formatLocalIso } from "../../lib/format";
 import { modelName, type StepVm } from "../../lib/runPageModel";
 
 // ONE STEP = ONE BLOCK, read top to bottom (item 18): a rail marks where it
@@ -145,7 +145,7 @@ const firstCallAt = computed(() => {
             ]"
             :style="tallyPaint"
             :data-heat="tallyHeat.level"
-            ><template v-if="tallyHeat.over">timed out · </template>{{ formatElapsed(tally.ms) }}</span
+            ><template v-if="tallyHeat.over">timed out · </template>{{ formatDuration(tally.ms, "clock") }}</span
           >
         </summary>
         <div class="gbody flex flex-col gap-2 pb-1 pt-2">

@@ -34,6 +34,10 @@ export type RunNoteKind =
   | "fleet_busy"
   | "stop_requested"
   | "stopped"
+  /** Setup spans the request's stream sink had to drop before this run was
+   *  bound (features/tracing.md): `summary` says how many, `from`/`to` the
+   *  interval, which the partition reports as not recorded. */
+  | "spans_dropped"
   /** The PR head moved while a review ran and the same run is re-reviewing at
    *  the new head (agent-review.md item 12). Published by the dispatcher. */
   | "head_moved"
@@ -49,6 +53,26 @@ export type RunNoteKind =
    *  (features/run-history.md item 37); the summary says how many calls were
    *  in flight at the kill and how each was settled. Published by the runner. */
   | "resumed";
+
+/** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
+ *  this; adding a kind to the union without adding it here is a type error). */
+export const RUN_NOTE_KINDS = [
+  "wrap_up",
+  "time_budget_exhausted",
+  "turn_budget_exhausted",
+  "sandbox_dead",
+  "fleet_busy",
+  "stop_requested",
+  "stopped",
+  "spans_dropped",
+  "head_moved",
+  "mcp_unavailable",
+  "follow_up",
+  "resumed",
+] as const satisfies readonly RunNoteKind[];
+type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
+const _everyKindListed: _EveryKindListed = true;
+void _everyKindListed;
 
 /** How an operator asked a run to stop (#101): `soft` — take no new steps and
  *  wrap up through the normal finale; `hard` — abort the in-flight call now, no
@@ -374,17 +398,6 @@ function capClean(clean: string): string {
 export function prepareToolResult(output: string): { summary: string; output: string } {
   const clean = redactSecrets(stripAnsi(output));
   return { summary: summarizeClean(clean), output: capClean(clean) };
-}
-
-/** `5m 04s` / `1.3s` / `800ms` — the one duration format every surface that
- *  names a model turn uses (status card, CLI; the page's inlined timeline has
- *  its own copy because it cannot import). */
-export function formatTurnDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(Math.round(ms / 100) / 10).toFixed(1)}s`;
-  const m = Math.floor(ms / 60_000);
-  const s = Math.round((ms - m * 60_000) / 1000);
-  return `${m}m ${s < 10 ? "0" : ""}${s}s`;
 }
 
 /** `JSON.stringify(event)`, computed once per event object however many readers

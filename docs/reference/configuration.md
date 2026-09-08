@@ -19,6 +19,7 @@ Every top-level block, what it's for, and what happens when it's absent. Copy `c
 | `slack.catchUp` | Reconnect catch-up window after a deploy/drain | on, 30-minute window |
 | `runtimeOverrides` | Where chat-set overrides (`config set`, `config instructions`) persist | `data/overrides.json` on host disk — **ephemeral on Cloudflare Containers** |
 | `runHistory` | Durable run records: retention window, byte/count caps, which store backs it | **off** — runs are live-only, evicted ~60s after finish |
+| `tracing` | Span log verbosity: `log: roots` (one JSON line per request) or `slow` (plus every span of 1 s or more) | `roots` |
 
 ## Two blocks that matter most for "does a restart lose anything"
 

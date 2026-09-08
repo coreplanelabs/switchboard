@@ -307,7 +307,7 @@ describe("analyzeRunFriction — slow_model_turn (the time between a result and 
     const [f] = d.findings;
     expect(f.severity).toBe("medium");
     expect(f.durationMs).toBe(60_000);
-    expect(f.summary).toMatch(/1m 0s/);
+    expect(f.summary).toMatch(/1m 00s/);
     expect(f.summary).toContain("$ cat a.ts"); // anchored to the call the turn produced
     expect(f.eventIndex).toBe(3);
     expect(d.modelTimeMs).toBe(5_000 + 60_000 + 59_999);
@@ -366,7 +366,7 @@ describe("analyzeRunFriction — slow_model_turn (the time between a result and 
       ...bash("ls", T0 + 1_000, 1_000),
       ...bash("cat a.ts", T0 + 2_000 + 180_000, 2_000), // 3 min think, 2 s tool
     ]);
-    expect(d.verdict).toMatch(/slow model turns dominated: 1 finding, 3m 0s/);
+    expect(d.verdict).toMatch(/slow model turns dominated: 1 finding, 3m 00s/);
     expect(d.verdict).toMatch(/of run time/);
     expect(d.verdict).not.toMatch(/tool time/);
   });
@@ -405,7 +405,7 @@ describe("analyzeRunFriction — aggregation and verdict", () => {
       ...bash("npm test", T0 + 61_000, 40_000, false, "fail"), // failed AND slow → failed_tool
     ]);
     expect(d.verdict).toMatch(/setup\/install/i);
-    expect(d.verdict).toMatch(/1m 0s/);
+    expect(d.verdict).toMatch(/1m 00s/);
     expect(d.verdict).toMatch(/60%/);
   });
 

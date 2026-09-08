@@ -10,7 +10,7 @@ import {
   type FrictionRunRecord,
   type ImprovementProposal,
 } from "./frictionProposals.js";
-import { formatMs } from "./runFriction.js";
+import { formatDuration } from "./time/formatDuration.js";
 
 // The self-improvement step (Area 7b / #84): ledger → cluster → propose →
 // dedupe against open proposals → file issues. This is the orchestration
@@ -149,7 +149,7 @@ export function formatSelfImprovementReport(r: SelfImprovementReport): string {
   const head = `🔍 *Friction proposals* — ${runs}${truncatedNote} · ${r.patterns.length} recurring pattern${r.patterns.length === 1 ? "" : "s"}${tally}${r.dryRun ? " · dry run (nothing filed)" : ""}`;
   const lines = [head, ""];
   r.patterns.forEach((p, i) => {
-    const time = p.durationMs > 0 ? ` · ${formatMs(p.durationMs)}` : "";
+    const time = p.durationMs > 0 ? ` · ${formatDuration(p.durationMs, "report")}` : "";
     lines.push(`${i + 1}. \`${p.key}\` — ${p.runIds.length} runs · ${p.occurrences}×${time} · ${p.severity}`);
   });
   const filedKeys = new Set(r.filed.map((f) => f.proposal.key));

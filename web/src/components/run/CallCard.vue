@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject } from "vue";
 import { durationTone, heatStyle } from "../../lib/durationTone";
-import { formatElapsed, formatLocalIso } from "../../lib/format";
+import { formatDuration, formatLocalIso } from "../../lib/format";
 import { RunnerClockKey, type CallVm } from "../../lib/runPageModel";
 
 // A call card: <details> — header row is the summary (status glyph, $ or tool
@@ -26,7 +26,7 @@ const clock = inject(RunnerClockKey, null);
 const elapsed = computed(() => {
   const now = clock?.value;
   if (props.call.status !== "running" || typeof now !== "number" || props.call.startedAt === undefined) return "";
-  return formatElapsed(Math.max(0, now - props.call.startedAt));
+  return formatDuration(Math.max(0, now - props.call.startedAt), "clock");
 });
 
 const heat = computed(() => durationTone(props.call.durationMs, "tool", props.call.timedOut));

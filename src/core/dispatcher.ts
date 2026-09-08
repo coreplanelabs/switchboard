@@ -52,7 +52,8 @@ import { recognizeOperation } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
-import { formatTurnDuration, redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
+import { redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
+import { formatDuration } from "./time/formatDuration.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import {
   decideFollowUp,
@@ -2685,7 +2686,7 @@ function activityLine(e: RunEvent): string {
     case "answer":
       return "answer ready";
     case "turn":
-      return `💭 thought for ${formatTurnDuration(e.durationMs)}`;
+      return `💭 thought for ${formatDuration(e.durationMs, "precise")}`;
     case "run_meta":
       return "run context recorded"; // published straight to the registry too — never arrives here
     case "skill_use":

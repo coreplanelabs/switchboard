@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createRunTimeline, type TimelineChange } from "./runTimeline.js";
 
@@ -165,7 +166,7 @@ describe("createRunTimeline — call cards", () => {
     t.push(result("a", { at: 61_500 }));
     t.push(result("b", { at: 59_960 }));
     expect(t.steps()[0].calls[0].facts).toContain("1m 02s");
-    expect(t.steps()[0].calls[1].facts).toContain("60.0s");
+    expect(t.steps()[0].calls[1].facts).toContain("1m 00s"); // 59.96 s rounds up and carries into the minute (F1 of #625);
   });
 
   it("no duration when either timestamp is missing or the clock ran backwards", () => {
@@ -263,27 +264,12 @@ describe("createRunTimeline — classification (open-by-default rules key on the
   });
 });
 
-describe("createRunTimeline — inlinable into the run page", () => {
-  it("is a plain self-contained function (no import/require, no DOM, no closure over module scope)", () => {
-    const src = String(createRunTimeline);
-    expect(src.startsWith("function createRunTimeline(")).toBe(true);
-    expect(src).not.toMatch(/\b(import|require)\b/);
+describe("createRunTimeline — DOM-free", () => {
+  it("never touches the DOM (the page does DOM only; this stays unit-testable)", () => {
+    const src = readFileSync(new URL("./runTimeline.ts", import.meta.url), "utf8");
     expect(src).not.toContain("document.");
     expect(src).not.toContain("innerHTML");
     expect(src).not.toContain("</script");
-  });
-
-  it("re-evaluates from its source with identical behavior (the String(fn) round trip)", () => {
-    const shim = "var __name = function (fn) { return fn; };";
-    const again = new Function(
-      `${shim}\n${String(createRunTimeline)}\nreturn createRunTimeline;`,
-    )() as typeof createRunTimeline;
-    const t = again();
-    t.push({ type: "assistant", text: "hi", at: 1 });
-    t.push(call("a", "ls", 2));
-    t.push(result("a", { at: 3, summary: "x (9 chars, 2 lines)" }));
-    expect(t.steps()).toHaveLength(1);
-    expect(t.steps()[0].calls[0]).toMatchObject({ title: "ls", status: "ok", facts: ["exit 0", "2 lines", "1ms"] });
   });
 });
 

@@ -1,7 +1,8 @@
 // One import site for the shared formatters (src/channels/*): the same
 // implementations the bot's chat/CLI surfaces and the old server renderer use.
 
-export { formatDateTime, formatElapsed, formatRelative, splitRunLabel } from "@core/channels/indexFormat.js";
+export { formatDateTime, formatRelative, splitRunLabel } from "@core/channels/indexFormat.js";
+export { formatDuration } from "@core/core/time/formatDuration.js";
 export { formatLocalIso } from "@core/channels/localIso.js";
 
 /** The timeline clock: `5:19:57 PM PDT` — the viewer's 12-hour wall time with

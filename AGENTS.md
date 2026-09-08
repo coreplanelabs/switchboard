@@ -30,14 +30,14 @@ This file is read by every agent that works on this repository — Claude Code, 
 | Orchestration: directives, resolution, gates, history, the agent run | `src/core/dispatcher.ts` | `features/routing-and-config.md`, `run-loop.md` |
 | Commands, once, every surface (chat, CLI, HTTP, MCP) | `src/core/commandRegistry.ts`, `commands/`, `commandSurface.ts` | `features/command-registry.md` |
 | Authorization: actors, grants, the policy table, predicates | `src/core/authz/` | `features/authorization.md` |
-| Runs: live registry, durable history, the run page and SSE | `src/core/runRegistry.ts`, `runStore.ts`, `runsService.ts`, `src/channels/liveView.ts` | `features/run-history.md`, `live-view.md` |
+| Runs: live registry, durable history, tracing, the run page and SSE | `src/core/runRegistry.ts`, `runStore.ts`, `runsService.ts`, `trace/`, `src/channels/liveView.ts` | `features/run-history.md`, `live-view.md`, `tracing.md` |
 | Channels: Slack (transport only), HTTP, MCP ingress | `src/channels/` | `features/slack-channel.md`, `http-ingress.md`, `mcp-ingress.md` |
 | Agents as data; providers; executors (local, sandbox, resident) | `src/agents/`, `src/providers/`, `src/execution/` | `features/agent-*.md`, `execution.md`, `resident-repos.md` |
 | Memory, skills, external MCP tools, GitHub tools | `src/core/memory/`, `src/skills/`, `src/mcp/`, `src/tools/` | `features/memory.md`, `skills.md`, `mcp-tools.md`, `github-tools.md` |
 | The dashboard (Vue) served from the bot's seed | `web/` | `features/live-view.md` |
 | The four runtime Workers and the docs Worker | `deploy/cloudflare*/` | `features/release-and-deploy.md`, `docs-site.md` |
 | Deploy selection, order, and live gate | `src/deploy/` | `features/release-and-deploy.md` |
-| Human docs (Diataxis) and their generated tables | `docs/`, `src/docs/` | `features/docs-site.md` |
+| Human docs and their generated tables | `docs/`, `src/docs/` | `features/docs-site.md` |
 
 Module by module: [Code map](docs/reference/code-map.md).
 
@@ -67,6 +67,8 @@ The whole interface to this repository: deterministic, non-interactive, no crede
 | `npm run check:pr-title` | Judges one PR title against Conventional Commits with the types release-please knows. | `-- "feat(scope): …"` before opening a PR; CI's `title` check runs it. |
 | `npm run check:project-facts` | Every copy of the project's name, repository, docs URL and contact address equals `project.json`. | After editing `project.json` or a community file; part of `check:consistency`. |
 | `npm run agents:gen` | Writes the Commands table in AGENTS.md from `package.json` and this file. | After adding or changing a script; part of `fix`. |
+| `npm run clock:gen` | Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree. | After removing a direct `Date.now()`; part of `fix`. |
+| `npm run clock:check` | No production file reads the wall clock more than its allowlist entry permits, and no entry is stale. | Part of `check:consistency`. |
 | `npm run agents:check` | AGENTS.md is under its size budget, its Commands table is current, and every root script is described here. | Part of `check:consistency`. |
 | `npm run lint` | ESLint over the whole tree. | `npm run fix` repairs what it can. |
 | `npm run lint:fix` | ESLint with autofix. | Part of `fix`. |
@@ -106,14 +108,8 @@ Workspaces have their own `verify` (`-w web`, `-w docs`, `-w deploy/<worker>`); 
 
 ## Switchboard develops Switchboard
 
-The rules above are written in terms of the product's own agents, because they are who follows them:
-
-- **`agent:review` reviews every PR.** Read-only, in a warm checkout, one verdict with labeled findings posted at the head it read; it never approves or merges. The auto-approve workflow trusts its `LGTM`; the reviewed-head guard refuses a verdict for a head it did not read.
-- **`agent:coding` implements issues**, with the vendored skills under `skills/` as its house style (the PR-Tour skill shapes PR bodies), pushing a branch and submitting a typed description that Switchboard renders and opens as the PR.
-- **`agent:ship` runs the loop end to end** — coding, review, fixes — to an `LGTM`, in one thread.
-- **Run pages are the audit trail.** Every agent run has a page: what it read, ran, and wrote, with timestamps, kept in run history.
-- **`friction propose` files the process's own improvement issues**, from the recurring delay patterns in run history — proposals only, never PRs.
+The rules above are written in terms of the product's own agents, because they are who follows them: `agent:review` reviews every PR (read-only, one verdict, never a merge), `agent:coding` implements issues with the vendored skills as house style, `agent:ship` runs the loop end to end, every run has a page, and `friction propose` files the process's own improvement issues. How each behaves: [How we work](docs/explanation/how-we-work.md#switchboard-develops-switchboard).
 
 ## Working locally
 
-Node from `.nvmrc`, `npm ci`, `npm run verify`. `npm run cli -- ask "agent:review <PR url>"` drives the full pipeline without Slack; `npm run cli -- <group> <verb> --help` for any command. The `bash` tool runs model-generated commands inside the executor's boundary — never put write-capable credentials where the model can reach them. Production, sizing, and what is deliberately off: [Operate production](docs/how-to/operate-production.md), [Capacity and sizing](docs/explanation/capacity-and-sizing.md), [Known limits](docs/explanation/known-limits.md).
+Node from `.nvmrc`, `npm ci`, `npm run verify`. `npm run cli -- ask "agent:review <PR url>"` drives the pipeline without Slack; `npm run cli -- <group> <verb> --help` for any command. The `bash` tool runs model-generated commands inside the executor's boundary — never put write-capable credentials where the model can reach them. Production, sizing, and what is deliberately off: [Operate production](docs/how-to/operate-production.md), [Capacity and sizing](docs/explanation/capacity-and-sizing.md), [Known limits](docs/explanation/known-limits.md).

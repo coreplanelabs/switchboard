@@ -12,7 +12,7 @@ import { createRunPageModel, liveWait, modelName, runnerNow, RunnerClockKey, run
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
 import { durationTone, heatStyle } from "../lib/durationTone";
-import { formatClock, formatDateTime, formatElapsed, formatLocalIso } from "../lib/format";
+import { formatClock, formatDateTime, formatDuration, formatLocalIso } from "../lib/format";
 import { statusLabel } from "../lib/indexRow";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
@@ -73,7 +73,7 @@ const endMs = computed(() =>
       ? state.lastAt - state.firstAt
       : undefined,
 );
-const endDuration = computed(() => (endMs.value === undefined ? "" : formatElapsed(endMs.value)));
+const endDuration = computed(() => (endMs.value === undefined ? "" : formatDuration(endMs.value, "clock")));
 // The header's total is painted on the run scale (item 24): a 40-minute run
 // announces itself before the reader scrolls to find where the time went.
 const endHeat = computed(() => durationTone(endMs.value, "run"));
@@ -586,7 +586,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           <span
             class="since ml-auto shrink-0 text-xs tabular-nums"
             :class="waiting.slow ? 'text-warn' : 'text-dimmed'"
-            >{{ formatElapsed(waiting.elapsedMs) }}</span
+            >{{ formatDuration(waiting.elapsedMs, "clock") }}</span
           >
         </li>
         <li ref="logEnd" aria-hidden="true" />
