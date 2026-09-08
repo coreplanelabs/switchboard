@@ -48,8 +48,9 @@ It refuses to run from any ref but `main`. `deploy all` from a checkout still wo
 Putting a new secret value does **not** restart the running container — it keeps the environment it started with. Rotation is two steps:
 
 ```bash
-# in deploy/cloudflare/ (or wherever the secret lives — check deploy/secrets.manifest.json)
-npm run secrets   # or: wrangler secret put <NAME>
+# in deploy/cloudflare/ (or wherever the secret lives — check deploy/secrets.manifest.json);
+# the value comes from the profile's secretsSource (~/.secrets/switchboard/<NAME> by default, or op://Vault/Item)
+npm run secrets -- --only <NAME>   # = `deploy secrets bot --only <NAME>`; or: wrangler secret put <NAME>
 
 # from the repo root
 SWITCHBOARD_DEPLOY_TOKEN=… npm run cli -- deploy restart

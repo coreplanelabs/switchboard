@@ -1,10 +1,17 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { WORKERS, loadManifest, planSecretPuts, type Manifest } from "../../deploy/bin/put-secrets.mjs";
+import { WORKER_SPECS } from "../deploy/plan.js";
+import { MANIFEST_PATH, parseManifest } from "../deploy/secrets.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
-const manifest = loadManifest(resolve(ROOT, "deploy/secrets.manifest.json"));
+/** Worker → its deploy/ directory name — the four Workers that hold secrets, from the deploy specs. */
+const WORKERS: Record<string, string> = Object.fromEntries(
+  WORKER_SPECS.map((w) => [w.name, w.dir.replace(/^deploy\//, "")]),
+);
+const parsed = parseManifest(JSON.parse(readFileSync(resolve(ROOT, MANIFEST_PATH), "utf8")));
+if (!parsed.ok) throw new Error(parsed.problems.join("; "));
+const manifest = parsed.manifest;
 
 /** Property names of the `interface Env { … }` block in a Worker's worker.ts. */
 function envInterfaceKeys(workerDir: string): Set<string> {
@@ -41,7 +48,8 @@ describe("deploy/secrets.manifest.json", () => {
     for (const [worker, dir] of Object.entries(WORKERS)) {
       const env = envInterfaceKeys(dir);
       for (const s of manifest.secrets) {
-        if (s.workers.includes(worker)) expect(env, `${s.name} is not in ${dir}/worker.ts Env`).toContain(s.name);
+        if ((s.workers as readonly string[]).includes(worker))
+          expect(env, `${s.name} is not in ${dir}/worker.ts Env`).toContain(s.name);
       }
     }
   });
@@ -70,43 +78,5 @@ describe("deploy/secrets.manifest.json", () => {
 
   it("STATE_WORKER_URL is a var, never a secret — it is a public URL", () => {
     expect(manifest.secrets.map((s) => s.name)).not.toContain("STATE_WORKER_URL");
-  });
-});
-
-describe("planSecretPuts", () => {
-  const m: Manifest = {
-    secrets: [
-      { name: "A", workers: ["bot", "resident"] },
-      { name: "B", workers: ["bot"], optional: true },
-      { name: "C", workers: ["memory"] },
-    ],
-  };
-  const files = (present: string[]) => (name: string) => present.includes(name);
-
-  it("selects the Worker's secrets, in manifest order", () => {
-    expect(planSecretPuts(m, "bot", files(["A", "B"]))).toEqual({ puts: ["A", "B"], skippedOptional: [], missing: [] });
-    expect(planSecretPuts(m, "resident", files(["A"]))).toEqual({ puts: ["A"], skippedOptional: [], missing: [] });
-  });
-
-  it("a missing local file for a required secret is reported, never silently skipped", () => {
-    expect(planSecretPuts(m, "bot", files(["B"]))).toEqual({ puts: ["B"], skippedOptional: [], missing: ["A"] });
-  });
-
-  it("a missing optional secret is skipped and named", () => {
-    expect(planSecretPuts(m, "bot", files(["A"]))).toEqual({ puts: ["A"], skippedOptional: ["B"], missing: [] });
-  });
-
-  it("an explicit name list narrows the put, and an unknown name is refused", () => {
-    expect(planSecretPuts(m, "bot", files(["A", "B"]), ["B"])).toEqual({
-      puts: ["B"],
-      skippedOptional: [],
-      missing: [],
-    });
-    expect(() => planSecretPuts(m, "bot", files(["A"]), ["C"])).toThrow(/C is not a bot secret/);
-    expect(() => planSecretPuts(m, "bot", files(["A"]), ["NOPE"])).toThrow(/NOPE is not a bot secret/);
-  });
-
-  it("an unknown Worker is refused", () => {
-    expect(() => planSecretPuts(m, "edge", files([]))).toThrow(/unknown worker "edge"/);
   });
 });

@@ -13,6 +13,8 @@ import type { LoadedProfile } from "../../deploy/profile.js";
 import { planRestart, type RestartPlan } from "../../deploy/restart.js";
 import { formatDeployResults, type DeployRunResult, type RestartRunResult } from "../../deploy/run.js";
 import { renderWorkerConfigs, workerConfigTargets } from "../../deploy/wranglerTemplate.js";
+import { MANIFEST_PATH, parseManifest, parseSecretsSource, planSecretPuts, secretRef } from "../../deploy/secrets.js";
+import type { SecretsHostIO } from "../../deploy/secretsHost.js";
 import {
   CommandError,
   commandDefiner,
@@ -50,6 +52,8 @@ export interface DeployCommandDeps {
       read(path: string): Promise<string | undefined>;
       write(path: string, text: string): Promise<void>;
     };
+    /** `deploy secrets`: the manifest, which names the source has a value for, and one `wrangler secret put` (src/deploy/secretsHost.ts). */
+    secrets: SecretsHostIO;
   };
 }
 
@@ -320,11 +324,108 @@ export const deployInit = defineCommand({
   },
 });
 
+const secretNames = z
+  .string()
+  .transform((s) =>
+    s
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean),
+  )
+  .refine(
+    (names) => names.length > 0 && names.every((n) => /^[A-Z][A-Z0-9_]*$/.test(n)),
+    "expected a comma list of secret names (SCREAMING_SNAKE)",
+  )
+  .transform((names) => [...new Set(names)]);
+
+const secretsOptions = z.object({
+  only: secretNames
+    .optional()
+    .describe("put only these secrets (comma list of names from deploy/secrets.manifest.json)"),
+});
+
+interface SecretsOutput {
+  worker: WorkerName;
+  dir: string;
+  /** Where the values were read from, with `<NAME>` for the secret — never a value. */
+  source: string;
+  put: string[];
+  skippedOptional: string[];
+}
+
+export const deploySecrets = defineCommand({
+  id: "deploy.secrets",
+  args: [
+    {
+      name: "worker",
+      schema: z.enum(DEPLOY_ORDER as [WorkerName, ...WorkerName[]]),
+      describe: `the Worker to provision (${DEPLOY_ORDER.join(", ")})`,
+    },
+  ],
+  options: secretsOptions,
+  action: "deploy:write",
+  effect: "write",
+  surfaces: { chat: false, mcp: false, http: false },
+  describe:
+    "Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into `wrangler secret put`; none is ever printed.",
+  render: (output) => {
+    const o = output as unknown as SecretsOutput;
+    return [
+      ...o.skippedOptional.map((n) => `skip  ${n} (optional; no value at ${o.source.replace("<NAME>", n)})`),
+      ...o.put.map((n) => `put   ${n} → ${o.dir}`),
+      `done: ${o.put.length} secret(s) on ${o.worker} from ${o.source}`,
+    ].join("\n");
+  },
+  handler: async ({ args, options, deps }) => {
+    const worker = args.worker;
+    const loaded = await loadProfile(deps);
+    const source = parseSecretsSource(loaded.profile.secretsSource);
+    if (!source.ok) throw new CommandError("unavailable", `${loaded.path}: ${source.problem}`);
+    const raw = await deps.deploy.secrets.manifest();
+    if (raw === undefined) throw new CommandError("unavailable", `${MANIFEST_PATH}: no such file`);
+    const manifest = parseManifest(raw);
+    if (!manifest.ok)
+      throw new CommandError("unavailable", `${MANIFEST_PATH} is invalid —\n  - ${manifest.problems.join("\n  - ")}`);
+    const mine = manifest.manifest.secrets.filter((s) => s.workers.includes(worker)).map((s) => s.name);
+    const present = await deps.deploy.secrets.present(source.source, mine);
+    if (!present.ok) throw new CommandError("unavailable", present.problem);
+    const planned = planSecretPuts(manifest.manifest, worker, present.present, options.only);
+    if (!planned.ok) throw new CommandError("invalid_input", planned.problem);
+    const { plan } = planned;
+    const where = secretRef(source.source, "<NAME>");
+    if (plan.missing.length > 0)
+      throw new CommandError(
+        "unavailable",
+        `refusing: no value for required ${worker} secret(s) ${plan.missing.join(", ")} — expected ${where}. Nothing uploaded.`,
+      );
+    for (const [i, name] of plan.puts.entries()) {
+      const r = await deps.deploy.secrets.put(source.source, plan.dir, name);
+      if (r.code !== 0) {
+        const rest = plan.puts.slice(i + 1);
+        const said = r.output.trim().split("\n").at(-1) ?? "";
+        throw new CommandError(
+          "unavailable",
+          `wrangler secret put ${name} failed (exit ${r.code}) in ${plan.dir}; stopping — ${rest.length > 0 ? rest.join(", ") : "nothing"} not attempted${said ? `. ${said}` : ""}`,
+        );
+      }
+    }
+    const output: SecretsOutput = {
+      worker,
+      dir: plan.dir,
+      source: where,
+      put: plan.puts,
+      skippedOptional: plan.skippedOptional,
+    };
+    return output as unknown as JsonValue;
+  },
+});
+
 export const deployCommands: readonly CommandDef<DeployCommandDeps>[] = [
   deployPlan,
   deployAll,
   deployRestart,
   deployInit,
+  deploySecrets,
 ] as unknown as CommandDef<DeployCommandDeps>[];
 
 export function registerDeployCommands<D extends DeployCommandDeps>(registry: CommandRegistry<D>): void {

@@ -12,7 +12,7 @@
     "dev": "wrangler dev",
     "typegen": "wrangler types",
     "tail": "wrangler tail",
-    "secrets": "node ../bin/put-secrets.mjs sandbox"
+    "secrets": "npm --prefix ../.. run --silent cli -- deploy secrets sandbox"
   },
   "dependencies": {
     "@cloudflare/sandbox": "0.12.9"
