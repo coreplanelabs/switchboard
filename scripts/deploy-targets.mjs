@@ -4,12 +4,10 @@
 //
 // On an ordinary PR (ci.yml) the base is the PR's own base (HEAD^ of the merge
 // commit CI checks out) and the table lands in the job summary. For the RELEASE
-// PR the same script runs from release-please.yml on the push to main that
-// opened or updated it — its own pull_request runs sit at `action_required`
-// (the branch is pushed by github-actions[bot]) — against production instead:
-// each Worker's live commit, and the table is kept as ONE sticky comment on the
-// PR, re-rendered on every merge to main, so what merging the release will
-// deploy is on the PR itself.
+// PR the same script ALSO runs from release-please.yml on the push to main that
+// opened or updated it, against production instead: each Worker's live commit,
+// and the table is kept as ONE sticky comment on the PR, re-rendered on every
+// merge to main, so what merging the release will deploy is on the PR itself.
 //
 // Environment (all set by the workflow; the script is the only logic):
 //   RELEASE_PR          "true" when run for the release PR, else unset/"false"
