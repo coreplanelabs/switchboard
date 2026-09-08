@@ -10,11 +10,14 @@ import { RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
 import { TEST_PROFILE } from "../../deploy/testing/profile.js";
 import type { RestartRunResult } from "../../deploy/run.js";
 import { GENERATED_HEADER, TEMPLATE_FILE, workerConfigTargets } from "../../deploy/wranglerTemplate.js";
+import type { SecretsSource } from "../../deploy/secrets.js";
+import type { SecretsHostIO } from "../../deploy/secretsHost.js";
 import {
   deployAll,
   deployInit,
   deployPlan,
   deployRestart,
+  deploySecrets,
   registerDeployCommands,
   type DeployCommandDeps,
 } from "./deploy.js";
@@ -75,6 +78,7 @@ function bind(
   affected: (opts: { base?: string }) => Promise<AffectedReport> = neverAffected,
   profile: () => Promise<LoadedProfile> = async () => LOADED,
   disk: Map<string, string> = new Map(),
+  secrets: SecretsHostIO = noSecrets,
 ) {
   const registry = new CommandRegistry<DeployCommandDeps>({ audit: () => {} });
   registerDeployCommands(registry);
@@ -98,6 +102,7 @@ function bind(
         return affected(opts);
       },
       profile,
+      secrets,
       files: {
         read: async (path) => disk.get(path),
         write: async (path, text) => {
@@ -109,6 +114,19 @@ function bind(
   });
   return { commands, plans, restartPlans, affectedCalls, disk, writes };
 }
+
+/** A secrets host that must never be reached — every test but `deploy.secrets`'s binds it. */
+const noSecrets: SecretsHostIO = {
+  manifest: async () => {
+    throw new Error("must not read the manifest");
+  },
+  present: async () => {
+    throw new Error("must not probe the source");
+  },
+  put: async () => {
+    throw new Error("must not put");
+  },
+};
 
 /** A one-line template per Worker dir: enough to see the profile land in the render. */
 const TEMPLATE = '{ "name": "{{script}}", "account_id": "{{account}}", "routes": [{ "pattern": "{{hostname}}" }] }\n';
@@ -636,5 +654,175 @@ describe("deploy.init", () => {
     expect(renderText(commands.get("deploy.init")!, res.value)).toContain(
       "Worker configs from deploy/profile.example.json (the EXAMPLE profile):",
     );
+  });
+});
+
+describe("deploy.secrets", () => {
+  const MANIFEST = {
+    secrets: [
+      { name: "SLACK_BOT_TOKEN", workers: ["bot"] },
+      { name: "ANTHROPIC_ADMIN_KEY", workers: ["bot"], optional: true },
+      { name: "MEMORY_TOKEN", workers: ["bot", "resident", "memory"] },
+    ],
+  };
+  /** A source holding `values`; every put is recorded (name + dir), never a value, and answers `putCode`. */
+  function host(values: string[], opts: { manifest?: unknown; putCode?: (name: string) => number } = {}) {
+    const puts: string[] = [];
+    const probes: { source: SecretsSource; names: readonly string[] }[] = [];
+    const io: SecretsHostIO = {
+      manifest: async () => ("manifest" in opts ? opts.manifest : MANIFEST),
+      present: async (source, names) => {
+        probes.push({ source, names });
+        return { ok: true, present: new Set(names.filter((n) => values.includes(n))) };
+      },
+      put: async (_source, dir, name) => {
+        puts.push(`${name} → ${dir}`);
+        return { code: opts.putCode?.(name) ?? 0, output: opts.putCode?.(name) ? "✘ [ERROR] boom" : "" };
+      },
+    };
+    return { io, puts, probes };
+  }
+  const withSecrets = (io: SecretsHostIO, profile: () => Promise<LoadedProfile> = async () => LOADED) =>
+    bind(neverRunsPlan, () => true, neverRestarts, neverAffected, profile, new Map(), io);
+
+  it("is CLI-only, deploy:write, operator-gated — like deploy.all", async () => {
+    const { commands } = withSecrets(host([]).io);
+    expect(deploySecrets).toMatchObject({
+      action: "deploy:write",
+      effect: "write",
+      surfaces: { chat: false, mcp: false, http: false },
+    });
+    expect(await commands.invoke("deploy.secrets", { args: ["bot"] }, admin)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+    expect(await commands.invoke("deploy.secrets", { args: ["bot"] }, mcp("deploy:write"))).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+  });
+
+  it("puts every manifest secret the Worker holds that the source has, in manifest order, from the profile's source (the default directory when unset); an absent optional one is skipped and said", async () => {
+    const h = host(["SLACK_BOT_TOKEN", "MEMORY_TOKEN"]);
+    const { commands } = withSecrets(h.io);
+    const res = await commands.invoke("deploy.secrets", { args: ["bot"] }, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.value).toEqual({
+      worker: "bot",
+      dir: "deploy/cloudflare",
+      source: "~/.secrets/switchboard/<NAME>",
+      put: ["SLACK_BOT_TOKEN", "MEMORY_TOKEN"],
+      skippedOptional: ["ANTHROPIC_ADMIN_KEY"],
+    });
+    expect(h.puts).toEqual(["SLACK_BOT_TOKEN → deploy/cloudflare", "MEMORY_TOKEN → deploy/cloudflare"]);
+    // The source was asked once, about the Worker's names only.
+    expect(h.probes).toEqual([
+      {
+        source: { kind: "dir", path: "~/.secrets/switchboard" },
+        names: ["SLACK_BOT_TOKEN", "ANTHROPIC_ADMIN_KEY", "MEMORY_TOKEN"],
+      },
+    ]);
+    expect(renderText(commands.get("deploy.secrets")!, res.value)).toBe(
+      [
+        "skip  ANTHROPIC_ADMIN_KEY (optional; no value at ~/.secrets/switchboard/ANTHROPIC_ADMIN_KEY)",
+        "put   SLACK_BOT_TOKEN → deploy/cloudflare",
+        "put   MEMORY_TOKEN → deploy/cloudflare",
+        "done: 2 secret(s) on bot from ~/.secrets/switchboard/<NAME>",
+      ].join("\n"),
+    );
+  });
+
+  it("reads an op:// source from the profile; the memory Worker gets only its own secret", async () => {
+    const h = host(["MEMORY_TOKEN"]);
+    const op: LoadedProfile = {
+      ...LOADED,
+      profile: { ...TEST_PROFILE, secretsSource: "op://Prod/Switchboard secrets" },
+    };
+    const { commands } = withSecrets(h.io, async () => op);
+    const res = await commands.invoke("deploy.secrets", { args: ["memory"] }, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.value).toMatchObject({
+      worker: "memory",
+      dir: "deploy/cloudflare-memory",
+      source: "op://Prod/Switchboard secrets/<NAME>",
+      put: ["MEMORY_TOKEN"],
+    });
+    expect(h.probes[0].source).toEqual({ kind: "op", vault: "Prod", item: "Switchboard secrets" });
+  });
+
+  it("refuses BEFORE any upload when a required value is absent, naming the secret and where it was expected", async () => {
+    const h = host(["SLACK_BOT_TOKEN"]);
+    const { commands } = withSecrets(h.io);
+    const res = await commands.invoke("deploy.secrets", { args: ["bot"] }, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
+    expect(res.ok ? "" : res.message).toBe(
+      "refusing: no value for required bot secret(s) MEMORY_TOKEN — expected ~/.secrets/switchboard/<NAME>. Nothing uploaded.",
+    );
+    expect(h.puts).toEqual([]);
+  });
+
+  it("--only narrows the put; a name that is not one of the Worker's secrets is invalid_input naming the manifest's", async () => {
+    const h = host(["SLACK_BOT_TOKEN", "MEMORY_TOKEN"]);
+    const { commands } = withSecrets(h.io);
+    const res = await commands.invoke("deploy.secrets", { args: ["bot"], options: { only: "MEMORY_TOKEN" } }, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.value).toMatchObject({ put: ["MEMORY_TOKEN"], skippedOptional: [] });
+    expect(h.puts).toEqual(["MEMORY_TOKEN → deploy/cloudflare"]);
+    const bad = await commands.invoke("deploy.secrets", { args: ["bot"], options: { only: "SANDBOX_TOKEN" } }, cli);
+    expect(bad).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(bad.ok ? "" : bad.message).toContain(
+      "SANDBOX_TOKEN is not a bot secret (manifest: SLACK_BOT_TOKEN, ANTHROPIC_ADMIN_KEY, MEMORY_TOKEN)",
+    );
+    expect(
+      await commands.invoke("deploy.secrets", { args: ["bot"], options: { only: "lowercase" } }, cli),
+    ).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(await commands.invoke("deploy.secrets", { args: ["edge"] }, cli)).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+    });
+  });
+
+  it("a failed put stops the run naming what was not attempted and wrangler's last line; a missing or invalid manifest, an unreadable source, and a bad secretsSource are `unavailable`", async () => {
+    const failing = host(["SLACK_BOT_TOKEN", "MEMORY_TOKEN"], { putCode: (n) => (n === "SLACK_BOT_TOKEN" ? 1 : 0) });
+    const res = await withSecrets(failing.io).commands.invoke("deploy.secrets", { args: ["bot"] }, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
+    expect(res.ok ? "" : res.message).toBe(
+      "wrangler secret put SLACK_BOT_TOKEN failed (exit 1) in deploy/cloudflare; stopping — MEMORY_TOKEN not attempted. ✘ [ERROR] boom",
+    );
+    expect(failing.puts).toEqual(["SLACK_BOT_TOKEN → deploy/cloudflare"]);
+
+    const none = await withSecrets(host([], { manifest: undefined }).io).commands.invoke(
+      "deploy.secrets",
+      { args: ["bot"] },
+      cli,
+    );
+    expect(none).toMatchObject({ ok: false, error: "unavailable" });
+    expect(none.ok ? "" : none.message).toBe("deploy/secrets.manifest.json: no such file");
+
+    const invalid = await withSecrets(
+      host([], { manifest: { secrets: [{ name: "x", workers: [] }] } }).io,
+    ).commands.invoke("deploy.secrets", { args: ["bot"] }, cli);
+    expect(invalid).toMatchObject({ ok: false, error: "unavailable" });
+    expect(invalid.ok ? "" : invalid.message).toContain("deploy/secrets.manifest.json is invalid");
+
+    const unreadable: SecretsHostIO = {
+      ...host([]).io,
+      present: async () => ({
+        ok: false,
+        problem: "secretsSource ~/.secrets/switchboard: no such directory (/home/x/.secrets/switchboard)",
+      }),
+    };
+    const dir = await withSecrets(unreadable).commands.invoke("deploy.secrets", { args: ["bot"] }, cli);
+    expect(dir).toMatchObject({ ok: false, error: "unavailable" });
+    expect(dir.ok ? "" : dir.message).toContain("no such directory");
+
+    const badSource: LoadedProfile = { ...LOADED, profile: { ...TEST_PROFILE, secretsSource: "s3://bucket" } };
+    const bad = await withSecrets(host([]).io, async () => badSource).commands.invoke(
+      "deploy.secrets",
+      { args: ["bot"] },
+      cli,
+    );
+    expect(bad).toMatchObject({ ok: false, error: "unavailable" });
+    expect(bad.ok ? "" : bad.message).toContain("unknown scheme");
   });
 });

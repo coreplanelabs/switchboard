@@ -531,6 +531,18 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
           exec(`deploy.init write ${path}`, undefined);
         },
       },
+      // `deploy secrets`: a three-entry manifest whose values are all present; the put is the effect and is recorded.
+      secrets: {
+        manifest: async () => ({
+          secrets: [
+            { name: "SLACK_BOT_TOKEN", workers: ["bot"] },
+            { name: "MEMORY_TOKEN", workers: ["bot", "resident", "memory"] },
+            { name: "SANDBOX_TOKEN", workers: ["bot", "sandbox"] },
+          ],
+        }),
+        present: async (_source, names) => ({ ok: true, present: new Set(names) }),
+        put: async (_source, dir, name) => exec(`deploy.secrets put ${name} → ${dir}`, { code: 0, output: "" }),
+      },
       affected: async (opts) => ({
         head: "f".repeat(40),
         workers: [

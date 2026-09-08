@@ -12,6 +12,7 @@ import {
   runBotRestart,
   runDeployPlan,
 } from "../deploy/run.js";
+import { hostSecretsIO } from "../deploy/secretsHost.js";
 import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -219,6 +220,7 @@ export function buildCoreCommands(
       affected: wiring.affected ?? computeAffectedOnHost,
       profile: wiring.profile ?? loadProfileOnHost,
       files: hostDeployFiles,
+      secrets: hostSecretsIO,
     },
     env: { bootstrap: bootstrapOnHost },
   };

@@ -14,7 +14,7 @@
     "verify": "npm run typecheck && npm test",
     "typegen": "wrangler types",
     "tail": "wrangler tail",
-    "secrets": "node ../bin/put-secrets.mjs resident"
+    "secrets": "npm --prefix ../.. run --silent cli -- deploy secrets resident"
   },
   "dependencies": {
     "@cloudflare/sandbox": "0.13.0-next.751.1"

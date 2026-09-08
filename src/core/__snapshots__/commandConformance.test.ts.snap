@@ -298,6 +298,29 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "deploy:write",
+    "args": [
+      {
+        "name": "worker",
+        "required": true,
+        "type": "enum",
+      },
+    ],
+    "effect": "write",
+    "id": "deploy.secrets",
+    "options": [
+      {
+        "name": "only",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
     "action": "env:write",
     "args": [],
     "effect": "write",

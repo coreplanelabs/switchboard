@@ -544,6 +544,10 @@ export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; ba
     hints: { only: "bot" },
     why: "`--only` is an enum of the one restartable Worker (`bot`) — the generic `only` hint (`memory`) is a deploy target",
   },
+  "deploy.secrets": {
+    hints: { only: "MEMORY_TOKEN" },
+    why: "`--only` is a comma list of SECRET names from the fixture manifest — the generic `only` hint (`memory`) is a deploy target",
+  },
   "mcp.add": {
     hints: { name: "notion" },
     baseline: { channel: FIXTURE.channel },

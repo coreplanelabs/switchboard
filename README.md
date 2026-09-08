@@ -211,10 +211,13 @@ The per-Worker steps below are what the runner executes, for first-time setup (s
 ```bash
 # one-time: wrangler login (account: coreplane-infra), Docker running
 
-# 0. Values: ~/.secrets/switchboard/<NAME> for every entry in deploy/secrets.manifest.json
-#    (from 1Password "Switchboard: <NAME>"; self-minted bearers are `openssl rand -hex 32`).
+# 0. Values: the profile's `secretsSource` — ~/.secrets/switchboard/<NAME> by default, or a
+#    1Password item `op://Vault/Item` with one field per name — for every entry in
+#    deploy/secrets.manifest.json (self-minted bearers are `openssl rand -hex 32`).
 #    Shared bearers (SANDBOX_TOKEN, RESIDENT_*_TOKEN, MEMORY_TOKEN) must be the same
-#    value on every Worker the manifest lists — the manifest is the list.
+#    value on every Worker the manifest lists — the manifest is the list. `npm run secrets`
+#    in a Worker's dir is `deploy secrets <worker>`: it refuses before any upload when a
+#    required value is absent.
 
 # 0b. One install for every package: the root lockfile covers the bot, web/,
 #     docs/, and all five Workers (npm workspaces).
