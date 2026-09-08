@@ -99,7 +99,7 @@ export default withMermaid(
             { text: "Worker topology", link: "/explanation/worker-topology" },
             { text: "One definition, every surface", link: "/explanation/one-command-many-surfaces" },
             { text: "Runs: live, then remembered", link: "/explanation/runs-live-and-history" },
-            { text: "How Switchboard improves itself", link: "/self-improvement-architecture" },
+            { text: "How Switchboard improves itself", link: "/explanation/how-switchboard-improves-itself" },
             { text: "How we work", link: "/explanation/how-we-work" },
             { text: "Capacity and sizing", link: "/explanation/capacity-and-sizing" },
             { text: "Known limits", link: "/explanation/known-limits" },
