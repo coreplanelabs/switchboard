@@ -9443,7 +9443,7 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
       } satisfies ChannelIO,
     };
     let reread = false;
-    let atPush: { slot: boolean; registryRow: boolean } | undefined;
+    let atPush: { slot: boolean; registryRow: boolean; slotStartedAt: number | undefined } | undefined;
     const ledger = new Proxy(inner, {
       get(target, prop) {
         if (prop === "readInbox") {
@@ -9488,6 +9488,7 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
             atPush = {
               slot: admission.get("slack:CX:1.0") !== undefined,
               registryRow: !!deps.runRegistry?.getById("run-far"),
+              slotStartedAt: admission.get("slack:CX:1.0")?.startedAt,
             };
             const result = await target.pushInbox(runId, message);
             landed();
@@ -9507,7 +9508,9 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     const a = fakeIO();
     await dispatch(deps, { ...msg("and also the numbers", "slack:UY"), userName: "uy" }, a.io);
     expect(slotAtResumeClaim).toBe("free"); // released before the round trip
-    expect(atPush).toEqual({ slot: true, registryRow: false }); // the push landed after the claim, before the registry row
+    // The push landed after the claim, before the registry row; the slot carries the
+    // row's ORIGINAL start (5_000), so a steer ack's elapsed time is the run's, not the resume's.
+    expect(atPush).toEqual({ slot: true, registryRow: false, slotStartedAt: 5_000 });
     expect(a.replies).toEqual([expect.stringMatching(/^↪ Folded into the \*general\* run/)]);
     await resumeRun;
     await wiredDeps.writer.settled();

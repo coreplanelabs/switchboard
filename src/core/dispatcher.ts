@@ -684,7 +684,12 @@ export async function dispatch(
     // a ship run, the child round in flight) or refuses it with a pointer to
     // the live run when a DIFFERENT agent was asked for explicitly. Either way
     // this dispatch ends here: no card, no run, no workspace.
-    let claim = admission.claim(msg.threadKey, { agent: agent.name });
+    // A resumed run's slot carries the row's original start (run-history item 38):
+    // the steer ack's "N in" is the run's elapsed time, not the resume's.
+    let claim = admission.claim(msg.threadKey, {
+      agent: agent.name,
+      ...(resume ? { now: resume.row.startedAt } : {}),
+    });
     if (claim.kind === "live" && resume) {
       // A resume is not a follow-up (run-history item 38): its message is
       // synthetic, so it must never be steered into — or refuse against — the
