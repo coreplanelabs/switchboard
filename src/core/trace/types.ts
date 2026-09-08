@@ -23,6 +23,11 @@ export interface SpanRecord {
   traceId: string;
   spanId: string;
   parentSpanId?: string;
+  /** The parent belongs to another process: this span is a root of its own
+   *  process that continues a remote trace — a Worker's root adopting the
+   *  bot's `traceparent` (features/tracing.md item 22). The log sink prints
+   *  it as a root; it never travels on a run stream. */
+  adopted?: true;
   name: string;
   startedAt: number;
   endedAt?: number;

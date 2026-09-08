@@ -26,6 +26,31 @@ describe("createLogSink", () => {
     }
   });
 
+  it("a root that adopted a remote parent — a Worker continuing the bot's trace — prints as a root at both levels, its children still by the level; the line keeps its shape", async () => {
+    for (const level of ["roots", "slow"] as const) {
+      const clock = createTickingClock(1_000);
+      const lines: string[] = [];
+      const tracer = createTracer({ clock: clock.now });
+      const root = tracer.start("state.fetch", {
+        sinks: [createLogSink({ level, write: (l) => lines.push(l) })],
+        parent: { traceId: "4bf92f3577b34da6a3ce929d0e0e4736", parentId: "00f067aa0ba902b7" },
+        attrs: { route: "/retrieve" },
+      });
+      await root.span("state.put", () => clock.tick(50));
+      clock.tick(100);
+      root.end("ok", { httpStatus: 200 });
+      const parsed = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(parsed.map((l) => l.span)).toEqual(["state.fetch"]);
+      expect(parsed[0]).toMatchObject({
+        traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+        parentSpanId: "00f067aa0ba902b7",
+        ms: 150,
+        attrs: { route: "/retrieve", httpStatus: 200 },
+      });
+      expect(parsed[0]).not.toHaveProperty("adopted");
+    }
+  });
+
   it("the line carries exactly the documented fields and never text, summary or output", async () => {
     const { clock, lines, root } = run("slow");
     await root

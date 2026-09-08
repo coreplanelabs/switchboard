@@ -72,6 +72,7 @@ export function createTracer(opts: TracerOptions): Tracer {
       const span = new SpanImpl(shared, {
         traceId: root.parent?.traceId ?? newTraceId(),
         parentId: root.parent?.parentId,
+        adopted: root.parent !== undefined,
         name,
         sinks: root.sinks,
         startedAt: root.startedAt,
@@ -92,6 +93,8 @@ interface Shared {
 interface SpanInit {
   traceId: string;
   parentId: string | undefined;
+  /** A root continuing a remote trace (see `SpanRecord.adopted`); children never are. */
+  adopted?: boolean;
   name: string;
   sinks: SpanSink[];
   startedAt: number | undefined;
@@ -119,6 +122,7 @@ class SpanImpl implements Span {
       traceId: this.traceId,
       spanId: this.id,
       ...(init.parentId ? { parentSpanId: init.parentId } : {}),
+      ...(init.adopted ? { adopted: true as const } : {}),
       name: this.name,
       startedAt: init.startedAt ?? shared.clock(),
       attrs: { ...(init.attrs ?? {}) },
