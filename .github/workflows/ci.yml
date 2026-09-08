@@ -164,10 +164,10 @@ jobs:
   # unclassified path shows here as "every Worker deploys" long before it
   # reaches a release. The logic is scripts/deploy-targets.mjs, like every
   # other step here: `npm run deploy:targets` runs it locally too. The RELEASE
-  # PR's plan (judged against production, kept as a sticky comment) is the same
-  # script run from release-please.yml on the push to main — a pull_request
-  # run on a branch pushed by github-actions[bot] sits at `action_required`
-  # until someone approves it, so it cannot be this job.
+  # PR's plan (judged against PRODUCTION, not a base — kept as a sticky comment
+  # and re-rendered on every merge to main) is the same script run from
+  # release-please.yml on the push to main; this job still runs on the release
+  # PR and shows the release diff against its base like any other PR.
   deploy-targets:
     name: deploy targets
     if: github.event_name == 'pull_request'
