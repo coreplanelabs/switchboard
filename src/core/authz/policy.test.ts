@@ -4,7 +4,7 @@ import { POLICY, grantPlaceholders, resolveGrant, validatePolicy } from "./polic
 import { ACTORS, REPOS, run, scope } from "./testing.js";
 import type { Actor, Condition, Resource, Rule } from "./types.js";
 
-// Plan U1: every row of the POLICY table has at least one allow and one deny
+// Every row of the POLICY table has at least one allow and one deny
 // case, keyed by the row's shape — a new row without cases fails `coverage`,
 // and a case for a row that no longer exists fails it too. The allow case must
 // pass THAT row (evaluateRule) and the table (authorize); the deny case must
@@ -34,9 +34,9 @@ const userConfig = (id: string): Resource => ({ type: "config-scope", kind: "use
 const orgConfig: Resource = { type: "config-scope", kind: "org" };
 
 const A = ACTORS;
-const foreignPrivRun = run({ channel: "priv", userId: "slack:U5" });
+const foreignPrivRun = run({ channel: "priv", userId: "slack:UERIN" });
 
-/** The `<action> command [has-grant(<action>)]` shape every command row has (plan U4). */
+/** The `<action> command [has-grant(<action>)]` shape every command row has. */
 const commandRow = (action: string, commandId: string, allow: readonly Actor[], deny: readonly Actor[]) => ({
   [`${action} command [has-grant(${action})]`]: {
     allow: allow.map((a): Case => [a, command(commandId)]),
@@ -47,7 +47,7 @@ const commandRow = (action: string, commandId: string, allow: readonly Actor[], 
 const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> = {
   "runs:read run [member-of]": {
     allow: [
-      [A.member, run({ channel: "pub1", userId: "slack:U5" })],
+      [A.member, run({ channel: "pub1", userId: "slack:UERIN" })],
       [A.token, run({ channel: "http", userId: "http:other" })],
     ],
     deny: [
@@ -58,11 +58,11 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
   "runs:read run [all-channels]": {
     allow: [
       [A.admin, foreignPrivRun],
-      [A.schedule, run({ channel: "dm", userId: "slack:U5" })],
+      [A.schedule, run({ channel: "dm", userId: "slack:UERIN" })],
     ],
     deny: [
       [A.nonMember, foreignPrivRun],
-      [A.reader, run({ channel: "dm", userId: "slack:U5" })],
+      [A.reader, run({ channel: "dm", userId: "slack:UERIN" })],
     ],
   },
   "runs:read run [is-self]": {
@@ -72,25 +72,25 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     ],
     deny: [
       [A.nonMember, foreignPrivRun],
-      [A.noGrants, run({ channel: "dm", userId: "slack:U1" })],
+      [A.noGrants, run({ channel: "dm", userId: "slack:UALICE" })],
     ],
   },
   "runs:write run [has-grant(runs:write) & member-of]": {
     // pub2 is PUBLIC: every actor is a member of it (item 4), so the non-member case is the dm run.
     allow: [
-      [A.member, run({ channel: "pub2", userId: "slack:U5" })],
+      [A.member, run({ channel: "pub2", userId: "slack:UERIN" })],
       [A.token, run({ channel: "http", userId: "http:other" })],
     ],
     deny: [
-      [A.reader, run({ channel: "pub1", userId: "slack:U5" })],
-      [A.member, run({ channel: "dm", userId: "slack:U5" })],
+      [A.reader, run({ channel: "pub1", userId: "slack:UERIN" })],
+      [A.member, run({ channel: "dm", userId: "slack:UERIN" })],
     ],
   },
   "runs:write run [has-grant(runs:write) & all-channels]": {
     allow: [[A.admin, foreignPrivRun]],
     deny: [
       [A.schedule, foreignPrivRun],
-      [A.reader, run({ channel: "pub1", userId: "slack:U5" })],
+      [A.reader, run({ channel: "pub1", userId: "slack:UERIN" })],
     ],
   },
   "runs:read command [has-grant(runs:read)]": {
@@ -252,8 +252,8 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.noGrants, userConfig(A.noGrants.id)],
     ],
     deny: [
-      [A.member, userConfig("slack:U5")],
-      [A.admin, userConfig("slack:U5")],
+      [A.member, userConfig("slack:UERIN")],
+      [A.admin, userConfig("slack:UERIN")],
     ],
   },
   "agent:run agent [has-grant(agent:run:{name})]": {
@@ -336,14 +336,14 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     [A.browser, A.dispatchOnly, A.noGrants],
   ),
   "memory:read memory-scope/org []": {
-    allow: [[A.noGrants, scope("org", "org:coreplanelabs")]],
-    deny: [[A.bogus, scope("org", "org:coreplanelabs")]],
+    allow: [[A.noGrants, scope("org", "org:acme")]],
+    deny: [[A.bogus, scope("org", "org:acme")]],
   },
   "memory:read memory-scope/user [is-self]": {
     allow: [[A.member, scope("user", `user:${A.member.id}`)]],
     deny: [
-      [A.member, scope("user", "user:slack:U5")],
-      [A.admin, scope("user", "user:slack:U5")],
+      [A.member, scope("user", "user:slack:UERIN")],
+      [A.admin, scope("user", "user:slack:UERIN")],
     ],
   },
   "memory:read memory-scope/channel [member-of]": {
@@ -365,19 +365,19 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
   },
   "memory:write memory-scope/org [] origin=public|machine": {
     allow: [
-      [A.noGrants, scope("org", "org:coreplanelabs", "public")],
-      [A.token, scope("org", "org:coreplanelabs", "machine")],
+      [A.noGrants, scope("org", "org:acme", "public")],
+      [A.token, scope("org", "org:acme", "machine")],
     ],
     deny: [
-      [A.admin, scope("org", "org:coreplanelabs", "private")],
-      [A.admin, scope("org", "org:coreplanelabs", "dm")],
-      [A.admin, scope("org", "org:coreplanelabs", "unknown")],
-      [A.admin, scope("org", "org:coreplanelabs")],
+      [A.admin, scope("org", "org:acme", "private")],
+      [A.admin, scope("org", "org:acme", "dm")],
+      [A.admin, scope("org", "org:acme", "unknown")],
+      [A.admin, scope("org", "org:acme")],
     ],
   },
   "memory:write memory-scope/user [is-self]": {
     allow: [[A.member, scope("user", `user:${A.member.id}`, "dm")]],
-    deny: [[A.member, scope("user", "user:slack:U5", "dm")]],
+    deny: [[A.member, scope("user", "user:slack:UERIN", "dm")]],
   },
   "memory:write memory-scope/channel [member-of]": {
     allow: [[A.member, scope("channel", "channel:slack:C_PRIV", "private")]],
@@ -428,7 +428,7 @@ describe("POLICY coverage", () => {
   }
 });
 
-describe("validatePolicy (closed vocabulary, KTD1)", () => {
+describe("validatePolicy (closed vocabulary)", () => {
   const bad = (rule: Record<string, unknown>) => () => validatePolicy([rule as unknown as Rule]);
 
   it("refuses a condition outside the vocabulary", () => {

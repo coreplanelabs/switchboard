@@ -40,7 +40,7 @@ export function buildMemoryStore(
   warn: (message: string) => void,
 ): MemoryStore | undefined {
   if (!cfg?.enabled) return undefined;
-  // Per-scope cap (#253): the same value reaches every store so the in-process
+  // Per-scope cap: the same value reaches every store so the in-process
   // fallback and the durable Worker enforce one limit. Validated here, once:
   // 0 would evict everything on each write and >MAX would make the Worker 400
   // every write — either is a config typo, so warn and use the default.

@@ -100,7 +100,7 @@ describe("RunStoreFrictionLedger", () => {
       agent: "coding",
       model: "anthropic/m",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
       channelVisibility: "unknown",
       startedAt: finishedAt - 1000,
@@ -257,7 +257,7 @@ describe("isFrictionRunRecord", () => {
 
   it("accepts a record written by an OLDER analyzer whose byCategory lacks categories added since (absent = zero)", () => {
     // Run history holds records for weeks; a new FrictionCategory
-    // (`slow_model_turn`, 2026-08-30) must not make every existing record
+    // (`slow_model_turn`, say) must not make every existing record
     // unreadable — the projection zero-fills what an older diagnosis lacks.
     const old = rec("a", 1);
     const { slow_model_turn: _dropped, ...legacy } = old.diagnosis.byCategory;

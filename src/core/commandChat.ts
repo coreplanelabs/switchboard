@@ -22,15 +22,16 @@ import {
 import type { IncomingMessage } from "./types.js";
 import type { Span } from "./trace/types.js";
 
-// The chat adapter for the command registry (#157 U13 — R7, KTD18, KTD19,
-// KTD21, KTD25). Chat is the one surface where a command shares its namespace
+// The chat adapter for the command registry
+// (docs/decisions/0008-one-command-definition-every-surface.md). Chat is the
+// one surface where a command shares its namespace
 // with prose, so recognition is deliberately narrow: a message IS a command
 // only when it starts with `<group> <verb>` for an id that is registered AND
 // exposed to chat (plus the one word `help`, the chat spelling of `help show`).
 // Everything else — prose, an unknown verb, a mid-sentence mention — is null,
 // and the dispatcher carries on. Since phase 4b there is no legacy chat parser
 // left: this is the ONLY thing that turns chat text into a command. Natural
-// language is never recognized here (KD3: never guess); the dispatcher's
+// language is never recognized here (never guess); the dispatcher's
 // `recognizeOperation` translates its few conservative forms INTO a registry
 // invocation (`repo.test` / `repo.build`) instead of executing anything itself.
 //
@@ -65,7 +66,7 @@ export interface ChatCommandCatalog {
  *  as `CoreDeps.commands` and never learns the deps type. */
 export type ChatCommands = CommandInvoker;
 
-/** The one-word chat spelling of `help show` (KTD25): what a person types first. */
+/** The one-word chat spelling of `help show`: what a person types first. */
 export const HELP_COMMAND_ID = "help.show";
 
 const WORD = /^[a-z][a-z0-9]*$/;
@@ -156,7 +157,7 @@ export interface HandleChatCommandArgs {
 /** The `Caller` a chat message resolves to: the message's user as the id and
  *  as the `Actor` the policy table decides on (its grants are what config names
  *  for that user id — `ConfigStore.grantsFor`), and the channel + thread it
- *  came from (`origin`). The adapter makes no authorization decision (KTD3):
+ *  came from (`origin`). The adapter makes no authorization decision:
  *  a machine credential speaking as text (`http:<subject>`, `mcp:<subject>`)
  *  is admitted by its grants like its tool call and sees the runs its grants
  *  name — not the channel it speaks in (authorization.md item 7), so one token
@@ -199,8 +200,8 @@ export interface ChatCommandResult {
  *  refusal the registry decided (the policy table denied the caller the
  *  command's action) is the fixed "is restricted" line; one the command
  *  decided about the request (the channel scope, another user's memory, a repo
- *  allowlist) carries its reason. The deny reason itself never reaches a reply
- *  (KTD8): it is on the audit line. */
+ *  allowlist) carries its reason. The deny reason itself never reaches a reply:
+ *  it is on the audit line. */
 export function chatErrorLine(
   id: string,
   error: InvokeErrorCode,

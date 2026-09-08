@@ -33,7 +33,7 @@ describe("reviewPostOptedOut", () => {
       "review this and do not post",
       "review it, dont post the comment",
       "just review, no post",
-      "review PR #42 — no-post please",
+      "review PR 42 — no-post please",
       "review but skip posting the comment",
       "review without posting to github",
       "no need to comment on the PR, just review",
@@ -56,7 +56,7 @@ describe("reviewPostOptedOut", () => {
 
   it("does NOT fire on ordinary review requests that mention posting positively", () => {
     for (const t of [
-      "review PR #42 and post the review as a comment",
+      "review PR 42 and post the review as a comment",
       "review https://github.com/o/r/pull/1",
       "post the findings and rank them",
       "look at the diff and comment on any bugs",

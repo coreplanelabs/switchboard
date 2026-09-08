@@ -1,12 +1,13 @@
 import { ALL_GRANTS } from "./grants.js";
 import type { Actor, Grants } from "./types.js";
 
-// Actor resolution (plan U2 — R2, KTD3): each adapter proves WHO is asking
-// (a Slack user id, an ingress token's subject, an Access `sub` or service
-// token `common_name`, the local CLI, a schedule registry entry) and hands it
-// here; this module gives it a kind, its platform-namespaced id (invariant 4)
-// and its grants — looked up by id through the one `GrantsLookup` config owns.
-// No decision lives here: nothing below says what an actor MAY do.
+// Actor resolution — adapters resolve identity, never authority: each adapter
+// proves WHO is asking (a Slack user id, an ingress token's subject, an Access
+// `sub` or service token `common_name`, the local CLI, a schedule registry
+// entry) and hands it here; this module gives it a kind, its
+// platform-namespaced id (invariant 4) and its grants — looked up by id through
+// the one `GrantsLookup` config owns. No decision lives here: nothing below
+// says what an actor MAY do.
 
 /** What an adapter can prove about a caller's surface. */
 export type ActorSurface = "slack" | "http" | "mcp" | "access-browser" | "access-service" | "cli" | "schedule";

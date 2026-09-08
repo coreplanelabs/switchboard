@@ -1,10 +1,10 @@
 ## TL;DR
 
-The coding agent's PR descriptions are hard for a human to consume: dense prose that never points at the code (see [#325](https://github.com/coreplanelabs/switchboard/pull/325)). This PR replaces the prose **Changes** / **How to review** sections of the PR-body template with a **Tour** — an ordered, reader-first walkthrough where each step is a heading naming the change, an explanation, and then a line permalink at the PR head that GitHub renders as embedded code — written by the agent that just made the change, so it costs no extra model call.
+The coding agent's PR descriptions are hard for a human to consume: dense prose that never points at the code (see any PR the agent opened under the previous template). This PR replaces the prose **Changes** / **How to review** sections of the PR-body template with a **Tour** — an ordered, reader-first walkthrough where each step is a heading naming the change, an explanation, and then a line permalink at the PR head that GitHub renders as embedded code — written by the agent that just made the change, so it costs no extra model call.
 
 ## What & why
 
-First piece of the "PRs consumable by humans" work (Tour in the body → skills provenance [#331](https://github.com/coreplanelabs/switchboard/pull/331) → the description as data with one renderer per surface ([features/pr-description.md](https://github.com/coreplanelabs/switchboard/blob/main/features/pr-description.md)) → typed skill events → optional meat reading diff → review-run panel). Modeled on Ramp Inspect's hunk-anchored Tour (`competitive-research/ramp-inspect/findings.md` #2, #8), with two improvements: GitHub is the renderer (a `blob/<40-char sha>/<path>#L<a>-L<b>` link inside a PR body renders as the code itself — no UI built), and each step leads with *what the change is* and *why*, so the reader knows what they are looking at before the hunk appears. The author writes it right after implementing because that is when it has the most context anyone will ever have about the change. This body itself was produced by the `PrDescription` pipeline from `src/core/testing/pr329.description.json` — the PR is the pipeline's golden test.
+First piece of the "PRs consumable by humans" work (Tour in the body → skills provenance (the vendored-skills follow-up) → the description as data with one renderer per surface ([features/pr-description.md](https://github.com/acme/api/blob/main/features/pr-description.md)) → typed skill events → optional meat reading diff → review-run panel). Modeled on Ramp Inspect's hunk-anchored Tour (`competitive-research/ramp-inspect/findings.md` #2, #8), with two improvements: GitHub is the renderer (a `blob/<40-char sha>/<path>#L<a>-L<b>` link inside a PR body renders as the code itself — no UI built), and each step leads with *what the change is* and *why*, so the reader knows what they are looking at before the hunk appears. The author writes it right after implementing because that is when it has the most context anyone will ever have about the change. This body itself was produced by the `PrDescription` pipeline from `src/core/testing/goldenTour.description.json` — the PR is the pipeline's golden test.
 
 ## Tour
 
@@ -14,23 +14,23 @@ The shared `PR_DESCRIPTION_TEMPLATE` (both coding prompts embed it). Every secti
 
 **Look for:** the ordering is explicit ("permalink to the hunk LAST"), and the sha rule says *full 40-char* — the one detail a model will economize on.
 
-https://github.com/coreplanelabs/switchboard/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/agents/registry.ts#L46-L60
+https://github.com/acme/api/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/agents/registry.ts#L46-L60
 
 ### 2. Tests — written red first
 
 Four failed before the template change (`**Tour**` missing, the old sections present, no permalink shape, no repush rule). They pin: the six-section list; `**Changes**` / `**How to review**` gone from both prompts; every section a `##` heading with `## TL;DR` first; the exact permalink shape GitHub embeds; "reading order" + "Remaining changes"; the step order (heading, **Look for:**, "permalink to the hunk LAST", "headings for steps, bold labels"); `git rev-parse HEAD` + "every push that changes the head".
 
-https://github.com/coreplanelabs/switchboard/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/agents/registry.test.ts#L154-L217
+https://github.com/acme/api/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/agents/registry.test.ts#L154-L217
 
 ### 3. Spec — item 3 and its criteria
 
 `features/agent-coding.md` item 3 now lists six `##`-headed sections and carries the Tour's contract as a sub-item; the criteria table says "six sections" and gains a row naming the five unit tests plus the live check (every Tour sha equals `headRefOid`; a follow-up repush moves every sha).
 
-https://github.com/coreplanelabs/switchboard/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/features/agent-coding.md#L14-L15
+https://github.com/acme/api/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/features/agent-coding.md#L14-L15
 
 ### 4. Remaining changes
 
-- `features/agent-coding.md` — L21–23 a `[gap]` roadmap item naming the debt this template leaves (the description as data, rendered per surface — [#332](https://github.com/coreplanelabs/switchboard/pull/332), linked per the reviewer's nit); L31–32 the two criteria rows.
+- `features/agent-coding.md` — L21–23 a `[gap]` roadmap item naming the debt this template leaves (the description as data, rendered per surface — the next PR in this series, linked per the reviewer's nit); L31–32 the two criteria rows.
 
 ## Decisions
 
@@ -57,7 +57,7 @@ Prompt-only change to `PR_DESCRIPTION_TEMPLATE`; no runtime code paths change. B
 | Step order: heading → description → optional Look-for → permalink last; markdown structure | `[unit]` `::each Tour step is heading → description → optional Look-for → permalink last` |
 | Repush rule: `git rev-parse HEAD` + "every push that changes the head" | `[unit]` `::both prompts require regenerating the Tour after any push that moves the head` |
 | GitHub renders the anchors as embedded code; the Tour regenerates on repush | This PR body is the receipt: the three Tour links above render as code blocks at this PR's head sha `685c471` — the fourth head this body has been re-rendered for (`06a12a6` → `64336c8` → `5bf806a` → `685c471`), the last two by re-running the pipeline with a new `--head` and no change to the description data. |
-| This body is a pipeline output, not hand-written markdown | `[unit]` `src/core/prDescription.test.ts::golden: PR #329 rendered through the pipeline` — `pr329.description.json` renders byte-for-byte to `pr329.body.md`, which is what `gh pr edit --body-file` put here. |
-| Live: agent-opened PR has a Tour at `headRefOid`; a follow-up repush updates every sha | `[agent]` post-deploy, spec criterion — receipt to [#222](https://github.com/coreplanelabs/switchboard/issues/222) |
+| This body is a pipeline output, not hand-written markdown | `[unit]` `src/core/prDescription.test.ts::golden: a full PR description rendered through the pipeline` — `goldenTour.description.json` renders byte-for-byte to `goldenTour.body.md`, which is what `gh pr edit --body-file` put here. |
+| Live: agent-opened PR has a Tour at `headRefOid`; a follow-up repush updates every sha | `[agent]` post-deploy, spec criterion — receipt to the feature's receipts issue in the tracker |
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

@@ -11,7 +11,7 @@ import type { RunStore } from "./runStore.js";
 
 export { isFrictionRunRecord };
 
-// The friction ledger (Area 7b / #84): where each finished run's diagnosis is
+// The friction ledger (features/self-improvement.md): where each finished run's diagnosis is
 // read from so the proposer can look ACROSS runs. The live run registry evicts
 // a finished run 60s after it ends; run history (features/run-history.md) is
 // where every finished run's record — diagnosis included — lands, so the
@@ -28,7 +28,7 @@ export interface LedgerReadOptions {
   sinceMs?: number;
   /** What the ACTOR may see: `predicateFor(actor, "runs:read", "run")`
    *  (authorization.md item 6 — `friction report` computes over the runs its
-   *  caller can read, OQ2). A `FrictionRunRecord` carries no channel, user, or
+   *  caller can read). A `FrictionRunRecord` carries no channel, user, or
    *  visibility by design, so only a ledger that reads the run store can apply
    *  a real predicate; a ledger of bare records (the in-memory test double)
    *  answers only a predicate that admits EVERYTHING (`all`) and contributes
@@ -92,7 +92,7 @@ export class InMemoryFrictionLedger implements FrictionLedger {
 }
 
 // ---------------------------------------------------------------------------
-// Served from the run store (#157, KD3 / KTD12)
+// Served from the run store
 // ---------------------------------------------------------------------------
 
 /** The ONLY fields a run-store row contributes to a friction record: the same
@@ -106,7 +106,7 @@ export function projectFrictionRecord(item: RunListItem): FrictionRunRecord {
 }
 
 /**
- * The friction ledger READ from the run store (KD3): one population for the
+ * The friction ledger READ from the run store: one population for the
  * dashboard and the self-improvement loop. `recent()` pages `store.list`
  * (never `get` — listings carry the diagnosis, so no event stream is loaded)
  * down to the newest `limit ?? DEFAULT_LEDGER_MAX` runs, then orders and

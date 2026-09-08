@@ -178,7 +178,7 @@ exports[`capability surfaces — cloud-full > help on chat 1`] = `
 • \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.
 
 *Per-request directives* (anywhere in the message):
-\`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42\` (effort: low | medium | high — lower = faster turns)
+\`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42\` (effort: low | medium | high — lower = faster turns)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
@@ -358,7 +358,7 @@ exports[`capability surfaces — local-full > help on chat 1`] = `
 • \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.
 
 *Per-request directives* (anywhere in the message):
-\`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42\` (effort: low | medium | high — lower = faster turns)
+\`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42\` (effort: low | medium | high — lower = faster turns)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
@@ -504,7 +504,7 @@ exports[`capability surfaces — minimal > help on chat 1`] = `
 • \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.
 
 *Per-request directives* (anywhere in the message):
-\`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42\` (effort: low | medium | high — lower = faster turns)
+\`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42\` (effort: low | medium | high — lower = faster turns)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*

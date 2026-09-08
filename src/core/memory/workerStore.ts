@@ -2,7 +2,7 @@ import type { MemoryCandidate, MemoryQuery, MemoryRecord, MemoryStore } from "./
 import { tracedFetch } from "../trace/tracedFetch.js";
 import type { Span, TraceOptions } from "../trace/types.js";
 
-// The durable MemoryStore (PR3, #85): an HTTPS client to the Memory Worker
+// The durable MemoryStore: an HTTPS client to the Memory Worker
 // (deploy/cloudflare-memory/ — one SQLite-backed Durable Object per scopeKey,
 // FTS5 candidate match, ranking + write plan from the shared engine.ts). This
 // mirrors ResidentExecutor's remote-plane-over-HTTPS pattern: the core sees the
@@ -11,7 +11,7 @@ import type { Span, TraceOptions } from "../trace/types.js";
 // nothing). Route contracts (JSON in/out, bearer MEMORY_TOKEN):
 //   POST /retrieve {scopeKey, query, limit} → {records: MemoryRecord[]}
 //   POST /write    {scopeKey, records: MemoryCandidate[], cap?} → {ok, inserted, deduped, superseded, evicted}
-//   POST /list     {scopeKey, limit, query?} → {records: MemoryRecord[]}  (#278/#293 human controls)
+//   POST /list     {scopeKey, limit, query?} → {records: MemoryRecord[]}  (human controls)
 //   POST /forget   {scopeKey, id} → {ok, forgotten: boolean}
 
 /** Per-request ceiling. Retrieval sits on the critical path of every model
@@ -27,11 +27,11 @@ export const MEMORY_WORKER_TIMEOUT_MS = 5_000;
 const MAX_RETRIEVE_QUERY_CHARS = 3900;
 
 export interface WorkerMemoryStoreOptions {
-  /** Base URL of the Memory Worker (e.g. https://switchboard-memory.coreplanelabs.dev). */
+  /** Base URL of the Memory Worker (e.g. https://switchboard-memory.example.com). */
   baseUrl: string;
   /** Bearer secret (MEMORY_TOKEN on the Worker). */
   token: string;
-  /** Per-scope cap on active records (#253), sent on every /write; absent →
+  /** Per-scope cap on active records, sent on every /write; absent →
    *  the Worker's own default. */
   cap?: number;
   /** Injectable for tests; defaults to global fetch. */
@@ -99,7 +99,7 @@ export class WorkerMemoryStore implements MemoryStore {
     }
   }
 
-  /** Human command (#278): failures THROW — a person asked to see the list, so
+  /** Human command: failures THROW — a person asked to see the list, so
    *  an empty reply on error would be a lie; the command layer renders ⚠️. */
   async list(scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]> {
     const res = await this.post("/list", { scopeKey, limit, ...(query !== undefined ? { query } : {}) });
@@ -109,7 +109,7 @@ export class WorkerMemoryStore implements MemoryStore {
     return Array.isArray(data.records) ? data.records.filter(isMemoryRecord) : [];
   }
 
-  /** Human command (#278): resolves the Worker's `forgotten` flag; throws on a non-2xx. */
+  /** Human command: resolves the Worker's `forgotten` flag; throws on a non-2xx. */
   async forget(scopeKey: string, id: string): Promise<boolean> {
     const res = await this.post("/forget", { scopeKey, id });
     const data = await parseBody(res);

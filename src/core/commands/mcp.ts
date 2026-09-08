@@ -14,7 +14,7 @@ import {
 
 export { MCP_OFF_MESSAGE };
 
-// The `mcp.*` registrations (#394, features/mcp-tools.md items 13–15): the
+// The `mcp.*` registrations (features/mcp-tools.md items 13–15): the
 // self-serve MCP server surface on the typed model — thin writes into the
 // config layers (`Scope.mcpServers`), the way `config instructions` is a thin
 // write into `Scope.instructions`.
@@ -30,7 +30,7 @@ export { MCP_OFF_MESSAGE };
 // by the DATA inside the handler (command-registry.md item 22), so the commands
 // declare `open` and refuse inside. Credentials NEVER travel through a command:
 // `add`/`connect` return a link to the Access-gated connect page. Nothing here
-// starts a run (KTD16); the dispatcher records `add`/`connect`/`remove` as
+// starts a run; the dispatcher records `add`/`connect`/`remove` as
 // inline runs.
 
 export interface McpCommandDeps {

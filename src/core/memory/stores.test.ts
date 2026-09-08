@@ -31,17 +31,17 @@ describe("NullMemoryStore", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("list returns [] and forget returns false (#278 human controls)", async () => {
+  it("list returns [] and forget returns false (human controls)", async () => {
     const store = new NullMemoryStore();
     expect(await store.list("org:acme", 10)).toEqual([]);
     expect(await store.forget("org:acme", "mem:org:acme:0")).toBe(false);
   });
 });
 
-// Feature: features/memory.md §24 (#278) — human controls: list a scope's active
+// Feature: features/memory.md §24 — human controls: list a scope's active
 // records newest first; forget = soft-delete (status `forgotten`, provenance
 // kept) that hides the record from retrieval, list, and dedup.
-describe("InMemoryMemoryStore.list / forget (#278)", () => {
+describe("InMemoryMemoryStore.list / forget", () => {
   const seed = () =>
     new InMemoryMemoryStore(
       [
@@ -49,7 +49,7 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
         rec({ id: "b", createdAt: NOW - 2000, text: "middle deploy note" }),
         rec({ id: "c", createdAt: NOW - 1000, text: "newest deploy note" }),
         rec({ id: "s", createdAt: NOW, text: "superseded deploy note", status: "superseded" }),
-        rec({ id: "u", scopeKey: "user:slack:U1", text: "user deploy note" }),
+        rec({ id: "u", scopeKey: "user:slack:UALICE", text: "user deploy note" }),
       ],
       { now: () => NOW },
     );
@@ -58,11 +58,11 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
     const store = seed();
     expect((await store.list("org:acme", 10)).map((r) => r.id)).toEqual(["c", "b", "a"]);
     expect((await store.list("org:acme", 2)).map((r) => r.id)).toEqual(["c", "b"]);
-    expect((await store.list("user:slack:U1", 10)).map((r) => r.id)).toEqual(["u"]);
-    expect(await store.list("user:slack:U2", 10)).toEqual([]);
+    expect((await store.list("user:slack:UALICE", 10)).map((r) => r.id)).toEqual(["u"]);
+    expect(await store.list("user:slack:UBOB", 10)).toEqual([]);
   });
 
-  it("list with a query keeps only records a query token hits (whole-token, text or keywords), newest first, no usage bump (#293)", async () => {
+  it("list with a query keeps only records a query token hits (whole-token, text or keywords), newest first, no usage bump", async () => {
     const store = seed();
     const hits = await store.list("org:acme", 10, "newest oldest");
     expect(hits.map((r) => r.id)).toEqual(["c", "a"]);
@@ -93,9 +93,9 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
   it("forget: unknown id, foreign-scope id, or an already non-active record → false, nothing changes", async () => {
     const store = seed();
     expect(await store.forget("org:acme", "nope")).toBe(false);
-    expect(await store.forget("org:acme", "u")).toBe(false); // lives in user:slack:U1
+    expect(await store.forget("org:acme", "u")).toBe(false); // lives in user:slack:UALICE
     expect(await store.forget("org:acme", "s")).toBe(false); // superseded
-    expect((await store.list("user:slack:U1", 10)).map((r) => r.id)).toEqual(["u"]);
+    expect((await store.list("user:slack:UALICE", 10)).map((r) => r.id)).toEqual(["u"]);
     expect(await store.forget("org:acme", "b")).toBe(true);
     expect(await store.forget("org:acme", "b")).toBe(false); // second time: no longer active
   });
@@ -290,9 +290,9 @@ describe("selectMemoryStore", () => {
   });
 });
 
-// Feature: features/memory.md — per-scope cap (#253): applied on write in the
+// Feature: features/memory.md — per-scope cap: applied on write in the
 // in-process store; evicted rows are soft-deleted and invisible everywhere.
-describe("InMemoryMemoryStore per-scope cap (#253)", () => {
+describe("InMemoryMemoryStore per-scope cap", () => {
   const c = (text: string): MemoryCandidate => ({
     kind: "fact",
     text,

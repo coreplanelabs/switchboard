@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseIngressTokenMap, RETIRED_TOKEN_FIELD, tokenForSubject } from "./ingressTokens.js";
 
 // Feature: features/http-ingress.md — the ONE parser of SWITCHBOARD_INGRESS_TOKENS,
-// shared by the bot's ingress adapters and the Worker shim (#244). Node-free. A
+// shared by the bot's ingress adapters and the Worker shim. Node-free. A
 // token is a credential: subject (+ the channel its dispatches are recorded
 // under); what its bearer may do is config's `grants` (authorization.md item 9).
 
@@ -79,12 +79,12 @@ describe("parseIngressTokenMap", () => {
 describe("tokenForSubject", () => {
   const tokens = {
     a: { subject: "cron", channel: "cron" },
-    b: { subject: "justin-ingress" },
+    b: { subject: "ops-ingress" },
   };
 
   it("returns the one token mapped to the subject", () => {
     expect(tokenForSubject(tokens, "cron")).toBe("a");
-    expect(tokenForSubject(tokens, "justin-ingress")).toBe("b");
+    expect(tokenForSubject(tokens, "ops-ingress")).toBe("b");
   });
 
   it("unknown subject → undefined; two tokens for one subject → undefined (ambiguity is refused, not guessed)", () => {

@@ -12,10 +12,9 @@ import { POLICY, ruleTarget } from "./policy.js";
 import { ACTORS, CHANNELS, REPOS, USERS, actor, grants, run, runFixture, scope, scopeFixture } from "./testing.js";
 import type { Actor, GrantSet, Resource, Rule } from "./types.js";
 
-// Plan U1 / R1, R2, R7, R11, KTD8: the one decision — grant arithmetic (wildcard
-// coverage on actions, literal ids elsewhere, the on-behalf-of intersection
-// that is never a superset), fail-closed defaults, and reasons that carry no
-// resource id.
+// The one decision — grant arithmetic (wildcard coverage on actions, literal
+// ids elsewhere, the on-behalf-of intersection that is never a superset),
+// fail-closed defaults, and reasons that carry no resource id.
 
 const A = ACTORS;
 const members = (set: GrantSet): string[] => (set === "all" ? ["all"] : [...set].sort());
@@ -197,7 +196,7 @@ describe("authorize: table shape", () => {
   });
 });
 
-describe("authorize: fail-closed (R7)", () => {
+describe("authorize: fail-closed", () => {
   /** A row with no condition whose selectors admit a plain `user` (the only way a grant-less user gets in). */
   const openRows = (action: string, target: string) =>
     POLICY.some(
@@ -213,23 +212,23 @@ describe("authorize: fail-closed (R7)", () => {
   function foreign(rule: Rule): Resource {
     switch (ruleTarget(rule)) {
       case "run":
-        return run({ channel: "priv", userId: "slack:U1" });
+        return run({ channel: "priv", userId: "slack:UALICE" });
       case "channel":
         return { type: "channel", id: CHANNELS.priv.id, visibility: "private" };
       case "memory-scope/org":
-        return scope("org", "org:coreplanelabs");
+        return scope("org", "org:acme");
       case "memory-scope/user":
-        return scope("user", "user:slack:U1");
+        return scope("user", "user:slack:UALICE");
       case "memory-scope/channel":
         return scope("channel", `channel:${CHANNELS.priv.id}`);
       case "memory-scope/repo":
         return scope("repo", `repo:${REPOS[0]}`);
       case "repo":
-        return { type: "repo", owner: "coreplanelabs", name: "switchboard" };
+        return { type: "repo", owner: "acme", name: "api" };
       case "config-scope/channel":
         return { type: "config-scope", kind: "channel", id: CHANNELS.priv.id };
       case "config-scope/user":
-        return { type: "config-scope", kind: "user", id: "slack:U1" };
+        return { type: "config-scope", kind: "user", id: "slack:UALICE" };
       case "config-scope/org":
         return { type: "config-scope", kind: "org" };
       case "agent":
@@ -270,45 +269,45 @@ describe("authorize: fail-closed (R7)", () => {
     });
   });
   it("unknown membership is not membership: an unlisted channel denies", () => {
-    expect(authorize(A.member, "runs:read", run({ channel: "dm", userId: "slack:U5" }))).toEqual({
+    expect(authorize(A.member, "runs:read", run({ channel: "dm", userId: "slack:UERIN" }))).toEqual({
       allow: false,
       reason: "not-member",
     });
   });
-  it("member-of's public half (item 4, U3): a run stamped `public` is readable by every actor without a channel grant; `unknown`, `private`, `dm` and `machine` are not", () => {
-    // Every fixture actor NOT granted pub2 (the non-member is — pub2 is its one channel); the run belongs to someone else (U2).
+  it("member-of's public half (item 4): a run stamped `public` is readable by every actor without a channel grant; `unknown`, `private`, `dm` and `machine` are not", () => {
+    // Every fixture actor NOT granted pub2 (the non-member is — pub2 is its one channel); the run belongs to someone else.
     for (const a of [A.reader, A.noGrants, A.token, A.manager]) {
-      expect(authorize(a, "runs:read", run({ channel: "pub2", userId: "slack:U2" })), a.id).toEqual({ allow: true });
+      expect(authorize(a, "runs:read", run({ channel: "pub2", userId: "slack:UBOB" })), a.id).toEqual({ allow: true });
       expect(
-        authorize(a, "runs:read", { ...run({ channel: "pub2", userId: "slack:U2" }), channelVisibility: "unknown" }),
+        authorize(a, "runs:read", { ...run({ channel: "pub2", userId: "slack:UBOB" }), channelVisibility: "unknown" }),
         a.id,
       ).toEqual({ allow: false, reason: "not-member" });
       expect(
-        authorize(a, "runs:read", { ...run({ channel: "pub2", userId: "slack:U2" }), channelVisibility: undefined }),
+        authorize(a, "runs:read", { ...run({ channel: "pub2", userId: "slack:UBOB" }), channelVisibility: undefined }),
         a.id,
       ).toEqual({ allow: false, reason: "not-member" });
     }
-    expect(authorize(A.noGrants, "runs:read", run({ channel: "priv", userId: "slack:U1" })).allow).toBe(false);
-    expect(authorize(A.noGrants, "runs:read", run({ channel: "dm", userId: "slack:U1" })).allow).toBe(false);
+    expect(authorize(A.noGrants, "runs:read", run({ channel: "priv", userId: "slack:UALICE" })).allow).toBe(false);
+    expect(authorize(A.noGrants, "runs:read", run({ channel: "dm", userId: "slack:UALICE" })).allow).toBe(false);
     expect(authorize(A.noGrants, "runs:read", run({ channel: "http", userId: "http:x" })).allow).toBe(false);
     // The public half is a RUN's stamp: a public origin never makes a memory scope's channel public.
     expect(
       authorize(A.noGrants, "memory:write", { ...scope("channel", `channel:${CHANNELS.priv.id}`, "public") }).allow,
     ).toBe(false);
     // …and it needs the write grant too: public makes the member, not the writer.
-    expect(authorize(A.reader, "runs:write", run({ channel: "pub2", userId: "slack:U2" }))).toEqual({
+    expect(authorize(A.reader, "runs:write", run({ channel: "pub2", userId: "slack:UBOB" }))).toEqual({
       allow: false,
       reason: "missing-grant",
     });
   });
   it("a malformed scope key never widens: the relation attribute is missing → deny", () => {
-    expect(authorize(A.admin, "memory:read", scope("user", "slack:U1")).allow).toBe(false);
+    expect(authorize(A.admin, "memory:read", scope("user", "slack:UALICE")).allow).toBe(false);
     expect(authorize(A.admin, "memory:read", scope("channel", "slack:C_PUB1")).allow).toBe(false);
   });
 });
 
-describe("authorize: org memory writes (R11)", () => {
-  const org = (v?: Parameters<typeof scope>[2]) => scope("org", "org:coreplanelabs", v);
+describe("authorize: org memory writes", () => {
+  const org = (v?: Parameters<typeof scope>[2]) => scope("org", "org:acme", v);
   it("public and machine origins may write org; private, dm, unknown, and absent never do — for any actor", () => {
     for (const a of [A.admin, A.member, A.noGrants, A.token, A.schedule]) {
       expect(authorize(a, "memory:write", org("public")), a.id).toEqual({ allow: true });
@@ -331,14 +330,14 @@ describe("authorize: org memory writes (R11)", () => {
   });
 });
 
-describe("authorize: agents act on behalf of a principal (R2)", () => {
-  const foreignPriv = run({ channel: "priv", userId: "slack:U5" });
+describe("authorize: agents act on behalf of a principal", () => {
+  const foreignPriv = run({ channel: "priv", userId: "slack:UERIN" });
   it("an agent with `all` on behalf of a non-member cannot read the non-member's inaccessible run", () => {
     expect(authorize(A.nonMember, "runs:read", foreignPriv).allow).toBe(false);
     expect(authorize(A.agentForNonMember, "runs:read", foreignPriv)).toEqual({ allow: false, reason: "not-member" });
   });
   it("…but reads what the principal can read, and is-self resolves to the principal", () => {
-    expect(authorize(A.agentForNonMember, "runs:read", run({ channel: "pub2", userId: "slack:U5" }))).toEqual({
+    expect(authorize(A.agentForNonMember, "runs:read", run({ channel: "pub2", userId: "slack:UERIN" }))).toEqual({
       allow: true,
     });
     expect(authorize(A.agentForNonMember, "runs:read", run({ channel: "priv", userId: A.nonMember.id }))).toEqual({
@@ -359,7 +358,7 @@ describe("authorize: agents act on behalf of a principal (R2)", () => {
       { actions: new Set(["runs:read"]), channels: new Set([CHANNELS.pub1.id]) },
       { onBehalfOf: A.admin },
     );
-    expect(authorize(narrow, "runs:read", run({ channel: "pub1", userId: "slack:U5" }))).toEqual({ allow: true });
+    expect(authorize(narrow, "runs:read", run({ channel: "pub1", userId: "slack:UERIN" }))).toEqual({ allow: true });
     expect(authorize(narrow, "runs:read", foreignPriv)).toEqual({ allow: false, reason: "not-member" });
     expect(authorize(narrow, "friction:write", { type: "command", id: "friction.propose" })).toEqual({
       allow: false,
@@ -382,7 +381,7 @@ describe("authorize: agents act on behalf of a principal (R2)", () => {
   });
 });
 
-describe("authorize: deny reasons are machine tokens without resource ids (KTD8)", () => {
+describe("authorize: deny reasons are machine tokens without resource ids", () => {
   const REASONS = new Set([
     "unknown-actor-kind",
     "no-rule",
@@ -401,13 +400,13 @@ describe("authorize: deny reasons are machine tokens without resource ids (KTD8)
       ...runFixture(),
       ...scopeFixture(),
       { type: "agent", name: "coding" },
-      { type: "repo", owner: "coreplanelabs", name: "switchboard" },
+      { type: "repo", owner: "acme", name: "api" },
     ];
     // Collect, then assert ONCE per property: the loop is actors × 7 actions ×
     // resources × ids, and an `expect` per iteration made it tens of
     // thousands of assertion objects — 0.4 s here, past vitest's 5 s timeout
-    // on a slow host (#473: the review sandbox failed it on PRs that never
-    // touched authz). The failure message keeps every offender.
+    // on a slow host (a review sandbox failed it on PRs that never touched
+    // authz). The failure message keeps every offender.
     let denies = 0;
     const unknownReasons = new Set<string>();
     const leaks = new Set<string>();

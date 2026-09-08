@@ -1,4 +1,4 @@
-// What a condition may read off a resource (plan U1, KTD1).
+// What a condition may read off a resource.
 //
 // Every condition in the closed vocabulary relates the actor to ONE resource
 // attribute: `member-of` → channelId, `is-self` → userId, `owner-of` → repo,
@@ -16,7 +16,7 @@ export interface ResourceAttributes {
   readonly repo?: string;
   /** Agent name. */
   readonly name?: string;
-  /** Visibility of the channel the resource originated in; absent → `unknown` (fail-closed, KTD7).
+  /** Visibility of the channel the resource originated in; absent → `unknown` (fail-closed).
    *  Read by the `originVisibility` row selector. */
   readonly visibility: ChannelVisibility;
   /** Visibility of the channel the resource IS or LIVES IN — a `run`'s stamped

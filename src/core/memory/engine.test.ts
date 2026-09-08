@@ -3,7 +3,7 @@ import { mintRecord, normalizeText, planEviction, planWrite, rankRecords } from 
 import type { MemoryCandidate, MemoryRecord } from "./types.js";
 
 // Feature: features/memory.md — the store-agnostic engine shared by the
-// in-process store and the Memory Worker's Durable Object (PR3, #85). The
+// in-process store and the Memory Worker's Durable Object. The
 // store tests prove each backend applies the plan; these prove the plan.
 
 const NOW = 1_700_000_000_000;
@@ -120,8 +120,8 @@ describe("mintRecord", () => {
   });
 });
 
-// Feature: features/memory.md — per-scope cap (#253): the pure eviction plan.
-describe("planEviction (#253)", () => {
+// Feature: features/memory.md — per-scope cap: the pure eviction plan.
+describe("planEviction", () => {
   const NOW = 1_700_000_000_000;
   const mk = (id: string, createdAt: number, lastUsedAt?: number): MemoryRecord => ({
     id,

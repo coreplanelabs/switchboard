@@ -65,9 +65,9 @@ describe("settlementFor — D4", () => {
     for (const name of ["read_file", "web_fetch", "github_file", "write_file", "update_status", "submit_verdict"]) {
       expect(settlementFor(call("c", name), toolMap)).toEqual({ toolUse: call("c", name), action: "rerun" });
     }
-    expect(settlementFor(call("c", "mcp_polylane_search"), toolMap)).toMatchObject({
+    expect(settlementFor(call("c", "mcp_acme_search"), toolMap)).toMatchObject({
       action: "synthetic",
-      text: "Tool mcp_polylane_search is not available after the bot restarted; continue without it.",
+      text: "Tool mcp_acme_search is not available after the bot restarted; continue without it.",
     });
   });
 });

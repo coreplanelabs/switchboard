@@ -18,8 +18,8 @@ import { InMemoryRunStore } from "../runStore.js";
 import { createRunsService } from "../runsService.js";
 import { registerRunsCommands, runsCommands, type RunReadDenied, type RunsCommandDeps, wrapEvent } from "./runs.js";
 
-// Feature: features/command-registry.md — the `runs.*` registrations (R8/R9,
-// KTD17/KTD18) — and features/authorization.md items 5–7 (U3): what a caller
+// Feature: features/command-registry.md — the `runs.*` registrations — and
+// features/authorization.md items 5–7: what a caller
 // may SEE is `authorize` / `predicateFor` on its Actor; a denied point read is
 // `not_found`; lists are filtered by the store predicate.
 
@@ -38,7 +38,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: `slack:C1:${id}`,
     channelVisibility: "unknown",
     startedAt: finishedAt - 10_000,
@@ -62,10 +62,10 @@ async function setup() {
   await store.put(record("fin-x", NOW - 1000, { channelId: "mcp:X", channelVisibility: "machine" }));
   await store.put(record("fin-y", NOW - 2000, { channelId: "mcp:Y", channelVisibility: "machine" }));
   await store.put(
-    record("fin-priv", NOW - 3000, { channelId: "slack:G_PRIV", userId: "slack:U9", channelVisibility: "private" }),
+    record("fin-priv", NOW - 3000, { channelId: "slack:G_PRIV", userId: "slack:UIVY", channelVisibility: "private" }),
   );
   await store.put(
-    record("fin-pub", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:U9", channelVisibility: "public" }),
+    record("fin-pub", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:UIVY", channelVisibility: "public" }),
   );
   const runs = createRunsService({ registry: reg, store });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
@@ -83,7 +83,7 @@ const actor = (
   channels: Set<string> | "all",
 ): Actor => ({ kind, id, grants: { actions, channels, repos: set() } });
 
-/** Config's grants for the machine callers below (`grantsFor`, KTD6): x-bot is granted its one channel, ci none. */
+/** Config's grants for the machine callers below (`grantsFor`): x-bot is granted its one channel, ci none. */
 const MACHINE_GRANTS = {
   "mcp:x-bot": { actions: ["runs:read", "runs:write"], channels: ["mcp:X"] },
   "mcp:ci": { actions: ["runs:read", "runs:write"] },
@@ -105,7 +105,7 @@ const pinnedX: Caller = {
   id: "mcp:x-bot",
   actor: resolveActor({ surface: "mcp", subjectId: "x-bot" }, (id) => grantsFor(id, MACHINE_SOURCE)),
 };
-/** A token WITHOUT a `channel` key: no channel grant at all (OQ4, option a). */
+/** A token WITHOUT a `channel` key: no channel grant at all. */
 const unpinned: Caller = {
   kind: "mcp",
   id: "mcp:ci",
@@ -122,7 +122,7 @@ const chatOperator: Caller = {
   id: "slack:UADMIN",
   actor: { kind: "user", id: "slack:UADMIN", grants: ALL_GRANTS },
 };
-/** An Access operator configured NATIVELY without `channels: all` (OQ1): every runs action, no channel membership. */
+/** An Access operator configured NATIVELY without `channels: all`: every runs action, no channel membership. */
 const accessOperator: Caller = {
   kind: "access",
   id: "access:op-2",
@@ -193,7 +193,7 @@ describe("runs.list", () => {
     const { id } = reg.create("coding · acme/live", {
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:t",
     });
     reg.publish(id, { type: "input", text: "live secret request" });
@@ -212,7 +212,7 @@ describe("runs.list", () => {
     const { id } = reg.create("coding · acme/live", {
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:t",
     });
     const bare = await registry.invoke("runs.list", {}, reader, deps);
@@ -288,7 +288,7 @@ describe("runs.list", () => {
 });
 
 describe("channel visibility (authorization.md items 5–7)", () => {
-  it("a pinned token sees its channel and the public runs — never another machine channel or a private run — on list (even when asking for another channel) and on get/events/friction/stop (KTD10 preserved, R12 d)", async () => {
+  it("a pinned token sees its channel and the public runs — never another machine channel or a private run — on list (even when asking for another channel) and on get/events/friction/stop", async () => {
     const { reg, registry, deps } = await setup();
     expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, pinnedX, deps))).toEqual([
       "fin-x",
@@ -323,7 +323,7 @@ describe("channel visibility (authorization.md items 5–7)", () => {
     });
   });
 
-  it("an unpinned token (no `channel` key) holds no channel: it lists NOTHING and gets not_found on every run — R12's fourth deliberate change (OQ4 a)", async () => {
+  it("an unpinned token (no `channel` key) holds no channel: it lists NOTHING and gets not_found on every run — a deliberate departure from the pre-table gates", async () => {
     const { registry, deps } = await setup();
     expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, unpinned, deps))).toEqual([
       "fin-pub",
@@ -362,7 +362,7 @@ describe("channel visibility (authorization.md items 5–7)", () => {
     ]); // its grant, not the channel it speaks in
   });
 
-  it("an Access operator without all-channels gets not_found outside their channels — a private Slack run is invisible on get/events/friction; the public run and their own are not (R12 b)", async () => {
+  it("an Access operator without all-channels gets not_found outside their channels — a private Slack run is invisible on get/events/friction; the public run and their own are not", async () => {
     const { registry, deps, denied } = await setup();
     for (const cmd of ["runs.get", "runs.events", "runs.friction"]) {
       const res = await registry.invoke(cmd, { args: ["fin-priv"], options: {} }, accessOperator, deps);
@@ -407,7 +407,7 @@ describe("channel visibility (authorization.md items 5–7)", () => {
     const owner: Caller = {
       kind: "access",
       id: "access:u9",
-      actor: actor("user", "slack:U9", set("runs:read"), set()),
+      actor: actor("user", "slack:UIVY", set("runs:read"), set()),
     };
     expect(await registry.invoke("runs.get", { args: ["fin-priv"], options: {} }, owner, deps)).toMatchObject({
       ok: true,
@@ -428,7 +428,7 @@ describe("channel visibility (authorization.md items 5–7)", () => {
 
   it("a live run without a stamp is `unknown` — never public: only a channel grant, all-channels, or its own user reads it", async () => {
     const { reg, registry, deps } = await setup();
-    const { id } = reg.create("x", { channelId: "slack:C_PUB", userId: "slack:U1", threadKey: "slack:C_PUB:t" });
+    const { id } = reg.create("x", { channelId: "slack:C_PUB", userId: "slack:UALICE", threadKey: "slack:C_PUB:t" });
     expect(await registry.invoke("runs.get", { args: [id], options: {} }, accessOperator, deps)).toMatchObject({
       ok: false,
       error: "not_found",
@@ -530,7 +530,7 @@ describe("runs.get / runs.events / runs.friction", () => {
     expect(getRun).toHaveBeenCalledWith("fin-x", { include: "messages" });
   });
 
-  it("every handler resolves the `runs` accessor exactly once per invocation (#409, F1)", async () => {
+  it("every handler resolves the `runs` accessor exactly once per invocation", async () => {
     const { registry, deps, reg } = await setup();
     const live = reg.create("coding · acme/live", {
       agent: "coding",
@@ -579,7 +579,7 @@ describe("runs.stop", () => {
     const { id, token } = reg.create("coding · acme/live", {
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:t",
     });
     const res = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);

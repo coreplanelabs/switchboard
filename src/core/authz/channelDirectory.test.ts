@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { STATIC_CHANNEL_DIRECTORY, StaticChannelDirectory, visibilityOf } from "./channelDirectory.js";
 import type { ChannelDirectory } from "./types.js";
 
-// Feature: features/authorization.md item 7 (U3) — the channel-facts seam and
+// Feature: features/authorization.md item 7 — the channel-facts seam and
 // its static first cut: what a platform-namespaced id alone establishes about
-// a channel's visibility. `unknown` is the fail-closed answer (R7).
+// a channel's visibility. `unknown` is the fail-closed answer.
 
 describe("visibilityOf — the static id mapping", () => {
   it("http:*/mcp:* are machine channels; a Slack DM is dm; a Slack private group is private", () => {
@@ -34,8 +34,8 @@ describe("StaticChannelDirectory", () => {
     expect(await directory.info("slack:C1")).toEqual({ visibility: "unknown" });
   });
 
-  it("knows no members: isMember is `unknown` for every actor and channel (not a member, R7)", async () => {
-    expect(await directory.isMember("slack:U1", "slack:C1")).toBe("unknown");
+  it("knows no members: isMember is `unknown` for every actor and channel (not a member, fail-closed)", async () => {
+    expect(await directory.isMember("slack:UALICE", "slack:C1")).toBe("unknown");
     expect(await directory.isMember("http:ops", "http:ops")).toBe("unknown");
   });
 

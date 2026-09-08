@@ -43,14 +43,14 @@ export interface IncomingMessage {
   /** The request text, already stripped of platform artifacts (mentions etc.). */
   text: string;
   /**
-   * Human display name for the channel/conversation (e.g. "switchboard-prompting"),
+   * Human display name for the channel/conversation (e.g. "general"),
    * for run labels and other human-facing surfaces. Adapters resolve it from their
    * platform; the core stays channel-agnostic and treats it as an optional hint —
    * absent for adapters that have no name (HTTP/MCP) or when a lookup fails.
    */
   channelName?: string;
   /**
-   * Human display name for the sending user (e.g. "justin"). Same contract as
+   * Human display name for the sending user (e.g. "alice"). Same contract as
    * `channelName`: an optional adapter-provided hint, never required by the core.
    */
   userName?: string;

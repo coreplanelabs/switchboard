@@ -1,7 +1,7 @@
 // The onboard-time command table, derived from what the repo root actually
 // holds (features/resident-repos.md item 52). Before this, an onboard that named
 // no commands got `npm install` / `npm run build --if-present` / `npm test`
-// unconditionally — and 2026-09-03 two residents went `down` at their first
+// unconditionally — and residents went `down` at their first
 // install: a pnpm workspace (`npm install` → EOVERRIDE) and a Terraform repo
 // with no package.json at all. Pure: the caller fetches the root listing and
 // package.json (`src/execution/githubRepoInspect.ts`); this decides.
@@ -35,7 +35,7 @@ export const NO_OP_COMMAND = "true";
 
 /** The table an onboard falls back to when the root cannot be inspected at all
  *  (no GitHub credential, or the API call failed): the historical npm defaults
- *  (verbatim what U3 proved on jshttp/vary). */
+ *  (the table every onboard used before the root was inspected). */
 export const NPM_FALLBACK_COMMANDS = {
   install: "npm install --no-audit --no-fund",
   build: "npm run build --if-present",

@@ -87,3 +87,52 @@ docs/reference/slack-commands.md	Combine freely: `agent:ship model:anthropic/cla
 docs/how-to/restrict-who-can-do-what.md	slack:U0123ADMIN:
 docs/how-to/restrict-who-can-do-what.md	slack:U0100FOUNDER:
 docs/reference/authorization.md	slack:U0123ADMIN:                 # an admin, spelled out
+
+# The project's own repository and docs URL: real infrastructure, held equal to project.json by check:project-facts.
+src/core/selfDescription.ts	export const SWITCHBOARD_REPO = "coreplanelabs/switchboard";
+src/core/docsLink.ts	export const PROJECT_DOCS_URL = "https://docs.switchboard.coreplanelabs.dev";
+src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Source of truth: the code lives in the GitHub repo coreplanelabs/switchboard — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under features/*.md (e.g. features/resident-repos.md, features/routing-and-config.md, features/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on coreplanelabs/switchboard) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings."
+
+# op:// is 1Password's own secret-reference scheme: `deploy secrets`, `deploy init` and `env bootstrap` resolve these through `op read`, so the scheme and the product name are the integration's, not an imprint.
+src/core/commands/deploy.ts	"read the config from this source instead of the profile's configSource (a path, github://owner/repo/path@ref, or op://Vault/Item/field)",
+src/core/commands/deploy.ts	"Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into `wrangler secret put`; none is ever printed.",
+src/core/commands/deploy.test.ts	it("reads an op:// source from the profile; the memory Worker gets only its own secret", async () => {
+src/core/commands/deploy.test.ts	profile: { ...TEST_PROFILE, secretsSource: "op://Prod/Switchboard secrets" },
+src/core/commands/deploy.test.ts	source: "op://Prod/Switchboard secrets/<NAME>",
+src/core/commands/env.ts	// env vars into the agent's execution environment from 1Password — the former
+src/core/commands/env.ts	// only: names + op:// refs, nothing read, nothing written); `--apply` resolves
+src/core/commands/env.ts	"Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).",
+src/core/commands/env.test.ts	log("  DATABASE_URL <- op://uat/db/url");
+src/core/commands/env.test.ts	ref: "op://uat/db/url",
+src/core/commands/env.test.ts	entries: [{ name: "DATABASE_URL", ref: "op://uat/db/url" }],
+src/core/commands/env.test.ts	lines: ["PLAN (apply) env=uat service=api", "  DATABASE_URL <- op://uat/db/url"],
+src/core/commands/env.test.ts	"PLAN (apply) env=uat service=api\n  DATABASE_URL <- op://uat/db/url",
+src/core/testing/conformanceFixture.ts	ref: "op://vault/item/field",
+src/core/__snapshots__/capabilitySurfaces.test.ts.snap	deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
+src/core/__snapshots__/capabilitySurfaces.test.ts.snap	env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply)."
+
+# Synthetic Slack ids of the real shape: mention-rendering and directive-position tests need a valid <@U…>/<#C…|name> token.
+src/core/dispatcher.test.ts	composeRunLabel({ ...base, repo: "o/r", text: "<@U0AAAAAAAAA> review this. Sent using <@U0BBBBBBBBB|Claude>" }),
+src/core/dispatcher.test.ts	expect(composeRunLabel({ ...base, repo: "o/r", text: "post in <#C0AAAAAAAAA|general> and <#C0BQ>" })).toBe(
+src/core/repoContext.test.ts	msg("<@U0AAAAAAAAA> agent:coding model:anthropic/claude-fable-5 in api: fix it"),
+
+# Anthropic's API version header: the integration's own version string, not a date of ours.
+src/core/costs.ts	const ANTHROPIC_VERSION = "2023-06-01";
+src/core/costs.test.ts	expect(h["anthropic-version"]).toBe("2023-06-01");
+
+# The W3C Trace Context specification's own example trace id, one hoisted constant per test file.
+src/core/trace/sinks.test.ts	const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+src/core/trace/tracer.test.ts	const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+src/core/trace/workerTrace.test.ts	const W3C_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+src/core/trace/traceparent.test.ts	const TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+# The issue body `friction propose` files links its tracking issue and spec permalinks on the project's repository; the test pins that text. Should come from project.json rather than be hard-coded.
+src/core/frictionProposals.ts	const TRACKING_ISSUE_URL = "https://github.com/coreplanelabs/switchboard/issues/84";
+src/core/frictionProposals.ts	`Switchboard's self-improvement pass ([#84](${TRACKING_ISSUE_URL})) found this friction recurring across its own recent runs. This issue is a **proposal for a human to triage** — nothing was changed automatically.`,
+src/core/frictionProposals.ts	`Generated by \`friction propose\` from the friction ledger: each run's event stream was diagnosed by \`analyzeRunFriction\` ([features/run-friction.md](https://github.com/coreplanelabs/switchboard/blob/main/features/run-friction.md)) and the diagnoses clustered across runs ([features/self-improvement.md](https://github.com/coreplanelabs/switchboard/blob/main/features/self-improvement.md)). Finding text is redacted at the source. Dedupe key \`${p.key}\`: re-running the pass will not refile this pattern while this issue is open.`,
+src/core/frictionProposals.test.ts	expect(p.body).toContain("#84");
+
+# Rendered schedule timestamps the `schedule list` test pins literally; a helper would only re-implement the formatter.
+src/core/commands/schedule.test.ts	"• `self-improvement` — `0 14 * * 1` · bot · `friction propose` as `cron` · next 2026-08-31 14:00 UTC · no firing recorded",
+src/core/commands/schedule.test.ts	"• `resident-watchdog` — `*/10 * * * *` · resident · resident watchdog — not a run · next 2026-08-30 12:10 UTC",
+src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00 UTC → completed (run run-abcd)");

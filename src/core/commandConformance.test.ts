@@ -77,7 +77,7 @@ import {
 //      submitted value;
 //   4. auth: admission on every surface is `authorize(actor, action, resource)`
 //      over the policy table — a fixed actor set × every command is derived from
-//      the table and checked against the real adapters (R13); a credential with
+//      the table and checked against the real adapters; a credential with
 //      no grants is refused before parse; writes are POST-only; reads never
 //      mutate the fixture; the Caller the registry saw is the adapter's;
 //   5. output hygiene: no capability token or planted secret; stored free text
@@ -228,7 +228,7 @@ describe("command conformance — catalogue fences", () => {
     expect(policyGaps(registry.list() as CommandDef<unknown>[])).toEqual([
       expect.stringMatching(/^demo\.norow: no policy row for demo:read on command/),
     ]);
-    // …and the registry refuses it for everyone, the local CLI included: no row → deny (R7).
+    // …and the registry refuses it for everyone, the local CLI included: no row → deny.
     expect(authorize(CLI_CALLER.actor, orphan.action, { type: "command", id: orphan.id })).toEqual({
       allow: false,
       reason: "no-rule",
@@ -643,7 +643,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         expect(f.executed).toEqual([]);
       }
     }
-    // A credential holding no grant at all is refused whatever the surface (fail-closed, R7) — driven as a CLI
+    // A credential holding no grant at all is refused whatever the surface (fail-closed) — driven as a CLI
     // caller, the one surface every command is exposed on.
     const bare = await reference(await fixture(), cmd, happy.named, {
       kind: "cli",
@@ -667,7 +667,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
     }
   });
 
-  it("authorization (R13): for every actor of the fixed set, the surface that carries it admits or refuses exactly as `authorize` over the policy table says; a refusal is `unauthorized` before parse with nothing executed", async () => {
+  it("authorization: for every actor of the fixed set, the surface that carries it admits or refuses exactly as `authorize` over the policy table says; a refusal is `unauthorized` before parse with nothing executed", async () => {
     const happy = variants.find((v) => v.name === "required-only")!;
     const row = buildAuthorizationMatrix([cmd]).rows[0]!;
     for (const role of AUTHZ_ROLES.filter((r) => CommandRegistry.exposedTo(cmd, carriedBy(r.id)))) {

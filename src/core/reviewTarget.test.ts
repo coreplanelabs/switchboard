@@ -3,10 +3,10 @@ import { reviewTargetBlock } from "./reviewTarget.js";
 
 // Feature: features/agent-review.md item 9 — the review agent is TOLD what it is
 // reviewing, deterministically, from the facts Switchboard resolved before the
-// model turn (repo, PR, head branch/commit, base). Incident 2026-08-29 (PR #182,
-// review 5059339497): the agent was handed only a URL and a prompt saying the
-// worktree was "typically" the branch under review, went looking, and reviewed
-// another PR's branch. Item 8's guard is the backstop; this is the fix.
+// model turn (repo, PR, head branch/commit, base). An agent handed only a URL
+// and a prompt saying the worktree was "typically" the branch under review
+// went looking and reviewed another PR's branch. Item 8's guard is the
+// backstop; this is the fix.
 
 const SHA = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
 
@@ -17,7 +17,7 @@ describe("reviewTargetBlock", () => {
     const b = reviewTargetBlock({ ...full, resident: true });
     expect(b.startsWith("REVIEW TARGET")).toBe(true);
     expect(b).toContain("Repository: acme/api");
-    expect(b).toContain("Pull request: #42 — https://github.com/acme/api/pull/42");
+    expect(b).toContain(`Pull request: #${full.pr} — https://github.com/acme/api/pull/${full.pr}`);
     expect(b).toContain("Head branch: patch-1");
     expect(b).toContain(`Head commit: ${SHA}`);
     expect(b).toContain("Base branch: main");
@@ -54,11 +54,10 @@ describe("reviewTargetBlock", () => {
     expect(b).toContain("`head` to submit_verdict");
   });
 
-  // Incident 2026-08-30 (PR #279, issue #282): the resident attached the
-  // worktree at the PR head, but the agent's first command was `cd /workspace`,
-  // it then found the resident's warm default-branch checkout with `find`,
-  // read `main`'s HEAD there and reported a mismatch. The block now names the
-  // worktree and forbids leaving it.
+  // A worktree attached at the PR head does not stop an agent whose first
+  // command is `cd /workspace`: it then finds the resident's warm
+  // default-branch checkout with `find`, reads `main`'s HEAD there and reports
+  // a false mismatch. The block names the worktree and forbids leaving it.
   it("resident path with the worktree path: names it, pins every command to it, forbids cd/find", () => {
     const b = reviewTargetBlock({
       ...full,

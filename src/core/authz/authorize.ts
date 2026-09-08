@@ -1,8 +1,9 @@
-// The ONE decision (plan U1, R1, R2, KTD2): `authorize(actor, action, resource)`.
+// The ONE decision (docs/decisions/0007-authorization-policy-table.md):
+// `authorize(actor, action, resource)`.
 //
 // Rows for the (action, target) OR; a row's conditions AND; no row → deny.
 // Deny reasons are short machine-readable tokens carrying no resource id or
-// attribute — an audit line may log them, a reply never renders them (KTD8).
+// attribute — an audit line may log them, a reply never renders them.
 //
 // Grant arithmetic lives here too. Action grants may be wildcards: `<prefix>:*`
 // covers every action under the prefix (`agent:run:*` ⊇ `agent:run:coding`).
@@ -50,7 +51,7 @@ export function intersectGrants(a: Grants, b: Grants): Grants {
 }
 
 /** The grants a decision is made against: an actor acting on behalf of a
- *  principal gets the intersection with that principal's effective grants (R2). */
+ *  principal gets the intersection with that principal's effective grants. */
 export function effectiveGrants(actor: Actor): Grants {
   return actor.onBehalfOf ? intersectGrants(actor.grants, effectiveGrants(actor.onBehalfOf)) : actor.grants;
 }
@@ -71,7 +72,7 @@ export type DenyReason =
   | "unknown-actor-kind" // actor.kind is outside the vocabulary
   | "no-rule" // nothing in the table names this action on this resource
   | "actor-kind" // rows exist, none admits this actor kind
-  | "origin-visibility" // rows exist, none admits the resource's origin visibility (R11)
+  | "origin-visibility" // rows exist, none admits the resource's origin visibility
   | "missing-grant"
   | "not-member"
   | "not-self"
@@ -107,8 +108,8 @@ export function evaluateCondition(
     }
     case "member-of":
       // Granted the channel, or the channel is public (a run's stamped
-      // visibility, KTD7). `unknown` — no stamp, a directory failure — is
-      // never public (R7).
+      // visibility). `unknown` — no stamp, a directory failure — is never
+      // public: fail-closed.
       return (
         (attributes.channelId !== undefined && holds(grants.channels, attributes.channelId)) ||
         attributes.channelVisibility === "public"

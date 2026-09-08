@@ -1,4 +1,4 @@
-// Public surface of the authorization core (plan U1). Command code uses
+// Public surface of the authorization core. Command code uses
 // `authorize`; store adapters use `predicateFor` (+ `matchesPredicate` for
 // in-memory stores); nothing else here is meant to leave the module.
 

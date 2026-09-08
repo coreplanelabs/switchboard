@@ -3,9 +3,9 @@ import { checkReviewedHead, parseRevParseOutput } from "./reviewedHead.js";
 
 // Feature: features/agent-review.md item 8 — a review is posted to a PR only
 // when the head the agent actually reviewed is the PR head resolved for the
-// run. Incident 2026-08-29 (PR #182): the agent fetched and reviewed another
-// PR's branch and its `LGTM:` was posted — and auto-approved — on the wrong
-// PR. This check is fail-closed: unknown or unverifiable → no post.
+// run. Otherwise an agent that fetched and reviewed another PR's branch gets
+// its `LGTM:` posted — and auto-approved — on the wrong PR. This check is
+// fail-closed: unknown or unverifiable → no post.
 
 const PR_HEAD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
 const OTHER = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
@@ -19,7 +19,7 @@ describe("checkReviewedHead", () => {
     });
   });
 
-  it("fails when the observed HEAD is another commit — the #182 incident shape", () => {
+  it("fails when the observed HEAD is another commit — a review of another PR's branch", () => {
     const r = checkReviewedHead({ expected: PR_HEAD, observed: OTHER, reported: OTHER });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe(`reviewed head ${OTHER.slice(0, 7)} is not the PR head ${PR_HEAD.slice(0, 7)}`);

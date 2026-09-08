@@ -3,7 +3,7 @@ import type { Span } from "./trace/types.js";
 import { repoFromThread } from "./repoContext.js";
 import { parseSlug, validRef } from "./residentAdmin.js";
 
-// Deterministic operations (U6, KTD8): the seam behind the registry's
+// Deterministic operations: the seam behind the registry's
 // `repo.test` / `repo.build` commands. The 3-method Executor cannot express a
 // named op with a structured result, so this is a separate capability: a name
 // from a FIXED enum → {ok, summary, output}. Two implementations exist per the
@@ -22,7 +22,7 @@ import { parseSlug, validRef } from "./residentAdmin.js";
 // grammar (src/core/commands/repo.ts); `recognizeOperation` below covers ONLY
 // the conservative natural-language forms and translates them into the same
 // registry invocation — anything ambiguous is null → the dispatcher falls
-// through to the agent (KD3).
+// through to the agent (never guess).
 
 export const OP_NAMES = ["test", "build", "status"] as const;
 export type OpName = (typeof OP_NAMES)[number];
@@ -61,7 +61,7 @@ export interface RecognizedOp {
   ref: string;
 }
 
-// Conservative natural-language forms (KTD8): whole-message anchoring, one
+// Conservative natural-language forms: whole-message anchoring, one
 // optional "in <owner/name>" tail, nothing else. "run the tests on main and
 // then deploy", question forms, and extra prose all fail to match — by design.
 const NL_TEST_RE = /^run\s+(?:the\s+)?tests?\s+on\s+(\S+)(?:\s+in\s+(\S+))?$/i;

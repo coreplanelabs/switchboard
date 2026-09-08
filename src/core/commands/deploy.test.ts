@@ -724,7 +724,7 @@ describe("deploy.secrets", () => {
     expect(h.puts).toEqual(["SLACK_BOT_TOKEN → deploy/cloudflare", "MEMORY_TOKEN → deploy/cloudflare"]);
     // The Worker's wrangler.jsonc (generated, absent from a clean checkout) is rendered from the
     // profile BEFORE wrangler runs in that dir — the same file `deploy init` writes, and only this
-    // Worker's (#662).
+    // Worker's.
     expect(writes).toEqual(["deploy/cloudflare/wrangler.jsonc"]);
     expect(disk.get("deploy/cloudflare/wrangler.jsonc")).toContain(`"name": "switchboard"`);
     // The source was asked once, about the Worker's names only.
@@ -794,7 +794,7 @@ describe("deploy.secrets", () => {
     });
   });
 
-  it("renders only the target Worker's wrangler.jsonc and leaves a current one alone; a template that cannot render is `unavailable` naming it, with nothing put (#662)", async () => {
+  it("renders only the target Worker's wrangler.jsonc and leaves a current one alone; a template that cannot render is `unavailable` naming it, with nothing put", async () => {
     const h = host(["MEMORY_TOKEN"]);
     const current = templatesOnDisk();
     const first = withSecrets(h.io, undefined, current);

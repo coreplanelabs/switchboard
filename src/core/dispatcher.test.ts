@@ -258,11 +258,11 @@ describe("composeRunLabel", () => {
     expect(
       composeRunLabel({
         ...base,
-        channelName: "switchboard-prompting",
-        userName: "justin",
+        channelName: "general",
+        userName: "alice",
         text: "run these with bash",
       }),
-    ).toBe('review · #switchboard-prompting · justin · "run these with bash"');
+    ).toBe('review · #general · alice · "run these with bash"');
   });
 
   it("falls back to the raw ids (slack: prefix stripped) when names are absent", () => {
@@ -314,10 +314,10 @@ describe("composeRunLabel", () => {
     expect(
       composeRunLabel({
         ...base,
-        repo: "coreplanelabs/switchboard",
-        text: "<https://github.com/coreplanelabs/switchboard/pull/41|https://github.com/coreplanelabs/switchboard/pull/41> — lead with a verdict",
+        repo: "acme/api",
+        text: "<https://github.com/acme/api/pull/41|https://github.com/acme/api/pull/41> — lead with a verdict",
       }),
-    ).toBe('review · coreplanelabs/switchboard · "coreplanelabs/switchboard#41 — lead with a verdict"');
+    ).toBe('review · acme/api · "acme/api#41 — lead with a verdict"');
     expect(composeRunLabel({ ...base, repo: "o/r", text: "<https://github.com/o/r/issues/7>" })).toBe(
       'review · o/r · "o/r#7"',
     );
@@ -365,9 +365,9 @@ describe("composeRunLabel", () => {
 
   it("Slack user/channel mentions render as their label or a readable stub", () => {
     expect(
-      composeRunLabel({ ...base, repo: "o/r", text: "<@U0BQNU1AD27> review this. Sent using <@U0BJJMDUCKY|Claude>" }),
+      composeRunLabel({ ...base, repo: "o/r", text: "<@U0AAAAAAAAA> review this. Sent using <@U0BBBBBBBBB|Claude>" }),
     ).toBe('review · o/r · "@user review this…"');
-    expect(composeRunLabel({ ...base, repo: "o/r", text: "post in <#C0BQS7KPJHK|general> and <#C0BQ>" })).toBe(
+    expect(composeRunLabel({ ...base, repo: "o/r", text: "post in <#C0AAAAAAAAA|general> and <#C0BQ>" })).toBe(
       'review · o/r · "post in #general and #channel"',
     );
     expect(composeRunLabel({ ...base, repo: "o/r", text: "cc <!here> and <!subteam^S123|@eng>" })).toBe(
@@ -451,8 +451,8 @@ describe("dispatch", () => {
 
 // The answer path is deterministic: one model call, the answer replied
 // verbatim through `io.reply` — no model ever sits between the run record and
-// a surface (features/llm-output.md item 7; the flag-gated structuring pass
-// from #76 was retired by #252's close).
+// a surface (features/llm-output.md item 7; an earlier flag-gated structuring
+// pass was retired).
 describe("answer reply path", () => {
   it("sends the answer verbatim via reply, with exactly one model call", async () => {
     const provider = capturingProvider();
@@ -509,7 +509,7 @@ describe("executor provisioning by agent resources", () => {
 
   // features/resident-repos.md item 51: the resolved PR head reaches executor
   // selection (→ the resident's /attach `sha`) so a mirror whose ref tip lags
-  // the push is fetched — the #214 re-review reviewed a stale tip otherwise.
+  // the push is fetched — a re-review would review a stale tip otherwise.
   it("passes the resolved repo, ref and PR head to executor selection", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
@@ -581,7 +581,7 @@ describe("executor provisioning by agent resources", () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  // Feature: features/run-loop.md item 8 (#101) — a HARD stop tears the
+  // Feature: features/run-loop.md item 8 — a HARD stop tears the
   // workspace down (`release("always")`, even for a coding run that would
   // otherwise keep dirty work), and the card/answer say the run was stopped.
   it("a hard stop from /runs releases the executor with 'always' and reports the abort", async () => {
@@ -900,8 +900,8 @@ describe("executor provisioning by agent resources", () => {
   });
 });
 
-// Feature: features/resident-repos.md — the KD7 per-repo gate (a refused user
-// sees a NAMED refusal, never a silent per-thread fallback) and the KTD10
+// Feature: features/resident-repos.md — the per-repo gate (a refused user
+// sees a NAMED refusal, never a silent per-thread fallback) and the
 // fallback note surfacing on the status card.
 const REPO_PERMS_YAML = `
 organization: acme
@@ -977,7 +977,7 @@ describe("resident repo dispatch", () => {
     const history: HistoryItem[] = [{ role: "user", text: "earlier we were looking at acme/api" }];
     const { io, replies } = fakeIO(history);
     // UDEV is NOT on acme/api's allowlist, but the DEFAULT agent (general) has
-    // no repo resource — the KD7 gate must not fire.
+    // no repo resource — the per-repo gate must not fire.
     await dispatch(deps, msg("give me a quick summary of the thread", "slack:UDEV"), io);
     expect(replies).toContain("answer");
     expect(replies.some((r) => r.includes("🚫"))).toBe(false);
@@ -985,24 +985,24 @@ describe("resident repo dispatch", () => {
     expect(provider.requests).toHaveLength(1);
   });
 
-  // #316: a FRESH thread whose only repo signal is a bare slug the resident
+  // A FRESH thread whose only repo signal is a bare slug the resident
   // registry rejected must not start a repo-less coding run (empty workspace,
   // `fatal: not a git repository`) — it says why the slug was ignored. The
   // resolver reports the refusal as `rejectedRepo`; a bound thread never sets
-  // it (prose slugs there are ignored silently — #289), and a no-repo agent
+  // it (prose slugs there are ignored silently), and a no-repo agent
   // never resolves a repo at all.
-  it("fresh thread + rejected bare slug + a repo-needing agent → one not-onboarded reply, no run (#316)", async () => {
+  it("fresh thread + rejected bare slug + a repo-needing agent → one not-onboarded reply, no run", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
     // The note is a resident installation's (item 16); the fixture names no resident Worker, so say there is one.
     deps.capabilities = { ...deps.capabilities, residents: true };
-    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/try-catch" });
     const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UADMIN"), io);
+    await dispatch(deps, msg("agent:coding in acme/try-catch: say hi", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("coreplanelabs/try-catch");
+    expect(replies[0]).toContain("acme/try-catch");
     expect(replies[0]).toContain("not onboarded");
-    expect(replies[0]).toContain("repo onboard coreplanelabs/try-catch");
+    expect(replies[0]).toContain("repo onboard acme/try-catch");
     expect(replies[0]).not.toContain("Ask "); // an admin can run `repo onboard` themselves
     expect(replies[0]).toMatch(/github\.com/); // the URL form still binds a real repo
     expect(provider.requests).toHaveLength(0); // no model turn
@@ -1017,26 +1017,26 @@ describe("resident repo dispatch", () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
     deps.capabilities = { ...deps.capabilities, residents: false };
-    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/try-catch" });
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UADMIN"), io);
+    await dispatch(deps, msg("agent:coding in acme/try-catch: say hi", "slack:UADMIN"), io);
     expect(replies.some((r) => r.includes("not onboarded"))).toBe(false);
     expect(replies.some((r) => r.includes("repo onboard"))).toBe(false);
     expect(provider.requests.length).toBeGreaterThan(0); // the run went ahead in a per-thread workspace
   });
 
-  // #445 F2: the registry did not ANSWER for the repo the message addressed.
+  // The registry did not ANSWER for the repo the message addressed.
   // Guessing — in a bound thread, the thread's old repo — is the wrong-repo
   // run addressing exists to end, so the dispatcher says so and stops.
   it("unverified repo (registry unreachable) + a repo-needing agent → one could-not-verify reply, no run", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
-    deps.resolveRepoContext = () => ({ unverifiedRepo: "coreplanelabs/nominal" });
+    deps.resolveRepoContext = () => ({ unverifiedRepo: "acme/web" });
     const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("agent:coding in coreplanelabs/nominal: fix the consent page", "slack:UADMIN"), io);
+    await dispatch(deps, msg("agent:coding in acme/web: fix the consent page", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("couldn't verify");
-    expect(replies[0]).toContain("coreplanelabs/nominal");
+    expect(replies[0]).toContain("acme/web");
     expect(replies[0]).not.toContain("not onboarded"); // silence is not a refusal
     expect(replies[0]).toMatch(/github\.com/); // the URL form still binds a real repo
     expect(provider.requests).toHaveLength(0);
@@ -1046,33 +1046,33 @@ describe("resident repo dispatch", () => {
 
   // `repo onboard` is admin-gated (canManageRepos, fail-closed): a non-admin
   // told to run it would just hit 🚫 next — point them at the admins instead.
-  it("a non-admin gets the not-onboarded reply with an ask-an-admin hint, never a command they cannot run (#316)", async () => {
+  it("a non-admin gets the not-onboarded reply with an ask-an-admin hint, never a command they cannot run", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
     deps.capabilities = { ...deps.capabilities, residents: true };
-    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/try-catch" });
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UDEV"), io);
+    await dispatch(deps, msg("agent:coding in acme/try-catch: say hi", "slack:UDEV"), io);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("not onboarded");
-    expect(replies[0]).toContain("Ask <@slack:UADMIN> to onboard it (`repo onboard coreplanelabs/try-catch`)");
+    expect(replies[0]).toContain("Ask <@slack:UADMIN> to onboard it (`repo onboard acme/try-catch`)");
     expect(replies[0]).toMatch(/github\.com/); // the self-serve path stays
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("the same rejected slug with a no-repo agent (general) runs unchanged (#316)", async () => {
+  it("the same rejected slug with a no-repo agent (general) runs unchanged", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
-    const resolveSpy = vi.fn(() => ({ rejectedRepo: "coreplanelabs/try-catch" }));
+    const resolveSpy = vi.fn(() => ({ rejectedRepo: "acme/try-catch" }));
     deps.resolveRepoContext = resolveSpy;
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("say hi about coreplanelabs/try-catch", "slack:UADMIN"), io);
+    await dispatch(deps, msg("say hi about acme/try-catch", "slack:UADMIN"), io);
     expect(replies).toContain("answer");
     expect(replies.some((r) => r.includes("not onboarded"))).toBe(false);
     expect(resolveSpy).not.toHaveBeenCalled();
   });
 
-  it("a bound thread with a prose slug in the follow-up stays silent — the resolver keeps the repo, no message (#316/#289)", async () => {
+  it("a bound thread with a prose slug in the follow-up stays silent — the resolver keeps the repo, no message", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
     // What the production resolver answers for a bound thread + prose slug:
@@ -1109,7 +1109,7 @@ describe("resident repo dispatch", () => {
   });
 });
 
-// Feature: features/resident-repos.md — U7: repo/ref resolved BEFORE the model
+// Feature: features/resident-repos.md — repo/ref resolved BEFORE the model
 // turn (production default resolver), the needs-ref ask-once flow (one
 // clarifying question, no model turn burned), and the resident prompt variant
 // selected AFTER executor resolution via RunOptions.system.
@@ -1144,10 +1144,10 @@ function residentFetchStub(
   return { fn, calls };
 }
 
-// Feature: features/resident-repos.md — U8: repo-management commands are
+// Feature: features/resident-repos.md — repo-management commands are
 // config-family (answered inline, never a model turn); all but `list` gated
-// by canManageRepos (KTD9 fail-closed).
-describe("repo management commands (U8)", () => {
+// by canManageRepos (fail-closed).
+describe("repo management commands", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -1237,14 +1237,14 @@ describe("repo management commands (U8)", () => {
   });
 });
 
-// Feature: features/resident-repos.md, features/routing-and-config.md — U6
-// deterministic ops fast-path (KTD8): recognized ops answer with a real op
+// Feature: features/resident-repos.md, features/routing-and-config.md — the
+// deterministic ops fast-path: recognized ops answer with a real op
 // execution and ZERO model turns, mirroring the config-command inline-reply
 // shape. Only the model call is skipped — the implicit target agent (coding)
-// passes canRunAgent and the repo passes canUseRepo (KD7) BEFORE anything
+// passes canRunAgent and the repo passes canUseRepo BEFORE anything
 // executes. Anything ambiguous or non-matching falls through to the agent
-// (KD3: never guess).
-describe("deterministic ops fast-path (U6)", () => {
+// (never guess).
+describe("deterministic ops fast-path", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -1305,7 +1305,7 @@ describe("deterministic ops fast-path (U6)", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("a canUseRepo refusal (KD7) names the repo; the op never executes", async () => {
+  it("a canUseRepo refusal names the repo; the op never executes", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider); // acme/api restricted to UADMIN; UDEV may run coding
     const ops = fakeOps(OK_RESULT);
@@ -1537,7 +1537,7 @@ describe("defaultOperations backend selection (real, not injected)", () => {
   });
 });
 
-describe("repo/ref resolution + resident prompt selection (U7)", () => {
+describe("repo/ref resolution + resident prompt selection", () => {
   afterEach(async () => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
@@ -1681,13 +1681,13 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(system).not.toMatch(/verified it before this run/);
   });
 
-  // Feature: features/agent-review.md item 10 (#282) — the dispatcher compares
+  // Feature: features/agent-review.md item 10 — the dispatcher compares
   // the sha the resident ATTACHED the worktree at with the PR head it resolved,
-  // before any model turn. Incident 2026-08-30 (PR #279): the worktree was at
-  // the PR head, but the agent left it (`cd /workspace`, `find … .git`), found
-  // the resident's warm default-branch checkout and reported ITS HEAD as a
-  // mismatch. Now the agent is told the worktree path and that the attach was
-  // verified; a real mismatch never reaches the model at all.
+  // before any model turn. Left to probe on its own, an agent that wanders out
+  // of the worktree (`cd /workspace`, `find … .git`) finds the resident's warm
+  // default-branch checkout and reports ITS HEAD as a mismatch. So the agent is
+  // told the worktree path and that the attach was verified; a real mismatch
+  // never reaches the model at all.
   it("a resident review attached AT the PR head: the block names the worktree path and says the attach was verified", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
@@ -1835,12 +1835,12 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
     expect(post).not.toHaveBeenCalled();
   });
 
-  // 2026-08-30, PR #300: the PR head went unresolved at resolution time, the
-  // run still started, the resident attached the stale worktree, the model
-  // spent 75 s discovering the new head was not there and wrote a
-  // `request_changes` "cannot review" verdict, and the reviewed-head guard then
-  // refused the post. Every step downstream of an unknown head is a guaranteed
-  // refusal, so the run is not started: one named reply, no attach, no model turn.
+  // When the PR head goes unresolved at resolution time and the run starts
+  // anyway, the resident attaches a stale worktree, the model burns its turns
+  // discovering the new head is not there and writes a `request_changes`
+  // "cannot review" verdict, and the reviewed-head guard then refuses the post.
+  // Every step downstream of an unknown head is a guaranteed refusal, so the
+  // run is not started: one named reply, no attach, no model turn.
   it("a review of a PR whose head could not be resolved is not started: named reply, no attach, no model turn", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
@@ -1978,12 +1978,12 @@ describe("repo/ref resolution + resident prompt selection (U7)", () => {
   });
 });
 
-// Feature: features/agent-review.md — the deterministic review post-step (issue
-// #69): a `review` run against a resolved PR posts its findings back to that PR
+// Feature: features/agent-review.md — the deterministic review post-step:
+// a `review` run against a resolved PR posts its findings back to that PR
 // by default (no "and post to the PR" needed). The system decides and posts (via
 // the injected postReviewComment seam — no real network here); opt-out and
 // no-PR reviews post nowhere; a post failure never fails the dispatch.
-describe("review post-step (issue #69)", () => {
+describe("review post-step", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -2436,7 +2436,7 @@ describe("review post-step (issue #69)", () => {
     });
   });
 
-  // Feature: features/run-loop.md item 8 (#101) — a HARD-stopped review has no
+  // Feature: features/run-loop.md item 8 — a HARD-stopped review has no
   // findings (its answer is the abort line), so nothing is posted to the PR.
   it("a hard-stopped review posts nothing to the PR", async () => {
     const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
@@ -2618,12 +2618,12 @@ describe("review post-step (issue #69)", () => {
   });
 
   // Feature: features/agent-review.md item 8 — the reviewed-head guard.
-  // Incident 2026-08-29 (PR #182): the agent fetched another PR's branch,
-  // reviewed it, and its LGTM was posted (and auto-approved) on the wrong PR.
-  // The post-step now refuses to post unless the head the agent actually
-  // reviewed IS the PR head resolved for the run. Fail-closed.
+  // An agent that fetches another PR's branch and reviews it would otherwise
+  // have its LGTM posted (and auto-approved) on the wrong PR. The post-step
+  // refuses to post unless the head the agent actually reviewed IS the PR
+  // head resolved for the run. Fail-closed.
   describe("reviewed-head guard", () => {
-    it("the workspace HEAD is not the PR head → no post, the thread is told both shas (the #182 shape)", async () => {
+    it("the workspace HEAD is not the PR head → no post, the thread is told both shas", async () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "looks great"));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor(OTHER_HEAD);
@@ -2776,7 +2776,7 @@ describe("coding PR post-step (features/pr-description.md)", () => {
   const DESCRIPTION = {
     title: "Fix the login redirect",
     tldr: "Restores the session cookie on login. Users can sign in again.",
-    whatWhy: "The handler dropped the cookie after #12; this restores it.",
+    whatWhy: "The handler dropped the cookie after the redirect change; this restores it.",
     tour: [
       {
         title: "The fix",
@@ -2816,11 +2816,11 @@ describe("coding PR post-step (features/pr-description.md)", () => {
    *  subdirectory): root git probes fail, `ls -d *\/.git` finds the clone, and
    *  only `git -C '<cloneDir>' …` probes answer — and, like the real cold
    *  clone (`gh repo clone … -- --depth 50`, single-branch), `@{u}` never
-   *  resolves there even after a successful push (#438); a resident tree is a
+   *  resolves there even after a successful push); a resident tree is a
    *  full clone, so its `@{u}` answers `remoteHead`. A `bindingRef` makes the
    *  selection a resident one bound to that ref. With `pushed`, the agent's
    *  own `git push` answers git's status block for that branch (the run's
-   *  push, as the runner records it, #458), `rev-parse 'refs/heads/<b>'`
+   *  push, as the runner records it), `rev-parse 'refs/heads/<b>'`
    *  answers its tip and the remote holds it at `pushed.remoteHead`
    *  (defaults to the tip; `null` = not on the remote) — while `branch`/`head`
    *  stay the CHECKOUT, which may have moved on. Records the order of
@@ -2846,7 +2846,7 @@ describe("coding PR post-step (features/pr-description.md)", () => {
       : "";
     const git = (cmd: string) => {
       // The push itself prints the block; so does `cat push.log` — a transcript
-      // of it, which must NOT count as a push (PR #469 F2).
+      // of it, which must NOT count as a push.
       if (/^git push\b/.test(cmd) || /^cat push\.log\b/.test(cmd)) return pushBlock;
       if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return opts.branch ? `${opts.branch}\n` : notARepo;
       if (/rev-parse @\{u\}/.test(cmd)) {
@@ -2968,16 +2968,15 @@ describe("coding PR post-step (features/pr-description.md)", () => {
     };
   }
 
-  // #458 — live incident 2026-09-04 (#justin-prompting 1788561130.012549):
-  // the run pushed `remove-legacy-maps-mcp-references`, then HEAD moved to
-  // ANOTHER branch before the post-step probed the workspace (a second run's
-  // `git checkout -b` in the shared sandbox — and just as well the agent
-  // itself checking out another branch after its push). The post-step read
-  // the checkout's branch, asked the remote for THAT one, and reported "not
-  // found on the remote": the pushed work was orphaned without a PR. The head
-  // branch is now the branch the run's own `git push` named, read off its
-  // bash result as the events stream by; the checkout is only the fallback.
-  it("HEAD moved to another branch after the push (#458) → the PR still opens from the PUSHED branch, the body rendered at that branch's tip", async () => {
+  // A run pushes its branch, then HEAD moves to ANOTHER branch before the
+  // post-step probes the workspace (a second run's `git checkout -b` in the
+  // shared sandbox — or the agent itself checking out another branch after
+  // its push). A post-step that read the checkout's branch would ask the
+  // remote for THAT one and report "not found on the remote": the pushed work
+  // orphaned without a PR. So the head branch is the branch the run's own
+  // `git push` named, read off its bash result as the events stream by; the
+  // checkout is only the fallback.
+  it("HEAD moved to another branch after the push → the PR still opens from the PUSHED branch, the body rendered at that branch's tip", async () => {
     const OTHER = "0123456789abcdef0123456789abcdef01234567";
     const deps = codingDeps(
       bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),
@@ -3025,7 +3024,7 @@ describe("coding PR post-step (features/pr-description.md)", () => {
     expect(note).not.toContain("github.com");
   });
 
-  // Review nit (PR #469, F2): the block is read only from a `git push` call's
+  // The block is read only from a `git push` call's
   // own result, paired by callId — a transcript printed by another command is
   // not a push, so the run falls back to the checkout exactly as if nothing
   // had been pushed.
@@ -3081,7 +3080,7 @@ describe("coding PR post-step (features/pr-description.md)", () => {
     expect(spy.calls[0].base).toBe("main");
   });
 
-  // Live incident (2026-09-04): a bare issue-link coding run resolves no
+  // A bare issue-link coding run resolves no
   // ref and no PR, and the resident attach fails for a reason OTHER than
   // needs-ref (an infra fault, not-onboarded, a probe outage) — so the
   // fresh-sandbox fallback carries no binding either. All three of the
@@ -3103,7 +3102,7 @@ describe("coding PR post-step (features/pr-description.md)", () => {
     expect(replies.some((r) => /PR opened/.test(r))).toBe(true);
   });
 
-  // Characterization (U4, extended by the 2026-09-04 fix): the no-base branch of the post-step
+  // Characterization: the no-base branch of the post-step
   // survives even the GitHub last resort — the repo lookup itself found no
   // default branch (or failed). Honest note naming the missing base, the
   // compare URL (the push WAS proven), and no PR call.
@@ -3598,8 +3597,8 @@ describe("live run-view wiring (Area 2)", () => {
       deps,
       {
         ...msg("agent:general please rotate ghp_abcdefghijklmnopqrstuvwxyz0123 now"),
-        channelName: "switchboard-prompting",
-        userName: "justin",
+        channelName: "general",
+        userName: "alice",
         sourceUrl: "https://acme.slack.com/archives/CX/p10",
         images: [png, png],
         documents: [{ name: "spec.pdf", mediaType: "application/pdf" as const, data: "AAAA" }],
@@ -3658,8 +3657,8 @@ describe("live run-view wiring (Area 2)", () => {
     // where it came from, for the Request block's `#channel · user · open thread` line
     expect(input.source).toEqual({
       url: "https://acme.slack.com/archives/CX/p10",
-      channel: "switchboard-prompting",
-      user: "justin",
+      channel: "general",
+      user: "alice",
     });
     // what the run is about, right after the request (live-view item 19): the
     // resolved agent + model; no repo context for a repo-less general run;
@@ -3992,7 +3991,7 @@ describe("typed answer output (features/llm-output.md)", () => {
   });
 });
 
-// Feature: features/memory.md — cross-session memory READ path (Area 7c, #85).
+// Feature: features/memory.md — cross-session memory READ path.
 // The load-bearing guarantee: with memory off (or a NullMemoryStore) the request
 // sent to the provider is byte-identical to today; when enabled with a seeded
 // store the advisory block rides on the system prompt, never in history.
@@ -4018,7 +4017,7 @@ function memRecord(over: Partial<MemoryRecord> = {}): MemoryRecord {
   };
 }
 
-describe("cross-session memory (Area 7c, #85)", () => {
+describe("cross-session memory READ path", () => {
   const ask = "what is the deploy command?";
 
   it("disabled path is byte-identical to memory-off (NullMemoryStore guarantee)", async () => {
@@ -4098,7 +4097,7 @@ describe("cross-session memory (Area 7c, #85)", () => {
   });
 });
 
-// Feature: features/skills.md — progressive disclosure (#100). When a skill
+// Feature: features/skills.md — progressive disclosure. When a skill
 // store is on CoreDeps, the dispatcher appends the calling agent's scoped skill
 // name+description list to its system prompt (bodies load on demand via
 // use_skill, never dumped) and passes the store to the tool context. An agent
@@ -4125,7 +4124,7 @@ function skillStore(): InMemorySkillStore {
   ]);
 }
 
-describe("skill loading / progressive disclosure (#100)", () => {
+describe("skill loading / progressive disclosure", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -4219,7 +4218,7 @@ describe("turnContent (attachment assembly)", () => {
   });
 });
 
-// Feature: features/memory.md — cross-session memory WRITE path (PR2, #85).
+// Feature: features/memory.md — cross-session memory WRITE path.
 // After the reply lands, a qualifying run (used tools, or a long thread) fires
 // ONE async reflection call on `memory.model`; disabled → nothing; fast paths
 // (config/deterministic) never reflect; reflection failures never touch the
@@ -4239,10 +4238,11 @@ const REFLECTION_REPLY = JSON.stringify({
 });
 
 /** A directory that calls the fixture's `slack:CX` a PUBLIC channel. The static
- *  default knows a Slack `C…` id only as `unknown`, and since authorization R11
- *  an unknown origin never writes the org scope (the fact is narrowed to the
- *  channel's), so the routing tests that expect org writes speak from a public
- *  channel — as the deployed bot's Slack directory would say of one. */
+ *  default knows a Slack `C…` id only as `unknown`, and the write gate
+ *  (features/authorization.md item 8) never lets an unknown origin write the
+ *  org scope (the fact is narrowed to the channel's), so the routing tests
+ *  that expect org writes speak from a public channel — as the deployed bot's
+ *  Slack directory would say of one. */
 const PUBLIC_CHANNEL: ChannelDirectory = {
   info: async () => ({ visibility: "public" }),
   isMember: async () => "unknown",
@@ -4282,7 +4282,7 @@ const longHistory: HistoryItem[] = Array.from({ length: REFLECT_MIN_TURNS }, (_,
   text: `turn ${i} about the deploy command`,
 }));
 
-describe("cross-session memory WRITE path (PR2, #85)", () => {
+describe("cross-session memory WRITE path", () => {
   async function run(yaml: string, history: HistoryItem[], opts: Parameters<typeof runThenReflect>[0] = {}) {
     const { provider, requests, order } = runThenReflect(opts);
     const store = new InMemoryMemoryStore();
@@ -4309,10 +4309,10 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect(written.every((r) => typeof r.sourceRunId === "string" && r.sourceRunId.length > 0)).toBe(true);
   });
 
-  // Feature: features/memory.md §10 (#292) — a `review` run never reflects: its
+  // Feature: features/memory.md §10 — a `review` run never reflects: its
   // findings land on the PR, and distilling them floods org memory with
   // per-PR ephemera. Other agents keep the work-based gate.
-  it("a `review` run that used tools in a long thread does NOT reflect — no extra model call, nothing written (#292)", async () => {
+  it("a `review` run that used tools in a long thread does NOT reflect — no extra model call, nothing written", async () => {
     const { provider, requests } = runThenReflect({ toolFirst: true });
     const store = new InMemoryMemoryStore();
     const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
@@ -4322,7 +4322,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect(await store.retrieve({ scopeKey: "org:acme", query: "deploy command", limit: 10 })).toEqual([]);
   });
 
-  it("a `coding` run that used tools still reflects (#292)", async () => {
+  it("a `coding` run that used tools still reflects", async () => {
     const { provider, requests } = runThenReflect({ toolFirst: true });
     const store = new InMemoryMemoryStore();
     const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
@@ -4343,7 +4343,7 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect(written).toEqual([]);
   });
 
-  // Feature: features/run-loop.md item 8 (#101) — a HARD-stopped run has no
+  // Feature: features/run-loop.md item 8 — a HARD-stopped run has no
   // summary to distill (its answer is the abort line), so it never reflects even
   // when the gate (long thread) would otherwise qualify it.
   it("a hard-stopped run does NOT reflect, even when the gate would qualify it", async () => {
@@ -4378,9 +4378,9 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect(await store.retrieve({ scopeKey: "org:acme", query: "deploy command", limit: 10 })).toEqual([]);
   });
 
-  // Feature: features/memory.md (#107 PR B) — user-scoped memory end to end:
-  // a `user`-audience fact from U1's run lands in U1's scope, surfaces on U1's
-  // next request, and never on U2's; org facts reach both.
+  // Feature: features/memory.md — user-scoped memory end to end: a
+  // `user`-audience fact from alice's run lands in alice's scope, surfaces on
+  // her next request, and never on bob's; org facts reach both.
   it("user-scoped memory: a user's own records surface for them and never for another user", async () => {
     const reply = JSON.stringify({
       facts: [
@@ -4406,37 +4406,39 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
       channelDirectory: PUBLIC_CHANNEL,
     };
 
-    await dispatch(deps, msg("how do we deploy?", "slack:U1"), fakeIO(longHistory).io);
+    await dispatch(deps, msg("how do we deploy?", "slack:UALICE"), fakeIO(longHistory).io);
     await drainReflections();
     expect(
-      (await store.retrieve({ scopeKey: "user:slack:U1", query: "preview link deploy", limit: 10 })).map((r) => r.text),
+      (await store.retrieve({ scopeKey: "user:slack:UALICE", query: "preview link deploy", limit: 10 })).map(
+        (r) => r.text,
+      ),
     ).toEqual(["this user wants a preview link before every deploy"]);
     expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
-    expect(await store.retrieve({ scopeKey: "user:slack:U2", query: "preview link deploy", limit: 10 })).toEqual([]);
+    expect(await store.retrieve({ scopeKey: "user:slack:UBOB", query: "preview link deploy", limit: 10 })).toEqual([]);
 
     requests.length = 0;
-    await dispatch(deps, msg("deploy preview link?", "slack:U1"), fakeIO().io);
+    await dispatch(deps, msg("deploy preview link?", "slack:UALICE"), fakeIO().io);
     const u1System = requests[0].system!;
-    expect(u1System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:U1");
+    expect(u1System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:UALICE");
     expect(u1System).toContain("this user wants a preview link before every deploy");
     expect(u1System).toContain("the deploy command is npm run deploy");
 
     requests.length = 0;
-    await dispatch(deps, msg("deploy preview link?", "slack:U2"), fakeIO().io);
+    await dispatch(deps, msg("deploy preview link?", "slack:UBOB"), fakeIO().io);
     const u2System = requests[0].system!;
-    expect(u2System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:U2");
+    expect(u2System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:UBOB");
     expect(u2System).not.toContain("preview link before every deploy");
     expect(u2System).toContain("the deploy command is npm run deploy");
   });
 
-  // Feature: features/authorization.md item 8, features/memory.md §23 (R11,
-  // deliberate change c) — end to end: the run's stamped channel visibility is
+  // Feature: features/authorization.md item 8, features/memory.md §23
+  // (deliberate change c) — end to end: the run's stamped channel visibility is
   // the origin the write gate decides under. A DM (`slack:D…`, dm by the static
   // directory) may not write the org scope: its `org` fact lands in the
   // requesting user's own scope, org stays empty, one `[memory]` line names the
   // reason token, and the channel fact keeps its scope (the audience is
   // narrowed, never widened). The same run from a public channel writes org.
-  it("dm-origin memory: an `org` fact from a DM is narrowed to the user's scope, never org — and the same fact from a public channel reaches org (R11)", async () => {
+  it("dm-origin memory: an `org` fact from a DM is narrowed to the user's scope, never org — and the same fact from a public channel reaches org", async () => {
     const reply = JSON.stringify({
       facts: [
         { text: "the deploy command is npm run deploy", confidence: 0.9, audience: "org" },
@@ -4457,12 +4459,12 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await dispatch(
       deps,
-      { ...msg("how do we deploy?", "slack:U1"), channelId: "slack:D0AB", threadKey: "slack:D0AB:1.0" },
+      { ...msg("how do we deploy?", "slack:UALICE"), channelId: "slack:D0AB", threadKey: "slack:D0AB:1.0" },
       fakeIO(longHistory).io,
     );
     await drainReflections();
     expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual([]);
-    expect((await store.list("user:slack:U1", 10)).map((r) => r.text)).toEqual([
+    expect((await store.list("user:slack:UALICE", 10)).map((r) => r.text)).toEqual([
       "the deploy command is npm run deploy",
     ]);
     expect((await store.list("channel:slack:D0AB", 10)).map((r) => r.text)).toEqual([
@@ -4479,13 +4481,13 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
       memory: pub,
       channelDirectory: PUBLIC_CHANNEL,
     };
-    await dispatch(publicDeps, msg("how do we deploy?", "slack:U1"), fakeIO(longHistory).io);
+    await dispatch(publicDeps, msg("how do we deploy?", "slack:UALICE"), fakeIO(longHistory).io);
     await drainReflections();
     expect((await pub.list("org:acme", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
-    expect(await pub.list("user:slack:U1", 10)).toEqual([]);
+    expect(await pub.list("user:slack:UALICE", 10)).toEqual([]);
   });
 
-  // Feature: features/memory.md §21–23 (#253) — repo + channel scopes end to end:
+  // Feature: features/memory.md §21–23 — repo + channel scopes end to end:
   // a repo-bound coding run writes a `repo` fact into `repo:acme/api` and a
   // `channel` fact into this channel's scope; a request from another channel
   // still gets the org fact but not the channel fact.
@@ -4525,20 +4527,20 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
 
     requests.length = 0;
-    await dispatch(deps, msg("acme deploy release?", "slack:U2"), fakeIO().io); // same channel (slack:CX), toolless general
+    await dispatch(deps, msg("acme deploy release?", "slack:UBOB"), fakeIO().io); // same channel (slack:CX), toolless general
     const sameChannel = requests[0].system!;
-    expect(sameChannel).toContain("Background memory for org:acme + channel:slack:CX + user:slack:U2");
+    expect(sameChannel).toContain("Background memory for org:acme + channel:slack:CX + user:slack:UBOB");
     expect(sameChannel).toContain("this channel coordinates acme deploys");
     expect(sameChannel).not.toContain("make release"); // no repo bound on a toolless general run
 
     requests.length = 0;
     await dispatch(
       deps,
-      { ...msg("acme deploy release?", "slack:U2"), channelId: "slack:CY", threadKey: "slack:CY:1.0" },
+      { ...msg("acme deploy release?", "slack:UBOB"), channelId: "slack:CY", threadKey: "slack:CY:1.0" },
       fakeIO().io,
     );
     const otherChannel = requests[0].system!;
-    expect(otherChannel).toContain("Background memory for org:acme + channel:slack:CY + user:slack:U2");
+    expect(otherChannel).toContain("Background memory for org:acme + channel:slack:CY + user:slack:UBOB");
     expect(otherChannel).not.toContain("coordinates acme deploys");
     expect(otherChannel).toContain("the deploy command is npm run deploy");
   });
@@ -4612,11 +4614,11 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     await drainReflections();
   });
 
-  // #317 producer: a mentioned reply was 👀-acked and `dispatch()` entered, then
-  // SIGTERM landed one second later and the drain logged "0 run(s) in flight" —
-  // the count used to start only after resolution, the setup card and the
-  // executor attach. A dispatch is in flight from its first line.
-  it("a dispatch is counted in flight from entry — before history, the setup card or any attach (#317 drain race)", async () => {
+  // Drain race: a mentioned reply is 👀-acked and `dispatch()` entered, then
+  // SIGTERM lands a second later — a count that started only after resolution,
+  // the setup card and the executor attach would let the drain log "0 run(s)
+  // in flight". A dispatch is in flight from its first line.
+  it("a dispatch is counted in flight from entry — before history, the setup card or any attach (drain race)", async () => {
     const { provider } = runThenReflect();
     const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
     let releaseHistory!: () => void;
@@ -4704,7 +4706,7 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
                 type: "tool_use",
                 id: "t1",
                 name: "github_issue_create",
-                input: { repo: "coreplanelabs/switchboard", title: "foo", body: "bar" },
+                input: { repo: "acme/api", title: "foo", body: "bar" },
               },
             ],
             stopReason: "tool_use",
@@ -4717,7 +4719,7 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
       },
     };
     const deps = makeDeps(YAML_FIXTURE, provider);
-    const api = new InMemoryGithubApi({ "coreplanelabs/switchboard": {} });
+    const api = new InMemoryGithubApi({ "acme/api": {} });
     deps.githubApi = api;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg('open an issue on the switchboard app with the title "foo" and the body "bar"'), io);
@@ -4725,16 +4727,14 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
       expect.arrayContaining(["github_issue_create", "github_file", "github_repos", "web_fetch"]),
     );
     expect(provider.requests[0].tools?.map((t) => t.name)).not.toContain("bash");
-    expect((await api.listIssues("coreplanelabs/switchboard")).map((i) => ({ title: i.title, body: i.body }))).toEqual([
+    expect((await api.listIssues("acme/api")).map((i) => ({ title: i.title, body: i.body }))).toEqual([
       { title: "foo", body: "bar" },
     ]);
-    expect(replies.at(-1)).toContain(
-      "Opened coreplanelabs/switchboard#1: foo\nhttps://github.com/coreplanelabs/switchboard/issues/1",
-    );
+    expect(replies.at(-1)).toContain("Opened acme/api#1: foo\nhttps://github.com/acme/api/issues/1");
   });
 
   it("the issue write is gated by restrict.repos for the requesting user — refused before the API, allowed for a granted user", async () => {
-    const gated = YAML_FIXTURE.replace("restrict:\n", 'restrict:\n  repos: ["coreplanelabs/switchboard"]\n');
+    const gated = YAML_FIXTURE.replace("restrict:\n", 'restrict:\n  repos: ["acme/api"]\n');
     const call = (): Provider => {
       let n = 0;
       return {
@@ -4747,7 +4747,7 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
                   type: "tool_use",
                   id: "t1",
                   name: "github_issue_create",
-                  input: { repo: "coreplanelabs/switchboard", title: "foo" },
+                  input: { repo: "acme/api", title: "foo" },
                 },
               ],
               stopReason: "tool_use",
@@ -4760,20 +4760,20 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
         },
       };
     };
-    const api = new InMemoryGithubApi({ "coreplanelabs/switchboard": {} });
+    const api = new InMemoryGithubApi({ "acme/api": {} });
     const denied = makeDeps(gated, call());
     denied.githubApi = api;
     const d = fakeIO();
     await dispatch(denied, msg("open an issue", "slack:UX"), d.io);
     expect(d.replies.at(-1)).toContain(
-      "github_issue_create: you are not allowed to write to coreplanelabs/switchboard (it is restricted and you hold no grant for it)",
+      "github_issue_create: you are not allowed to write to acme/api (it is restricted and you hold no grant for it)",
     );
-    expect(await api.listIssues("coreplanelabs/switchboard")).toEqual([]);
+    expect(await api.listIssues("acme/api")).toEqual([]);
     const allowed = makeDeps(gated, call());
     allowed.githubApi = api;
     const a = fakeIO();
     await dispatch(allowed, msg("open an issue", "slack:UADMIN"), a.io);
-    expect(a.replies.at(-1)).toContain("Opened coreplanelabs/switchboard#1: foo");
+    expect(a.replies.at(-1)).toContain("Opened acme/api#1: foo");
   });
 });
 
@@ -4932,7 +4932,7 @@ channels:
   });
 });
 
-describe("self-improvement wiring (Area 7b / #84)", () => {
+describe("self-improvement wiring", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -4978,7 +4978,7 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
   });
 
-  // Feature: features/memory.md §24 (#278) — `memory list`/`memory forget` are
+  // Feature: features/memory.md §24 — `memory list`/`memory forget` are
   // config-family: answered inline from the store, never a model turn.
   it("`memory list` is answered inline from the memory store through the registry — no model turn, no repo resolution unless the repo scope is asked for", async () => {
     const provider = capturingProvider();
@@ -5056,7 +5056,7 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
 });
 
 // Feature: features/routing-and-config.md behavior 9 — per-scope custom
-// instructions (#107 phase 2) folded into the system prompt at the same seam
+// instructions folded into the system prompt at the same seam
 // as memory/skills/config-awareness. Advisory only.
 describe("custom instructions in the system prompt", () => {
   // Pinned to the renderer's own header so a wording change in the
@@ -5221,7 +5221,7 @@ describe("custom instructions in the system prompt", () => {
     expect(replies[1]).toMatch(new RegExp(`instructions.*${long.length} chars`));
   });
 
-  it("quotes are the shared grammar's: a quoted span is one token, smart quotes normalize, and quotes never survive into the text (KTD26)", async () => {
+  it("quotes are the shared grammar's: a quoted span is one token, smart quotes normalize, and quotes never survive into the text", async () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     await dispatch(deps, msg('config instructions me "a" or "b"'), fakeIO().io);
     expect(deps.config.scopes("slack:CX", "slack:UX").user.instructions).toBe("a or b");
@@ -5282,9 +5282,9 @@ describe("shutdown notice on the live status card", () => {
 });
 
 // Feature: features/run-visibility.md item 2 — the live card's title suffix
-// tells model time from tool time. 2026-09-07 (#531): a `pnpm typecheck` in
-// flight for an hour was rendered as `thinking (3601s since last tool)`.
-describe("in-flight tool label on the live status card (#531)", () => {
+// tells model time from tool time: a `pnpm typecheck` in flight for an hour
+// must never render as `thinking (3601s since last tool)`.
+describe("in-flight tool label on the live status card", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
@@ -5337,11 +5337,11 @@ describe("in-flight tool label on the live status card (#531)", () => {
 });
 
 // Feature: features/self-improvement.md item 7 + features/live-view.md item 13
-// (#244): `friction report|propose` are RUNS \u2014 a registry record (input \u2192
+// — `friction report|propose` are RUNS \u2014 a registry record (input \u2192
 // answer), listed on /runs, with a receipt to the channel \u2014 so a scheduled
 // firing arriving through /ingress as `http:cron` leaves the same trace as
 // any other run. Agent runs report a receipt too. Config replies do not.
-describe("inline command runs + run receipts (#244)", () => {
+describe("inline command runs + run receipts", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -5362,7 +5362,7 @@ describe("inline command runs + run receipts (#244)", () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.frictionLedger = new InMemoryFrictionLedger();
     deps.runRegistry = sequentialRegistry("fr");
-    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
+    wireCommands(deps); // friction.* lives on the registry; bound after the ledger/tracker are set
     const { io, replies, receipts } = receiptIO();
     await dispatch(deps, { ...msg("friction report"), channelName: "cron", userName: "cron" }, io);
 
@@ -5409,7 +5409,7 @@ describe("inline command runs + run receipts (#244)", () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.frictionLedger = new InMemoryFrictionLedger();
     deps.runRegistry = sequentialRegistry("fr");
-    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
+    wireCommands(deps); // friction.* lives on the registry; bound after the ledger/tracker are set
     const { io, replies, receipts } = receiptIO();
     await dispatch(deps, { ...msg("friction propose"), userId: "http:cron", channelId: "http:cron" }, io);
     expect(replies[0]).toMatch(/^\ud83d\udeab/);
@@ -5431,7 +5431,7 @@ describe("inline command runs + run receipts (#244)", () => {
     deps.frictionLedger = new InMemoryFrictionLedger();
     deps.issueTracker = new InMemoryIssueTracker();
     deps.runRegistry = sequentialRegistry("fr");
-    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
+    wireCommands(deps); // friction.* lives on the registry; bound after the ledger/tracker are set
     const { io, replies, receipts } = receiptIO();
     await dispatch(deps, { ...msg("friction propose"), userId: "http:cron", channelId: "http:cron" }, io);
     expect(replies[0]).toContain("0 runs analyzed");
@@ -5449,7 +5449,7 @@ describe("inline command runs + run receipts (#244)", () => {
       },
     };
     deps.runRegistry = sequentialRegistry("fr");
-    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
+    wireCommands(deps); // friction.* lives on the registry; bound after the ledger/tracker are set
     const a = receiptIO();
     const b = receiptIO();
     const both = Promise.all([
@@ -5475,7 +5475,7 @@ describe("inline command runs + run receipts (#244)", () => {
       },
     };
     deps.runRegistry = sequentialRegistry("fr");
-    wireCommands(deps); // friction.* lives on the registry since U9; bound after the ledger/tracker are set
+    wireCommands(deps); // friction.* lives on the registry; bound after the ledger/tracker are set
     const { io, replies, receipts } = receiptIO();
     await dispatch(deps, msg("friction report"), io);
     expect(deps.runRegistry.listActive()[0].finished).toBe(true);
@@ -5513,12 +5513,12 @@ describe("inline command runs + run receipts (#244)", () => {
   });
 });
 
-// Feature: features/run-visibility.md \u2014 the exchange in the run stream (#157 U1):
+// Feature: features/run-visibility.md \u2014 the exchange in the run stream:
 // the stream carries the full exchange \u2014 the request (`input`), the thread
 // context fed to the model (`context`), the reply (`answer`) \u2014 as redacted,
 // uncapped events, so the live page and the run record show what the model saw
 // and said, never a secret, never an attachment body.
-describe("input / context / answer events in the run stream (#157 U1)", () => {
+describe("input / context / answer events in the run stream", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.mocked(makeExecutor).mockClear();
@@ -5715,9 +5715,9 @@ describe("input / context / answer events in the run stream (#157 U1)", () => {
   });
 });
 
-// Feature: features/live-view.md \u2014 one backlog (#157 U11): the dispatcher's
+// Feature: features/live-view.md \u2014 one backlog: the dispatcher's
 // friction diagnosis is computed from the registry snapshot, not a second ring.
-describe("friction diagnosis reads the registry backlog (#157 U11)", () => {
+describe("friction diagnosis reads the registry backlog", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -5767,11 +5767,11 @@ describe("friction diagnosis reads the registry backlog (#157 U11)", () => {
   });
 });
 
-// Feature: features/run-history.md — the dispatcher write path (#157 U4, KTD4):
+// Feature: features/run-history.md — the dispatcher write path:
 // the run record is built synchronously at finish (inside the run's try/catch,
 // so failed runs take the same path) and handed to the history writer only
 // AFTER the reply is sent; the write never delays or fails the reply.
-describe("run history write path (#157 U4)", () => {
+describe("run history write path", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.mocked(makeExecutor).mockClear();
@@ -5821,13 +5821,13 @@ describe("run history write path (#157 U4)", () => {
     const { deps, store, writer } = wired(capturingProvider());
     await dispatch(
       deps,
-      { ...msg("hello there"), sourceUrl: "https://acme.slack.com/archives/CX/p10", userName: "justin" },
+      { ...msg("hello there"), sourceUrl: "https://acme.slack.com/archives/CX/p10", userName: "alice" },
       fakeIO().io,
     );
     await writer.settled();
     const rec = (await store.get("run-h"))!;
     expect(rec.sourceUrl).toBe("https://acme.slack.com/archives/CX/p10");
-    expect(rec.userName).toBe("justin");
+    expect(rec.userName).toBe("alice");
     expect(rec.activity).toBe(activityOfEvents(rec.events));
     expect(rec.activity).toEqual(expect.any(String));
     expect(isRunRecord(rec)).toBe(true);
@@ -5842,7 +5842,7 @@ describe("run history write path (#157 U4)", () => {
     expect(bareRec).not.toHaveProperty("userName");
   });
 
-  it("channel visibility stamp (authorization KTD7): the run's meta and its record carry what the channel directory says at dispatch — the static default maps the id (slack:C… → unknown, slack:D… → dm, http: → machine); an injected directory is asked once per run; a failing directory stamps `unknown`", async () => {
+  it("channel visibility stamp: the run's meta and its record carry what the channel directory says at dispatch — the static default maps the id (slack:C… → unknown, slack:D… → dm, http: → machine); an injected directory is asked once per run; a failing directory stamps `unknown`", async () => {
     const { deps, store, writer, registry } = wired(capturingProvider());
     await dispatch(deps, msg("hello there"), fakeIO().io);
     await writer.settled();
@@ -5888,7 +5888,7 @@ describe("run history write path (#157 U4)", () => {
     ).toBe(true);
   });
 
-  // Feature: features/authorization.md item 7 (U5) — the Slack directory behind
+  // Feature: features/authorization.md item 7 — the Slack directory behind
   // the stamp: `conversations.info` decides a `slack:C…` channel's visibility, so
   // a run in a PUBLIC channel is readable by every actor (`member-of`'s public
   // half) while a private channel's or a DM's stays grants-only; one Slack call
@@ -5896,7 +5896,7 @@ describe("run history write path (#157 U4)", () => {
   it("Slack directory stamp: a public-channel run is visible to a plain Slack user's run reads, a private-channel or DM run is not; conversations.info is asked once per channel across runs", async () => {
     const info = vi.fn(async ({ channel }: { channel: string }) => ({ channel: { is_private: channel === "CPRIV" } }));
     const directory = new SlackChannelDirectory({ conversations: { info } }, { now: () => 0 });
-    const plainUser: Actor = { kind: "user", id: "slack:U9", grants: NO_GRANTS };
+    const plainUser: Actor = { kind: "user", id: "slack:UIVY", grants: NO_GRANTS };
     const readable = predicateFor(plainUser, "runs:read", "run");
     const records: RunRecord[] = [];
     for (const [id, channel] of [
@@ -5909,7 +5909,7 @@ describe("run history write path (#157 U4)", () => {
       w.deps.channelDirectory = directory;
       await dispatch(
         w.deps,
-        { ...msg("hello there", "slack:U1"), channelId: channel, threadKey: `${channel}:1` },
+        { ...msg("hello there", "slack:UALICE"), channelId: channel, threadKey: `${channel}:1` },
         fakeIO().io,
       );
       await w.writer.settled();
@@ -6284,7 +6284,7 @@ describe("run history write path (#157 U4)", () => {
       ...io,
       reply: async () => {
         // The run has finished (the reply comes after finish) and the finish
-        // record is not written yet — only the start-of-run tombstone (#375).
+        // record is not written yet — only the start-of-run tombstone.
         snapAtReply = registry.snapshot("run-h", "tok")!.events;
         expect((await store.get("run-h"))?.status).toBe("interrupted");
       },
@@ -6323,7 +6323,7 @@ describe("run history write path (#157 U4)", () => {
     };
     await dispatch(deps, msg("hello there"), observing);
     await writer.settled();
-    expect(putsAtReply).toBe(1); // the start-of-run tombstone (#375), never the finish record
+    expect(putsAtReply).toBe(1); // the start-of-run tombstone, never the finish record
     expect(puts.map((p) => p.status)).toEqual(["interrupted", "completed"]);
   });
 
@@ -6392,7 +6392,7 @@ describe("run history write path (#157 U4)", () => {
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 
-  describe("tombstone-first provisional records (#375)", () => {
+  describe("tombstone-first provisional records", () => {
     it("a provisional interrupted record is written at run start — finishedAt = startedAt, the request/context events — and the finish write replaces it", async () => {
       const inner = new InMemoryRunStore();
       const puts: RunRecord[] = [];
@@ -6408,7 +6408,7 @@ describe("run history write path (#157 U4)", () => {
       const history: HistoryItem[] = [{ role: "user", text: "earlier turn" }];
       await dispatch(
         deps,
-        { ...msg("hello there"), sourceUrl: "https://acme.slack.com/archives/CX/p10", userName: "justin" },
+        { ...msg("hello there"), sourceUrl: "https://acme.slack.com/archives/CX/p10", userName: "alice" },
         fakeIO(history).io,
       );
       await writer.settled();
@@ -6425,7 +6425,7 @@ describe("run history write path (#157 U4)", () => {
         userId: "slack:UX",
         threadKey: "slack:CX:1.0",
         sourceUrl: "https://acme.slack.com/archives/CX/p10",
-        userName: "justin",
+        userName: "alice",
         truncated: false,
       });
       expect(isRunRecord(tomb)).toBe(true);
@@ -6462,11 +6462,11 @@ describe("run history write path (#157 U4)", () => {
         agent: "coding",
         model: "anthropic/claude",
         channelId: "slack:C1",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: "slack:C1:t",
         repo: "acme/x",
         sourceUrl: "https://acme.slack.com/archives/C1/p1",
-        userName: "justin",
+        userName: "alice",
       });
       registry.publish(run.id, { type: "input", text: "go", at: 1 });
       for (let i = 1; i <= 3; i++)
@@ -6482,11 +6482,11 @@ describe("run history write path (#157 U4)", () => {
         agent: "coding",
         model: "anthropic/claude",
         channelId: "slack:C1",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: "slack:C1:t",
         repo: "acme/x",
         sourceUrl: "https://acme.slack.com/archives/C1/p1",
-        userName: "justin",
+        userName: "alice",
         eventCount: 4,
         storedEventCount: 4,
         truncated: false,
@@ -6502,7 +6502,7 @@ describe("run history write path (#157 U4)", () => {
       const live = registry.create("coding · acme/x", {
         agent: "coding",
         channelId: "slack:C1",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: "slack:C1:t",
       });
       registry.publish(live.id, { type: "input", text: "go", at: 1 });
@@ -6510,7 +6510,7 @@ describe("run history write path (#157 U4)", () => {
       const done = registry.create("review · acme/y", {
         agent: "review",
         channelId: "slack:C1",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: "slack:C1:u",
       });
       registry.finish(done.id, "completed");
@@ -6525,7 +6525,7 @@ describe("run history write path (#157 U4)", () => {
       expect(n).toBe(1);
       expect(writes).toHaveLength(1);
       const only = writes[0];
-      // Provisional (#375): the persisted dot means "finished and durably stored" —
+      // Provisional: the persisted dot means "finished and durably stored" —
       // an abandoned run never finished — and a provisional write stands down if
       // the run's real finish record shows up inside the drain's write budget.
       expect(only.opts).toEqual({ provisional: true });
@@ -6539,11 +6539,11 @@ describe("run history write path (#157 U4)", () => {
 });
 
 // Feature: features/command-registry.md (chat adapter) / features/routing-and-config.md
-// item 10 — the registry chat parse is the LAST text-only fast path (KTD19):
+// item 10 — the registry chat parse is the LAST text-only fast path:
 // as the whole of stage A, before io.history()/recognizeOperation.
 // Since phase 4b EVERY chat command is registry-owned; nothing is reserved
 // for a legacy parser (there is none).
-describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
+describe("registry chat commands in the fast-path chain", () => {
   function withCommands(deps: TestDeps) {
     const reg = new RunRegistry({ genId: () => "live0001", genToken: () => "tok-secret" });
     reg.create("coding · acme/api <!channel>", {
@@ -6663,15 +6663,15 @@ describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
     deps.residentAdmin = admin;
     withCommands(deps);
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo onboard coreplanelabs/infrastructure", "slack:UADMIN"), io);
+    await dispatch(deps, msg("repo onboard acme/infra", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
     await vi.waitFor(() =>
       expect(replies[1]).toBe(
-        "❌ `coreplanelabs/infrastructure` failed to provision: provision-failed at install: exit 254: npm error enoent Could not read package.json\n" +
-          'Fix the command table with `repo reconfigure coreplanelabs/infrastructure --install "…" --build "…" --test "…"`, then `repo rebuild coreplanelabs/infrastructure`.',
+        "❌ `acme/infra` failed to provision: provision-failed at install: exit 254: npm error enoent Could not read package.json\n" +
+          'Fix the command table with `repo reconfigure acme/infra --install "…" --build "…" --test "…"`, then `repo rebuild acme/infra`.',
       ),
     );
-    await dispatch(deps, msg("repo rebuild coreplanelabs/infrastructure --dry-run", "slack:UADMIN"), io);
+    await dispatch(deps, msg("repo rebuild acme/infra --dry-run", "slack:UADMIN"), io);
     expect(replies[2]).toMatch(/^🧪 \*Dry run\*/);
     await new Promise((r) => setTimeout(r, 20));
     expect(replies).toHaveLength(3);
@@ -6886,7 +6886,7 @@ workspaceDir: __WORKDIR__
   const SHIP_DESCRIPTION = {
     title: "Fix the login redirect",
     tldr: "Restores the session cookie on login. Users can sign in again.",
-    whatWhy: "The handler dropped the cookie after #12; this restores it.",
+    whatWhy: "The handler dropped the cookie after the redirect change; this restores it.",
     tour: [
       {
         title: "The fix",
@@ -7011,7 +7011,7 @@ workspaceDir: __WORKDIR__
     deps.postReviewComment = vi.fn(
       async (target: ReviewCommentTarget, body: string) => void posts.push({ target, body }),
     );
-    // Round 0 creates the pipeline branch through this seam (KTD12) — stubbed
+    // Round 0 creates the pipeline branch through this seam — stubbed
     // so the fetch guard below proves no direct GitHub call ever fires.
     deps.createBranchRef = vi.fn(async () => {});
     return { deps, opened, posts };
@@ -7062,7 +7062,7 @@ workspaceDir: __WORKDIR__
     expect(makeExecutor).not.toHaveBeenCalled();
   });
 
-  it("permission: user allowed ship but not coding → refused naming coding, no child run (KTD6)", async () => {
+  it("permission: user allowed ship but not coding → refused naming coding, no child run", async () => {
     const provider = shipProvider();
     const { deps } = shipDeps(provider);
     const { io, replies } = fakeIO();
@@ -7086,7 +7086,7 @@ workspaceDir: __WORKDIR__
     expect(makeExecutor).not.toHaveBeenCalled();
   });
 
-  it("auto-merge repo → refused before round 0; an unverifiable setting refuses fail-closed too (R15)", async () => {
+  it("auto-merge repo → refused before round 0; an unverifiable setting refuses fail-closed too", async () => {
     const provider = shipProvider();
     const { deps } = shipDeps(provider);
     deps.fetchRepoShipInfo = vi.fn(async () => ({ allowAutoMerge: true, defaultBranch: "main" }));
@@ -7163,9 +7163,9 @@ workspaceDir: __WORKDIR__
           head: HEAD_A,
           findings: [F1, F2],
         }),
-        say("R1 prose: the cookie is dropped on redirect."),
+        say("Round 1 prose: the cookie is dropped on redirect."),
         toolUse("submit_verdict", { verdict: "approve", summary: "fixed", head: HEAD_B }),
-        say("R2 prose: verified."),
+        say("Round 2 prose: verified."),
       ],
     });
     const { deps, opened, posts } = shipDeps(provider);
@@ -7186,7 +7186,7 @@ workspaceDir: __WORKDIR__
     expect(fixTurn).toBeDefined();
     expect(fixTurn).toContain("[blocking] F1 src/login.ts:10 — drops the session cookie");
     expect(fixTurn).toContain("[nit] F2 src/login.ts — rename shadowed variable");
-    expect(fixTurn).toContain("R1 prose: the cookie is dropped on redirect.");
+    expect(fixTurn).toContain("Round 1 prose: the cookie is dropped on redirect.");
     // knownFindingIds: the unknown id came back as a string error naming it.
     expect(JSON.stringify(provider.requests)).toContain("unknown finding id F9");
     // Both reviews posted, each pinned to its round's head.
@@ -7249,14 +7249,14 @@ workspaceDir: __WORKDIR__
       ],
       review: [
         toolUse("submit_verdict", { verdict: "request_changes", summary: "issues", head: HEAD_A, findings: [F1, F2] }),
-        say("R1 prose."),
+        say("Round 1 prose."),
         toolUse("submit_verdict", {
           verdict: "request_changes",
           summary: "still issues",
           head: HEAD_B,
           findings: [F2, F3],
         }),
-        say("R2 prose."),
+        say("Round 2 prose."),
       ],
     });
     const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxRounds: 2\n");
@@ -7367,7 +7367,7 @@ workspaceDir: __WORKDIR__
     expect(makeExecutor).not.toHaveBeenCalled();
   });
 
-  it("a repo-shaped repoCtx.ref never becomes the pipeline base — the default branch wins (live incident 2026-09-03)", async () => {
+  it("a repo-shaped repoCtx.ref never becomes the pipeline base — the default branch wins", async () => {
     const provider = shipProvider({
       coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
       review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
@@ -7385,7 +7385,7 @@ workspaceDir: __WORKDIR__
     expect(vi.mocked(createRef).mock.calls[0][2]).toBe("main"); // fromRef = default branch, never the slug
   });
 
-  it("a coding round that ends on ANOTHER branch aborts before any PR write — work pushed elsewhere is unreachable (live incident 2026-09-03)", async () => {
+  it("a coding round that ends on ANOTHER branch aborts before any PR write — work pushed elsewhere is unreachable", async () => {
     const provider = shipProvider({
       coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed (on my own branch).")],
     });
@@ -7441,7 +7441,7 @@ workspaceDir: __WORKDIR__
     }
   });
 
-  it("branch binding (KTD12): every round attaches the ship branch, review/fix rounds at the pinned head", async () => {
+  it("branch binding: every round attaches the ship branch, review/fix rounds at the pinned head", async () => {
     let currentHead = HEAD_A;
     const provider = shipProvider({
       coding: [
@@ -7453,9 +7453,9 @@ workspaceDir: __WORKDIR__
       ],
       review: [
         toolUse("submit_verdict", { verdict: "request_changes", summary: "one blocker", head: HEAD_A, findings: [F1] }),
-        say("R1 prose."),
+        say("Round 1 prose."),
         toolUse("submit_verdict", { verdict: "approve", summary: "fixed", head: HEAD_B }),
-        say("R2 prose."),
+        say("Round 2 prose."),
       ],
     });
     const { deps } = shipDeps(provider);
@@ -7551,7 +7551,7 @@ workspaceDir: __WORKDIR__
     expect(reviewSystem).not.toContain("BASE main");
   });
 
-  it("new task text citing a human-authored open PR does NOT bind it — round 0 starts from the default branch, no refusal (#512)", async () => {
+  it("new task text citing a human-authored open PR does NOT bind it — round 0 starts from the default branch, no refusal", async () => {
     const TASK = "investigate the review-agent bug seen on acme/api#508";
     const provider = shipProvider({ coding: [say("Which review run did you mean?")] });
     const { deps } = shipDeps(provider);
@@ -7570,7 +7570,7 @@ workspaceDir: __WORKDIR__
       headSha: HEAD_A,
       baseRef: "main",
     });
-    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "justin", id: 42 } }));
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 } }));
     const branch = shipBranchName(shipTaskText(TASK, "acme/api"), "slack:CX:1.0");
     queueWorkspaces(shipWorkspace({ head: HEAD_A, branch, remoteHead: null }));
     const { io, replies } = fakeIO();
@@ -7579,20 +7579,20 @@ workspaceDir: __WORKDIR__
     expect(vi.mocked(makeExecutor).mock.calls[0][1].agent.name).toBe("coding"); // round 0, not a refusal
     // Round 0 creates the pipeline branch from the repo default branch — NEVER
     // the cited PR's head branch (SHIP_BRANCH), which would carry the
-    // stranger's commits and dangle when #508 merges (F1).
+    // stranger's commits and dangle when that PR merges.
     expect(deps.createBranchRef).toHaveBeenCalledWith("acme/api", branch, "main");
     for (const r of replies) expect(r).not.toContain("not ship's to drive");
   });
 
-  it("in-message cited PR + new task text + FAILING prFacts fetch → round 0 starts off the DEFAULT branch, no refusal (#567)", async () => {
+  it("in-message cited PR + new task text + FAILING prFacts fetch → round 0 starts off the DEFAULT branch, no refusal", async () => {
     const TASK = "investigate the review-agent bug seen on acme/api#508";
     const provider = shipProvider({ coding: [say("Which review run did you mean?")] });
     const { deps } = shipDeps(provider);
     // The resolver flagged the cited PR as in-message (prFromMessage) with its
     // head ref bound (refFromPr). Ship's OWN facts fetch then fails transiently
-    // — the unlucky #512 case. prFromMessage + task text is the fall-through, so
+    // — the unlucky case. prFromMessage + task text is the fall-through, so
     // ship must NOT refuse; and because facts.headRef is now UNKNOWN, only
-    // refFromPr keeps round 0 off the stranger's PR head branch (#567 F1).
+    // refFromPr keeps round 0 off the stranger's PR head branch.
     deps.resolveRepoContext = () => ({
       repo: "acme/api",
       pr: 508,
@@ -7610,13 +7610,13 @@ workspaceDir: __WORKDIR__
     expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(makeExecutor).mock.calls[0][1].agent.name).toBe("coding"); // round 0, not a refusal
     // Round 0 branches from the repo default — NEVER the cited PR's head branch
-    // (SHIP_BRANCH), which the failed facts fetch left unverifiable (#567 F1).
+    // (SHIP_BRANCH), which the failed facts fetch left unverifiable.
     expect(deps.createBranchRef).toHaveBeenCalledWith("acme/api", branch, "main");
     for (const r of replies) expect(r).not.toContain("PR unverifiable");
     for (const r of replies) expect(r).not.toContain("refusing fail-closed");
   });
 
-  it("inherited unreachable PR (prUnpostable) + new task text → still refused fail-closed (#567 keeps inherited PRs closed)", async () => {
+  it("inherited unreachable PR (prUnpostable) + new task text → still refused fail-closed (inherited PRs stay closed)", async () => {
     const provider = shipProvider();
     const { deps } = shipDeps(provider);
     // An INHERITED thread PR that could not be fetched — prFromMessage is unset,
@@ -7633,7 +7633,7 @@ workspaceDir: __WORKDIR__
     expect(makeExecutor).not.toHaveBeenCalled();
   });
 
-  it("in-message cited PR + NO task text + failing prFacts fetch → still refused (a bare reference is a resume attempt) (#567)", async () => {
+  it("in-message cited PR + NO task text + failing prFacts fetch → still refused (a bare reference is a resume attempt)", async () => {
     const provider = shipProvider();
     const { deps } = shipDeps(provider);
     // In-message, but no task text — a bare URL is a resume request, so the PR
@@ -7660,7 +7660,7 @@ workspaceDir: __WORKDIR__
     const provider = shipProvider();
     const { deps } = shipDeps(provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
-    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "justin", id: 42 } }));
+    deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 } }));
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
@@ -7669,7 +7669,7 @@ workspaceDir: __WORKDIR__
     expect(makeExecutor).not.toHaveBeenCalled();
   });
 
-  it("resident attach fails → plain report, no cold clone, no model call (R13)", async () => {
+  it("resident attach fails → plain report, no cold clone, no model call", async () => {
     const provider = shipProvider();
     const { deps } = shipDeps(provider);
     queueWorkspaces({
@@ -7743,7 +7743,7 @@ workspaceDir: __WORKDIR__
     for (const t of opened) expect(Object.keys(t).sort()).toEqual(["base", "body", "headBranch", "repo", "title"]);
   });
 
-  // Feature: features/agent-ship.md item 12 (U8) — rounds are legible: typed
+  // Feature: features/agent-ship.md item 12 — rounds are legible: typed
   // `ship_round` boundary events on the one stream, and an orchestrator-owned
   // round header on the card that a child's update_status cannot erase.
   /** The 2-round script (request_changes → fix → approve) the round-visibility
@@ -7764,9 +7764,9 @@ workspaceDir: __WORKDIR__
       review: [
         toolUse("update_status", { checklist: "✱ Reading the diff" }),
         toolUse("submit_verdict", { verdict: "request_changes", summary: "one blocker", head: HEAD_A, findings: [F1] }),
-        say("R1 prose."),
+        say("Round 1 prose."),
         toolUse("submit_verdict", { verdict: "approve", summary: "fixed", head: HEAD_B }),
-        say("R2 prose."),
+        say("Round 2 prose."),
       ],
     });
   }
@@ -7867,9 +7867,9 @@ workspaceDir: __WORKDIR__
     expect(details[beta].startsWith("Round 0 — coding")).toBe(true); // … the header is not
   });
 
-  // ---- pipeline honesty fixes (2026-08-30 review) ----------------------------
+  // ---- pipeline honesty --------------------------------------------------------
 
-  it("fresh pipeline: the bot creates the pipeline branch from base BEFORE the first attach (KTD12)", async () => {
+  it("fresh pipeline: the bot creates the pipeline branch from base BEFORE the first attach", async () => {
     const provider = shipProvider({
       coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
       review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
@@ -7906,7 +7906,7 @@ workspaceDir: __WORKDIR__
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("a thread already bound to another ref: the coding round refuses naming both refs — no model call, no PR (KTD12)", async () => {
+  it("a thread already bound to another ref: the coding round refuses naming both refs — no model call, no PR", async () => {
     const provider = shipProvider();
     const { deps, opened } = shipDeps(provider);
     queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: "feature-a" })); // the thread's prior binding wins at the resident
@@ -8017,7 +8017,7 @@ workspaceDir: __WORKDIR__
             head: HEAD_A,
             findings: [F1],
           }),
-          say("R1 prose."),
+          say("Round 1 prose."),
         ],
       },
       (n) => {
@@ -8052,7 +8052,7 @@ workspaceDir: __WORKDIR__
       ],
       review: [
         toolUse("submit_verdict", { verdict: "request_changes", summary: "one blocker", head: HEAD_A, findings: [F1] }),
-        say("R1 prose."),
+        say("Round 1 prose."),
       ],
     });
     const { deps, posts } = shipDeps(provider);
@@ -8082,13 +8082,13 @@ workspaceDir: __WORKDIR__
       ],
       review: [
         toolUse("submit_verdict", { verdict: "request_changes", summary: "one concern", head: HEAD_A, findings: [F1] }),
-        say("R1 prose."),
+        say("Round 1 prose."),
         toolUse("submit_verdict", {
           verdict: "approve",
           summary: "conceded — the decline argument holds",
           head: HEAD_A,
         }),
-        say("R2 prose."),
+        say("Round 2 prose."),
       ],
     });
     const { deps, posts } = shipDeps(provider);
@@ -8278,14 +8278,14 @@ workspaceDir: __WORKDIR__
       ],
       review: [
         toolUse("submit_verdict", { verdict: "request_changes", summary: "a nit", head: HEAD_A, findings: [F1_NIT] }),
-        say("R1 prose."),
+        say("Round 1 prose."),
         toolUse("submit_verdict", {
           verdict: "request_changes",
           summary: "new blocker",
           head: HEAD_B,
           findings: [F1_REUSED],
         }),
-        say("R2 prose."),
+        say("Round 2 prose."),
       ],
     });
     const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxRounds: 2\n");
@@ -8304,7 +8304,7 @@ workspaceDir: __WORKDIR__
   });
 });
 
-describe("MCP tools (#394, features/mcp-tools.md)", () => {
+describe("MCP tools (features/mcp-tools.md)", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -8722,7 +8722,7 @@ describe("thread admission (features/thread-admission.md)", () => {
     expect(registry.listActive().find((r) => r.id === "r2")?.userId).toBe("slack:UZ");
   });
 
-  it("a run that THREW after an operator stop was requested still counts as stopped: its follow-up is not run (review F1 on #456)", async () => {
+  it("a run that THREW after an operator stop was requested still counts as stopped: its follow-up is not run", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const { provider, requests, firstStarted, settle } = gatedProvider();

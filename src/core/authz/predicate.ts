@@ -1,4 +1,4 @@
-// The list-shaped evaluator (plan U1, R6, KTD2): the SAME rules `authorize`
+// The list-shaped evaluator: the SAME rules `authorize`
 // decides with, compiled into a store predicate for one actor.
 //
 // Per row: every condition becomes a predicate — a grant the actor lacks is

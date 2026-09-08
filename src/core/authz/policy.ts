@@ -1,4 +1,4 @@
-// THE policy table (plan U1, KTD1, KTD5). Data, not code.
+// THE policy table (docs/decisions/0007-authorization-policy-table.md). Data, not code.
 //
 // Every gate Switchboard had — command chat gates, machine token scopes, the
 // machine-caller channel pin, `canRunAgent` / `canUseRepo` / `canManageRepos`
@@ -9,7 +9,7 @@
 // outside the vocabulary, fails the import — the table is closed by
 // construction, not by review.
 //
-// COMMANDS (U4). `CommandRegistry.invoke` asks `authorize(caller.actor,
+// COMMANDS. `CommandRegistry.invoke` asks `authorize(caller.actor,
 // cmd.action, resource)` for every command on every surface, where the
 // resource is `command { id }` unless the definition resolves one from the
 // input (`repo.test|build` → `agent { coding }`). One rule shape covers what
@@ -47,7 +47,7 @@ const ALL_CHANNELS: Condition = { kind: "all-channels" };
 export const POLICY: readonly Rule[] = [
   // ── runs ─────────────────────────────────────────────────────────────────
   // A run is readable by a member of its channel, by anyone who sees every
-  // channel, or by the user it belongs to (R5).
+  // channel, or by the user it belongs to.
   { action: "runs:read", resource: "run", when: [MEMBER_OF] },
   { action: "runs:read", resource: "run", when: [ALL_CHANNELS] },
   { action: "runs:read", resource: "run", when: [IS_SELF] },
@@ -60,9 +60,9 @@ export const POLICY: readonly Rule[] = [
 
   // ── friction ─────────────────────────────────────────────────────────────
   // `friction report` is what every Slack user holds (CHAT_OPEN_ACTIONS); what
-  // it reports is the store predicate's job (OQ2). A token needs the grant.
+  // it reports is the store predicate's job. A token needs the grant.
   { action: "friction:read", resource: "command", when: [grant("friction:read")] },
-  // `friction propose` files issues: the repo-management gate (KTD6 → friction:write).
+  // `friction propose` files issues: the repo-management gate, now the `friction:write` grant.
   { action: "friction:write", resource: "command", when: [grant("friction:write")] },
 
   // ── repos ────────────────────────────────────────────────────────────────
@@ -72,12 +72,12 @@ export const POLICY: readonly Rule[] = [
   // `repo test|build` run the repo's onboarded command as the coding agent with
   // zero model turns: admitted by the right to run that agent (the `agentRun`
   // chat gate) or by the exec grant a token was minted with; `write` never
-  // implies `exec`. The per-repo allowlist (KD7) is the handler's own check.
+  // implies `exec`. The per-repo allowlist is the handler's own check.
   { action: "repo:exec", resource: "agent", when: [grant("agent:run:{name}")] },
   { action: "repo:exec", resource: "agent", when: [grant("repo:exec")] },
-  // The exec grant on a repo the actor may use (KTD30, not yet asked by a command).
+  // The exec grant on a repo the actor may use (not yet asked by a command).
   { action: "repo:exec", resource: "repo", when: [grant("repo:exec"), OWNER_OF] },
-  // Binding a run to a repo; open-when-absent today → grants.repos = "all" (KTD6).
+  // Binding a run to a repo; open-when-absent today → grants.repos = "all".
   { action: "repo:use", resource: "repo", when: [OWNER_OF] },
 
   // ── config ───────────────────────────────────────────────────────────────
@@ -92,7 +92,8 @@ export const POLICY: readonly Rule[] = [
   // admins through `all`, anyone granted it by name; never a baseline). Membership
   // is NOT a condition
   // here: a chat user may target another channel with `--channel`, and no
-  // adapter proves channel membership yet (plan U5, the directory).
+  // adapter proves channel membership yet (the channel directory's `isMember`
+  // is where that fact will come from).
   { action: "config:write", resource: "config-scope", resourceKind: "channel", when: [grant("config:write")] },
   // A user edits only their own scope.
   { action: "config:write", resource: "config-scope", resourceKind: "user", when: [IS_SELF] },
@@ -122,7 +123,7 @@ export const POLICY: readonly Rule[] = [
     when: [grant("mcp:write")],
   },
   // ORG-wide servers reach the coding/review agents: the repo-management right
-  // (`repo:write`, KTD9 fail-closed) for a person; `mcp:write` for a credential.
+  // (`repo:write`, fail-closed) for a person; `mcp:write` for a credential.
   { action: "mcp:write", resource: "config-scope", resourceKind: "org", when: [grant("repo:write")] },
   {
     action: "mcp:write",
@@ -138,12 +139,12 @@ export const POLICY: readonly Rule[] = [
   // and forgetting a SHARED record is the repo-management right (`repo:write`).
   { action: "memory:read", resource: "command", when: [grant("memory:read")] },
   { action: "memory:write", resource: "command", when: [grant("memory:write")] },
-  // Reads are unchanged (R11): org is shared; the rest are relations.
+  // Reads are unchanged: org is shared; the rest are relations.
   { action: "memory:read", resource: "memory-scope", resourceKind: "org", when: [] },
   { action: "memory:read", resource: "memory-scope", resourceKind: "user", when: [IS_SELF] },
   { action: "memory:read", resource: "memory-scope", resourceKind: "channel", when: [MEMBER_OF] },
   { action: "memory:read", resource: "memory-scope", resourceKind: "repo", when: [OWNER_OF] },
-  // Writes: a fact from a private/dm/unknown origin has NO org row (R11).
+  // Writes: a fact from a private/dm/unknown origin has NO org row.
   {
     action: "memory:write",
     resource: "memory-scope",
@@ -156,7 +157,7 @@ export const POLICY: readonly Rule[] = [
   { action: "memory:write", resource: "memory-scope", resourceKind: "repo", when: [OWNER_OF] },
 
   // ── schedules ────────────────────────────────────────────────────────────
-  // Only the schedule shim's actor fires a schedule (R9).
+  // Only the schedule shim's actor fires a schedule.
   { action: "schedule:fire", resource: "command", actorKinds: ["schedule"], when: [] },
 ];
 
@@ -214,7 +215,7 @@ function describeRule(rule: unknown): string {
   return `${String(r.action)} on ${String(r.resource)}${r.resourceKind ? `/${String(r.resourceKind)}` : ""}`;
 }
 
-/** Refuse a table the evaluators could not both decide and compile (KTD1).
+/** Refuse a table the evaluators could not both decide and compile.
  *  Called on `POLICY` at module load; exported so a test can feed it a bad table. */
 export function validatePolicy(rules: readonly Rule[]): void {
   if (!Array.isArray(rules)) throw new PolicyError("table is not an array", rules);

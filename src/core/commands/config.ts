@@ -27,14 +27,14 @@ import {
 // table about `config-scope { channel }` only when that scope is named
 // (`config:write` is held only where `grants` say so: admins through `all`,
 // anyone granted it by name, on any surface).
-// Dotted option keys (`--models.coding x`) nest on every surface (KTD21). None
+// Dotted option keys (`--models.coding x`) nest on every surface. None
 // of this reaches a model or starts a run.
 
 /** The store's reads and writes, each behind an async accessor: the config is
  *  opened asynchronously (its overrides backing may be the state Worker,
  *  routing-and-config item 12), so a command that needs it awaits the open
  *  exactly when it first reaches for it — and a command that never does never
- *  waits (#409). No classification of commands anywhere. */
+ *  waits. No classification of commands anywhere. */
 export interface ConfigCommandDeps {
   config: {
     /** Everything `config show` reports but `channelConfigRestricted`, which is the caller's actor's to decide (`mayEditChannel`). */

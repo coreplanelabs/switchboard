@@ -7,7 +7,7 @@ import { partition, type LossInterval, type Partition, type Window } from "./tra
 import type { RunOwner } from "./trace/streamSpans.js";
 import type { SpanRecord } from "./trace/types.js";
 
-// Run-friction analyzer (Area 7b / #84, first piece): a PURE, deterministic
+// Run-friction analyzer (features/run-friction.md): a PURE, deterministic
 // function from a run's RunEvent stream to a structured diagnosis of what cost
 // the run time or made it stumble — slow/failed tool calls, slow model turns,
 // retries, setup/install time, wrap-up, budget hits, exec-infrastructure

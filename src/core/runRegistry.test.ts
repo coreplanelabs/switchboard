@@ -22,7 +22,7 @@ import { MAX_EVENT_BYTES } from "./runRecord.js";
 
 const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", summary });
 const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result", tool: "bash", ok, summary });
-/** What `publish` hands back: the input event stamped with its per-run `seq` (#157). */
+/** What `publish` hands back: the input event stamped with its per-run `seq`. */
 const seq = (n: number, e: RunEvent): RunEvent => ({ ...e, seq: n });
 /** A span record (features/tracing.md): the union gains the variant with the emitters. */
 const spanEnd = (name: string): RunEvent =>
@@ -50,7 +50,7 @@ describe("RunRegistry.create", () => {
     expect(b).toMatchObject({ id: "id-2", token: "tok-2" });
     expect(a.id).not.toBe(b.id);
     expect(a.token).not.toBe(b.token);
-    expect(a.control).not.toBe(b.control); // each run owns its own stop control (#101)
+    expect(a.control).not.toBe(b.control); // each run owns its own stop control
   });
 
   it("defaults to crypto-random ids/tokens that are unguessable and distinct", () => {
@@ -505,11 +505,11 @@ describe("RunRegistry.listActive", () => {
       agent: "coding",
       model: "anthropic/claude",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
       repo: "acme/x",
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
-      userName: "justin",
+      userName: "alice",
       receivedAt: 900,
     });
     expect(handle.label).toBe('coding · acme/x · "token «redacted-github-token»"');
@@ -519,19 +519,23 @@ describe("RunRegistry.listActive", () => {
       agent: "coding",
       model: "anthropic/claude",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
       repo: "acme/x",
       receivedAt: 900,
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
-      userName: "justin",
+      userName: "alice",
     }); // sourceUrl + userName: live-view item 21, the index's thread link and its hover identity
     expect(reg.getById(handle.id)).toMatchObject({ agent: "coding", repo: "acme/x" });
     const bare = reg.create();
     const bareRow = reg.listActive().find((r) => r.id === bare.id)!;
     expect(bare.label).toBeUndefined();
     expect(Object.keys(bareRow).sort()).toEqual(["eventCount", "finished", "id", "startedAt", "stepCount", "token"]);
-    const chat = reg.create("general · #ch", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:2" });
+    const chat = reg.create("general · #ch", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:2",
+    });
     expect(reg.getById(chat.id)).not.toHaveProperty("repo");
     expect(reg.getById(chat.id)).not.toHaveProperty("sourceUrl");
     expect(reg.getById(chat.id)).not.toHaveProperty("agent");
@@ -738,7 +742,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
   });
 });
 
-describe("snapshot — token-gated read of a run's backlog (#84)", () => {
+describe("snapshot — token-gated read of a run's backlog", () => {
   it("returns a copy of the backlog plus the finished flag; null for a bad token or unknown run", () => {
     const reg = new RunRegistry({ genId: () => "r1", genToken: () => "tok" });
     const { id, token } = reg.create();
@@ -773,7 +777,7 @@ describe("snapshot — token-gated read of a run's backlog (#84)", () => {
   });
 });
 
-// Feature: features/run-history.md — `markPersisted` (#157 KTD9): the history
+// Feature: features/run-history.md — `markPersisted`: the history
 // writer confirms a run is in the durable store; the index learns it through
 // an upsert whose summary carries `persisted: true`.
 describe("RunRegistry.markPersisted", () => {
@@ -825,7 +829,7 @@ describe("RunRegistry.markPersisted", () => {
   });
 });
 
-describe("RunRegistry.snapshot — record inputs (#157 U4)", () => {
+describe("RunRegistry.snapshot — record inputs", () => {
   it("carries the run's startedAt and the monotonic eventCount alongside the (bounded) backlog", () => {
     const { reg } = testRegistry({ backlogLimit: 2 });
     const { id, token } = reg.create();
@@ -842,11 +846,11 @@ describe("RunRegistry.snapshot — record inputs (#157 U4)", () => {
     const { reg } = testRegistry();
     const stamped = reg.create("x", {
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
       receivedAt: 900,
     });
-    const plain = reg.create("y", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:2" });
+    const plain = reg.create("y", { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:2" });
     expect(reg.snapshot(stamped.id, stamped.token)?.receivedAt).toBe(900);
     expect(reg.listActive().find((r) => r.id === stamped.id)?.receivedAt).toBe(900);
     expect("receivedAt" in (reg.snapshot(plain.id, plain.token) ?? {})).toBe(false);
@@ -854,7 +858,7 @@ describe("RunRegistry.snapshot — record inputs (#157 U4)", () => {
   });
 });
 
-// Feature: features/live-view.md item 10 — run control (#101). Every run owns a
+// Feature: features/live-view.md item 10 — run control. Every run owns a
 // RunControl (soft/hard stop request + a hard AbortSignal); `requestStop` is the
 // token-gated control-plane entry the /runs surface calls.
 describe("RunControl", () => {
@@ -889,7 +893,7 @@ describe("RunControl", () => {
   });
 });
 
-describe("RunRegistry.requestStop — run control (#101)", () => {
+describe("RunRegistry.requestStop — run control", () => {
   it("create() hands out the run's control; a valid stop drives it and reports the effective mode", () => {
     const { reg } = testRegistry();
     const { id, token, control } = reg.create();
@@ -949,12 +953,12 @@ describe("RunRegistry.requestStop — run control (#101)", () => {
   });
 });
 
-// Feature: features/run-visibility.md — the exchange in the stream (#157 U1): every
+// Feature: features/run-visibility.md — the exchange in the stream: every
 // published event is stamped with a monotonic per-run `seq`, an event published
 // after finish() is dropped (the dispatcher must publish the answer BEFORE finishing),
 // and the label is redacted at create() so a secret in the request snippet never
 // reaches the index.
-describe("RunRegistry — text events, seq, label redaction (#157 U1)", () => {
+describe("RunRegistry — text events, seq, label redaction", () => {
   const text = (type: "input" | "context" | "answer", text: string): RunEvent => ({ type, text });
 
   it("stamps every published event with a monotonic per-run seq (1, 2, 3…)", () => {
@@ -994,11 +998,11 @@ describe("RunRegistry — text events, seq, label redaction (#157 U1)", () => {
   });
 });
 
-// Feature: features/live-view.md — one backlog bounded by count AND bytes (#157
-// U11): the registry backlog is the only per-run event store (the dispatcher's
+// Feature: features/live-view.md — one backlog bounded by count AND bytes: the
+// registry backlog is the only per-run event store (the dispatcher's
 // separate ring is gone), so its bounds are what the friction diagnosis and the
 // live replay see. A throwing per-run subscriber is isolated like index sinks.
-describe("RunRegistry — backlog bounds and subscriber isolation (#157 U11)", () => {
+describe("RunRegistry — backlog bounds and subscriber isolation", () => {
   it("defaults to an 8000-event backlog: the 8001st event drops the oldest one; eventCount keeps counting", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
@@ -1134,7 +1138,7 @@ describe("RunRegistry — backlog bounds and subscriber isolation (#157 U11)", (
   });
 });
 
-describe("RunRegistry — token-free operator reads (#157 U5, KTD7)", () => {
+describe("RunRegistry — token-free operator reads", () => {
   it("getById/snapshotById mirror the token-gated reads and are null for unknown or evicted runs", () => {
     const { reg, tick } = testRegistry({ ttlMs: 60_000 });
     const { id, token } = reg.create("lbl");
@@ -1212,7 +1216,7 @@ describe("RunRegistry — `activity` on the summary (live-view item 20)", () => 
 describe("RunRegistry — terminal status + finishedAt on the summary; truncated on the snapshot (review)", () => {
   it("finish(id, status) stores the status: the summary and the index upsert carry `status` and `finishedAt`; a live run has neither", () => {
     const { reg, tick } = testRegistry();
-    const run = reg.create("l", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1" });
+    const run = reg.create("l", { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1" });
     const live = reg.getById(run.id)!;
     expect("status" in live).toBe(false);
     expect("finishedAt" in live).toBe(false);

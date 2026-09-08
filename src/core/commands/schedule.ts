@@ -8,8 +8,8 @@ import {
 import type { ScheduleStore } from "../scheduleStore.js";
 import { nextFire, type ScheduleDef, type ScheduleFiring } from "../schedules.js";
 
-// `schedule.list` (#244, phase 4b): the schedule registry as a command — what
-// is armed (`SCHEDULES`, the one catalog every Worker fires from, #307), which
+// `schedule.list` (phase 4b): the schedule registry as a command — what
+// is armed (`SCHEDULES`, the one catalog every Worker fires from), which
 // Worker runs it, when each fires next (UTC, from the cron expression), and the
 // newest firing of each from the `ScheduleStore` when one is configured.
 // `internal` plumbing (the per-minute container keep-alive) is hidden here

@@ -4,7 +4,7 @@ import { CommandRegistry, bindCommands, renderText, type Caller } from "../comma
 import { callerWith } from "../testing/callers.js";
 import { helpShow, registerHelpCommands, type HelpCommandDeps } from "./help.js";
 
-// Feature: features/command-registry.md (phase 4b, KTD25): `help show` — the
+// Feature: features/command-registry.md (phase 4b): `help show` — the
 // help text derived from the agent registry and the command catalogue, never
 // hand-written; the bare word `help` in chat is this command.
 
@@ -44,7 +44,7 @@ describe("help.show", () => {
       "*Switchboard* — send me a request. Agents:\n• `general` — answers questions\n• `coding` — ships PRs",
     );
     expect(text).toContain(
-      "*Per-request directives* (anywhere in the message):\n`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42`",
+      "*Per-request directives* (anywhere in the message):\n`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42`",
     );
     expect(text).toContain("*Commands*");
     expect(text).toContain("  runs list   — list runs");

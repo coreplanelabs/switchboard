@@ -23,13 +23,13 @@ const claim = (runId: string, threadKey: string, gen = "g1", over: Partial<Claim
   startedAt: 1_000,
   meta: {
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey,
     agent: "review",
     model: "p/m",
     channelVisibility: "private",
     repo: "acme/api",
-    userName: "justin",
+    userName: "alice",
   },
   card: { channel: "C1", ts: `${runId}.1` },
   system: "sys",
@@ -98,7 +98,7 @@ describe("reclaimRuns", () => {
       { type: "run_meta", agent: "review", model: "p/m", at: 1_001, seq: 2 },
       { type: "tool_call", tool: "bash", summary: "ls", at: 1_002, seq: 3 },
     ]);
-    await ledger.pushInbox("r1", { text: "also the numbers", userId: "slack:U2" }); // steered after the last record
+    await ledger.pushInbox("r1", { text: "also the numbers", userId: "slack:UBOB" }); // steered after the last record
     const outcome = await run();
     expect(outcome.closed).toEqual([]);
     expect(outcome.resumable).toHaveLength(1);
@@ -108,7 +108,7 @@ describe("reclaimRuns", () => {
     expect(r.lastStep).toMatchObject({ step: 1, inFlight: [{ callId: "c1", tool: "bash" }] });
     expect(r.transcript).toEqual({ complete: true, turns: 2, messages: [user("go"), assistant("looking")] });
     expect(r.events.map((e) => e.type)).toEqual(["input", "run_meta", "tool_call"]);
-    expect(r.inbox).toEqual([{ seq: 1, message: { text: "also the numbers", userId: "slack:U2" } }]); // the resume folds it in
+    expect(r.inbox).toEqual([{ seq: 1, message: { text: "also the numbers", userId: "slack:UBOB" } }]); // the resume folds it in
     expect(ledger.live.has("r1")).toBe(true);
     expect(ledger.steps.get("r1")).toHaveLength(2);
     expect(ledger.finished.has("r1")).toBe(false);
@@ -149,11 +149,11 @@ describe("reclaimRuns", () => {
       agent: "review",
       model: "p/m",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1.0",
       channelVisibility: "private",
       repo: "acme/api",
-      userName: "justin",
+      userName: "alice",
       startedAt: 1_000,
       finishedAt: 100_000,
       eventCount: 3,

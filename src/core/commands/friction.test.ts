@@ -28,7 +28,7 @@ import {
 } from "./friction.js";
 
 // Feature: features/self-improvement.md (triggers) / features/command-registry.md
-// (migration, R13/AE12): `friction.report` and `friction.propose` as registry
+// (migration): `friction.report` and `friction.propose` as registry
 // commands — the same step the chat command has always run, now reachable on
 // every surface, with the chat gates unchanged (`report` open, `propose` =
 // repo managers) and explicit `friction:read` / `friction:write` scopes for
@@ -67,7 +67,7 @@ async function seededLedger() {
   return ledger;
 }
 
-const CONFIG: SelfImprovementConfig = { repo: "coreplanelabs/switchboard" };
+const CONFIG: SelfImprovementConfig = { repo: "acme/api" };
 
 /** A ready ledger as the async accessor the deps now carry. */
 const ledgerDep = (ledger: FrictionLedger) => async () => ledger;
@@ -102,7 +102,7 @@ const chat = (userId: string, gates: { repoManager: boolean }, channels: "all" |
   });
 /** A machine caller with the given actions over every channel (an ops token granted `channels: all`). */
 const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", actions);
-/** The same token WITHOUT a channel grant (unpinned, OQ4 a): admitted to the command, shown no run. */
+/** The same token WITHOUT a channel grant (unpinned): admitted to the command, shown no run. */
 const mcpNoChannels = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", { actions: new Set(actions) });
 
 /** A seeded ledger whose newest record was diagnosed on a head-truncated stream. */
@@ -129,7 +129,7 @@ function reportOf(res: Invoked): SelfImprovementReport {
 }
 
 describe("friction.report", () => {
-  it("is open to any chat caller and renders the exact pre-migration reply (AE10) for an actor that sees every channel; a caller with no channel grants is admitted too and analyzes 0 runs (OQ2: the aggregate is per-actor)", async () => {
+  it("is open to any chat caller and renders the exact pre-migration reply for an actor that sees every channel; a caller with no channel grants is admitted too and analyzes 0 runs (the aggregate is per-actor)", async () => {
     const { commands, tracker } = bind({ ledger: ledgerDep(await seededLedger()) });
     for (const caller of [chat("slack:UADMIN", { repoManager: true }), chat("slack:UNOBODY", { repoManager: false })]) {
       const res = await commands.invoke("friction.report", {}, caller);
@@ -189,7 +189,7 @@ describe("friction.report", () => {
         agent: "coding",
         model: "m",
         channelId,
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: `${channelId}:${id}`,
         channelVisibility,
         startedAt: NOW - 60_000,
@@ -209,7 +209,7 @@ describe("friction.report", () => {
     return store;
   }
 
-  it("analyzes only the runs the actor can see (authorization.md item 6, OQ2): a token granted one channel sees that channel; an all-channels actor sees the fleet", async () => {
+  it("analyzes only the runs the actor can see (authorization.md item 6): a token granted one channel sees that channel; an all-channels actor sees the fleet", async () => {
     const store = await fleetStore();
     const { commands } = bind({ ledger: ledgerDep(new RunStoreFrictionLedger(store)) });
 
@@ -242,7 +242,7 @@ describe("friction.report", () => {
       7,
     );
 
-    // No channel grants at all (an unpinned token, OQ4 a): nothing to analyze — never the runs of the channel it speaks in.
+    // No channel grants at all (an unpinned token): nothing to analyze — never the runs of the channel it speaks in.
     const nothing = await commands.invoke(
       "friction.report",
       { options: { minRuns: "1" } },
@@ -251,7 +251,7 @@ describe("friction.report", () => {
     expect(reportOf(nothing)).toMatchObject({ runsAnalyzed: 0, patterns: [] });
   });
 
-  it("the self-improvement schedule actor analyzes every channel's runs (R12 a, #395): the registry's declared grants hold all-channels, so a firing from the cron channel sees the fleet, not its own firings", async () => {
+  it("the self-improvement schedule actor analyzes every channel's runs: the registry's declared grants hold all-channels, so a firing from the cron channel sees the fleet, not its own firings", async () => {
     const store = await fleetStore();
     const { commands, tracker } = bind({ ledger: ledgerDep(new RunStoreFrictionLedger(store)) });
     const dir = mkdtempSync(join(tmpdir(), "swb-friction-authz-"));
@@ -286,12 +286,12 @@ describe("friction.report", () => {
     );
     expect(proposed.runsAnalyzed).toBe(7);
     expect(proposed.filed).toHaveLength(1);
-    expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
+    expect(tracker.issues("acme/api")).toHaveLength(1);
   });
 });
 
 describe("friction.propose", () => {
-  it("a repoManager chat caller files through the tracker with the exact pre-migration reply; a plain user is refused (R13)", async () => {
+  it("a repoManager chat caller files through the tracker with the exact pre-migration reply; a plain user is refused", async () => {
     const { commands, tracker } = bind({ ledger: ledgerDep(await seededLedger()) });
     const refused = await commands.invoke(
       "friction.propose",
@@ -307,9 +307,9 @@ describe("friction.propose", () => {
       chat("slack:UDEV", { repoManager: true }),
     );
     expect(text(commands, "friction.propose", filed)).toBe(
-      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 filed\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Filed:*\n• https://github.com/coreplanelabs/switchboard/issues/1 — [friction] the repo's setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
+      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 filed\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Filed:*\n• https://github.com/acme/api/issues/1 — [friction] the repo's setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
     );
-    expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
+    expect(tracker.issues("acme/api")).toHaveLength(1);
 
     const again = await commands.invoke(
       "friction.propose",
@@ -317,9 +317,9 @@ describe("friction.propose", () => {
       chat("slack:UADMIN", { repoManager: true }),
     );
     expect(text(commands, "friction.propose", again)).toBe(
-      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 already open\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Already open (not refiled):*\n• https://github.com/coreplanelabs/switchboard/issues/1 — `setup_install:pnpm install --frozen-lockfile`",
+      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 already open\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Already open (not refiled):*\n• https://github.com/acme/api/issues/1 — `setup_install:pnpm install --frozen-lockfile`",
     );
-    expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
+    expect(tracker.issues("acme/api")).toHaveLength(1);
   });
 
   it('`dryRun` is a real boolean on text surfaces: "false" files, "true" files nothing', async () => {
@@ -332,10 +332,10 @@ describe("friction.propose", () => {
     expect(text(commands, "friction.propose", dry)).toBe(
       "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · dry run (nothing filed)\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Would file (dry run):*\n• [friction] the repo's setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
     );
-    expect(tracker.issues("coreplanelabs/switchboard")).toEqual([]);
+    expect(tracker.issues("acme/api")).toEqual([]);
     const wet = await commands.invoke("friction.propose", { options: { dryRun: "false" } }, mcp("friction:write"));
     expect(wet.ok).toBe(true);
-    expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
+    expect(tracker.issues("acme/api")).toHaveLength(1);
     expect(
       await commands.invoke("friction.propose", { options: { dryRun: "yes" } }, mcp("friction:write")),
     ).toMatchObject({ ok: false, error: "invalid_input" });
@@ -378,7 +378,7 @@ describe("friction.propose", () => {
     });
   });
 
-  it("`report` and `propose` each resolve the ledger accessor exactly once per invocation (#409, F2)", async () => {
+  it("`report` and `propose` each resolve the ledger accessor exactly once per invocation", async () => {
     const ledger = await seededLedger();
     let resolved = 0;
     const { commands } = bind({
@@ -418,10 +418,10 @@ describe("scopes on machine surfaces (AE12)", () => {
     expect((await commands.invoke("friction.propose", { options: { dryRun: "true" } }, mcp("friction:write"))).ok).toBe(
       true,
     );
-    expect(tracker.issues("coreplanelabs/switchboard")).toEqual([]);
+    expect(tracker.issues("acme/api")).toEqual([]);
   });
 
-  it("declares the R13 actions and derives a JSON schema (dryRun accepts a boolean or its string form)", () => {
+  it("declares the read/write actions and derives a JSON schema (dryRun accepts a boolean or its string form)", () => {
     const byId = Object.fromEntries(frictionCommands.map((c) => [c.id, c]));
     expect(byId["friction.report"]).toMatchObject({ action: "friction:read", effect: "read" });
     expect(byId["friction.propose"]).toMatchObject({ action: "friction:write", effect: "write" });

@@ -1,5 +1,5 @@
-// Feature: features/run-history.md — the dispatcher's write path (#157 U4,
-// KTD4): a finished run's record is handed to the writer AFTER the reply and
+// Feature: features/run-history.md — the dispatcher's write path: a finished
+// run's record is handed to the writer AFTER the reply and
 // persisted fire-and-forget with two jittered retries on transient failures,
 // never on a 4xx, never on a missing route; every permanent loss is counted and
 // every in-flight write (backoff included) is visible to the shutdown drain.
@@ -16,7 +16,7 @@ function record(id = "run-1"): RunRecord {
   return {
     id,
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1.0",
     channelVisibility: "unknown",
     startedAt: 1000,
@@ -87,7 +87,7 @@ describe("createRunHistoryWriter", () => {
     expect(h.warnings).toEqual([]);
   });
 
-  it("a provisional write (#375, the start-of-run tombstone) skips onPersisted but is stored, retried and drain-counted like any write", async () => {
+  it("a provisional write (the start-of-run tombstone) skips onPersisted but is stored, retried and drain-counted like any write", async () => {
     const h = harness([new TransientStoreError("HTTP 503"), OK]);
     h.writer.write({ ...record("run-tomb"), status: "interrupted" }, { provisional: true });
     expect(h.writer.pending()).toBe(1); // drain-counted while in flight
@@ -104,7 +104,7 @@ describe("createRunHistoryWriter", () => {
     await h.writer.settled();
     expect(h.puts).toHaveLength(3);
     expect(new Set(h.puts.map((r) => r.id))).toEqual(new Set(["run-retry"]));
-    // random() = 0.5 → the midpoint of the jitter window is the nominal delay.
+    // random() = 0.5 → the midpoint of the jitter window is the base delay.
     expect(h.sleeps).toEqual(RUN_HISTORY_RETRY_DELAYS_MS);
     expect(h.writer.pending()).toBe(0);
     expect(h.writer.failures()).toBe(0);
@@ -124,7 +124,7 @@ describe("createRunHistoryWriter", () => {
     expect(writer.pending()).toBe(0);
   });
 
-  it("the jitter is bounded: a delay is within ±50% of its nominal value for random() in [0, 1)", async () => {
+  it("the jitter is bounded: a delay is within ±50% of its base value for random() in [0, 1)", async () => {
     const lo = harness([new TransientStoreError("x"), OK], { random: () => 0 });
     lo.writer.write(record());
     await lo.writer.settled();
@@ -234,7 +234,7 @@ describe("createRunHistoryWriter", () => {
     expect(writer.failures()).toBe(0);
   });
 
-  it("a final write for the same id stands down a provisional write sitting in retry backoff (#375): the tombstone retry never lands after the finish record", async () => {
+  it("a final write for the same id stands down a provisional write sitting in retry backoff: the tombstone retry never lands after the finish record", async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const { store, puts } = scriptedStore([new TransientStoreError("HTTP 503"), OK, OK]);

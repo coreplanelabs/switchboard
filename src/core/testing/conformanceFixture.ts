@@ -206,7 +206,7 @@ export function record(id: string, finishedAt: number): RunRecord {
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: `slack:C1:${id}`,
     channelVisibility: "public", // public: every fixture caller may read it — conformance is about surfaces, not visibility
     startedAt: finishedAt - 10_000,
@@ -295,7 +295,7 @@ export interface Stubs {
  *  Anything that would execute (resident admin writes, deterministic ops, the
  *  deploy runner, the env bootstrap, the run-stream source) RECORDS the call
  *  into `executed` and answers a plausible shape. */
-/** The MCP service (#394) over a THROWAWAY config store per call: the seeded
+/** The MCP service over a THROWAWAY config store per call: the seeded
  *  `linear` server (auth none) exists in the org tier, the fixture channel, and
  *  every caller's own tier — so each surface's caller finds "its" server under
  *  the default `me` scope and the outputs fold by caller id like memory's —
@@ -529,7 +529,7 @@ export async function fixture(
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:t",
     channelVisibility: "public",
   });
@@ -794,7 +794,7 @@ export const chat: Surface = {
 export const SURFACES: Surface[] = [httpGet, httpPost, mcp, cli, chat];
 expect(SURFACES.map((s) => s.meta.key)).toEqual(SURFACE_METAS.map((m) => m.key));
 
-// ---- the fixed actor set (R13), driven through the surface that carries each id ------------------
+// ---- the fixed actor set, driven through the surface that carries each id ------------------
 
 /** The Access identity an `access:` role authenticates as: a service token by common_name, else a browser sub. */
 export function httpIdentityOf(role: AuthzRole): { sub: string; commonName?: string } {
@@ -918,7 +918,7 @@ export function lastInvoke(f: Fixture, cmd: CommandDef<unknown>): { caller: Call
 
 /** Chat renders in a proportional font (Slack): a run of two or more spaces
  *  between words is a padded column that will collapse into ragged whitespace
- *  (`help` 2026-08-30, `<group> help` and `runs list` 2026-09-04). Leading
+ *  (seen live for `help`, then `<group> help` and `runs list`). Leading
  *  indentation is allowed; interior padding is not. */
 export function assertChatShape(text: string, label: string): void {
   const padded = text.split("\n").filter((line) => /\S {2,}\S/.test(line));

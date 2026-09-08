@@ -188,8 +188,8 @@ describe("produceReadingDiff", () => {
     expect(a?.truncated).toBe(true);
   });
 
-  // Review finding on #340: the artifact goes straight into the run stream,
-  // which the registry publishes as-is — so this module owns the stream's
+  // The artifact goes straight into the run stream, which the registry
+  // publishes as-is — so this module owns the stream's
   // hygiene: control-strip + redact FIRST, cap after, on every string.
   it("redacts secrets and strips ANSI from the diff before it can reach the stream — git and meat alike, meat's summary included", async () => {
     const secret = "ghp_" + "A".repeat(36);

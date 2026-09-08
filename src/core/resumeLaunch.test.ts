@@ -27,7 +27,7 @@ const row = (over: Partial<LiveRunRow> = {}): LiveRunRow => ({
   stop: null,
   meta: {
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1.0",
     agent: "review",
     model: "anthropic/review-model",
@@ -36,7 +36,7 @@ const row = (over: Partial<LiveRunRow> = {}): LiveRunRow => ({
     ref: "feat/x",
     pr: 12,
     headSha: "a".repeat(40),
-    userName: "justin",
+    userName: "alice",
     sourceUrl: "https://acme.slack.com/archives/C1/p1",
   },
   card: { channel: "C1", ts: "1.1" },
@@ -65,7 +65,7 @@ const resumable = (over: Partial<ResumableRun> = {}): ResumableRun => ({
     { type: "input", text: "please review", at: 1, seq: 1 },
     { type: "tool_call", tool: "read_file", summary: "x", at: 2, seq: 2 },
   ],
-  inbox: [{ seq: 1, message: { text: "also the numbers", userId: "slack:U2" } }],
+  inbox: [{ seq: 1, message: { text: "also the numbers", userId: "slack:UBOB" } }],
   ...over,
 });
 const reviewAgent = { toolset: "readonly" } as AgentDef;
@@ -86,10 +86,10 @@ describe("the pure pieces", () => {
   it("resumeMessage pins the agent, model and effort the run had, carries the row's identity, and drops what the row lacks", () => {
     expect(resumeMessage(row(), "please review")).toEqual({
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1.0",
       text: "agent:review model:anthropic/review-model effort:high please review",
-      userName: "justin",
+      userName: "alice",
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
     });
     const bare = row({
@@ -143,7 +143,7 @@ describe("launchResumes", () => {
     expect(ctx.lastStep.step).toBe(1);
     expect(ctx.lastSeq).toBe(2);
     expect(ctx.repoCtx).toEqual({ repo: "acme/api", ref: "feat/x", pr: 12, headSha: "a".repeat(40) });
-    expect(ctx.inbox).toEqual([{ seq: 1, message: { text: "also the numbers", userId: "slack:U2" } }]); // item 40
+    expect(ctx.inbox).toEqual([{ seq: 1, message: { text: "also the numbers", userId: "slack:UBOB" } }]); // item 40
     expect(ctx.plan).toMatchObject({ kind: "resume", stepRecorded: true, step: 1, remainingMs: 300_000 });
     expect(ctx.plan.settlements.map((s) => [s.toolUse.id, s.action])).toEqual([["c1", "rerun"]]);
     expect(h.logs[0]).toMatch(/r1 slack:C1:1.0: resuming \(settling step 1, 1 call\(s\), 5 min left\)/);

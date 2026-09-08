@@ -5,11 +5,11 @@
 // used those facts only AFTER the run, to post and to guard. The model itself
 // got a Slack sentence with a URL and a prompt that said its worktree was
 // "typically" the branch under review. That hedge is an invitation to go and
-// check, which is exactly what PR #182's agent did on 2026-08-29 (review
-// 5059339497): it fetched another PR's branch and reviewed that. Item 8's
-// reviewed-head guard now refuses such a post; this block is the fix upstream
-// of it — the agent is TOLD its target, deterministically, from the same facts
-// the guard checks against, so the two can only disagree if the agent strays.
+// check — and an agent that goes checking can fetch another PR's branch and
+// review that. Item 8's reviewed-head guard refuses such a post; this block is
+// the fix upstream of it — the agent is TOLD its target, deterministically,
+// from the same facts the guard checks against, so the two can only disagree
+// if the agent strays.
 //
 // Pure: same input → same text. Appended to the effective system prompt for a
 // `review` run whose RepoContext resolved a PR, on both execution paths.
@@ -27,10 +27,10 @@ export interface ReviewTarget {
   resident: boolean;
   /** Resident path: absolute path of the thread's worktree (the cwd of every
    *  bash call), when the attach answer named it. Named to the model so it
-   *  never leaves the tree to go looking for the repository (#282). */
+   *  never leaves the tree to go looking for the repository. */
   workspace?: string;
   /** Resident path: the dispatcher compared the sha the resident attached the
-   *  worktree at with `headSha` and they match (#282). The model-side HEAD
+   *  worktree at with `headSha` and they match. The model-side HEAD
    *  check stays as the backstop for drift after attach. */
   verifiedAtAttach?: boolean;
 }
@@ -49,9 +49,9 @@ export function reviewTargetBlock(t: ReviewTarget): string {
     "",
   ];
   if (t.resident) {
-    // Incident 2026-08-30 (PR #279, #282): the worktree WAS at the PR head, but
-    // the agent's first command was `cd /workspace`, then `find / -name .git`,
-    // and it compared the resident's warm default-branch checkout instead.
+    // The worktree can BE at the PR head and the agent still stray: a first
+    // command of `cd /workspace`, then `find / -name .git`, compares the
+    // resident's warm default-branch checkout instead.
     // Name the tree, pin every command to it, and say what Switchboard already
     // verified — so "go and look" has nothing left to look for.
     lines.push(

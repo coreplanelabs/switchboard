@@ -10,7 +10,7 @@ import {
 } from "./grants.js";
 import { NO_GRANTS, type Grants } from "./types.js";
 
-// Feature: docs/plans/2026-09-03-001-feat-authorization-model-plan.md — U2 (R2, KTD3).
+// Feature: features/authorization.md item 1 (docs/decisions/0007-authorization-policy-table.md).
 // Adapters resolve identity, never authority: `resolveActor` turns what an
 // adapter can prove into an `Actor` whose grants come from config.
 
@@ -44,7 +44,7 @@ const lookup = (id: string) => grantsFor(id, source);
 
 describe("actorIdFor — platform-namespaced ids (invariant 4)", () => {
   it("one prefix per surface; Access service tokens under access:svc:", () => {
-    expect(actorIdFor("slack", "U1")).toBe("slack:U1");
+    expect(actorIdFor("slack", "UALICE")).toBe("slack:UALICE");
     expect(actorIdFor("http", "alice")).toBe("http:alice");
     expect(actorIdFor("mcp", "alice")).toBe("mcp:alice");
     expect(actorIdFor("access-browser", "sub-1")).toBe("access:sub-1");
@@ -106,7 +106,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     });
   });
 
-  it("ingress token whose entry names no channel → service with NO channel (OQ4 a: nothing until config names its channels)", () => {
+  it("ingress token whose entry names no channel → service with NO channel (nothing until config names its channels)", () => {
     const a = resolveActor({ surface: "http", subjectId: "ci" }, lookup);
     expect(a).toEqual({ kind: "service", id: "http:ci", grants: grants({ actions: set("dispatch") }) });
   });
@@ -159,7 +159,9 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
   });
 
   it("origin needs both channel and thread; it is context, never authority", () => {
-    expect(resolveActor({ surface: "slack", subjectId: "U1", channelId: "slack:C1" }, lookup).origin).toBeUndefined();
+    expect(
+      resolveActor({ surface: "slack", subjectId: "UALICE", channelId: "slack:C1" }, lookup).origin,
+    ).toBeUndefined();
     const a = resolveActor(
       { surface: "slack", subjectId: "UNOBODY", channelId: "slack:CADMIN", threadKey: "slack:CADMIN:1" },
       lookup,
@@ -190,7 +192,7 @@ describe("resolveChatActor — a chat message's namespaced user id chooses the s
       id: "cli:local",
       grants: ALL_GRANTS,
     });
-    // A schedule firing that reaches chat as `schedule:<name>` is the `schedule` kind (R9), grants by that id.
+    // A schedule firing that reaches chat as `schedule:<name>` is the `schedule` kind, grants by that id.
     expect(resolveChatActor(msg("schedule:self-improvement", "http:cron"), lookup)).toMatchObject({
       kind: "schedule",
       id: "schedule:self-improvement",

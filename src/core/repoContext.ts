@@ -3,7 +3,8 @@ import { validRef } from "./residentAdmin.js";
 import type { PrCommitList } from "./headMoved.js";
 import { normalizeHead } from "./reviewedHead.js";
 
-// Repo/ref resolution for resident environments (U7, KD7/KTD11): the
+// Repo/ref resolution for resident environments (features/resident-repos.md
+// item 29): the
 // dispatcher resolves the target repo and ref BEFORE the model turn, from
 // explicit signals only. Extraction sources in priority order:
 //   1. the CURRENT message — an `owner/name` slug, a github.com repo/PR URL
@@ -21,31 +22,31 @@ import { normalizeHead } from "./reviewedHead.js";
 // tokens are consulted only while nothing strong has bound the thread. This
 // is what makes the binding deterministic across a thread's life: the PR
 // named in the first message stays the target of every re-review until a
-// message names a different repo/PR explicitly (PR #167, 2026-08-29: a bare
-// `features/memory.md` in a re-review reply rebound the repo, unbound the
-// PR, and the LGTM never reached GitHub).
+// message names a different repo/PR explicitly (otherwise a bare
+// `features/memory.md` in a re-review reply rebinds the repo, unbinds the
+// PR, and the LGTM never reaches GitHub).
 //
-// Weak tokens are further guarded two ways (2026-08-29 regressions: prose
-// like `reflection/review-post`, `try/catch`, `comment/spec` in a thread
-// opened with a bare `in coreplanelabs/switchboard` each sent a review into
-// a cold sandbox for a repo that does not exist): (1) a bare token NEVER
+// Weak tokens are further guarded two ways (prose like
+// `reflection/review-post`, `try/catch`, `comment/spec` in a thread opened
+// with a bare `in acme/api` would each send a review into a cold sandbox for
+// a repo that does not exist): (1) a bare token NEVER
 // overrides a repo the thread already established, whatever its strength —
 // the first binding stays until a STRONG signal replaces it; (2) in a thread
 // with no repo yet, a bare token binds only when the injectable resident
 // probe (`isResident`) confirms it names an onboarded resource. No probe
 // (local/dev, tests) → binds as before: there is no registry to consult.
 //
-// ADDRESSED repos are the third strength (2026-09-04: a thread bound to
-// switchboard by an issue link kept every later `in coreplanelabs/nominal`
-// run on the switchboard resident — the bare slug was weak, so it could not
-// rebind — and the opening `in nominal` carried no signal at all, so that run
-// went cold): a token right after the word `in` names the TARGET of the
+// ADDRESSED repos are the third strength (without them, a thread bound to
+// acme/api by an issue link keeps every later `in acme/web` run on the
+// acme/api resident — the bare slug is weak, so it cannot rebind — and an
+// opening `in web` carries no signal at all, so that run goes cold): a token
+// right after the word `in` names the TARGET of the
 // request — `in owner/name` anywhere in the message, or a bare `in name` in
-// the DIRECTIVE position only (`agent:coding in nominal, …`: nothing but
+// the DIRECTIVE position only (`agent:coding in web, …`: nothing but
 // directives or mentions before it — "the crash is in api, see the logs" is
 // prose even when a repo is called `api`). Once the registry vets it, it is
 // STRONG: it binds a fresh thread and rebinds a bound one, like a URL. The
-// vetting is what keeps the #167 guard intact — `in features/memory.md` is
+// vetting is what keeps the strong-binding guard intact — `in features/memory.md` is
 // refused by the probe and changes nothing, and a merely-mentioned onboarded
 // slug ("also check acme/web") is still weak. A bare NAME resolves only
 // through the registry listing (`residentSlugs`) and only when exactly one
@@ -57,7 +58,7 @@ import { normalizeHead } from "./reviewedHead.js";
 // `unverifiedRepo` and binds nothing — never a silent fall back to the
 // thread's old repo, which is the wrong-repo run this strength exists to end.
 //
-// Ref extraction is deliberately conservative (KTD6: ref binding is
+// Ref extraction is deliberately conservative (ref binding is
 // explicit-or-ask-once, never a silent guess): explicit forms only —
 // "on branch X" / `branch:X`, "on X" where X is a well-known default branch
 // or slash-shaped, a /tree/<ref> URL, or a PR's head ref. When in doubt the
@@ -72,7 +73,7 @@ import { normalizeHead } from "./reviewedHead.js";
 export interface RepoContext {
   repo?: string;
   ref?: string;
-  /** PR number the review post-step targets (issue #69). Set when the CURRENT
+  /** PR number the review post-step targets. Set when the CURRENT
    *  message references a PR of the resolved repo (URL or `owner/name#N`) —
    *  independent of ref binding, known from the reference itself, so it
    *  survives a failed/cross-fork head-ref fetch. Otherwise INHERITED from the
@@ -84,16 +85,16 @@ export interface RepoContext {
   /** True when `pr` was named by the CURRENT message (a URL or `owner/name#N`),
    *  false/unset when `pr` was INHERITED from the thread. Ship reads it to tell
    *  a foreign PR quoted as evidence inside new task text (in-message → may fall
-   *  through to a fresh round 0, #512/#567) from the thread's own in-flight PR
+   *  through to a fresh round 0) from the thread's own in-flight PR
    *  (inherited → still fail-closed when the PR's facts cannot be fetched). */
   prFromMessage?: boolean;
   /** True when `ref` was taken from a cited PR's head branch (the REST head
    *  fetch below), false/unset when `ref` came from message phrasing (`on X`,
    *  `/tree/<ref>`) or is absent. A consumer that does NOT bind that PR as its
    *  target must DROP `ref` — basing new work on a stranger's PR head branch
-   *  would carry its commits and dangle when the PR merges (ship #512 F1). The
-   *  flag is decided HERE so it holds even when a later facts fetch fails and
-   *  the head ref is otherwise unknown (#567). */
+   *  would carry its commits and dangle when the PR merges. The flag is
+   *  decided HERE so it holds even when a later facts fetch fails and the head
+   *  ref is otherwise unknown. */
   refFromPr?: boolean;
   /** Head commit SHA of that PR at resolution time (from the same REST call as
    *  the head ref). Pins the posted review via `commit_id`, so the org's
@@ -113,10 +114,10 @@ export interface RepoContext {
   /** Set when NO repo could be bound and the reason is that every bare
    *  `owner/name` candidate the resolver consulted (this message's slug, the
    *  thread's weakly-bound repo, an `on <slug>` mention) was refused by the
-   *  resident probe — the first refused one, in resolution order (#316). The
+   *  resident probe — the first refused one, in resolution order. The
    *  dispatcher turns it into a "not onboarded" reply instead of a repo-less
    *  run. Never set alongside `repo`; never set for a thread that already has
-   *  a repo (prose slugs there are never even probed — #289; only an
+   *  a repo (prose slugs there are never even probed; only an
    *  `in <slug>` address costs one probe, refused or not); never set
    *  without a probe (local/dev binds unvetted). */
   rejectedRepo?: string;
@@ -126,8 +127,8 @@ export interface RepoContext {
    *  candidate, in resolution order. An explicitly addressed `in <slug>` in
    *  the current message that cannot be vetted sets this even in a bound
    *  thread, instead of falling back to the thread's old repo (the wrong-repo
-   *  run of 2026-09-04). The dispatcher turns it into a "could not verify,
-   *  try again" reply. Never set alongside `repo`; outranks `rejectedRepo`
+   *  run this strength exists to end). The dispatcher turns it into a "could
+   *  not verify, try again" reply. Never set alongside `repo`; outranks `rejectedRepo`
    *  when both would apply (a registry that was down cannot have refused). */
   unverifiedRepo?: string;
 }
@@ -409,15 +410,15 @@ export async function resolveRepoContext(
   const s = extractSignals(msg.text);
   const thread = threadSignals(history);
   // The first bare candidate the probe refused, remembered so the dispatcher
-  // can say why nothing was bound (#316) — only meaningful when `repo` stays
+  // can say why nothing was bound — only meaningful when `repo` stays
   // unset; cleared below the moment anything binds.
   let rejected: string | undefined;
   // The first candidate the registry did not ANSWER for (unreachable) — kept
   // apart from `rejected`: a registry that was down cannot have refused.
   let unverified: string | undefined;
   // One probe per candidate per resolution: an addressed slug is vetted as an
-  // address first and may be consulted again as a weak token below (#289's
-  // "never probed twice" holds, the registry is not hammered on retries).
+  // address first and may be consulted again as a weak token below ("never
+  // probed twice" holds, the registry is not hammered on retries).
   const vetted = new Map<string, Promise<boolean | "unreachable">>();
   const vet = async (cand: string): Promise<boolean> => {
     let p = vetted.get(cand);
@@ -478,8 +479,8 @@ export async function resolveRepoContext(
   // "on <owner/name-shaped>": a ref when a repo is independently established
   // (current message or thread), otherwise a (vetted) repo mention. When the
   // slug IS the established repo, "on <slug>" merely restates it — never a
-  // ref (live incident 2026-09-03: "auto-merge is now disabled on
-  // coreplanelabs/switchboard" handed ship a repo-shaped base ref).
+  // ref (otherwise "auto-merge is now disabled on acme/api" hands ship a
+  // repo-shaped base ref).
   if (s.onSlug) {
     if (repo && !ref) {
       if (slugOf(s.onSlug) !== repo) ref = s.onSlug;
@@ -497,7 +498,7 @@ export async function resolveRepoContext(
   // resolved repo, regardless of any ref phrasing beside it. The PR is the
   // explicit target: its head branch is the ref, and its head SHA pins the
   // review post (agent-review.md item 8). A prose "on X" in the same message
-  // ("re-review: rebuilt on main after #298 landed…", PR #300, 2026-08-30) used
+  // ("re-review: rebuilt on main after the caching PR landed…") used
   // to bind `ref` and thereby SKIP this fetch — leaving the head unknown, the
   // resident's worktree stale and the post refused. Now the phrase is only a
   // fallback for when the fetch fails (repo-only otherwise).

@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prCommitsSince, repoFromThread, resolveRepoContext } from "./repoContext.js";
 
-// Feature: features/resident-repos.md — U7 repo/ref resolution BEFORE the
+// Feature: features/resident-repos.md item 29 — repo/ref resolution BEFORE the
 // model turn: explicit signals in the current message (owner/name slug,
 // github.com repo/PR URL, conservative branch phrasing) → the thread's
 // previously-established repo (derived from history, restart-safe, never
-// stored) → none. Ref extraction is conservative by design (KTD6: binding is
+// stored) → none. Ref extraction is conservative by design (binding is
 // explicit-or-ask-once, never a silent guess): when in doubt the ref stays
 // undefined and the attach path asks. PR head refs come from the GitHub REST
 // API (never a gh shell-out — AGENTS.md invariant 5); all fetches are mocked.
@@ -38,9 +38,10 @@ afterEach(() => {
 describe("resolveRepoContext: explicit signals in the current message", () => {
   it("owner/name slug + 'on branch X' phrasing", async () => {
     const { fn } = stubFetch();
-    await expect(
-      resolveRepoContext(msg("fix the bug in coreplanelabs/switchboard on branch fix/x"), []),
-    ).resolves.toEqual({ repo: "coreplanelabs/switchboard", ref: "fix/x" });
+    await expect(resolveRepoContext(msg("fix the bug in acme/api on branch fix/x"), [])).resolves.toEqual({
+      repo: "acme/api",
+      ref: "fix/x",
+    });
     expect(fn).not.toHaveBeenCalled();
   });
 
@@ -70,8 +71,8 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
   });
 
   it("uppercase slugs are lowercased (resident resource ids are lowercase)", async () => {
-    await expect(resolveRepoContext(msg("fix it in CorePlaneLabs/Switchboard"), [])).resolves.toEqual({
-      repo: "coreplanelabs/switchboard",
+    await expect(resolveRepoContext(msg("fix it in Acme/Api"), [])).resolves.toEqual({
+      repo: "acme/api",
     });
   });
 
@@ -82,8 +83,8 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
   });
 
   it("'on <slug-shaped>' WITH a repo signal present is a ref", async () => {
-    await expect(resolveRepoContext(msg("on fix/x in coreplanelabs/switchboard please"), [])).resolves.toEqual({
-      repo: "coreplanelabs/switchboard",
+    await expect(resolveRepoContext(msg("on fix/x in acme/api please"), [])).resolves.toEqual({
+      repo: "acme/api",
       ref: "fix/x",
     });
   });
@@ -92,13 +93,15 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
 describe("resolveRepoContext: PR URLs and shorthand", () => {
   it("a PR URL yields repo + head ref via the GitHub REST API", async () => {
     const { fn, calls } = stubFetch({ body: { head: { ref: "patch-1", repo: { full_name: "jshttp/vary" } } } });
-    await expect(resolveRepoContext(msg("review <https://github.com/jshttp/vary/pull/42|#42>"), [])).resolves.toEqual({
-      repo: "jshttp/vary",
-      ref: "patch-1",
-      refFromPr: true,
-      pr: 42,
-      prFromMessage: true,
-    });
+    await expect(resolveRepoContext(msg("review <https://github.com/jshttp/vary/pull/42|PR 42>"), [])).resolves.toEqual(
+      {
+        repo: "jshttp/vary",
+        ref: "patch-1",
+        refFromPr: true,
+        pr: 42,
+        prFromMessage: true,
+      },
+    );
     expect(fn).toHaveBeenCalledTimes(1);
     expect(calls[0].url).toBe("https://api.github.com/repos/jshttp/vary/pulls/42");
   });
@@ -169,8 +172,8 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     });
   });
 
-  // 2026-08-30, PR #300: a re-review reading "re-review: rebuilt on main after
-  // #298 landed …" bound `ref: "main"` from the prose "on main", which skipped
+  // A re-review reading "re-review: rebuilt on main after the caching PR
+  // landed …" once bound `ref: "main"` from the prose "on main", which skipped
   // the PR head fetch entirely → no headSha → the resident kept the stale
   // worktree, the agent could not find the new head, and the reviewed-head
   // guard refused the post ("PR head unknown at resolution time"). A PR named
@@ -188,7 +191,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     await expect(
       resolveRepoContext(
         msg(
-          "agent:review https://github.com/acme/api/pull/300 — re-review: rebuilt on main after #298 landed the same caching. Head 517cfeb.",
+          "agent:review https://github.com/acme/api/pull/300 — re-review: rebuilt on main after the caching PR landed. Head 517cfeb.",
         ),
         [],
       ),
@@ -222,12 +225,12 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     });
   });
 
-  // The PR number carries the deterministic review post-step (issue #69): set
+  // The PR number carries the deterministic review post-step: set
   // only when the CURRENT message names a PR of the resolved repo.
   it("a bare repo mention (no PR reference) carries no pr — nowhere to post", async () => {
     const { fn } = stubFetch();
-    await expect(resolveRepoContext(msg("review coreplanelabs/switchboard"), [])).resolves.toEqual({
-      repo: "coreplanelabs/switchboard",
+    await expect(resolveRepoContext(msg("review acme/api"), [])).resolves.toEqual({
+      repo: "acme/api",
     });
     expect(fn).not.toHaveBeenCalled();
   });
@@ -251,13 +254,13 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
   });
 });
 
-// Feature: features/agent-ship.md item 10 (#512/#567) — the resolver flags a PR
+// Feature: features/agent-ship.md item 10 — the resolver flags a PR
 // named in the CURRENT message (`prFromMessage`) and a ref taken from a cited
 // PR's head branch (`refFromPr`). Ship reads both: prFromMessage tells a foreign
 // PR quoted as evidence from the thread's own in-flight PR, and refFromPr keeps
 // round 0 off the stranger's PR head even when a later facts fetch fails and the
 // head ref is otherwise unknown.
-describe("resolveRepoContext: PR-source flags for ship (#512/#567)", () => {
+describe("resolveRepoContext: PR-source flags for ship", () => {
   const SHA = "e".repeat(40);
 
   it("a PR named in the current message sets prFromMessage, and its bound head ref sets refFromPr", async () => {
@@ -279,7 +282,7 @@ describe("resolveRepoContext: PR-source flags for ship (#512/#567)", () => {
     expect(ctx.refFromPr).toBeUndefined();
   });
 
-  it("an in-message PR whose head fetch FAILS keeps prFromMessage but never sets refFromPr (#567 F1 guard on the failed-fetch path)", async () => {
+  it("an in-message PR whose head fetch FAILS keeps prFromMessage but never sets refFromPr (the guard holds on the failed-fetch path)", async () => {
     stubFetch({ reject: "fetch failed" });
     const ctx = await resolveRepoContext(msg("look into https://github.com/acme/api/pull/508 for the regression"), []);
     expect(ctx.pr).toBe(508);
@@ -349,13 +352,13 @@ describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail
     expect(fn).not.toHaveBeenCalled();
   });
 
-  // Regression (PR #167, 2026-08-29): the re-review reply said "(index.ts +
-  // features/memory.md §22)" — a bare path token outside backticks. It parsed
-  // as repo `features/memory.md`, which unbound the thread's PR, so the second
-  // LGTM never reached GitHub and the run went to a cold sandbox for a repo
-  // that does not exist. A thread bound to a repo by a STRONG signal (PR URL,
-  // repo URL, owner/name#N) is never rebound by a bare slug-shaped token.
-  it("a bare slug-shaped token never rebinds a thread bound by URL — the PR is still inherited (#167)", async () => {
+  // A re-review reply saying "(index.ts + features/memory.md §22)" carries a
+  // bare path token outside backticks. Parsed as repo `features/memory.md` it
+  // would unbind the thread's PR, so the second LGTM never reaches GitHub and
+  // the run goes to a cold sandbox for a repo that does not exist. A thread
+  // bound to a repo by a STRONG signal (PR URL, repo URL, owner/name#N) is
+  // never rebound by a bare slug-shaped token.
+  it("a bare slug-shaped token never rebinds a thread bound by URL — the PR is still inherited", async () => {
     stubFetch({ body: { state: "open", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
     const text = "both nits addressed (index.ts + features/memory.md §22). Please re-review; comment only.";
     await expect(resolveRepoContext(msg(text), history)).resolves.toEqual({ repo: "acme/api", pr: 7, headSha: SHA });
@@ -445,7 +448,7 @@ describe("resolveRepoContext: thread history inheritance", () => {
     await expect(resolveRepoContext(msg("on fix/x"), history)).resolves.toEqual({ repo: "acme/api", ref: "fix/x" });
   });
 
-  it("`on <the established repo's own slug>` restates the repo — it never becomes the ref (live incident 2026-09-03: ship's base became 'coreplanelabs/switchboard')", async () => {
+  it("`on <the established repo's own slug>` restates the repo — it never becomes the ref (else ship's base branch becomes 'acme/api')", async () => {
     await expect(
       resolveRepoContext(msg("auto-merge is now disabled on acme/api — retry the task"), history),
     ).resolves.toEqual({ repo: "acme/api" });
@@ -456,14 +459,14 @@ describe("resolveRepoContext: thread history inheritance", () => {
     await expect(resolveRepoContext(msg("also check https://github.com/acme/other"), history)).resolves.toEqual({
       repo: "acme/other",
     });
-    // Bare token: the thread's established repo stays (2026-08-29 guard).
+    // Bare token: the thread's established repo stays (weak signals never rebind).
     await expect(resolveRepoContext(msg("also check acme/other"), history)).resolves.toEqual({ repo: "acme/api" });
   });
 
-  // Regression (found validating #138): a review follow-up saying "the
-  // `unset/unset` sentinel is gone" ran against repo `unset/unset` in a cold
-  // sandbox — a prose token in backticks outranked both the PR URL in the same
-  // message and the thread's repo, and the verdict never reached GitHub.
+  // A review follow-up saying "the `unset/unset` sentinel is gone" once ran
+  // against repo `unset/unset` in a cold sandbox — a prose token in backticks
+  // outranked both the PR URL in the same message and the thread's repo, and
+  // the verdict never reached GitHub.
   it("a token inside a code span never establishes a repo — the thread's repo is kept", async () => {
     const { fn } = stubFetch();
     await expect(
@@ -635,18 +638,17 @@ describe("PR head SHA for review pinning", () => {
   });
 });
 
-// Regression (2026-08-29): three Slack replies in a thread whose real repo was
-// coreplanelabs/switchboard each contained an un-backticked prose token shaped
-// like an owner/name slug — `reflection/review-post`, `try/catch`,
-// `comment/spec` — and each rebound the thread's repo, sending a review into a
-// cold sandbox for a repo that does not exist. #142 excluded code-spanned
-// tokens and #167 made STRONG bindings sticky, but a weakly-bound thread (a
-// bare `in coreplanelabs/switchboard` opener) was still hijacked by the next
-// prose slug. The guard: a bare token NEVER overrides a repo the thread
+// Three replies in a thread whose real repo is acme/api, each containing an
+// un-backticked prose token shaped like an owner/name slug —
+// `reflection/review-post`, `try/catch`, `comment/spec` — must not rebind the
+// thread's repo and send a review into a cold sandbox for a repo that does not
+// exist. Excluding code-spanned tokens and making STRONG bindings sticky is
+// not enough: a weakly-bound thread (a bare `in acme/api` opener) would still
+// be hijacked by the next prose slug. The guard: a bare token NEVER overrides a repo the thread
 // already established (any strength), and in an unbound thread it binds only
 // when the injectable resident probe confirms an onboarded resource (no probe
 // configured → binds as before: there is no registry to consult).
-describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () => {
+describe("bare prose slugs never hijack a thread", () => {
   const PAYLOADS = [
     "the reflection/review-post step is deduped now — one verdict per head SHA. please re-review",
     "good catch — wrapped the resolver in try/catch so a probe failure degrades to repo-only",
@@ -655,7 +657,7 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
   const boundHistory = [
     {
       role: "user" as const,
-      text: "agent:coding in coreplanelabs/switchboard: the resolver reads prose as a repo slug — fix it",
+      text: "agent:coding in acme/api: the resolver reads prose as a repo slug — fix it",
     },
     { role: "assistant" as const, text: "on it — branch pushed" },
   ];
@@ -663,34 +665,34 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
   for (const payload of PAYLOADS) {
     it(`resolveRepoContext keeps the weakly-bound thread repo: ${JSON.stringify(payload.slice(0, 40))}…`, async () => {
       const { fn } = stubFetch();
-      const probe = vi.fn(async (slug: string) => slug === "coreplanelabs/switchboard");
+      const probe = vi.fn(async (slug: string) => slug === "acme/api");
       await expect(resolveRepoContext(msg(payload), boundHistory, probe)).resolves.toEqual({
-        repo: "coreplanelabs/switchboard",
+        repo: "acme/api",
       });
       // A prose slug is never even a candidate — only the thread's repo is
       // vetted. The one exception is an ADDRESS: `in try/catch` is probed once
       // (item 29), refused, and changes nothing; never more than that.
-      expect(probe).toHaveBeenCalledWith("coreplanelabs/switchboard");
+      expect(probe).toHaveBeenCalledWith("acme/api");
       expect(probe).not.toHaveBeenCalledWith(expect.stringMatching(/review-post|spec/));
       expect(probe.mock.calls.length).toBeLessThanOrEqual(2);
       expect(fn).not.toHaveBeenCalled();
     });
 
-    it(`resolveRepoContext in a FRESH thread refuses the not-onboarded slug — and names it as rejected (#316): ${JSON.stringify(payload.slice(0, 40))}…`, async () => {
+    it(`resolveRepoContext in a FRESH thread refuses the not-onboarded slug — and names it as rejected: ${JSON.stringify(payload.slice(0, 40))}…`, async () => {
       const probe = vi.fn(async () => false);
       const ctx = await resolveRepoContext(msg(payload), [], probe);
       expect(ctx.repo).toBeUndefined();
       // The dispatcher tells the user the slug was refused instead of starting
-      // a repo-less run — but only for this fresh-thread case (#316).
+      // a repo-less run — but only for this fresh-thread case.
       expect(ctx.rejectedRepo).toMatch(/^[a-z]+\/[a-z-]+$/);
       expect(probe).toHaveBeenCalledTimes(1);
     });
 
     it(`repoFromThread keeps the weakly-bound thread repo: ${JSON.stringify(payload.slice(0, 40))}…`, () => {
       const h = [...boundHistory, { role: "user" as const, text: payload }];
-      expect(repoFromThread(h, (slug) => slug === "coreplanelabs/switchboard")).toBe("coreplanelabs/switchboard");
+      expect(repoFromThread(h, (slug) => slug === "acme/api")).toBe("acme/api");
       // The no-override rule holds even without a probe (sync callers may have none).
-      expect(repoFromThread(h)).toBe("coreplanelabs/switchboard");
+      expect(repoFromThread(h)).toBe("acme/api");
     });
 
     it(`repoFromThread in a FRESH thread refuses the not-onboarded slug: ${JSON.stringify(payload.slice(0, 40))}…`, () => {
@@ -705,24 +707,22 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
     });
   });
 
-  it("a fresh thread whose only signal is a rejected bare slug reports it as rejectedRepo, no repo (#316)", async () => {
+  it("a fresh thread whose only signal is a rejected bare slug reports it as rejectedRepo, no repo", async () => {
     const probe = vi.fn(async () => false);
-    await expect(
-      resolveRepoContext(msg("agent:coding in coreplanelabs/try-catch: say hi"), [], probe),
-    ).resolves.toEqual({
-      rejectedRepo: "coreplanelabs/try-catch",
+    await expect(resolveRepoContext(msg("agent:coding in acme/try-catch: say hi"), [], probe)).resolves.toEqual({
+      rejectedRepo: "acme/try-catch",
     });
   });
 
-  it("a thread weakly bound to a repo the probe rejects reports THAT repo as rejected on a signal-less follow-up (#316)", async () => {
+  it("a thread weakly bound to a repo the probe rejects reports THAT repo as rejected on a signal-less follow-up", async () => {
     const probe = vi.fn(async () => false);
-    const h = [{ role: "user" as const, text: "agent:coding in coreplanelabs/try-catch: say hi" }];
+    const h = [{ role: "user" as const, text: "agent:coding in acme/try-catch: say hi" }];
     await expect(resolveRepoContext(msg("now run git status"), h, probe)).resolves.toEqual({
-      rejectedRepo: "coreplanelabs/try-catch",
+      rejectedRepo: "acme/try-catch",
     });
   });
 
-  it("a rejected `on <slug>` mention is reported too; an accepted candidate never leaves rejectedRepo behind (#316)", async () => {
+  it("a rejected `on <slug>` mention is reported too; an accepted candidate never leaves rejectedRepo behind", async () => {
     await expect(resolveRepoContext(msg("agent:coding on acme/nope: fix it"), [], async () => false)).resolves.toEqual({
       rejectedRepo: "acme/nope",
     });
@@ -747,16 +747,16 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
   });
 });
 
-// Addressed repos (resident-repos.md item 29, the 2026-09-04 wrong-repo run):
+// Addressed repos (resident-repos.md item 29):
 // `in <owner/name>` / `in <name>` names the TARGET of a request. Vetted
 // against the resident registry, an addressed repo is a STRONG signal — it
 // binds a fresh thread and rebinds a bound one — because a registry-confirmed
 // repo is unambiguous in a way a prose slug (`features/memory.md`) never is.
 // A bare NAME resolves only through the registry listing and only when exactly
-// one onboarded repo carries it ("in nominal" → coreplanelabs/nominal); an
+// one onboarded repo carries it ("in atlas" → acme/atlas); an
 // unknown or ambiguous name is prose and binds nothing.
 describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind once the registry vets them", () => {
-  const onboarded = ["acme/api", "acme/web", "acme/nominal"];
+  const onboarded = ["acme/api", "acme/web", "acme/atlas"];
   const probe = vi.fn(async (slug: string) => onboarded.includes(slug));
   const slugs = vi.fn(async () => onboarded);
   // A thread bound by URL to acme/api (no PR, so no inherited-PR fetch).
@@ -774,7 +774,7 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     ).resolves.toEqual({ repo: "acme/api" });
   });
 
-  it("an onboarded slug that is merely mentioned (not addressed with `in`) still never rebinds — the #167 guard stands", async () => {
+  it("an onboarded slug that is merely mentioned (not addressed with `in`) still never rebinds — the strong-binding guard stands", async () => {
     await expect(resolveRepoContext(msg("also check acme/web"), boundToApi, probe, slugs)).resolves.toEqual({
       repo: "acme/api",
     });
@@ -788,27 +788,27 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
 
   it("`in <name>`: a bare repo name carried by exactly one onboarded resident binds it in a fresh thread", async () => {
     await expect(
-      resolveRepoContext(msg("agent:coding in nominal, the consent page is impossibly long"), [], probe, slugs),
+      resolveRepoContext(msg("agent:coding in atlas, the consent page is impossibly long"), [], probe, slugs),
     ).resolves.toEqual({
-      repo: "acme/nominal",
+      repo: "acme/atlas",
     });
   });
 
   it("`in <name>` rebinds a URL-bound thread too (the target was named explicitly)", async () => {
     await expect(
-      resolveRepoContext(msg("agent:coding in nominal: same fix there"), boundToApi, probe, slugs),
-    ).resolves.toEqual({ repo: "acme/nominal" });
+      resolveRepoContext(msg("agent:coding in atlas: same fix there"), boundToApi, probe, slugs),
+    ).resolves.toEqual({ repo: "acme/atlas" });
   });
 
   it("an ambiguous name (two owners) binds nothing — fresh thread stays repo-less, a bound thread keeps its repo", async () => {
-    const two = vi.fn(async () => ["acme/nominal", "beta/nominal"]);
-    await expect(resolveRepoContext(msg("agent:coding in nominal: fix"), [], probe, two)).resolves.toEqual({});
-    await expect(resolveRepoContext(msg("agent:coding in nominal: fix"), boundToApi, probe, two)).resolves.toEqual({
+    const two = vi.fn(async () => ["acme/atlas", "beta/atlas"]);
+    await expect(resolveRepoContext(msg("agent:coding in atlas: fix"), [], probe, two)).resolves.toEqual({});
+    await expect(resolveRepoContext(msg("agent:coding in atlas: fix"), boundToApi, probe, two)).resolves.toEqual({
       repo: "acme/api",
     });
   });
 
-  it("a bare name counts only in the directive position — `in api` deep in prose never rebinds, even when a repo is called api (#445 F1)", async () => {
+  it("a bare name counts only in the directive position — `in api` deep in prose never rebinds, even when a repo is called api", async () => {
     await expect(
       resolveRepoContext(
         msg("the crash is in api, see the logs"),
@@ -821,7 +821,7 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     // Directives and a mention may precede it; anything else is prose.
     await expect(
       resolveRepoContext(
-        msg("<@U0BQNU1AD27> agent:coding model:anthropic/claude-fable-5 in api: fix it"),
+        msg("<@U0AAAAAAAAA> agent:coding model:anthropic/claude-fable-5 in api: fix it"),
         [],
         probe,
         slugs,
@@ -834,7 +834,7 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     ).resolves.toEqual({ repo: "acme/web" });
   });
 
-  it("the registry did not ANSWER for an addressed slug in the current message → unverifiedRepo, never a fall back to the thread's old repo (#445 F2)", async () => {
+  it("the registry did not ANSWER for an addressed slug in the current message → unverifiedRepo, never a fall back to the thread's old repo", async () => {
     const down = vi.fn(async (): Promise<boolean | "unreachable"> => "unreachable");
     await expect(resolveRepoContext(msg("agent:coding in acme/web: fix it"), boundToApi, down, slugs)).resolves.toEqual(
       { unverifiedRepo: "acme/web" },
@@ -851,8 +851,8 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     ).resolves.toEqual({ unverifiedRepo: "acme/web" });
     // A URL in the same message still wins — it needs no vetting.
     await expect(
-      resolveRepoContext(msg("agent:coding in acme/web: see https://github.com/acme/nominal"), boundToApi, down, slugs),
-    ).resolves.toEqual({ repo: "acme/nominal" });
+      resolveRepoContext(msg("agent:coding in acme/web: see https://github.com/acme/atlas"), boundToApi, down, slugs),
+    ).resolves.toEqual({ repo: "acme/atlas" });
   });
 
   it("an unanswered address in HISTORY is no answer: older strong signals still bind; a fresh thread's unvetted weak slug reports unverifiedRepo, not rejectedRepo", async () => {
@@ -872,7 +872,7 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
   });
 
   it("no registry lister → names are ignored; slug addressing still works", async () => {
-    await expect(resolveRepoContext(msg("agent:coding in nominal: fix"), [], probe)).resolves.toEqual({});
+    await expect(resolveRepoContext(msg("agent:coding in atlas: fix"), [], probe)).resolves.toEqual({});
     await expect(resolveRepoContext(msg("agent:coding in acme/web: fix"), boundToApi, probe)).resolves.toEqual({
       repo: "acme/web",
     });
@@ -882,7 +882,7 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     const failing = vi.fn(async (): Promise<string[] | undefined> => {
       throw new Error("resident admin unreachable");
     });
-    await expect(resolveRepoContext(msg("agent:coding in nominal: fix"), boundToApi, probe, failing)).resolves.toEqual({
+    await expect(resolveRepoContext(msg("agent:coding in atlas: fix"), boundToApi, probe, failing)).resolves.toEqual({
       repo: "acme/api",
     });
   });
@@ -897,19 +897,19 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
   it("the registry is listed at most once per resolution, however many names the thread carries", async () => {
     const lister = vi.fn(async () => onboarded);
     const h = [
-      { role: "user" as const, text: "agent:coding in nominal: fix the page" },
+      { role: "user" as const, text: "agent:coding in atlas: fix the page" },
       { role: "user" as const, text: "and in web the same" },
     ];
-    await expect(resolveRepoContext(msg("in nominal again: run the tests"), h, probe, lister)).resolves.toEqual({
-      repo: "acme/nominal",
+    await expect(resolveRepoContext(msg("in atlas again: run the tests"), h, probe, lister)).resolves.toEqual({
+      repo: "acme/atlas",
     });
     expect(lister).toHaveBeenCalledTimes(1);
   });
 
   it("an address in HISTORY binds the follow-up (the thread's binding is derived from every user turn)", async () => {
-    const h = [{ role: "user" as const, text: "agent:coding in nominal, the consent page is impossibly long" }];
+    const h = [{ role: "user" as const, text: "agent:coding in atlas, the consent page is impossibly long" }];
     await expect(resolveRepoContext(msg("now run the tests"), h, probe, slugs)).resolves.toEqual({
-      repo: "acme/nominal",
+      repo: "acme/atlas",
     });
   });
 
@@ -930,9 +930,9 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     expect(
       repoFromThread([...boundToApi, { role: "user", text: "agent:coding in acme/nope: port it" }], isOnboarded),
     ).toBe("acme/api");
-    expect(
-      repoFromThread([...boundToApi, { role: "user", text: "agent:coding in nominal: port it" }], isOnboarded),
-    ).toBe("acme/api");
+    expect(repoFromThread([...boundToApi, { role: "user", text: "agent:coding in atlas: port it" }], isOnboarded)).toBe(
+      "acme/api",
+    );
     // No predicate (local/dev): nothing can be vetted, so an addressed slug stays weak like any other.
     expect(repoFromThread([...boundToApi, { role: "user", text: "agent:coding in acme/web: port it" }])).toBe(
       "acme/api",

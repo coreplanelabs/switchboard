@@ -4,7 +4,7 @@ import { COLD_START_ALLOWANCE_MS, DRAIN_DEADLINE_MS, MIN_CATCH_UP_WINDOW_MS, cat
 
 // Feature: features/slack-channel.md item 7 — the reconnect catch-up window is
 // the ONLY recovery for mentions posted while a deploy-time drain holds the
-// socket closed (#272), so it must cover the whole drain deadline plus a cold
+// socket closed, so it must cover the whole drain deadline plus a cold
 // start. Lowering DEFAULT_WINDOW_MS below that is a silent blackout regression.
 describe("catch-up window vs drain deadline", () => {
   it("the default window covers the drain deadline plus the cold-start allowance", () => {

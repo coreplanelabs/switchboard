@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { formatTraceparent, parseTraceparent } from "./traceparent.js";
 import { TRACE_CONTEXT_HEADERS } from "./traceparent.js";
 
+/** The W3C Trace Context specification's own example trace id and parent span id. */
 const TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
 const SPAN = "00f067aa0ba902b7";
 

@@ -14,9 +14,10 @@ import type { RunStatus } from "./runRecord.js";
 import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 
 // The run registry is the unit-testable core of the external live-view page
-// (Area 2 / #43) and the ONE per-run event store while a run is live (#157
-// KTD9): a run's events (tool steps and the `message` events carrying the
-// exchange) live here in a bounded backlog — so a viewer who opens the
+// (features/live-view.md) and the ONE per-run event store while a run is live
+// (docs/decisions/0006-runs-have-two-lives.md): a run's events (tool steps and
+// the `message` events carrying the exchange) live here in a bounded backlog —
+// so a viewer who opens the
 // capability link mid-run sees what already happened, and the finish-time
 // snapshot feeds the friction diagnosis and the persisted run record — and
 // finished runs are evicted after a short TTL. Durability is the run store's
@@ -24,7 +25,8 @@ import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 // is intentional: a restart ends the runs it was streaming, and their
 // (already-visible) events simply stop.
 //
-// Access is "capability OR operator" (#157 KTD7). The capability: create()
+// Access is "capability OR operator" (docs/decisions/0013-capability-tokens-for-live-run-pages.md).
+// The capability: create()
 // mints a random run id AND a random view token; the token-gated reads
 // (subscribe/has/snapshot/requestStop) require the correct token for that id,
 // compared in constant time — the gate behind the live URL, kept as defense in
@@ -35,7 +37,7 @@ import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 // an operator is; it only trusts that its token-free callers already did.
 
 /**
- * Per-run stop control (#101). One per run, minted by `RunRegistry.create()` and
+ * Per-run stop control. One per run, minted by `RunRegistry.create()` and
  * handed to the runner; `requestStop` is driven through the registry's
  * token-gated `requestStop(id, token, mode)`. Two modes, one direction:
  *   - `soft`: only records the request. The runner polls `requested` between
@@ -107,7 +109,7 @@ export interface RunMeta {
   userId: string;
   threadKey: string;
   /** The channel's visibility as the `ChannelDirectory` reported it at dispatch
-   *  (authorization KTD7) — what `member-of` reads on a live run. The dispatcher
+   *  (authorization) — what `member-of` reads on a live run. The dispatcher
    *  always stamps it; a hand-built run without it is `unknown`, never public. */
   channelVisibility?: ChannelVisibility;
   /** `owner/name` for repo runs. */
@@ -116,7 +118,7 @@ export interface RunMeta {
    *  so the index can offer the thread without opening the run (live-view item 20). */
   sourceUrl?: string;
   /** Resolved display name of who started it (`IncomingMessage.userName`) — the
-   *  source mark's hover says `via Slack · justin`, never a raw member id. */
+   *  source mark's hover says `via Slack · alice`, never a raw member id. */
   userName?: string;
   /** Our process saw the message that started this run (features/tracing.md);
    *  the run's duration opens here, falling back to `startedAt` when absent. */
@@ -175,10 +177,10 @@ export interface RunSummary {
   sourceUrl?: string;
   /** `RunMeta.userName`: who started it, resolved. */
   userName?: string;
-  /** Present only once a stop has been requested (#101). */
+  /** Present only once a stop has been requested. */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
-   *  store (#157 KTD9) — how an index client learns a row outlives eviction. */
+   *  store — how an index client learns a row outlives eviction. */
   persisted?: boolean;
   /** The seven stamps and the one duration (features/tracing.md). `receivedAt`:
    *  our process saw the message, from the adapter's clock (stamped by the
@@ -273,7 +275,7 @@ export type IndexSubscriber = (event: IndexEvent) => void;
  *  the display truncation. */
 export const RUN_LABEL_MAX = 200;
 
-/** Default per-run backlog bounds (#157 KTD9): count and bytes. The registry
+/** Default per-run backlog bounds: count and bytes. The registry
  *  backlog is the ONLY per-run event store — the friction diagnosis and the run
  *  record are built from it — so it is bounded generously and by both axes. */
 export const DEFAULT_BACKLOG_LIMIT = 8000;
@@ -548,7 +550,7 @@ export class RunRegistry {
   }
 
   /**
-   * Ask a live run to stop (#101) — the control-plane entry behind
+   * Ask a live run to stop — the control-plane entry behind
    * `POST /runs/:id/stop`. Same constant-time token gate as every read (wrong
    * token and unknown run are indistinguishable: `not-found`); a finished run is
    * refused (`finished`). On success the run's `RunControl` is driven (the runner
@@ -564,7 +566,7 @@ export class RunRegistry {
   }
 
   /**
-   * Token-free stop for an authorized operator (#157 KTD7) — `RunsService.stopRun`
+   * Token-free stop for an authorized operator — `RunsService.stopRun`
    * after the command layer authorized the caller. Same outcomes as
    * `requestStop`; additionally the `stop_requested` note carries the structured
    * `actor` (sanitized: `ACTOR_ID_PATTERN` charset, ≤ 128 chars) so the stream
@@ -719,7 +721,7 @@ export class RunRegistry {
   }
 
   /**
-   * Record that the durable run store confirmed this run's record (#157 KTD9):
+   * Record that the durable run store confirmed this run's record:
    * the history writer calls this on a successful put. The summary gains
    * `persisted: true` and the index is upserted, so an `?all=1` client can keep
    * the row when eviction fires. A no-op for an unknown or already-evicted run
@@ -826,8 +828,8 @@ export class RunRegistry {
 
   /**
    * Token-gated, read-only snapshot of a run's retained backlog plus whether it
-   * has finished — the input to the run-friction analyzer (#84) and the run
-   * record (#157) for a run that is still in the registry (live, or finished
+   * has finished — the input to the run-friction analyzer and the run
+   * record for a run that is still in the registry (live, or finished
    * within the TTL). `eventCount` is the monotonic published total (the backlog
    * is bounded, so `events.length` may be smaller) and `startedAt` the create()
    * clock time — the two record fields not derivable from the events. A COPY of
@@ -841,7 +843,7 @@ export class RunRegistry {
     return RunRegistry.snapshotOf(run);
   }
 
-  /** Token-free summary of one non-evicted run for `RunsService` (#157 KTD7),
+  /** Token-free summary of one non-evicted run for `RunsService`,
    *  or null when unknown/evicted. Carries the token like every `RunSummary` —
    *  the service projects it out before anything leaves the core. */
   getById(id: string): RunSummary | null {
@@ -850,7 +852,7 @@ export class RunRegistry {
     return run ? this.summaryOf(run) : null;
   }
 
-  /** Token-free `snapshot` for `RunsService` (#157 KTD7): the same copied
+  /** Token-free `snapshot` for `RunsService`: the same copied
    *  backlog + finished/startedAt/eventCount, null when unknown/evicted. */
   snapshotById(id: string): RunSnapshot | null {
     this.sweep();

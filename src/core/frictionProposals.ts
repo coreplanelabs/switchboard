@@ -7,15 +7,15 @@ import {
 } from "./runFriction.js";
 import { formatDuration } from "./time/formatDuration.js";
 
-// Friction proposer (Area 7b / #84, second piece): the PURE half of turning
-// the run-friction ANALYSIS (#105, `analyzeRunFriction`) into ACTION. Given the
+// Friction proposer (features/self-improvement.md): the PURE half of turning
+// the run-friction ANALYSIS (`analyzeRunFriction`) into ACTION. Given the
 // diagnoses of many recent runs, it (1) reduces each finding to a stable
 // cross-run signature, (2) clusters signatures that recur across DISTINCT runs,
 // (3) ranks them, (4) renders the top ones as GitHub-issue proposals carrying
 // the evidence and a concrete suggested fix, and (5) dedupes against proposals
 // already open via a marker in the issue body. No I/O, no clock: the same
 // records always yield the same proposals, so the whole step is testable
-// against recorded runs — which is exactly why #105 made the analyzer pure.
+// against recorded runs — which is exactly why the analyzer is pure.
 //
 // It never reimplements the analyzer: every pattern is built from the
 // `FrictionFinding`s the analyzer already produced. The one cross-run signal it

@@ -13,7 +13,7 @@ import { registerScheduleCommands, type ScheduleCommandDeps } from "./schedule.j
 // Every command the bot registers, and the deps object they are bound to.
 // Bound ONCE per process by `buildCoreCommands` (src/core/commandCatalogue.ts)
 // — the one binding the bot (src/index.ts) and the CLI (src/cli.ts) share — so
-// HTTP, MCP, CLI, and chat all expose the same catalogue (KD2). Since phase 4b
+// HTTP, MCP, CLI, and chat all expose the same catalogue. Since phase 4b
 // this IS every command there is: no legacy chat parser, no standalone CLI. A
 // new command group adds its deps slice here and its `register*` call below; no
 // adapter changes.

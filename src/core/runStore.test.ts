@@ -8,7 +8,7 @@ import type { RunEvent } from "./runEvents.js";
 import { buildRunStore, FileRunStore, InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
 import { WorkerRunStore } from "./runStoreWorker.js";
 
-// Feature: features/run-history.md — the RunStore seam (U2): in-memory and
+// Feature: features/run-history.md — the RunStore seam: in-memory and
 // directory-backed file stores sharing one retention function with the Worker.
 
 const DAY = 86_400_000;
@@ -31,7 +31,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     agent: "review",
     model: "anthropic/m",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1",
     channelVisibility: "unknown",
     startedAt: finishedAt - 5000,
@@ -106,7 +106,7 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
     // and rewrite the index — O(n) I/O per put by design (self-healing index).
     // ~300 ms on an idle SSD, but on a busy runner it has blown the default
     // timeout twice now (a CI runner at 260 records; a resident review worktree
-    // under build contention, #403). The generous ceiling keeps the test's
+    // under build contention). The generous ceiling keeps the test's
     // coverage without racing the disk.
     it(
       "list is newest-first, capped at 200 (default 50), with a `before` cursor and filters",
@@ -149,16 +149,20 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
     it("list applies `visibleTo` — the actor's predicate — as its own filter, ANDed with the others; a row without the stamp is `unknown` and never public", async () => {
       const { store } = make();
       await store.put(
-        record("pub", NOW - 1000, { channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }),
+        record("pub", NOW - 1000, { channelId: "slack:C_PUB", userId: "slack:UALICE", channelVisibility: "public" }),
       );
       await store.put(
-        record("priv", NOW - 2000, { channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }),
+        record("priv", NOW - 2000, { channelId: "slack:G1", userId: "slack:UBOB", channelVisibility: "private" }),
       );
       await store.put(
         record("ops", NOW - 3000, { channelId: "http:ops", userId: "http:ci", channelVisibility: "machine" }),
       );
       await store.put(
-        record("old-style", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:U3", channelVisibility: "unknown" }),
+        record("old-style", NOW - 4000, {
+          channelId: "slack:C_PUB",
+          userId: "slack:UCAROL",
+          channelVisibility: "unknown",
+        }),
       );
       const ids = async (visibleTo: RunListOptions["visibleTo"], more: Partial<RunListOptions> = {}) =>
         (await store.list({ visibleTo, ...more })).map((r) => r.id);
@@ -179,7 +183,7 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
           kind: "or",
           of: [
             { kind: "visibility-in", visibilities: ["public"] },
-            { kind: "user-is", userId: "slack:U2" },
+            { kind: "user-is", userId: "slack:UBOB" },
           ],
         }),
       ).toEqual(["pub", "priv"]);

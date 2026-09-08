@@ -1,4 +1,4 @@
-// Feature: features/run-history.md — `RunsService` (#157 U5): the one async
+// Feature: features/run-history.md — `RunsService`: the one async
 // service behind every `runs.*` read and stop. It merges the live registry with
 // the durable store into token-free projections, pages events with a bounded
 // page, authorizes the live SSE path synchronously, and records who asked a run
@@ -46,7 +46,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: `slack:C1:${id}`,
     channelVisibility: "unknown",
     startedAt: finishedAt - 10_000,
@@ -163,12 +163,12 @@ describe("RunsService.listRuns — read merge", () => {
     expect(after.runs[0].stop).toBeUndefined(); // stop state lived only on the registry row
   });
 
-  it("a live run's provisional interrupted tombstone (#375) never surfaces: the run lists as live under `all`, is absent from `finished`, and getRun serves the live row", async () => {
+  it("a live run's provisional interrupted tombstone never surfaces: the run lists as live under `all`, is absent from `finished`, and getRun serves the live row", async () => {
     const { reg, svc, store } = setup();
     const { id } = reg.create("coding · acme/x", {
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:x",
     });
     reg.publish(id, { type: "input", text: "go" });
@@ -199,7 +199,7 @@ describe("RunsService.listRuns — read merge", () => {
     expect(got.ok && got.value.status).toBeUndefined();
   });
 
-  it("a crash leaves the tombstone as the record (#375): with the registry empty, the interrupted row lists under `finished` and reads as interrupted", async () => {
+  it("a crash leaves the tombstone as the record: with the registry empty, the interrupted row lists under `finished` and reads as interrupted", async () => {
     const { svc, store } = setup(); // an empty registry = the next container after a crash
     await store!.put(record("dead", NOW, { status: "interrupted", startedAt: NOW }));
     const finished = await svc.listRuns({ visibleTo: ALL, status: "finished" });
@@ -286,7 +286,7 @@ describe("RunsService.listRuns — read merge", () => {
       agent: "coding",
       model: "anthropic/claude",
       channelId: "slack:C1",
-      userId: "slack:U9",
+      userId: "slack:UIVY",
       threadKey: "slack:C1:9",
     });
     const bare = reg.create("bare"); // no meta: excluded by an agent/channel filter, kept otherwise
@@ -297,7 +297,7 @@ describe("RunsService.listRuns — read merge", () => {
       agent: "coding",
       model: "anthropic/claude",
       channelId: "slack:C1",
-      userId: "slack:U9",
+      userId: "slack:UIVY",
       threadKey: "slack:C1:9",
     });
 
@@ -314,7 +314,7 @@ describe("RunsService.listRuns — read merge", () => {
       agent: "coding",
       model: "anthropic/claude",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:x",
       channelVisibility: "unknown" as const,
       repo: "acme/x",
@@ -479,7 +479,7 @@ describe("RunsService.listRuns — read merge", () => {
     const run = reg.create("r", {
       agent: "review",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
     });
     tick(5_000);
@@ -495,7 +495,7 @@ describe("RunsService.listRuns — read merge", () => {
     const run = reg.create("r", {
       agent: "review",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
     });
     tick(7_000);
@@ -520,13 +520,13 @@ describe("RunsService.listRuns — read merge", () => {
     });
   });
 
-  it("`visibleTo` is pushed down (authorization R6): live rows are filtered by the predicate, the store is asked with its wire form, `all` sends no filter, and `none` touches neither", async () => {
+  it("`visibleTo` is pushed down to the store: live rows are filtered by the predicate, the store is asked with its wire form, `all` sends no filter, and `none` touches neither", async () => {
     const { reg, svc, store } = setup();
     await store!.put(
-      record("pub", NOW - DAY, { channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }),
+      record("pub", NOW - DAY, { channelId: "slack:C_PUB", userId: "slack:UALICE", channelVisibility: "public" }),
     );
     await store!.put(
-      record("priv", NOW - 2 * DAY, { channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }),
+      record("priv", NOW - 2 * DAY, { channelId: "slack:G1", userId: "slack:UBOB", channelVisibility: "private" }),
     );
     const liveOps = reg.create("ops", {
       agent: "coding",
@@ -538,14 +538,14 @@ describe("RunsService.listRuns — read merge", () => {
     const livePriv = reg.create("priv-live", {
       agent: "coding",
       channelId: "slack:G1",
-      userId: "slack:U2",
+      userId: "slack:UBOB",
       threadKey: "slack:G1:1",
       channelVisibility: "private",
     });
     const unstamped = reg.create("bare", {
       agent: "coding",
       channelId: "slack:C_PUB",
-      userId: "slack:U3",
+      userId: "slack:UCAROL",
       threadKey: "slack:C_PUB:2",
     }); // no stamp = unknown
     const list = vi.spyOn(store!, "list");
@@ -579,7 +579,7 @@ describe("RunsService.listRuns — read merge", () => {
         kind: "or",
         of: [
           { kind: "visibility-in", visibilities: new Set(["public"]) },
-          { kind: "user-is", userId: "slack:U2" },
+          { kind: "user-is", userId: "slack:UBOB" },
         ],
       },
     });
@@ -599,7 +599,7 @@ describe("RunsService.listRuns — read merge", () => {
 });
 
 // One durable registry across container generations (features/run-history.md
-// item 41; #556 criterion 3): a run live on the ledger under another generation
+// item 41): a run live on the ledger under another generation
 // — or reclaimed here and not yet launched — lists, reads, pages, diagnoses and
 // stops through the same service as a run in this process's registry.
 describe("RunsService with the run ledger — one registry across generations (run-history item 41)", () => {
@@ -619,7 +619,7 @@ describe("RunsService with the run ledger — one registry across generations (r
       startedAt: NOW - 5_000,
       meta: {
         channelId: "slack:C9",
-        userId: over.userId ?? "slack:U9",
+        userId: over.userId ?? "slack:UIVY",
         threadKey: `slack:C9:${id}`,
         agent: over.agent ?? "coding",
         model: "anthropic/claude",
@@ -641,7 +641,7 @@ describe("RunsService with the run ledger — one registry across generations (r
   it("lists a run live on the ledger under another generation as a live row — its agent, sender, repo, event count and activity from the ledger, its owner generation named — under `all` and `active`, never under `finished`; its store tombstone never surfaces", async () => {
     const { svc, store, ledger } = ledgerSetup();
     await farRun(ledger);
-    // The start tombstone (#375) a killed run would leave: terminal in the store while the ledger says live.
+    // The start tombstone a killed run would leave: terminal in the store while the ledger says live.
     await store!.put(
       record("far-1", NOW - 5_000, { status: "interrupted", startedAt: NOW - 5_000, finishedAt: NOW - 5_000 }),
     );
@@ -652,7 +652,7 @@ describe("RunsService with the run ledger — one registry across generations (r
       agent: "coding",
       model: "anthropic/claude",
       channelId: "slack:C9",
-      userId: "slack:U9",
+      userId: "slack:UIVY",
       threadKey: "slack:C9:far-1",
       channelVisibility: "public",
       repo: "acme/api",
@@ -677,7 +677,7 @@ describe("RunsService with the run ledger — one registry across generations (r
     const mine = reg.create("coding · mine", {
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:mine",
     });
     await ledger.claim({
@@ -686,7 +686,7 @@ describe("RunsService with the run ledger — one registry across generations (r
       gen: "g-ME",
       leaseMs: 30_000,
       startedAt: NOW,
-      meta: { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:mine", agent: "coding" },
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:mine", agent: "coding" },
       card: null,
       system: "sys",
       tools: [],
@@ -699,9 +699,9 @@ describe("RunsService with the run ledger — one registry across generations (r
 
   it("the viewer's predicate applies to ledger rows as to any row", async () => {
     const { svc, ledger } = ledgerSetup();
-    await farRun(ledger, "far-1", { userId: "slack:U9" });
-    await farRun(ledger, "far-2", { userId: "slack:U8" });
-    const res = await svc.listRuns({ visibleTo: { kind: "user-is", userId: "slack:U8" }, status: "active" });
+    await farRun(ledger, "far-1", { userId: "slack:UIVY" });
+    await farRun(ledger, "far-2", { userId: "slack:UHAL" });
+    const res = await svc.listRuns({ visibleTo: { kind: "user-is", userId: "slack:UHAL" }, status: "active" });
     expect(res.runs.map((r) => r.id)).toEqual(["far-2"]);
     expect((await svc.listRuns({ visibleTo: { kind: "none" }, status: "active" })).runs).toEqual([]);
   });
@@ -778,7 +778,7 @@ describe("RunsService with the run ledger — one registry across generations (r
       gen: "g-ME",
       leaseMs: 30_000,
       startedAt: NOW,
-      meta: { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:mine" },
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:mine" },
       card: null,
       system: "sys",
       tools: [],

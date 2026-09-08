@@ -4,14 +4,14 @@ import type { CompletionResult, TokenUsage } from "../providers/types.js";
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
 import type { PrDescription } from "./prDescriptionTypes.js";
 
-// Run visibility (Area 2 / R12): a typed stream of what an agent is doing —
+// Run visibility (features/run-visibility.md): a typed stream of what an agent is doing —
 // tool calls and their (redacted, summarized) results — emitted by the runner.
 // Today the in-channel status card consumes it live; the external live-view
 // page (a follow-up) will consume the same stream. Keeping it a small typed
 // seam here means neither consumer reaches into the runner's internals.
 
 //
-// Timing + lifecycle (Area 7b / #84): every event carries an optional `at`
+// Timing + lifecycle: every event carries an optional `at`
 // (epoch ms, stamped by the runner's injectable clock) so the run-friction
 // analyzer (`runFriction.ts`) can attribute delay; a `tool_result` marks exec-
 // INFRASTRUCTURE failures (`infra: true`, an `ExecInfraError` — the sandbox, not
@@ -22,7 +22,7 @@ import type { PrDescription } from "./prDescriptionTypes.js";
 
 /** Typed lifecycle notices the runner emits alongside its `onProgress` text.
  *  `stop_requested` is published by the registry when an operator asks the run
- *  to stop from /runs (#101); `stopped` by the runner when it honors it. */
+ *  to stop from /runs; `stopped` by the runner when it honors it. */
 export type RunNoteKind =
   | "wrap_up"
   | "time_budget_exhausted"
@@ -74,12 +74,12 @@ type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] 
 const _everyKindListed: _EveryKindListed = true;
 void _everyKindListed;
 
-/** How an operator asked a run to stop (#101): `soft` — take no new steps and
+/** How an operator asked a run to stop: `soft` — take no new steps and
  *  wrap up through the normal finale; `hard` — abort the in-flight call now, no
  *  finale, tear the workspace down. */
 export type StopMode = "soft" | "hard";
 
-/** Who asked a run to stop (#157 R9): the caller's surface and its platform-
+/** Who asked a run to stop: the caller's surface and its platform-
  *  namespaced identity (`slack:U…`, `access:<sub>`, `mcp:<subject>`,
  *  `cli:local`). Recorded on the `stop_requested` note so the stream itself says
  *  who stopped the run; `id` is charset-restricted to `ACTOR_ID_PATTERN` and
@@ -270,7 +270,7 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
-  /** One prior thread turn fed to the model (#157, KD1), prefixed with its role
+  /** One prior thread turn fed to the model, prefixed with its role
    *  (`user: …` / `assistant: …`), humanized and redacted like `input`, with
    *  attachments as metadata lines. Published by the dispatcher right after
    *  `input`, bounded (newest 20 turns / 256 KiB) and gated by

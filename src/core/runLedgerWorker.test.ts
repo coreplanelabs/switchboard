@@ -40,7 +40,7 @@ const claimReq: ClaimRequest = {
   gen: "g1",
   leaseMs: LEASE_MS,
   startedAt: 1_000,
-  meta: { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1.0" },
+  meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0" },
   system: "s",
   tools: [],
 };

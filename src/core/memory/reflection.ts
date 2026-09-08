@@ -8,7 +8,7 @@ import type { HistoryItem } from "../types.js";
 import type { MemoryCandidate, MemoryRecord, MemoryScope, MemoryStore } from "./types.js";
 import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 
-// Cross-session memory WRITE path (Area 7c, #85, PR2): the post-run reflection
+// Cross-session memory WRITE path: the post-run reflection
 // pass. After a run's reply has landed, ONE cheap model call distills the thread
 // into ≤MAX_REFLECTION_FACTS durable facts + 1 episodic summary, validated and
 // secret-redacted here, then handed to `store.write` (dedup/supersede inside the
@@ -17,15 +17,15 @@ import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 // touch the user reply. Pure pieces (gate, input builder, parser) are exported
 // for unit tests; `reflect` composes them around a Provider.
 //
-// Scoped routing (#107 PR B, #253): the extractor tags each fact with an
+// Scoped routing: the extractor tags each fact with an
 // `audience` — `user` for knowledge about the requesting person (preferences,
 // habits, their own setup), `repo` for knowledge specific to the repository the
 // run worked in, `channel` for what this channel is for, `org` for shared
 // knowledge. Each fact is written to its audience's scope when the run has it
 // (else org); the summary follows the narrowest scope that got a fact — user >
-// repo > channel > org (#205). Still ONE extractor call per run.
+// repo > channel > org. Still ONE extractor call per run.
 //
-// Write gate (authorization R11, features/authorization.md item 8): the
+// Write gate (features/authorization.md item 8): the
 // audience is a HINT the policy may narrow, never widen. Every candidate's
 // write is `authorize(runActor, "memory:write", memory-scope{kind, key,
 // originChannelVisibility})`; a fact whose run originated in a private, DM, or
@@ -63,14 +63,14 @@ export interface ReflectGateInput {
   toolCalls: number;
   /** Prior turns in the thread (`io.history().length`). */
   historyTurns: number;
-  /** The resolved agent. `review` runs never reflect (#292). Absent → the
+  /** The resolved agent. `review` runs never reflect. Absent → the
    *  work-based gate alone. */
   agentName?: string;
 }
 
 /** Agents whose runs are never distilled. A review's findings already land on
  *  the PR and describe one PR at one moment — distilling them floods the org
- *  scope with "PR #N approved at <sha>, 1616 tests pass" ephemera (#292).
+ *  scope with "PR #N approved at <sha>, 1616 tests pass" ephemera.
  *  `ship` joins it (features/agent-ship.md item 12): its report is the same
  *  per-PR findings content, one pipeline's worth. */
 export const NO_REFLECT_AGENTS: ReadonlySet<string> = new Set(["review", "ship"]);
@@ -130,10 +130,10 @@ export interface ReflectionProvenance {
 }
 
 /** Who a distilled fact is for: the shared org scope, or the requesting user's
- *  own scope (#107 PR B). Decided by the extractor, defaulting to `org`. */
+ *  own scope. Decided by the extractor, defaulting to `org`. */
 export type MemoryAudience = "org" | "user" | "repo" | "channel";
 
-/** Summary inheritance order (#205, #253): the narrowest scope that received
+/** Summary inheritance order: the narrowest scope that received
  *  a fact wins, so a thread that yielded personal knowledge keeps its summary
  *  personal, a repo-specific thread keeps it in the repo, and so on. */
 const SUMMARY_INHERITANCE: readonly MemoryAudience[] = ["user", "repo", "channel"];
@@ -162,7 +162,7 @@ const REFLECTION_ENVELOPE = jsonOutput(z.object({ facts: z.array(z.unknown()), s
  *  redacted; `supersedes` survives only when it names a record the extractor was
  *  shown; `audience` is `user`/`repo`/`channel` only when it says exactly that,
  *  else `org`. The summary inherits the narrowest audience any fact carried —
- *  user > repo > channel > org (#205, #253): a thread that yielded personal (or
+ *  user > repo > channel > org: a thread that yielded personal (or
  *  repo-/channel-specific) knowledge has a summary that restates it, and
  *  routing that to org would leak it to everyone. */
 export function parseReflection(raw: string, prov: ReflectionProvenance, knownIds: Set<string>): ParsedReflection {
@@ -237,7 +237,7 @@ function parseKeywords(v: unknown): string[] | undefined {
  *  before the run (the adapter delivered the message from that channel; the
  *  repo gate admitted that repo), stated here on the membership axis so the
  *  table's `member-of` / `owner-of` rows recognize the run's own scopes and the
- *  one open question left to the policy is R11's — may THIS origin write the
+ *  one open question left to the policy is the write gate's — may THIS origin write the
  *  shared org scope. No action is added; `"all"` is left alone; the principal
  *  is not mutated. */
 export function reflectionActor(principal: Actor, run: { channelId?: string; repo?: string }): Actor {
@@ -264,8 +264,8 @@ export interface ReflectDeps extends ReflectionProvenance {
   /** Who the writes are decided for (authorization.md item 8): the run's
    *  principal as `reflectionActor` prepares it. */
   actor: Actor;
-  /** The run's stamped `channelVisibility` (KTD7) — the origin every write is
-   *  decided under. Absent → `unknown`: an unstamped run never writes org (R7). */
+  /** The run's stamped `channelVisibility` — the origin every write is
+   *  decided under. Absent → `unknown`: an unstamped run never writes org (fail-closed). */
   originChannelVisibility?: ChannelVisibility;
   history: HistoryItem[];
   request: string;
@@ -321,7 +321,7 @@ type Placement =
   | { kind: "write"; target: ScopeTarget; narrowed?: { from: MemoryScope; reason: string } }
   | { kind: "drop"; from: MemoryScope; reason: string };
 
-/** The policy's decision on one candidate (R11): its routed scope when the
+/** The policy's decision on one candidate: its routed scope when the
  *  table allows the write; a denied `org` write narrows down `narrowingOrder`
  *  to the first scope the run has AND the table allows; any other denial, or
  *  no allowed narrower scope, drops the candidate — never a wider scope, never

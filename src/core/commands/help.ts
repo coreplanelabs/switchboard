@@ -11,7 +11,7 @@ import { catalogueText, chatCatalogueText, chatForm, cliWords, type CommandShape
 // agent registry, the per-request directive syntax, and the chat catalogue
 // from the command registry itself (every chat-exposed command, in registration
 // order). Nothing about a command is hand-written here: adding a registration
-// adds its help line. In chat the bare word `help` is this command (KTD25).
+// adds its help line. In chat the bare word `help` is this command.
 
 export interface HelpCommandDeps {
   help: {
@@ -24,7 +24,7 @@ export interface HelpCommandDeps {
 const defineCommand = commandDefiner<HelpCommandDeps>();
 
 export const DIRECTIVES_HELP =
-  "`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42` (effort: low | medium | high — lower = faster turns)";
+  "`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42` (effort: low | medium | high — lower = faster turns)";
 
 /** The help text around the command list — shared by both renderings. */
 function helpFrame(output: JsonValue, commandList: (commands: CommandShape[]) => string[]): string {

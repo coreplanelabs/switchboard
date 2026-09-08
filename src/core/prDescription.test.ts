@@ -9,11 +9,12 @@ import {
 } from "./prDescription.js";
 
 // Feature: features/pr-description.md — the PR description is data; the GitHub
-// body is one rendering of it. The fixture is PR #329's own description and
-// the golden file is the body that PR carries, so the pipeline is exercised
-// end to end on a real PR, not a toy.
+// body is one rendering of it. The fixture is a real PR's description — the
+// PR that introduced the Tour, rewritten onto the fixture repo `acme/api` — and
+// the golden file is its rendered body, so the pipeline is exercised end to end
+// on a full-sized description, not a toy.
 
-const CTX = { repo: "coreplanelabs/switchboard", headSha: "685c471f31feaadd725fb917b68a2eea31c0f81a" };
+const CTX = { repo: "acme/api", headSha: "685c471f31feaadd725fb917b68a2eea31c0f81a" };
 
 function desc(over: Partial<PrDescription> = {}): PrDescription {
   return {
@@ -109,7 +110,7 @@ describe("renderPrDescriptionMarkdown", () => {
       CTX,
     );
     expect(md).toContain(
-      "### 1. First\n\nOne.\n\n**Look for:** the guard\n\nhttps://github.com/coreplanelabs/switchboard/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/a.ts#L3-L9\n\n### 2. Second\n\nTwo.\n\nhttps://github.com/coreplanelabs/switchboard/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/b.ts#L10-L10\n\n### 3. Remaining changes",
+      "### 1. First\n\nOne.\n\n**Look for:** the guard\n\nhttps://github.com/acme/api/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/a.ts#L3-L9\n\n### 2. Second\n\nTwo.\n\nhttps://github.com/acme/api/blob/685c471f31feaadd725fb917b68a2eea31c0f81a/src/b.ts#L10-L10\n\n### 3. Remaining changes",
     );
   });
 
@@ -120,13 +121,13 @@ describe("renderPrDescriptionMarkdown", () => {
     expect(a).not.toBe(b);
     expect(b).toContain(`/blob/${"a".repeat(40)}/src/a.ts#L3-L9`);
     expect(anchorUrl(CTX, { path: "x/y.ts", from: 1, to: 2 })).toBe(
-      `https://github.com/coreplanelabs/switchboard/blob/${CTX.headSha}/x/y.ts#L1-L2`,
+      `https://github.com/acme/api/blob/${CTX.headSha}/x/y.ts#L1-L2`,
     );
   });
 
   it("percent-encodes path segments (a space or `#` in a filename would break the link), keeping `/` as the separator", () => {
     expect(anchorUrl(CTX, { path: "docs/my file#1.md", from: 1, to: 2 })).toBe(
-      `https://github.com/coreplanelabs/switchboard/blob/${CTX.headSha}/docs/my%20file%231.md#L1-L2`,
+      `https://github.com/acme/api/blob/${CTX.headSha}/docs/my%20file%231.md#L1-L2`,
     );
   });
 
@@ -152,8 +153,8 @@ describe("renderPrDescriptionMarkdown", () => {
     const md = renderPrDescriptionMarkdown(
       desc({
         decisions: [
-          { title: "No period", rationale: "R1." },
-          { title: "Has period.", rationale: "R2." },
+          { title: "No period", rationale: "One." },
+          { title: "Has period.", rationale: "Two." },
         ],
         validation: {
           summary: "All green.",
@@ -165,7 +166,7 @@ describe("renderPrDescriptionMarkdown", () => {
       }),
       CTX,
     );
-    expect(md).toContain("- **No period.** R1.\n- **Has period.** R2.\n");
+    expect(md).toContain("- **No period.** One.\n- **Has period.** Two.\n");
     expect(md).toContain("## Validation\n\nAll green.\n\n| Criterion | Proof |\n|---|---|\n| a \\| b | multi line |\n");
     // A backslash in the input is escaped before the pipe is, so `\|` in a cell
     // renders as the two literal characters, not as an escaped-escape + row split.
@@ -173,16 +174,16 @@ describe("renderPrDescriptionMarkdown", () => {
   });
 });
 
-// The golden: PR #329's description as data renders to the exact body #329
-// carries. `scripts/render-pr-description.ts` produced the golden file from the
-// same fixture, and `gh pr edit --body-file` put it on the PR — so the PR body,
-// the golden file, and this assertion are one artifact by construction.
-describe("golden: PR #329 rendered through the pipeline", () => {
+// The golden: a real PR's description as data renders to the exact body that
+// PR carried. `scripts/render-pr-description.ts` produced the golden file from
+// the same fixture, and `gh pr edit --body-file` put it on the PR — so the PR
+// body, the golden file, and this assertion are one artifact by construction.
+describe("golden: a full PR description rendered through the pipeline", () => {
   it("fixture → markdown equals the checked-in body byte for byte", () => {
     const fixture = parsePrDescription(
-      JSON.parse(readFileSync(new URL("./testing/pr329.description.json", import.meta.url), "utf8")),
+      JSON.parse(readFileSync(new URL("./testing/goldenTour.description.json", import.meta.url), "utf8")),
     );
-    const golden = readFileSync(new URL("./testing/pr329.body.md", import.meta.url), "utf8");
+    const golden = readFileSync(new URL("./testing/goldenTour.body.md", import.meta.url), "utf8");
     expect(renderPrDescriptionMarkdown(fixture, CTX)).toBe(golden);
   });
 });

@@ -1,7 +1,7 @@
 import { NO_GRANTS, type Actor, type Grants } from "../authz/types.js";
 import type { Caller } from "../commandRegistry.js";
 
-// Hand-built `Caller`s for tests (plan U4): the surface kind, the namespaced
+// Hand-built `Caller`s for tests: the surface kind, the namespaced
 // id, and an `Actor` holding exactly the grants given — what an adapter would
 // have resolved from config. No production code imports this module.
 
@@ -22,7 +22,7 @@ export function actorKindOf(id: string): Actor["kind"] {
 
 /** A `Caller` whose actor holds exactly `grants`. A list of actions means "over
  *  every channel" (an ops token granted `channels: all`); `Partial<Grants>` is
- *  taken as given (an absent axis is the empty set, R7). `extra` adds a chat `origin`. */
+ *  taken as given (an absent axis is the empty set). `extra` adds a chat `origin`. */
 export function callerWith(
   kind: Caller["kind"],
   id: string,

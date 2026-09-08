@@ -54,7 +54,7 @@ describe("deploy/secrets.manifest.json", () => {
     }
   });
 
-  it("every bot secret reaches the container: the shim forwards each manifest `bot` entry (a secret on the Worker the container never sees is a silent misconfiguration — MCP_CREDENTIAL_KEY, 2026-09-04)", () => {
+  it("every bot secret reaches the container: the shim forwards each manifest `bot` entry (a secret on the Worker the container never sees is a silent misconfiguration — MCP_CREDENTIAL_KEY once was)", () => {
     const src = readFileSync(resolve(ROOT, "deploy/cloudflare/worker.ts"), "utf8");
     const fn = /function containerEnv\(env: Env\)[\s\S]*?\n\}/.exec(src);
     if (!fn) throw new Error("deploy/cloudflare/worker.ts: no containerEnv()");

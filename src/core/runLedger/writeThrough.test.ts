@@ -26,7 +26,7 @@ const record = (id: string): RunRecord =>
   ({
     id,
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1.0",
     startedAt: 1_000,
     finishedAt: 5_000,
@@ -99,7 +99,7 @@ const openReq = (over: Partial<OpenRunRequest> = {}): OpenRunRequest => ({
   runId: "r1",
   threadKey: "slack:C1:1.0",
   startedAt: 9_000,
-  meta: { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1.0", agent: "review", model: "p/m" },
+  meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", agent: "review", model: "p/m" },
   card: { channel: "C1", ts: "1.1" },
   system: "you are a reviewer",
   tools: [{ name: "bash", description: "run", inputSchema: { type: "object" } }],
@@ -163,7 +163,7 @@ describe("open — claim and seed", () => {
       gen: "gen-Z",
       leaseMs: 30_000,
       startedAt: 1_000,
-      meta: { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1.0" },
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0" },
       system: "",
       tools: [],
     });

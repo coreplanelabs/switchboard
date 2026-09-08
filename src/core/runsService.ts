@@ -32,22 +32,22 @@ import { activityOfEvents } from "./runRegistry.js";
  *  the ledger's live rows change on the order of a run's lifetime. */
 export const LEDGER_LIST_TTL_MS = 2_000;
 
-// Run history (#157, U5): the ONE service behind every `runs.*` command — list,
+// Run history (docs/decisions/0006-runs-have-two-lives.md): the ONE service behind every `runs.*` command — list,
 // get, events, friction, stop — and the live view's authorization. It owns the
 // read merge between the in-memory registry (live runs, plus finished ones for
 // the 60 s TTL) and the durable `RunStore` (finished runs for the retention
 // window), and it is the boundary where the registry's capability token stops:
-// nothing this module returns carries `token` (KTD7 — `RunSummary` never leaves
+// nothing this module returns carries `token` (`RunSummary` never leaves
 // the core). Who may CALL is decided one layer up (the command registry's policy
 // table, the Cloudflare Access gate). What a caller may SEE in a list
 // arrives as `visibleTo` — the authorization policy compiled to a store
 // predicate (`predicateFor`, authorization.md item 6) — and is pushed down: live
 // rows are filtered by the reference evaluator, the store receives the same
-// predicate as its filter, and nothing is loaded to be dropped afterwards (R6).
+// predicate as its filter, and nothing is loaded to be dropped afterwards.
 // Point reads return the run as stored; the command that asked authorizes it
-// against the run's own attributes (KTD8: a deny is `not_found`). The one check
+// against the run's own attributes (a deny is `not_found`). The one check
 // this service makes itself is `authorizeLive`, the capability-token gate for
-// the live SSE/HTML path (KTD6), synchronous so that path stays byte-identical.
+// the live SSE/HTML path, synchronous so that path stays byte-identical.
 
 export type { RunActor } from "./runEvents.js";
 
@@ -72,7 +72,7 @@ export interface RunView {
   channelId?: string;
   userId?: string;
   threadKey?: string;
-  /** The stamped visibility (authorization KTD7); absent on a hand-built live row = `unknown`. */
+  /** The stamped visibility (authorization); absent on a hand-built live row = `unknown`. */
   channelVisibility?: ChannelVisibility;
   repo?: string;
   startedAt: number;
@@ -191,8 +191,8 @@ export interface StopRunView {
 }
 
 /** The registry capabilities handed to the live HTML/SSE path once the token
- *  checked out: the subscription, the backlog, and the token-gated stop (U8 —
- *  the page's Stop/Kill buttons stay capability-gated, not operator-gated). */
+ *  checked out: the subscription, the backlog, and the token-gated stop (the
+ *  page's Stop/Kill buttons stay capability-gated, not operator-gated). */
 export interface LiveRunAccess {
   /** `RunRegistry.subscribe` with the id and token already bound: the resume
    *  cursor and the replay budget live in the options, the elided range on the
@@ -213,7 +213,7 @@ export interface RunsService {
   getRunEvents(id: string, opts: { afterSeq?: number; limit?: number }): Promise<Result<RunEventsPageView>>;
   getRunFriction(id: string): Promise<Result<RunFrictionView>>;
   stopRun(id: string, mode: StopMode, actor: RunActor): Promise<Result<StopRunView>>;
-  /** Synchronous capability check for the live HTML/SSE routes (KTD6): the
+  /** Synchronous capability check for the live HTML/SSE routes: the
    *  registry subscription when `token` is right for a non-evicted run, else null. */
   authorizeLive(id: string, token: string): LiveRunAccess | null;
 }
@@ -447,7 +447,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       let storeUnavailable = false;
       // Every unfinished registry run, whatever `status`/page was asked for: a
       // store row for one of these is its provisional `interrupted` tombstone
-      // (#375) — the truth only if the run dies — and must never surface while
+      // — the truth only if the run dies — and must never surface while
       // the run is demonstrably alive.
       const unfinished = new Set([
         ...registry
@@ -462,7 +462,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         try {
           const rows = await store.list({
             limit: Math.min(RUN_LIST_MAX_LIMIT, limit + live.length),
-            // The policy rides down as the store's own filter (R6): `all` is no
+            // The policy rides down as the store's own filter: `all` is no
             // constraint and is omitted so the store's query is unchanged for it.
             ...(opts.visibleTo.kind !== "all" ? { visibleTo: toVisibilityFilter(opts.visibleTo) } : {}),
             ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
@@ -488,10 +488,10 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // source of truth for `finishedAt`/`status` (a reply that threw after the
       // loop is `failed` in the record while the registry row still says
       // `completed`). It also contributes what only the record knows —
-      // `diagnosis`, `bytes` — so a run in both lists as one complete row (U8).
+      // `diagnosis`, `bytes` — so a run in both lists as one complete row.
       // An UNFINISHED live row wins whole (its store row — the provisional
       // tombstone, already dropped above — says `interrupted`, which is the
-      // truth only once the run is dead; a live run must list as live, #375).
+      // truth only once the run is dead; a live run must list as live).
       for (const row of liveRows) {
         const stored = byId.get(row.id);
         if (!row.finished || !stored) {
@@ -579,7 +579,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       }
       if (!store || !RUN_ID_PATTERN.test(id)) return notFound;
       // The store answers an unknown, expired, or malformed id with null (the
-      // same not-found `get` gives, R4); an existing run with nothing past
+      // same not-found `get` gives); an existing run with nothing past
       // `afterSeq` is an empty page and stays `ok`.
       const page = await store.events(id, { afterSeq, limit: cap });
       if (!page) return notFound;

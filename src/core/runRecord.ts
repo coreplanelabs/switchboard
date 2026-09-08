@@ -8,7 +8,7 @@ import {
   type FrictionDiagnosis,
 } from "./runFriction.js";
 
-// Run history (#157, U12): the cross-deployable contract for a persisted run.
+// Run history (docs/decisions/0006-runs-have-two-lives.md): the cross-deployable contract for a persisted run.
 // Both the bot (`src/core/runStore.ts`) and the state Worker's `RunHistoryDO`
 // (`deploy/cloudflare-memory/`) import this file, so it is node-free — no Node
 // built-in imports, bytes measured with `TextEncoder` — and pure: no I/O, no
@@ -17,7 +17,7 @@ import {
 // ONE retention function both sides apply (so a read on either side hides the
 // same rows), and the byte-budget helper that keeps a record storable.
 
-// `interrupted` (#375, tombstone-first): the run was cut down before finish —
+// `interrupted` (tombstone-first): the run was cut down before finish —
 // container replaced at the drain deadline, or crashed outright. Written as a
 // provisional TERMINAL record at run start (`finishedAt` = `startedAt` there:
 // nobody knows the real death time of a crash) and upgraded at the drain
@@ -28,7 +28,7 @@ export type RunStatus = "completed" | "stopped_soft" | "stopped_hard" | "failed"
 
 const RUN_STATUSES: readonly RunStatus[] = ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"];
 
-/** Every `runs.*` id (R4): checked before any store call. */
+/** Every `runs.*` id: checked before any store call. */
 export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** One finished run as the store keeps it. Events are already redacted and
@@ -46,7 +46,7 @@ export interface RunRecord {
   channelId: string;
   userId: string;
   threadKey: string;
-  /** How the run's channel may travel (authorization KTD7): stamped at dispatch
+  /** How the run's channel may travel (authorization): stamped at dispatch
    *  from the `ChannelDirectory`, read by `member-of` (a `public` run is
    *  readable by everyone). A stored record written before the stamp existed
    *  reads as `unknown` — never public (`normalizeStored`). */
@@ -84,7 +84,7 @@ export interface RunRecord {
    *  failed (live-view item 20). Optional: records written before it lack it. */
   activity?: string;
   /** Who started the run, resolved (`IncomingMessage.userName`) — the index's
-   *  source mark says `via Slack · justin`, never a raw member id. */
+   *  source mark says `via Slack · alice`, never a raw member id. */
   userName?: string;
   /** The thread that started the run (`IncomingMessage.sourceUrl`), for the
    *  index's hover link. Optional as above. */
@@ -92,7 +92,7 @@ export interface RunRecord {
 }
 
 /** A run as a listing shows it: the record minus its events. `diagnosis` stays —
- *  the friction ledger's `recent()` is served from this shape (R5). `bytes` is
+ *  the friction ledger's `recent()` is served from this shape. `bytes` is
  *  the stored record's JSON size when the store knows it; retention treats a
  *  missing value as 0. */
 export type RunListItem = Omit<RunRecord, "events"> & { bytes?: number };
@@ -149,7 +149,7 @@ export interface RunListOptions {
   agent?: string;
   /** Platform-namespaced channel id (`slack:C0123`) — a plain filter the caller asked for. */
   channel?: string;
-  /** What the ACTOR may see (authorization R6): the store predicate compiled
+  /** What the ACTOR may see (authorization): the store predicate compiled
    *  from the policy, pushed down so no surface loads rows and filters after.
    *  Absent = no visibility constraint — only a caller that has already decided
    *  (the dispatcher's own writes, a test) omits it; the read services always
@@ -162,7 +162,7 @@ export interface RunListOptions {
 /** The list-shaped authorization decision as it travels to a store: the authz
  *  `Predicate` with its sets as arrays, so it fits a JSON body (`/runs/list`) and
  *  the Worker can compile it to SQL. `channel-prefix` does not exist: channels
- *  are channels (OQ4, option a). Every store — in-memory, file, the DO — answers
+ *  are channels. Every store — in-memory, file, the DO — answers
  *  it with the same truth table as `matchesVisibility`. */
 export type RunVisibilityFilter =
   | { kind: "none" }
@@ -302,7 +302,7 @@ export const DEFAULT_RETENTION_POLICY: Readonly<RetentionPolicy> = {
   maxBytes: 2 * GIB,
 };
 
-/** Inclusive `[min, max]` per policy field (KTD5). */
+/** Inclusive `[min, max]` per policy field. */
 export const RETENTION_BOUNDS: Readonly<Record<keyof RetentionPolicy, readonly [number, number]>> = {
   retentionDays: [1, 365],
   maxRuns: [1, 20_000],
@@ -530,7 +530,7 @@ export function capEvent(event: RunEvent, maxBytes: number): { event: RunEvent; 
 }
 
 /**
- * Make a record storable under `maxBytes` (KTD3). First every event is capped
+ * Make a record storable under `maxBytes`. First every event is capped
  * to `MAX_EVENT_BYTES`; then, if the record is still over budget, events are
  * dropped from the MIDDLE: the kept set is a head and a tail grown alternately
  * (head first) from the two ends until the next event would not fit, so the

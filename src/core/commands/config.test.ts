@@ -272,7 +272,7 @@ describe("config set", () => {
     expect(
       await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, mcp("dispatch")),
     ).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
-    // The one deliberate change of plan U4: a browser session may write ITS OWN scope (`config-scope/user` is the user's,
+    // The one deliberate departure from the pre-table gates: a browser session may write ITS OWN scope (`config-scope/user` is the user's,
     // and nothing dispatches as an Access identity); the channel scope stays the channel-config right it never held.
     const browser = callerWith("access", "access:u", ["config:read"]);
     expect((await commands.invoke("config.set", { args: ["me"], options: { agent: "review" } }, browser)).ok).toBe(

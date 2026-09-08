@@ -1,4 +1,4 @@
-// The agent:ship pipeline (features/agent-ship.md, issue #131): the coding →
+// The agent:ship pipeline (features/agent-ship.md): the coding →
 // review → fix loop to LGTM as ONE dispatch — one card, one run record, N
 // strictly serial child rounds, every GitHub side effect executed by the bot
 // process from typed artifacts. `dispatch()` forks in here (runShipBranch in
@@ -136,8 +136,8 @@ export function shipTaskText(requestText: string, repo: string): string {
 }
 
 /**
- * The pipeline branch ship names and binds the thread to at round 0's attach
- * (KTD12): `ship/<task-slug>-<thread-hash>`. Deterministic per (task, thread)
+ * The pipeline branch ship names and binds the thread to at round 0's attach:
+ * `ship/<task-slug>-<thread-hash>`. Deterministic per (task, thread)
  * — a re-issued task in the same thread lands on the same branch, so the
  * resident's one-ref-per-thread binding and the PR open-or-edit idempotency
  * both hold across restarts (recreatability, AGENTS.md invariant 6).
@@ -219,7 +219,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
         `Start it there instead, and watch pipelines on the run page (${page}).`,
     );
   }
-  // Spec item 2 (KTD6): child rounds never re-enter dispatch(), so without the
+  // Spec item 2: child rounds never re-enter dispatch(), so without the
   // compound gate a user denied `coding` would gain push+PR capability through
   // ship. The repo leg (`canUseRepo`) already ran — the fork sits after it.
   const missing = ["ship", "coding", "review"].filter((a) => !input.gates.canRunAgent(a));
@@ -240,7 +240,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       "🚫 `agent:ship` needs a target repository — name it in the request, e.g. `agent:ship in owner/repo: <task>`.",
     );
   }
-  // Spec item 9 (R15): the approving verdict's LGTM line triggers the org
+  // Spec item 9: the approving verdict's LGTM line triggers the org
   // auto-approve workflow; with auto-merge on, the PR would merge with no
   // human having read it. Unknown (lookup failed, field absent) = refused.
   const info = await input.repoInfo(repo).catch(() => undefined);
@@ -264,8 +264,8 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   if (repoCtx.pr !== undefined) {
     const where = `${repo}#${repoCtx.pr}`;
     const facts = await input.prFacts({ repo, number: repoCtx.pr }).catch(() => undefined);
-    // A cited PR whose facts we cannot fetch is fail-closed — EXCEPT the #512
-    // fall-through case (#567): a PR named in THIS message and quoted as
+    // A cited PR whose facts we cannot fetch is fail-closed — EXCEPT the
+    // fall-through case: a PR named in THIS message and quoted as
     // evidence inside NEW task text is context, not the target, so a transient
     // fetch failure must not block the task. It falls through to round 0 below,
     // which drops the PR-derived ref (repoCtx.refFromPr) and starts a fresh
@@ -297,7 +297,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       const author = facts.author;
       const shipAuthored = self !== undefined && author?.login === self.login && author?.id === self.id;
       if (facts.state === "open" && !(task && !shipAuthored)) {
-        // Binding rule (#512): a PR quoted as evidence inside a NEW task is not
+        // Binding rule: a PR quoted as evidence inside a NEW task is not
         // the PR to drive — with task text present, someone ELSE's PR mention
         // does not bind; execution falls through to round 0 below and the
         // reference stays in the task text as context for the coding child.
@@ -355,7 +355,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       }
       // A closed/merged PR is done — the thread may start a fresh task below.
     }
-    // Otherwise `facts` is undefined and this is the #567 fall-through (an
+    // Otherwise `facts` is undefined and this is the fall-through (an
     // in-message PR cited as evidence in new task text): execution drops to the
     // round-0 return below, which starts a fresh ship branch off the default
     // branch and leaves the reference in the task text for the coding child.
@@ -368,11 +368,11 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
     );
   }
   // The round-0 base is a user-phrased "on <ref>" or the repo default — never
-  // a ref that resolveRepoContext derived from a cited PR's head branch (#512
-  // F1): that PR did not bind as ship's target, so basing the new work on its
-  // head would carry the stranger's commits and dangle when the PR merges. The
-  // resolver flags such a ref (`refFromPr`) at the source, so this holds even
-  // when the facts fetch failed and the head ref is otherwise unknown (#567).
+  // a ref that resolveRepoContext derived from a cited PR's head branch: that
+  // PR did not bind as ship's target, so basing the new work on its head would
+  // carry the stranger's commits and dangle when the PR merges. The resolver
+  // flags such a ref (`refFromPr`) at the source, so this holds even when the
+  // facts fetch failed and the head ref is otherwise unknown.
   // Belt-and-braces guard stays: a repo-shaped ref (the slug itself, or any
   // owner/name the API would 404 on as a ref) can only be a misparse —
   // createBranchRef would fail on it. Any of these → the repo's default branch.
@@ -580,7 +580,7 @@ interface ReviewRoundResult {
 }
 
 /**
- * The strictly serial round loop (KTD2/KTD8/KTD12): round 0 opens the PR
+ * The strictly serial round loop: round 0 opens the PR
  * through the coding PR gate, then review → fix repeats until an approve
  * verdict, a cap, an abort terminal, or an operator stop. Each child runs on
  * its own agent's budgets CLIPPED to the remaining pipeline wall clock; the
@@ -746,7 +746,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       await ws.release({ hardStopped: false, ...(roundSpan ? { span: roundSpan } : {}) });
       return { answer: "", residentUnavailable: note ?? "no resident worktree attached" };
     }
-    // KTD12 honesty (mirrors guardAttachedHead): the resident binds ONE ref
+    // Binding honesty (mirrors guardAttachedHead): the resident binds ONE ref
     // per thread at first attach and ignores later hints — a thread already
     // bound to another branch would code, push, and open-or-edit somewhere
     // the pipeline never looks. Refuse BEFORE any model call, naming both
@@ -791,8 +791,8 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     });
     let answer: string;
     let observed: Awaited<ReturnType<typeof observeCodingWorkspace>> | undefined;
-    // The branch the child's own `git push` named (pr-description item 5,
-    // #458): the post-step opens from it, and from the checkout only when no
+    // The branch the child's own `git push` named (pr-description item 5):
+    // the post-step opens from it, and from the checkout only when no
     // push was observed. The latest push wins.
     const pushes = trackPushedBranch();
     try {
@@ -804,8 +804,8 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         ...(roundSpan ? { span: roundSpan } : {}),
         backend: ws.selection.backend,
         // The branch contract OVERRIDES the coding prompt's generic "create a
-        // branch" step — the first live run (2026-09-03) followed that step,
-        // pushed its own branch, and stranded the pipeline: the thread's
+        // branch" step — a child that follows that step pushes its own branch
+        // and strands the pipeline: the thread's
         // binding stays on the ship branch, so the review round can never see
         // a PR opened from anywhere else.
         system: `${composeSystem({ sha: undefined, verified: false })}\n\n${shipBranchContract(entry.branch)}`,
@@ -1066,8 +1066,8 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   if (!entry.resume) {
     if (control.requested) return stoppedOutcome();
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
-    // The pipeline branch must exist on origin BEFORE the first attach
-    // (KTD12): the resident refuses to bind a thread to a ref GitHub does not
+    // The pipeline branch must exist on origin BEFORE the first attach:
+    // the resident refuses to bind a thread to a ref GitHub does not
     // have, and the executor factory's sandbox fallback would then misreport
     // "onboard the repo" on every fresh pipeline. The BOT creates the ref
     // from the PR base (422 already-exists is success inside createBranchRef

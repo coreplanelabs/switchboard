@@ -1,6 +1,6 @@
 // The coding run's deterministic PR post-step (features/pr-description.md
 // item 5, agent-coding.md item 2), extracted from dispatch() as callable
-// units (agent:ship plan U4) so a ship round can run them for its coding and
+// units so a ship round can run them for its coding and
 // fix rounds without being the dispatch's top-level agent. Two phases with an
 // explicit seam between them, because the dispatcher publishes the accepted
 // `pr_description` event in between and a hard stop can land mid-observation:
@@ -18,7 +18,7 @@
 // push` command's own result is read, `pushedBranchOf` parses git's `To <url>` +
 // per-ref status block) — and the checked-out branch only when no push was
 // observed. The checkout is NOT the record of what was pushed: anything that
-// moves HEAD between the push and the post (#458: a second run's `git
+// moves HEAD between the push and the post (a second run's `git
 // checkout -b` in a shared sandbox; equally the agent itself checking out
 // another branch after pushing) would make the post ask the remote for a
 // branch nobody pushed and orphan the pushed work. When the two differ, the
@@ -30,16 +30,16 @@
 // The clone's tracking state (`@{u}`) is NOT the proof — a `--depth` /
 // `--single-branch` clone, the cold sandbox's usual shape, never creates the
 // remote-tracking ref for a pushed branch, so `@{u}` fails after a successful
-// `git push -u` (#438: two real pushes reported as "no pushed upstream", no
-// PR opened). `@{u}` is consulted only when the remote probe itself fails.
+// `git push -u` (a real push reported as "no pushed upstream", no PR
+// opened). `@{u}` is consulted only when the remote probe itself fails.
 // Failure honesty throughout: never a fabricated PR URL, and the branch
 // compare URL is offered only when the remote match proved the branch exists.
 //
 // Base resolution (CodingPrTarget): a bound PR's true base, else the resident
 // binding ref, else the dispatch's resolved ref, else — the true last resort —
 // the repo's own default branch fetched from GitHub (resolveBaseRefLazy,
-// githubPulls.ts). That fetch is the fix for a live incident (2026-09-04): a
-// bare issue-link coding run has no PR/explicit ref, and when the
+// githubPulls.ts). That fetch closes a real gap: a bare issue-link coding
+// run has no PR/explicit ref, and when the
 // resident attach ALSO fails for a reason other than needs-ref (an infra
 // fault, not-onboarded, a probe outage), the fresh-sandbox fallback carries no
 // binding either — all three fields undefined, no PR openable, though the run
@@ -75,7 +75,7 @@ export interface WorkspaceObservation {
    *  is known (a failed probe, a detached checkout with no push observed). */
   branch: string | undefined;
   /** The branch checked out when the workspace was observed. Equals `branch`
-   *  unless HEAD moved to another branch after the push (#458) — then the
+   *  unless HEAD moved to another branch after the push — then the
    *  post-step's notes name both. */
   checkedOut: string | undefined;
   /** The commit the remote holds for `branch` — the proof of a push, read
@@ -264,8 +264,8 @@ export function trackPushedBranch(initial?: string): { observe(event: RunEvent):
  *  shared with agent:ship's own resolution in shipPipeline.ts). None of these
  *  three fields alone is reliable: a resident attach that fails for a reason
  *  OTHER than needs-ref (an infra fault, not-onboarded, a probe outage) drops
- *  `bindingRef` with no equivalent fallback of its own — live incident
- *  2026-09-04 — which is exactly the case the GitHub fetch closes. */
+ *  `bindingRef` with no equivalent fallback of its own — which is exactly the
+ *  case the GitHub fetch closes. */
 export interface CodingPrTarget {
   /** `owner/name` the dispatch resolved, or undefined (agent-discovered repo). */
   repo: string | undefined;
@@ -310,7 +310,7 @@ export async function runCodingPrPostStep(input: {
   const pushed = headSha !== undefined && remoteHead !== undefined && sameCommit(remoteHead, headSha);
   const compareUrl =
     repo && branch && pushed ? `https://github.com/${repo}/compare/${encodeGithubPathSegments(branch)}` : undefined;
-  // HEAD moved after the push (#458): the head branch is the one the run's
+  // HEAD moved after the push: the head branch is the one the run's
   // push named, the checkout another. Every note and log line about the
   // branch names both, so a reader can tell which branch was asked about.
   const moved = branch !== undefined && observed.checkedOut !== undefined && observed.checkedOut !== branch;

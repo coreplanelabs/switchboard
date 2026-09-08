@@ -6,12 +6,13 @@ import { InMemoryScheduleStore } from "../scheduleStore.js";
 import { SCHEDULES, type ScheduleDef } from "../schedules.js";
 import { registerScheduleCommands, scheduleList, type ScheduleCommandDeps } from "./schedule.js";
 
-// Feature: features/live-view.md item 14 (#244) / features/command-registry.md
+// Feature: features/live-view.md item 14 / features/command-registry.md
 // (phase 4b): `schedule list` — the schedule registry, next firing (UTC), and
 // the newest firing per schedule from the ScheduleStore; the text twin of the
 // /runs "Scheduled" panel.
 
-const NOW = Date.UTC(2026, 7, 30, 12, 0); // Sunday 2026-08-30 12:00 UTC
+// A Sunday at noon: the weekly Monday 14:00 schedule fires next the following day.
+const NOW = Date.UTC(2026, 7, 30, 12, 0);
 /** A plain Slack user: the open chat commands. */
 const chat: Caller = callerWith("chat", "slack:UX", CHAT_OPEN_ACTIONS);
 const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", actions);
@@ -29,7 +30,7 @@ describe("schedule.list", () => {
     expect(res.ok).toBe(true);
     if (!res.ok) throw new Error("unreachable");
     const v = res.value as { schedules: Array<Record<string, unknown>>; firingsUnavailable?: string };
-    // the `internal` keep-alive is plumbing: hidden here as on the /runs panel (#307)
+    // the `internal` keep-alive is plumbing: hidden here as on the /runs panel
     expect(v.schedules.map((s) => s.name)).toEqual(SCHEDULES.filter((s) => !s.internal).map((s) => s.name));
     expect(v.schedules.map((s) => s.name)).not.toContain("keep-alive");
     const weekly = v.schedules.find((s) => s.name === "self-improvement")!;

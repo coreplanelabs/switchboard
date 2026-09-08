@@ -3,7 +3,7 @@ import { buildMemoryStore } from "./buildStore.js";
 import { InMemoryMemoryStore } from "./stores.js";
 import { WorkerMemoryStore } from "./workerStore.js";
 
-// Feature: features/memory.md — process-startup store selection (PR3, #85):
+// Feature: features/memory.md — process-startup store selection:
 // the durable Worker store when memory.worker is configured and its bearer is
 // present, otherwise the in-process store WITH a loud durability warning;
 // nothing at all when memory is disabled.
@@ -40,7 +40,7 @@ describe("buildMemoryStore", () => {
     expect(store).toBeInstanceOf(WorkerMemoryStore);
   });
 
-  // Feature: features/memory.md §29 (#253) — the cap is threaded into the store built here.
+  // Feature: features/memory.md §29 — the cap is threaded into the store built here.
   it("threads memory.maxRecordsPerScope into the in-process store (a write past it evicts)", async () => {
     const store = buildMemoryStore({ enabled: true, maxRecordsPerScope: 1 }, {}, () => {})!;
     await store.write("org:acme", [{ kind: "fact", text: "first", sourceThreadKey: "slack:C1:1.0" }]);

@@ -23,7 +23,7 @@ import {
 } from "./commandSurface.js";
 
 // Feature: features/command-registry.md — everything a surface shows is DERIVED
-// from the typed definition (KTD20/KTD21): naming, the one grammar CLI and chat
+// from the typed definition: naming, the one grammar CLI and chat
 // share, the merged JSON Schema, and help. No adapter owns any of this.
 
 const define = commandDefiner<undefined>();

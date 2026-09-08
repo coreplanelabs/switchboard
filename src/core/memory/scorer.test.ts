@@ -130,7 +130,7 @@ describe("applyBudget", () => {
   });
 
   it("budgets on the escaped rendered size so the rendered block stays within maxTokens", () => {
-    // Regression (PR #89 review): applyBudget estimated a record's tokens from the
+    // Regression: applyBudget estimated a record's tokens from the
     // RAW record.text, but renderMemoryBlock escapes `<`→`&lt;` (+3 chars each), so
     // an angle-bracket-dominated record was under-counted and the rendered block
     // could blow past the ~800 cap (reviewer: ~424 estimated → ~1441 actual). The
