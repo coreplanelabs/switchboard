@@ -3,7 +3,7 @@ import type { AffectedReport } from "./affected.js";
 import {
   capabilityProblem,
   classifyDeployOutput,
-  CONFIG_DESTINATION,
+  CONFIG_DOCUMENT_KEY,
   containerApplicationName,
   decideAccount,
   DEPLOY_ORDER,
@@ -105,9 +105,15 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     const p = plan();
     expect(p.checks.account).toBe(TEST_PROFILE.account);
     expect(p.profile).toEqual({ origin: "profile", path: "deploy/profile.json" });
-    expect(p.config).toEqual({ source: "config/config.production.yaml", destination: CONFIG_DESTINATION });
+    // The config goes to the state Worker's `base` document, never into the image.
+    expect(p.config).toEqual({
+      source: "config/config.production.yaml",
+      document: CONFIG_DOCUMENT_KEY,
+      stateWorkerUrl: "https://switchboard-memory.example.test",
+    });
+    expect(CONFIG_DOCUMENT_KEY).toBe("base");
     expect(formatPlan(p)).toContain(
-      "Profile: deploy/profile.json; config: config/config.production.yaml → config/config.production.yaml",
+      'Profile: deploy/profile.json; config: config/config.production.yaml → document "base" on https://switchboard-memory.example.test',
     );
     // Another installation, another fleet — the same specs.
     const other = workersFor({

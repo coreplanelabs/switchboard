@@ -228,7 +228,7 @@ describe("classifyPath", () => {
     expect(classifyPath("package-lock.json")).toEqual({ kind: "unclassified" });
   });
 
-  it("a Worker's own directory, its wrangler config and Dockerfile are its inputs; the bot's image inputs are the root Dockerfile, .dockerignore, package files, tsconfigs, src/, web/, config/ and skills/", () => {
+  it("a Worker's own directory, its wrangler config and Dockerfile are its inputs; the bot's image inputs are the root Dockerfile, .dockerignore, package files, tsconfigs, src/, web/ and skills/ — never config/, which the bot reads from the state Worker", () => {
     expect(classifyPath("deploy/cloudflare-resident/worker.ts")).toEqual({ kind: "input", workers: ["resident"] });
     expect(classifyPath("deploy/cloudflare-resident/wrangler.jsonc")).toEqual({ kind: "input", workers: ["resident"] });
     expect(classifyPath("deploy/cloudflare-resident/Dockerfile")).toEqual({ kind: "input", workers: ["resident"] });
@@ -247,11 +247,16 @@ describe("classifyPath", () => {
       "src/core/dispatcher.ts",
       "web/package.json",
       "web/src/App.vue",
-      "config/config.production.yaml",
       "skills/pr-tour/SKILL.md",
     ]) {
       expect(classifyPath(p), p).toEqual({ kind: "input", workers: ["bot"] });
     }
+    // The bot's config is pushed to the state Worker (`deploy config`), never built into the image.
+    expect(classifyPath("config/config.production.yaml")).toEqual({
+      kind: "inert",
+      rule: "bot runtime config (pushed to the state Worker, never built into the image)",
+    });
+    expect(classifyPath("config/config.example.yaml")).toMatchObject({ kind: "inert" });
     // A test under src/ is inert even though src/ is a bot input: the image never carries it.
     expect(classifyPath("src/core/dispatcher.test.ts")).toMatchObject({ kind: "inert" });
     // But a skill's markdown IS shipped (COPY skills; loaded at startup) — the markdown rule stops at skills/.

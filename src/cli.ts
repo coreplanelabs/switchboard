@@ -29,6 +29,7 @@
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { openConfigStore, type ConfigStore } from "./config.js";
+import { parseConfigLocation } from "./configDocument.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 import { CLI_ACTOR } from "./core/authz/actor.js";
@@ -255,7 +256,9 @@ export async function loadBotConfig(
     fetch?: typeof fetch;
   } = {},
 ): Promise<ConfigStore> {
-  if (!(opts.exists ?? existsSync)(configPath)) throw missingBotConfig(configPath);
+  // A `state://` location is read from the state Worker (src/configDocument.ts); only a file can be missing here.
+  if (parseConfigLocation(configPath).kind === "file" && !(opts.exists ?? existsSync)(configPath))
+    throw missingBotConfig(configPath);
   // The same backing the bot uses (`runtimeOverrides.worker` → the ConfigDO), so
   // `config set` from the CLI and from Slack write ONE document; the file is
   // the fallback for a config without a state Worker.

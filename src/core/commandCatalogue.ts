@@ -9,6 +9,7 @@ import {
   hasNodeModules,
   hostDeployFiles,
   loadProfileOnHost,
+  pushConfigOnHost,
   runBotRestart,
   runDeployPlan,
 } from "../deploy/run.js";
@@ -221,6 +222,7 @@ export function buildCoreCommands(
       profile: wiring.profile ?? loadProfileOnHost,
       files: hostDeployFiles,
       secrets: hostSecretsIO,
+      pushConfig: pushConfigOnHost,
     },
     env: { bootstrap: bootstrapOnHost },
   };

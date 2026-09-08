@@ -4,7 +4,6 @@ import {
   OP_TOKEN_ENV,
   parseConfigSource,
   readConfigSource,
-  sourceIsDestination,
   type ConfigSourceIO,
 } from "./configSource.js";
 
@@ -139,15 +138,5 @@ describe("readConfigSource", () => {
         io({ env: { [OP_TOKEN_ENV]: "ops_x" }, opRead: async () => ({ code: 0, output: "providers: {}\n" }) }),
       ),
     ).toEqual({ ok: true, text: "providers: {}\n", how: "config from op://Prod/Switchboard/config" });
-  });
-});
-
-describe("sourceIsDestination", () => {
-  it("a path source that is the destination is a no-op; anything else is a write", () => {
-    const dest = "config/config.production.yaml";
-    expect(sourceIsDestination({ kind: "path", path: dest }, dest)).toBe(true);
-    expect(sourceIsDestination({ kind: "path", path: "./config//config.production.yaml" }, dest)).toBe(true);
-    expect(sourceIsDestination({ kind: "path", path: "config/other.yaml" }, dest)).toBe(false);
-    expect(sourceIsDestination({ kind: "op", ref: "op://V/I/f" }, dest)).toBe(false);
   });
 });

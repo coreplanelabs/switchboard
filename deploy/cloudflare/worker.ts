@@ -75,6 +75,7 @@ const FORWARDED_OPTIONAL = [
   "BRAVE_SEARCH_API_KEY",
   "MEMORY_TOKEN",
   "MCP_CREDENTIAL_KEY",
+  "STATE_WORKER_URL",
 ] as const satisfies readonly (keyof Env)[];
 
 /** The container's environment, computed from the Worker env AT START TIME.
@@ -84,7 +85,10 @@ const FORWARDED_OPTIONAL = [
  *  stops the container, the next start carries the current secrets. */
 function containerEnv(env: Env): Record<string, string> {
   const vars: Record<string, string> = {
-    SWITCHBOARD_CONFIG: "./config/config.production.yaml",
+    // The image carries no config: the bot reads the `base` document `deploy config`
+    // pushed to the state Worker (src/configDocument.ts), reached through
+    // STATE_WORKER_URL + MEMORY_TOKEN forwarded below.
+    SWITCHBOARD_CONFIG: "state://base",
     SLACK_BOT_TOKEN: env.SLACK_BOT_TOKEN,
     SLACK_APP_TOKEN: env.SLACK_APP_TOKEN,
     ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,

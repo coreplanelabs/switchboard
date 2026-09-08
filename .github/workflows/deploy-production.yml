@@ -31,6 +31,10 @@
 #                         docs Worker's narrower token)
 #   RESIDENT_READ_TOKEN   the resident preflight reads GET /residents with it;
 #                         read scope is enough (any of the three bearers works)
+#   MEMORY_TOKEN          the state Worker's bearer: `deploy all` pushes the
+#                         bot's config to it as the `base` document right before
+#                         the bot step (the same value the Workers hold); a bot
+#                         step is refused before anything deploys without it
 #   SANDBOX_TOKEN         required whenever the sandbox is selected: its live
 #                         gate reads GET /healthz and probes POST /exec with it
 #                         (a sandbox step is refused before anything deploys
@@ -97,6 +101,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
       DEPLOY_TOKEN_SOURCE: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN && 'CLOUDFLARE_DEPLOY_TOKEN' || 'CLOUDFLARE_API_TOKEN (the docs token — fallback)' }}
       RESIDENT_READ_TOKEN: ${{ secrets.RESIDENT_READ_TOKEN }}
+      MEMORY_TOKEN: ${{ secrets.MEMORY_TOKEN }}
       SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
       WRANGLER_SEND_METRICS: "false"
       CI: "1"
@@ -126,6 +131,7 @@ jobs:
           echo "Cloudflare credential: $DEPLOY_TOKEN_SOURCE"
           if [ "${DEPLOY_TOKEN_SOURCE#CLOUDFLARE_API_TOKEN}" != "$DEPLOY_TOKEN_SOURCE" ]; then echo "::warning::deploying with the docs Worker's token — it may lack the Containers/R2 scopes; deploy all checks before touching a Worker"; fi
           if [ -z "$RESIDENT_READ_TOKEN" ]; then echo "::warning::RESIDENT_READ_TOKEN is not set — a resident step would be refused before anything deploys"; fi
+          if [ -z "$MEMORY_TOKEN" ]; then echo "::warning::MEMORY_TOKEN is not set — a bot step would be refused before anything deploys (deploy all pushes the bot's config to the state Worker with it)"; fi
           if [ -z "$SANDBOX_TOKEN" ]; then echo "::warning::SANDBOX_TOKEN is not set — a sandbox step would be refused before anything deploys, and --affected judges the sandbox against the last release tag, not what it serves"; fi
       - name: the selection
         id: selection
