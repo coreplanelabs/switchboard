@@ -226,12 +226,40 @@ jobs:
       # site is never silently older than main.
       - id: touched
         run: npm run docs:changed
+      # The docs Worker's wrangler.jsonc is generated from the deployment
+      # profile (account, hostname), and production's profile lives in
+      # coreplanelabs/infrastructure — read with a read-only App token minted
+      # for that repository alone, like the release deploy's.
+      - name: load the App's credentials from 1Password
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
+        uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+        with:
+          export-env: true
+          version: 2.39.0
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          COREPLANE_CLIENT_ID: op://CI/coreplane-bot/client-id
+          COREPLANE_PRIVATE_SIGNING_KEY: op://CI/coreplane-bot/private-key
+      - name: mint the App token that reads the infrastructure repository
+        id: infra-token
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ env.COREPLANE_CLIENT_ID }}
+          private-key: ${{ env.COREPLANE_PRIVATE_SIGNING_KEY }}
+          owner: coreplanelabs
+          repositories: infrastructure
+          permission-contents: read
       - name: build + deploy
         if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
-        # `npm run deploy` in the docs Worker builds docs/ first, so the upload
-        # can never be a stale dist. CLOUDFLARE_ACCOUNT_ID is deliberately NOT
-        # set — the account is pinned in wrangler.jsonc and the env var would
-        # override it. A missing token is a loud skip (the step's `if`), not a
-        # red main on every docs edit: the token is a one-time repository-secret
-        # setup.
+        # `npm run deploy` in the docs Worker renders its wrangler.jsonc from
+        # the profile and builds docs/ first, so the upload can never be a
+        # stale dist or an example-valued config. CLOUDFLARE_ACCOUNT_ID is
+        # deliberately NOT set — the account comes from the profile and the env
+        # var would override it. A missing token is a loud skip (the step's
+        # `if`), not a red main on every docs edit: the token is a one-time
+        # repository-secret setup.
         run: npm run deploy -w deploy/cloudflare-docs
+        env:
+          SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
+          CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}

@@ -39,11 +39,11 @@ This file is read by every agent that works on this repository — Claude Code, 
 | Deploy selection, order, and live gate | `src/deploy/` | `features/release-and-deploy.md` |
 | Human docs (Diataxis) and their generated tables | `docs/`, `src/docs/` | `features/docs-site.md` |
 
-Module by module, with each area's gotchas: [Code map](docs/reference/code-map.md).
+Module by module: [Code map](docs/reference/code-map.md).
 
 ## Commands
 
-The whole interface to this repository. Each script is deterministic and non-interactive, needs no credential unless it says so, and fails fast naming a missing one. CI calls nothing else.
+The whole interface to this repository: deterministic, non-interactive, no credential unless it says so, failing fast by name when one is missing. CI calls nothing else.
 
 <!-- generated:commands · npm run agents:gen — generated from package.json + project.json, do not edit by hand -->
 
@@ -53,15 +53,15 @@ The whole interface to this repository. Each script is deterministic and non-int
 | `npm run start` | Runs the compiled bot from `dist/`. | Production entry (the container's CMD). |
 | `npm run dev` | Runs the bot from source with tsx. | Local development against a real Slack app. |
 | `npm run typecheck` | TypeScript over the bot and its scripts, no emit. | After type-level changes; `verify:root` runs it. |
-| `npm run test` | The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry. | Before pushing. |
+| `npm run test` | The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry, after `deploy:gen`. | Before pushing. |
 | `npm run cli` | The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack. | Smoke tests, deploys, config, run history. |
 | `npm run verify` | The whole gate: every root check, every workspace's verify, the site check — exactly what CI runs. | Before requesting review. ~4 min. |
 | `npm run verify:root` | The bot package's gate: consistency checks, typecheck, lint, format, tests, dist. | When only the bot changed. |
-| `npm run check:consistency` | The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table, Worker configs). | After touching a generated or declared artifact; one CI leg. |
+| `npm run check:consistency` | The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table). | After touching a generated or declared artifact; one CI leg. |
 | `npm run ci:gate` | Reads the `needs` context of a CI fan-out and passes only when every leg succeeded. | CI only — the `bot` and `workers` gate jobs. |
 | `npm run fix` | Regenerates every generated artifact and repairs lint and formatting. | Before committing; whenever `check:consistency` reports drift. |
-| `npm run deploy:gen` | Renders each Worker's `wrangler.jsonc` from its template and the deployment profile. | After editing a template or `deploy/profile.json`. |
-| `npm run deploy:check` | The rendered `wrangler.jsonc` files match `deploy:gen`. | Part of `check:consistency`. |
+| `npm run deploy:gen` | Renders each Worker's gitignored `wrangler.jsonc` from its template and the profile in force. | `test`, each Worker's `verify` and `deploy all` run it; by hand before `wrangler dev`. |
+| `npm run deploy:check` | The rendered `wrangler.jsonc` files match `deploy:gen`. | When one looks hand-edited; change the template. |
 | `npm run check:lockfile` | Every native package in the lockfile carries its Linux x64 and macOS arm64 variants. | After any `npm install`; the fix is `rm -rf node_modules && npm install`. |
 | `npm run check:sandbox-pair` | Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag. | After bumping either half of a pair. |
 | `npm run check:pr-title` | Judges one PR title against Conventional Commits with the types release-please knows. | `-- "feat(scope): …"` before opening a PR; CI's `title` check runs it. |
@@ -90,7 +90,7 @@ The whole interface to this repository. Each script is deterministic and non-int
 
 <!-- /generated:commands -->
 
-Workspaces have their own `verify` (`-w web`, `-w docs`, `-w deploy/<worker>`); the root `verify` runs them all. Node is `.nvmrc`'s (24, Active LTS); `npm ci` at the root installs every workspace.
+Workspaces have their own `verify` (`-w web`, `-w docs`, `-w deploy/<worker>`); the root `verify` runs them all. Node is `.nvmrc`'s; `npm ci` at the root installs every workspace.
 
 ## Rules for agents
 

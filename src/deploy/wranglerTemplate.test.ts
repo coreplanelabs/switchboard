@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseProfile, PROFILE_PATH, type DeploymentProfile } from "./profile.js";
+import { parseProfile, PROFILE_ENV, PROFILE_EXAMPLE_PATH, PROFILE_PATH, type DeploymentProfile } from "./profile.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 import {
   GENERATED_HEADER,
@@ -175,21 +175,42 @@ describe("workerConfigTargets / renderWorkerConfigs", () => {
   });
 });
 
-// The migration proof and the standing guard: every wrangler.jsonc in the
-// tree IS the render of its template with the installation's profile. A hand
-// edit to a rendered file, or a template change without `npm run deploy:gen`,
-// fails here (and in `npm run deploy:check`).
-describe("the checked-in wrangler.jsonc files", () => {
-  const raw: unknown = JSON.parse(readFileSync(PROFILE_PATH, "utf8"));
-  const parsed = parseProfile(raw);
-  const profile = parsed.ok ? parsed.profile : undefined;
+// The standing guard: every rendered wrangler.jsonc on disk (gitignored,
+// written by `npm run deploy:gen` — which `npm test` runs first) IS the render
+// of its template with the profile in force: the installation's own when it
+// has one, else the example. A hand edit to a rendered file, or a template
+// change without a re-render, fails here (and in `npm run deploy:check`).
+describe("the rendered wrangler.jsonc files", () => {
+  const readDisk = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : undefined);
+  const example = parseProfile(JSON.parse(readFileSync(PROFILE_EXAMPLE_PATH, "utf8")));
+  const inForce = parseProfile(
+    JSON.parse(readFileSync(existsSync(PROFILE_PATH) ? PROFILE_PATH : PROFILE_EXAMPLE_PATH, "utf8")),
+  );
+  const profile = inForce.ok ? inForce.profile : undefined;
+  // With SWITCHBOARD_DEPLOY_PROFILE exported, the files on disk were rendered
+  // from whatever it names (possibly a github:// reference this synchronous
+  // test cannot read); the override path is proven in loadProfile.test.ts.
+  const generated =
+    profile !== undefined &&
+    process.env[PROFILE_ENV] === undefined &&
+    workerConfigTargets(profile).every((t) => existsSync(t.outputPath));
 
-  it.skipIf(!profile)("each equals the render of its template with deploy/profile.json, byte for byte", () => {
-    const rendered = renderWorkerConfigs(profile!, (path) =>
-      existsSync(path) ? readFileSync(path, "utf8") : undefined,
-    );
+  it("the five templates render against the committed example with nothing left unfilled", () => {
+    if (!example.ok) throw new Error(example.problems.join("; "));
+    const rendered = renderWorkerConfigs(example.profile, readDisk);
     expect(rendered.ok, JSON.stringify(rendered)).toBe(true);
     if (!rendered.ok) return;
-    for (const f of rendered.files) expect(readFileSync(f.path, "utf8"), f.path).toBe(f.text);
+    expect(rendered.files).toHaveLength(5);
+    for (const f of rendered.files) expect(f.text, f.path).not.toMatch(/\{\{|\}\}/);
   });
+
+  it.skipIf(!generated)(
+    "each generated file equals the render of its template with the profile in force, byte for byte",
+    () => {
+      const rendered = renderWorkerConfigs(profile!, readDisk);
+      expect(rendered.ok, JSON.stringify(rendered)).toBe(true);
+      if (!rendered.ok) return;
+      for (const f of rendered.files) expect(readFileSync(f.path, "utf8"), f.path).toBe(f.text);
+    },
+  );
 });

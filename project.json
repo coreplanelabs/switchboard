@@ -18,11 +18,11 @@
       "when": "When only the bot changed."
     },
     "check:consistency": {
-      "does": "The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table, Worker configs).",
+      "does": "The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table).",
       "when": "After touching a generated or declared artifact; one CI leg."
     },
     "test": {
-      "does": "The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry.",
+      "does": "The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry, after `deploy:gen`.",
       "when": "Before pushing."
     },
     "typecheck": {
@@ -116,12 +116,12 @@
       "when": "CI only — gates the docs deploy."
     },
     "deploy:gen": {
-      "does": "Renders each Worker's `wrangler.jsonc` from its template and the deployment profile.",
-      "when": "After editing a template or `deploy/profile.json`."
+      "does": "Renders each Worker's gitignored `wrangler.jsonc` from its template and the profile in force.",
+      "when": "`test`, each Worker's `verify` and `deploy all` run it; by hand before `wrangler dev`."
     },
     "deploy:check": {
       "does": "The rendered `wrangler.jsonc` files match `deploy:gen`.",
-      "when": "Part of `check:consistency`."
+      "when": "When one looks hand-edited; change the template."
     },
     "deploy:targets": {
       "does": "Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment.",

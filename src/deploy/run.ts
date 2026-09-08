@@ -37,6 +37,7 @@ import {
   type LoadedProfile,
 } from "./profile.js";
 import { classifyRestartResponse, type RestartPlan } from "./restart.js";
+import { renderWorkerConfigs } from "./wranglerTemplate.js";
 import {
   containerAppId,
   decideSandboxLive,
@@ -216,15 +217,45 @@ export function hasNodeModules(dir: string): boolean {
   return existsSync(join(REPO_ROOT, dir, "node_modules"));
 }
 
+/** Parse + validate profile JSON read from `where` (a path or a source reference — what errors name). */
+function profileFromJson(text: string, where: string, origin: LoadedProfile["origin"]): LoadedProfile {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`${where}: not valid JSON — ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
+  const parsed = parseProfile(raw);
+  if (!parsed.ok) throw new Error(`${where}: invalid deployment profile —\n  - ${parsed.problems.join("\n  - ")}`);
+  // The example is the example wherever it was read from — a copy of it
+  // pointed at by the env var, too — so the runner's refusal holds.
+  return { profile: parsed.profile, origin: isExampleProfile(parsed.profile) ? "example" : origin, path: where };
+}
+
 /**
- * The deployment profile on this host: `$SWITCHBOARD_DEPLOY_PROFILE`, else
- * `deploy/profile.json`, else the checked-in example — which a plan may be
- * read from (a pull request's CI, a fresh clone) and `deploy all` refuses. An
- * unreadable or invalid profile is an error naming the file and each problem;
- * never a silent fall-through to the example.
+ * The deployment profile on this host: `$SWITCHBOARD_DEPLOY_PROFILE` — a path,
+ * or the same `github://owner/repo/path@ref` / `op://Vault/Item/field` forms
+ * `configSource` takes, read through the same loaders (our production keeps
+ * its profile in the infrastructure repository and the release workflow names
+ * it this way) — else `deploy/profile.json` (an installation's own, gitignored),
+ * else the checked-in example — which a plan may be read from (a pull request's
+ * CI, a fresh clone) and `deploy all` refuses. An unreadable or invalid profile
+ * is an error naming the file or reference and each problem; never a silent
+ * fall-through to the example.
  */
-export async function loadProfileOnHost(env: Record<string, string | undefined> = process.env): Promise<LoadedProfile> {
+export async function loadProfileOnHost(
+  env: Record<string, string | undefined> = process.env,
+  sourceIO: ConfigSourceIO = hostConfigSourceIO(),
+): Promise<LoadedProfile> {
   const override = env[PROFILE_ENV];
+  if (override) {
+    const source = parseConfigSource(override);
+    if (source.ok && source.source.kind !== "path") {
+      const read = await readConfigSource(source.source, sourceIO);
+      if (!read.ok) throw new Error(`${PROFILE_ENV}=${override}: ${read.problem}`);
+      return profileFromJson(read.text, override, "profile");
+    }
+  }
   const candidates: { path: string; origin: LoadedProfile["origin"] }[] = override
     ? [{ path: override, origin: "profile" }]
     : [
@@ -237,21 +268,32 @@ export async function loadProfileOnHost(env: Record<string, string | undefined> 
       if (c.origin === "profile" && override) throw new Error(`${PROFILE_ENV}=${override}: no such file`);
       continue;
     }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(readFileSync(abs, "utf8"));
-    } catch (err) {
-      throw new Error(`${c.path}: not valid JSON — ${err instanceof Error ? err.message : String(err)}`, {
-        cause: err,
-      });
-    }
-    const parsed = parseProfile(raw);
-    if (!parsed.ok) throw new Error(`${c.path}: invalid deployment profile —\n  - ${parsed.problems.join("\n  - ")}`);
-    // The example is the example wherever it was read from — a copy of it
-    // pointed at by the env var, too — so the runner's refusal holds.
-    return { profile: parsed.profile, origin: isExampleProfile(parsed.profile) ? "example" : c.origin, path: c.path };
+    return profileFromJson(readFileSync(abs, "utf8"), c.path, c.origin);
   }
   throw new Error(`no deployment profile: write ${PROFILE_PATH} (see ${PROFILE_EXAMPLE_PATH}) or set ${PROFILE_ENV}`);
+}
+
+/**
+ * Render every Worker's `wrangler.jsonc` from its template and the profile in
+ * force (src/deploy/wranglerTemplate.ts). The rendered files are generated and
+ * gitignored, so this dirties nothing; `deploy all` does it before anything
+ * reads a Worker's config — the capability pre-checks and wrangler itself pick
+ * the account from these files. Returns the problems, if any.
+ */
+export async function renderWorkerConfigsOnHost(
+  io: Pick<DeployRunnerIO, "log">,
+  env: Record<string, string | undefined> = process.env,
+  writeFile: (path: string, text: string) => void = (path, text) => writeFileSync(join(REPO_ROOT, path), text),
+): Promise<string[]> {
+  const loaded = await loadProfileOnHost(env);
+  const rendered = renderWorkerConfigs(loaded.profile, (path) => {
+    const abs = join(REPO_ROOT, path);
+    return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
+  });
+  if (!rendered.ok) return rendered.problems;
+  for (const f of rendered.files) writeFile(f.path, f.text);
+  io.log(`[deploy:all] rendered ${rendered.files.length} Worker config(s) from ${loaded.path}`);
+  return [];
 }
 
 /** `deploy init`'s file access on this host: repo-relative paths under the checkout. */
@@ -738,6 +780,11 @@ export async function runDeployPlan(
       ],
     };
   }
+  // The Worker configs first: they are rendered from the profile (gitignored, so
+  // the tree stays clean), and everything after — the capability pre-checks,
+  // wrangler — reads the account and names from them.
+  const renderProblems = await renderWorkerConfigsOnHost(io);
+  if (renderProblems.length > 0) return { kind: "refused", problems: renderProblems };
   const problems = await preChecks(plan, io);
   if (problems.length > 0) return { kind: "refused", problems };
   // The bot reads its config from the state Worker, so the bot step is preceded
