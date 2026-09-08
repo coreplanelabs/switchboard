@@ -307,6 +307,36 @@ export const RESTORE_STALL_MS = 120_000;
  *  runaway wake is still the wake path's own verdict, not the watchdog's. */
 export const RESTORE_MAX_MS = 25 * 60_000;
 
+/** Below this much of the hydrate deadline left, the wake does not start a
+ *  deps materialization at all: a download or install that cannot finish is
+ *  worse than the next refresh cycle's repair (`no deps marker on disk`). */
+export const WAKE_DEPS_MIN_MS = 60_000;
+
+export type WakeDepsBudget =
+  | { action: "skip"; remainingMs: number }
+  | { action: "materialize"; installBudgetMs: number; restoreDeadlineMs: number; remainingMs: number };
+
+/** The wake path's deps materialization (item 61 PR B: restore the warm
+ *  key's entry, or install it) lives INSIDE the hydrate's one deadline, so
+ *  the worst-case `restoring` span is still RESTORE_MAX_MS — the invariant
+ *  the watchdog's 30-min stale-mid-flight window rests on. The restore is
+ *  judged against the hydrate deadline itself; the installer's budget is the
+ *  smaller of its own and what remains; under WAKE_DEPS_MIN_MS nothing starts. */
+export function planWakeDepsBudget(input: {
+  nowMs: number;
+  deadlineMs: number;
+  installBudgetMs: number;
+}): WakeDepsBudget {
+  const remainingMs = Math.max(0, input.deadlineMs - input.nowMs);
+  if (remainingMs < WAKE_DEPS_MIN_MS) return { action: "skip", remainingMs };
+  return {
+    action: "materialize",
+    installBudgetMs: Math.min(input.installBudgetMs, remainingMs),
+    restoreDeadlineMs: input.deadlineMs,
+    remainingMs,
+  };
+}
+
 /** Where the Sandbox SDK stages a backup archive inside the container while it
  *  downloads (`BACKUP_CONTAINER_DIR` in @cloudflare/sandbox): the restore
  *  writes `<dir>/<backupId>.sqsh` in full FIRST and extracts into the target

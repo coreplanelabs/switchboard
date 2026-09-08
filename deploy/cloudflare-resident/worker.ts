@@ -134,6 +134,7 @@ import {
   planRefresh,
   RUNTIME_REPLACEMENT_WORDING,
   judgeRestoreProgress,
+  planWakeDepsBudget,
   RESTORE_MAX_MS,
   RESTORE_POLL_MS,
   restoreArchivePath,
@@ -184,7 +185,12 @@ import { createTracer } from "../../src/core/trace/tracer.js";
 import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrace.js";
 import { backupTransferMode } from "../../src/execution/residentBackupTransfer.js";
 import {
+  CHECKOUT_SNAPSHOT_EXCLUDES,
+  DEPS_BACKUP_KEY_PREFIX,
+  DEPS_BACKUP_TTL_S,
   DEPS_STORE_DIR,
+  depsBackupStorageKey,
+  depsBackupsToDrop,
   depsCompletePath,
   depsEntryPath,
   depsInstallSemaphoreSize,
@@ -994,7 +1000,22 @@ interface SnapshotRecord {
   lockfileHash: string;
   createdAt: string;
   mirror: DirectoryBackup; // SDK handle; objects live under backups/<id>/ in BACKUP_BUCKET
+  /** Since item 61 PR B the checkout archive EXCLUDES its top-level
+   *  node_modules (CHECKOUT_SNAPSHOT_EXCLUDES); the deps come back through the
+   *  key's entry backup (DepsBackupRecord) or the installer. Older records
+   *  still carry node_modules and are adopted on restore as before. */
   checkout: DirectoryBackup;
+}
+
+/** One immutable archive per deps-store entry (item 61, #614 PR B), keyed by
+ *  lockfile key under DEPS_BACKUP_KEY_PREFIX. Taken once, right after the
+ *  entry is committed; the handle's `dir` is the entry's node_modules, and a
+ *  restore overrides `dir` to a scratch tree so the commit script — not the
+ *  archive — decides when the entry is complete. */
+interface DepsBackupRecord {
+  key: string;
+  backup: DirectoryBackup;
+  createdAt: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1669,6 +1690,10 @@ export class ResidentDO extends Sandbox<Env> {
             localBucket,
             ttl: SNAPSHOT_TTL_S,
             name: `${resource} checkout`,
+            // The tree without its deps view (item 61 PR B): the store entry
+            // has its own archive, so a refresh cycle stops re-uploading
+            // node_modules and the wake restores the key's entry instead.
+            excludes: [...CHECKOUT_SNAPSHOT_EXCLUDES],
           }),
           R2_TRANSFER_TIMEOUT_MS,
           "checkout backup",
@@ -2030,9 +2055,57 @@ export class ResidentDO extends Sandbox<Env> {
     await this.adoptCheckoutDeps(snap.lockfileHash).catch((err) =>
       console.log(`deps: adopt after restore failed: ${errMsg(err)}`),
     );
-    // The restored checkout carries the snapshot's deps + build, so the
-    // refresh checkpoints are exactly the stamp.
-    await this.writeDiskMarkers({ ready: snap.sha, depsKey: snap.lockfileHash, builtSha: snap.sha });
+    // A snapshot taken since item 61 PR B carries the tree WITHOUT its deps
+    // view. If the checkout has no node_modules after the adopt (a new-format
+    // snapshot; an old one was adopted and linked just above), materialize
+    // the stamp's key — hit, the entry backup, or the installer — and link
+    // the view. The deps checkpoint is written ONLY when the checkout holds
+    // its view: anything else (a repo without an install command has no view
+    // to hold; a lookup or materialize failure) leaves it unwritten, so the
+    // next refresh cycle's plan (`no deps marker on disk — full install`)
+    // repairs it — never a `down` for a cache miss. The whole thing stays
+    // under the hydrate's ONE deadline (planWakeDepsBudget): the restore is
+    // judged against it and the install is bounded by what remains.
+    let depsLinked = false;
+    try {
+      const resource = await this.ctx.storage.get<string>(RESOURCE_KEY);
+      if (!resource) throw new Error("no resource recorded");
+      const record = await this.registry().getRecord(resource);
+      if (!record) throw new Error("registry record missing");
+      const hasView = (await this.run(["test", "-d", `${CHECKOUT_DIR}/node_modules`])).exitCode === 0;
+      if (!record.commands.install) {
+        depsLinked = hasView;
+      } else if (hasView) {
+        depsLinked = true;
+      } else {
+        const budget = planWakeDepsBudget({
+          nowMs: systemClock(),
+          deadlineMs,
+          installBudgetMs: REFRESH_INSTALL_TIMEOUT_MS,
+        });
+        if (budget.action === "skip") throw new Error(`${budget.remainingMs} ms left of the hydrate deadline`);
+        const entry = await this.materializeDeps(
+          snap.lockfileHash,
+          snap.sha,
+          record.commands.install,
+          budget.installBudgetMs,
+          {
+            restoreDeadlineMs: deadlineMs,
+          },
+        );
+        await this.linkDepsView(`${entry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
+        depsLinked = true;
+      }
+    } catch (err) {
+      console.log(`deps: no view after restore — the next refresh installs: ${errMsg(err)}`);
+    }
+    // The restored checkout carries the snapshot's build, so the refresh
+    // checkpoints are the stamp — the deps checkpoint only with the view in place.
+    await this.writeDiskMarkers({
+      ready: snap.sha,
+      ...(depsLinked ? { depsKey: snap.lockfileHash } : {}),
+      builtSha: snap.sha,
+    });
     await this.ctx.storage.put(FACTS_KEY, {
       ...facts,
       lastRestore: { at: new Date(systemClock()).toISOString(), ms: systemClock() - t0 },
@@ -3536,6 +3609,9 @@ export class ResidentDO extends Sandbox<Env> {
   /** key → the entry path promise of the install running for it in this
    *  incarnation; a second caller joins instead of installing twice. */
   private depsInFlight = new Map<string, Promise<string>>();
+  /** Keys whose entry archive is uploading (item 61 PR B): protected from
+   *  eviction like an install in flight, and never archived twice at once. */
+  private depsBackupsInFlight = new Set<string>();
   /** Parallel install slots = cores (`nproc`, read once per incarnation). */
   private depsInstallSlots: number | null = null;
   private depsInstallRunning = 0;
@@ -3566,21 +3642,146 @@ export class ResidentDO extends Sandbox<Env> {
     /** `seedFromKey`: a complete entry to hardlink into the scratch tree
      *  before the install, so npm reconciles the delta (item 58) instead of
      *  extracting every package — and the two entries share every unchanged
-     *  inode. Ignored when it is the key itself or has no complete entry. */
-    opts: { seedFromKey?: string } = {},
+     *  inode. Ignored when it is the key itself or has no complete entry.
+     *  `restoreDeadlineMs`: the absolute deadline the `restore` backing is
+     *  judged against — the wake path passes its ONE hydrate deadline so the
+     *  `restoring` span stays under RESTORE_MAX_MS in total (#572's
+     *  invariant); every other caller gets `min(budgetMs, RESTORE_MAX_MS)`
+     *  from now, so an attach never waits longer for a download than it
+     *  would for an install. */
+    opts: { seedFromKey?: string; restoreDeadlineMs?: number } = {},
   ): Promise<string> {
+    const backupRecord = await this.depsBackupRecord(key);
     const plan = planDepsMaterialization({
       complete: await this.depsEntryComplete(key),
       inFlight: this.depsInFlight.has(key),
+      backup: backupRecord !== undefined,
     });
     if (plan.action === "hit") {
       await this.run(["touch", depsUsedPath(key)]);
       return depsEntryPath(key);
     }
     if (plan.action === "join") return this.depsInFlight.get(key) as Promise<string>;
-    const p = this.installDepsEntry(key, sha, installCmd, budgetMs, opts).finally(() => this.depsInFlight.delete(key));
+    // `restore` (item 61 PR B): the key's archive comes down into a scratch
+    // tree and commits like an install would. A restore that fails for any
+    // reason drops the record (an expired or missing archive would fail the
+    // same way next time) and falls through to the installer, which records
+    // a fresh backup — never a stranded key.
+    const restoreDeadlineMs = opts.restoreDeadlineMs ?? systemClock() + Math.min(budgetMs, RESTORE_MAX_MS);
+    const p = (
+      plan.action === "restore" && backupRecord
+        ? this.restoreDepsEntry(key, backupRecord, restoreDeadlineMs).catch(async (err) => {
+            console.log(`deps: restore of ${key.slice(0, 8)} failed — installing instead: ${errMsg(err)}`);
+            await this.dropDepsBackups([key]).catch(() => {});
+            return this.installDepsEntry(key, sha, installCmd, budgetMs, opts);
+          })
+        : this.installDepsEntry(key, sha, installCmd, budgetMs, opts)
+    ).finally(() => this.depsInFlight.delete(key));
     this.depsInFlight.set(key, p);
     return p;
+  }
+
+  private async depsBackupRecord(key: string): Promise<DepsBackupRecord | undefined> {
+    return this.ctx.storage.get<DepsBackupRecord>(depsBackupStorageKey(key));
+  }
+
+  /** Archive a freshly committed entry to R2, once (item 61 PR B). Runs after
+   *  the commit, off the caller's critical path — the entry is already
+   *  serving — and only in presigned mode: local-bucket mode would put the
+   *  Durable Object in the data path of a deps-sized upload, the very class of
+   *  failure #614 removes. Housekeeping: a failure is a log line; the next
+   *  wake installs, as before. The key stays protected from eviction while
+   *  the upload runs (`depsBackupsInFlight`). */
+  private async backupDepsEntry(key: string): Promise<void> {
+    if (this.depsBackupsInFlight.has(key) || (await this.depsBackupRecord(key))) return;
+    const transfer = backupTransferMode(this.env as unknown as Record<string, unknown>);
+    if (transfer.mode === "local") return;
+    this.depsBackupsInFlight.add(key);
+    const t0 = systemClock();
+    try {
+      const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+      const backup = await withTimeout(
+        this.createBackup({
+          dir: `${depsEntryPath(key)}/node_modules`,
+          localBucket: transfer.localBucket,
+          ttl: DEPS_BACKUP_TTL_S,
+          name: `${resource} deps ${key.slice(0, 8)}`,
+        }),
+        R2_TRANSFER_TIMEOUT_MS,
+        "deps backup",
+      );
+      // The entry may have been evicted or replaced while the archive was
+      // taken (it is protected, but a rebuild wipes the disk): record only
+      // what still describes a complete entry.
+      if (!(await this.depsEntryComplete(key))) {
+        await this.deleteBackupObjects([backup.id]).catch(() => {});
+        return;
+      }
+      const record: DepsBackupRecord = { key, backup, createdAt: new Date(systemClock()).toISOString() };
+      await this.ctx.storage.put(depsBackupStorageKey(key), record);
+      console.log(`deps: backed up ${key.slice(0, 8)} in ${systemClock() - t0}ms`);
+    } catch (err) {
+      console.log(`deps: backup of ${key.slice(0, 8)} failed: ${errMsg(err)}`);
+    } finally {
+      this.depsBackupsInFlight.delete(key);
+    }
+  }
+
+  /** The `restore` backing of materializeDeps (item 61 PR B): download the
+   *  key's archive into a private scratch tree — the SDK extracts wherever
+   *  the handle's `dir` says, so the handle is re-pointed at the scratch —
+   *  judged by the bytes arriving like every restore (restoreWithProgress),
+   *  then the same commit script an install ends with: staging, atomic
+   *  rename, `.complete` LAST. A partial download never becomes an entry.
+   *  `deadlineMs` is the caller's (see materializeDeps): never a fresh cap. */
+  private async restoreDepsEntry(key: string, record: DepsBackupRecord, deadlineMs: number): Promise<string> {
+    const attempt = crypto.randomUUID().slice(0, 8);
+    const scratch = depsScratchPath(attempt);
+    const staging = depsStagingPath(key, attempt);
+    const t0 = systemClock();
+    try {
+      await this.ensureDepsStoreDir();
+      console.log(`deps: restoring ${key.slice(0, 8)} from backup ${record.backup.id.slice(0, 8)} into ${scratch}`);
+      await this.restoreWithProgress(
+        { ...record.backup, dir: `${scratch}/node_modules` },
+        `deps restore ${key.slice(0, 8)}`,
+        deadlineMs,
+      );
+      await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, scratch], "deps-restore-chown");
+      await this.runOk(
+        [
+          "sh",
+          "-c",
+          depsStoreCommitScript({
+            scratchDir: scratch,
+            stagingDir: staging,
+            entryDir: depsEntryPath(key),
+            completePath: depsCompletePath(key),
+          }),
+        ],
+        "deps-restore-commit",
+        { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
+      );
+      console.log(`deps: restored ${key.slice(0, 8)} from backup in ${systemClock() - t0}ms`);
+      return depsEntryPath(key);
+    } catch (err) {
+      await this.run(["rm", "-rf", scratch, staging]).catch(() => {});
+      throw err;
+    }
+  }
+
+  /** Forget entry backups: the records and the R2 objects behind them. */
+  private async dropDepsBackups(keys: readonly string[]): Promise<number> {
+    if (keys.length === 0) return 0;
+    const records = await this.ctx.storage.get<DepsBackupRecord>(keys.map((k) => depsBackupStorageKey(k)));
+    const ids = [...records.values()].map((r) => r.backup.id);
+    await this.ctx.storage.delete(keys.map((k) => depsBackupStorageKey(k)));
+    return this.deleteBackupObjects(ids);
+  }
+
+  private async allDepsBackups(): Promise<DepsBackupRecord[]> {
+    const all = await this.ctx.storage.list<DepsBackupRecord>({ prefix: DEPS_BACKUP_KEY_PREFIX });
+    return [...all.values()];
   }
 
   private async installDepsEntry(
@@ -3665,6 +3866,7 @@ export class ResidentDO extends Sandbox<Env> {
         { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
       );
       console.log(`deps: installed ${key.slice(0, 8)} in ${systemClock() - t0}ms`);
+      this.ctx.waitUntil(this.backupDepsEntry(key));
       return depsEntryPath(key);
     } catch (err) {
       await this.run(["rm", "-rf", scratch, staging]).catch(() => {});
@@ -3771,6 +3973,7 @@ export class ResidentDO extends Sandbox<Env> {
       { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
     );
     await this.linkDepsView(`${depsEntryPath(warmKey)}/node_modules`, CHECKOUT_DIR, BUILD_USER);
+    this.ctx.waitUntil(this.backupDepsEntry(warmKey));
   }
 
   /** Cache upkeep after every disk measurement (item 59): list the store,
@@ -3784,7 +3987,7 @@ export class ResidentDO extends Sandbox<Env> {
     const listing = parseDepsStoreListing(listed.stdout);
     if (listing.entries.length === 0 && listing.leftovers.length === 0) return;
     const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
-    const protectedKeys = new Set<string>(this.depsInFlight.keys());
+    const protectedKeys = new Set<string>([...this.depsInFlight.keys(), ...this.depsBackupsInFlight]);
     if (facts?.lockfileHash) protectedKeys.add(facts.lockfileHash);
     for (const b of await this.liveBindings()) if (b.depsKey) protectedKeys.add(b.depsKey);
     // A scratch/staging dir of an install still running in this incarnation
@@ -3797,6 +4000,20 @@ export class ResidentDO extends Sandbox<Env> {
     console.log(
       `deps: evicted ${plan.remove.length} path(s) — ${plan.remove.map((p) => p.slice(DEPS_STORE_DIR.length + 1, DEPS_STORE_DIR.length + 9)).join(", ")}; kept ${plan.keep.map((k) => k.slice(0, 8)).join(", ")}`,
     );
+    // The evicted entries' archives go with them (item 61 PR B): a spare
+    // nothing references on disk is a spare nothing will wake into.
+    const kept = new Set(plan.keep);
+    const evictedKeys = listing.entries.map((e) => e.key).filter((k) => !kept.has(k));
+    const drop = depsBackupsToDrop({
+      evictedKeys,
+      backedUpKeys: (await this.allDepsBackups()).map((r) => r.key),
+    });
+    if (drop.length > 0) {
+      const n = await this.dropDepsBackups(drop).catch(() => 0);
+      console.log(
+        `deps: dropped ${drop.length} entry backup(s) (${n} object(s)) — ${drop.map((k) => k.slice(0, 8)).join(", ")}`,
+      );
+    }
   }
 
   /** The per-user 700 staging dir (`install -d` is idempotent), memoized per
@@ -4520,6 +4737,22 @@ export class ResidentDO extends Sandbox<Env> {
     return { threads: [...all.values()].map(({ worktreePath: _internal, ...rest }) => rest) };
   }
 
+  /** The entry backups on record (item 61 PR B): key, archive id, when — the
+   *  receipt surface for "backed up once, restored on wake". */
+  async debugDepsBackups(): Promise<{
+    depsBackups: Array<{ key: string; backupId: string; createdAt: string; inFlight: boolean }>;
+  }> {
+    const records = await this.allDepsBackups();
+    return {
+      depsBackups: records.map((r) => ({
+        key: r.key,
+        backupId: r.backup.id,
+        createdAt: r.createdAt,
+        inFlight: this.depsBackupsInFlight.has(r.key),
+      })),
+    };
+  }
+
   /** Delete the EVICTED bindings whose threadKey starts with `prefix` (item 60):
    *  eviction keeps a binding on purpose (KTD6), so a load run's synthetic
    *  threads would otherwise stay on the detail page forever. The decision is
@@ -5020,6 +5253,13 @@ export class ResidentDO extends Sandbox<Env> {
         errors.push(`backup object deletion failed: ${errMsg(err)}`);
       }
     }
+    // The entry backups (item 61 PR B) live under backups/<id>/ too — the
+    // same out-of-prefix objects, the same only path that reaches them.
+    try {
+      backupObjectsDeleted += await this.dropDepsBackups((await this.allDepsBackups()).map((r) => r.key));
+    } catch (err) {
+      errors.push(`deps backup deletion failed: ${errMsg(err)}`);
+    }
     try {
       await this.destroy();
       containerStopped = true;
@@ -5080,7 +5320,7 @@ function hasScope(env: Env, token: string | null, scope: Scope): boolean {
 }
 
 /** /debug ops a read-scope bearer may run: pure reads of DO storage/schedules. */
-const READ_DEBUG_OPS = new Set(["info", "schedules", "threads"]);
+const READ_DEBUG_OPS = new Set(["info", "schedules", "threads", "deps-backups"]);
 
 // ---------------------------------------------------------------------------
 // Request validation
@@ -6150,6 +6390,8 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     case "threads":
       return json(await stub.debugThreads());
+    case "deps-backups":
+      return json(await stub.debugDepsBackups());
     case "sweep-now":
       return json(await stub.debugSweepNow());
     case "reclaim-now":

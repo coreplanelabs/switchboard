@@ -70,15 +70,66 @@ export function depsStagingPath(key: string, attempt: string, storeDir: string =
   return `${storeDir}/.staging-${key}-${attempt}`;
 }
 
-export type DepsMaterializationPlan = { action: "hit" } | { action: "join" } | { action: "install" };
+export type DepsMaterializationPlan =
+  { action: "hit" } | { action: "join" } | { action: "restore" } | { action: "install" };
 
 /** A complete entry wins over everything (a stale in-flight memo after a DO
  *  reset must never make a caller wait for an install that is not running);
- *  an install already running for the key is joined, never duplicated. */
-export function planDepsMaterialization(input: { complete: boolean; inFlight: boolean }): DepsMaterializationPlan {
+ *  an install already running for the key is joined, never duplicated; a
+ *  recorded entry backup (item 61, #614) is restored before anything is
+ *  installed — the container downloads a finished tree instead of building
+ *  one — and only a key with neither installs. */
+export function planDepsMaterialization(input: {
+  complete: boolean;
+  inFlight: boolean;
+  /** An entry backup is recorded for the key (`depsBackupStorageKey`). */
+  backup?: boolean;
+}): DepsMaterializationPlan {
   if (input.complete) return { action: "hit" };
   if (input.inFlight) return { action: "join" };
+  if (input.backup) return { action: "restore" };
   return { action: "install" };
+}
+
+// ---------------------------------------------------------------------------
+// Entry backups (item 61, #614 PR B): content-addressed snapshots of the store
+// ---------------------------------------------------------------------------
+
+/** The checkout snapshot leaves out its top-level node_modules: since item 59
+ *  that directory is a hardlink view of an immutable store entry, and the
+ *  entry has its own backup (below). Nested node_modules (a workspace package's
+ *  own) stay in — small, and the view mechanism does not cover them. The
+ *  pattern is anchored at the archive root (mksquashfs wildcard semantics:
+ *  a bare name matches only there; `...`-prefixed patterns match anywhere). */
+export const CHECKOUT_SNAPSHOT_EXCLUDES: readonly string[] = ["node_modules"];
+
+/** One backup per lockfile key, taken ONCE right after the entry is committed
+ *  (install or adoption) and never again: the entry is immutable, so its
+ *  archive is too. Recorded on the DO under this prefix, by key. */
+export const DEPS_BACKUP_KEY_PREFIX = "resident:depsBackup:";
+
+export function depsBackupStorageKey(key: string): string {
+  assertKey(key);
+  return `${DEPS_BACKUP_KEY_PREFIX}${key}`;
+}
+
+/** Entry backups are a cache with a long shelf life: a key stays warm for as
+ *  long as main keeps its lockfile, and the wake path counts on finding the
+ *  warm key's archive. 180 days; an expired archive fails the restore and the
+ *  local installer runs, re-recording a fresh backup — never a stranded key.
+ *  The snapshot handles keep their own TTL (SNAPSHOT_TTL_S in the Worker). */
+export const DEPS_BACKUP_TTL_S = 180 * 24 * 60 * 60;
+
+/** After a store sweep: the backups whose entries the sweep just evicted go
+ *  too — a spare nothing references on disk is a spare nothing will wake
+ *  into either, and the archive is re-taken on the next install of that key.
+ *  Never a key still in the store, and never a key without a record. */
+export function depsBackupsToDrop(input: {
+  evictedKeys: readonly string[];
+  backedUpKeys: readonly string[];
+}): string[] {
+  const backedUp = new Set(input.backedUpKeys);
+  return input.evictedKeys.filter((k) => backedUp.has(k));
 }
 
 /** Distinct keys may install in parallel up to the core count — `nproc`
