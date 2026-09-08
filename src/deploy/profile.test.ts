@@ -27,14 +27,13 @@ describe("parseProfile", () => {
     expect(EXAMPLE_ACCOUNT).toMatch(/^0{32}$/);
   });
 
-  it("names each problem by its field: a bad account, a hostname with a scheme, a missing Worker, an unknown scheme is fine here (the source parser judges it)", () => {
+  it("names each problem by its field: a bad account, a hostname with a scheme, the missing bot Worker, an unknown scheme is fine here (the source parser judges it)", () => {
     const r = parseProfile({
       ...TEST_PROFILE,
       account: "not-hex",
       workers: {
         ...TEST_PROFILE.workers,
         bot: { script: "Bot!", hostname: "https://switchboard.example.test" },
-        sandbox: undefined,
       },
     });
     expect(r.ok).toBe(false);
@@ -44,10 +43,30 @@ describe("parseProfile", () => {
         expect.stringMatching(/^account: /),
         expect.stringMatching(/^workers\.bot\.script: /),
         expect.stringMatching(/^workers\.bot\.hostname: /),
-        expect.stringMatching(/^workers\.sandbox: /),
       ]),
     );
     for (const p of r.problems) expect(p).not.toContain("not-hex");
+    const noBot = parseProfile({ ...TEST_PROFILE, workers: { ...TEST_PROFILE.workers, bot: undefined } });
+    expect(noBot.ok ? [] : noBot.problems).toEqual([expect.stringMatching(/^workers\.bot: /)]);
+  });
+
+  // Feature: features/release-and-deploy.md item 14 — the bot is the one
+  // required Worker; a profile leaves the others out and the tooling has no
+  // step and no URL for them.
+  it("memory, resident and sandbox are optional: a bot-only profile parses, and the URLs of the Workers it lacks are undefined while the bot's stand", () => {
+    const botOnly = { ...TEST_PROFILE, workers: { bot: TEST_PROFILE.workers.bot } };
+    expect(parseProfile(botOnly).ok).toBe(true);
+    const u = profileUrls(botOnly);
+    expect(u.publicBaseUrl).toBe("https://switchboard.example.test");
+    expect(u.botAdminRestartUrl).toBe("https://switchboard.example.test/admin/restart");
+    expect(u.healthUrl("bot")).toBe("https://switchboard.example.test/healthz");
+    expect(u.stateWorkerUrl).toBeUndefined();
+    expect(u.healthUrl("memory")).toBeUndefined();
+    expect(u.baseUrl("sandbox")).toBeUndefined();
+    expect(u.docsBaseUrl).toBeUndefined();
+    const withMemory = { ...botOnly, workers: { ...botOnly.workers, memory: TEST_PROFILE.workers.memory } };
+    expect(parseProfile(withMemory).ok).toBe(true);
+    expect(profileUrls(withMemory).stateWorkerUrl).toBe("https://switchboard-memory.example.test");
   });
 
   it("a hostname outside the zone, or two Workers sharing a script name, is a problem", () => {

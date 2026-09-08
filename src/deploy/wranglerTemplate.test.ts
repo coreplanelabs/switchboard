@@ -165,6 +165,34 @@ describe("renderTemplate", () => {
   });
 });
 
+// Feature: features/release-and-deploy.md item 14 — a profile without a state
+// Worker renders the bot's config without STATE_WORKER_URL.
+describe("templateView / renderTemplate for a bot-only profile", () => {
+  const botOnly = { ...TEST_PROFILE, workers: { bot: TEST_PROFILE.workers.bot } };
+
+  it("the bot's view carries no state Worker URL and no docs URL; the Workers the profile lacks have no view", () => {
+    const view = templateView(botOnly, "bot")!;
+    expect(view.urls).toEqual({
+      publicBaseUrl: "https://switchboard.example.test",
+      stateWorkerUrl: undefined,
+      docsBaseUrl: undefined,
+    });
+    for (const kind of ["memory", "resident", "sandbox", "docs"] as const)
+      expect(templateView(botOnly, kind)).toBeUndefined();
+    expect(workerConfigTargets(botOnly).map((t) => t.kind)).toEqual(["bot"]);
+  });
+
+  it("the committed bot template renders against a bot-only profile with nothing left unfilled — its STATE_WORKER_URL line drops; the full profile keeps it", () => {
+    const template = readFileSync(new URL(`../../deploy/cloudflare/${TEMPLATE_FILE}`, import.meta.url), "utf8");
+    const without = renderTemplate(template, templateView(botOnly, "bot")!);
+    expect(without.ok ? "" : without.problems.join("\n")).toBe("");
+    expect(without.ok && without.text).not.toContain("STATE_WORKER_URL");
+    expect(without.ok && without.text).toContain('"PUBLIC_BASE_URL": "https://switchboard.example.test"');
+    const withState = renderTemplate(template, templateView(TEST_PROFILE, "bot")!);
+    expect(withState.ok && withState.text).toContain('"STATE_WORKER_URL": "https://switchboard-memory.example.test"');
+  });
+});
+
 describe("workerConfigTargets / renderWorkerConfigs", () => {
   it("one template → one wrangler.jsonc per Worker the profile has, the docs Worker included only when present", () => {
     expect(workerConfigTargets(TEST_PROFILE).map((t) => [t.kind, t.templatePath, t.outputPath])).toEqual([

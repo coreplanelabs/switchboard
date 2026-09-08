@@ -313,7 +313,7 @@ export function planRestart(opts: RestartOptions, profile: DeploymentProfile): R
   return {
     target: opts.only,
     adminUrl: urls.botAdminRestartUrl,
-    healthUrl: urls.healthUrl("bot"),
+    healthUrl: `${urls.publicBaseUrl}/healthz`,
     tokenEnv: RESTART_TOKEN_ENV,
     force: opts.force,
     waitMaxMs: opts.waitMaxMinutes * 60_000,

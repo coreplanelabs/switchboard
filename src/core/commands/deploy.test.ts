@@ -851,6 +851,20 @@ describe("deploy.config", () => {
     bytes: 9007,
   };
 
+  // Feature: features/release-and-deploy.md item 14 — a profile without a state Worker has no document to push to.
+  it("a profile with no memory (state) Worker → `unavailable` naming the profile, and nothing is pushed", async () => {
+    const p = pusher(PUSHED);
+    const botOnly: LoadedProfile = {
+      ...LOADED,
+      profile: { ...TEST_PROFILE, workers: { bot: TEST_PROFILE.workers.bot } },
+    };
+    const { commands } = withPush(p.pushConfig, async () => botOnly);
+    const res = await commands.invoke("deploy.config", {}, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable", decidedBy: "handler" });
+    expect(res.ok ? "" : res.message).toContain("deploy/profile.json names no memory (state) Worker");
+    expect(p.calls).toEqual([]);
+  });
+
   it("is CLI-only, deploy:write, operator-gated — like deploy.all", async () => {
     const { commands } = withPush(pusher(PUSHED).pushConfig);
     expect(deployConfig).toMatchObject({
