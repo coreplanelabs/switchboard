@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/coreplanelabs/switchboard/compare/v0.6.1...v0.7.0) (2026-09-08)
+
+
+### Features
+
+* **config:** the bot reads its config from the state Worker; the image carries none ([#601](https://github.com/coreplanelabs/switchboard/issues/601)) ([384deb4](https://github.com/coreplanelabs/switchboard/commit/384deb4a0eff9fb64320e68010e5de555fa51e6c))
+* **run-ledger:** the bot mirrors every run onto the ledger as it runs — claim, seed, step records before tools, events, state, finishing, finish ([#603](https://github.com/coreplanelabs/switchboard/issues/603)) ([684ba9a](https://github.com/coreplanelabs/switchboard/commit/684ba9a3c18179e98451754e658c8edf6c0e0439))
+
+
+### Bug fixes
+
+* **execution:** sandbox sends get a bot-side deadline (budget + 30 s); the card says running &lt;tool&gt;, not thinking ([#604](https://github.com/coreplanelabs/switchboard/issues/604)) ([2fe881b](https://github.com/coreplanelabs/switchboard/commit/2fe881b1eae567b283196b3294fd7883fd3b6e7c))
+* **resident:** refresh thread credentials off the token's own expiry, not the file's age ([#528](https://github.com/coreplanelabs/switchboard/issues/528)) ([#605](https://github.com/coreplanelabs/switchboard/issues/605)) ([64b79c0](https://github.com/coreplanelabs/switchboard/commit/64b79c0b13b4b5af10f5198268ba1a9fdc248c11))
+
 ## [0.6.1](https://github.com/coreplanelabs/switchboard/compare/v0.6.0...v0.6.1) (2026-09-08)
 
 
