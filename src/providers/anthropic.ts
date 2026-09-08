@@ -32,7 +32,7 @@ export class AnthropicProvider implements Provider {
       // it run to completion in the background.
       req.signal ? { signal: req.signal } : undefined,
     );
-    // The stream's timing hooks for the model.turn span (features/tracing.md;
+    // The stream's timing hooks for the model.turn span (docs/reference/specs/tracing.md;
     // live-view item 15): the first streamed content (a text delta or a block
     // start) is the time to first token, and each raw `content_block_start` /
     // `content_block_stop` is a block boundary by kind and index. Feature-

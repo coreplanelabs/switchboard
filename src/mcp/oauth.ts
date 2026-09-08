@@ -2,7 +2,7 @@ import { assertUrlAllowed, type FetchLike } from "../tools/web.js";
 import { MCP_PROTOCOL_VERSION } from "./client.js";
 import type { McpAuthKind } from "./registry.js";
 
-// OAuth 2.1 for external MCP servers (features/mcp-tools.md item 18). Every
+// OAuth 2.1 for external MCP servers (docs/reference/specs/mcp-tools.md item 18). Every
 // step is a deterministic HTTP exchange the SERVICE drives — the browser only
 // ever visits the authorization endpoint and comes back to our callback; no
 // model is involved and no token travels through chat. The pieces:

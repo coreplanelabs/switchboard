@@ -1,6 +1,6 @@
 import { McpError, type McpCallResult, type McpClient, type McpToolInfo } from "./types.js";
 
-// Streamable-HTTP MCP client (features/mcp-tools.md items 2–4). JSON-RPC 2.0
+// Streamable-HTTP MCP client (docs/reference/specs/mcp-tools.md items 2–4). JSON-RPC 2.0
 // over POST; the server answers with JSON or an SSE stream (we take the frame
 // carrying our request id). `initialize` + `notifications/initialized` run
 // lazily once per client; the server's `Mcp-Session-Id` rides on every later

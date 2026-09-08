@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The `deploy targets` CI job (features/release-and-deploy.md item 8): which
+// The `deploy targets` CI job (docs/reference/specs/release-and-deploy.md item 8): which
 // Workers this PR's diff would deploy, judged by `deploy plan --affected`.
 //
 // On an ordinary PR (ci.yml) the base is the PR's own base (HEAD^ of the merge

@@ -15,7 +15,7 @@ export const SERVICEABLE_STATES: ReadonlySet<ResidentLifecycleState> = new Set<R
   "degraded",
 ]);
 
-// A `degraded` reason names its cause (features/resident-repos.md item 7).
+// A `degraded` reason names its cause (docs/reference/specs/resident-repos.md item 7).
 // Only reasons that PROVE the previous checkout + dep cache are intact attach:
 // `github-unreachable: …` (the fetch failed before the checkout was touched)
 // and `alarm-missed: …` (the watchdog re-armed a dead chain; nothing ran).

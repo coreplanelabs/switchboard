@@ -25,7 +25,7 @@ import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 // (else org); the summary follows the narrowest scope that got a fact — user >
 // repo > channel > org. Still ONE extractor call per run.
 //
-// Write gate (features/authorization.md item 8): the
+// Write gate (docs/reference/specs/authorization.md item 8): the
 // audience is a HINT the policy may narrow, never widen. Every candidate's
 // write is `authorize(runActor, "memory:write", memory-scope{kind, key,
 // originChannelVisibility})`; a fact whose run originated in a private, DM, or
@@ -71,7 +71,7 @@ export interface ReflectGateInput {
 /** Agents whose runs are never distilled. A review's findings already land on
  *  the PR and describe one PR at one moment — distilling them floods the org
  *  scope with "PR #N approved at <sha>, 1616 tests pass" ephemera.
- *  `ship` joins it (features/agent-ship.md item 12): its report is the same
+ *  `ship` joins it (docs/reference/specs/agent-ship.md item 12): its report is the same
  *  per-PR findings content, one pipeline's worth. */
 export const NO_REFLECT_AGENTS: ReadonlySet<string> = new Set(["review", "ship"]);
 
@@ -149,7 +149,7 @@ export type RoutedCandidate = MemoryCandidate & { audience: MemoryAudience };
 
 export type ParsedReflection = { ok: true; candidates: RoutedCandidate[] } | { ok: false; error: string };
 
-/** The reflection reply's envelope as a typed LLM output (features/llm-output.md
+/** The reflection reply's envelope as a typed LLM output (docs/reference/specs/llm-output.md
  *  item 6): the JSON type owns the format (fence-strip, parse, shape); the
  *  fact-level leniency below owns the meaning. */
 const REFLECTION_ENVELOPE = jsonOutput(z.object({ facts: z.array(z.unknown()), summary: z.unknown().optional() }), {

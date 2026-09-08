@@ -2,7 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 
-// Feature: features/execution.md item 5 — GitHub App identity: 1-hour
+// Feature: docs/reference/specs/execution.md item 5 — GitHub App identity: 1-hour
 // installation tokens minted on demand, reused only while they have at least
 // TOKEN_REUSE_MARGIN_MS of life left (the longest single command plus slack),
 // falling back to a static GH_TOKEN (or nothing) when the App isn't configured.
@@ -88,7 +88,7 @@ describe("resolveGithubToken", () => {
     expect(JSON.parse(Buffer.from(payload, "base64url").toString())).toMatchObject({ iss: "12345" });
   });
 
-  // Feature: features/tracing.md item 23 — the mint under the caller's span.
+  // Feature: docs/reference/specs/tracing.md item 23 — the mint under the caller's span.
   it("under a span the mint is a github.token_mint child carrying scope, cached and expiresInMs, with the access_tokens request as its github.rest child; a cache hit is a mint span with cached: true and no request", async () => {
     configureApp();
     const fetchMock = mockMint("ghs_traced", 60 * 60_000);

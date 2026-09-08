@@ -1,5 +1,5 @@
-// The resident's own measurement of a request's steps (features/tracing.md
-// item 19; features/resident-repos.md item 63): every command the Worker runs
+// The resident's own measurement of a request's steps (docs/reference/specs/tracing.md
+// item 19; docs/reference/specs/resident-repos.md item 63): every command the Worker runs
 // for one `/attach` or `/op` — clone, fetch, install, the mutex wait — as
 // offsets from the request's start, handed back in the answer's `trace` so
 // the bot grafts them under the span that made the call. A pure module both

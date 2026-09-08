@@ -1,6 +1,6 @@
 import type { Scope } from "../config.js";
 
-// Per-scope custom instructions (features/routing-and-config.md behavior 9).
+// Per-scope custom instructions (docs/reference/specs/routing-and-config.md behavior 9).
 // Channel and user scopes may carry free-text `instructions`
 // ("remember my rules/preferences"); this renders them as ONE clearly
 // delimited advisory block for the system prompt. Pure: the dispatcher hands

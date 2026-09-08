@@ -1,7 +1,7 @@
 import { onMounted, onUnmounted, ref, type Ref } from "vue";
 
 // The browser's wall clock, read here and nowhere else in the web app
-// (features/tracing.md item 8, the clock ratchet): the one web file the
+// (docs/reference/specs/tracing.md item 8, the clock ratchet): the one web file the
 // `clock-ban` lint and the allowlist scanner exempt. Every page that ticks or
 // stamps "now" goes through these two, so a test can pin time by faking the
 // browser's timers in one place.

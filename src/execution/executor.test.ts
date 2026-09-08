@@ -12,7 +12,7 @@ import {
   type Executor,
 } from "./executor.js";
 
-// Feature: features/resident-repos.md — LocalOperations: the dev-only
+// Feature: docs/reference/specs/resident-repos.md — LocalOperations: the dev-only
 // second Operations implementation (≥2-implementations invariant).
 // No command table and no refs locally — fixed Node conventions run in the
 // thread's local workspace dir, and a requested ref is honestly reported as
@@ -138,7 +138,7 @@ describe("ExecHealthTracker", () => {
     expect(t.consecutiveInfraFailures).toBe(1); // unchanged
   });
 
-  // Feature: features/execution.md item 14 — a full fleet is capacity, not a
+  // Feature: docs/reference/specs/execution.md item 14 — a full fleet is capacity, not a
   // dead sandbox: ExecCapacityError is deliberately NOT an ExecInfraError, so
   // it must neither count toward fail-fast nor reset a real streak.
   it("leaves the count untouched on ExecCapacityError (a full fleet is not a dead sandbox)", async () => {
@@ -208,7 +208,7 @@ describe("ExecHealthTracker", () => {
   });
 });
 
-// Feature: features/run-loop.md item 8 — a hard stop's AbortSignal kills
+// Feature: docs/reference/specs/run-loop.md item 8 — a hard stop's AbortSignal kills
 // the local child process instead of waiting out its 5-minute budget.
 describe("LocalExecutor exec abort", () => {
   it("kills a running command when the signal aborts and returns an exit line, never throws", async () => {
@@ -224,7 +224,7 @@ describe("LocalExecutor exec abort", () => {
   });
 });
 
-// Feature: features/execution.md item 11 — per-call bash timeout. The local
+// Feature: docs/reference/specs/execution.md item 11 — per-call bash timeout. The local
 // executor honors ExecOptions.timeoutMs (execFile's `timeout`, maxBuffer kept)
 // and a deadline kill renders as exit 124 NAMING the limit that fired and the
 // timeoutMs knob, so the model can self-correct instead of seeing a bare abort.
@@ -265,7 +265,7 @@ describe("LocalExecutor per-call timeout", () => {
   });
 });
 
-// Feature: features/execution.md item 11 — the per-call deadline every remote
+// Feature: docs/reference/specs/execution.md item 11 — the per-call deadline every remote
 // executor joins with the hard-stop signal. Built on a plain timer, not
 // `AbortSignal.timeout`: Node runs that one on an internal timer that neither
 // fake timers nor a test can observe, so a deadline built on it could never be

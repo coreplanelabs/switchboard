@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — the streamed set, its classes, and the
+// Feature: docs/reference/specs/tracing.md — the streamed set, its classes, and the
 // ancestor invariant the partition's depth rule relies on.
 import { describe, expect, it } from "vitest";
 import { ATTR_KEYS, invalidAttrKeys } from "./attrs.js";
@@ -83,7 +83,7 @@ describe("attrs", () => {
     expect(invalidAttrKeys({ host: "https://x.example/?t=SECRET" })).toEqual(["host"]);
     expect(invalidAttrKeys({ execMs: Number.NaN })).toEqual(["execMs"]);
     expect(ATTR_KEYS).toContain("queuedBehindMs");
-    // The Workers' own roots (features/tracing.md item 25): counts, never names.
+    // The Workers' own roots (docs/reference/specs/tracing.md item 25): counts, never names.
     expect(invalidAttrKeys({ residents: 3, swept: 120 })).toEqual([]);
     expect(invalidAttrKeys({ residents: "3" } as never)).toEqual(["residents"]);
   });

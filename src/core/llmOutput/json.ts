@@ -1,7 +1,7 @@
 import type { z } from "zod";
 import type { OutputFailure, OutputType, ParseOutcome } from "./types.js";
 
-// The JSON output type (features/llm-output.md item 4): the crisp-format
+// The JSON output type (docs/reference/specs/llm-output.md item 4): the crisp-format
 // counterpart to markdown. Violations here are classifiable and a re-ask can
 // fix them, so it retries by default — and it is the ready seam for
 // provider-native JSON output modes (the type module stays; only the request

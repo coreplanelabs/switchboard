@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createAppendFlusher } from "./flusher.js";
 
-// The append flusher (features/run-history.md item 30): events reach the
+// The append flusher (docs/reference/specs/run-history.md item 30): events reach the
 // ledger in batches — every 500 ms or 32 events, whichever first — and a push
 // never blocks or throws; a failed send is reported and dropped, because the
 // transcript, not the event stream, is what a resume is rebuilt from.

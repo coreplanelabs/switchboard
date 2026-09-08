@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — strict W3C trace context.
+// Feature: docs/reference/specs/tracing.md — strict W3C trace context.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { formatTraceparent, parseTraceparent } from "./traceparent.js";
@@ -36,7 +36,7 @@ describe("parseTraceparent", () => {
     expect(formatTraceparent(TRACE, SPAN, false)).toBe(`00-${TRACE}-${SPAN}-00`);
   });
 });
-// Feature: features/tracing.md item 21 — a container edge ignores an inbound
+// Feature: docs/reference/specs/tracing.md item 21 — a container edge ignores an inbound
 // trace context unconditionally: no adapter has a code path that reads one.
 describe("the container edges", () => {
   it("never read traceparent, tracestate or baggage — the root they mint is theirs", () => {

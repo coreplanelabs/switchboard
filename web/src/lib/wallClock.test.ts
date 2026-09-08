@@ -1,4 +1,4 @@
-// Feature: features/tracing.md item 8 — the web app's one clock: a reading, and
+// Feature: docs/reference/specs/tracing.md item 8 — the web app's one clock: a reading, and
 // a ref that ticks while mounted.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, nextTick } from "vue";

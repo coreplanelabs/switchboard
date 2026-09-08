@@ -1,7 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-// Feature: features/routing-and-config.md item 12 — the ConfigDO: versioned
+// Feature: docs/reference/specs/routing-and-config.md item 12 — the ConfigDO: versioned
 // runtime config documents (the bot's chat-set `overrides`). Runs in workerd
 // against the real SQLite-backed Durable Object.
 
@@ -86,7 +86,7 @@ describe("ConfigDO routes", () => {
   });
 });
 
-describe("ConfigDO secrets + tickets (features/mcp-tools.md items 15–16)", () => {
+describe("ConfigDO secrets + tickets (docs/reference/specs/mcp-tools.md items 15–16)", () => {
   it("put → get → delete a sealed credential; the blob is stored verbatim and never interpreted", async () => {
     const serverId = `user:slack:U${key()}/vanta`;
     const sealed = { serverId, keyId: "k1", sealed: "AAAA", updatedAt: 3 };

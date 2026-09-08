@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { AGENTS, getAgent } from "./registry.js";
 
-// Features: features/agent-general.md, features/agent-review.md,
-// features/agent-coding.md — budgets, toolsets, and prompt guarantees are
+// Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
+// docs/reference/specs/agent-coding.md — budgets, toolsets, and prompt guarantees are
 // spec'd there; these tests pin the registry data to the spec so a budget
 // change forces a feature-file update (and vice versa).
 
@@ -29,7 +29,7 @@ describe("agent registry matches the feature specs", () => {
   it("general's prompt names its GitHub tools and redirects code/PR/web-research asks to the other agents", () => {
     // The general agent points at the agents that can act — it never invents a
     // repo URL or tells the user to run git themselves. It holds the issue tools
-    // itself (features/github-tools.md), so "open an issue on the app" is
+    // itself (docs/reference/specs/github-tools.md), so "open an issue on the app" is
     // answered here rather than bounced to agent:coding, and the prompt must
     // say what it can do, never that it has no tools.
     expect(AGENTS.general.system).toContain("agent:coding");
@@ -74,7 +74,7 @@ describe("agent registry matches the feature specs", () => {
   });
 });
 
-// Feature: features/resident-repos.md — resident-path prompt variants:
+// Feature: docs/reference/specs/resident-repos.md — resident-path prompt variants:
 // the workspace is a ready worktree (no cloning, no installs, no repo
 // discovery, no gh CLI); selected by the dispatcher AFTER executor resolution,
 // never by mutating the shared AgentDef.
@@ -115,7 +115,7 @@ describe("resident prompt variants", () => {
   });
 });
 
-// Feature: features/distilled-diffs.md. The resident prompts use the
+// Feature: docs/reference/specs/distilled-diffs.md. The resident prompts use the
 // digest two ways: coding lets it shape the submitted PR description; review
 // orients with it before reading. Review READS the code — it never runs the
 // project's tests or build (CI's verify gate does that, item 7).
@@ -153,7 +153,7 @@ describe("distilled-diffs prompt behavior (resident variants)", () => {
     expect(AGENTS.review.residentSystem!).toMatch(/GATHER ONCE/);
   });
 
-  // features/agent-review.md item 9 — the prompt no longer hedges about which
+  // docs/reference/specs/agent-review.md item 9 — the prompt no longer hedges about which
   // branch the worktree is on (the REVIEW TARGET block states it), and never
   // asks the agent to fetch: `origin/<base>` is already in the clone.
   it("review resident: no 'typically the branch under review' hedge, no git fetch instruction", () => {
@@ -164,7 +164,7 @@ describe("distilled-diffs prompt behavior (resident variants)", () => {
   });
 });
 
-// Feature: features/agent-review.md — posting the review back to the
+// Feature: docs/reference/specs/agent-review.md — posting the review back to the
 // PR is the system's job (a deterministic dispatcher post-step), NOT the model's.
 // Both review prompts must forbid self-posting so the run never double-comments,
 // and must say the system posts by default (comment-only) with an opt-out.
@@ -183,7 +183,7 @@ describe("review post-step: prompts defer posting to the system", () => {
   });
 });
 
-// Feature: features/pr-description.md — the coding agent's PR deliverable is a
+// Feature: docs/reference/specs/pr-description.md — the coding agent's PR deliverable is a
 // typed PrDescription submitted through submit_pr_description after pushing;
 // the bot process renders the body at the pushed head and opens/edits the PR.
 // The prompts must instruct push-then-submit and never open-the-PR-yourself.
@@ -219,7 +219,7 @@ describe("coding prompts: push then submit_pr_description (opening the PR is the
   });
 });
 
-// Feature: features/agent-ship.md item 6 — the review verdict enumerates
+// Feature: docs/reference/specs/agent-ship.md item 6 — the review verdict enumerates
 // findings as typed entries. Both review prompts must instruct the structured
 // findings array with stable ids and define the severity vocabulary once; the
 // prose still carries the full explanation of each finding.
@@ -244,7 +244,7 @@ describe("review prompts: structured findings through submit_verdict (agent-ship
   });
 });
 
-// Feature: features/agent-coding.md — every PR carries a rich description BY
+// Feature: docs/reference/specs/agent-coding.md — every PR carries a rich description BY
 // DEFAULT (not on request). The template survives as the content contract for
 // the submitted object's fields — sections map 1:1 — plus the rules that keep
 // it honest; nothing in it tells the agent to write body markdown anymore.
@@ -320,11 +320,11 @@ describe("coding prompts: the PR-description content contract (submitted object)
   });
 });
 
-// Feature: features/agent-ship.md item 1 — `agent:ship` resolves through the
+// Feature: docs/reference/specs/agent-ship.md item 1 — `agent:ship` resolves through the
 // registry like every directive, but the ship branch in dispatch() never calls
 // runAgent with THIS def: children run on the coding/review defs (clipped), so
 // ship's budgets are placeholders and its prompt is never sent to a model.
-describe("ship agent (features/agent-ship.md)", () => {
+describe("ship agent (docs/reference/specs/agent-ship.md)", () => {
   it("ship: repo required, full toolset, placeholder budgets (never used for a model call)", () => {
     expect(AGENTS.ship.resources?.repo).toBe("required");
     expect(AGENTS.ship.toolset).toBe("full");

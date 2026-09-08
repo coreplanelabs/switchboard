@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { bodyDigest, checkVendoredSkills, parseManifest, renderVendoredSkill, upstreamFileUrl, upstreamRawUrl } from "./manifest.js";
 import { parseSkillMarkdown } from "./frontmatter.js";
 
-// Feature: features/skills.md items 9–10 — third-party skills are vendored
+// Feature: docs/reference/specs/skills.md items 9–10 — third-party skills are vendored
 // from a pinned upstream commit through a manifest, never hand-copied, so
 // updates are inherited by re-syncing and the vendored files provably match
 // what the manifest says they are.
@@ -90,7 +90,7 @@ describe("parseManifest", () => {
     expect(() => parseManifest("skills: []")).toThrow(/sources/);
   });
 
-  // First-party skills (features/skills.md item 11): `local: true` replaces
+  // First-party skills (docs/reference/specs/skills.md item 11): `local: true` replaces
   // source/path — the file is authored here, never synced.
   it("parses a local entry (no source/path); rejects a local entry that also names a source or path, and a non-local entry missing them", () => {
     const m = parseManifest(LOCAL_MANIFEST);

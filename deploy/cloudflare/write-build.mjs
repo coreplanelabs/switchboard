@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Stamp the build identity into the bot image (features/slack-channel.md item 8).
+// Stamp the build identity into the bot image (docs/reference/specs/slack-channel.md item 8).
 //
 // `wrangler deploy` builds ../../Dockerfile from the CURRENT tree and exposes
 // no build args, so `npm run deploy` writes `<repo>/build.json` first and the

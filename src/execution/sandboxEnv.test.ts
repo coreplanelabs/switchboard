@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ENV_NAME_PATTERN, envFromRequest } from "./sandboxEnv.js";
 
-// Feature: features/execution.md item 5 — the env map the bot forwards into a
+// Feature: docs/reference/specs/execution.md item 5 — the env map the bot forwards into a
 // per-thread sandbox rides ONLY in the request BODY; request headers are never
 // a credential channel: Workers Logs record every invocation's request headers
 // and redact by a NAME heuristic — `x-env-gh_token` shows as REDACTED, but

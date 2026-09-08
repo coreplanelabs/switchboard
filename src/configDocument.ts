@@ -1,4 +1,4 @@
-// The bot's base config as a DOCUMENT on the state Worker (features/routing-and-
+// The bot's base config as a DOCUMENT on the state Worker (docs/reference/specs/routing-and-
 // config.md item 14): `deploy config` (and `deploy all`, before the bot step)
 // pushes the operator's config.yaml into the ConfigDO under the `base` key,
 // and the bot reads it at startup when SWITCHBOARD_CONFIG is `state://base`

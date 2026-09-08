@@ -26,7 +26,7 @@ import type { RunEvent } from "../core/runEvents.js";
 
 export interface ToolContext {
   executor: Executor;
-  /** The tool call's own span (features/tracing.md): what a tool measures
+  /** The tool call's own span (docs/reference/specs/tracing.md): what a tool measures
    *  itself (an MCP round trip, an executor op) is a child of it. Absent (CLI,
    *  most unit tests) → the tool measures nothing. */
   span?: Span;
@@ -47,7 +47,7 @@ export interface ToolContext {
   /** Skill store backing list_skills/use_skill. Injected by the
    *  dispatcher; absent → the skill tools report themselves unavailable. */
   skills?: SkillStore;
-  /** GitHub capability behind the `github_*` tools (features/github-tools.md):
+  /** GitHub capability behind the `github_*` tools (docs/reference/specs/github-tools.md):
    *  the REST client on the bot's App credential plus the requesting user's
    *  per-repo write gate. Injected by the dispatcher; absent → the tools
    *  report themselves unavailable. */
@@ -67,13 +67,13 @@ export interface ToolContext {
    *  (src/core/reviewVerdict.ts). Absent → the tool still accepts the call. */
   onVerdict?: (verdict: ReviewVerdict) => void;
   /** Receives the coding agent's typed PR description from
-   *  `submit_pr_description` (features/pr-description.md). Injected by the
+   *  `submit_pr_description` (docs/reference/specs/pr-description.md). Injected by the
    *  dispatcher for coding runs; the last valid call wins. The dispatcher
    *  renders the GitHub body from it at the pushed head and opens/edits the
    *  PR. Absent → the tool still accepts the call. */
   onPrDescription?: (desc: PrDescription) => void;
   /** Receives a fix round's per-finding dispositions from
-   *  `submit_dispositions` (features/agent-ship.md item 6). Injected by the
+   *  `submit_dispositions` (docs/reference/specs/agent-ship.md item 6). Injected by the
    *  ship orchestrator for fix rounds; the last valid call wins. Absent → the
    *  tool still accepts the call. */
   onDispositions?: (dispositions: FindingDisposition[]) => void;
@@ -129,7 +129,7 @@ export const bashTool: RunnableTool = {
     const requested = input.timeoutMs;
     let timeoutMs =
       typeof requested === "number" && Number.isFinite(requested) ? clampBashTimeout(requested) : undefined;
-    // …then clipped to the run's remaining wall clock (features/execution.md
+    // …then clipped to the run's remaining wall clock (docs/reference/specs/execution.md
     // item 12): a command may never outlive the run it serves, and inside the
     // write-up reserve nothing starts at all.
     let clipNote = "";
@@ -298,7 +298,7 @@ export const submitVerdictTool: RunnableTool = {
   },
 };
 
-// The fix round's answer to the review's findings (features/agent-ship.md
+// The fix round's answer to the review's findings (docs/reference/specs/agent-ship.md
 // item 6): one typed disposition per finding, so the ship orchestrator can
 // split a cap report into declined (disposition recorded) vs unaddressed
 // (none). Validation mirrors submit_verdict's fail-closed style — the parse
@@ -344,7 +344,7 @@ export const submitDispositionsTool: RunnableTool = {
         return `error: unknown finding id${unknown.length === 1 ? "" : "s"} ${unknown.join(", ")} — use exactly the ids from the review's findings list`;
       }
     }
-    // No sink means no ship fix round is listening (features/agent-ship.md
+    // No sink means no ship fix round is listening (docs/reference/specs/agent-ship.md
     // item 6): a "recorded" ack here would be a false success the model
     // relays to the user — say the truth instead.
     if (!ctx.onDispositions)
@@ -355,7 +355,7 @@ export const submitDispositionsTool: RunnableTool = {
   },
 };
 
-// The coding agent's PR deliverable (features/pr-description.md): a typed
+// The coding agent's PR deliverable (docs/reference/specs/pr-description.md): a typed
 // PrDescription instead of hand-written markdown. The dispatcher renders the
 // GitHub body from the submitted object at the pushed head and opens/edits
 // the PR itself, so the loop's ground truth comes from code, never from prose.
@@ -492,7 +492,7 @@ export const updateStatusTool: RunnableTool = {
 // submit_pr_description and submit_dispositions are full-only: only the coding
 // agent ships PRs and answers review findings, the way submit_verdict is
 // readonly-only because only the review agent judges them.
-// features/github-tools.md: the GitHub READ tools (repos, files, trees, code
+// docs/reference/specs/github-tools.md: the GitHub READ tools (repos, files, trees, code
 // search, issue list/get) join every toolset with a tool loop — they need no
 // workspace and let any agent answer from the org's repos. The issue WRITE
 // tools (create/update/comment/delete) go where the agent may act on GitHub:

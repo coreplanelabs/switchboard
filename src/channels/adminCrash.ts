@@ -1,5 +1,5 @@
 // `POST /admin/crash` — kill injection for the durable-runs receipts
-// (features/run-history.md item 36): the bot process exits hard —
+// (docs/reference/specs/run-history.md item 36): the bot process exits hard —
 // no drain, no handoff, no finish writes, the platform restarts the container
 // — so the "run survives kill -9" criterion is reproducible from the harness,
 // without a shell on the container. A hard exit, not a self-SIGKILL: the bot

@@ -1,4 +1,4 @@
-// A full container disk, named for what it is (features/resident-repos.md
+// A full container disk, named for what it is (docs/reference/specs/resident-repos.md
 // item 54). Pure decisions the resident Worker (deploy/cloudflare-resident/
 // worker.ts) imports; no I/O, no clock — `now` is an input.
 //

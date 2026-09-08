@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MCP_KEY_ENV, parseMcpSettings } from "./config.js";
 
-describe("parseMcpSettings (the `mcp` block — features/mcp-tools.md item 13)", () => {
+describe("parseMcpSettings (the `mcp` block — docs/reference/specs/mcp-tools.md item 13)", () => {
   it("absent → undefined (MCP off); `mcp: {}` → the defaults", () => {
     expect(parseMcpSettings(undefined)).toBeUndefined();
     expect(parseMcpSettings(null)).toBeUndefined();

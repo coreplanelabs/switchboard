@@ -18,7 +18,7 @@ import {
 } from "./web.js";
 import { toolResultText } from "../providers/types.js";
 
-// Feature: features/web-tools.md — provider-agnostic URL reading + web search.
+// Feature: docs/reference/specs/web-tools.md — provider-agnostic URL reading + web search.
 
 function fakeResponse(opts: {
   status?: number;

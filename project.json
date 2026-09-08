@@ -121,7 +121,7 @@
       "when": "Part of `check:consistency`."
     },
     "specs:check": {
-      "does": "Every `file::describe::it` proof in `features/*.md` names a real test; header paths exist; every `[gap]` links an issue.",
+      "does": "Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist; every `[gap]` links an issue.",
       "when": "After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit."
     },
     "decisions:check": {
@@ -182,7 +182,7 @@
     },
     "load": {
       "does": "Load harness: `-- history|resident|sandbox|e2e|cards|provider`.",
-      "when": "Capacity receipts (features/load-harness.md)."
+      "when": "Capacity receipts (docs/reference/specs/load-harness.md)."
     }
   }
 }

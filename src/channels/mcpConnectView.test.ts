@@ -12,7 +12,7 @@ import { McpService, type McpActor } from "../mcp/service.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { createMcpConnectViewHandler, isConnectPath, parseConnectRoute } from "./mcpConnectView.js";
 
-// features/mcp-tools.md item 15: the connect page. The handler receives the
+// docs/reference/specs/mcp-tools.md item 15: the connect page. The handler receives the
 // Access-verified identity from index.ts; these tests drive it over a real
 // local http server with a fixed identity per request (header-selected so one
 // server can play several people).

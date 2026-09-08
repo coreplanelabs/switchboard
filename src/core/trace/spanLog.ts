@@ -1,7 +1,7 @@
 import { logLineOf, type LogLine } from "./sinks.js";
 import type { SpanSink } from "./types.js";
 
-// The bot's span log, kept in the process (features/tracing.md item 26): every
+// The bot's span log, kept in the process (docs/reference/specs/tracing.md item 26): every
 // span end this process's roots see, as the same line the log sink prints,
 // in a bounded ring — so an operator can read what the container's stdout
 // holds without reading the container's stdout, and at every level, not only

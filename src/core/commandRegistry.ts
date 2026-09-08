@@ -25,7 +25,7 @@ import { ALL_CAPABILITIES, type Capabilities } from "./capabilities.js";
 // an unauthorized caller learns nothing about the schema, and error text names
 // the argument/option and the expected type — never the submitted value.
 //
-// AUTHORIZE is ONE question on every surface (features/authorization.md,
+// AUTHORIZE is ONE question on every surface (docs/reference/specs/authorization.md,
 // docs/decisions/0007-authorization-policy-table.md): `authorize(caller.actor, cmd.action, resource)` over the policy table in
 // `src/core/authz/policy.ts`, where `resource` is `command { id }` unless the
 // definition resolves one from the input (`CommandDef.resource`). The registry
@@ -45,7 +45,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export type JsonObject = { [key: string]: JsonValue | undefined };
 
 /** `<group>:read` | `<group>:write` | `<group>:exec` — what a command DOES, and
- *  the name of the grant an actor needs for it (features/authorization.md item
+ *  the name of the grant an actor needs for it (docs/reference/specs/authorization.md item
  *  2). `exec` is the deterministic-operation class (`repo:exec` runs a repo's
  *  onboarded test/build command; no model, no agent run); `write` never
  *  implies it. */
@@ -110,7 +110,7 @@ export interface CommandContext<A extends readonly ArgDef[], O extends OptionsSc
   caller: Caller;
   deps: D;
   /** The span the surface runs the command under — the dispatcher's
-   *  `run.command` (features/tracing.md item 24); a handler binds its clients
+   *  `run.command` (docs/reference/specs/tracing.md item 24); a handler binds its clients
    *  to it. Absent on a surface without a trace (the CLI, a test). */
   span?: Span;
 }
@@ -213,7 +213,7 @@ export function defineCommand<D, const A extends readonly ArgDef[] = readonly []
   for (const retired of RETIRED_FIELDS) {
     if (retired in def)
       throw new Error(
-        `${def.id}: \`${retired}\` is gone — declare \`action\` and let the policy table decide (features/authorization.md)`,
+        `${def.id}: \`${retired}\` is gone — declare \`action\` and let the policy table decide (docs/reference/specs/authorization.md)`,
       );
   }
   if (typeof def.action !== "string" || !COMMAND_ACTION.test(def.action))
@@ -646,7 +646,7 @@ function renderRunLine(r: JsonObject, now: number, surface: "chat" | "text"): st
   const receivedAt = typeof r.receivedAt === "number" ? r.receivedAt : undefined;
   const stop = isObject(r.stop) && typeof r.stop.state === "string" ? r.stop.state : undefined;
   const status = r.finished === true ? (typeof r.status === "string" ? r.status : "finished") : (stop ?? "active");
-  // The one duration definition (features/tracing.md): received (or started) to
+  // The one duration definition (docs/reference/specs/tracing.md): received (or started) to
   // finished, or to now while live.
   const ms = startedAt === undefined ? undefined : runDurationMs({ startedAt, receivedAt, finishedAt }, now);
   const duration = ms === undefined ? "-" : formatDuration(ms, "clock");

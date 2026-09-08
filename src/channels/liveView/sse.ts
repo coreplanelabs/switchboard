@@ -249,7 +249,7 @@ export function serveIndexEvents(
  */
 export function withOmittedMarkers(events: readonly RunEvent[], eventCount: number): LiveFrame[] {
   // A span record without a `seq` was synthesized by `normalizeSpans` for the
-  // seed (features/tracing.md): it stands for nothing the registry counted, so
+  // seed (docs/reference/specs/tracing.md): it stands for nothing the registry counted, so
   // it is neither part of the stored count nor a step of the cursor below.
   const counted = events.filter((e) => !(isSpanRecord(e) && e.seq === undefined)).length;
   const omitted = eventCount - counted;

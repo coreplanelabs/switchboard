@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PRESIGNED_BACKUP_ENV, backupTransferMode } from "./residentBackupTransfer.js";
 
-// Feature: features/resident-repos.md item 61 — which way snapshot bytes
+// Feature: docs/reference/specs/resident-repos.md item 61 — which way snapshot bytes
 // travel. `localBucket: true` (the Sandbox SDK's local-development mode) pumps
 // every archive through the Durable Object over the control RPC, so a checkout
 // restore larger than the isolate's memory resets the isolate mid-transfer.

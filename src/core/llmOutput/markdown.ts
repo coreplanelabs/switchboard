@@ -1,7 +1,7 @@
 import { fromMarkdown } from "mdast-util-from-markdown";
 import type { OutputType } from "./types.js";
 
-// The prose output type (features/llm-output.md item 3). There is no invalid
+// The prose output type (docs/reference/specs/llm-output.md item 3). There is no invalid
 // Markdown — every string renders as something — so this type never fails and
 // never retries; what it fixes is DIALECT variance. Models alternate between
 // `*x*` (mrkdwn bold) and `**x**` (Markdown bold), and per-surface renderers

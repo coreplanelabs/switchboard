@@ -12,7 +12,7 @@ import {
   staleAllowEntries,
 } from "../scripts/public-hygiene.mjs";
 
-// The public-hygiene ratchet (features/public-hygiene.md): the public tree
+// The public-hygiene ratchet (docs/reference/specs/public-hygiene.md): the public tree
 // carries no company, person, tracker, plan-id, platform-id or incident-date
 // imprint. Every hit is counted per file and class; the committed allowlist can
 // only shrink, and a line that is legitimately allowed is named verbatim.
@@ -73,7 +73,7 @@ describe("the classes", () => {
 });
 
 describe("scope", () => {
-  it("the public tree: src, deploy, web, scripts, config, docs, features, .github and the root markdown; not plans, the changelog, generated notices, lockfiles, binaries, or the ratchet's own files", () => {
+  it("the public tree: src, deploy, web, scripts, config, docs, .github and the root markdown; not plans, the changelog, generated notices, lockfiles, binaries, or the ratchet's own files", () => {
     for (const p of [
       "src/core/dispatcher.ts",
       "deploy/cloudflare/wrangler.template.jsonc",
@@ -82,7 +82,7 @@ describe("scope", () => {
       "config/config.example.yaml",
       "docs/explanation/x.md",
       "docs/decisions/0001-x.md",
-      "features/memory.md",
+      "docs/reference/specs/memory.md",
       ".github/workflows/ci.yml",
       "README.md",
       "AGENTS.md",

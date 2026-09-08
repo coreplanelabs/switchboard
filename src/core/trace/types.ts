@@ -1,4 +1,4 @@
-/** The one measurement primitive (features/tracing.md).
+/** The one measurement primitive (docs/reference/specs/tracing.md).
  *
  *  A span is one unit of work with a start, an end, a name and a parent. A root
  *  has no parent; one root per message. Every awaited step Switchboard takes
@@ -9,7 +9,7 @@
 import type { SpanAttrs } from "./attrs.js";
 
 /** The only way production code reads the time: injected, never `Date.now()`
- *  (features/tracing.md, the clock ratchet). */
+ *  (docs/reference/specs/tracing.md, the clock ratchet). */
 export type Clock = () => number;
 
 export type SpanStatus = "ok" | "error";
@@ -25,7 +25,7 @@ export interface SpanRecord {
   parentSpanId?: string;
   /** The parent belongs to another process: this span is a root of its own
    *  process that continues a remote trace — a Worker's root adopting the
-   *  bot's `traceparent` (features/tracing.md item 22). The log sink prints
+   *  bot's `traceparent` (docs/reference/specs/tracing.md item 22). The log sink prints
    *  it as a root; it never travels on a run stream. */
   adopted?: true;
   name: string;
@@ -64,7 +64,7 @@ export interface SpanOptions {
 
 /** The one trailing argument a client method takes to join a trace: the
  *  caller's span, under which the client's outbound call becomes an
- *  `http.client` span (features/tracing.md item 24). Absent, the call is the
+ *  `http.client` span (docs/reference/specs/tracing.md item 24). Absent, the call is the
  *  plain fetch it was. */
 export interface TraceOptions {
   span?: Span;
@@ -112,7 +112,7 @@ export interface RootOptions {
   startedAt?: number;
   attrs?: SpanAttrs;
   /** A remote parent to adopt — a Worker's authenticated branch reading the
-   *  bot's `traceparent` (features/tracing.md item 22): the root joins that
+   *  bot's `traceparent` (docs/reference/specs/tracing.md item 22): the root joins that
    *  trace as a child of that span instead of minting its own. */
   parent?: { traceId: string; parentId: string };
 }

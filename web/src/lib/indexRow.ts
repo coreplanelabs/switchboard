@@ -33,7 +33,7 @@ export function statusWord(run: IndexRow): string {
 export type DotTone = "green" | "red" | "amber" | "grey";
 
 /** A finished run whose stream has not been sealed yet: the agent stopped and
- *  the reply is in flight (features/tracing.md). A persisted row is past that
+ *  the reply is in flight (docs/reference/specs/tracing.md). A persisted row is past that
  *  (its record was written after the seal); a row that never gets a seal — the
  *  process died, the reply hung — stays amber until the registry evicts it. */
 export function delivering(run: IndexRow): boolean {
@@ -88,7 +88,7 @@ export function shortId(id: string): string {
   return id.length > 8 ? `${id.slice(0, 8)}…` : id;
 }
 
-/** The stopwatch cell: the one duration (features/tracing.md) — received (or
+/** The stopwatch cell: the one duration (docs/reference/specs/tracing.md) — received (or
  *  started) to finished, fixed; a live row's to `now`; a tombstone or a live
  *  row with no clock → empty. */
 export function elapsedText(run: IndexRow, now: number | undefined): string {
@@ -185,7 +185,7 @@ export function mergeRow(prev: IndexRow | undefined, run: IndexRow): IndexRow {
   const merged: IndexRow = { ...run };
   if (merged.finishedAt === undefined && prev.finishedAt !== undefined) merged.finishedAt = prev.finishedAt;
   if (merged.status === undefined && prev.status !== undefined) merged.status = prev.status;
-  // The tracing stamps (features/tracing.md) ride the record, not a registry upsert.
+  // The tracing stamps (docs/reference/specs/tracing.md) ride the record, not a registry upsert.
   if (merged.receivedAt === undefined && prev.receivedAt !== undefined) merged.receivedAt = prev.receivedAt;
   if (merged.sealedAt === undefined && prev.sealedAt !== undefined) merged.sealedAt = prev.sealedAt;
   if (merged.replyOk === undefined && prev.replyOk !== undefined) merged.replyOk = prev.replyOk;

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// The PR description as DATA (features/pr-description.md). One typed object
+// The PR description as DATA (docs/reference/specs/pr-description.md). One typed object
 // carries everything a reader needs about a change — the PR title, TL;DR,
 // what & why, the Tour (hunk-anchored walkthrough), decisions, risks,
 // validation criteria with their proofs — and each surface has its own
@@ -113,7 +113,7 @@ function cell(s: string): string {
 
 /**
  * The GitHub PR body. Section order and shape are the contract the coding
- * agent's template describes in prose (features/agent-coding.md item 3):
+ * agent's template describes in prose (docs/reference/specs/agent-coding.md item 3):
  * every section a `##` heading, TL;DR first; Tour steps as `### N. title` →
  * description → optional **Look for:** → permalink last; a final
  * `### N. Remaining changes` list; decisions as `- **title.** rationale`;

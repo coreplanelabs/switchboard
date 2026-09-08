@@ -12,7 +12,7 @@ import {
   type LiveThread,
 } from "./threadAdmission.js";
 
-// Feature: features/thread-admission.md — one live run per thread; a follow-up
+// Feature: docs/reference/specs/thread-admission.md — one live run per thread; a follow-up
 // while a run is in flight is steered into it or refused with a pointer, never
 // started as a rival run.
 

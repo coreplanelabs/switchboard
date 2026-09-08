@@ -5,7 +5,7 @@ import { callerWith } from "../testing/callers.js";
 import { parseInvocation } from "../commandSurface.js";
 import { envBootstrap, registerEnvCommands, type EnvCommandDeps } from "./env.js";
 
-// Feature: features/agent-env-bootstrap.md / features/command-registry.md (phase
+// Feature: docs/reference/specs/agent-env-bootstrap.md / docs/reference/specs/command-registry.md (phase
 // 4b): `env bootstrap` — the former `agent-env-bootstrap` script as a CLI-only
 // registry command. The host half (op read, the 600 file) is injected; the
 // command owns the option grammar, the log lines, and never lets a value out.

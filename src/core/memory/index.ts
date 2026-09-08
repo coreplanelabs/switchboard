@@ -158,7 +158,7 @@ export async function memoryContextBlock(
   userId?: string,
   scopes: MemoryScopeInputs = {},
   /** The caller's span — the dispatcher's `dispatch.memory_read` — under which
-   *  every scope's retrieve becomes an `http.client` span (features/tracing.md item 24). */
+   *  every scope's retrieve becomes an `http.client` span (docs/reference/specs/tracing.md item 24). */
   span?: Span,
 ): Promise<string | undefined> {
   const store = selectMemoryStore(cfg, injected);

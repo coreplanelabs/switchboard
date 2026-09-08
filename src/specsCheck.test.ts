@@ -284,7 +284,7 @@ describe("partitionAgainstBaseline", () => {
 
 describe("the repository's own specs", () => {
   it("carry over a thousand proof references, so the parser is reading the real convention", () => {
-    const md = readFileSync(new URL("features/slack-channel.md", `file://${root}`), "utf8");
+    const md = readFileSync(new URL("docs/reference/specs/slack-channel.md", `file://${root}`), "utf8");
     expect(parseProofRefs(md).length).toBeGreaterThan(20);
   });
 

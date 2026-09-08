@@ -1,6 +1,6 @@
 import type { RunOwner } from "./trace/streamSpans.js";
 
-// Who owns a run's window (features/tracing.md): the partition classes
+// Who owns a run's window (docs/reference/specs/tracing.md): the partition classes
 // `run.command` and its resident grafts as the run's own tools when the run IS
 // the command (a chat command's deterministic body, no model) and as setup
 // when an agent run merely fell through one. The agent name a command run's

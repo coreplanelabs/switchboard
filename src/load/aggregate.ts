@@ -1,4 +1,4 @@
-// The load harness's result math (features/load-harness.md): one Sample per
+// The load harness's result math (docs/reference/specs/load-harness.md): one Sample per
 // operation in, the per-operation latency table, the refusal count by named
 // reason, and the plan's D10 pass/fail lines out. Pure — no clock, no I/O; the
 // harness commands feed it and write what it renders.

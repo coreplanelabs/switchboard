@@ -16,8 +16,8 @@
 // a wildcard at the parameter.
 //
 //   npm run specs:check                                # every spec
-//   npm run specs:check -- features/x.md               # one spec
-//   npm run specs:check -- --no-baseline features/x.md # list its known-stale references too
+//   npm run specs:check -- docs/reference/specs/x.md               # one spec
+//   npm run specs:check -- --no-baseline docs/reference/specs/x.md # list its known-stale references too
 //   npm run specs:check -- --fix                       # `title` → `title…` where that is the one match
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -300,7 +300,7 @@ export function resolveRefs(refs, titlesFor) {
 // ---------------------------------------------------------------------------
 // The check over the tree.
 
-export const SPECS_DIR = "features";
+export const SPECS_DIR = "docs/reference/specs";
 
 export function checkSpec(specPath, { root, titlesFor, testFiles }) {
   const markdown = readFileSync(join(root, specPath), "utf8");

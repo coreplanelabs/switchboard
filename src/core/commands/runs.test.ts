@@ -18,8 +18,8 @@ import { InMemoryRunStore } from "../runStore.js";
 import { createRunsService } from "../runsService.js";
 import { registerRunsCommands, runsCommands, type RunReadDenied, type RunsCommandDeps, wrapEvent } from "./runs.js";
 
-// Feature: features/command-registry.md — the `runs.*` registrations — and
-// features/authorization.md items 5–7: what a caller
+// Feature: docs/reference/specs/command-registry.md — the `runs.*` registrations — and
+// docs/reference/specs/authorization.md items 5–7: what a caller
 // may SEE is `authorize` / `predicateFor` on its Actor; a denied point read is
 // `not_found`; lists are filtered by the store predicate.
 
@@ -207,7 +207,7 @@ describe("runs.list", () => {
     expect(json).not.toMatch(/"events"/);
   });
 
-  it("status defaults to active (features/run-history.md: active by default, `all` opt-in) — a bare `runs list` equals `--status active`", async () => {
+  it("status defaults to active (docs/reference/specs/run-history.md: active by default, `all` opt-in) — a bare `runs list` equals `--status active`", async () => {
     const { reg, registry, deps } = await setup();
     const { id } = reg.create("coding · acme/live", {
       agent: "coding",

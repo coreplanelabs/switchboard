@@ -17,7 +17,7 @@ import {
   type SandboxLiveInput,
 } from "./sandboxLiveGate.js";
 
-// features/release-and-deploy.md item 16 — the sandbox is live when the Worker,
+// docs/reference/specs/release-and-deploy.md item 16 — the sandbox is live when the Worker,
 // the rollout and a probe agree. A sandbox deploy is two artifacts: the Worker
 // upload is instant, the image rollout is not, so a thread created in between
 // lands on a container still running the previous image and every exec fails

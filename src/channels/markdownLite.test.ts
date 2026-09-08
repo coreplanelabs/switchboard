@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderMarkdownInto } from "./markdownLite.js";
 
-// Feature: features/live-view.md item 12 — the safe-subset markdown renderer the
+// Feature: docs/reference/specs/live-view.md item 12 — the safe-subset markdown renderer the
 // run page uses for the Request/Answer blocks and assistant rows. It runs in the
 // browser under the page's strict CSP, so it is exercised here against a minimal
 // fake DOM (createElement / createTextNode / appendChild / textContent /

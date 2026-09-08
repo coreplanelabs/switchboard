@@ -1,4 +1,4 @@
-// Planning a resume (features/run-history.md item 37): what a new generation
+// Planning a resume (docs/reference/specs/run-history.md item 37): what a new generation
 // does with a reclaimed run's transcript and last step record, decided purely
 // so the rule is one place and testable without a runner. The runner then
 // re-enters its loop from the plan (`RunOptions.resume`).

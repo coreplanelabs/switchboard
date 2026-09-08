@@ -7,7 +7,7 @@ import { recordingSink } from "../core/testing/recordingSink.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../core/trace/internalHosts.js";
 import { parseTraceparent } from "../core/trace/traceparent.js";
 
-// Feature: features/resident-repos.md — bot-side resident client: every
+// Feature: docs/reference/specs/resident-repos.md — bot-side resident client: every
 // route POSTs {resource, threadKey, ...}; /exec streams heartbeat whitespace
 // then one JSON document with in-body errors; needs:"attach" (evicted or
 // disk-recycled worktree) is recovered by exactly one re-attach + retry.
@@ -67,7 +67,7 @@ describe("ResidentExecutor.attach over a heartbeat stream (item 59: an attach th
     });
   });
 
-  // Feature: features/tracing.md item 19 — the resident's step trace rides the
+  // Feature: docs/reference/specs/tracing.md item 19 — the resident's step trace rides the
   // binding, rebuilt from the allowlist; a Worker without one binds as before.
   it("carries the resident's step trace on the binding, sanitized: hostile names and malformed steps never survive, and a trace-less answer has no trace", async () => {
     stubFetch({
@@ -92,7 +92,7 @@ describe("ResidentExecutor.attach over a heartbeat stream (item 59: an attach th
     expect(plain.attachMs).toBeUndefined();
   });
 
-  // Feature: features/tracing.md item 19 — a refused attach's steps ride the
+  // Feature: docs/reference/specs/tracing.md item 19 — a refused attach's steps ride the
   // error it becomes, sanitized, so the dispatcher can still graft them.
   it("pins a refused attach's step trace on the thrown error, sanitized; a trace-less refusal pins nothing", async () => {
     stubFetch({
@@ -491,7 +491,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[0])).toMatchObject({ resource: OPTS.resource, threadKey: OPTS.threadKey, refHint: "master" });
   });
 
-  // features/resident-repos.md item 50: a read-only run asks for a read-only
+  // docs/reference/specs/resident-repos.md item 50: a read-only run asks for a read-only
   // worktree (no credential file, unfetchable origin). Sent only when true so
   // an older resident sees the same body it always did.
   it("sends readonly:true in the attach body when the run is read-only, and omits the field otherwise", async () => {
@@ -502,7 +502,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[1])).not.toHaveProperty("readonly");
   });
 
-  // features/resident-repos.md item 51: the expected head rides along so the
+  // docs/reference/specs/resident-repos.md item 51: the expected head rides along so the
   // resident fetches a mirror whose ref tip lags it (a re-review after a push
   // would otherwise attach to a stale tip). Sent only when set — older body
   // otherwise.
@@ -577,12 +577,12 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
   });
 });
 
-// Feature: features/resident-repos.md — ResidentOperations: the
+// Feature: docs/reference/specs/resident-repos.md — ResidentOperations: the
 // deterministic-ops client for POST /op. Responses stream like /exec
 // (heartbeat whitespace + one JSON document, parsed from the BODY); a failing
 // op is a RESULT (ok:false), a mutating-entry refusal and not-onboarded are
 // distinct named kinds, and transport failures never masquerade as results.
-// Feature: features/tracing.md item 21 — every resident route is one
+// Feature: docs/reference/specs/tracing.md item 21 — every resident route is one
 // `http.client` span under the caller's span, and the trace context rides to
 // the resident because it is one of our hosts — and only then.
 describe("ResidentExecutor trace context", () => {
@@ -655,7 +655,7 @@ describe("ResidentExecutor trace context — the recovery re-attach", () => {
 describe("ResidentOperations.run", () => {
   const OPS = { baseUrl: "https://resident.example", token: "op-token" };
 
-  // Feature: features/tracing.md item 19 — an op's step trace and total ride the result.
+  // Feature: docs/reference/specs/tracing.md item 19 — an op's step trace and total ride the result.
   it("carries the resident's step trace and total on the result, sanitized", async () => {
     stubFetch({
       raw: JSON.stringify({
@@ -870,7 +870,7 @@ describe("ResidentExecutor.moveTo", () => {
   });
 });
 
-// Feature: features/execution.md item 11 — per-call bash timeout on the
+// Feature: docs/reference/specs/execution.md item 11 — per-call bash timeout on the
 // resident path. The budget rides in the /exec body only when the caller asked
 // for one (an older resident keeps seeing the body it always did), clamped
 // client-side to [1s, 20 min]; the resident clamps again server-side and never
@@ -964,7 +964,7 @@ describe("ResidentExecutor per-send deadline", () => {
   });
 });
 
-// Feature: features/resident-repos.md item 62 — the bot re-sanitizes every
+// Feature: docs/reference/specs/resident-repos.md item 62 — the bot re-sanitizes every
 // resident string at the parse, permanently: a reason stored by an older
 // resident survives that resident's deploy and its rollbacks.
 describe("resident text is made safe at the parse (item 62)", () => {

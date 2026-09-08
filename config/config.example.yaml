@@ -55,7 +55,7 @@ defaults:
 #   slack:U012345:
 #     model: openai/gpt-5
 
-# Authorization (features/authorization.md item 9, docs/reference/authorization.md):
+# Authorization (docs/reference/specs/authorization.md item 9, docs/reference/authorization.md):
 # two blocks. `restrict` names what is CLOSED unless granted — an agent listed
 # here runs only for an actor whose grants hold agent:run:<name> (or `all`); a
 # repo listed here is used only by an actor whose `repos` axis names it (or
@@ -146,7 +146,7 @@ execution:
 # On Fly.io set this to ./data/workspaces so checkouts live on the volume.
 workspaceDir: ./workspaces
 
-# Cross-session self-learning memory (features/memory.md). DEFAULT OFF: absent, or
+# Cross-session self-learning memory (docs/reference/specs/memory.md). DEFAULT OFF: absent, or
 # enabled:false, means the dispatcher uses a NullMemoryStore and the model input
 # is byte-identical to memory-off — zero behavior change. When enabled, before
 # each model turn the dispatcher retrieves scope-relevant distilled records
@@ -159,7 +159,7 @@ workspaceDir: ./workspaces
 # write) — fire-and-forget, so it never delays or fails the reply. Records live
 # in the Memory Worker (deploy/cloudflare-memory/: one SQLite Durable Object per
 # scope, survives bot restarts); with no `worker` configured the bot falls back
-# to an IN-PROCESS store and warns at startup — dev only. See features/memory.md.
+# to an IN-PROCESS store and warns at startup — dev only. See docs/reference/specs/memory.md.
 # memory:
 #   enabled: false      # master switch (default false)
 #   worker:
@@ -180,8 +180,8 @@ workspaceDir: ./workspaces
 #                       # <provider>/<model> for the reflection pass — pick a
 #                       # cheap tier. Absent → the run's own resolved model.
 
-# Self-improvement proposals (features/run-friction.md). Every finished run's friction
-# diagnosis (features/run-friction.md) is stored with its run record, so the
+# Self-improvement proposals (docs/reference/specs/run-friction.md). Every finished run's friction
+# diagnosis (docs/reference/specs/run-friction.md) is stored with its run record, so the
 # runs these commands see are run history's (`runHistory` below; its retention
 # bounds them — without `runHistory` there are no recent runs to analyze).
 # `friction report` (open to everyone) shows the patterns that recur across
@@ -189,7 +189,7 @@ workspaceDir: ./workspaces
 # files the top patterns as labeled GitHub issues — evidence, affected runs, a
 # concrete suggested fix — deduped against the proposals already open. It only
 # ever PROPOSES: no PRs, nothing merged. Without `repo`, `friction propose`
-# refuses. See features/self-improvement.md.
+# refuses. See docs/reference/specs/self-improvement.md.
 # selfImprovement:
 #   repo: acme/switchboard      # owner/name the proposals are filed against
 #   label: self-improvement     # triage label (created if missing; default shown)
@@ -211,7 +211,7 @@ workspaceDir: ./workspaces
 #     baseUrl: https://switchboard-memory.example.com
 #     tokenEnv: MEMORY_TOKEN    # env var holding the Worker's bearer (default)
 
-# agent:ship pipeline caps (features/agent-ship.md). `agent:ship in owner/repo:
+# agent:ship pipeline caps (docs/reference/specs/agent-ship.md). `agent:ship in owner/repo:
 # <task>` runs the coding → review → fix loop to LGTM as one pipeline: at most
 # `maxRounds` review rounds and `maxMinutes` minutes of wall clock — whichever
 # hits first ends the loop, and each child round's own budget is clipped to the
@@ -220,7 +220,7 @@ workspaceDir: ./workspaces
 #   maxRounds: 3      # review rounds per pipeline
 #   maxMinutes: 120   # pipeline wall-clock budget in minutes
 
-# Spend reporting: GET /costs (Access-gated). Optional. See features/costs.md.
+# Spend reporting: GET /costs (Access-gated). Optional. See docs/reference/specs/costs.md.
 # costs:
 #   cloudflareAccountId: <32-hex account id>
 #   cloudflareTokenEnv: CF_ANALYTICS_TOKEN     # token with Account Analytics:Read
@@ -235,7 +235,7 @@ workspaceDir: ./workspaces
 #         <32-hex namespace id>: server DO
 #       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
 
-# Dashboard authentication (features/access-gate.md). Everything the dashboard
+# Dashboard authentication (docs/reference/specs/access-gate.md). Everything the dashboard
 # serves — /runs*, /residents*, /costs*, /mcp/connect/*, and every /api/* command
 # — sits behind ONE identity gate; `auth` picks which credential it checks:
 #   access — the Cloudflare Access JWT the edge injects (ACCESS_TEAM_DOMAIN and
@@ -273,7 +273,7 @@ workspaceDir: ./workspaces
 #     windowMinutes: 30
 
 # Where chat-set runtime overrides (`config set`, `config instructions`, `config clear`)
-# persist (features/routing-and-config.md item 12). Without this block they go to
+# persist (docs/reference/specs/routing-and-config.md item 12). Without this block they go to
 # data/overrides.json on the host disk — EPHEMERAL on Cloudflare Containers. In
 # production name the state Worker's ConfigDO (same Worker + bearer as memory and
 # run history); the bot and the CLI then write one versioned document.
@@ -282,7 +282,7 @@ workspaceDir: ./workspaces
 #     baseUrl: https://switchboard-memory.example.com
 #     tokenEnv: MEMORY_TOKEN   # default
 
-# Persistent run history (features/run-history.md). Every finished run's
+# Persistent run history (docs/reference/specs/run-history.md). Every finished run's
 # record — identity, timing, terminal status, the redacted event stream, the
 # friction diagnosis — is kept for a retention window instead of evicted 60 s
 # after finish, and the friction ledger's "recent runs" are read from it.
@@ -302,7 +302,7 @@ workspaceDir: ./workspaces
 #     baseUrl: https://switchboard-memory.example.com
 #     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)
 
-# External MCP servers as agent tools (features/mcp-tools.md). Servers are a
+# External MCP servers as agent tools (docs/reference/specs/mcp-tools.md). Servers are a
 # SETTING ON THE CONFIG SCOPES, not a list here: `defaults.mcpServers` (org-wide),
 # `channels.<id>.mcpServers`, `users.<id>.mcpServers` — static below, or added at run
 # time with `mcp add` (persisted with the other runtime overrides). A run gets the

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { commentBody, FOOTER, MARKER, summaryBlock } from "../scripts/deploy-targets.mjs";
 
-// The `deploy targets` CI job's two rendered artifacts (features/release-and-
+// The `deploy targets` CI job's two rendered artifacts (docs/reference/specs/release-and-
 // deploy.md item 8). The command it wraps (`deploy plan --affected`) has its
 // own tests; what matters here is the exact shape the job summary and the
 // release PR's sticky comment take, since the comment is found again by its

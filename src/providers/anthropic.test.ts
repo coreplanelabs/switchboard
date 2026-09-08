@@ -8,7 +8,7 @@ import {
 } from "./anthropic.js";
 import type { ChatMessage, CompletionRequest } from "./types.js";
 
-// Feature: features/run-loop.md — prompt caching: the static prefix (tools +
+// Feature: docs/reference/specs/run-loop.md — prompt caching: the static prefix (tools +
 // system) and a rolling breakpoint on the newest message, so every turn after
 // the first reads the conversation so far from cache instead of re-billing it.
 describe("buildAnthropicParams (prompt-cache layout)", () => {
@@ -89,7 +89,7 @@ describe("buildAnthropicParams (prompt-cache layout)", () => {
   });
 });
 
-// Feature: features/slack-channel.md — attachments seam. A PDF attachment must
+// Feature: docs/reference/specs/slack-channel.md — attachments seam. A PDF attachment must
 // reach Anthropic as a native document content block; images and text pass
 // through unchanged.
 
@@ -214,7 +214,7 @@ describe("usageFromAnthropic (token usage → TokenUsage)", () => {
   });
 });
 
-// Feature: features/run-loop.md item 11 — cache TTL per agent, thinking blocks
+// Feature: docs/reference/specs/run-loop.md item 11 — cache TTL per agent, thinking blocks
 // replayed unchanged, effort sent only where the model accepts it.
 type Captured = { params: Record<string, unknown>; opts: unknown };
 function fakeClient(msg: Record<string, unknown>, captured: Captured[]) {
@@ -227,7 +227,7 @@ function fakeClient(msg: Record<string, unknown>, captured: Captured[]) {
     },
   } as unknown as ConstructorParameters<typeof AnthropicProvider>[2];
 }
-// Feature: features/live-view.md item 15 — the stream's block boundaries reach the
+// Feature: docs/reference/specs/live-view.md item 15 — the stream's block boundaries reach the
 // observer by kind and index; the first text or block is the first token, once.
 describe("stream timing hooks", () => {
   it("content_block_start/stop reach onBlockStart/onBlockEnd with the block's kind and index; onFirstToken fires once at the first text or block; a double without `on` still completes", async () => {

@@ -53,7 +53,7 @@ export interface RolloutTarget {
   image: string | null;
 }
 
-/** The one JSON document a streamed `/exec` answer ends with (features/execution.md item 3). */
+/** The one JSON document a streamed `/exec` answer ends with (docs/reference/specs/execution.md item 3). */
 export interface ExecBody {
   stdout?: unknown;
   stderr?: unknown;

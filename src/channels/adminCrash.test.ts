@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleAdminCrash } from "./adminCrash.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 
-// `POST /admin/crash` (features/run-history.md item 36, plan D12): the kill
+// `POST /admin/crash` (docs/reference/specs/run-history.md item 36, plan D12): the kill
 // injection behind the durable-runs receipts — authorized exactly like
 // `deploy restart` (a `deploy:write` bearer), answered before the process
 // exits hard (PID 1 cannot SIGKILL itself; the exit is the same event).

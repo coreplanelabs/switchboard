@@ -11,7 +11,7 @@ import { buildRunLedger } from "./runLedgerWorker.js";
 import { buildRunStore } from "./runStore.js";
 import { buildScheduleStore } from "./scheduleStore.js";
 
-// Feature: features/routing-and-config.md item 16 — one Capabilities value,
+// Feature: docs/reference/specs/routing-and-config.md item 16 — one Capabilities value,
 // computed once from the config and the environment. Every axis is exercised
 // with the config/env that turns it on and off, and each axis that mirrors a
 // builder's selection is pinned to that builder so the two rules cannot drift.
@@ -123,7 +123,7 @@ describe("capabilitiesFrom — every axis, on and off", () => {
     expect(caps({}, {}).ingress).toBe(false);
   });
 
-  it("dashboardAuth is the strategy the gate runs (features/access-gate.md): `dashboard.auth` when set, else `access` iff parseAccessConfig answers, else `none`; ACCESS_DEV_BYPASS is not read", () => {
+  it("dashboardAuth is the strategy the gate runs (docs/reference/specs/access-gate.md): `dashboard.auth` when set, else `access` iff parseAccessConfig answers, else `none`; ACCESS_DEV_BYPASS is not read", () => {
     const access = { ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com", ACCESS_AUD: "a".repeat(64) };
     const envs: NodeJS.ProcessEnv[] = [
       {},

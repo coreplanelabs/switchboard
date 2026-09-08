@@ -1,5 +1,5 @@
 // `POST /admin/restart/authorize` — the bot's half of the Worker's
-// `POST /admin/restart` (deploy/cloudflare/worker.ts, features/slack-channel.md
+// `POST /admin/restart` (deploy/cloudflare/worker.ts, docs/reference/specs/slack-channel.md
 // item 8). The Worker holds the token map, so it can tell WHO a bearer is, but
 // what that identity may do lives in the bot's config (`grants`, authorization.md
 // item 9) — the Worker has no config store. So before it stops the container it

@@ -1,5 +1,5 @@
 // The `dashboard` block of config.yaml and the one rule that picks the
-// dashboard auth strategy (features/access-gate.md, plan D5). Pure — no
+// dashboard auth strategy (docs/reference/specs/access-gate.md, plan D5). Pure — no
 // crypto, no I/O — so the capabilities value (src/core/capabilities.ts) and
 // the verifier that actually gates requests (src/channels/dashboardAuth.ts)
 // both call `resolveDashboardAuthMode` and can never name different modes.

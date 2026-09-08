@@ -24,12 +24,12 @@ import {
   threadIncludesBot,
 } from "./slack.js";
 
-// Feature: features/slack-channel.md — trigger gating (which events start a
+// Feature: docs/reference/specs/slack-channel.md — trigger gating (which events start a
 // run) and image-attachment ingestion within budgets.
 
 const BOT = "U0BOT";
 
-// Feature: features/run-history.md item 36 — the orphan sweep's question is
+// Feature: docs/reference/specs/run-history.md item 36 — the orphan sweep's question is
 // "live anywhere we know of", not "driven here": a card the ledger says another
 // generation still holds is not an orphan.
 describe("live cards", () => {
@@ -135,7 +135,7 @@ describe("classifyMessage (trigger gating)", () => {
   });
 });
 
-// Feature: features/run-visibility.md item 2 — the status/progress card is a context
+// Feature: docs/reference/specs/run-visibility.md item 2 — the status/progress card is a context
 // headline (mrkdwn, escaped) over a rich_text body. The body must be rich_text,
 // never a section: Slack folds a section's mrkdwn behind "Show more" at five
 // rendered lines and re-renders a folded card expanded-then-collapsed on every
@@ -318,7 +318,7 @@ describe("stripMention — Slack app 'Sent using' footer", () => {
   });
 });
 
-// Feature: features/slack-channel.md — the adapter resolves human display names
+// Feature: docs/reference/specs/slack-channel.md — the adapter resolves human display names
 // for the channel + user (feeding IncomingMessage.channelName/userName for the
 // live-view run label). Best-effort and cached: one API call per new id, any
 // error falls back to undefined, and a failure is never cached.
@@ -404,7 +404,7 @@ describe("resolveChannelName / resolveUserName (best-effort, cached)", () => {
   });
 });
 
-// Feature: features/slack-channel.md — a follow-up's thread page is fetched
+// Feature: docs/reference/specs/slack-channel.md — a follow-up's thread page is fetched
 // once (the bot-in-thread check hands it to history()), and a message's
 // attachments download concurrently instead of one after another.
 describe("SlackIO.history — thread reuse and concurrent attachment downloads", () => {
@@ -680,7 +680,7 @@ describe("fetchDocuments (PDF + text/code ingestion within budgets)", () => {
   });
 });
 
-// Feature: features/slack-channel.md — secret-file denylist. A file whose name
+// Feature: docs/reference/specs/slack-channel.md — secret-file denylist. A file whose name
 // looks like credentials/keys/private config is never inlined into the model
 // prompt, even when its mimetype or extension would otherwise mark it text.
 describe("classifyDocument (secret-file denylist overrides text classification)", () => {
@@ -809,7 +809,7 @@ describe("slackPermalink (the Request block's link back to the thread)", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 7 — a message the reconnect catch-up
+// Feature: docs/reference/specs/slack-channel.md item 7 — a message the reconnect catch-up
 // replays tells the thread how late the pickup was (a mention can sit for
 // minutes with no 👀 through a deploy drain; from the thread the caller cannot
 // tell "ignored" from "bot restarting").
@@ -827,7 +827,7 @@ describe("catchUpDelayNote", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 9 — Slack re-delivers an event whose
+// Feature: docs/reference/specs/slack-channel.md item 9 — Slack re-delivers an event whose
 // original delivery was never acked (a deploy blackout), and a live path that
 // runs it unconditionally double-runs it: a mention posted into a drain is
 // answered by the reconnect catch-up within minutes, then RE-delivered ~6 min
@@ -936,7 +936,7 @@ describe("dedupeDelivery (redelivery guard)", () => {
   });
 });
 
-// Feature: features/run-history.md item 38 — a resumed run keeps the card the
+// Feature: docs/reference/specs/run-history.md item 38 — a resumed run keeps the card the
 // previous generation posted: `status()` edits it instead of posting a second one.
 describe("SlackIO.status on a resumed run (existing card)", () => {
   const ev = { channel: "C1", user: "UA", text: "", ts: "1.0", threadTs: "1.0", botUserId: "UBOT" };
@@ -994,7 +994,7 @@ describe("SlackIO.status on a resumed run (existing card)", () => {
   });
 });
 
-describe("SlackIO.attach (features/slack-channel.md item 10)", () => {
+describe("SlackIO.attach (docs/reference/specs/slack-channel.md item 10)", () => {
   const ev = { channel: "C1", user: "UA", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
   const file = {
     name: "mcp-show.txt",

@@ -3,7 +3,7 @@ import { authorizeIngressBearer } from "../deploy/restart.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
 import type { SpanLog, SpanLogQuery } from "../core/trace/spanLog.js";
 
-// `GET /admin/trace/log` (features/tracing.md item 26): the bot's own span log,
+// `GET /admin/trace/log` (docs/reference/specs/tracing.md item 26): the bot's own span log,
 // for an ingress bearer whose actor holds `trace:read` — readable by us, never
 // from the outside. The shim forwards `/admin/*` to the container untouched and
 // the Access gate does not cover it, so the bearer is the whole door, like the

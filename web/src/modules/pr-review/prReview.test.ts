@@ -4,7 +4,7 @@ import { mountApp } from "../../testing/mount";
 import { preferredDiff, prLinks } from "./types";
 import type { PrReviewData, ReadingDiff } from "./types";
 
-// Feature: features/reading-diff.md item 6 — the pr-review module renders the
+// Feature: docs/reference/specs/reading-diff.md item 6 — the pr-review module renders the
 // change as a reviewer reads it, from props alone (the module is liftable; the
 // host adapts its own data). These tests drive the panel purely through
 // PrReviewData fixtures — no seeds, no streams.

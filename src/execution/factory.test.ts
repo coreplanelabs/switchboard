@@ -26,7 +26,7 @@ vi.mock("./githubApp.js", async (importOriginal) => {
   };
 });
 
-// Feature: features/execution.md — per-agent executor provisioning: agents
+// Feature: docs/reference/specs/execution.md — per-agent executor provisioning: agents
 // declare the resources they need (AgentDef.resources); an agent that declares
 // no repo gets a null executor and no sandbox/workspace is ever provisioned.
 
@@ -56,7 +56,7 @@ describe("makeExecutor per-agent provisioning", () => {
       ctx("general"),
     );
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(backend).toBe("local"); // a null executor runs nothing anywhere: its spans say `local` (features/tracing.md)
+    expect(backend).toBe("local"); // a null executor runs nothing anywhere: its spans say `local` (docs/reference/specs/tracing.md)
     // Tools reaching a resource-less agent's executor is a config bug — it
     // must surface legibly, not crash or provision anything.
     await expect(ex.exec("echo hi")).rejects.toThrow(/no repo resource/);
@@ -125,7 +125,7 @@ describe("makeExecutor per-agent provisioning", () => {
     expect(resolveGithubToken).toHaveBeenCalledWith("write");
   });
 
-  // Feature: features/execution.md item 5 — the credential is resolved when a
+  // Feature: docs/reference/specs/execution.md item 5 — the credential is resolved when a
   // command runs, never captured when the executor is built (a token captured
   // at build time would expire under a 20-minute first command).
   it("the sandbox credential is resolved per command, not captured at executor construction", async () => {
@@ -146,7 +146,7 @@ describe("makeExecutor per-agent provisioning", () => {
   });
 });
 
-// Feature: features/resident-repos.md — resident selection: with a
+// Feature: docs/reference/specs/resident-repos.md — resident selection: with a
 // resolved target repo and execution.resident configured, a warm resident
 // serves the thread; any other state falls back to the per-thread backend
 // with a NAMED note; probe transport failures are negative-cached so
@@ -292,7 +292,7 @@ describe("makeExecutor resident selection", () => {
     expect(bodies[2]?.refHint).toBe("master"); // re-attach on the resident's default
   });
 
-  // features/resident-repos.md item 50: the review agent (toolset "readonly")
+  // docs/reference/specs/resident-repos.md item 50: the review agent (toolset "readonly")
   // attaches read-only; coding (toolset "full") attaches writable. The bot
   // decides from the agent's declared toolset — never from the prompt.
   it("a readonly-toolset agent attaches with readonly:true; a full-toolset agent's body has no readonly field", async () => {
@@ -316,7 +316,7 @@ describe("makeExecutor resident selection", () => {
     expect(bodies[3]).not.toHaveProperty("readonly");
   });
 
-  // features/resident-repos.md item 51: a resolved PR head is passed to /attach
+  // docs/reference/specs/resident-repos.md item 51: a resolved PR head is passed to /attach
   // as `sha` so the resident fetches a mirror whose ref tip lags it (otherwise
   // a re-review right after a push clones a stale tip); no resolved head → no
   // field (older body).

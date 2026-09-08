@@ -4,7 +4,7 @@ import type { CompletionResult, TokenUsage } from "../providers/types.js";
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
 import type { PrDescription } from "./prDescriptionTypes.js";
 
-// Run visibility (features/run-visibility.md): a typed stream of what an agent is doing —
+// Run visibility (docs/reference/specs/run-visibility.md): a typed stream of what an agent is doing —
 // tool calls and their (redacted, summarized) results — emitted by the runner.
 // Today the in-channel status card consumes it live; the external live-view
 // page (a follow-up) will consume the same stream. Keeping it a small typed
@@ -29,28 +29,28 @@ export type RunNoteKind =
   | "turn_budget_exhausted"
   | "sandbox_dead"
   /** The sandbox fleet had no free instance for this thread within the
-   *  executor's bounded wait (features/execution.md item 14). Capacity, not a
+   *  executor's bounded wait (docs/reference/specs/execution.md item 14). Capacity, not a
    *  dead sandbox: the run goes on and the model is told to retry or finish. */
   | "fleet_busy"
   | "stop_requested"
   | "stopped"
   /** Setup spans the request's stream sink had to drop before this run was
-   *  bound (features/tracing.md): `summary` says how many, `from`/`to` the
+   *  bound (docs/reference/specs/tracing.md): `summary` says how many, `from`/`to` the
    *  interval, which the partition reports as not recorded. */
   | "spans_dropped"
   /** The PR head moved while a review ran and the same run is re-reviewing at
    *  the new head (agent-review.md item 12). Published by the dispatcher. */
   | "head_moved"
   /** An MCP server configured for this agent did not answer discovery
-   *  (features/mcp-tools.md item 8); the run proceeds without its tools. One
+   *  (docs/reference/specs/mcp-tools.md item 8); the run proceeds without its tools. One
    *  note per server, published by the dispatcher before the first turn. */
   | "mcp_unavailable"
   /** A thread follow-up steered into this run was folded into its next step
-   *  (features/thread-admission.md item 2). Published by the runner as it
+   *  (docs/reference/specs/thread-admission.md item 2). Published by the runner as it
    *  drains the inbox, beside an `input` event carrying the follow-up itself. */
   | "follow_up"
   /** The run was resumed by a new bot generation from its ledger transcript
-   *  (features/run-history.md item 37); the summary says how many calls were
+   *  (docs/reference/specs/run-history.md item 37); the summary says how many calls were
    *  in flight at the kill and how each was settled. Published by the runner. */
   | "resumed";
 
@@ -106,7 +106,7 @@ export function sanitizeActor(actor: RunActor): RunActor {
   return { kind: actor.kind, id: id.length > 0 ? id : "unknown" };
 }
 
-/** How one `agent:ship` round boundary reads (features/agent-ship.md item 12).
+/** How one `agent:ship` round boundary reads (docs/reference/specs/agent-ship.md item 12).
  *  `started` marks the round's child being dispatched; the rest settle it:
  *  `pr_opened` — a coding round's post-step opened or edited the PR;
  *  `completed` — a fix round finished without a PR write (e.g. it declined
@@ -126,14 +126,14 @@ export type ShipRoundOutcome =
  * event read back from the registry) so replays and history pages can resume
  * from a point without comparing payloads.
  */
-/** A span record (features/tracing.md): timing, not content. The registry
+/** A span record (docs/reference/specs/tracing.md): timing, not content. The registry
  *  accepts them between a run's finish and its seal, they never repaint the
  *  index, and every reader's counts and clocks skip them. */
 export function isSpanRecord(e: { type: string }): e is SpanStartEvent | SpanEndEvent {
   return e.type === "span_start" || e.type === "span_end";
 }
 
-/** The protected head (features/tracing.md; live-view item 2) — is this event head material? The root's start, `slack.receive` and the
+/** The protected head (docs/reference/specs/tracing.md; live-view item 2) — is this event head material? The root's start, `slack.receive` and the
  *  `dispatch.*` span pairs, `input`, `context`, `run_meta`, and the
  *  `mcp_unavailable` / `spans_dropped` notes. */
 export function isHeadMaterial(event: RunEvent): boolean {
@@ -158,7 +158,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
  *  rides only in `span_end.error`, redacted and capped. */
 export type SpanEventAttrs = Readonly<Record<string, string | number | boolean>>;
 
-/** A span opened (features/tracing.md): the run-stream sink publishes one per
+/** A span opened (docs/reference/specs/tracing.md): the run-stream sink publishes one per
  *  streamed span so a live page can show the step as it runs. `at` is the
  *  span's start on the runner clock. */
 export interface SpanStartEvent {
@@ -196,11 +196,11 @@ export type RunEvent =
   /** `command` rides on bash calls only: the FULL command (redacted, capped at
    *  `COMMAND_CAP`, far above the 200-char `summary`), for consumers that must
    *  judge what the command did — the pushed-branch tracker
-   *  (features/pr-description.md item 5) reads it, because an agent's chained
+   *  (docs/reference/specs/pr-description.md item 5) reads it, because an agent's chained
    *  `git add … && git commit … && git push …` routinely carries its `push`
    *  past the summary cap. The status card and friction analyzer keep reading
    *  `summary`. */
-  /** `spanId` (features/tracing.md): the `tool.*` span this call ran under, once the runner emits spans. */
+  /** `spanId` (docs/reference/specs/tracing.md): the `tool.*` span this call ran under, once the runner emits spans. */
   | {
       type: "tool_call";
       tool: string;
@@ -238,7 +238,7 @@ export type RunEvent =
       summary: string;
       mode?: StopMode;
       actor?: RunActor;
-      /** On a `spans_dropped` note only (features/tracing.md): the runner-clock
+      /** On a `spans_dropped` note only (docs/reference/specs/tracing.md): the runner-clock
        *  interval the dropped setup records covered — a `not recorded` loss. */
       from?: number;
       to?: number;
@@ -252,14 +252,14 @@ export type RunEvent =
    *  per run, before `finish()` and before the reply goes out; absent when an
    *  AGENT run threw (the card shows ❌). An inline command run that throws
    *  still publishes one — the `⚠️ <error>` reply — so its record explains the
-   *  `failed` status. `text` is the CANONICAL Markdown (features/llm-output.md
+   *  `failed` status. `text` is the CANONICAL Markdown (docs/reference/specs/llm-output.md
    *  item 5); `raw` is the model's own text, present only when normalization
    *  changed it (redacted too, dropped if it would blow the per-event budget). */
   | { type: "answer"; text: string; raw?: string; seq?: number; at?: number }
   /** The request as received (directives stripped, attachments noted as a
    *  one-line count suffix — never bytes or file bodies), redacted, uncapped. Published by the dispatcher once
    *  per run, right after the run is registered — the first event of the record,
-   *  so the run page can lead with what was asked (features/live-view.md item 12). */
+   *  so the run page can lead with what was asked (docs/reference/specs/live-view.md item 12). */
   | {
       type: "input";
       text: string;
@@ -280,7 +280,7 @@ export type RunEvent =
    *  tool_use in one completion. Emitted by the runner, redacted, uncapped. The
    *  final text-only completion is NOT one of these (that is the `answer`). */
   | { type: "assistant"; text: string; spanId?: string; seq?: number; at?: number }
-  /** @deprecated as an emitted event (features/tracing.md): the `model.turn` span
+  /** @deprecated as an emitted event (docs/reference/specs/tracing.md): the `model.turn` span
    *  is the one timing record of a model call once the runner emits spans; kept
    *  as a reader-only variant for stored streams, which `normalizeSpans`
    *  adapts. One model call, as the runner saw it (live-view item 15): emitted when the
@@ -315,7 +315,7 @@ export type RunEvent =
       agent: string;
       /** Absent on a command run, which resolves no model. */
       model?: string;
-      /** The request's trace id (features/tracing.md), once the root exists. */
+      /** The request's trace id (docs/reference/specs/tracing.md), once the root exists. */
       traceId?: string;
       effort?: string;
       repo?: string;
@@ -325,7 +325,7 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
-  /** A skill was loaded into the model's context (features/skills.md). Emitted
+  /** A skill was loaded into the model's context (docs/reference/specs/skills.md). Emitted
    *  by the `use_skill` tool on a successful load — alongside, not instead of,
    *  its `tool_call`/`tool_result` pair — so skill use is a first-class fact in
    *  the run data with its own metadata: which skill, for which agent, from
@@ -337,7 +337,7 @@ export type RunEvent =
       skill: string;
       description: string;
       agent: string;
-      /** The pinned upstream file URL for a vendored skill (features/skills.md item 9). */
+      /** The pinned upstream file URL for a vendored skill (docs/reference/specs/skills.md item 9). */
       source?: string;
       /** Structured vendoring provenance (`Skill.upstream`, recorded by skills:sync). */
       upstream?: { repo: string; commit: string };
@@ -346,10 +346,10 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
-  /** @deprecated as an emitted event (features/tracing.md): the `mcp.<server>.<tool>`
+  /** @deprecated as an emitted event (docs/reference/specs/tracing.md): the `mcp.<server>.<tool>`
    *  span is the one timing record once the bridge emits spans; kept as a
    *  reader-only variant for stored streams, which `normalizeSpans` adapts. One
-   *  call to an external MCP server's tool (features/mcp-tools.md item
+   *  call to an external MCP server's tool (docs/reference/specs/mcp-tools.md item
    *  10). Emitted by the bridge beside the runner's generic `tool_call`/
    *  `tool_result` pair so remote time is attributable per service: which
    *  server and remote tool, whether it succeeded (`ok` = not a transport
@@ -367,7 +367,7 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
-  /** A review run's reading diff (features/reading-diff.md): the change as a
+  /** A review run's reading diff (docs/reference/specs/reading-diff.md): the change as a
    *  reviewer reads it. The baseline artifact is the full `git diff`
    *  (`poweredBy: "git"`, guaranteed on every PR review); with the meat
    *  provider a SECOND artifact may follow — meat.dev's abridged reading diff
@@ -388,7 +388,7 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
-  /** A coding run's accepted `PrDescription` (features/pr-description.md): the
+  /** A coding run's accepted `PrDescription` (docs/reference/specs/pr-description.md): the
    *  typed object the run submitted through `submit_pr_description`, as
    *  validated — the same object the dispatcher renders the GitHub body from,
    *  so the run page's review panel can render it without a second authoring
@@ -396,14 +396,14 @@ export type RunEvent =
    *  wins), string fields redacted like every event payload. Additive: unknown
    *  → ignored. */
   | { type: "pr_description"; description: PrDescription; seq?: number; at?: number }
-  /** The coding PR post-step's outcome (features/pr-description.md item 5):
+  /** The coding PR post-step's outcome (docs/reference/specs/pr-description.md item 5):
    *  the PR opened for the run's pushed branch — or, open-or-edit, the
    *  existing open PR that was edited (`created: false`). Published by the
    *  dispatcher straight to the registry BEFORE the stream finishes, so the
    *  run record carries the PR URL as a fact of the run rather than only the
    *  channel reply's projection of it. Additive: unknown → ignored. */
   | { type: "pr_opened"; url: string; number: number; created: boolean; seq?: number; at?: number }
-  /** One `agent:ship` round boundary (features/agent-ship.md item 12): the
+  /** One `agent:ship` round boundary (docs/reference/specs/agent-ship.md item 12): the
    *  pipeline publishes a `started` event when a round's child is dispatched
    *  and one settle event when its outcome is known (`ShipRoundOutcome`), so
    *  rounds are legible on the one stream and per-round cost is derivable by
@@ -413,7 +413,7 @@ export type RunEvent =
    *  straight to the registry (like `pr_opened`), never through the runner.
    *  Additive: unknown → ignored. */
   | { type: "ship_round"; index: number; agent: string; outcome: ShipRoundOutcome; seq?: number; at?: number }
-  /** The span records (features/tracing.md): published, counted and stored like
+  /** The span records (docs/reference/specs/tracing.md): published, counted and stored like
    *  every other event, read as timing and never as content. */
   | SpanStartEvent
   | SpanEndEvent;

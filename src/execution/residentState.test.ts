@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { degradedIsServiceable, isServiceable, SERVICEABLE_STATES } from "./residentState.js";
 
-// Feature: features/resident-repos.md item 24 — the bot's attach decision per
+// Feature: docs/reference/specs/resident-repos.md item 24 — the bot's attach decision per
 // resident lifecycle state. `degraded` is serviceable only for reason classes
 // that leave the checkout + dep cache intact (fetch/bookkeeping failures); a
 // failure inside the rebuild lock section (checkout-update/install/build/

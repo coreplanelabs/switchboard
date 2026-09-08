@@ -3,7 +3,7 @@ import { createLogSink } from "./sinks.js";
 import { formatTraceparent, parseTraceparent, TRACE_CONTEXT_HEADERS } from "./traceparent.js";
 import type { Span, SpanSink, Tracer } from "./types.js";
 
-// The Workers' side of trace context (features/tracing.md item 22), shared by
+// The Workers' side of trace context (docs/reference/specs/tracing.md item 22), shared by
 // the shim, the state Worker, the resident and the sandbox — pure functions
 // over the platform's Request/Headers, no I/O. The public edge (the shim)
 // strips whatever context a caller sent and mints its own root; an internal

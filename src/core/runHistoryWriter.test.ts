@@ -1,4 +1,4 @@
-// Feature: features/run-history.md — the dispatcher's write path: a finished
+// Feature: docs/reference/specs/run-history.md — the dispatcher's write path: a finished
 // run's record is handed to the writer AFTER the reply and
 // persisted fire-and-forget with two jittered retries on transient failures,
 // never on a 4xx, never on a missing route; every permanent loss is counted and
@@ -64,7 +64,7 @@ function harness(outcomes: Array<Error | PutResult>, over: { random?: () => numb
 }
 
 describe("createRunHistoryWriter", () => {
-  it("write hands its span to the store's put — the request's root, so a Worker store's request is an http.client child of it (features/tracing.md item 24); a write without one hands none", async () => {
+  it("write hands its span to the store's put — the request's root, so a Worker store's request is an http.client child of it (docs/reference/specs/tracing.md item 24); a write without one hands none", async () => {
     const h = harness([OK, OK]);
     const root = createTracer({ clock: () => 1 }).start("request", { sinks: [] });
     h.writer.write(record("run-a"), { span: root });
@@ -299,7 +299,7 @@ describe("createRunHistoryWriter", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 16 — the Null Object a process
+// Feature: docs/reference/specs/routing-and-config.md item 16 — the Null Object a process
 // without run history is wired with: the dispatcher writes unconditionally.
 describe("NullRunHistoryWriter — the writer of a process without run history", () => {
   it("drops every write (final, provisional, via a sink), never counts pending or failures, is never degraded, and settles at once", async () => {

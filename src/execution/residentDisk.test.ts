@@ -10,7 +10,7 @@ import {
   planDiskFullRecovery,
 } from "./residentDisk.js";
 
-// Feature: features/resident-repos.md item 54 — a full container disk is named
+// Feature: docs/reference/specs/resident-repos.md item 54 — a full container disk is named
 // `disk-full`, never `github-unreachable` / `<step>-failed`, and the resident
 // recycles its (cache) disk once nothing live would be lost.
 

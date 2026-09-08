@@ -1,7 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-// Feature: features/live-view.md item 13 — the ScheduleDO: the durable
+// Feature: docs/reference/specs/live-view.md item 13 — the ScheduleDO: the durable
 // record of scheduled firings behind the /runs "Scheduled" panel. The Worker
 // shim writes one row per cron firing; the bot reads the newest per schedule.
 // Runs in workerd against the real SQLite-backed Durable Object.

@@ -1,4 +1,5 @@
-import { globSync, readFileSync } from "node:fs";
+import { existsSync, globSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -20,6 +21,18 @@ const ABSOLUTE_URL = /\bhttps?:\/+[^\s)"'<>\]]*/g;
 /** `https:` must be followed by exactly two slashes, then a host character. */
 const WELL_FORMED_SCHEME = /^https?:\/\/[^/]/;
 
+/**
+ * The markdown with fenced blocks and inline code spans blanked, line count
+ * preserved. A span closes on a backtick run of the same length; a `\`` inside
+ * one is the specs' notation for a literal backtick (see `specs-check.mjs`).
+ */
+function withoutCode(markdown: string): string {
+  return markdown
+    .replace(/\\`/g, "  ")
+    .replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, (block) => block.replace(/[^\n]/g, " "))
+    .replace(/(`+)[^`\n][^\n]*?\1/g, (span) => " ".repeat(span.length));
+}
+
 function docsPages(): string[] {
   return globSync("**/*.md", { cwd: DOCS }).filter(
     (rel) => !rel.startsWith("node_modules/") && !rel.startsWith(".vitepress/"),
@@ -37,7 +50,9 @@ describe("absolute URLs in docs/", () => {
   it("every absolute URL is `scheme://host` — not `https:///host` (which browsers silently repair) and not a hostless one", () => {
     const broken: string[] = [];
     for (const rel of pages) {
-      const text = readFileSync(`${DOCS}/${rel}`, "utf8");
+      // Code is quoted text, not a link: a spec that shows the scheme alone
+      // (`https://`) or a namespaced-id list (`http:/mcp:`) is not malformed.
+      const text = withoutCode(readFileSync(`${DOCS}/${rel}`, "utf8"));
       for (const [line, i] of text.split("\n").map((l, i) => [l, i] as const)) {
         for (const raw of line.match(ABSOLUTE_URL) ?? []) {
           // Trailing punctuation belongs to the prose, not the URL.
@@ -57,20 +72,23 @@ describe("absolute URLs in docs/", () => {
     expect(broken).toEqual([]);
   });
 
-  it("links that leave the tree point at the repo over https, the one form that resolves on GitHub and on the site", () => {
+  it("a relative link that leaves the tree names a file that exists — the site rewrites it to the repository URL, so only the target's existence can be checked here", () => {
     const wrong: string[] = [];
-    // `plans/**` is not published (srcExclude), so its pages only ever render
-    // on GitHub — a relative link out of the tree is correct there.
+    // `plans/**` are frozen records (decisions:check) and are not published:
+    // a target they named may since have moved, and that is not a defect.
     for (const rel of pages.filter((p) => !p.startsWith("plans/"))) {
       const text = readFileSync(`${DOCS}/${rel}`, "utf8");
-      // A relative link that climbs out of docs/ resolves on GitHub but has no
-      // page on the site — the convention is an absolute repo URL instead.
+      // A relative link that climbs out of docs/ resolves on GitHub to the file
+      // and, on the site, to that file's page in the repository (the config's
+      // link rule). The site's dead-link check never sees it, so this is the
+      // one place a renamed or deleted target is caught.
       for (const [line, i] of text.split("\n").map((l, i) => [l, i] as const)) {
-        for (const m of line.matchAll(/\]\((\.\.\/[^)]+)\)/g)) {
+        for (const m of line.matchAll(/\]\((\.\.\/[^)#]+)(?:#[^)]*)?\)/g)) {
           const target = m[1];
           const climbs = rel.split("/").length - 1;
           const ups = (target.match(/\.\.\//g) ?? []).length;
-          if (ups > climbs) wrong.push(`${rel}:${i + 1} ${target}`);
+          if (ups <= climbs) continue; // stays inside docs/: the site checks it
+          if (!existsSync(resolve(DOCS, dirname(rel), target))) wrong.push(`${rel}:${i + 1} ${target}`);
         }
       }
     }

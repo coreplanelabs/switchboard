@@ -12,7 +12,7 @@ import { InMemoryMemoryStore } from "../memory/stores.js";
 import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js";
 import { MEMORY_OFF_MESSAGE, registerMemoryCommands, scopeKeyOfMemoryId, type MemoryCommandDeps } from "./memory.js";
 
-// Feature: features/memory.md §24–26 / features/command-registry.md
+// Feature: docs/reference/specs/memory.md §24–26 / docs/reference/specs/command-registry.md
 // (phase 4b): `memory list` / `memory forget` as registry commands — deterministic
 // (no model turn), caller-scoped on every surface: a caller manages its OWN
 // scope freely, the shared scopes (org, repo, channel) are admin-gated

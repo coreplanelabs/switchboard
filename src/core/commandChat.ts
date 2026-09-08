@@ -150,7 +150,7 @@ export interface HandleChatCommandArgs {
   /** Clock for live-run durations; defaults to `Date.now()`. */
   now?: number;
   /** The span the dispatcher runs the command's body under (`run.command`);
-   *  the registry hands it to the handler (features/tracing.md item 24). */
+   *  the registry hands it to the handler (docs/reference/specs/tracing.md item 24). */
   span?: Span;
 }
 
@@ -190,7 +190,7 @@ export interface ChatCommandResult {
    *  caller posts `text` first, then awaits this. */
   followUp?: () => Promise<SettledOutcome | undefined>;
   /** A backend's own step trace, when the command's value carried one (a
-   *  resident op — features/tracing.md item 19): re-validated by the grafter. */
+   *  resident op — docs/reference/specs/tracing.md item 19): re-validated by the grafter. */
   trace?: unknown;
   /** The backend's own total for the work, when the value carried one. */
   residentMs?: number;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { reviewTargetBlock } from "./reviewTarget.js";
 
-// Feature: features/agent-review.md item 9 — the review agent is TOLD what it is
+// Feature: docs/reference/specs/agent-review.md item 9 — the review agent is TOLD what it is
 // reviewing, deterministically, from the facts Switchboard resolved before the
 // model turn (repo, PR, head branch/commit, base). An agent handed only a URL
 // and a prompt saying the worktree was "typically" the branch under review

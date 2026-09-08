@@ -5,7 +5,7 @@ import YAML from "yaml";
 import { parseSkillMarkdown } from "./frontmatter.js";
 import type { Skill, SkillUpstream } from "./types.js";
 
-// The skills manifest (features/skills.md items 9–10): third-party skills are
+// The skills manifest (docs/reference/specs/skills.md items 9–10): third-party skills are
 // VENDORED, never hand-copied. `skills/manifest.yaml` names each upstream
 // source (a GitHub repo + ref, pinned to a commit by the sync) and each skill we
 // take from it (its path there, and which of our agents it is scoped to).
@@ -37,7 +37,7 @@ export type ManifestSkill =
       /** Our scoping — which agents may list/load it (frontmatter `agents`). */
       agents: string[];
     }
-  /** A first-party skill (features/skills.md item 11): authored in this repo,
+  /** A first-party skill (docs/reference/specs/skills.md item 11): authored in this repo,
    *  never synced — git is its integrity. No source/path/upstream. */
   | { name: string; local: true; source?: undefined; path?: undefined; agents: string[] };
 

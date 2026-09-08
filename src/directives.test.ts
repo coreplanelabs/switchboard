@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { lastThreadDirectives, parseDirectives } from "./directives.js";
 
-// Feature: features/routing-and-config.md — per-request directives & thread stickiness.
+// Feature: docs/reference/specs/routing-and-config.md — per-request directives & thread stickiness.
 
 describe("parseDirectives", () => {
   it("extracts agent and model and strips them from the text", () => {

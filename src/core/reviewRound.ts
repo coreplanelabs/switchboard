@@ -89,7 +89,7 @@ export async function attachRoundWorkspace(input: {
   round: { threadKey: string; agent: AgentDef; repo?: string; ref?: string; headSha?: string };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
-   *  become its `http.client` children (features/tracing.md item 21). */
+   *  become its `http.client` children (docs/reference/specs/tracing.md item 21). */
   span?: Span;
 }): Promise<RoundWorkspace> {
   const { agent } = input.round;
@@ -281,7 +281,7 @@ export function makeSystemComposer(input: {
     const target = targetBlock(head);
     const baseSystem = target ? `${residentSystem ?? agent.system}\n\n${target}` : residentSystem;
     // Tool guidance trails the agent's own instructions: skills, then the
-    // external MCP servers (features/mcp-tools.md item 9) — both are about the
+    // external MCP servers (docs/reference/specs/mcp-tools.md item 9) — both are about the
     // agent's tools, not advisory context like the memory block up front.
     const trailing = [blocks.skills, blocks.mcp].filter((b): b is string => Boolean(b));
     return trailing.length > 0 ? [baseSystem ?? agent.system, ...trailing].join("\n\n") : baseSystem;
@@ -300,7 +300,7 @@ export function makeSystemComposer(input: {
  *  reuses `toolContext` for its re-review turn with its own verdict capture
  *  (the voided verdict must not leak back through the first turn's hook). */
 export interface ReviewTurnSpec {
-  /** Where the re-review's commands execute (features/tracing.md). */
+  /** Where the re-review's commands execute (docs/reference/specs/tracing.md). */
   backend?: Backend;
   provider: Provider;
   model: string;
@@ -308,7 +308,7 @@ export interface ReviewTurnSpec {
   effort?: Effort;
   toolContext: ToolContext;
   /** This run's per-run tools (bridged MCP tools) — the re-review turn must
-   *  see exactly what the first turn saw (features/mcp-tools.md item 12). */
+   *  see exactly what the first turn saw (docs/reference/specs/mcp-tools.md item 12). */
   extraTools?: RunnableTool[];
   onProgress: (note: string) => void;
   onEvent: (event: RunEvent) => void;
@@ -350,7 +350,7 @@ export interface SettledReviewHead {
  */
 export async function settleReviewedHead(input: SettleReviewedHeadInput): Promise<SettledReviewHead> {
   // The whole settle is one uncounted `run.settle_reviewed_head` span
-  // (features/tracing.md): its git and GitHub awaits are overhead by design,
+  // (docs/reference/specs/tracing.md): its git and GitHub awaits are overhead by design,
   // and the re-review's `run.agent` is its child.
   return input.span
     ? input.span.span("run.settle_reviewed_head", (span) => settle(input, span))
@@ -387,7 +387,7 @@ export interface SettleReviewedHeadInput {
 async function settle(input: SettleReviewedHeadInput, span: Span | undefined): Promise<SettledReviewHead> {
   const { pr, executor, turn, logKey } = input;
   // The probe and the move are the settle's own work: their `exec.*` spans hang
-  // under `run.settle_reviewed_head` (features/tracing.md item 17).
+  // under `run.settle_reviewed_head` (docs/reference/specs/tracing.md item 17).
   const trace = span ? { span } : undefined;
   const probeHead = async () => parseRevParseOutput(await executor.exec("git rev-parse HEAD", trace).catch(() => ""));
   let answer = input.answer;

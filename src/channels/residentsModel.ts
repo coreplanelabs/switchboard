@@ -70,7 +70,7 @@ export function residentSlug(record: ResidentRecordView): string {
   return str(record.resource).replace(/^repo:/, "");
 }
 
-/** The live view's `disk` (features/resident-repos.md item 55): the resident's
+/** The live view's `disk` (docs/reference/specs/resident-repos.md item 55): the resident's
  *  last `df` + `du` sample, or null when it has not measured yet (a fresh
  *  container before its first cycle) or the field is malformed. The shape is
  *  the resident's `DiskSample` (KiB; a `parts` value may be null = unmeasured,

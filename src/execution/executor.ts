@@ -17,7 +17,7 @@ export { BASH_TIMEOUT_MS, BASH_TIMEOUT_MAX_MS, EXEC_CALL_MARGIN_MS, clampBashTim
 // per-thread sandbox (production).
 
 /** The caller's span — the runner's `exec.*` span — so an executor's own
- *  outbound calls become its `http.client` children (features/tracing.md item
+ *  outbound calls become its `http.client` children (docs/reference/specs/tracing.md item
  *  21). Absent from a caller with no trace: the call is then a plain fetch. */
 export interface ExecTraceOptions {
   span?: Span;
@@ -103,7 +103,7 @@ export class ExecInfraError extends Error {
 }
 
 /** An exec-CAPACITY failure: the sandbox fleet had no free instance for this
- *  thread within the executor's bounded wait (features/execution.md item 14).
+ *  thread within the executor's bounded wait (docs/reference/specs/execution.md item 14).
  *  Nothing ran and nothing is broken — the fleet's `max_instances` is reached
  *  — so this is deliberately NOT an `ExecInfraError`: `ExecHealthTracker`
  *  neither counts it nor resets on it, and the runner hands it to the model as

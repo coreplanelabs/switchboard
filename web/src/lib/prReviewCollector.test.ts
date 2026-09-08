@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createPrReviewCollector } from "./prReviewCollector";
 
-// Feature: features/reading-diff.md item 6 — the runs→module adapter: run_meta
+// Feature: docs/reference/specs/reading-diff.md item 6 — the runs→module adapter: run_meta
 // carries the PR identity, review_artifact the diffs; everything else (and
 // every malformed frame) is ignored. This file is the ONLY place run shapes
 // and the pr-review module meet.

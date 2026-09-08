@@ -6,7 +6,7 @@ import {
   type ConversationInfoClient,
 } from "./slackChannelDirectory.js";
 
-// Feature: features/authorization.md item 7, features/slack-channel.md
+// Feature: docs/reference/specs/authorization.md item 7, docs/reference/specs/slack-channel.md
 // item 6a — the Slack `ChannelDirectory`: `conversations.info` decides a
 // `slack:C…`/`slack:G…` channel's visibility (is_im/is_mpim → dm, is_private →
 // private, else public), cached per channel for a TTL and bounded in size; any

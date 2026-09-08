@@ -37,7 +37,7 @@ const input = {
   source: { channel: "dev", user: "alice", url: "https://acme.slack.com/archives/C1/p1" },
 };
 const assistant = (text: string, at: number) => ({ type: "assistant", text, at });
-/** A model turn's timing record (features/tracing.md): the `model.turn` span end the runner emits. */
+/** A model turn's timing record (docs/reference/specs/tracing.md): the `model.turn` span end the runner emits. */
 const modelTurn = (t: {
   durationMs: number;
   at: number;
@@ -84,7 +84,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-// Feature: features/live-view.md item 25 — the timeline reads the spans and the
+// Feature: docs/reference/specs/live-view.md item 25 — the timeline reads the spans and the
 // stamps; its lede is the header's total split into the five words.
 const spanEnd = (
   spanId: string,
@@ -227,7 +227,7 @@ describe("RunPage — the timeline (item 25)", () => {
 });
 
 describe("RunPage — history mode", () => {
-  // features/thread-admission.md item 2: a steered follow-up is a second `input`
+  // docs/reference/specs/thread-admission.md item 2: a steered follow-up is a second `input`
   // on the same run — its own block in the timeline where the run read it,
   // never in the request's place.
   it("keeps the first input as the Request and renders later inputs as follow-up blocks in the timeline (one run, several inputs)", () => {
@@ -703,7 +703,7 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find("#log .span .dur").text()).toBe("250ms");
   });
 
-  it("the setup spans fold under a Setup head with their count and span, open while setting up, closed by the agent loop's start and reopened by a click; the tail names the open span (features/live-view.md item 25)", async () => {
+  it("the setup spans fold under a Setup head with their count and span, open while setting up, closed by the agent loop's start and reopened by a click; the tail names the open span (docs/reference/specs/live-view.md item 25)", async () => {
     const { wrapper, es } = mountLive();
     es().emitOpen();
     es().emitMessage({ type: "span_start", spanId: "root", name: "request", at: 1_000 }, "1");
@@ -985,7 +985,7 @@ describe("RunPage — live mode", () => {
   });
 });
 
-// Feature: features/reading-diff.md item 6 — the pr-review module on the run
+// Feature: docs/reference/specs/reading-diff.md item 6 — the pr-review module on the run
 // page: a run that published reading-diff artifacts gets the Reading diff
 // button; the slideout renders the module from the adapter's state. The
 // module itself is tested in src/modules/pr-review/; this is the wiring.

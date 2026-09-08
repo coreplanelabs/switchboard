@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { GithubIssueTracker, InMemoryIssueTracker } from "./githubIssues.js";
 
-// Feature: features/self-improvement.md — the IssueTracker seam behind the
+// Feature: docs/reference/specs/self-improvement.md — the IssueTracker seam behind the
 // friction proposer. GithubIssueTracker speaks the GitHub REST API from the bot
 // process with the App installation token (AGENTS.md invariant 5: never a `gh`
 // shell-out); InMemoryIssueTracker is the second implementation (invariant 2)

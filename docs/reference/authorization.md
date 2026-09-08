@@ -87,4 +87,4 @@ A config that still carries `permissions:` is refused at load with this mapping.
 
 - [How-to: restrict who can do what](../how-to/restrict-who-can-do-what.md) — the narrative version, building up from open to locked down.
 - [Explanation: execution and trust](../explanation/execution-and-trust.md) — why `repo:write` in particular is never a baseline.
-- [Spec: authorization](https://github.com/coreplanelabs/switchboard/blob/main/features/authorization.md) — the policy table, the actor model, and the proofs.
+- [Spec: authorization](specs/authorization.md) — the policy table, the actor model, and the proofs.

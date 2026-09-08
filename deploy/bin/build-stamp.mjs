@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Stamp the build identity into a Worker SCRIPT deploy (features/execution.md
+// Stamp the build identity into a Worker SCRIPT deploy (docs/reference/specs/execution.md
 // item 13) — the resident, memory and sandbox Workers' `npm run deploy` runs
 // this instead of bare `wrangler deploy`.
 //

@@ -2,7 +2,7 @@
 
 Goal: run exactly the Switchboard you need — a Slack bot with one provider on a laptop, or the full four-Worker deployment — and know, before you change a block of `config.yaml`, what will appear, what will disappear, and what it will cost you to run.
 
-Everything optional is a **capability**: computed once when the process starts, from `config.yaml` and the environment, and read by every surface. A capability that is off is not a feature that answers "unavailable" — it is a feature that is not there. Its commands are absent from `help`, from the CLI and MCP catalogues and from `/api`; its dashboard section is not in the nav; the agent's own account of itself does not mention it; `deploy plan` does not list its Worker. Turn it on and all of that appears at once, from one change. The exact rules are the contract in [`features/capabilities.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/capabilities.md).
+Everything optional is a **capability**: computed once when the process starts, from `config.yaml` and the environment, and read by every surface. A capability that is off is not a feature that answers "unavailable" — it is a feature that is not there. Its commands are absent from `help`, from the CLI and MCP catalogues and from `/api`; its dashboard section is not in the nav; the agent's own account of itself does not mention it; `deploy plan` does not list its Worker. Turn it on and all of that appears at once, from one change. The exact rules are the contract in [`docs/reference/specs/capabilities.md`](../reference/specs/capabilities.md).
 
 ## The matrix
 

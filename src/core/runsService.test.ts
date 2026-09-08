@@ -1,4 +1,4 @@
-// Feature: features/run-history.md — `RunsService`: the one async
+// Feature: docs/reference/specs/run-history.md — `RunsService`: the one async
 // service behind every `runs.*` read and stop. It merges the live registry with
 // the durable store into token-free projections, pages events with a bounded
 // page, authorizes the live SSE path synchronously, and records who asked a run
@@ -598,7 +598,7 @@ describe("RunsService.listRuns — read merge", () => {
   });
 });
 
-// One durable registry across container generations (features/run-history.md
+// One durable registry across container generations (docs/reference/specs/run-history.md
 // item 41): a run live on the ledger under another generation
 // — or reclaimed here and not yet launched — lists, reads, pages, diagnoses and
 // stops through the same service as a run in this process's registry.
@@ -929,7 +929,7 @@ describe("RunsService.getRunFriction", () => {
     reg.publish(id, call("$ ls"));
     reg.finish(id);
     await svc.getRunFriction(id);
-    // The live stream is schema 2 and a finished run's window is its own stamps (features/tracing.md).
+    // The live stream is schema 2 and a finished run's window is its own stamps (docs/reference/specs/tracing.md).
     expect(analyze).toHaveBeenCalledWith([expect.objectContaining({ seq: 1 })], {
       finished: true,
       truncated: false,

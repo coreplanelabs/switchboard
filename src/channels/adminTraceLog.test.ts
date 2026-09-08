@@ -1,4 +1,4 @@
-// Feature: features/tracing.md item 26 — the span log behind an ingress bearer with trace:read.
+// Feature: docs/reference/specs/tracing.md item 26 — the span log behind an ingress bearer with trace:read.
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleAdminTraceLog, parseTraceLogQuery, TRACE_LOG_PATH } from "./adminTraceLog.js";

@@ -11,7 +11,7 @@
 //   X-Thread-Key: <threadKey>               (one sandbox per conversation thread)
 // and the body's optional `env` ({ NAME: value }) is forwarded into the sandbox
 // for that one command — in the body, never in headers, because Workers Logs
-// record request headers (features/execution.md item 5).
+// record request headers (docs/reference/specs/execution.md item 5).
 //
 // The Sandbox SDK only runs inside Workers — that's why this proxy exists.
 // Verify method names against https://developers.cloudflare.com/sandbox/ on
@@ -63,7 +63,7 @@ export class SwitchboardSandbox extends Sandbox {
   // killed at 20:00 exactly, surfaced as "Command execution failed", and
   // the next command found a fresh container with an empty /workspace. `exec`
   // below renews the clock every minute while a command runs, which makes
-  // this a true idle timeout (features/execution.md item 2). The 0.3.x
+  // this a true idle timeout (docs/reference/specs/execution.md item 2). The 0.3.x
   // containers base tracks in-flight requests itself, so the keepalive is now
   // belt-and-braces — kept until a live long-command receipt retires it. 5
   // minutes of idle frees the slot sooner while a prompt follow-up still
@@ -72,7 +72,7 @@ export class SwitchboardSandbox extends Sandbox {
 
   // A Worker and its image deploy as two artifacts; until the rollout finishes
   // this Worker can be handed a container still on the PREVIOUS image
-  // (features/execution.md item 6; seen live: a 0.3.7 container under the
+  // (docs/reference/specs/execution.md item 6; seen live: a 0.3.7 container under the
   // 0.12.9 SDK, every command a message-less 400 for 90 s). The SDK's own
   // check logs `container=unknown` at info and does nothing else; this one
   // names the skew at warn so the rollout is visible in the logs.
@@ -181,7 +181,7 @@ const STALE_SESSION = /session '[^']*' not found/i;
  *  re-send is safe by construction. Anything else propagates: a failure whose
  *  command MAY have run (a session shell that exited mid-command, a container
  *  that stopped under the call) is never re-run here — /exec names it a
- *  recycle instead (features/execution.md item 9). */
+ *  recycle instead (docs/reference/specs/execution.md item 9). */
 const CONTAINER_STARTING_RETRY_DELAY_MS = 3_000;
 
 async function withSessionRecovery<T>(
@@ -225,7 +225,7 @@ const EXEC_TIMEOUT_SECS = 280;
  *  (`deploy/bin/build-stamp.mjs`) and answered on GET /healthz as `build`. */
 const BUILD = injectedBuildStamp();
 
-// The Worker's own spans (features/tracing.md item 22): one `sandbox.exec`
+// The Worker's own spans (docs/reference/specs/tracing.md item 22): one `sandbox.exec`
 // root per command, started at the attempt that produced the answer, joining
 // the bot's trace (the bearer checked out before the header is read).
 const tracer = createTracer({ clock: systemClock });
@@ -244,7 +244,7 @@ export default {
     }
     // Build identity, behind the SAME bearer as everything else: this Worker
     // authenticates every request and gains no unauthenticated surface for a
-    // stamp (features/execution.md item 13). It needs no thread, so it answers
+    // stamp (docs/reference/specs/execution.md item 13). It needs no thread, so it answers
     // before the X-Thread-Key check — and it is the one GET here.
     if (request.method === "GET" && new URL(request.url).pathname === "/healthz") {
       return json({ ok: true, build: BUILD });
@@ -263,7 +263,7 @@ export default {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
 
     // Optional env passthrough (e.g. GH_TOKEN), read from the BODY's `env`
-    // (features/execution.md item 5). It then rides in the SDK's per-exec
+    // (docs/reference/specs/execution.md item 5). It then rides in the SDK's per-exec
     // `env` option, which the container applies to that one command and
     // restores afterwards (0.12.x; 0.3.7 ignored it, so the value used to be
     // an inline base64 `export` prefix — which put the live GH_TOKEN into every
@@ -305,7 +305,7 @@ export default {
           // stragglers. COMMAND_TIMEOUT_MS (Dockerfile) sits above this as a
           // pure backstop.
           //
-          // Per-call budget (features/execution.md item 11): a numeric
+          // Per-call budget (docs/reference/specs/execution.md item 11): a numeric
           // timeoutMs in the body is clamped server-side to the shared
           // [1s, 20 min] bounds; absent (an older bot) → the tuned 280s
           // default this Worker has always used.
@@ -340,7 +340,7 @@ export default {
       // Never an empty text (item 3): a message-less SDK error is named as
       // such, with the rollout hint.
       const msg = thrownText(thrownShape(err));
-      // A full fleet (features/execution.md item 14): the SDK could not get a
+      // A full fleet (docs/reference/specs/execution.md item 14): the SDK could not get a
       // container instance for this thread's Durable Object, so no session
       // exists and the file op never started — re-sending is safe by
       // construction. Named so the executor waits instead of reading it as a
@@ -403,7 +403,7 @@ function streamExec(
             ? `command timed out in the sandbox after ${execTimeoutSecs}s (pass the bash tool's timeoutMs for longer commands, max ${BASH_TIMEOUT_MAX_MS} ms); ` +
               "re-run as smaller/faster steps or background it with nohup"
             : "";
-          // The command as the Worker's own root (features/tracing.md item 22).
+          // The command as the Worker's own root (docs/reference/specs/tracing.md item 22).
           execRoot(attemptStartedAt, traceparent).end(exitCode === 0 ? "ok" : "error", {
             exitCode: timedOut ? 124 : exitCode,
             ...(timedOut ? { timedOut: true } : {}),
@@ -413,7 +413,7 @@ function streamExec(
             stderr: [result.stderr ?? "", note].filter(Boolean).join("\n"),
             exitCode: timedOut ? 124 : exitCode,
             // The command's wall time in the sandbox, for the bot's `exec.exec`
-            // span (features/tracing.md item 19); an older client ignores it.
+            // span (docs/reference/specs/tracing.md item 19); an older client ignores it.
             durationMs: systemClock() - attemptStartedAt,
           });
         })
@@ -428,7 +428,7 @@ function streamExec(
           // heal above failed too — is named, with the rollout hint.
           // The classifiers below still read the raw `shape`.
           const raw = thrownText(shape);
-          // A full fleet (features/execution.md item 14): session creation
+          // A full fleet (docs/reference/specs/execution.md item 14): session creation
           // failed because no container instance was free, so the command
           // never started — re-sending it is safe by construction. The named
           // `reason` is what the executor waits on; the dual shape below is
@@ -437,7 +437,7 @@ function streamExec(
             finish(fleetBusyExecAnswer(raw));
             return;
           }
-          // The container was replaced under the command (features/execution.md
+          // The container was replaced under the command (docs/reference/specs/execution.md
           // item 2): certain when the SDK says so with a typed error, inferred
           // when a recycle-shaped text arrives minutes into this attempt. Say
           // so, and that /workspace is gone. Still exit 127: the workspace

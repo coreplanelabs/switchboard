@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — the primitive's pinned semantics.
+// Feature: docs/reference/specs/tracing.md — the primitive's pinned semantics.
 import { describe, expect, it } from "vitest";
 import { recordingSink } from "../testing/recordingSink.js";
 import { createAlsContext, createTickingClock } from "../testing/tickingClock.js";
@@ -19,7 +19,7 @@ function setup() {
 }
 
 describe("createTracer", () => {
-  // Feature: features/tracing.md item 22 — a Worker's root joins the bot's trace.
+  // Feature: docs/reference/specs/tracing.md item 22 — a Worker's root joins the bot's trace.
   it("a root started with a remote parent carries that trace id and parent span id; without one it mints its own", () => {
     const log = recordingSink();
     const tracer = createTracer({ clock: () => 1_000 });

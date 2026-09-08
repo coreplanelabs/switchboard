@@ -1,4 +1,4 @@
-// Feature: features/tracing.md; features/execution.md — every executor operation a tool asks for is an `exec.*` span.
+// Feature: docs/reference/specs/tracing.md; docs/reference/specs/execution.md — every executor operation a tool asks for is an `exec.*` span.
 import { describe, expect, it } from "vitest";
 import { createTracer } from "../core/trace/tracer.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
@@ -42,7 +42,7 @@ describe("TracingExecutor", () => {
     expect(await ex.writeFile("src/b.ts", "body")).toBe("Wrote");
     expect(seen).toEqual(["exec echo secret", "read src/a.ts", "write src/b.ts body"]);
     // Each op's own exec.* span is handed down, so the inner executor's HTTP
-    // calls become its http.client children (features/tracing.md item 21).
+    // calls become its http.client children (docs/reference/specs/tracing.md item 21).
     expect(spansSeen).toEqual(["exec.exec", "exec.read_file", "exec.write_file"]);
     expect(log.ends.map((e) => e.name)).toEqual(["exec.exec", "exec.read_file", "exec.write_file"]);
     for (const e of log.ends) {

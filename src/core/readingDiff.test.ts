@@ -12,7 +12,7 @@ import type { RunEvent } from "./runEvents.js";
 import { recordingSink } from "./testing/recordingSink.js";
 import { createTracer } from "./trace/tracer.js";
 
-// Feature: features/reading-diff.md — every PR review run carries a
+// Feature: docs/reference/specs/reading-diff.md — every PR review run carries a
 // `review_artifact` reading diff. The git BASELINE is guaranteed (the
 // dispatcher joins it before the answer); meat, when configured, is an
 // unawaited UPGRADE artifact under its own runtime budget — it lands iff it
@@ -330,7 +330,7 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
   });
 });
 
-describe("reading diff spans (features/tracing.md items 17/18)", () => {
+describe("reading diff spans (docs/reference/specs/tracing.md items 17/18)", () => {
   it("produceReadingDiff hands its span to the executor's exec, and nothing without one", async () => {
     const seen: unknown[] = [];
     const executor = {

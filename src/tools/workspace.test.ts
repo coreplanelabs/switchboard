@@ -11,7 +11,7 @@ import {
   type ToolContext,
 } from "./workspace.js";
 
-// Feature: features/distilled-diffs.md. The diff_digest tool is a thin
+// Feature: docs/reference/specs/distilled-diffs.md. The diff_digest tool is a thin
 // wrapper: it runs `git diff <base>...HEAD` through the Executor seam and
 // distills the raw output. These tests use a fake Executor so no repo/process
 // is needed.
@@ -133,7 +133,7 @@ describe("diff_digest toolset wiring", () => {
   });
 });
 
-// Feature: features/agent-review.md — the structured verdict channel. The
+// Feature: docs/reference/specs/agent-review.md — the structured verdict channel. The
 // review agent states approve/request_changes through this tool; the
 // dispatcher (not the model) writes the `LGTM:` line from it.
 describe("submit_verdict tool", () => {
@@ -183,7 +183,7 @@ describe("submit_verdict tool", () => {
     ).resolves.toBe("verdict recorded: request_changes");
   });
 
-  // Feature: features/agent-ship.md item 6 — the verdict enumerates findings
+  // Feature: docs/reference/specs/agent-ship.md item 6 — the verdict enumerates findings
   // as typed entries with stable ids; the tool text is where the review agent
   // learns the id and severity contract.
   describe("findings (agent-ship item 6)", () => {
@@ -242,7 +242,7 @@ describe("submit_verdict tool", () => {
   });
 });
 
-// Feature: features/agent-ship.md item 6 — fix rounds record one disposition
+// Feature: docs/reference/specs/agent-ship.md item 6 — fix rounds record one disposition
 // per review finding through this tool; the ship orchestrator injects
 // the round's known finding ids and consumes the last valid call.
 describe("submit_dispositions tool", () => {
@@ -357,7 +357,7 @@ describe("submit_dispositions tool", () => {
   });
 });
 
-// Feature: features/pr-description.md — the coding agent's PR deliverable is a
+// Feature: docs/reference/specs/pr-description.md — the coding agent's PR deliverable is a
 // typed PrDescription submitted through this tool; the dispatcher (not the
 // model) renders the GitHub body from it at the pushed head and opens/edits
 // the PR. Validation mirrors submit_verdict: a bad object comes back as a
@@ -467,7 +467,7 @@ describe("submit_pr_description tool", () => {
   });
 });
 
-// Feature: features/execution.md item 11 — the bash tool's per-call timeoutMs:
+// Feature: docs/reference/specs/execution.md item 11 — the bash tool's per-call timeoutMs:
 // default 5 min, model-requestable up to the 20-min ceiling, clamped at the
 // tool layer before any executor sees it. No timeoutMs → exactly the old call
 // shape, so every executor behaves as before.
@@ -522,7 +522,7 @@ describe("bash tool timeoutMs", () => {
     expect(seen[1].opts?.timeoutMs).toBeUndefined();
   });
 
-  // Feature: features/execution.md item 12 — a command's budget is clipped to
+  // Feature: docs/reference/specs/execution.md item 12 — a command's budget is clipped to
   // the run's remaining wall clock minus a reserve for the write-up. Without
   // the clip one long command can consume most of a review budget, leaving
   // the model minutes to recover and none to review.

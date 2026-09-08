@@ -54,7 +54,7 @@ export const useSkillTool: RunnableTool = {
         (available.length > 0 ? ` Available: ${available.join(", ")}.` : "")
       );
     }
-    // The load is a first-class fact in the run data (features/skills.md): the
+    // The load is a first-class fact in the run data (docs/reference/specs/skills.md): the
     // generic tool_call only says `use_skill <name>`; this carries the skill's
     // metadata so runs data and the run page can show what was loaded, for
     // whom, from where, and what it cost in context.

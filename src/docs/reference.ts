@@ -2,7 +2,7 @@
 //
 // Every command is registered once (`src/core/commands/all.ts`) with its args,
 // options, action, effect, and per-surface opt-outs; who may run it is the
-// policy table's answer (`src/core/authz/policy.ts`, features/authorization.md).
+// policy table's answer (`src/core/authz/policy.ts`, docs/reference/specs/authorization.md).
 // That registration IS the reference material: a hand-written table can only
 // ever be a copy of it that rots (the pre-generator table had no `mcp` group and
 // no `deploy restart`). So the tables come from the registry, `npm run docs:gen`

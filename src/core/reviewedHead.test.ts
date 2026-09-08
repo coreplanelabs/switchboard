@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { checkReviewedHead, parseRevParseOutput } from "./reviewedHead.js";
 
-// Feature: features/agent-review.md item 8 — a review is posted to a PR only
+// Feature: docs/reference/specs/agent-review.md item 8 — a review is posted to a PR only
 // when the head the agent actually reviewed is the PR head resolved for the
 // run. Otherwise an agent that fetched and reviewed another PR's branch gets
 // its `LGTM:` posted — and auto-approved — on the wrong PR. This check is

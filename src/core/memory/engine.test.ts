@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mintRecord, normalizeText, planEviction, planWrite, rankRecords } from "./engine.js";
 import type { MemoryCandidate, MemoryRecord } from "./types.js";
 
-// Feature: features/memory.md — the store-agnostic engine shared by the
+// Feature: docs/reference/specs/memory.md — the store-agnostic engine shared by the
 // in-process store and the Memory Worker's Durable Object. The
 // store tests prove each backend applies the plan; these prove the plan.
 
@@ -120,7 +120,7 @@ describe("mintRecord", () => {
   });
 });
 
-// Feature: features/memory.md — per-scope cap: the pure eviction plan.
+// Feature: docs/reference/specs/memory.md — per-scope cap: the pure eviction plan.
 describe("planEviction", () => {
   const NOW = 1_700_000_000_000;
   const mk = (id: string, createdAt: number, lastUsedAt?: number): MemoryRecord => ({

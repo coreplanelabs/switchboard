@@ -4,7 +4,7 @@ import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import { LEASE_MS, type ClaimRequest, type StepRecord } from "./types.js";
 
-// The reference ledger (features/run-history.md items 28–31, 33): the whole
+// The reference ledger (docs/reference/specs/run-history.md items 28–31, 33): the whole
 // protocol over one object, in the shape the Durable Object mirrors.
 
 const seedTurns: ChatMessage[] = [

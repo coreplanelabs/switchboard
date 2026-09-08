@@ -1,4 +1,4 @@
-// The run page's grouping model (features/live-view.md item 13).
+// The run page's grouping model (docs/reference/specs/live-view.md item 13).
 //
 // The event stream is flat: `assistant` prose, then that turn's `tool_call`s,
 // each followed by its `tool_result`. A human reads a run in STEPS — "the agent
@@ -106,7 +106,7 @@ export type TimelineChange =
    *  card (the call card is the tool's; this is what the tool loaded). */
   | { kind: "skill"; step: TimelineStep; skill: TimelineSkill }
   /** A streamed span that is neither a model turn nor a tool call
-   *  (features/tracing.md): a `dispatch.*` / `run.*` / `post.*` / `ship.round`
+   *  (docs/reference/specs/tracing.md): a `dispatch.*` / `run.*` / `post.*` / `ship.round`
    *  step, rendered as its own row. `open` is a start with no end yet; the end
    *  comes as a second change with the same `spanId`. `name` is the raw span
    *  name — the page renders it through the display table, never as is. */
@@ -322,7 +322,7 @@ export function createRunTimeline(): RunTimeline {
         // Optional fields ride only when present (and well-typed) — the page
         // shows exactly what was resolved, never an empty slot.
         if (!str(e.agent)) return [];
-        // A command run's meta names no model (features/tracing.md).
+        // A command run's meta names no model (docs/reference/specs/tracing.md).
         const meta: TimelineChange = { kind: "meta", agent: str(e.agent), model: str(e.model), at: num(e.at) };
         if (str(e.effort)) meta.effort = str(e.effort);
         if (str(e.repo)) meta.repo = str(e.repo);
@@ -342,12 +342,12 @@ export function createRunTimeline(): RunTimeline {
       case "assistant":
         return [{ kind: "step", step: openStep({ text: str(e.text), at: num(e.at) }) }];
       case "turn":
-        // Legacy stored records only (features/tracing.md): the history seed is
+        // Legacy stored records only (docs/reference/specs/tracing.md): the history seed is
         // normalized before the fold, so a stored `turn` arrives as a
         // `model.turn` span and this case never draws — a raw one is ignored.
         return [];
       case "review_artifact":
-        // The reading diff is the review panel's material (features/reading-diff.md
+        // The reading diff is the review panel's material (docs/reference/specs/reading-diff.md
         // roadmap) — the timeline's step story does not change shape for it.
         return [];
       case "span_start": {
@@ -368,7 +368,7 @@ export function createRunTimeline(): RunTimeline {
         const status = e.status === "error" ? "error" : "ok";
         const attrs = typeof e.attrs === "object" && e.attrs !== null ? (e.attrs as Record<string, unknown>) : {};
         if (name === "model.turn") {
-          // The model turn's one timing record (features/tracing.md): the same
+          // The model turn's one timing record (docs/reference/specs/tracing.md): the same
           // row the legacy `turn` event draws, from the span's attrs — and the
           // same step boundary.
           current = null;

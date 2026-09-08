@@ -1,6 +1,6 @@
 import { ALL_CAPABILITIES, NO_CAPABILITIES, type Capabilities } from "../capabilities.js";
 
-// Three installations, as configurations (features/capabilities.md item 4):
+// Three installations, as configurations (docs/reference/specs/capabilities.md item 4):
 // the config.yaml and the environment that PRODUCE each `Capabilities` value
 // through `capabilitiesFrom`, plus the value itself. The capability suite
 // (`src/core/capabilitySurfaces.test.ts`) asserts the round trip — so a

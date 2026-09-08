@@ -1,4 +1,4 @@
-/** Extracting an R2 restore onto the resident's own disk (features/resident-repos.md
+/** Extracting an R2 restore onto the resident's own disk (docs/reference/specs/resident-repos.md
  *  item 61), kept pure and dependency-free so it is unit-testable from
  *  src/ and imported by the resident Worker — the tested code IS the shipped
  *  code.

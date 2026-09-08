@@ -1,6 +1,6 @@
 // The records gate: reads every record under docs/decisions/ and docs/plans/,
 // reads their copies on the base branch, and reports through the pure rules in
-// src/docs/records.ts (features/docs-site.md item 16).
+// src/docs/records.ts (docs/reference/specs/docs-site.md item 16).
 //
 //   npm run decisions:check                       # every record, against origin/main (locally and in CI)
 //   DECISIONS_BASE=<ref> npm run decisions:check  # against another base, e.g. the branch a stacked PR targets

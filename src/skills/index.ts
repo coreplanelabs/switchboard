@@ -10,7 +10,7 @@ export { InMemorySkillStore, BundledSkillStore, loadBundledSkills } from "./stor
 export const DEFAULT_SKILLS_DIR = process.env.SWITCHBOARD_SKILLS_DIR ?? "./skills";
 
 /**
- * Progressive disclosure (features/skills.md): the calling agent's scoped skill name +
+ * Progressive disclosure (docs/reference/specs/skills.md): the calling agent's scoped skill name +
  * description list, plus a short instruction to load the relevant one with the
  * use_skill tool BEFORE doing the work. Bodies are NEVER included here — they
  * load on demand via use_skill, keeping the prompt small.

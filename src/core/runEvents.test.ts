@@ -12,7 +12,7 @@ import {
   RUN_NOTE_KINDS,
 } from "./runEvents.js";
 
-// Feature: features/run-visibility.md — the run-event stream and its redaction.
+// Feature: docs/reference/specs/run-visibility.md — the run-event stream and its redaction.
 
 describe("redactSecrets", () => {
   it("redacts known credential shapes", () => {
@@ -156,7 +156,7 @@ describe("summarizeToolResult", () => {
   });
 });
 
-// Feature: features/live-view.md item 13 — the run page shows each tool call
+// Feature: docs/reference/specs/live-view.md item 13 — the run page shows each tool call
 // as a card with its real exit status and its (bounded) output inside.
 describe("parseExitPrefix", () => {
   it("reads the numeric exit code every executor prefixes nonzero output with", () => {
@@ -256,7 +256,7 @@ describe("redactSecrets — linear on long unbroken tokens", () => {
   });
 });
 
-// Feature: features/agent-ship.md item 12 — the `ship_round` variant: a typed
+// Feature: docs/reference/specs/agent-ship.md item 12 — the `ship_round` variant: a typed
 // round boundary on the one run stream (index 0-based, round 0 = the initial
 // coding round; a review round and its fix round share an index). This pin is
 // mostly a compile-time contract: the fields are typed, not free text.
@@ -267,7 +267,7 @@ describe("ship_round events", () => {
   });
 });
 
-// Feature: features/tracing.md item 11 — the note-kind list is derived from the union.
+// Feature: docs/reference/specs/tracing.md item 11 — the note-kind list is derived from the union.
 describe("RUN_NOTE_KINDS", () => {
   it("lists every kind the union names, including spans_dropped, with no duplicates", () => {
     expect(new Set(RUN_NOTE_KINDS).size).toBe(RUN_NOTE_KINDS.length);

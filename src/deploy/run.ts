@@ -701,7 +701,7 @@ export async function deployStep(
 ): Promise<StepOutcome> {
   // One `deploy.step.<worker>` root per step on the runner's own output, its
   // live gate a `deploy.wait_live` child carrying the `waitedMs` the "live"
-  // line prints (features/tracing.md item 20; release-and-deploy.md item 19).
+  // line prints (docs/reference/specs/tracing.md item 20; release-and-deploy.md item 19).
   // `slow`: the step always prints, the gate when it took a second or more.
   const root = startProcessRoot(
     { clock: deps.now, sinks: [createLogSink({ level: "slow", write: (line) => io.log(line) })] },

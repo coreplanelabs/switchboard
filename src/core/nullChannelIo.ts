@@ -1,4 +1,4 @@
-// The channel IO for a resumed run whose caller is gone (features/run-history.md
+// The channel IO for a resumed run whose caller is gone (docs/reference/specs/run-history.md
 // item 38): an HTTP `/ingress` or MCP request that was answered — or whose
 // client dropped — when the previous generation died. The run's deliverable is
 // its record (and, for a coding run, the PR it opens); the reply has nowhere

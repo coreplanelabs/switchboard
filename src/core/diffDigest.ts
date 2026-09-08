@@ -4,7 +4,7 @@
 // (src/tools/workspace.ts) runs `git diff` through the Executor seam and renders
 // its output with this function; the coding agent puts the digest in a PR body
 // (a distilled summary, not the raw diff) and the review agent uses it to
-// orient before analyzing. Feature: features/distilled-diffs.md.
+// orient before analyzing. Feature: docs/reference/specs/distilled-diffs.md.
 
 type FileStatus = "modified" | "added" | "deleted" | "renamed" | "binary";
 

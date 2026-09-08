@@ -3,7 +3,7 @@ import type { ChatMessage } from "../../providers/types.js";
 import { assembleTranscript, chunkRows, turnRows } from "./transcript.js";
 import { ATTACHMENT_REF_BYTES, TRANSCRIPT_PART_BYTES } from "./types.js";
 
-// The transcript on the wire (features/run-history.md item 32): one row per
+// The transcript on the wire (docs/reference/specs/run-history.md item 32): one row per
 // content part so no row nears the Durable Object's 2 MB limit, base64
 // attachment data over a threshold stored once and referenced, requests
 // chunked under the body fence, and the read side assembling the exact array

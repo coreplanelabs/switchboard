@@ -323,7 +323,7 @@ export function bindBotConfig(
 }
 
 /**
- * What the CLI's catalogue hides (features/command-registry.md item 28),
+ * What the CLI's catalogue hides (docs/reference/specs/command-registry.md item 28),
  * resolved ONCE at startup from the config FILE — a synchronous read, so `help`
  * and the catalogue never wait on the state Worker. A config that is not
  * a readable file — a `state://` location, a missing or unparsable file — is
@@ -366,7 +366,7 @@ async function main(): Promise<void> {
           warn: (m) => warn(`[run-history] ${m}`),
         }) ?? new NullRunStore(),
     })));
-  // MCP (features/mcp-tools.md) rides the same config: entries are config scopes, secrets follow
+  // MCP (docs/reference/specs/mcp-tools.md) rides the same config: entries are config scopes, secrets follow
   // the overrides backing; connect links point at the bot's PUBLIC_BASE_URL.
   // With `runtimeOverrides.worker` set the CLI and the bot share one ConfigDO
   // (entries, credentials, tickets), so a CLI-minted link completes on the
@@ -418,7 +418,7 @@ async function main(): Promise<void> {
   // carries the same prompt blocks and card notes as one started in Slack.
   const capabilities = capabilitiesFrom(config.config, process.env);
   // Every optional subsystem is a real implementation or its Null Object
-  // (features/routing-and-config.md item 16), as in the bot. The CLI has no
+  // (docs/reference/specs/routing-and-config.md item 16), as in the bot. The CLI has no
   // run ledger: a one-shot process reclaims and resumes nothing.
   const mcp = (await mcpWiring()).source ?? new NullMcpToolSource();
   const memory =
@@ -449,7 +449,7 @@ async function main(): Promise<void> {
     threadsElsewhere: new ThreadsElsewhere(),
     commands,
   };
-  // The request's root (features/tracing.md): the CLI's receipt is now.
+  // The request's root (docs/reference/specs/tracing.md): the CLI's receipt is now.
   const receivedAt = systemClock();
   const trace = startRequestRoot(deps, { channel: "cli", receivedAt });
   await dispatch(

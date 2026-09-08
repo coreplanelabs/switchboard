@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CUSTOM_INSTRUCTIONS_HEADER, customInstructionsBlock } from "./customInstructions.js";
 
-// Feature: features/routing-and-config.md behavior 9 — per-scope custom
+// Feature: docs/reference/specs/routing-and-config.md behavior 9 — per-scope custom
 // instructions. Pure renderer: resolved scopes in, advisory
 // block (or nothing) out.
 

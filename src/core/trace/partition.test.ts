@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — the partition identity on every fixture the
+// Feature: docs/reference/specs/tracing.md — the partition identity on every fixture the
 // plan names, the open-span rules, the loss algebra and the printed shape.
 import { describe, expect, it } from "vitest";
 import { isInformative, partition, printedShape, type LossInterval, type Partition } from "./partition.js";

@@ -1,5 +1,5 @@
 /** The one sink that turns streamed spans into run-stream events
- *  (features/tracing.md, Sink scoping).
+ *  (docs/reference/specs/tracing.md, Sink scoping).
  *
  *  Attached to a request's root before any run exists, it retains every
  *  streamed start and end in one bounded, append-only buffer for the root's

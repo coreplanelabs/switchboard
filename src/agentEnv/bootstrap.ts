@@ -376,7 +376,7 @@ export async function runBootstrap(opts: BootstrapOptions, deps: BootstrapDeps):
  *  way src/execution/factory.ts's githubEnvs() supplies GH_TOKEN). Returns
  *  NAME->value; writes no file and logs no value. Enforces the UAT-only
  *  allowlist and the fail-closed token check. This is the clean seam the
- *  executor factory would call — see features/agent-env-bootstrap.md. */
+ *  executor factory would call — see docs/reference/specs/agent-env-bootstrap.md. */
 export async function buildAgentEnv(input: {
   manifest: AgentEnvManifest;
   env: string;

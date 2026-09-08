@@ -166,7 +166,7 @@ describe("renderTemplate", () => {
   });
 });
 
-// Feature: features/release-and-deploy.md item 14 — a profile without a state
+// Feature: docs/reference/specs/release-and-deploy.md item 14 — a profile without a state
 // Worker renders the bot's config without STATE_WORKER_URL.
 describe("templateView / renderTemplate for a bot-only profile", () => {
   const botOnly = { ...TEST_PROFILE, workers: { bot: TEST_PROFILE.workers.bot } };

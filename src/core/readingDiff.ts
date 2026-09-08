@@ -4,7 +4,7 @@ import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
 import type { ExecTraceOptions } from "../execution/executor.js";
 
-// The reading diff (features/reading-diff.md): every PR review run publishes a
+// The reading diff (docs/reference/specs/reading-diff.md): every PR review run publishes a
 // `review_artifact` event carrying the change as a reviewer would read it —
 // either the full `git diff` or meat.dev's abridged "reading diff" (the
 // conceptual meat of the change, style/noise dropped). Which one is a
@@ -157,7 +157,7 @@ function failedOutput(out: string): boolean {
   return /^(exit \d+|exit [A-Z]+|fatal|error):/i.test(out.trimStart());
 }
 
-/** The dispatcher's one call (features/reading-diff.md item 4). Guarantees by
+/** The dispatcher's one call (docs/reference/specs/reading-diff.md item 4). Guarantees by
  *  construction, no waits in the pipeline:
  *  - `baseline`: the git artifact, produced concurrently from run start and
  *    published as soon as it exists. The dispatcher JOINS this promise before
@@ -178,7 +178,7 @@ export function startReviewReadingDiff(args: {
   /** The request's root: each production becomes a `run.reading_diff` /
    *  `run.reading_diff.upgrade` background span under it, `outcome` saying
    *  whether it published, and the diff's exec is that span's child
-   *  (features/tracing.md item 18). Absent, nothing is measured. */
+   *  (docs/reference/specs/tracing.md item 18). Absent, nothing is measured. */
   parent?: Span;
 }): { baseline: Promise<boolean>; upgrade?: Promise<boolean> } {
   const resolved = resolveReadingDiff(args.cfg, args.env);

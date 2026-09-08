@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { configAwarenessBlock } from "./configAwareness.js";
 
-// Feature: features/routing-and-config.md — config awareness (behavior 8): the
+// Feature: docs/reference/specs/routing-and-config.md — config awareness (behavior 8): the
 // model is told the RESOLVED agent/model/scope and that config is tunable, so
 // no agent can truthfully-sounding claim it is "stateless" or "untunable".
 
@@ -151,7 +151,7 @@ describe("configAwarenessBlock — custom instructions", () => {
   });
 });
 
-describe("configAwarenessBlock — MCP (features/mcp-tools.md item 17)", () => {
+describe("configAwarenessBlock — MCP (docs/reference/specs/mcp-tools.md item 17)", () => {
   it("is absent without `mcp` (byte-identical to before the feature)", () => {
     expect(configAwarenessBlock(base)).not.toContain("MCP");
   });

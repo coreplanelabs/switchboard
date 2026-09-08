@@ -14,7 +14,7 @@ import type { RunEvent } from "./runEvents.js";
 import type { RunRecord } from "./runRecord.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
 
-// Feature: features/self-improvement.md — the FrictionLedger seam: where each
+// Feature: docs/reference/specs/self-improvement.md — the FrictionLedger seam: where each
 // finished run's diagnosis is READ from so the proposer can look ACROSS runs
 // (the live registry evicts a finished run after 60s). Production reads run
 // history (`RunStoreFrictionLedger`); the in-memory ledger is the test double
@@ -271,7 +271,7 @@ describe("isFrictionRunRecord", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 16 — the Null Object a process
+// Feature: docs/reference/specs/routing-and-config.md item 16 — the Null Object a process
 // without run history is wired with; `selectFrictionLedger` hands it out for a
 // missing store instead of `undefined`.
 describe("NullFrictionLedger — the ledger of a process without run history", () => {

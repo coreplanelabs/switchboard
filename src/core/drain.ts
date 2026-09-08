@@ -16,7 +16,7 @@
 /** How long the drain waits for in-flight work after SIGTERM before exiting —
  *  the grace Cloudflare's rollout allows before SIGKILL. With the run ledger on,
  *  the runs a resume can continue are handed off instead of waited for
- *  (features/run-history.md item 39); this is the wait for the rest. */
+ *  (docs/reference/specs/run-history.md item 39); this is the wait for the rest. */
 export const DRAIN_DEADLINE_MS = 15 * 60_000;
 
 /** The handoff's own budget (plan D8): after every resumable run is marked

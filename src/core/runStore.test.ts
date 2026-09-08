@@ -8,7 +8,7 @@ import type { RunEvent } from "./runEvents.js";
 import { buildRunStore, FileRunStore, InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
 import { WorkerRunStore } from "./runStoreWorker.js";
 
-// Feature: features/run-history.md — the RunStore seam: in-memory and
+// Feature: docs/reference/specs/run-history.md — the RunStore seam: in-memory and
 // directory-backed file stores sharing one retention function with the Worker.
 
 const DAY = 86_400_000;
@@ -453,7 +453,7 @@ describe("buildRunStore", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 16 — the Null Object a process
+// Feature: docs/reference/specs/routing-and-config.md item 16 — the Null Object a process
 // without run history is wired with, so no caller branches on a missing store.
 describe("NullRunStore — the store of a process without run history", () => {
   it("accepts a put and keeps nothing (stored: false, like a record outside retention); every read is the not-found shape; list is empty; delete is a no-op", async () => {

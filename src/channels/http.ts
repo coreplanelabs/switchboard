@@ -294,7 +294,7 @@ async function handleAuthorized(
   if ("error" in parsed) {
     return { status: 400, body: { error: parsed.error } };
   }
-  // The request's root (features/tracing.md): started once the caller's
+  // The request's root (docs/reference/specs/tracing.md): started once the caller's
   // identity is established and the body parsed; `dispatch()` ends it.
   const receivedAt = systemClock();
   const trace = startRequestRoot(deps, { channel: "http", receivedAt });

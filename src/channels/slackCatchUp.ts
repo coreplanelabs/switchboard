@@ -22,7 +22,7 @@ import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 // or reply cannot). A same-process seen-set additionally keeps a message that
 // arrived live AND appears in the scan from running twice.
 //
-// The same scan sweeps ORPHANED STATUS CARDS (features/slack-channel.md item
+// The same scan sweeps ORPHANED STATUS CARDS (docs/reference/specs/slack-channel.md item
 // 8): a card still showing a live glyph whose process is gone — a deploy
 // rollout killed the container before its drain finished, so the card froze
 // mid-"thinking" for good while the run vanished from /runs. The card is the
@@ -222,7 +222,7 @@ export interface FindOrphanedInput {
   /** Full replies (parent first) per thread, by parent ts. */
   threads: Map<string, SlackHistoryMessage[]>;
   /** Is the card's run still live anywhere this process knows of — driven here,
-   *  or leased on the run ledger by another generation (features/run-history.md
+   *  or leased on the run ledger by another generation (docs/reference/specs/run-history.md
    *  item 36)? Those are running, not orphaned. */
   isLive: (channel: string, ts: string) => boolean;
 }

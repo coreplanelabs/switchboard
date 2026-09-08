@@ -58,11 +58,11 @@ export interface ResidentExecutorOptions {
   threadKey: string;
   /** Ref for a first attach; an existing thread binding always wins over it. */
   refHint?: string;
-  /** Read-only run (features/resident-repos.md item 50): the resident builds
+  /** Read-only run (docs/reference/specs/resident-repos.md item 50): the resident builds
    *  the worktree with no credential file and an unfetchable origin. Sent only
    *  when true, so an older resident sees the body it always did. */
   readonly?: boolean;
-  /** The commit the caller expects the ref to be at — a PR head (features/
+  /** The commit the caller expects the ref to be at — a PR head (docs/reference/specs/
    *  resident-repos.md item 51). The resident fetches its mirror when the ref's
    *  tip is not this commit instead of cloning a stale tip. Sent only when set,
    *  so an older resident sees the body it always did. */
@@ -77,7 +77,7 @@ export interface ResidentBinding {
    *  every /exec. Advisory (named to the model so it never goes looking for
    *  the repository); undefined if the attach answer lacked it. */
   workspace?: string;
-  /** The resident's own step trace for the attach (features/tracing.md item
+  /** The resident's own step trace for the attach (docs/reference/specs/tracing.md item
    *  19), sanitized at the parse; absent from a Worker predating it. */
   trace?: ResidentStep[];
   /** The resident's total for the attach (`attachMs`), for the clock-skew attr. */
@@ -267,7 +267,7 @@ export class ResidentExecutor implements Executor {
   ): Promise<{ status: number; data: Record<string, unknown> }> {
     let res: Response;
     try {
-      // One `http.client` span under the caller's (features/tracing.md item 21);
+      // One `http.client` span under the caller's (docs/reference/specs/tracing.md item 21);
       // the trace context rides only because the resident is one of our hosts.
       res = await tracedFetch(
         span,
@@ -347,7 +347,7 @@ export class ResidentExecutor implements Executor {
       return this.lastBinding;
     }
     const err = String(data.error ?? `HTTP ${status}`);
-    // The steps the resident ran before refusing ride the error (features/
+    // The steps the resident ran before refusing ride the error (docs/reference/specs/
     // tracing.md item 19): the dispatcher grafts them under its attach span.
     const failedTrace = sanitizeGraftedSteps(data.trace);
     const fail = (e: Error): never => {
@@ -460,7 +460,7 @@ export class ResidentExecutor implements Executor {
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
-    // Per-call budget (features/execution.md item 11). It rides in the body
+    // Per-call budget (docs/reference/specs/execution.md item 11). It rides in the body
     // only when the caller asked for one, so an older resident Worker sees the
     // body it always did (same convention as attach's readonly/sha); the
     // resident clamps server-side with the same [1s, 20 min] bounds and never

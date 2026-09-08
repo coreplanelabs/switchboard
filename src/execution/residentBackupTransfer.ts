@@ -1,4 +1,4 @@
-/** Which way a resident's snapshot bytes travel (features/resident-repos.md
+/** Which way a resident's snapshot bytes travel (docs/reference/specs/resident-repos.md
  *  item 61), kept pure so the decision is a unit test and the Worker only
  *  reads it.
  *

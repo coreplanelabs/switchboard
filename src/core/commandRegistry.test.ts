@@ -22,10 +22,10 @@ import {
 import { callerWith } from "./testing/callers.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
 
-// Feature: features/command-registry.md — the one seam every surface adapts,
+// Feature: docs/reference/specs/command-registry.md — the one seam every surface adapts,
 // in its typed form: positional `args` + named `options`, both
 // inferred into the handler. Authorization is the policy table's
-// (features/authorization.md): the demo commands declare REAL actions so the
+// (docs/reference/specs/authorization.md): the demo commands declare REAL actions so the
 // real rows decide, and the callers hold exactly the grants config would give.
 
 type Deps = { hits: string[]; seen?: unknown };
@@ -580,7 +580,7 @@ describe("untrusted wrapping and rendering", () => {
             eventCount: 1,
           },
           {
-            // the one duration definition (features/tracing.md): received → finished
+            // the one duration definition (docs/reference/specs/tracing.md): received → finished
             id: "receivedfirst0000",
             agent: "general",
             status: "completed",
@@ -817,7 +817,7 @@ describe("settle — the deferred outcome of an accepted command (resident-repos
   });
 });
 
-describe("CommandRegistry.invoke — the caller's span (features/tracing.md item 24)", () => {
+describe("CommandRegistry.invoke — the caller's span (docs/reference/specs/tracing.md item 24)", () => {
   it("the handler's context carries the span invoke was given and has no `span` key without one; bindCommands forwards it", async () => {
     const seen: unknown[] = [];
     const registry = new CommandRegistry<Deps>({ audit: () => {} });
@@ -841,7 +841,7 @@ describe("CommandRegistry.invoke — the caller's span (features/tracing.md item
   });
 });
 
-// Feature: features/command-registry.md item 28 — `enabledWhen`: a command
+// Feature: docs/reference/specs/command-registry.md item 28 — `enabledWhen`: a command
 // whose capability is off does not exist in this process, on any surface.
 describe("enabledWhen — a capability that is off hides the command (item 28)", () => {
   const gated = define({

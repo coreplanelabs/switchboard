@@ -8,7 +8,7 @@ import {
   type FrictionDiagnosis,
 } from "./runFriction.js";
 
-// Feature: features/run-friction.md — the pure, deterministic analyzer that
+// Feature: docs/reference/specs/run-friction.md — the pure, deterministic analyzer that
 // turns a run's RunEvent stream into a structured friction diagnosis.
 // Streams below are synthetic: one per friction category, plus edges.
 
@@ -470,7 +470,7 @@ describe("formatFrictionReport", () => {
   });
 });
 
-// Feature: features/run-visibility.md — the narrative events (`input`,
+// Feature: docs/reference/specs/run-visibility.md — the narrative events (`input`,
 // `context`, `assistant`, `answer`) are the run's story, not its steps: none of
 // them counts toward `eventCount`. `input`/`assistant`/`answer` still drive the
 // model-turn clock (run-friction.md, slow_model_turn); `context` — replayed
@@ -530,7 +530,7 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
     expect(d.eventCount).toBe(2);
     expect(d.runMs).toBe(9000);
     expect(d.toolCalls).toBe(1);
-    // A legacy stream WITH turn receipts is timed by them (features/tracing.md
+    // A legacy stream WITH turn receipts is timed by them (docs/reference/specs/tracing.md
     // item 14): model time is the receipts' own durations, not the gaps.
     expect(d.modelTimeMs).toBe(900 + 6000);
   });
@@ -558,7 +558,7 @@ describe("analyzeRunFriction — truncated input (the registry backlog dropped e
   });
 });
 
-// Feature: features/agent-ship.md item 12 — `ship_round` marks a pipeline's
+// Feature: docs/reference/specs/agent-ship.md item 12 — `ship_round` marks a pipeline's
 // round boundaries: a fact about the run, not a step. Like the other side
 // facts (skill_use, review_artifact, pr_description, pr_opened) it must not
 // count as an event, a tool call, or a model-turn boundary.
@@ -586,7 +586,7 @@ describe("analyzeRunFriction — ship_round is a side fact, invisible to frictio
   });
 });
 
-// Feature: features/tracing.md — reader tolerance: span records on the stream
+// Feature: docs/reference/specs/tracing.md — reader tolerance: span records on the stream
 // (emitted from PR 4 on) are timing, not steps; they never count as events nor
 // move the stream's first/last stamps.
 describe("analyzeRunFriction — span records are invisible to counts and to the stream clock", () => {
@@ -611,7 +611,7 @@ describe("analyzeRunFriction — span records are invisible to counts and to the
     expect(d.runMs).toBe(5_000);
   });
 
-  // Feature: features/tracing.md — a stream timed by `model.turn` spans takes
+  // Feature: docs/reference/specs/tracing.md — a stream timed by `model.turn` spans takes
   // model time from them, never from the result→call gap as well.
   it("model.turn span ends are the model time on a span-timed stream: summed, flagged past the threshold at the span's index, and the gap rule is silent", () => {
     const turn = (spanId: string, startedAt: number, durationMs: number, stopReason = "tool_use") =>
@@ -643,10 +643,10 @@ describe("analyzeRunFriction — span records are invisible to counts and to the
   });
 });
 
-// Feature: features/tracing.md item 5; features/run-friction.md items 3–4 — the
+// Feature: docs/reference/specs/tracing.md item 5; docs/reference/specs/run-friction.md items 3–4 — the
 // analyzer on spans: one span set for every duration, the window and the shape,
 // union time for the run-denominated categories, and the report's vocabulary.
-describe("analyzeRunFriction — the window, the shape and the span set (features/tracing.md)", () => {
+describe("analyzeRunFriction — the window, the shape and the span set (docs/reference/specs/tracing.md)", () => {
   const span = (
     spanId: string,
     name: string,

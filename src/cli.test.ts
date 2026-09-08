@@ -34,7 +34,7 @@ import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./core/commands/all.js";
 import type { AffectedReport } from "./deploy/affected.js";
 
-// Feature: features/command-registry.md — the derived CLI (`npx tsx src/cli.ts
+// Feature: docs/reference/specs/command-registry.md — the derived CLI (`npx tsx src/cli.ts
 // <group> <verb> [args…] [--option value…] [--json]`): argv goes through
 // the SAME grammar chat uses; `runCli` is the transport-free path `main()` and
 // the contract test share. Exit codes: 2 = the invocation was rejected (usage,
@@ -639,7 +639,7 @@ describe("a command that never touches the config never waits for the open", () 
   });
 });
 
-// Feature: features/command-registry.md item 28 — the CLI's catalogue hides what
+// Feature: docs/reference/specs/command-registry.md item 28 — the CLI's catalogue hides what
 // is off, resolved ONCE at startup from the config FILE (a synchronous read; the
 // async store open is never waited for).
 describe("cliCapabilities — what the CLI's catalogue is bound to", () => {

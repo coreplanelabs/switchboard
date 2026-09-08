@@ -1,6 +1,6 @@
 import { monitorEventLoopDelay } from "node:perf_hooks";
 
-// Process metrics for `/healthz` (features/slack-channel.md item 8): the bot is
+// Process metrics for `/healthz` (docs/reference/specs/slack-channel.md item 8): the bot is
 // one Node process on a small container, and under many concurrent runs the
 // first failure is the process itself (heap, then the event loop) — invisible
 // from Slack, and container stdout is not in Workers Logs. RSS and heap come

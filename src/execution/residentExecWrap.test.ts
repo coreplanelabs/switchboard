@@ -8,7 +8,7 @@ import { capBytesFor, capWrappedCommand, recoverCapturedOutput } from "./residen
 
 const run = promisify(execFile);
 
-// Feature: features/resident-repos.md item 21 — /exec (and /op) output is
+// Feature: docs/reference/specs/resident-repos.md item 21 — /exec (and /op) output is
 // bounded INSIDE the container; only the capped head of each stream crosses
 // the RPC into the DO isolate. These tests run the generated script under a
 // real bash, so the exit-code/stream/cap contract is proven, not asserted.

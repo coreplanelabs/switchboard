@@ -1,4 +1,4 @@
-// Head moved during a review run (features/agent-review.md items 10 and 12).
+// Head moved during a review run (docs/reference/specs/agent-review.md items 10 and 12).
 //
 // A review is posted pinned to the head it examined (`RepoContext.headSha`);
 // if a push landed while the run was in flight, the PR head is now a different

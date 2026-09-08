@@ -1,4 +1,4 @@
-// Reviewed-head guard for the review post-step (features/agent-review.md item 8).
+// Reviewed-head guard for the review post-step (docs/reference/specs/agent-review.md item 8).
 //
 // A review may only be posted to a PR when the commit the agent ACTUALLY
 // reviewed is the PR head resolved for the run (`RepoContext.headSha`). The

@@ -9,7 +9,7 @@ import {
 
 const KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; // 32 zero bytes, base64
 
-describe("credential sealing (features/mcp-tools.md item 16)", () => {
+describe("credential sealing (docs/reference/specs/mcp-tools.md item 16)", () => {
   it("seals and opens under the same key; the blob carries no plaintext", async () => {
     const k = importCredentialKey(KEY);
     const sealed = await sealCredential(k, "org/linear", "lin_api_SECRET", 1000);

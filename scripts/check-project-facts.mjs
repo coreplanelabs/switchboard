@@ -25,7 +25,7 @@ export const CHECKED_FILES = [
   "GOVERNANCE.md",
   "NOTICE",
   "docs/README.md",
-  "features/docs-site.md",
+  "docs/reference/specs/docs-site.md",
   "src/core/docsLink.ts",
 ];
 

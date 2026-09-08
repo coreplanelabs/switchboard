@@ -20,7 +20,7 @@ import type { ChannelDirectory, ChannelVisibility } from "../core/authz/types.js
 // requesting user's own scope — a group DM has no shared channel audience the
 // org would otherwise be narrowed to. Membership (`isMember`) is NOT
 // enumerated in this cut: the seam answers `unknown` (not a member) until
-// `conversations.members` lands behind it — features/authorization.md [gap].
+// `conversations.members` lands behind it — docs/reference/specs/authorization.md [gap].
 
 /** Default time a channel's visibility is served from the cache. Channels
  *  rarely flip public ↔ private; a stale window of minutes is accepted and

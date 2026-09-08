@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { durationStats, pageAll, peakConcurrency, realRuns } from "./history.js";
 
-// `load:history` (features/load-harness.md item 4): the production baseline the
+// `load:history` (docs/reference/specs/load-harness.md item 4): the production baseline the
 // plan quotes (peak 8 concurrent runs) must be reproducible from the run
 // store. The math is a sweep-line over [startedAt, finishedAt) intervals.
 

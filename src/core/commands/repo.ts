@@ -36,7 +36,7 @@ import type { Span } from "../trace/types.js";
 //                                                decided on `agent { coding }` (the implicit
 //                                                target agent — the right to run it, or the
 //                                                exec grant) + the per-repo allowlist inside
-// Every gate is a policy row (features/authorization.md); the handlers hold no
+// Every gate is a policy row (docs/reference/specs/authorization.md); the handlers hold no
 // identity comparison of their own.
 // The handlers are thin: typed args/options → the resident Worker's admin
 // routes, or the `Operations` backend (resident `/op` or local). Nothing here
@@ -100,7 +100,7 @@ const slugArg = { name: "slug", schema: repoSlug, describe: "GitHub owner/name o
 async function adminOf(deps: RepoCommandDeps, span?: Span): Promise<ResidentAdminClient> {
   const api = await deps.repo.admin();
   if ("unavailable" in api) throw new CommandError("unavailable", api.unavailable);
-  // Bound to the command's span (features/tracing.md item 24): each admin call
+  // Bound to the command's span (docs/reference/specs/tracing.md item 24): each admin call
   // is an `http.client` child of `run.command`. A client without the view (a
   // test double) is used as is.
   return span && api.withSpan ? api.withSpan(span) : api;

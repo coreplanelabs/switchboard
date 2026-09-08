@@ -7,7 +7,7 @@ import {
   type ResidentThreadClient,
 } from "./residentLoad.js";
 
-// `load:resident` against an in-memory resident (features/load-harness.md
+// `load:resident` against an in-memory resident (docs/reference/specs/load-harness.md
 // item 8): a pool of N seats, named refusals past it, releases that free a
 // seat, and the admin purge. The clock is virtual; nothing sleeps.
 

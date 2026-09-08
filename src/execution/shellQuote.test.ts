@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { shellQuote } from "./shellQuote.js";
 
-// Feature: features/execution.md — shell quoting through the sandbox's
+// Feature: docs/reference/specs/execution.md — shell quoting through the sandbox's
 // `timeout -k 10 280 bash -c '<command>'` wrapper. Tests the exact module the
 // worker ships. The timeout-binary cases need coreutils `timeout` (present on
 // CI's ubuntu; absent on stock macOS — skipped there, CI is the gate).

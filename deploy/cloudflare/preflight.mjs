@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Deploy preflight for the bot Worker (features/slack-channel.md item 8).
+// Deploy preflight for the bot Worker (docs/reference/specs/slack-channel.md item 8).
 //
 // `wrangler deploy` rolls the bot container. Cloudflare's rollout sends SIGTERM;
-// since the run ledger's handoff (features/run-history.md item 39) the bot
+// since the run ledger's handoff (docs/reference/specs/run-history.md item 39) the bot
 // hands every resumable run to the next generation and exits within seconds,
 // and the next generation continues the runs under their own cards — so a
 // deploy no longer waits on runs, and this preflight no longer refuses for
@@ -121,7 +121,7 @@ export function listContainerApps({ cwd = dirname(fileURLToPath(import.meta.url)
 
 /**
  * Warnings (never refusals) from the reconnect catch-up's status on /healthz
- * (features/slack-channel.md item 7): a scan that could not run at all
+ * (docs/reference/specs/slack-channel.md item 7): a scan that could not run at all
  * (`catchUp.error`, e.g. `missing_scope`) or a bot token missing required
  * scopes. Pure; an older payload without `catchUp` says nothing.
  * @returns {string[]}

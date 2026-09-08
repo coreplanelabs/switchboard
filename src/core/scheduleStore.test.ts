@@ -8,7 +8,7 @@ import {
 } from "./scheduleStore.js";
 import type { ScheduleFiring } from "./schedules.js";
 
-// Feature: features/live-view.md item 13: where a schedule's firings
+// Feature: docs/reference/specs/live-view.md item 13: where a schedule's firings
 // live. Two implementations of one seam (AGENTS.md invariant 2): the durable
 // Worker client (ScheduleDO on the state Worker — the production choice, so
 // the record survives bot restarts, invariant 6) and the in-memory store for
@@ -144,7 +144,7 @@ describe("buildScheduleStore (startup selection)", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 16 — the Null Object a process
+// Feature: docs/reference/specs/routing-and-config.md item 16 — the Null Object a process
 // without a firing store is wired with.
 describe("NullScheduleStore — the store of a process without a firing store", () => {
   it("drops a firing and has never seen one", async () => {

@@ -152,7 +152,7 @@ describe("bridgeMcpTools", () => {
     await expect(boom.run({}, ctx())).rejects.toThrow("MCP linear/boom failed: socket hang up");
   });
 
-  // Feature: features/tracing.md; features/mcp-tools.md item 10 — under a tool
+  // Feature: docs/reference/specs/tracing.md; docs/reference/specs/mcp-tools.md item 10 — under a tool
   // span the remote call is one `mcp.<server>.<tool>` span; the legacy event
   // is published only when no span is given.
   it("under a tool span, each call is an mcp.<server>.<tool> span with ok and bytes, error-status when the server errs or the call throws (classified), and no mcp_tool_use event", async () => {

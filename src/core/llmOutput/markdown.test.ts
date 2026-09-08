@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { canonicalizeMarkdown, markdownOutput } from "./markdown.js";
 
-// Feature: features/llm-output.md item 3 — Markdown canonicalization promotes
+// Feature: docs/reference/specs/llm-output.md item 3 — Markdown canonicalization promotes
 // single-asterisk emphasis to strong (`*x*` → `**x**`), positionally and
 // parser-guided, so every projector receives ONE dialect: asterisk emphasis =
 // bold, `_x_` = italic. Everything else is byte-identical.

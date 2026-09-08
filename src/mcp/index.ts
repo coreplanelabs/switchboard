@@ -73,7 +73,7 @@ export interface McpWiring {
 }
 
 /**
- * Startup wiring shared by the bot and the CLI (features/mcp-tools.md item 13):
+ * Startup wiring shared by the bot and the CLI (docs/reference/specs/mcp-tools.md item 13):
  * servers come from the config store's scopes (already loaded); sealed
  * credentials and tickets go where the runtime overrides go — the state
  * Worker's ConfigDO when `runtimeOverrides.worker` is set, else a JSON file

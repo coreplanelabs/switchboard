@@ -1,4 +1,4 @@
-// The agent:ship pipeline (features/agent-ship.md): the coding →
+// The agent:ship pipeline (docs/reference/specs/agent-ship.md): the coding →
 // review → fix loop to LGTM as ONE dispatch — one card, one run record, N
 // strictly serial child rounds, every GitHub side effect executed by the bot
 // process from typed artifacts. `dispatch()` forks in here (runShipBranch in
@@ -66,7 +66,7 @@ import {
   type ReviewPostOutcome,
 } from "./reviewRound.js";
 
-// ---- config (`ship` block, features/agent-ship.md item 8) -------------------
+// ---- config (`ship` block, docs/reference/specs/agent-ship.md item 8) -------------------
 
 /** The `ship` config block: pipeline caps, resolved at deployment level like
  *  the sibling `review` block (no per-scope layering exists for these blocks —
@@ -507,7 +507,7 @@ export interface ShipPipelineInput {
   threadKey: string;
   caps: ShipCaps;
   control: RunControl;
-  /** The thread's follow-up inbox (features/thread-admission.md): handed to
+  /** The thread's follow-up inbox (docs/reference/specs/thread-admission.md): handed to
    *  every child round's runner so a reply during the pipeline is read by the
    *  child in flight at its next step. Absent (tests) → children run as
    *  without follow-ups. */
@@ -521,7 +521,7 @@ export interface ShipPipelineInput {
    *  pr_description, pr_opened; the ship_round boundaries) — the dispatcher's
    *  hook also feeds the card's round header off the `ship_round` events. */
   publish: (event: RunEvent) => void;
-  /** The run's root span (features/tracing.md): every round is a `ship.round`
+  /** The run's root span (docs/reference/specs/tracing.md): every round is a `ship.round`
    *  child of it, every child run's `run.agent` a child of its round. Absent
    *  (tests) → no spans. */
   span?: Span;
@@ -529,7 +529,7 @@ export interface ShipPipelineInput {
   reply: (text: string) => Promise<void>;
   web?: WebCapability;
   skills?: SkillStore;
-  /** The `github_*` tools' capability for the child runs (features/github-tools.md). */
+  /** The `github_*` tools' capability for the child runs (docs/reference/specs/github-tools.md). */
   githubTools?: GithubCapability;
   github: ShipGithub;
   /** Deep string-leaf redaction for the published pr_description event (the
@@ -717,7 +717,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     );
 
   // ---- one coding child (round 0, and every fix round) ----------------------
-  /** One round as a `ship.round` span (features/tracing.md), when traced. */
+  /** One round as a `ship.round` span (docs/reference/specs/tracing.md), when traced. */
   const round = <T>(index: number, agentName: "coding" | "review", fn: (span: Span | undefined) => Promise<T>) =>
     input.span ? input.span.span("ship.round", fn, { attrs: { index, agent: agentName } }) : fn(undefined);
 

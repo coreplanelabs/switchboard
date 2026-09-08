@@ -1,4 +1,4 @@
-// The clock ratchet's scanner (features/tracing.md): counts direct wall-clock
+// The clock ratchet's scanner (docs/reference/specs/tracing.md): counts direct wall-clock
 // reads per production file with the TypeScript AST, using the same predicate
 // ids as the ESLint `clock-ban` rule (clockReads.mjs). Plain JS beside the
 // predicate list, so the lint config, the CLI (scripts/clock-allowlist.mts) and

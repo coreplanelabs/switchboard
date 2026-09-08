@@ -1,5 +1,5 @@
 // Write the generated regions of docs/reference/* from the command registry
-// (features/docs-site.md items 6–8).
+// (docs/reference/specs/docs-site.md items 6–8).
 //
 //   npm run docs:gen     rewrite every region; prints one line per file changed
 //   npm run docs:check   verify the committed regions match the code — what CI

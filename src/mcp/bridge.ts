@@ -5,7 +5,7 @@ import { McpError, type McpCallResult, type McpClient, type McpServerSpec, type 
 import { classifyError } from "../core/trace/classify.js";
 import type { Span } from "../core/trace/types.js";
 
-// The bridge (features/mcp-tools.md items 5–7, 10): one remote tool → one
+// The bridge (docs/reference/specs/mcp-tools.md items 5–7, 10): one remote tool → one
 // `RunnableTool` the runner can call like any built-in. Names are mechanical
 // and provider-safe; descriptions and results are treated as untrusted data;
 // `sideEffectFree` follows the server's annotations conservatively; every call
@@ -83,7 +83,7 @@ export function bridgeMcpTools(
         }
         opts.budget.calls++;
         // The remote call is one `mcp.<server>.<tool>` span under the tool
-        // call's span (features/tracing.md): ok and the result size as attrs,
+        // call's span (docs/reference/specs/tracing.md): ok and the result size as attrs,
         // the failure classified (never the body). Without a span (CLI, a bare
         // tool test) the legacy `mcp_tool_use` event carries the same facts.
         const call = async (span: Span | undefined): Promise<string> => {

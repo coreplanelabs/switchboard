@@ -3,7 +3,7 @@ import type { ParsedChatCommand } from "./commandChat.js";
 import { LONG_COMMAND_REPLY_CHARS, replyCommandOutput } from "./dispatcher.js";
 import type { ChannelIO } from "./types.js";
 
-// features/command-registry.md item 27 / mcp-tools.md item 19: a command reply
+// docs/reference/specs/command-registry.md item 27 / mcp-tools.md item 19: a command reply
 // longer than one chat message goes out as an attachment where the channel
 // has one — lead line as the message, the whole text as `<group>-<verb>.md`,
 // converted from the chat dialect to CommonMark (`toMarkdownDocument`).

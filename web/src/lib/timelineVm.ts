@@ -14,7 +14,7 @@ import { queuedCaption } from "@core/core/runShape.js";
 import { deliveryCaption } from "./runPageModel";
 import { formatDuration } from "./format";
 
-// The run page's timeline (features/live-view.md item 25; features/tracing.md):
+// The run page's timeline (docs/reference/specs/live-view.md item 25; docs/reference/specs/tracing.md):
 // the run's shape from its spans and stamps alone, on the header's own window
 // so the lede's total IS the header's total. Pure: the page hands in the span
 // set, the loss intervals, the window, the phase and the delivery stamps, and

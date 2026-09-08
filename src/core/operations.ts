@@ -36,7 +36,7 @@ export type OperationResult =
       ok: boolean;
       summary: string;
       output?: string;
-      /** The resident's own step trace (features/tracing.md item 19), sanitized at the parse. */
+      /** The resident's own step trace (docs/reference/specs/tracing.md item 19), sanitized at the parse. */
       trace?: ResidentStep[];
       /** The resident's total for the op, for the clock-skew attr. */
       residentMs?: number;
@@ -50,7 +50,7 @@ export type OperationResult =
 
 export interface Operations {
   /** `trace.span`: the caller's span, when it has one — the backend's HTTP
-   *  call becomes its `http.client` child (features/tracing.md item 21). */
+   *  call becomes its `http.client` child (docs/reference/specs/tracing.md item 21). */
   run(op: OpName, req: { repo: string; ref?: string }, trace?: { span?: Span }): Promise<OperationResult>;
 }
 

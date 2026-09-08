@@ -422,7 +422,7 @@ describe("NullLlmCostSource", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 16 — the Null Object a process
+// Feature: docs/reference/specs/routing-and-config.md item 16 — the Null Object a process
 // without cost reporting is wired with.
 describe("NullCostsService — the service of a process without cost reporting", () => {
   it("has no groups, and refuses a report with the reason the view shows", async () => {

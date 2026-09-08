@@ -132,7 +132,7 @@ describe("stopwatch", () => {
     expect(elapsedText(row(), undefined)).toBe("");
   });
 
-  it("receivedAt opens the window when present (features/tracing.md): live and finished rows both measure from it; a tombstone is empty", () => {
+  it("receivedAt opens the window when present (docs/reference/specs/tracing.md): live and finished rows both measure from it; a tombstone is empty", () => {
     expect(elapsedText(row({ receivedAt: 1_000_000 - 20_000 }), 1_000_000 + 40_000)).toBe("1m 00s");
     expect(
       elapsedText(row({ finished: true, receivedAt: 1_000_000 - 20_000, finishedAt: 1_000_000 + 40_000 }), 99),

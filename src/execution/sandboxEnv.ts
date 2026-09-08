@@ -1,4 +1,4 @@
-// The env map a per-thread sandbox request carries (features/execution.md
+// The env map a per-thread sandbox request carries (docs/reference/specs/execution.md
 // item 5): ONE reader, shared by the sandbox Worker and its tests. Deliberately
 // free of node: imports so wrangler can bundle it into the Worker, like
 // bashTimeout.ts, shellQuote.ts and sandboxErrors.ts.

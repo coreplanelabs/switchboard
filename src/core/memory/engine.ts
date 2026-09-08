@@ -66,7 +66,7 @@ export type WritePlan =
   { action: "dedup"; target: MemoryRecord } | { action: "insert"; record: MemoryRecord; supersede?: MemoryRecord };
 
 /**
- * Decide how one candidate lands among a scope's ACTIVE records (features/
+ * Decide how one candidate lands among a scope's ACTIVE records (docs/reference/specs/
  * memory.md §8):
  * - **Supersede target** = the active same-scope record whose id equals
  *   `cand.supersedes`; an unknown/foreign id resolves to nothing (the new

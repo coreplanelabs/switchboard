@@ -1,4 +1,4 @@
-/** The resident's content-addressed dependency store (features/resident-repos.md
+/** The resident's content-addressed dependency store (docs/reference/specs/resident-repos.md
  *  item 59), kept pure and dependency-free so it is unit-testable from
  *  src/ and imported by the resident Worker like residentDepCache — the
  *  tested code IS the shipped code.

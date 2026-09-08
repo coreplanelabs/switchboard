@@ -1,4 +1,4 @@
-/** The partition (features/tracing.md): every instant of a run's window
+/** The partition (docs/reference/specs/tracing.md): every instant of a run's window
  *  belongs to exactly one of seven terms —
  *
  *    window = getting ready + thinking + tools + finishing up

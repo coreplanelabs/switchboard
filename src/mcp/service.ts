@@ -50,7 +50,7 @@ import type { McpSecretStore } from "./secretStore.js";
 import { DiscoveringMcpToolSource, type DiscoveringSourceOptions, type ResolvedServer } from "./source.js";
 import type { McpClientFactory, McpServerSpec } from "./types.js";
 
-// The MCP server rules in ONE place (features/mcp-tools.md items 13–17), over
+// The MCP server rules in ONE place (docs/reference/specs/mcp-tools.md items 13–17), over
 // the CONFIG STORE — a server is `Scope.mcpServers[name]` in the org, channel,
 // or user tier, persisted like every other runtime override — plus the secret
 // store for what a config document must never hold (sealed credentials,

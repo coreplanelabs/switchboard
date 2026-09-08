@@ -8,7 +8,7 @@ import {
   type PrDescription,
 } from "./prDescription.js";
 
-// Feature: features/pr-description.md — the PR description is data; the GitHub
+// Feature: docs/reference/specs/pr-description.md — the PR description is data; the GitHub
 // body is one rendering of it. The fixture is a real PR's description — the
 // PR that introduced the Tour, rewritten onto the fixture repo `acme/api` — and
 // the golden file is its rendered body, so the pipeline is exercised end to end

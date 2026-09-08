@@ -1,4 +1,4 @@
-// Feature: features/tracing.md item 26 — the in-process span log an operator's bearer reads.
+// Feature: docs/reference/specs/tracing.md item 26 — the in-process span log an operator's bearer reads.
 import { describe, expect, it } from "vitest";
 import { createTickingClock } from "../testing/tickingClock.js";
 import { createSpanLog, SPAN_LOG_PAGE_DEFAULT, SPAN_LOG_PAGE_MAX } from "./spanLog.js";

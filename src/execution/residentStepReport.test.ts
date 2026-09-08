@@ -7,7 +7,7 @@ import {
   STEP_REPORT_PER_STREAM,
 } from "./residentStepReport.js";
 
-// Feature: features/resident-repos.md item 53 — a failed resident step names
+// Feature: docs/reference/specs/resident-repos.md item 53 — a failed resident step names
 // the failure. The fixtures below are REAL captures, not invented strings:
 // `PNPM_WARN` is the byte-for-byte stderr of `pnpm install --frozen-lockfile`
 // under the resident image's pnpm (11.x) on a pnpm workspace, and

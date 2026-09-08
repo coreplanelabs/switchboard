@@ -7,8 +7,8 @@ import {
   validateDashboardConfig,
 } from "./dashboardAuthConfig.js";
 
-// Feature: features/access-gate.md (dashboard auth is a strategy) and
-// features/routing-and-config.md (the `dashboard` block) — the pure half: the
+// Feature: docs/reference/specs/access-gate.md (dashboard auth is a strategy) and
+// docs/reference/specs/routing-and-config.md (the `dashboard` block) — the pure half: the
 // default-selection rule and the block's validation at load.
 
 describe("resolveDashboardAuthMode — the default-selection rule", () => {

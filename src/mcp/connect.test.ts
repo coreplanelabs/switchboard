@@ -21,7 +21,7 @@ const base = { nonce: "n".repeat(24), serverId: "user:slack:UA/vanta", requester
 const ada = { sub: "cf-1", email: "ada@example.com" };
 const other = { sub: "cf-2", email: "someone@else.example" };
 
-describe("connect tickets (features/mcp-tools.md item 15)", () => {
+describe("connect tickets (docs/reference/specs/mcp-tools.md item 15)", () => {
   it("a ticket lives 10 minutes, starts pending, lowercases the requester email", () => {
     const t = newTicket({ ...base, requesterEmail: "Ada@Example.com" });
     expect(t).toMatchObject({
@@ -94,7 +94,7 @@ describe("connect tickets (features/mcp-tools.md item 15)", () => {
   });
 });
 
-describe("OAuth transitions (features/mcp-tools.md item 18)", () => {
+describe("OAuth transitions (docs/reference/specs/mcp-tools.md item 18)", () => {
   const sealed = { keyId: "k1", sealed: "c2VhbGVk" };
 
   it("the shared validators accept the new kind, state and record — and refuse a malformed record", () => {

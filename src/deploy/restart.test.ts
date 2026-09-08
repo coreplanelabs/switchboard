@@ -22,7 +22,7 @@ import {
   restartResponse,
 } from "./restart.js";
 
-// features/slack-channel.md item 8 — `deploy restart`: a rotated bot secret goes
+// docs/reference/specs/slack-channel.md item 8 — `deploy restart`: a rotated bot secret goes
 // live by restarting the container WITHOUT an image build. `wrangler secret put`
 // updates the Worker's env but a running container keeps the env it started
 // with, so the Worker's `POST /admin/restart` asks the Container DO to `stop()`

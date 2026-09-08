@@ -1,7 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-// Feature: features/run-history.md item 32 — one RunTranscriptDO per live run:
+// Feature: docs/reference/specs/run-history.md item 32 — one RunTranscriptDO per live run:
 // the owner fence, part rows and attachments written and read back verbatim,
 // clear. Runs in workerd against the real SQLite object; a unique run id per test.
 

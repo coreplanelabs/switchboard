@@ -18,7 +18,7 @@ import {
   type ScheduleWorker,
 } from "./schedules.js";
 
-// Feature: features/self-improvement.md item 7c + features/live-view.md item 13:
+// Feature: docs/reference/specs/self-improvement.md item 7c + docs/reference/specs/live-view.md item 13:
 // the schedule registry is the single source of truth for every cron
 // the Worker shim runs — wrangler.jsonc `triggers.crons` and the shim both
 // derive from it — and the pure helpers the shim uses to turn a firing into a
@@ -397,7 +397,7 @@ describe("interpretIngressResponse (the firing record)", () => {
 describe("isScheduleFiring", () => {
   it("accepts the record shape and rejects anything else", () => {
     expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed" })).toBe(true);
-    // The shim's trace id (features/tracing.md item 21): optional, a string when present.
+    // The shim's trace id (docs/reference/specs/tracing.md item 21): optional, a string when present.
     expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed", traceId: "a".repeat(32) })).toBe(true);
     expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed", traceId: 7 })).toBe(false);
     expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed", runId: "r", detail: "d" })).toBe(true);

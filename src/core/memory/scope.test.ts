@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deriveScopeKey, listScopeKeys, requestScopeKeys } from "./scope.js";
 
-// Feature: features/memory.md — the pure scope deriver. Org-scoped +
+// Feature: docs/reference/specs/memory.md — the pure scope deriver. Org-scoped +
 // user-scoped, namespaced per AGENTS.md invariant 4. The org is the
 // config's `organization`, an input like the others — the code names none.
 

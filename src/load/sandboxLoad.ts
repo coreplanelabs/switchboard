@@ -1,7 +1,7 @@
 // `load:sandbox`: N per-thread sandboxes through the bot's own cold-path
 // client, each running a trivial command then the CPU burn on a loop. In
 // Phase 0 this proves the current cold path end to end and measures what the
-// fleet does past `max_instances` (`fleet-busy` waits, features/execution.md
+// fleet does past `max_instances` (`fleet-busy` waits, docs/reference/specs/execution.md
 // item 14); Phase 3 adds `--seed` for the snapshot-seeded restore. Sandboxes
 // are not released explicitly — the Worker sleeps them after their idle window.
 

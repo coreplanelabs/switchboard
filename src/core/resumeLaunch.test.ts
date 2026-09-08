@@ -7,7 +7,7 @@ import { inputTextOf, knownToolsFor, launchResumes, repoContextOf, resumeMessage
 import type { LiveRunRow, StepRecord } from "./runLedger/types.js";
 import type { ChannelIO, IncomingMessage } from "./types.js";
 
-// The resume launcher (features/run-history.md item 38): plans each reclaimed
+// The resume launcher (docs/reference/specs/run-history.md item 38): plans each reclaimed
 // run and dispatches it with a ResumeContext, or closes it with the reason.
 
 const text = (t: string) => ({ type: "text" as const, text: t });

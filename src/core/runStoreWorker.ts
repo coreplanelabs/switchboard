@@ -170,7 +170,7 @@ export class WorkerRunStore implements RunStore {
     let res: Response;
     try {
       // One `http.client` span under `span` when the caller has one (the
-      // history writer's; features/tracing.md item 24), the route being the
+      // history writer's; docs/reference/specs/tracing.md item 24), the route being the
       // path literal; the plain fetch otherwise.
       res = await tracedFetch(
         span,

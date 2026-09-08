@@ -6,7 +6,7 @@ import { getCatchUpStatus, resetCatchUpStatus, REQUIRED_BOT_SCOPES } from "./sla
 import { getSocketStatus, resetSocketStatus } from "./slackSocketStatus.js";
 import { dispatch, type CoreDeps } from "../core/dispatcher.js";
 
-// Feature: features/slack-channel.md item 7 — reconnect catch-up wiring.
+// Feature: docs/reference/specs/slack-channel.md item 7 — reconnect catch-up wiring.
 // Bolt-level harness: `createSlackApp` builds a real App on a real
 // `SocketModeReceiver`, and the receiver's socket client is a plain
 // EventEmitter that only dials out on `start()` — so emitting `connected` on

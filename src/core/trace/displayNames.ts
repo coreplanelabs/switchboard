@@ -1,7 +1,7 @@
 import { STREAMED_SPANS, type StreamedSpanName } from "./streamSpans.js";
 import { residentStepLabel } from "../../execution/residentSteps.js";
 
-// What a reader sees for a span (features/tracing.md): one table over the
+// What a reader sees for a span (docs/reference/specs/tracing.md): one table over the
 // enumerated streamed names — total by type, unique by test — plus one rule per
 // prefix family. No user surface prints a raw span name; the card's setup label
 // and the timeline's rows and ranked list all come through here.

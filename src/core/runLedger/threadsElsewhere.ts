@@ -1,5 +1,5 @@
 // The threads whose live run is on the ledger but not in this process
-// (features/thread-admission.md item 5): a row another generation still holds
+// (docs/reference/specs/thread-admission.md item 5): a row another generation still holds
 // (a rollout overlap, or a dead generation whose lease has not expired), or a
 // row this generation reclaimed and has not yet launched. In-process admission
 // knows nothing of them, so a follow-up on such a thread would start a rival

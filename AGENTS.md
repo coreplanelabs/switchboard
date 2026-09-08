@@ -2,11 +2,11 @@
 
 Switchboard is an agent gateway: a message arrives over a channel (Slack, the CLI, HTTP, MCP), a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor it never touches directly. Slack is one channel, not the architecture.
 
-Every agent working here reads this file, as does a person asking how we work: how a change is made, the invariants, where things are, the commands that are the repo's whole interface, and the rules. Detail is a link away: [README.md](README.md) (engineering), [docs/](docs/README.md) (the human-facing tree, published at <https://docs.switchboard.coreplanelabs.dev>), [features/](features/README.md) (the behavioral contract).
+Every agent working here reads this file, as does a person asking how we work: how a change is made, the invariants, where things are, the commands that are the repo's whole interface, and the rules. Detail is a link away: [README.md](README.md) (engineering), [docs/](docs/README.md) (the human-facing tree, published at <https://docs.switchboard.coreplanelabs.dev>), [docs/reference/specs/](docs/reference/specs/README.md) (the behavioral contract).
 
 ## How a change is made
 
-1. **The spec says what should be true.** Every behavior has a row in a spec under `features/`: the criterion and its proof — a `file::describe::it` test, a procedure an agent runs live, or a `[gap]` linking the issue that closes it. A change starts with that row, in the same PR as the code. A spec describing code that no longer exists is a bug.
+1. **The spec says what should be true.** Every behavior has a row in a spec under `docs/reference/specs/`: the criterion and its proof — a `file::describe::it` test, a procedure an agent runs live, or a `[gap]` linking the issue that closes it. A change starts with that row, in the same PR as the code. A spec describing code that no longer exists is a bug.
 2. **A failing test, then the code.** Unit tests are the default proof. `npx vitest run --changed origin/main` is the loop; `npm test` before pushing.
 3. **`npm run fix`, then `npm run verify`.** `fix` regenerates every generated artifact and repairs lint and formatting. `verify` is the whole gate and exactly what CI runs — nothing lives only in CI; a unit test over the workflow files keeps it so.
 4. **A PR written for the reader.** Conventional title (`feat(scope): …`; a required check refuses anything else). Body: two sentences a stranger can act on, then a Tour of the change in reading order with permalinks at the pushed head, the non-obvious decisions, and the validation with receipts. Docs describing changed behavior change in the same PR.
@@ -25,19 +25,21 @@ Every agent working here reads this file, as does a person asking how we work: h
 
 ## Where things are
 
-| Area | Path | Contract |
+| Area | Path | Spec |
 |---|---|---|
-| Orchestration: directives, resolution, gates, history, the run | `src/core/dispatcher.ts` | `features/routing-and-config.md`, `run-loop.md` |
-| Commands once, every surface (chat, CLI, HTTP, MCP) | `src/core/commandRegistry.ts`, `commands/`, `commandSurface.ts` | `features/command-registry.md` |
-| Authorization: actors, grants, the policy table, predicates | `src/core/authz/` | `features/authorization.md` |
-| Runs: live registry, history, tracing, the run page | `src/core/runRegistry.ts`, `runStore.ts`, `runsService.ts`, `trace/`, `src/channels/liveView.ts` | `features/run-history.md`, `live-view.md`, `tracing.md` |
-| Channels: Slack (transport only), HTTP, MCP ingress | `src/channels/` | `features/slack-channel.md`, `http-ingress.md`, `mcp-ingress.md` |
-| Agents (data), providers, executors | `src/agents/`, `src/providers/`, `src/execution/` | `features/agent-*.md`, `execution.md`, `resident-repos.md` |
-| Memory, skills, MCP tools, GitHub tools | `src/core/memory/`, `src/skills/`, `src/mcp/`, `src/tools/` | `features/memory.md`, `skills.md`, `mcp-tools.md`, `github-tools.md` |
-| The dashboard (Vue) served from the bot's seed | `web/` | `features/live-view.md` |
-| The runtime Workers and the docs Worker | `deploy/cloudflare*/` | `features/release-and-deploy.md`, `docs-site.md` |
-| Deploy selection, order, and live gate | `src/deploy/` | `features/release-and-deploy.md` |
-| Human docs and their generated tables | `docs/`, `src/docs/` | `features/docs-site.md` |
+| Orchestration: directives, resolution, gates, history, the run | `src/core/dispatcher.ts` | `routing-and-config.md`, `run-loop.md` |
+| Commands once, every surface (chat, CLI, HTTP, MCP) | `src/core/commandRegistry.ts`, `commands/`, `commandSurface.ts` | `command-registry.md` |
+| Authorization: actors, grants, the policy table, predicates | `src/core/authz/` | `authorization.md` |
+| Runs: live registry, history, tracing, the run page | `src/core/runRegistry.ts`, `runStore.ts`, `runsService.ts`, `trace/`, `src/channels/liveView.ts` | `run-history.md`, `live-view.md`, `tracing.md` |
+| Channels: Slack (transport only), HTTP, MCP ingress | `src/channels/` | `slack-channel.md`, `http-ingress.md`, `mcp-ingress.md` |
+| Agents (data), providers, executors | `src/agents/`, `src/providers/`, `src/execution/` | `agent-*.md`, `execution.md`, `resident-repos.md` |
+| Memory, skills, MCP tools, GitHub tools | `src/core/memory/`, `src/skills/`, `src/mcp/`, `src/tools/` | `memory.md`, `skills.md`, `mcp-tools.md`, `github-tools.md` |
+| The dashboard (Vue) served from the bot's seed | `web/` | `live-view.md` |
+| The runtime Workers and the docs Worker | `deploy/cloudflare*/` | `release-and-deploy.md`, `docs-site.md` |
+| Deploy selection, order, and live gate | `src/deploy/` | `release-and-deploy.md` |
+| Human docs and their generated tables | `docs/`, `src/docs/` | `docs-site.md` |
+
+Specs live in `docs/reference/specs/`.
 
 Module by module: [Code map](docs/reference/code-map.md).
 
@@ -82,7 +84,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run licenses:check` | Every production dependency's license is on the allowlist. | After adding a dependency. |
 | `npm run docs:gen` | Writes the generated regions of the reference docs from the command registry. | After changing a command, flag, route, or config key; part of `fix`. |
 | `npm run docs:check` | The generated doc regions equal what the code would generate. | Part of `check:consistency`. |
-| `npm run specs:check` | Every `file::describe::it` proof in `features/*.md` names a real test; header paths exist; every `[gap]` links an issue. | After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit. |
+| `npm run specs:check` | Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist; every `[gap]` links an issue. | After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit. |
 | `npm run decisions:check` | Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`. | Part of `check:consistency`; when a record fails it, write a new record and supersede the old one instead of editing it. |
 | `npm run hygiene:check` | The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks. | Part of `check:consistency`. New hit: rewrite the line or allow it by name in `scripts/public-hygiene.allow`; `-- --list <prefix>` shows the rest. |
 | `npm run hygiene:gen` | Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`. | Part of `fix`, safe to run blindly: new imprint fails it like `hygiene:check`. |
@@ -91,7 +93,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs. |
 | `npm run docs:build` | Builds the docs site to `docs/.vitepress/dist`. | Rarely by hand; `verify -w docs` and the docs Worker's deploy run it. |
 | `npm run web:preview` | Serves the dashboard bundle over fixtures for a visual check. | After a `web/` change. |
-| `npm run load` | Load harness: `-- history\|resident\|sandbox\|e2e\|cards\|provider`. | Capacity receipts (features/load-harness.md). |
+| `npm run load` | Load harness: `-- history\|resident\|sandbox\|e2e\|cards\|provider`. | Capacity receipts (docs/reference/specs/load-harness.md). |
 
 <!-- /generated:commands -->
 

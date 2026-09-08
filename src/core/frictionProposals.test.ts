@@ -14,7 +14,7 @@ import {
   type FrictionRunRecord,
 } from "./frictionProposals.js";
 
-// Feature: features/self-improvement.md — the PURE half of the friction
+// Feature: docs/reference/specs/self-improvement.md — the PURE half of the friction
 // proposer: cluster the per-run diagnoses the
 // analyzer already produces into recurring cross-run patterns, rank
 // them, render each as an issue proposal with its evidence and a concrete

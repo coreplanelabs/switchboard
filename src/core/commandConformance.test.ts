@@ -62,7 +62,7 @@ import {
   type Named,
 } from "./testing/commandConformance.js";
 
-// Feature: features/command-registry.md item 25 — the REGISTRY-DRIVEN
+// Feature: docs/reference/specs/command-registry.md item 25 — the REGISTRY-DRIVEN
 // CONFORMANCE SUITE. Nothing below names a command: the catalogue is enumerated
 // (`registerCoreCommands`, asserted identical to `buildCoreCommands`), every
 // case is generated from each command's declared zod schemas
@@ -194,8 +194,8 @@ describe("command conformance — catalogue fences", () => {
     expect(catalogueSnapshot(CATALOGUE)).toMatchSnapshot();
   });
 
-  it("features/command-registry.md `## Catalogue` table lists exactly the registered commands", () => {
-    const md = readFileSync(join(here, "..", "..", "features", "command-registry.md"), "utf8");
+  it("docs/reference/specs/command-registry.md `## Catalogue` table lists exactly the registered commands", () => {
+    const md = readFileSync(join(here, "..", "..", "docs", "reference", "specs", "command-registry.md"), "utf8");
     expect(parseCatalogueTable(md)).toEqual(CATALOGUE.map((c) => c.id).sort());
   });
 
@@ -209,7 +209,7 @@ describe("command conformance — catalogue fences", () => {
       expect(ids.has(id), `COMMAND_FIXTURES["${id}"] names no registered command`).toBe(true);
   });
 
-  it("authorization: every command's action has a policy row on the resource it authorizes (features/authorization.md item 4)", () => {
+  it("authorization: every command's action has a policy row on the resource it authorizes (docs/reference/specs/authorization.md item 4)", () => {
     expect(policyGaps(CATALOGUE)).toEqual([]);
   });
 
@@ -310,7 +310,7 @@ describe("command conformance — catalogue fences", () => {
         matrix.commands.find((c) => c.id === cmd.id)?.rows.map((r) => r.variant),
         cmd.id,
       ).toEqual(vs.map((v) => v.name));
-      // The capability column is the registry's own answer (features/capabilities.md item 3).
+      // The capability column is the registry's own answer (docs/reference/specs/capabilities.md item 3).
       expect(matrix.commands.find((c) => c.id === cmd.id)?.needs, `${cmd.id} needs`).toEqual(dependsOn(cmd));
     }
     expect(matrix.summary).toEqual({ commands: CATALOGUE.length, surfaces: SURFACES.length, variants, cells });

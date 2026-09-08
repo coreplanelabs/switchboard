@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RunEvent } from "./runEvents.js";
 import { QUIET_SUFFIX_AFTER_MS, inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 
-// Feature: features/run-visibility.md item 2 — the live card's title suffix
+// Feature: docs/reference/specs/run-visibility.md item 2 — the live card's title suffix
 // tells model time from tool time. A `pnpm typecheck` in flight for an hour
 // must never render as `thinking (3601s since last tool)`: when the last event
 // WAS a tool call, the run is waiting on the sandbox, not on the model.

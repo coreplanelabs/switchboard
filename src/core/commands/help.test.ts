@@ -4,7 +4,7 @@ import { CommandRegistry, bindCommands, renderText, type Caller } from "../comma
 import { callerWith } from "../testing/callers.js";
 import { helpShow, registerHelpCommands, type HelpCommandDeps } from "./help.js";
 
-// Feature: features/command-registry.md (phase 4b): `help show` — the
+// Feature: docs/reference/specs/command-registry.md (phase 4b): `help show` — the
 // help text derived from the agent registry and the command catalogue, never
 // hand-written; the bare word `help` in chat is this command.
 

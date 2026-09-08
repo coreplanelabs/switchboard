@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderDecisionIndex, type DecisionRecord } from "./decisions.js";
 
-// features/docs-site.md item 17 — the Design decisions index is rendered from
+// docs/reference/specs/docs-site.md item 17 — the Design decisions index is rendered from
 // the records' frontmatter, never typed.
 
 const record = (file: string, front: Record<string, string>): DecisionRecord => ({

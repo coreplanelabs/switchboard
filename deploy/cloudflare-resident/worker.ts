@@ -227,7 +227,7 @@ const BUILD = injectedBuildStamp();
  *  the commit alone cannot tell two builds of one dirty tree apart. */
 const BUILD_ID = buildId(BUILD);
 
-// The Worker's own spans (features/tracing.md item 22): the streamed routes
+// The Worker's own spans (docs/reference/specs/tracing.md item 22): the streamed routes
 // (/attach, /exec, /op) are rooted inside the DO where the work is, their
 // collector's steps as `resident.<step>` children; every other authenticated
 // route is a `resident.fetch` root at the edge. Each joins the bot's trace when
@@ -261,7 +261,7 @@ interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
   REGISTRY: DurableObjectNamespace<ResidentRegistryDO>;
   BACKUP_BUCKET: R2Bucket;
-  // Presigned snapshot transfers (features/resident-repos.md item 61): with all
+  // Presigned snapshot transfers (docs/reference/specs/resident-repos.md item 61): with all
   // four present the container moves archive bytes itself over presigned R2
   // URLs and the DO stays out of the data path; any one absent → the SDK's
   // local-bucket mode (the DO pumps the bytes — a 1.16 GB restore exceeds the
@@ -301,7 +301,7 @@ interface Env {
  *  over-cap onboard is always refused by the registry, never by a platform
  *  scheduling failure. Bump the two together. */
 // 6 = the number of repos one team works on concurrently. Past the cap,
-// `evictColdest:true` makes room (features/resident-repos.md item 46).
+// `evictColdest:true` makes room (docs/reference/specs/resident-repos.md item 46).
 const RESIDENT_CAP = 6;
 
 /** Container sleep window, passed to every getSandbox() for ResidentDO.
@@ -480,14 +480,14 @@ const NON_EVIDENCE_REASON = /^(?:alarm-missed|stale-mid-flight|refresh-interrupt
 /** Consecutive cycles that ended `refresh-interrupted`: feeds the
  *  short-re-arm cap in `nextRefreshDelayS`; cleared by any other outcome. */
 const INTERRUPTED_STREAK_KEY = "resident:interruptedStreak";
-/** When the disk-full recovery last stopped the container (features/resident-repos.md item 54):
+/** When the disk-full recovery last stopped the container (docs/reference/specs/resident-repos.md item 54):
  *  feeds `planDiskFullRecovery`'s cooldown so a working set that refills the
  *  disk is named, not recycled in a loop. */
 const DISK_FULL_RECYCLE_KEY = "resident:diskFullRecycleAt";
 /** A disk-full attach pulls the refresh cycle this close (seconds) so the
  *  recovery decision runs now, not at the next 600 s alarm. */
 const DISK_FULL_REARM_S = 1;
-/** The last disk measurement (features/resident-repos.md item 55; `residentDiskBudget.ts`): one
+/** The last disk measurement (docs/reference/specs/resident-repos.md item 55; `residentDiskBudget.ts`): one
  *  `df` + one `du` over the parts, taken at the end of every refresh cycle and
  *  (deferred by DISK_MEASURE_DELAY_S, off the hot path) after every attach,
  *  detach and sweep eviction. Surfaced as the live view's `disk`; the attach
@@ -933,7 +933,7 @@ interface ThreadBinding {
 interface ThreadErr {
   error: string;
   status: number;
-  /** The steps the request ran before it failed (features/tracing.md item 19):
+  /** The steps the request ran before it failed (docs/reference/specs/tracing.md item 19):
    *  a failed attach's trace is the one that says which step blew the budget. */
   trace?: ResidentStep[];
   needs?: string;
@@ -962,7 +962,7 @@ interface AttachOk {
   readonly: boolean;
   mutexWaitMs: number;
   attachMs: number;
-  /** Every command this attach ran, as offsets from its start (features/
+  /** Every command this attach ran, as offsets from its start (docs/reference/specs/
    *  tracing.md item 19): the bot grafts them under its attach span. */
   trace: ResidentStep[];
 }
@@ -984,7 +984,7 @@ interface OpRunOk {
   deps: ThreadDepsMechanism;
   reconciled: boolean;
   durationMs: number;
-  /** Every command this op ran, as offsets from its start (features/tracing.md item 19). */
+  /** Every command this op ran, as offsets from its start (docs/reference/specs/tracing.md item 19). */
   trace: ResidentStep[];
 }
 
@@ -1017,7 +1017,7 @@ interface SnapshotRecord {
   checkout: DirectoryBackup;
 }
 
-/** One immutable archive per deps-store entry (features/resident-repos.md item 61), keyed by
+/** One immutable archive per deps-store entry (docs/reference/specs/resident-repos.md item 61), keyed by
  *  lockfile key under DEPS_BACKUP_KEY_PREFIX. Taken once, right after the
  *  entry is committed; the handle's `dir` is the entry's node_modules, and a
  *  restore overrides `dir` to a scratch tree so the commit script — not the
@@ -1236,7 +1236,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  survives, so hydration state is always probed from disk. */
   private hydration: Promise<void> | null = null;
 
-  /** The step trace of the request in flight (features/tracing.md item 19):
+  /** The step trace of the request in flight (docs/reference/specs/tracing.md item 19):
    *  `attachThread` and `runOp` each run inside their own collector, so the
    *  commands `runOk` runs and the mirror-lock waits land on the answer that
    *  caused them — never on a concurrent request's. Empty outside a traced
@@ -1297,7 +1297,7 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Restore a backup INTO `targetDir` as a plain directory on the resident's
-   *  disk (features/resident-repos.md item 61). In presigned mode the SDK's restore MOUNTS the
+   *  disk (docs/reference/specs/resident-repos.md item 61). In presigned mode the SDK's restore MOUNTS the
    *  archive (squashfuse + fuse-overlayfs) at the handle's `dir` instead of
    *  extracting it, which breaks every step that treats the mirror, checkout
    *  or a store entry as a directory on one ext4 filesystem (
@@ -1731,7 +1731,7 @@ export class ResidentDO extends Sandbox<Env> {
     lockfileHash: string,
   ): Promise<SnapshotRecord> {
     try {
-      // Presigned transfers when the env allows (features/resident-repos.md item 61) — the
+      // Presigned transfers when the env allows (docs/reference/specs/resident-repos.md item 61) — the
       // container moves the bytes, the DO only signs — else the SDK's
       // local-bucket mode (the DO in the data path). The handle records the
       // mode, so the restore of THIS snapshot travels the same way.
@@ -2197,7 +2197,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  last snapshot still serving. */
   async onRefreshAlarm(payload: string): Promise<void> {
     // The freshness cycle nobody asked for is a root of its own
-    // (features/tracing.md item 25): `resident.refresh`, with every command it
+    // (docs/reference/specs/tracing.md item 25): `resident.refresh`, with every command it
     // ran as a `resident.<step>` child, exactly like an attach's.
     const t0 = systemClock();
     const trace = createStepTrace(t0);
@@ -2254,7 +2254,7 @@ export class ResidentDO extends Sandbox<Env> {
       // every other state decision in this file.
       const entry = await this.getStatus();
       if (entry.state === "degraded" && isDiskFullReason(entry.reason)) {
-        // The cycle owns the disk-full verdict (features/resident-repos.md item 54): re-probe before
+        // The cycle owns the disk-full verdict (docs/reference/specs/resident-repos.md item 54): re-probe before
         // fetching. Still full → nothing a fetch can do; decide whether the
         // container may be recycled and stop here (a fetch that happened to fit
         // would flip the resident `warm`, the bot would attach, git-setup would
@@ -2596,7 +2596,7 @@ export class ResidentDO extends Sandbox<Env> {
     return checks.every((c) => c.clean); // any dirty or unknown → not clean
   }
 
-  // -- disk-full (features/resident-repos.md item 54) ---------------------------
+  // -- disk-full (docs/reference/specs/resident-repos.md item 54) ---------------------------
 
   /** Free space on the workspace mount in KiB; `null` when df cannot answer.
    *  One fork, run only after a step has already failed — never on the hot path. */
@@ -2649,7 +2649,7 @@ export class ResidentDO extends Sandbox<Env> {
     this.rearmOutcome = "disk-full-restart";
   }
 
-  // -- disk budget (features/resident-repos.md item 55) -------------------------
+  // -- disk budget (docs/reference/specs/resident-repos.md item 55) -------------------------
 
   /** The `df` half: total/used/free of the workspace mount; null when df
    *  cannot answer (never 0 — unknown must not read as full or as empty). */
@@ -3215,7 +3215,7 @@ export class ResidentDO extends Sandbox<Env> {
     record?: ResidentRecord,
     traceparent?: string,
   ): Promise<AttachOk | ThreadErr> {
-    // One step trace per attach (features/tracing.md item 19): every command
+    // One step trace per attach (docs/reference/specs/tracing.md item 19): every command
     // the attach runs lands on it, and the answer carries it.
     const t0 = systemClock();
     const trace = createStepTrace(t0);
@@ -3262,7 +3262,7 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** A failed attach step after its rollback: the 500 the caller falls back
-   *  on, named by step. A step that died of a full disk (features/resident-repos.md item 54) also
+   *  on, named by step. A step that died of a full disk (docs/reference/specs/resident-repos.md item 54) also
    *  flips the resident `degraded(disk-full: …)` — not serviceable, so the
    *  next dispatch goes cold without attaching (the card names the disk, not
    *  `/etc/gitconfig.lock`) — and pulls the refresh cycle to now, where the
@@ -3773,7 +3773,7 @@ export class ResidentDO extends Sandbox<Env> {
     return this.ctx.storage.get<DepsBackupRecord>(depsBackupStorageKey(key));
   }
 
-  /** Archive a freshly committed entry to R2, once (features/resident-repos.md
+  /** Archive a freshly committed entry to R2, once (docs/reference/specs/resident-repos.md
    *  item 61). Runs after the commit, off the caller's critical path — the
    *  entry is already serving — and only in presigned mode: local-bucket mode
    *  would put the Durable Object in the data path of a deps-sized upload, the
@@ -4257,7 +4257,7 @@ export class ResidentDO extends Sandbox<Env> {
       startedAt = systemClock();
       return this.execThreadImpl(threadKey, command, timeoutMs);
     });
-    // The command as the resident's own `resident.exec` root (features/tracing.md
+    // The command as the resident's own `resident.exec` root (docs/reference/specs/tracing.md
     // item 22): started when the command did, the wait for the thread's turn an attr.
     emitStepRoot("resident.exec", startedAt, [], traceparent, "error" in res ? refusalOutcome(res) : "ok", {
       waitedMs: startedAt - queuedAt,
@@ -4687,7 +4687,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  lockfile-keyed cache, scoped token-free install only when the committed
    *  key differs. No snapshot is ever written here. */
   async runOp(op: "test" | "build", refArg: string | null, traceparent?: string): Promise<OpRunOk | ThreadErr> {
-    // One step trace per op (features/tracing.md item 19), like an attach.
+    // One step trace per op (docs/reference/specs/tracing.md item 19), like an attach.
     const t0 = systemClock();
     const trace = createStepTrace(t0);
     const res = await this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0));
@@ -5640,7 +5640,7 @@ export default {
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
     // `build` names the commit this bundle was deployed from, so a deploy's
     // propagation is provable from the outside without auth.
-    // `backupTransfer` (features/resident-repos.md item 61): "presigned" when the container moves
+    // `backupTransfer` (docs/reference/specs/resident-repos.md item 61): "presigned" when the container moves
     // snapshot bytes itself, "local" when the DO does — the one GET that proves
     // the R2 credentials landed (their names, never their values, on a miss).
     if (url.pathname === "/healthz" && request.method === "GET") {
@@ -5667,7 +5667,7 @@ export default {
     const body: Record<string, unknown> =
       route.method === "POST" ? ((await request.json().catch(() => ({}))) as Record<string, unknown>) : {};
 
-    // Authenticated from here (features/tracing.md item 22): the bot's trace
+    // Authenticated from here (docs/reference/specs/tracing.md item 22): the bot's trace
     // context is read only now. The streamed routes hand it to the DO, whose
     // own root covers the work; every other route is one `resident.fetch` root.
     const traceparent = request.headers.get("traceparent") ?? undefined;
@@ -5746,7 +5746,7 @@ export default {
       return;
     }
     const firedAt = controller.scheduledTime || systemClock();
-    // One `resident.watchdog` root per firing (features/tracing.md item 25),
+    // One `resident.watchdog` root per firing (docs/reference/specs/tracing.md item 25),
     // each resident's check a `resident.check` child; the firing the state
     // Worker records carries the root's trace id, like the shim's cron roots.
     const root = startAdoptedRoot(tracer, "resident.watchdog", { sinks: traceSinks });

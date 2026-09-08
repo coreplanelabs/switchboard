@@ -36,7 +36,7 @@ describe("bot deploy preflight — wranglerFailureText()", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 8 — the bot deploy preflight. Seen
+// Feature: docs/reference/specs/slack-channel.md item 8 — the bot deploy preflight. Seen
 // live: two `wrangler deploy`s 90 s apart landed on a review run; the second
 // rollout replaced the instance the first had already put into its graceful
 // drain, killing the run at 153 s and freezing its status card forever. A

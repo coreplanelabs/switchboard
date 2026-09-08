@@ -42,7 +42,7 @@ export interface Capabilities {
   /** The HTTP and MCP ingress surfaces: `SWITCHBOARD_INGRESS_TOKENS` names at least one bearer. */
   ingress: boolean;
   /**
-   * The dashboard auth strategy that gates the dashboards (features/access-gate.md):
+   * The dashboard auth strategy that gates the dashboards (docs/reference/specs/access-gate.md):
    * `config.dashboard.auth` when set; else `access` when a Cloudflare Access app
    * is configured (`ACCESS_TEAM_DOMAIN` + `ACCESS_AUD`, the JWT re-verified
    * in-process), else `none` (no credential — loopback callers on a localhost

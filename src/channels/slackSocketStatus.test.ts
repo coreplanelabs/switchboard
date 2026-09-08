@@ -6,7 +6,7 @@ import {
   resetSocketStatus,
 } from "./slackSocketStatus.js";
 
-// Feature: features/slack-channel.md item 8 — /healthz reports the Socket Mode
+// Feature: docs/reference/specs/slack-channel.md item 8 — /healthz reports the Socket Mode
 // state, so "HTTP up, Slack not connected yet" (the cold-start window) and
 // "socket silently dead" are both visible without container stdout.
 

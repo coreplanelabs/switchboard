@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { postReviewComment } from "./githubComments.js";
 
-// Feature: features/agent-review.md — the bot-process post is a COMMENT-event
+// Feature: docs/reference/specs/agent-review.md — the bot-process post is a COMMENT-event
 // pull-request review (what the auto-approve workflow listens to), pinned to
 // the reviewed commit, and never an APPROVE/REQUEST_CHANGES event.
 describe("postReviewComment", () => {

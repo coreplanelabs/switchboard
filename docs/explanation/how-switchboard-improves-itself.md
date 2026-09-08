@@ -1,6 +1,6 @@
 # How Switchboard improves itself
 
-A human-first tour of the self-improvement loop: what it watches, what it remembers, what it files, and where every piece runs. The behavioral contract with tests and validation criteria is [`features/self-improvement.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/self-improvement.md); the per-run diagnosis it builds on is [`features/run-friction.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/run-friction.md). This page is the map, those are the law.
+A human-first tour of the self-improvement loop: what it watches, what it remembers, what it files, and where every piece runs. The behavioral contract with tests and validation criteria is [`docs/reference/specs/self-improvement.md`](../reference/specs/self-improvement.md); the per-run diagnosis it builds on is [`docs/reference/specs/run-friction.md`](../reference/specs/run-friction.md). This page is the map, those are the law.
 
 **In one sentence:** after every agent run Switchboard diagnoses where the time went, remembers that diagnosis, and once a week (or on demand) looks for friction that keeps recurring across runs and files each recurring pattern as a labeled GitHub issue with evidence and a suggested fix, for a human to triage.
 
@@ -141,7 +141,7 @@ Notes that matter for reading a filed issue:
 | HTTP / MCP | `POST /api/friction.propose`, tool `friction_propose` | tokens holding `friction:write` |
 | Schedule | `self-improvement` entry of the schedule registry, `0 14 * * 1` | the `cron` ingress identity, whose `grants` entry (`http:cron`) holds `friction:write` and `channels: all` |
 
-Who may CALL a command is the table above; WHAT it analyzes is the [authorization policy](https://github.com/coreplanelabs/switchboard/blob/main/features/authorization.md): the caller's run-read predicate, pushed into the run store. An admin or the cron sees the fleet; a token granted one channel sees that channel; a caller granted no channel sees only its own runs.
+Who may CALL a command is the table above; WHAT it analyzes is the [authorization policy](../reference/specs/authorization.md): the caller's run-read predicate, pushed into the run store. An admin or the cron sees the fleet; a token granted one channel sees that channel; a caller granted no channel sees only its own runs.
 
 All of these are the same registered command with the same JSON output and the same rendered text. The chat flags are derived from the command's schema, not hand-parsed.
 
@@ -154,8 +154,8 @@ All of these are the same registered command with the same JSON output and the s
 
 ## Further reading
 
-- [`features/self-improvement.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/self-improvement.md): the contract, every edge case, and the validation criteria with their tests.
-- [`features/run-friction.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/run-friction.md): the per-run diagnosis, its categories, thresholds, and the `friction analyze` CLI for one saved stream.
-- [`features/run-history.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/run-history.md): where the diagnoses persist and for how long.
-- [`features/command-registry.md`](https://github.com/coreplanelabs/switchboard/blob/main/features/command-registry.md): why one command definition serves Slack, HTTP, MCP, and the CLI.
+- [`docs/reference/specs/self-improvement.md`](../reference/specs/self-improvement.md): the contract, every edge case, and the validation criteria with their tests.
+- [`docs/reference/specs/run-friction.md`](../reference/specs/run-friction.md): the per-run diagnosis, its categories, thresholds, and the `friction analyze` CLI for one saved stream.
+- [`docs/reference/specs/run-history.md`](../reference/specs/run-history.md): where the diagnoses persist and for how long.
+- [`docs/reference/specs/command-registry.md`](../reference/specs/command-registry.md): why one command definition serves Slack, HTTP, MCP, and the CLI.
 - Filed proposals carry the `self-improvement` label in the repository the proposer targets.

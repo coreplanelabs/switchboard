@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { STATIC_CHANNEL_DIRECTORY, StaticChannelDirectory, visibilityOf } from "./channelDirectory.js";
 import type { ChannelDirectory } from "./types.js";
 
-// Feature: features/authorization.md item 7 — the channel-facts seam and
+// Feature: docs/reference/specs/authorization.md item 7 — the channel-facts seam and
 // its static first cut: what a platform-namespaced id alone establishes about
 // a channel's visibility. `unknown` is the fail-closed answer.
 

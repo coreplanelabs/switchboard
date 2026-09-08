@@ -1,4 +1,4 @@
-// Per-call bash timeout policy (features/execution.md item 11): ONE clamp and
+// Per-call bash timeout policy (docs/reference/specs/execution.md item 11): ONE clamp and
 // one set of bounds, shared by the tool layer, every executor, and both deploy
 // Workers (which import from src/execution like shellQuote/residentDetach).
 // Deliberately free of node: imports so wrangler can bundle it into Workers.

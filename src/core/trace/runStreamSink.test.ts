@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — sink scoping: retain, bind, backfill, route;
+// Feature: docs/reference/specs/tracing.md — sink scoping: retain, bind, backfill, route;
 // two roots never cross; one root two runs (the fall-through) both see the
 // setup; a bounded buffer announces what it dropped; nothing after the root end.
 import { describe, expect, it } from "vitest";

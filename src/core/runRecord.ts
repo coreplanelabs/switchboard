@@ -56,7 +56,7 @@ export interface RunRecord {
   /** Epoch ms. */
   startedAt: number;
   finishedAt: number;
-  /** The seven stamps and the one duration (features/tracing.md). `receivedAt`:
+  /** The seven stamps and the one duration (docs/reference/specs/tracing.md). `receivedAt`:
    *  our process saw the message, from the adapter's clock (stamped by the
    *  dispatcher once the adapters carry it; absent until then, so every reader
    *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
@@ -347,7 +347,7 @@ export function isStoredDiagnosis(v: unknown): v is FrictionDiagnosis {
   if (!Array.isArray(d.findings) || !isFiniteNumber(d.eventCount) || typeof d.verdict !== "string") return false;
   if (d.runMs !== undefined && !isFiniteNumber(d.runMs)) return false;
   if (typeof d.byCategory !== "object" || d.byCategory === null) return false;
-  // The shape (features/tracing.md item 5), when the analyzer had a window: seven finite terms.
+  // The shape (docs/reference/specs/tracing.md item 5), when the analyzer had a window: seven finite terms.
   if (d.shape !== undefined) {
     if (typeof d.shape !== "object" || d.shape === null) return false;
     const shape = d.shape as Record<string, unknown>;
@@ -413,7 +413,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility))
     return false;
   if (!isFiniteNumber(r.startedAt) || !isFiniteNumber(r.finishedAt)) return false;
-  // The tracing stamps (features/tracing.md): each optional, typed when present.
+  // The tracing stamps (docs/reference/specs/tracing.md): each optional, typed when present.
   for (const key of ["receivedAt", "sealedAt"] as const) {
     if (r[key] !== undefined && !isFiniteNumber(r[key])) return false;
   }
@@ -546,7 +546,7 @@ export function fitRecordToBudget(record: RunRecord, maxBytes: number = MAX_RECO
   const whole: RunRecord = { ...record, events: cappedAll.map((c) => c.event), storedEventCount: cappedAll.length };
   if (utf8ByteLength(JSON.stringify(whole)) <= maxBytes) return whole;
 
-  // Spans displace no content (features/tracing.md): before any content event
+  // Spans displace no content (docs/reference/specs/tracing.md): before any content event
   // goes, span records are dropped pair by pair from the middle of the stream
   // outward — never from the protected head — until the record fits or none is
   // left. A dropped `tool.*`/`mcp.*` twin is re-synthesized by `normalizeSpans`

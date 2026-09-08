@@ -2,7 +2,7 @@ import { reactive } from "vue";
 import { SHA_RE, type PrReviewData, type ReadingDiff } from "../modules/pr-review/types";
 
 // Switchboard's adapter from run events to the pr-review module's contract
-// (features/reading-diff.md item 6). This is the runs-specific half the module
+// (docs/reference/specs/reading-diff.md item 6). This is the runs-specific half the module
 // deliberately does not know about: `run_meta` carries which PR the review is
 // of, `review_artifact` events carry the reading diffs. Runs stay unique to
 // Switchboard; another host of the module writes its own adapter.

@@ -1,4 +1,4 @@
-// Toolchain pins in the container images (features/execution.md item 10),
+// Toolchain pins in the container images (docs/reference/specs/execution.md item 10),
 // parsed from the Dockerfiles so "pinned" is a test, not a habit.
 //
 // Why this exists: the resident image installed its package managers as

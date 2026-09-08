@@ -1,4 +1,4 @@
-// The bot's write-through onto the run ledger (features/run-history.md item
+// The bot's write-through onto the run ledger (docs/reference/specs/run-history.md item
 // 35): one `LedgerRun` per dispatched run that mirrors what the process holds
 // in closures — the claim with the composed system prompt and tool
 // definitions, the seed, a step record before each step's tools, the event
@@ -161,7 +161,7 @@ export interface LedgerRun {
   close(): Promise<void>;
 }
 
-/** A run this generation reclaimed at boot (features/run-history.md item 37):
+/** A run this generation reclaimed at boot (docs/reference/specs/run-history.md item 37):
  *  its row is already ours — no claim, no seed — and its writes continue from
  *  where the previous generation stopped. */
 export interface AdoptRunRequest {

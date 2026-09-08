@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — the one discriminator for a command run.
+// Feature: docs/reference/specs/tracing.md — the one discriminator for a command run.
 import { describe, expect, it } from "vitest";
 import { COMMAND_RUN_AGENT, runOwnerOf } from "./runOwner.js";
 

@@ -70,7 +70,7 @@ export interface ExecutorContext {
   /** inferred git ref within `repo` */
   ref?: string;
   /** the commit `ref` is expected to be at (a resolved PR head) — the resident
-   *  fetches a mirror whose tip lags it (features/resident-repos.md item 51) */
+   *  fetches a mirror whose tip lags it (docs/reference/specs/resident-repos.md item 51) */
   headSha?: string;
 }
 
@@ -86,11 +86,11 @@ export interface ExecutorSelection {
   executor: Executor;
   note?: string;
   resident?: boolean;
-  /** Where the run's commands execute (features/tracing.md): recorded on its
+  /** Where the run's commands execute (docs/reference/specs/tracing.md): recorded on its
    *  `exec.*` spans. Every production selection names one; a test double may
    *  leave it out. */
   backend?: Backend;
-  /** The resident's step trace for the attach (features/tracing.md item 19):
+  /** The resident's step trace for the attach (docs/reference/specs/tracing.md item 19):
    *  the dispatcher grafts it under its attach span. On the resident path, or
    *  on the sandbox fallback after a resident attach failed (the steps that
    *  led to the failure). */
@@ -105,7 +105,7 @@ export interface ExecutorSelection {
 
 // Resident lifecycle states the bot attaches in — `isServiceable` in
 // residentState.ts (shared with the resident Worker's own state union). The
-// resident's contract (features/resident-repos.md items 7/12) is that
+// resident's contract (docs/reference/specs/resident-repos.md items 7/12) is that
 // `refreshing` keeps SERVING the last snapshot — the mirror lock serializes an
 // attach against a refresh's fetch/rebuild — and that `degraded` does too when
 // the failure happened BEFORE the checkout was touched (fetch/bookkeeping
@@ -177,7 +177,7 @@ export async function makeExecutor(
           probe.state === "warm" ? undefined : oneLine(`${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
         // Read-only agents (the review toolset) get a read-only worktree —
         // decided from the agent's declared toolset, never from the prompt
-        // (features/resident-repos.md item 50).
+        // (docs/reference/specs/resident-repos.md item 50).
         const readonly = ctx.agent.toolset === "readonly" ? true : undefined;
         // The resolved PR head rides along so the resident fetches a mirror
         // whose ref tip lags it (item 51) instead of cloning a stale tip.

@@ -1,4 +1,4 @@
-// Feature: features/tracing.md item 22 — the Workers' side of trace context:
+// Feature: docs/reference/specs/tracing.md item 22 — the Workers' side of trace context:
 // the edge strips, an internal Worker adopts after auth, routes are words from a
 // closed table, refusals leave no line.
 import { describe, expect, it } from "vitest";

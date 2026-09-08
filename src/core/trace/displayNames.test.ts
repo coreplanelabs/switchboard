@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — the display names: total over the streamed set, unique, never a raw name.
+// Feature: docs/reference/specs/tracing.md — the display names: total over the streamed set, unique, never a raw name.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DISPLAY_NAMES, displayNameOf, ENUMERATED_SPAN_NAMES, GENERIC_STEP_NAME } from "./displayNames.js";
@@ -49,7 +49,7 @@ describe("display names", () => {
 // `a Switchboard step` twenty times over one attach until every name here had a
 // label. The scan keeps the table honest: a step added to the Worker without
 // a label fails, and a label for a step the Worker no longer names is noise.
-describe("resident step labels (features/tracing.md item 15)", () => {
+describe("resident step labels (docs/reference/specs/tracing.md item 15)", () => {
   const source = readFileSync(new URL("../../../deploy/cloudflare-resident/worker.ts", import.meta.url), "utf8");
   const named = new Set<string>();
   for (const m of source.matchAll(/(?:runOk|run|gitWithCred|runAs|runStep)\([^)]*"([a-z][a-z0-9_-]{2,30})"/g))

@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — one duration formatter, three styles.
+// Feature: docs/reference/specs/tracing.md — one duration formatter, three styles.
 import { describe, expect, it } from "vitest";
 import { formatDuration } from "./formatDuration.js";
 

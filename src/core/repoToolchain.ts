@@ -1,5 +1,5 @@
 // The onboard-time command table, derived from what the repo root actually
-// holds (features/resident-repos.md item 52). Before this, an onboard that named
+// holds (docs/reference/specs/resident-repos.md item 52). Before this, an onboard that named
 // no commands got `npm install` / `npm run build --if-present` / `npm test`
 // unconditionally — and residents went `down` at their first
 // install: a pnpm workspace (`npm install` → EOVERRIDE) and a Terraform repo

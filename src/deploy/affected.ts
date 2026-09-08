@@ -1,7 +1,7 @@
 import { WORKER_SPECS, type WorkerName, type WorkerSpec } from "./plan.js";
 
 // Which Workers a tree needs deployed — DERIVED, never declared
-// (features/release-and-deploy.md items 4–7). A PR body saying "bot deploy
+// (docs/reference/specs/release-and-deploy.md items 4–7). A PR body saying "bot deploy
 // only" is a claim; this module works from facts: the commit each Worker is
 // serving (`build.commit` on its /healthz), the paths that changed between
 // that and HEAD, and each Worker's real inputs — the relative-import closure

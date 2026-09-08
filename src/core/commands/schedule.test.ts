@@ -6,7 +6,7 @@ import { InMemoryScheduleStore } from "../scheduleStore.js";
 import { SCHEDULES, type ScheduleDef } from "../schedules.js";
 import { registerScheduleCommands, scheduleList, type ScheduleCommandDeps } from "./schedule.js";
 
-// Feature: features/live-view.md item 14 / features/command-registry.md
+// Feature: docs/reference/specs/live-view.md item 14 / docs/reference/specs/command-registry.md
 // (phase 4b): `schedule list` — the schedule registry, next firing (UTC), and
 // the newest firing per schedule from the ScheduleStore; the text twin of the
 // /runs "Scheduled" panel.

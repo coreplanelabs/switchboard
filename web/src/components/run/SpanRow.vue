@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// A streamed span that is a step of its own (features/tracing.md): its display
+// A streamed span that is a step of its own (docs/reference/specs/tracing.md): its display
 // name, its duration once it ended, a pulse while open. One markup for the rows
 // of the log and the rows under the Setup head.
 import type { SpanRowVm } from "../../lib/runPageModel";

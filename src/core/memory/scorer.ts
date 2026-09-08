@@ -110,7 +110,7 @@ export function memoryBlockPrefix(resource: string): string {
  *  a record field can contain no literal `<` or `>`, so it can never forge the
  *  `<background_memory>`/`</background_memory>` fence delimiter \u2014 or any other
  *  tag \u2014 inline within a bullet. This is the anti-poisoning containment for the
- *  memory block (see features/memory.md). */
+ *  memory block (see docs/reference/specs/memory.md). */
 export function sanitizeMemoryField(s: string): string {
   return (
     s

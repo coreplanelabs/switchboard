@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { toMarkdownDocument } from "./markdownDocument.js";
 
-// features/command-registry.md item 27: a long command reply is attached as a
+// docs/reference/specs/command-registry.md item 27: a long command reply is attached as a
 // `.md` file, which Slack renders as CommonMark. Command output is written in
 // the chat dialect (`*bold*`, `•` bullets, one line per fact) — the document
 // form has to say the same thing in CommonMark, where `*x*` is italic, `•` is

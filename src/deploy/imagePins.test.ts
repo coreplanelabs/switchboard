@@ -6,7 +6,7 @@ import { floatingImagePins, imagePins } from "./imagePins.js";
 const ROOT = resolve(import.meta.dirname, "../..");
 const IMAGES = ["deploy/cloudflare-resident/Dockerfile", "deploy/cloudflare-sandbox/Dockerfile", "Dockerfile"] as const;
 
-// Feature: features/execution.md item 10 — the execution images' toolchain is
+// Feature: docs/reference/specs/execution.md item 10 — the execution images' toolchain is
 // PINNED. `RUN npm install -g pnpm@latest yarn@latest` in the resident image
 // meant the pnpm major changed with the image, not with a commit: a routine
 // rebuild silently moved pnpm 10 → 11, which stopped reading `package.json`'s

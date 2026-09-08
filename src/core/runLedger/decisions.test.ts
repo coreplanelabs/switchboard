@@ -9,7 +9,7 @@ import {
   transcriptCompleteness,
 } from "./decisions.js";
 
-// The ledger's decisions (features/run-history.md items 28–31), pure: the
+// The ledger's decisions (docs/reference/specs/run-history.md items 28–31), pure: the
 // Durable Object applies them inside one transaction and the in-memory ledger
 // applies them in tests. One live run per thread; every write fenced by the
 // owner generation; reclaim takes exactly the expired and handed-off rows; the

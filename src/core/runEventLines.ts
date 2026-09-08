@@ -6,7 +6,7 @@ import { RUN_NOTE_KINDS, type RunEvent, type RunNoteKind } from "./runEvents.js"
 // nothing here touches a run, a sandbox, or GitHub.
 
 // Derived from the union, so a new note kind reaches `friction analyze` the day
-// it is added (features/tracing.md).
+// it is added (docs/reference/specs/tracing.md).
 const NOTE_KINDS = new Set<RunNoteKind>(RUN_NOTE_KINDS);
 
 /**
@@ -38,7 +38,7 @@ export function parseRunEventLines(text: string): { events: RunEvent[]; skipped:
 
 /** A plain object with no `type` is a transport frame — `end`'s `{}` today,
  *  `{ sealedAt, replyOk }` and the `finished`/`replay_elided` payloads later
- *  (features/tracing.md) — never garbage. Anything else that is not an event
+ *  (docs/reference/specs/tracing.md) — never garbage. Anything else that is not an event
  *  (a number, a string, an array, an object whose `type` this reader does not
  *  know) is skipped and counted. */
 function isTransportFrame(v: unknown): boolean {

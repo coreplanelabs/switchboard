@@ -297,7 +297,7 @@ async function route(
       if (args.thread !== undefined && typeof args.thread !== "string") {
         return err(id, INVALID_PARAMS, "`thread` must be a string");
       }
-      // The request's root (features/tracing.md), once the caller is known.
+      // The request's root (docs/reference/specs/tracing.md), once the caller is known.
       const receivedAt = systemClock();
       const trace = startRequestRoot(deps, { channel: "mcp", receivedAt });
       const msg: IncomingMessage = {

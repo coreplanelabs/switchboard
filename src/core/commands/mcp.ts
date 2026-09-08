@@ -14,7 +14,7 @@ import {
 
 export { MCP_OFF_MESSAGE };
 
-// The `mcp.*` registrations (features/mcp-tools.md items 13–15): the
+// The `mcp.*` registrations (docs/reference/specs/mcp-tools.md items 13–15): the
 // self-serve MCP server surface on the typed model — thin writes into the
 // config layers (`Scope.mcpServers`), the way `config instructions` is a thin
 // write into `Scope.instructions`.
@@ -95,7 +95,7 @@ async function via<T>(fn: () => Promise<T> | T): Promise<T> {
   }
 }
 
-/** The connect follow-up (`settle`, features/mcp-tools.md item 19): an `add`
+/** The connect follow-up (`settle`, docs/reference/specs/mcp-tools.md item 19): an `add`
  *  or `connect` that handed out a link gets a SECOND reply in the thread when
  *  the link is used — connected with the tool count (or the verify warning),
  *  or expired unused with the way to a new link. A link superseded by a newer

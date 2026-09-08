@@ -13,7 +13,7 @@ vi.mock("../authz/index.js", async (importOriginal) => {
   return { ...mod, authorize: vi.fn(mod.authorize) };
 });
 
-// Feature: features/memory.md — the dispatcher-facing read path that ties the
+// Feature: docs/reference/specs/memory.md — the dispatcher-facing read path that ties the
 // store, scope deriver, budget, and renderer together.
 
 const NOW = 1_700_000_000_000;
@@ -73,12 +73,12 @@ describe("memoryContextBlock", () => {
   });
 });
 
-// Feature: features/memory.md — user-scoped memory on the read
+// Feature: docs/reference/specs/memory.md — user-scoped memory on the read
 // path: org + the requesting user's records, never another user's.
-// Feature: features/memory.md §21–22 — repo and channel scopes join the
+// Feature: docs/reference/specs/memory.md §21–22 — repo and channel scopes join the
 // one ranked pool; repo may arrive late (a promise) because the dispatcher
 // starts the memory read before repo resolution finishes.
-// Feature: features/authorization.md item 8, features/memory.md §22:
+// Feature: docs/reference/specs/authorization.md item 8, docs/reference/specs/memory.md §22:
 // reads are unchanged — the write gate is reflection's alone. The read path
 // derives its scopes from the request and never asks the policy.
 describe("memoryContextBlock — reads are not policy-gated", () => {
@@ -292,7 +292,7 @@ describe("memoryContextBlock — user scope", () => {
   });
 });
 
-describe("memoryContextBlock — the caller's span (features/tracing.md item 24)", () => {
+describe("memoryContextBlock — the caller's span (docs/reference/specs/tracing.md item 24)", () => {
   it("hands the span to every scope's retrieve, and nothing when it has none", async () => {
     const seeded = new InMemoryMemoryStore([rec()], { now: () => NOW });
     const spy = vi.spyOn(seeded as MemoryStore, "retrieve");

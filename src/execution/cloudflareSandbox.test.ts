@@ -7,7 +7,7 @@ import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ExecCapacityError, ExecInfraError } from "./executor.js";
 import { FLEET_BUSY_WAIT_MAX_MS } from "./sandboxErrors.js";
 
-// Feature: features/execution.md item 11 — per-call bash timeout on the
+// Feature: docs/reference/specs/execution.md item 11 — per-call bash timeout on the
 // per-thread sandbox path. Like the resident client: the budget rides in the
 // /exec body only when the caller asked for one (an older sandbox Worker sees
 // the body it always did), clamped client-side to [1s, 20 min]; the Worker
@@ -36,7 +36,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// Feature: features/tracing.md item 21 — one `http.client` span per send under
+// Feature: docs/reference/specs/tracing.md item 21 — one `http.client` span per send under
 // the caller's span; the trace context rides to the sandbox Worker only because
 // it is one of our hosts.
 describe("CloudflareSandboxExecutor trace context", () => {
@@ -64,7 +64,7 @@ describe("CloudflareSandboxExecutor trace context", () => {
   });
 });
 
-// Feature: features/execution.md item 5 — the sandbox credential is resolved
+// Feature: docs/reference/specs/execution.md item 5 — the sandbox credential is resolved
 // per command, not per run: a token captured at executor construction would
 // expire while the run's first command ran for 20 minutes, and every later
 // command would carry the same dead token.
@@ -93,7 +93,7 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
   });
 });
 
-// Feature: features/execution.md item 5 — the env map rides ONLY in the JSON
+// Feature: docs/reference/specs/execution.md item 5 — the env map rides ONLY in the JSON
 // body; the request carries no `x-env-*` header on any route. Workers Logs
 // record an invocation's request headers and redact by a NAME heuristic —
 // `x-env-PROBE_VAR: hello` is logged in clear while `x-env-gh_token` happens
@@ -147,7 +147,7 @@ describe("CloudflareSandboxExecutor per-call timeout", () => {
   });
 });
 
-// Feature: features/execution.md item 14 — a full fleet is capacity, not a
+// Feature: docs/reference/specs/execution.md item 14 — a full fleet is capacity, not a
 // dead sandbox. The Worker names it (`reason: "fleet-busy"`, in-body on /exec
 // or HTTP 503 on /read + /write); the executor waits a bounded time and
 // re-sends the identical request, and only when that wait is exhausted throws
@@ -303,7 +303,7 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
   });
 });
 
-// Feature: features/execution.md items 3 and 9 — a present-but-empty `error`
+// Feature: docs/reference/specs/execution.md items 3 and 9 — a present-but-empty `error`
 // is the Worker's failure shape with its text missing, never a command exit.
 // A thread placed on a previous-image container during a rollout gets
 // `{error: "", stdout: "", stderr: "", exitCode: 127}` for every command; a
@@ -336,7 +336,7 @@ describe("CloudflareSandboxExecutor in-body empty error", () => {
   });
 });
 
-// Feature: features/execution.md item 11 — every send to the sandbox Worker
+// Feature: docs/reference/specs/execution.md item 11 — every send to the sandbox Worker
 // has a bot-side deadline of the operation's budget plus EXEC_CALL_MARGIN_MS,
 // covering the WHOLE exchange (headers and streamed body). Without it one
 // `/exec` whose sandbox container is gone (`There is no container instance…`)

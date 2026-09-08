@@ -2,13 +2,15 @@
 //
 // The site is built IN PLACE from this tree — no copy, no second source — so a
 // relative `.md` link keeps working on both surfaces: GitHub follows it to the
-// file, VitePress rewrites it to the built clean URL. Anything the site cannot
-// own (a link out to README.md, AGENTS.md, features/) is an absolute repo URL
-// in the source for exactly that reason.
+// file, VitePress rewrites it to the built clean URL. A relative link that
+// leaves the tree (a source file, AGENTS.md) is rewritten at build time to that
+// file's page in the repository — see the `link_open` rule below.
 //
 // Build: `npm run build` in docs/ → docs/.vitepress/dist, deployed by CI from
 // deploy/cloudflare-docs/ (an assets-only Worker). Dead links FAIL the build.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join, posix } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
 import { withMermaid } from "vitepress-plugin-mermaid";
 
@@ -19,6 +21,19 @@ const project = JSON.parse(readFileSync(new URL("../../project.json", import.met
   steward: { name: string };
 };
 const GITHUB_REPO = project.repository;
+
+// The reference specs are one sidebar entry per file, read from the directory
+// at build time so the list cannot drift from the tree; the label is each
+// spec's own H1.
+const SPECS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "reference", "specs");
+const specItems = readdirSync(SPECS_DIR)
+  .filter((f) => f.endsWith(".md") && f !== "README.md")
+  .sort()
+  .map((f) => {
+    const slug = f.slice(0, -3);
+    const h1 = /^# (.+)$/m.exec(readFileSync(join(SPECS_DIR, f), "utf8"))?.[1] ?? slug;
+    return { text: h1, link: `/reference/specs/${slug}` };
+  });
 
 export default withMermaid(
   defineConfig({
@@ -38,6 +53,34 @@ export default withMermaid(
     lastUpdated: true,
     // A dead internal link is a build failure, not a 404 someone finds later.
     ignoreDeadLinks: false,
+    markdown: {
+      // Inline code is literal text. Fenced blocks already get `v-pre`; without
+      // it on `<code>` too, a `{{placeholder}}` in a code span is compiled as a
+      // Vue interpolation and breaks the build.
+      config(md) {
+        const codeInline = md.renderer.rules.code_inline!;
+        md.renderer.rules.code_inline = (tokens, idx, options, env, self) =>
+          codeInline(tokens, idx, options, env, self).replace(/^<code/, "<code v-pre");
+        // A relative link that leaves this tree (a source file, AGENTS.md, a
+        // plan) has no page here: on the site it points at the repository. The
+        // source stays relative so GitHub follows it to the file.
+        const linkOpen =
+          md.renderer.rules.link_open ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+        md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+          const token = tokens[idx];
+          const href = token.attrGet("href");
+          if (href && /^\.\.?\//.test(href)) {
+            const [file, hash] = href.split("#");
+            const target = posix.normalize(posix.join(posix.dirname(env.relativePath ?? ""), file));
+            if (target.startsWith("../") || target.startsWith("plans/")) {
+              const repoPath = posix.normalize(posix.join("docs", target));
+              token.attrSet("href", `${GITHUB_REPO}/blob/main/${repoPath}${hash ? `#${hash}` : ""}`);
+            }
+          }
+          return linkOpen(tokens, idx, options, env, self);
+        };
+      },
+    },
     head: [["link", { rel: "icon", href: "/favicon.svg" }]],
     // Mermaid renders client-side (bundled — nothing is fetched at runtime).
     // The font is pinned to the system stack ON PURPOSE: mermaid sizes each
@@ -95,6 +138,7 @@ export default withMermaid(
             { text: "Authorization", link: "/reference/authorization" },
             { text: "Dashboard routes", link: "/reference/dashboard-routes" },
             { text: "Code map", link: "/reference/code-map" },
+            { text: "Specs", link: "/reference/specs/", collapsed: true, items: specItems },
           ],
         },
         {
@@ -123,7 +167,7 @@ export default withMermaid(
       },
       outline: { level: [2, 3] },
       footer: {
-        message: `Built from <a href="${GITHUB_REPO}/tree/main/docs">docs/</a> on every push to main. The behavioral contract is <a href="${GITHUB_REPO}/tree/main/features">features/</a>.`,
+        message: `Built from <a href="${GITHUB_REPO}/tree/main/docs">docs/</a> on every push to main. The behavioral contract is the <a href="/reference/specs/">reference specs</a>.`,
         copyright: project.steward.name,
       },
     },

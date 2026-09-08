@@ -14,7 +14,7 @@
 // The model's prose follows after a blank line. Whatever the prose says, only
 // an explicit `approve` verdict can produce a body that begins with "LGTM".
 //
-// The verdict also carries typed findings (features/agent-ship.md item 6):
+// The verdict also carries typed findings (docs/reference/specs/agent-ship.md item 6):
 // one compact entry per issue, rendered as a list under the verdict line, so
 // a fix round can reference each finding by its stable id and answer it with
 // a typed disposition (`parseDispositionsInput` below). Findings validate

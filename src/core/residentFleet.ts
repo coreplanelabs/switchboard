@@ -1,7 +1,7 @@
 import { NullResidentAdminClient, type ResidentAdminClient } from "./residentAdmin.js";
 
 // What the bot knows about its resident fleet without asking on the run path
-// (features/routing-and-config.md item 11): the cap the resident Worker
+// (docs/reference/specs/routing-and-config.md item 11): the cap the resident Worker
 // reports on `GET /residents` — a fact of that Worker's build and its test
 // overrides, never a constant compiled into the bot. The self-description
 // block reads it synchronously on every dispatch, so the value is refreshed in

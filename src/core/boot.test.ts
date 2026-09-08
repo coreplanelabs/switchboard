@@ -6,7 +6,7 @@ import type { RunLedger } from "./runLedger/ledger.js";
 import { LEASE_MS, type ClaimRequest } from "./runLedger/types.js";
 import { RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 
-// The boot reclaim (features/run-history.md item 36): before the socket opens,
+// The boot reclaim (docs/reference/specs/run-history.md item 36): before the socket opens,
 // this generation closes every run the previous one left — with a record built
 // from the ledger's own copy of the events — and hands back the rows another
 // generation still holds, so the card sweep leaves those alone.

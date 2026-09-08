@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { toOAIMessages, usageFromOpenAI } from "./openaiCompat.js";
 import type { ChatMessage } from "./types.js";
 
-// Feature: features/slack-channel.md — attachments seam. OpenAI-compatible chat
+// Feature: docs/reference/specs/slack-channel.md — attachments seam. OpenAI-compatible chat
 // endpoints have inconsistent binary-PDF support, so a document (PDF) part is
 // rendered as an inline-text placeholder naming the file; images still map to
 // image_url. Text-file parts arrive as ordinary text and pass straight through.

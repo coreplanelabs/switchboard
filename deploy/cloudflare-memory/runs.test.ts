@@ -4,7 +4,7 @@ import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { RUN_EVENT_INSERT_BATCH, RunHistoryDO } from "./worker.ts";
 
-// Feature: features/run-history.md — the RunHistoryDO: the durable
+// Feature: docs/reference/specs/run-history.md — the RunHistoryDO: the durable
 // run store behind the bot's WorkerRunStore. Runs in workerd against the real
 // SQLite-backed Durable Object; a unique store key per test.
 
@@ -525,7 +525,7 @@ describe("run history routes", () => {
     expect(got.finishedAt).toBe(row.finished_at);
   });
 
-  it("receivedAt and sealedAt a year ahead are clamped like finishedAt (features/tracing.md)", async () => {
+  it("receivedAt and sealedAt a year ahead are clamped like finishedAt (docs/reference/specs/tracing.md)", async () => {
     const key = storeKey();
     const before = Date.now();
     const far = before + 365 * DAY;

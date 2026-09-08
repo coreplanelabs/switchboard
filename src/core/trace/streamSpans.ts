@@ -1,5 +1,5 @@
 /** Which spans reach a run's stream, and how the partition counts each one
- *  (features/tracing.md). Everything not named here is log-only by default.
+ *  (docs/reference/specs/tracing.md). Everything not named here is log-only by default.
  *
  *  Three classes:
  *  - counted: the span's interval claims one of the four buckets;
@@ -119,7 +119,7 @@ export function classOf(name: string, owner: RunOwner): SpanClass | undefined {
   return undefined;
 }
 
-/** The parents each streamed name may have (features/tracing.md taxonomy) —
+/** The parents each streamed name may have (docs/reference/specs/tracing.md taxonomy) —
  *  what the ancestor invariant is checked against. Prefix families are keyed by
  *  their prefix. */
 export const PARENTS: Readonly<Record<string, readonly string[]>> = {

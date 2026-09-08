@@ -1,4 +1,4 @@
-// Skill-loading capability (features/skills.md): methodology is LOADED as a
+// Skill-loading capability (docs/reference/specs/skills.md): methodology is LOADED as a
 // skill on demand, never baked into a prompt. A skill is a reusable
 // methodology (spec-driven development, code review, …) that an agent lists
 // and loads into its context at run time via the list_skills/use_skill tools.

@@ -10,7 +10,7 @@ import {
   type McpSecretStore,
 } from "./secretStore.js";
 
-// features/mcp-tools.md items 15–16: where sealed credentials and tickets live.
+// docs/reference/specs/mcp-tools.md items 15–16: where sealed credentials and tickets live.
 
 const sealed: SealedCredential = { serverId: "user:slack:UA/vanta", keyId: "k1", sealed: "AAAA", updatedAt: 2 };
 const ticket: McpTicket = {

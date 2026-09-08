@@ -50,7 +50,7 @@ describe("parseProfile", () => {
     expect(noBot.ok ? [] : noBot.problems).toEqual([expect.stringMatching(/^workers\.bot: /)]);
   });
 
-  // Feature: features/release-and-deploy.md item 14 — the bot is the one
+  // Feature: docs/reference/specs/release-and-deploy.md item 14 — the bot is the one
   // required Worker; a profile leaves the others out and the tooling has no
   // step and no URL for them.
   it("memory, resident and sandbox are optional: a bot-only profile parses, and the URLs of the Workers it lacks are undefined while the bot's stand", () => {

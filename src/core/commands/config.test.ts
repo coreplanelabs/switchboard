@@ -9,7 +9,7 @@ import { callerWith } from "../testing/callers.js";
 import { parseInvocation, tokenize } from "../commandSurface.js";
 import { configCommands, registerConfigCommands, type ConfigCommandDeps } from "./config.js";
 
-// Feature: features/routing-and-config.md items 5, 9 / features/command-registry.md
+// Feature: docs/reference/specs/routing-and-config.md items 5, 9 / docs/reference/specs/command-registry.md
 // (phase 4b): `config show|set|clear|instructions` as registry commands. The
 // caller's channel is the default target; `me` is always open; the `channel`
 // scope rides `config:write` (never a baseline: admins and the granted) inside the handler;

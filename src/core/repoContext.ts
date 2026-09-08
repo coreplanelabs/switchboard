@@ -3,7 +3,7 @@ import { validRef } from "./residentAdmin.js";
 import type { PrCommitList } from "./headMoved.js";
 import { normalizeHead } from "./reviewedHead.js";
 
-// Repo/ref resolution for resident environments (features/resident-repos.md
+// Repo/ref resolution for resident environments (docs/reference/specs/resident-repos.md
 // item 29): the
 // dispatcher resolves the target repo and ref BEFORE the model turn, from
 // explicit signals only. Extraction sources in priority order:
@@ -17,13 +17,13 @@ import { normalizeHead } from "./reviewedHead.js";
 // Signals have two strengths. STRONG: a github.com URL (repo, PR, /tree), or
 // `owner/name#N` shorthand — unambiguously a repository. WEAK: a bare
 // `owner/name`-shaped token, which is also the shape of every relative file
-// path (`features/memory.md`, `src/core`) and of ordinary prose. A thread
+// path (`docs/reference/specs/memory.md`, `src/core`) and of ordinary prose. A thread
 // bound by a strong signal is rebound ONLY by another strong signal; weak
 // tokens are consulted only while nothing strong has bound the thread. This
 // is what makes the binding deterministic across a thread's life: the PR
 // named in the first message stays the target of every re-review until a
 // message names a different repo/PR explicitly (otherwise a bare
-// `features/memory.md` in a re-review reply rebinds the repo, unbinds the
+// `docs/reference/specs/memory.md` in a re-review reply rebinds the repo, unbinds the
 // PR, and the LGTM never reaches GitHub).
 //
 // Weak tokens are further guarded two ways (prose like
@@ -46,7 +46,7 @@ import { normalizeHead } from "./reviewedHead.js";
 // directives or mentions before it — "the crash is in api, see the logs" is
 // prose even when a repo is called `api`). Once the registry vets it, it is
 // STRONG: it binds a fresh thread and rebinds a bound one, like a URL. The
-// vetting is what keeps the strong-binding guard intact — `in features/memory.md` is
+// vetting is what keeps the strong-binding guard intact — `in docs/reference/specs/memory.md` is
 // refused by the probe and changes nothing, and a merely-mentioned onboarded
 // slug ("also check acme/web") is still weak. A bare NAME resolves only
 // through the registry listing (`residentSlugs`) and only when exactly one
@@ -103,7 +103,7 @@ export interface RepoContext {
    *  is not bound. Inherited PR: always set (its absence drops the PR). */
   headSha?: string;
   /** Base branch of that PR (from the same REST call), validated as a ref.
-   *  Tells the review agent its diff base (features/agent-review.md item 9);
+   *  Tells the review agent its diff base (docs/reference/specs/agent-review.md item 9);
    *  unset when unknown — the agent then uses origin/HEAD. */
   baseRef?: string;
   /** Set when the thread's bound PR was NOT usable for the post-step: it is
@@ -242,7 +242,7 @@ function extractSignals(rawText: string): Signals {
   //
   // A token inside a code span / fenced block (`like/this`) is code or a path
   // being TALKED ABOUT, never a repo switch — it is excluded from the bare-slug
-  // branch only (see features/resident-repos.md item 29). Refs (`on \`main\``)
+  // branch only (see docs/reference/specs/resident-repos.md item 29). Refs (`on \`main\``)
   // and URL/PR forms are unaffected.
   const tokens = text.split(/\s+/).filter(Boolean);
   const inCode = text

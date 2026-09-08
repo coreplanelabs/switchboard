@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { RunEvent } from "./runEvents.js";
 import { analyzeRunFriction } from "./runFriction.js";
 
-// features/skills.md — `skill_use` is a fact about a use_skill call that already
+// docs/reference/specs/skills.md — `skill_use` is a fact about a use_skill call that already
 // produced its own tool_call/tool_result pair; the analyzer must not count it as
 // a step, a tool call, or a turn boundary.
 describe("analyzeRunFriction — skill_use is invisible to friction", () => {

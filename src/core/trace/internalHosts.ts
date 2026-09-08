@@ -1,4 +1,4 @@
-// The hosts our own Workers answer on (features/tracing.md item 21): the one
+// The hosts our own Workers answer on (docs/reference/specs/tracing.md item 21): the one
 // set `tracedFetch` consults before it puts a `traceparent` on a request. It is
 // computed once at startup from the configured URLs — the resident, the state
 // Worker, the sandbox, the public shim — and named in one log line, so the

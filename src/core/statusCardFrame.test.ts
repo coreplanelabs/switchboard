@@ -1,4 +1,4 @@
-// Feature: features/run-visibility.md item 2 — the status card's one frame builder.
+// Feature: docs/reference/specs/run-visibility.md item 2 — the status card's one frame builder.
 import { describe, expect, it } from "vitest";
 import { createCardShell, LIVE_CARD_PREFIXES, SPINNER_GLYPHS, type CardClose } from "./statusCardFrame.js";
 
@@ -36,7 +36,7 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(shell.live().title.startsWith("◐ ")).toBe(true); // wraps
   });
 
-  it("the elapsed time floors in clock style like every other duration surface (features/tracing.md), never a second ahead of the run page", () => {
+  it("the elapsed time floors in clock style like every other duration surface (docs/reference/specs/tracing.md), never a second ahead of the run page", () => {
     expect(shellAt(1_499).live().title).toBe(`◐ ${LABEL} · 1s`);
     expect(shellAt(1_999).live().title).toBe(`◐ ${LABEL} · 1s`);
     expect(shellAt(50_850).live().title).toBe(`◐ ${LABEL} · 50s`);
@@ -52,7 +52,7 @@ describe("createCardShell — every paint comes from one builder", () => {
   });
 
   // The eight closes, pinned as a table: what each paints today — every close
-  // carries the request's elapsed time from the ack's clock (features/tracing.md).
+  // carries the request's elapsed time from the ack's clock (docs/reference/specs/tracing.md).
   const link = { url: "https://sb.example/runs/r1?t=tok", label: "Live run" };
   const CLOSES: Array<[CardClose, { title: string; detail?: string; link?: typeof link }]> = [
     [

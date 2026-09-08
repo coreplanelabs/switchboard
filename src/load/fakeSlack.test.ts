@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FakeSlack, TokenBucket } from "./fakeSlack.js";
 
-// `load:cards` (features/load-harness.md item 7) measures the status-card path
+// `load:cards` (docs/reference/specs/load-harness.md item 7) measures the status-card path
 // against Slack's published limits without touching Slack: `chat.update` is a
 // Tier 3 method (~50 calls a minute per app) and the coalescer's own comment
 // cites ~1 edit per second per channel. This fake enforces both, answers

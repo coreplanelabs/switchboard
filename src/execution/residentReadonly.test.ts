@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseReadonly, planReadonlyAttach } from "./residentReadonly.js";
 
-// Feature: features/resident-repos.md item 50 — a read-only attach gets no
+// Feature: docs/reference/specs/resident-repos.md item 50 — a read-only attach gets no
 // credential file and an unfetchable origin; a mode switch on a thread
 // recreates the tree. Pure decision, imported by the resident Worker.
 

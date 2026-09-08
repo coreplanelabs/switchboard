@@ -18,7 +18,7 @@ const unreachable = async (): Promise<RepoShipInfo | undefined> => {
   throw new Error("fetchRepoInfo must not be called when a base is already known");
 };
 
-// Feature: features/pr-description.md item 5 — the coding PR post-step as a
+// Feature: docs/reference/specs/pr-description.md item 5 — the coding PR post-step as a
 // callable unit: given a workspace observation and the run's submitted
 // PrDescription, open or edit the PR from typed values and return the honest
 // reply note. The dispatcher suite proves the end-to-end behavior
@@ -348,7 +348,7 @@ function workspace(answers: Array<[RegExp, string]>) {
 }
 
 describe("observeCodingWorkspace", () => {
-  it("every probe carries the caller's span to the executor, and none without one (features/tracing.md item 17)", async () => {
+  it("every probe carries the caller's span to the executor, and none without one (docs/reference/specs/tracing.md item 17)", async () => {
     const seen: unknown[] = [];
     const exec = vi.fn(async (_cmd: string, opts?: { span?: unknown }) => {
       seen.push(opts?.span);

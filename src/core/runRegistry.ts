@@ -14,14 +14,14 @@ import type { RunStatus } from "./runRecord.js";
 import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 
 // The run registry is the unit-testable core of the external live-view page
-// (features/live-view.md) and the ONE per-run event store while a run is live
+// (docs/reference/specs/live-view.md) and the ONE per-run event store while a run is live
 // (docs/decisions/0006-runs-have-two-lives.md): a run's events (tool steps and
 // the `message` events carrying the exchange) live here in a bounded backlog —
 // so a viewer who opens the
 // capability link mid-run sees what already happened, and the finish-time
 // snapshot feeds the friction diagnosis and the persisted run record — and
 // finished runs are evicted after a short TTL. Durability is the run store's
-// job (features/run-history.md); per AGENTS.md invariant 6 the eviction here
+// job (docs/reference/specs/run-history.md); per AGENTS.md invariant 6 the eviction here
 // is intentional: a restart ends the runs it was streaming, and their
 // (already-visible) events simply stop.
 //
@@ -73,7 +73,7 @@ export class RunControl {
 
 /** The identifiers a freshly created run is addressed by, plus its control. */
 /** `create()` for a run that already has an identity and a past (a resume,
- *  features/run-history.md item 37): the ledger's run id, so the page URL and
+ *  docs/reference/specs/run-history.md item 37): the ledger's run id, so the page URL and
  *  the ledger row are the same run, and the events published before the
  *  restart under their original seqs. */
 export interface CreateOptions {
@@ -120,7 +120,7 @@ export interface RunMeta {
   /** Resolved display name of who started it (`IncomingMessage.userName`) — the
    *  source mark's hover says `via Slack · alice`, never a raw member id. */
   userName?: string;
-  /** Our process saw the message that started this run (features/tracing.md);
+  /** Our process saw the message that started this run (docs/reference/specs/tracing.md);
    *  the run's duration opens here, falling back to `startedAt` when absent. */
   receivedAt?: number;
 }
@@ -142,7 +142,7 @@ export type StopRequestResult = { ok: true; mode: StopMode } | { ok: false; reas
  * (`GET /runs`). It intentionally carries the per-run `token` so the index can
  * render each run's full capability link — the index is the ONE place tokens
  * surface, and it must only ever be exposed behind Cloudflare Access (see
- * features/live-view.md). `eventCount` is monotonic (total published, not the
+ * docs/reference/specs/live-view.md). `eventCount` is monotonic (total published, not the
  * bounded-backlog length) and `startedAt` is the injectable-clock time at
  * `create()`, so callers can sort/label without reaching into run internals.
  */
@@ -182,7 +182,7 @@ export interface RunSummary {
   /** Present (true) once the history writer confirmed the run is in the durable
    *  store — how an index client learns a row outlives eviction. */
   persisted?: boolean;
-  /** The seven stamps and the one duration (features/tracing.md). `receivedAt`:
+  /** The seven stamps and the one duration (docs/reference/specs/tracing.md). `receivedAt`:
    *  our process saw the message, from the adapter's clock (stamped by the
    *  dispatcher once the adapters carry it; absent until then, so every reader
    *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
@@ -207,10 +207,10 @@ export interface RunSnapshot {
   /** The clock time at `finish()`; absent while the run is live. The record's
    *  `finishedAt` is this value, so the registry row and the record agree. */
   finishedAt?: number;
-  /** `RunMeta.receivedAt`, when the run was created with it (features/tracing.md). */
+  /** `RunMeta.receivedAt`, when the run was created with it (docs/reference/specs/tracing.md). */
   receivedAt?: number;
   eventCount: number;
-  /** Content events published — span records excluded (features/tracing.md). */
+  /** Content events published — span records excluded (docs/reference/specs/tracing.md). */
   stepCount: number;
   /** True when the bounded backlog dropped events (`eventCount > events.length`):
    *  a consumer analyzing `events` is looking at a head-truncated stream. */
@@ -226,7 +226,7 @@ export interface FinishedFrame {
   finishedAt: number;
 }
 /** The stream closed (`seal()`): the SSE `end` frame. `replyOk` is tri-state
- *  (features/tracing.md): `true` a reply was attempted and delivered, `false`
+ *  (docs/reference/specs/tracing.md): `true` a reply was attempted and delivered, `false`
  *  attempted and threw, absent none was measured. */
 export interface SealedFrame {
   sealedAt: number;
@@ -281,7 +281,7 @@ export const RUN_LABEL_MAX = 200;
 export const DEFAULT_BACKLOG_LIMIT = 8000;
 export const DEFAULT_BACKLOG_BYTES = 4 * 1024 * 1024;
 
-/** The protected head (features/tracing.md; live-view item 2): the events that
+/** The protected head (docs/reference/specs/tracing.md; live-view item 2): the events that
  *  say what a run is — its request, its context, its meta, the setup spans and
  *  the notes about missing tools or dropped setup — are never trimmed by the
  *  count or byte bound, up to this many bytes. Past the budget, or once any
@@ -291,7 +291,7 @@ export const DEFAULT_BACKLOG_BYTES = 4 * 1024 * 1024;
 export const HEAD_BUDGET_BYTES = 512 * 1024;
 
 /** The replay budget a late subscriber gets from the retained backlog
- *  (features/live-view.md item 5): at most this many events and at most
+ *  (docs/reference/specs/live-view.md item 5): at most this many events and at most
  *  `DEFAULT_REPLAY_BYTES` of UTF-8 JSON, the newest first. The backlog keeps
  *  more than a browser needs to follow a live run, and a page must not stall on
  *  a 4 MiB burst; what the budget leaves out is reported as `elided`, never
@@ -400,7 +400,7 @@ interface RunState {
   /** Content events published (span records excluded); monotonic like `eventCount`. */
   stepCount: number;
   /** The protected head: the first `headLen` backlog entries, never trimmed,
-   *  `headBytes` of them (features/tracing.md). Grows only while the backlog
+   *  `headBytes` of them (docs/reference/specs/tracing.md). Grows only while the backlog
    *  holds nothing but head material and the budget allows. */
   headLen: number;
   headBytes: number;
@@ -509,7 +509,7 @@ export class RunRegistry {
       persisted: false,
     };
     this.runs.set(id, run);
-    // A resumed run (features/run-history.md item 37) brings the events it
+    // A resumed run (docs/reference/specs/run-history.md item 37) brings the events it
     // published before the restart, under their original `seq`: they are
     // appended as if published (bounded like any backlog, no subscribers yet)
     // and the counter continues past the highest, so the record assembled at
@@ -532,7 +532,7 @@ export class RunRegistry {
   private appendToBacklog(run: RunState, published: RunEvent): void {
     const headEligible =
       run.backlog.length === run.headLen && isHeadMaterial(published) && run.headBytes < HEAD_BUDGET_BYTES;
-    // A head event is capped at publish (features/tracing.md): the cap is the
+    // A head event is capped at publish (docs/reference/specs/tracing.md): the cap is the
     // record's per-event cap, so what the head holds is what a record would.
     const stamped = headEligible ? capEvent(published, MAX_EVENT_BYTES).event : published;
     const bytes = utf8ByteLength(serializedOnce(stamped)); // memoized: the SSE frame reuses this string
@@ -603,7 +603,7 @@ export class RunRegistry {
   /** Stamp an event with the run's next `seq`, append it to the backlog (dropping
    *  the oldest past the count or byte bound — the newest always survives), and
    *  fan it out to live subscribers. Content stops at finish and span records
-   *  stop at the seal (features/tracing.md): a content event on a finished run
+   *  stop at the seal (docs/reference/specs/tracing.md): a content event on a finished run
    *  and anything on a sealed or unknown run is a silent no-op. Never throws,
    *  and a throwing subscriber is isolated like an index sink: it can neither
    *  stop the other subscribers nor reach the publisher. */
@@ -773,7 +773,7 @@ export class RunRegistry {
     const { backlog, backlogSizes } = run;
     // The backlog is `seq`-ascending: the offered events are one suffix, and the
     // replayed ones a suffix of that. A fresh subscribe (no cursor) always gets
-    // the protected head first (features/tracing.md), and the budget then buys
+    // the protected head first (docs/reference/specs/tracing.md), and the budget then buys
     // the newest of the rest; a resume re-sends nothing from the head. Walk
     // newest-first, admitting an event while both bounds hold; the newest is
     // admitted unconditionally.
@@ -895,7 +895,7 @@ export class RunRegistry {
    * runs never appear. Each summary carries the per-run token so the index can
    * render full capability links — this method (and the index it feeds) is the
    * only place tokens surface outside a per-run link, which is why the index
-   * must sit behind Cloudflare Access (see features/live-view.md). Ordering is
+   * must sit behind Cloudflare Access (see docs/reference/specs/live-view.md). Ordering is
    * by `startedAt` descending, tie-broken by creation `seq` descending so runs
    * created within the same clock tick still come out newest-first.
    */

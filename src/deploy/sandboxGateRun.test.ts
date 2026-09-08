@@ -14,7 +14,7 @@ import {
 import { TEST_PROFILE } from "./testing/profile.js";
 
 // The sandbox live gate's LOOP (src/deploy/run.ts `waitUntilSandboxLive`,
-// features/release-and-deploy.md item 16): read the Worker's /healthz with the
+// docs/reference/specs/release-and-deploy.md item 16): read the Worker's /healthz with the
 // bearer; once it serves the deployed commit, probe `echo ok` through the gate's
 // thread and read the container application's state and instances; live only
 // when all three agree — the application having LEFT the version read before
@@ -104,7 +104,7 @@ function harness(script: Scripted, env: Record<string, string> = { SANDBOX_TOKEN
   const count = (dep: string) => calls.filter((c) => c.dep === dep).length;
   /** The runner's own lines, without the span log lines `deployStep` writes to the same output. */
   const plain = () => lines.filter((l) => !l.startsWith("{"));
-  /** The span log lines, parsed (features/tracing.md item 20). */
+  /** The span log lines, parsed (docs/reference/specs/tracing.md item 20). */
   const spans = () => lines.filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as LogLine);
   return { deps, io, calls, lines, count, plain, spans };
 }
@@ -283,7 +283,7 @@ describe("deployStep (sandbox)", () => {
     ]);
   });
 
-  // Feature: features/tracing.md item 20; features/release-and-deploy.md item
+  // Feature: docs/reference/specs/tracing.md item 20; docs/reference/specs/release-and-deploy.md item
   // 19 — the step is a root on the runner's own log and its live gate a child
   // whose `waitedMs` is the number the "live" line prints.
   it("the step is a `deploy.step.sandbox` root on the runner's log and its live gate a `deploy.wait_live` child whose waitedMs is the seconds the live line prints", async () => {

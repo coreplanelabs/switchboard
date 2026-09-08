@@ -1,4 +1,4 @@
-// The transcript on the wire (features/run-history.md item 32). The runner's
+// The transcript on the wire (docs/reference/specs/run-history.md item 32). The runner's
 // `messages` array is append-only, so the durable form is one row per content
 // part: no row nears the Durable Object's 2 MB limit, a step writes only its
 // new turns, and the read side assembles the exact array — thinking blocks and

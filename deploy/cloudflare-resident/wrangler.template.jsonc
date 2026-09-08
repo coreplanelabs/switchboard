@@ -21,7 +21,7 @@
     // {{#if urls.stateWorkerUrl}}
     "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}",
     // {{/if}}
-    // Presigned snapshot transfers (features/resident-repos.md item 61):
+    // Presigned snapshot transfers (docs/reference/specs/resident-repos.md item 61):
     // with these two vars AND the R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
     // secrets (deploy/secrets.manifest.json) present, the container moves
     // archive bytes itself over presigned R2 URLs and the Durable Object stays
@@ -47,7 +47,7 @@
       // checked by instanceSizing.test.ts against this file: the resident of
       // a large monorepo filled the previous 8 GB in 45 min (provision, one
       // thread attached 42 min later, ENOSPC 6 min after that). Measured
-      // inside the resident (features/resident-repos.md item 55): image
+      // inside the resident (docs/reference/specs/resident-repos.md item 55): image
       // 552 MB + mirror 380 + warm checkout 2772 (history 380, tree 94, pnpm
       // node_modules 2298) + the reserve the attach admission holds back
       // (snapshot staging + a 1 GiB floor, 2965) = 6669 MB base; a hardlinked

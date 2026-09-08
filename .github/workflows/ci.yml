@@ -195,7 +195,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: npm run ci:gate
 
-  # Which Workers this PR's diff would deploy (features/release-and-deploy.md
+  # Which Workers this PR's diff would deploy (docs/reference/specs/release-and-deploy.md
   # item 8): `deploy plan --affected --base HEAD^` — HEAD is the merge commit,
   # so HEAD^ is the PR's base — into the job summary, on every PR. An
   # unclassified path shows here as "every Worker deploys" long before it

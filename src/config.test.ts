@@ -21,7 +21,7 @@ import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";
 import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, SHIP_DEFAULT_MAX_ROUNDS } from "./core/shipPipeline.js";
 
-// Feature: features/routing-and-config.md — layered resolution & permission gates.
+// Feature: docs/reference/specs/routing-and-config.md — layered resolution & permission gates.
 
 const YAML_FIXTURE = `
 organization: acme
@@ -237,7 +237,7 @@ describe("permission gates", () => {
   });
 });
 
-// Feature: features/resident-repos.md — per-repo access is open unless the repo
+// Feature: docs/reference/specs/resident-repos.md — per-repo access is open unless the repo
 // is listed under `restrict.repos`: then only actors whose `repos` grant
 // covers it (or `all`) may use it.
 describe("per-repo access (canUseRepo)", () => {
@@ -279,7 +279,7 @@ describe("per-repo access (canUseRepo)", () => {
   });
 });
 
-// Feature: features/resident-repos.md — repo management is FAIL-CLOSED:
+// Feature: docs/reference/specs/resident-repos.md — repo management is FAIL-CLOSED:
 // `repo:write` is never a baseline, because onboarding provisions billable
 // always-on compute and binds GitHub credentials.
 describe("repo management gate (canManageRepos)", () => {
@@ -298,7 +298,7 @@ describe("repo management gate (canManageRepos)", () => {
   });
 });
 
-// Feature: features/authorization.md item 9 — `grantsFor` is the ONE lookup the
+// Feature: docs/reference/specs/authorization.md item 9 — `grantsFor` is the ONE lookup the
 // command registry's policy table decides on: a namespace baseline (the open
 // chat commands for slack: users, every group's read for browser sessions,
 // nothing for credentials) plus the actor's `grants` entry. FAIL-CLOSED: only
@@ -391,7 +391,7 @@ describe("grantsFor — the grants the policy table decides on", () => {
   });
 });
 
-// Feature: features/routing-and-config.md behavior 9 — per-scope custom
+// Feature: docs/reference/specs/routing-and-config.md behavior 9 — per-scope custom
 // instructions: stored on Scope, capped, advisory only.
 describe("custom instructions (Scope.instructions)", () => {
   const withUser = (id: string, instructions: string) =>
@@ -455,7 +455,7 @@ describe("custom instructions (Scope.instructions)", () => {
   });
 });
 
-// Feature: features/authorization.md — the `grants` block parses fail-closed.
+// Feature: docs/reference/specs/authorization.md — the `grants` block parses fail-closed.
 describe("grants config — the one shape", () => {
   const load = (yaml: string, options?: ConstructorParameters<typeof ConfigStore>[2]) => {
     const dir = mkdtempSync(join(tmpdir(), "swb-config-grants-"));
@@ -540,7 +540,7 @@ describe("restrict — closed unless granted (authorization.md item 11)", () => 
   });
 });
 
-// Feature: features/run-history.md — the `runHistory` section.
+// Feature: docs/reference/specs/run-history.md — the `runHistory` section.
 describe("runHistory config", () => {
   const withRunHistory = (block: string, extra = "") => `${YAML_FIXTURE}\n${extra}\nrunHistory:\n${block}\n`;
   const load = (yaml: string) => {
@@ -598,7 +598,7 @@ describe("selfImprovement", () => {
   });
 });
 
-// Feature: features/agent-ship.md item 8 — the `ship` caps block: pipeline
+// Feature: docs/reference/specs/agent-ship.md item 8 — the `ship` caps block: pipeline
 // wall clock + review-round cap, deployment-level like the sibling `review`
 // block, validated at load so a typo cannot silently become "no cap".
 describe("ship caps block (agent:ship pipeline)", () => {
@@ -634,7 +634,7 @@ describe("ship caps block (agent:ship pipeline)", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 12 — where runtime overrides persist.
+// Feature: docs/reference/specs/routing-and-config.md item 12 — where runtime overrides persist.
 describe("overrides backing (item 12: durable runtime overrides)", () => {
   const cfgFile = (yaml: string = YAML_FIXTURE) => {
     const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
@@ -933,7 +933,7 @@ describe("WorkerOverridesBacking (the ConfigDO client)", () => {
   });
 });
 
-// Feature: features/mcp-tools.md items 11 + 14 + 17 — MCP servers as a Scope setting.
+// Feature: docs/reference/specs/mcp-tools.md items 11 + 14 + 17 — MCP servers as a Scope setting.
 describe("Scope.mcpServers (MCP servers layered through config)", () => {
   const MCP_YAML = `${YAML_FIXTURE}
   "slack:CMCP":
@@ -1130,7 +1130,7 @@ describe("organization", () => {
   });
 });
 
-// Feature: features/tracing.md item 3 — the span log's verbosity knob.
+// Feature: docs/reference/specs/tracing.md item 3 — the span log's verbosity knob.
 describe("tracing", () => {
   it("accepts `log: roots` and `log: slow`, refuses anything else at load, and defaults to absent", () => {
     expect(store(`${YAML_FIXTURE}\ntracing:\n  log: slow\n`).config.tracing).toEqual({ log: "slow" });
@@ -1143,8 +1143,8 @@ describe("tracing", () => {
   });
 });
 
-// Feature: features/access-gate.md (dashboard auth is a strategy) and
-// features/routing-and-config.md — the `dashboard` block is validated at load.
+// Feature: docs/reference/specs/access-gate.md (dashboard auth is a strategy) and
+// docs/reference/specs/routing-and-config.md — the `dashboard` block is validated at load.
 describe("dashboard", () => {
   it("accepts each strategy, exposes the block as written, and defaults to absent", () => {
     expect(store(`${YAML_FIXTURE}\ndashboard:\n  auth: none\n`).config.dashboard).toEqual({ auth: "none" });

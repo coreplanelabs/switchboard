@@ -19,16 +19,16 @@
     "bindings": [
       { "name": "MEMORY", "class_name": "MemoryDO" },
       // ONE ScheduleDO (named "schedules"): every cron firing the bot's Worker
-      // shim makes, for the /runs Scheduled panel (features/live-view.md).
+      // shim makes, for the /runs Scheduled panel (docs/reference/specs/live-view.md).
       { "name": "SCHEDULES", "class_name": "ScheduleDO" },
       // One RunHistoryDO per store key (`runs:default`): persistent run history
-      // (features/run-history.md) — runs + run_events + the retention policy.
+      // (docs/reference/specs/run-history.md) — runs + run_events + the retention policy.
       { "name": "RUNS", "class_name": "RunHistoryDO" },
       // ONE ConfigDO (named "config"): the bot's runtime config documents — the
-      // chat-set `overrides` (features/routing-and-config.md item 12) — versioned.
+      // chat-set `overrides` (docs/reference/specs/routing-and-config.md item 12) — versioned.
       { "name": "CONFIG", "class_name": "ConfigDO" },
       // One RunTranscriptDO per LIVE run (the DO name is the run id): the raw
-      // transcript a resumed run continues from (features/run-history.md item
+      // transcript a resumed run continues from (docs/reference/specs/run-history.md item
       // 32). Kept apart from the history object so transcript bytes never queue
       // behind an admission decision; cleared at finish.
       { "name": "RUN_TRANSCRIPTS", "class_name": "RunTranscriptDO" }
@@ -44,7 +44,7 @@
     { "tag": "v6", "new_sqlite_classes": ["RunTranscriptDO"] },
     // The friction ledger is read from run history (RunHistoryDO carries every
     // run's diagnosis); the FrictionDO that once mirrored those diagnoses is
-    // retired with its rows — features/self-improvement.md item 1.
+    // retired with its rows — docs/reference/specs/self-improvement.md item 1.
     { "tag": "v7", "deleted_classes": ["FrictionDO"] }
   ]
 }

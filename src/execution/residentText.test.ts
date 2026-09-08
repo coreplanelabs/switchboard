@@ -1,4 +1,4 @@
-// Feature: features/resident-repos.md item 62 — resident-supplied text is made
+// Feature: docs/reference/specs/resident-repos.md item 62 — resident-supplied text is made
 // safe at the seams: the resident sanitizes at the write and the exit, the bot
 // at the parse, so no card, reply, listing or record shows raw remote output.
 import { describe, expect, it } from "vitest";
