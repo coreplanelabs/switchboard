@@ -20,6 +20,7 @@ import {
 import { NO_OP_COMMAND, NPM_FALLBACK_COMMANDS, detectCommands, type DetectedCommands } from "../repoToolchain.js";
 import { formatDiskGauge } from "../../execution/residentDiskBudget.js";
 import type { RepoInspector } from "../../execution/githubRepoInspect.js";
+import type { Span } from "../trace/types.js";
 
 // The `repo.*` registrations (#157 R13 + phase 4b): the whole repo surface on
 // ONE typed model.
@@ -96,10 +97,13 @@ const slugArg = { name: "slug", schema: repoSlug, describe: "GitHub owner/name o
 
 // ---- shared -------------------------------------------------------------------
 
-async function adminOf(deps: RepoCommandDeps): Promise<ResidentAdminClient> {
+async function adminOf(deps: RepoCommandDeps, span?: Span): Promise<ResidentAdminClient> {
   const api = await deps.repo.admin();
   if ("unavailable" in api) throw new CommandError("unavailable", api.unavailable);
-  return api;
+  // Bound to the command's span (features/tracing.md item 24): each admin call
+  // is an `http.client` child of `run.command`. A client without the view (a
+  // test double) is used as is.
+  return span && api.withSpan ? api.withSpan(span) : api;
 }
 
 /** A transport failure of the admin client is the resident being unreachable. */
@@ -174,8 +178,8 @@ export const repoList = defineCommand({
   effect: "read",
   describe: "Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge.",
   render: (output) => renderResidentList(output as Record<string, unknown>),
-  handler: async ({ deps }) => {
-    const res = await call(async () => (await adminOf(deps)).residents());
+  handler: async ({ deps, span }) => {
+    const res = await call(async () => (await adminOf(deps, span)).residents());
     if (res.status !== 200)
       throw new CommandError(
         "unavailable",
@@ -243,7 +247,7 @@ export const repoOnboard = defineCommand({
     if (typeof o.warning === "string" && o.warning) lines.push(`⚠️ ${o.warning}`);
     return lines.join("\n");
   },
-  handler: async ({ args, options, deps }) => {
+  handler: async ({ args, options, deps, span }) => {
     const defaultRef = options.ref ?? DEFAULT_REF;
     // Item 52: the table comes from the repo root, not from an assumption. An
     // explicit flag wins per key; an uninspectable root falls back to the npm
@@ -264,7 +268,7 @@ export const repoOnboard = defineCommand({
       ...(options.install !== undefined ? { install: options.install } : {}),
     };
     const r = await call(async () =>
-      (await adminOf(deps)).onboard({
+      (await adminOf(deps, span)).onboard({
         resource: repoResourceId(args.slug),
         commands,
         defaultRef,
@@ -415,9 +419,9 @@ export const repoOffboard = defineCommand({
       (errors.length > 0 ? `.\n⚠️ Errors: ${errors.join("; ")}` : ".")
     );
   },
-  handler: async ({ args, options, deps }) => {
+  handler: async ({ args, options, deps, span }) => {
     const dryRun = options.dryRun ?? false;
-    const r = await call(async () => (await adminOf(deps)).offboard(repoResourceId(args.slug), dryRun));
+    const r = await call(async () => (await adminOf(deps, span)).offboard(repoResourceId(args.slug), dryRun));
     if (r.status !== 200) throw residentFailure(r);
     return { ...(r.data as JsonObject), slug: args.slug, dryRun };
   },
@@ -460,9 +464,9 @@ export const repoRebuild = defineCommand({
     const o = output as JsonObject;
     return o.dryRun === true ? Promise.resolve(undefined) : settleProvisioning(deps, str(o.slug));
   },
-  handler: async ({ args, options, deps }) => {
+  handler: async ({ args, options, deps, span }) => {
     const dryRun = options.dryRun ?? false;
-    const r = await call(async () => (await adminOf(deps)).rebuild(repoResourceId(args.slug), dryRun));
+    const r = await call(async () => (await adminOf(deps, span)).rebuild(repoResourceId(args.slug), dryRun));
     if (r.status !== 200 && r.status !== 202) throw residentFailure(r);
     return { ...(r.data as JsonObject), slug: args.slug, dryRun };
   },
@@ -488,14 +492,14 @@ export const repoReconfigure = defineCommand({
     const changed = Object.entries(obj(o.changed)).map(([k, v]) => `${k} → \`${str(v)}\``);
     return `🔧 Reconfigured \`${str(o.slug)}\`: ${changed.join(", ")}. Takes effect on the next refresh/attach.`;
   },
-  handler: async ({ args, options, deps }) => {
+  handler: async ({ args, options, deps, span }) => {
     const commands: Record<string, string> = {};
     for (const key of ["test", "build", "install"] as const)
       if (options[key] !== undefined) commands[key] = options[key];
     if (Object.keys(commands).length === 0 && options.ref === undefined) {
       throw new CommandError("invalid_input", "nothing to reconfigure: pass --ref and/or --test / --build / --install");
     }
-    const api = await adminOf(deps);
+    const api = await adminOf(deps, span);
     const body: Record<string, unknown> = { resource: repoResourceId(args.slug) };
     if (Object.keys(commands).length > 0) {
       // The resident's /reconfigure REPLACES the whole command table (KTD9), so

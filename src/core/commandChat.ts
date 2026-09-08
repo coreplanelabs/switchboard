@@ -20,6 +20,7 @@ import {
   type GrammarRejection,
 } from "./commandSurface.js";
 import type { IncomingMessage } from "./types.js";
+import type { Span } from "./trace/types.js";
 
 // The chat adapter for the command registry (#157 U13 — R7, KTD18, KTD19,
 // KTD21, KTD25). Chat is the one surface where a command shares its namespace
@@ -147,6 +148,9 @@ export interface HandleChatCommandArgs {
   resolveRepo?: () => Promise<string | undefined>;
   /** Clock for live-run durations; defaults to `Date.now()`. */
   now?: number;
+  /** The span the dispatcher runs the command's body under (`run.command`);
+   *  the registry hands it to the handler (features/tracing.md item 24). */
+  span?: Span;
 }
 
 /** The `Caller` a chat message resolves to: the message's user as the id and
@@ -225,11 +229,12 @@ export async function invokeChatCommand({
   config,
   resolveRepo,
   now,
+  span,
 }: HandleChatCommandArgs): Promise<ChatCommandResult> {
   if (parsed.kind === "reply")
     return { ok: false, text: parsed.text, ...(parsed.error ? { error: parsed.error } : {}) };
   const caller = chatCallerFor(msg, config, resolveRepo);
-  const res = await commands.invoke(parsed.id, parsed.input, caller);
+  const res = await commands.invoke(parsed.id, parsed.input, caller, span ? { span } : undefined);
   if (res.ok) {
     const text = renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, {
       surface: "chat",

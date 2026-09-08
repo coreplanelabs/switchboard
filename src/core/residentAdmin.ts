@@ -1,5 +1,7 @@
 import type { ConfigStore } from "../config.js";
 import { sanitizeResidentBody } from "../execution/residentText.js";
+import { tracedFetch } from "./trace/tracedFetch.js";
+import type { Span } from "./trace/types.js";
 
 // The resident Worker's admin plane, as the bot sees it (U8): the client for
 // the `/onboard`, `/offboard`, `/reconfigure`, `/rebuild`, `/residents` routes
@@ -27,43 +29,66 @@ export interface ResidentAdminClient {
   /** One resident's `{ state, reason, inFlight }` (`GET /status`; 404 when not
    *  onboarded) — what the onboard/rebuild follow-up polls. */
   status(resource: string): Promise<ResidentAdminResponse>;
+  /** The same client bound to one span: every call the view makes is an
+   *  `http.client` child of it (features/tracing.md item 24). Optional so a
+   *  test double stays a plain object; a command uses a client without the
+   *  view as is. */
+  withSpan?(span: Span): ResidentAdminClient;
 }
 
+/** The admin routes, as the span names them: the path literal, never a query. */
+type AdminRoute = "/onboard" | "/offboard" | "/reconfigure" | "/rebuild" | "/residents" | "/status";
+
 export function makeResidentAdminClient(baseUrl: string, token: string): ResidentAdminClient {
-  const call = async (
-    route: string,
-    method: "GET" | "POST",
-    body?: Record<string, unknown>,
-  ): Promise<ResidentAdminResponse> => {
-    let res: Response;
-    try {
-      res = await fetch(`${baseUrl.replace(/\/$/, "")}${route}`, {
-        method,
-        headers: {
-          authorization: `Bearer ${token}`,
-          ...(body ? { "content-type": "application/json" } : {}),
-        },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-      });
-    } catch (err) {
-      throw new Error(
-        `resident admin ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
-          "The operation may still have run in the resident; check `repo list` before re-running it.",
-        { cause: err },
-      );
-    }
-    // Item 62: these bodies reach Slack replies (`repo list`, `repo rebuild`).
-    const data = sanitizeResidentBody((await res.json().catch(() => ({}))) as Record<string, unknown>);
-    return { status: res.status, data };
+  // One closure per parent: the unbound client, and the view `withSpan` makes
+  // of it — the only way to a bound client, so no caller can mint one that
+  // stays bound for the process's life.
+  const clientFor = (parent: Span | undefined): ResidentAdminClient => {
+    // `route` is what the span carries; `path` is what the request hits (the
+    // status route adds its query, which never reaches a span).
+    const call = async (
+      route: AdminRoute,
+      method: "GET" | "POST",
+      body?: Record<string, unknown>,
+      path: string = route,
+    ): Promise<ResidentAdminResponse> => {
+      let res: Response;
+      try {
+        res = await tracedFetch(
+          parent,
+          `${baseUrl.replace(/\/$/, "")}${path}`,
+          {
+            method,
+            headers: {
+              authorization: `Bearer ${token}`,
+              ...(body ? { "content-type": "application/json" } : {}),
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+          },
+          { route },
+        );
+      } catch (err) {
+        throw new Error(
+          `resident admin ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
+            "The operation may still have run in the resident; check `repo list` before re-running it.",
+          { cause: err },
+        );
+      }
+      // Item 62: these bodies reach Slack replies (`repo list`, `repo rebuild`).
+      const data = sanitizeResidentBody((await res.json().catch(() => ({}))) as Record<string, unknown>);
+      return { status: res.status, data };
+    };
+    return {
+      onboard: (body) => call("/onboard", "POST", body),
+      offboard: (resource, dryRun) => call("/offboard", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
+      reconfigure: (body) => call("/reconfigure", "POST", body),
+      rebuild: (resource, dryRun) => call("/rebuild", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
+      residents: () => call("/residents", "GET"),
+      status: (resource) => call("/status", "GET", undefined, `/status?resource=${encodeURIComponent(resource)}`),
+      withSpan: (span) => clientFor(span),
+    };
   };
-  return {
-    onboard: (body) => call("/onboard", "POST", body),
-    offboard: (resource, dryRun) => call("/offboard", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
-    reconfigure: (body) => call("/reconfigure", "POST", body),
-    rebuild: (resource, dryRun) => call("/rebuild", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
-    residents: () => call("/residents", "GET"),
-    status: (resource) => call(`/status?resource=${encodeURIComponent(resource)}`, "GET"),
-  };
+  return clientFor(undefined);
 }
 
 /** The admin client the config names, or the operator-facing reason there is

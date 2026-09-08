@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { analyzeRunFriction } from "./runFriction.js";
+import { recordingSink } from "./testing/recordingSink.js";
+import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "./trace/internalHosts.js";
+import { parseTraceparent } from "./trace/traceparent.js";
+import { createTracer } from "./trace/tracer.js";
 import type { RunEvent } from "./runEvents.js";
 import { DEFAULT_RETENTION_POLICY, type RunRecord } from "./runRecord.js";
 import {
@@ -224,5 +228,37 @@ describe("describeError — the cause chain survives into the warn line (#313)",
       name: "TransientStoreError",
       message: "run store /runs/list: fetch failed (cause: getaddrinfo ENOTFOUND)", // code already in the message → not repeated
     });
+  });
+});
+
+// features/tracing.md item 24: the record write hangs under the request's root
+// as an `http.client` child; the trace context rides to our own Worker.
+describe("WorkerRunStore trace context", () => {
+  it("put under a span is an http.client child with route /runs/put, POST and the status, no bearer or record text; traceparent rides for the configured host; a put without a span is a plain fetch", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
+    configureInternalHosts(internalHostsOf([OPTS.baseUrl]));
+    try {
+      const { fetch, calls } = fakeFetch(() => ({
+        status: 200,
+        body: { ok: true, retained: 1, stored: true, rewritten: false },
+      }));
+      const store = new WorkerRunStore({ ...OPTS, fetch });
+      const rec = record("run-traced");
+      await store.put(rec, { span: root });
+      const spans = log.ends.filter((e) => e.name === "http.client");
+      expect(spans.map((e) => [e.parentSpanId, e.attrs])).toEqual([
+        [root.id, { host: "state.example", route: "/runs/put", method: "POST", httpStatus: 200 }],
+      ]);
+      expect(JSON.stringify(spans)).not.toMatch(/Bearer|run-traced|slack:/);
+      const h = new Headers(calls[0]!.headers);
+      expect(parseTraceparent(h.get("traceparent"))?.parentId).toBe(spans[0]!.spanId);
+      expect(h.get("authorization")).toBe("Bearer tok");
+      await store.put(rec);
+      expect(log.ends.filter((e) => e.name === "http.client")).toHaveLength(1);
+      expect(new Headers(calls[1]!.headers).has("traceparent")).toBe(false);
+    } finally {
+      configureInternalHosts(NO_INTERNAL_HOSTS);
+    }
   });
 });

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Provider } from "../../providers/types.js";
 import { authorize } from "../authz/index.js";
-import type { MemoryRecord } from "./types.js";
+import type { MemoryRecord, MemoryStore } from "./types.js";
 import { InMemoryMemoryStore, NullMemoryStore } from "./stores.js";
 import { memoryContextBlock, reflect } from "./index.js";
+import { createTracer } from "../trace/tracer.js";
 
 // The one authorization entry point, spied so the read-path test below can
 // prove it is never consulted (authorization R11: reads are unchanged).
@@ -278,5 +279,20 @@ describe("memoryContextBlock — user scope (#107 PR B)", () => {
     // Both query tokens hit the user notes, one hits the org notes → the user
     // notes outrank across the scope boundary; the limit is not per scope.
     expect(bullets.every((b) => b.includes("user note"))).toBe(true);
+  });
+});
+
+describe("memoryContextBlock — the caller's span (features/tracing.md item 24)", () => {
+  it("hands the span to every scope's retrieve, and nothing when it has none", async () => {
+    const seeded = new InMemoryMemoryStore([rec()], { now: () => NOW });
+    const spy = vi.spyOn(seeded as MemoryStore, "retrieve");
+    const span = createTracer({ clock: () => NOW }).start("dispatch.memory_read", { sinks: [] });
+    await memoryContextBlock("acme", { enabled: true }, seeded, "deploy", "U1", { channelId: "C1" }, span);
+    expect(spy.mock.calls.length).toBeGreaterThan(1);
+    for (const call of spy.mock.calls) expect(call[1]).toEqual({ span });
+    spy.mockClear();
+    await memoryContextBlock("acme", { enabled: true }, seeded, "deploy");
+    expect(spy.mock.calls.length).toBeGreaterThan(0);
+    for (const call of spy.mock.calls) expect(call[1]).toBeUndefined();
   });
 });

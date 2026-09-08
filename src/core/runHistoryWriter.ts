@@ -1,5 +1,6 @@
 import type { RunRecord } from "./runRecord.js";
 import type { RunStore } from "./runStore.js";
+import type { Span, TraceOptions } from "./trace/types.js";
 import { PermanentStoreError, RouteMissingError } from "./runStoreWorker.js";
 
 // Run history (#157, U4 / KTD4): the dispatcher's write path. A finished run's
@@ -51,7 +52,11 @@ export interface RunHistoryWriter {
    *  another sink than the store — the run ledger's one-transaction `finish`
    *  for a tracked run (features/run-history.md item 35) — with the same
    *  retries, accounting and final-beats-provisional rule. */
-  write(record: RunRecord, opts?: { provisional?: boolean; via?: RecordSink }): void;
+  /** `span`: the request's root, handed to the sink's `put` so a Worker store's
+   *  request is an `http.client` child of it (features/tracing.md item 24);
+   *  the record is written after the reply, so that child is usually late —
+   *  recorded with its true times, log-only. */
+  write(record: RunRecord, opts?: { provisional?: boolean; via?: RecordSink; span?: Span }): void;
   /** Writes in flight, retry backoff included — awaited by the shutdown drain. */
   pending(): number;
   /** Records lost for good (retries exhausted, 4xx, or a missing route). */
@@ -63,7 +68,7 @@ export interface RunHistoryWriter {
 }
 
 /** Where a record can be written: the store, or a sink a caller routes one write through. */
-export type RecordSink = Pick<RunStore, "put"> | { put(record: RunRecord): Promise<unknown> };
+export type RecordSink = Pick<RunStore, "put"> | { put(record: RunRecord, trace?: TraceOptions): Promise<unknown> };
 
 export interface RunHistoryWriterOptions {
   store: RecordSink;
@@ -106,7 +111,12 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
     }
   };
 
-  const attemptAll = async (record: RunRecord, flag: ProvisionalFlag | undefined, sink: RecordSink): Promise<void> => {
+  const attemptAll = async (
+    record: RunRecord,
+    flag: ProvisionalFlag | undefined,
+    sink: RecordSink,
+    span: Span | undefined,
+  ): Promise<void> => {
     const attempts = RUN_HISTORY_RETRY_DELAYS_MS.length + 1;
     for (let attempt = 1; ; attempt++) {
       // A provisional write stands down (silently — not a loss) the moment the
@@ -114,7 +124,7 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
       // retry waking from backoff can never clobber the final record.
       if (flag?.superseded) return;
       try {
-        await sink.put(record);
+        await sink.put(record, span ? { span } : undefined);
         if (!flag) persisted(record.id);
         return;
       } catch (err) {
@@ -155,7 +165,7 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
       }
       // attemptAll never rejects (every path returns), but a defensive catch
       // keeps a bug here from surfacing as an unhandled rejection in a run.
-      const p: Promise<void> = attemptAll(record, flag, writeOpts?.via ?? opts.store)
+      const p: Promise<void> = attemptAll(record, flag, writeOpts?.via ?? opts.store, writeOpts?.span)
         .catch((err: unknown) => {
           failures++;
           opts.warn(`[run-history] ${record.id} writer failed unexpectedly: ${describe(err)}`);

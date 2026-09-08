@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { MemoryCandidate, MemoryRecord } from "./types.js";
 import { WorkerMemoryStore, MEMORY_WORKER_TIMEOUT_MS } from "./workerStore.js";
+import { recordingSink } from "../testing/recordingSink.js";
+import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../trace/internalHosts.js";
+import { parseTraceparent } from "../trace/traceparent.js";
+import { createTracer } from "../trace/tracer.js";
 
 // Feature: features/memory.md — the durable MemoryStore (PR3, #85): an HTTPS
 // client to the Memory Worker, mirroring ResidentExecutor's remote plane. The
@@ -181,5 +185,35 @@ describe("WorkerMemoryStore cap on the wire (#253)", () => {
   it("accepts `evicted` records from the Worker (status is part of the wire contract)", async () => {
     const { fetch } = fakeFetch(() => jsonRes({ records: [{ ...record, status: "evicted" }] }));
     expect(await store(fetch).list("org:acme", 5)).toHaveLength(1);
+  });
+});
+
+// features/tracing.md item 24: the retrieve a dispatch makes is an `http.client`
+// child of `dispatch.memory_read`; the trace context rides to our own Worker.
+describe("WorkerMemoryStore trace context", () => {
+  it("retrieve under a span is an http.client child with route /retrieve, POST and the status, no bearer or query text; traceparent rides for the configured host; without a span the call is a plain fetch", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
+    const read = root.start("dispatch.memory_read");
+    configureInternalHosts(internalHostsOf(["https://memory.example"]));
+    try {
+      const { fetch, calls } = fakeFetch(() => jsonRes({ records: [record] }));
+      const s = store(fetch);
+      const q = { scopeKey: "org:acme", query: "deploy secrets", limit: 8 };
+      expect(await s.retrieve(q, { span: read })).toEqual([record]);
+      const spans = log.ends.filter((e) => e.name === "http.client");
+      expect(spans.map((e) => [e.parentSpanId, e.attrs])).toEqual([
+        [read.id, { host: "memory.example", route: "/retrieve", method: "POST", httpStatus: 200 }],
+      ]);
+      expect(JSON.stringify(spans)).not.toMatch(/secret-token|deploy secrets|org:acme/);
+      const h = new Headers(calls[0]!.init.headers);
+      expect(parseTraceparent(h.get("traceparent"))?.parentId).toBe(spans[0]!.spanId);
+      expect(h.get("authorization")).toBe("Bearer secret-token");
+      await s.retrieve(q);
+      expect(log.ends.filter((e) => e.name === "http.client")).toHaveLength(1);
+      expect(new Headers(calls[1]!.init.headers).has("traceparent")).toBe(false);
+    } finally {
+      configureInternalHosts(NO_INTERNAL_HOSTS);
+    }
   });
 });

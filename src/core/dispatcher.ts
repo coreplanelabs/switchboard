@@ -948,7 +948,7 @@ export async function dispatch(
     // catch keeps an early return (repo refusal, ask-once) from leaving the
     // rejection unhandled; the real await below still surfaces a failure where
     // it did.
-    const memoryBlockP = root.span("dispatch.memory_read", () =>
+    const memoryBlockP = root.span("dispatch.memory_read", (span) =>
       memoryContextBlock(
         deps.config.config.organization,
         deps.config.config.memory,
@@ -956,6 +956,7 @@ export async function dispatch(
         directives.text,
         msg.userId,
         { channelId: msg.channelId, repo: repoCtxP.then((ctx) => ctx.repo) },
+        span,
       ),
     );
     memoryBlockP.catch(() => {});
@@ -2056,7 +2057,7 @@ export async function dispatch(
                 diagnosis,
                 seal,
               }),
-              ledgerRun ? { via: ledgerRun.sink } : undefined,
+              { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
             ),
         });
       }
@@ -2714,7 +2715,7 @@ async function runShipBranch(
               diagnosis,
               seal,
             }),
-            ledgerRun ? { via: ledgerRun.sink } : undefined,
+            { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
           ),
       });
     }
@@ -2813,7 +2814,7 @@ async function runChatCommand(
   if (!commands) return { ok: false, text: "" };
   const resolveRepo = async (): Promise<string | undefined> =>
     (await resolveRepoForCommand(deps, msg, await io.history())).repo;
-  const invoke = () => invokeChatCommand({ commands, parsed, msg, config: deps.config, resolveRepo });
+  const invoke = (span: Span) => invokeChatCommand({ commands, parsed, msg, config: deps.config, resolveRepo, span });
   if (parsed.kind === "invoke" && isInlineRunCommand(parsed.id))
     return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace);
   // A config reply, a listing, `help`: no run — the command's own work is the
@@ -2876,7 +2877,7 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
   msg: IncomingMessage,
   command: string,
   io: ChannelIO,
-  execute: () => Promise<T>,
+  execute: (span: Span) => Promise<T>,
   ending: RunEnding,
   trace: RequestTrace,
 ): Promise<T> {
@@ -2919,7 +2920,7 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
     result = await root.span(
       "run.command",
       async (span) => {
-        const r = await execute();
+        const r = await execute(span);
         const steps = sanitizeGraftedSteps(r.trace);
         if (steps.length > 0)
           graftResidentSteps(steps, {
@@ -2977,6 +2978,7 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
               diagnosis,
               seal,
             }),
+            { span: root },
           ),
       });
     }

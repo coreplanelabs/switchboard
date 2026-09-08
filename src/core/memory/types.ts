@@ -9,6 +9,8 @@
  *  live in thread history; duplicating them defeats the token win. Every record
  *  keeps provenance (`sourceThreadKey`/`sourceRunId`) so a distilled fact can be
  *  re-grounded in the run that produced it. */
+import type { TraceOptions } from "../trace/types.js";
+
 export interface MemoryRecord {
   /** Internal id, namespaced per AGENTS.md invariant 4 (`mem:<scopeKey>:<n>`). */
   id: string;
@@ -66,7 +68,7 @@ export interface MemoryQuery {
 export interface MemoryStore {
   /** Scope-partitioned retrieval, ranked by the pure scorer, oldest-irrelevant
    *  dropped. Returns [] when nothing matches. */
-  retrieve(q: MemoryQuery): Promise<MemoryRecord[]>;
+  retrieve(q: MemoryQuery, trace?: TraceOptions): Promise<MemoryRecord[]>;
   /** Persist distilled candidates. Dedup (identical normalized text → bump
    *  `useCount`) and supersede (`supersedes` id → old record soft-deleted) live
    *  inside the store. Driven by the post-run reflection pass (reflection.ts). */

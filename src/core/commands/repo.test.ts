@@ -15,6 +15,7 @@ import {
   type RepoCommandDeps,
 } from "./repo.js";
 import type { RepoInspector } from "../../execution/githubRepoInspect.js";
+import { createTracer } from "../trace/tracer.js";
 
 // Feature: features/resident-repos.md (items 32, 41) / features/command-registry.md
 // (phase 4b): the whole `repo.*` group as registry commands — `repo.list` (open,
@@ -946,5 +947,22 @@ describe("repo test / repo build (deterministic ops, U6/KTD8)", () => {
     expect(text).toContain("…");
     expect(text).toContain("THE END");
     expect(text.length).toBeLessThan(3200);
+  });
+});
+
+describe("adminOf — the command's span (features/tracing.md item 24)", () => {
+  it("binds the admin client to the handler's span through withSpan, never without a span, and uses a client without the view as is", async () => {
+    const base = mockClient();
+    const bound: unknown[] = [];
+    const withView: ResidentAdminClient = { ...base, withSpan: (span) => (bound.push(span), base) };
+    const span = createTracer({ clock: () => 1 }).start("run.command", { sinks: [] });
+    const viewed = bind({ admin: withView });
+    expect((await viewed.invoke("repo.list", {}, chat("slack:URANDOM"), { span })).ok).toBe(true);
+    expect(bound).toEqual([span]);
+    expect(base.residents).toHaveBeenCalledTimes(1);
+    await viewed.invoke("repo.list", {}, chat("slack:URANDOM"));
+    expect(bound).toEqual([span]);
+    const plain = bind({ admin: mockClient() });
+    expect((await plain.invoke("repo.list", {}, chat("slack:URANDOM"), { span })).ok).toBe(true);
   });
 });

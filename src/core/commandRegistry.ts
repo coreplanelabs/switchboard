@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { runDurationMs } from "./runDuration.js";
 import { systemClock } from "./trace/clock.js";
+import type { Span, TraceOptions } from "./trace/types.js";
 import { formatDuration } from "./time/formatDuration.js";
 import { authorize } from "./authz/authorize.js";
 import type { Actor, Resource } from "./authz/types.js";
@@ -107,6 +108,10 @@ export interface CommandContext<A extends readonly ArgDef[], O extends OptionsSc
   options: z.output<O>;
   caller: Caller;
   deps: D;
+  /** The span the surface runs the command under — the dispatcher's
+   *  `run.command` (features/tracing.md item 24); a handler binds its clients
+   *  to it. Absent on a surface without a trace (the CLI, a test). */
+  span?: Span;
 }
 
 export interface CommandDef<
@@ -352,7 +357,7 @@ export class CommandRegistry<D> {
     return !authorize(caller.actor, cmd.action, { type: "command", id: cmd.id }).allow;
   }
 
-  async invoke(id: string, input: CommandInput, caller: Caller, deps: D): Promise<InvokeResult> {
+  async invoke(id: string, input: CommandInput, caller: Caller, deps: D, trace?: TraceOptions): Promise<InvokeResult> {
     const cmd = this.commands.get(id);
     // A command that is not exposed on the caller's surface does not exist there.
     if (!cmd || !CommandRegistry.exposedTo(cmd, caller.kind)) {
@@ -391,6 +396,7 @@ export class CommandRegistry<D> {
         options: parsed.options,
         caller,
         deps,
+        ...(trace?.span ? { span: trace.span } : {}),
       });
       return done({ ok: true, value });
     } catch (err) {
@@ -429,7 +435,7 @@ export class CommandRegistry<D> {
 export interface CommandInvoker {
   list(): CommandDef<unknown>[];
   get(id: string): CommandDef<unknown> | undefined;
-  invoke(id: string, input: CommandInput, caller: Caller): Promise<InvokeResult>;
+  invoke(id: string, input: CommandInput, caller: Caller, trace?: TraceOptions): Promise<InvokeResult>;
   /** Whether `id` has a deferred outcome, and that outcome (see `CommandDef.settle`). */
   settles(id: string): boolean;
   settle(id: string, value: JsonValue, caller: Caller): Promise<SettledOutcome | undefined>;
@@ -439,7 +445,7 @@ export function bindCommands<D>(registry: CommandRegistry<D>, deps: D): CommandI
   return {
     list: () => registry.list() as CommandDef<unknown>[],
     get: (id) => registry.get(id) as CommandDef<unknown> | undefined,
-    invoke: (id, input, caller) => registry.invoke(id, input, caller, deps),
+    invoke: (id, input, caller, trace) => registry.invoke(id, input, caller, deps, trace),
     settles: (id) => registry.settles(id),
     settle: (id, value, caller) => registry.settle(id, value, caller, deps),
   };

@@ -1,4 +1,6 @@
 import { errorSuffix } from "./workerError.js";
+import { tracedFetch } from "./trace/tracedFetch.js";
+import type { Span, TraceOptions } from "./trace/types.js";
 import {
   isRunListItem,
   isRunRecord,
@@ -83,6 +85,9 @@ export interface WorkerRunStoreOptions {
   fetch?: typeof fetch;
 }
 
+/** The Worker's routes, as a span names them. */
+type RunStoreRoute = "/runs/put" | "/runs/get" | "/runs/summary" | "/runs/list" | "/runs/events" | "/runs/delete";
+
 export class WorkerRunStore implements RunStore {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -92,7 +97,7 @@ export class WorkerRunStore implements RunStore {
     this.fetchImpl = opts.fetch ?? fetch;
   }
 
-  async put(record: RunRecord): Promise<PutResult> {
+  async put(record: RunRecord, trace?: TraceOptions): Promise<PutResult> {
     if (!RUN_ID_PATTERN.test(record.id))
       throw new PermanentStoreError(`run store: refusing to put malformed id ${JSON.stringify(record.id)}`);
     const body: Record<string, unknown> = { storeKey: this.opts.storeKey, record };
@@ -100,7 +105,7 @@ export class WorkerRunStore implements RunStore {
       body.policy = this.opts.policy;
       if (this.opts.policyUpdatedAt !== undefined) body.policyUpdatedAt = this.opts.policyUpdatedAt;
     }
-    const data = await this.post("/runs/put", body);
+    const data = await this.post("/runs/put", body, trace?.span);
     if (
       data.ok !== true ||
       typeof data.retained !== "number" ||
@@ -160,19 +165,27 @@ export class WorkerRunStore implements RunStore {
 
   /** POST a JSON body and classify the outcome. The body is a STRING; the
    *  runtime sets its numeric Content-Length (never hand-set — see header). */
-  private async post(path: string, payload: unknown): Promise<Record<string, unknown>> {
+  private async post(path: RunStoreRoute, payload: unknown, span?: Span): Promise<Record<string, unknown>> {
     const body = JSON.stringify(payload);
     let res: Response;
     try {
-      res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.opts.token}`,
+      // One `http.client` span under `span` when the caller has one (the
+      // history writer's; features/tracing.md item 24), the route being the
+      // path literal; the plain fetch otherwise.
+      res = await tracedFetch(
+        span,
+        `${this.baseUrl}${path}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${this.opts.token}`,
+          },
+          body,
+          signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
         },
-        body,
-        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
-      });
+        { route: path, fetchImpl: this.fetchImpl },
+      );
     } catch (err) {
       throw new TransientStoreError(`run store ${path}: ${describeError(err)}`);
     }

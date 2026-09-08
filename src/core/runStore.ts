@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { RunEvent } from "./runEvents.js";
+import type { TraceOptions } from "./trace/types.js";
 import {
   applyRetention,
   clampListLimit,
@@ -63,7 +64,9 @@ export interface RunEventsPage {
 }
 
 export interface RunStore {
-  put(record: RunRecord): Promise<PutResult>;
+  /** `trace.span`: the caller's span, under which a Worker store's request is an
+   *  `http.client` span (features/tracing.md item 24); the local stores ignore it. */
+  put(record: RunRecord, trace?: TraceOptions): Promise<PutResult>;
   /** The record, or null when unknown, expired, or the id is malformed — one not-found shape (R4). */
   get(id: string): Promise<RunRecord | null>;
   /** The record WITHOUT its events (the listing row, `bytes` included) — the
