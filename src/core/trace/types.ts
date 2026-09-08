@@ -98,6 +98,10 @@ export interface RootOptions {
   sinks: SpanSink[];
   startedAt?: number;
   attrs?: SpanAttrs;
+  /** A remote parent to adopt — a Worker's authenticated branch reading the
+   *  bot's `traceparent` (features/tracing.md item 22): the root joins that
+   *  trace as a child of that span instead of minting its own. */
+  parent?: { traceId: string; parentId: string };
 }
 
 /** The one production implementation is `createTracer`; the seams with two

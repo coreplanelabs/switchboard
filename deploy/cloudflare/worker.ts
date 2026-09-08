@@ -26,6 +26,16 @@ import {
   scheduleForCron,
   type ScheduleFiring,
 } from "../../src/core/schedules.ts";
+import { systemClock } from "../../src/core/trace/clock.ts";
+import { createTracer } from "../../src/core/trace/tracer.ts";
+import { shimRoute, stripTraceContext, withTraceContext, workerLogSink } from "../../src/core/trace/workerTrace.ts";
+
+// The Worker's own spans (features/tracing.md item 22): one `bot-shim.fetch`
+// root per routed request and one `cron.<schedule>` root per fired schedule,
+// on a `slow` log sink whose filter drops the line an unauthenticated refusal
+// would leave. The public edge never adopts a caller's trace context.
+const tracer = createTracer({ clock: systemClock });
+const traceSinks = [workerLogSink((line) => console.log(line))];
 
 interface Env {
   SWITCHBOARD: DurableObjectNamespace<SwitchboardServer>;
@@ -207,9 +217,29 @@ async function recordFiring(env: Env, firing: ScheduleFiring): Promise<void> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // The one route the Worker answers itself; everything else is the container's.
-    if (new URL(request.url).pathname === "/admin/restart") return handleAdminRestart(request, env);
-    return getContainer(env.SWITCHBOARD, INSTANCE).fetch(request);
+    const pathname = new URL(request.url).pathname;
+    // The public edge (features/tracing.md item 22): whatever trace context the
+    // caller sent is stripped, and what the container sees carries this
+    // Worker's own root. A static asset or the live view's SSE stream gets no
+    // root; a refusal's line is dropped by the sink's filter.
+    const inbound = stripTraceContext(request);
+    const route = shimRoute(pathname);
+    if (route === undefined) return getContainer(env.SWITCHBOARD, INSTANCE).fetch(inbound);
+    const root = tracer.start("bot-shim.fetch", { sinks: traceSinks, attrs: { route } });
+    try {
+      const forwarded = withTraceContext(inbound, root);
+      // The one route the Worker answers itself; everything else is the container's.
+      const res =
+        pathname === "/admin/restart"
+          ? await handleAdminRestart(forwarded, env)
+          : await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded);
+      root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
+      return res;
+    } catch (err) {
+      root.fail(err);
+      root.end("error");
+      throw err;
+    }
   },
 
   // Every cron trigger in wrangler.jsonc is a `bot` schedule in the registry
@@ -253,24 +283,38 @@ export default {
       );
       return;
     }
+    // The firing is one `cron.<schedule>` root (features/tracing.md item 22):
+    // the ingress request carries it, and the recorded firing names its trace.
+    const root = tracer.start(`cron.${schedule.name}`, { sinks: traceSinks, startedAt: firedAt });
     let firing: ScheduleFiring;
     try {
       const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
-        new Request(`${INTERNAL}/ingress`, {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${plan.token}` },
-          body: JSON.stringify(plan.body),
-        }),
+        withTraceContext(
+          new Request(`${INTERNAL}/ingress`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${plan.token}` },
+            body: JSON.stringify(plan.body),
+          }),
+          root,
+        ),
       );
-      firing = interpretIngressResponse(schedule, firedAt, res.status, await res.text().catch(() => ""));
+      firing = {
+        ...interpretIngressResponse(schedule, firedAt, res.status, await res.text().catch(() => "")),
+        traceId: root.traceId,
+      };
     } catch (err) {
       firing = {
         schedule: schedule.name,
         firedAt,
         outcome: "ingress-error",
         detail: `fetch failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300),
+        traceId: root.traceId,
       };
     }
+    root.end(firing.outcome === "ingress-error" ? "error" : "ok", {
+      outcome: firing.outcome,
+      ...(firing.runId ? { runId: firing.runId } : {}),
+    });
     // Ids, outcome, and the reply's first line only — never a token.
     console.log(
       `[schedule] ${schedule.name} → ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""}${firing.detail ? ` — ${firing.detail}` : ""}`,

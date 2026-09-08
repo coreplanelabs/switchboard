@@ -57,10 +57,19 @@ import {
   type SealedCredential,
 } from "../../src/mcp/registry.ts";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.ts";
+import { systemClock } from "../../src/core/trace/clock.ts";
+import { createTracer } from "../../src/core/trace/tracer.ts";
+import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrace.ts";
 
 /** The commit this bundle was built from, injected by the deploy
  *  (`deploy/bin/build-stamp.mjs`) and answered on GET /healthz as `build`. */
 const BUILD = injectedBuildStamp();
+
+// The Worker's own spans (features/tracing.md item 22): one `state.fetch` root
+// per authenticated request, joining the bot's trace, on a `slow` log sink
+// whose filter drops the line a refusal would leave.
+const tracer = createTracer({ clock: systemClock });
+const traceSinks = [workerLogSink((line) => console.log(line))];
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
 // (src/core/memory/workerStore.ts) — cross-session memory PR3 (#85). One
@@ -2390,118 +2399,152 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
   return json({ ok: true, deleted });
 }
 
+const ROUTES = new Set([
+  ...CONFIG_ROUTES,
+  "/retrieve",
+  "/write",
+  "/list",
+  "/forget",
+  "/schedules/record",
+  "/schedules/latest",
+  "/runs/put",
+  "/runs/get",
+  "/runs/summary",
+  "/runs/list",
+  "/runs/events",
+  "/runs/delete",
+  ...LEDGER_ROUTES,
+]);
+
+/** The two decisions `fetch` makes once and hands down: is the path one of
+ *  ours, and did the bearer check out. `handleRequest` answers from them in the
+ *  order it always did (404, then 405, then 401) and never re-decides. */
+interface Admission {
+  known: boolean;
+  authorized: boolean;
+}
+
+/** Every request, once `fetch` has decided whether it gets a root. */
+async function handleRequest(request: Request, env: Env, admission: Admission): Promise<Response> {
+  const url = new URL(request.url);
+  if (url.pathname === "/healthz" && request.method === "GET")
+    return json({ ok: true, build: BUILD, features: ["memory", "schedules", "runs", "config"] });
+  if (!admission.known) return json({ error: "not found" }, 404);
+  if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
+  if (!admission.authorized) return json({ error: "unauthorized" }, 401);
+
+  // Size fence BEFORE parsing: a caller holding a valid bearer still can't
+  // make us JSON-parse an oversized body just to be told 400 by the field
+  // caps. Content-Length must be a plain digit string (RFC 9110) — that
+  // rules out the absent header of a chunked/streamed body, a blank value,
+  // and forms `Number()` would accept ("0x1000", "5e2", "12.5"); each is
+  // 411 Length Required. A well-formed length over the cap is 413. Every
+  // legitimate client (WorkerMemoryStore) sends a sized JSON body. The cap
+  // is per route — decided AFTER routing and before the parse: /runs/put
+  // carries a whole run record (budgeted to 1.5 MiB upstream) and gets 2 MiB;
+  // every other route keeps the 512 KB fence.
+  const header = request.headers.get("content-length");
+  if (header === null || !/^\d+$/.test(header.trim())) {
+    return json({ error: "body must declare a numeric Content-Length" }, 411);
+  }
+  // The ledger's bulk routes carry a finished record, a transcript chunk, or
+  // an event batch (32 × 64 KiB) and share /runs/put's fence.
+  const maxBodyBytes = WIDE_BODY_ROUTES.has(url.pathname) ? MAX_RUN_PUT_BODY_BYTES : MAX_BODY_BYTES;
+  if (Number(header) > maxBodyBytes) {
+    return json({ error: `body must be at most ${maxBodyBytes} bytes` }, 413);
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "body must be valid JSON" }, 400);
+  }
+
+  if (url.pathname === "/schedules/record") {
+    const parsed = parseScheduleFiring(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const firing = parsed.value;
+    const retained = await env.SCHEDULES.get(env.SCHEDULES.idFromName(SCHEDULES_OBJECT)).record(firing);
+    console.log(
+      `[schedules/record] ${firing.schedule} ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""} (${retained} retained)`,
+    );
+    return json({ ok: true, retained });
+  }
+  if (url.pathname === "/schedules/latest") {
+    const firings = await env.SCHEDULES.get(env.SCHEDULES.idFromName(SCHEDULES_OBJECT)).latest();
+    console.log(`[schedules/latest] -> ${firings.length} schedules`);
+    return json({ firings });
+  }
+  if (url.pathname.startsWith("/runs/")) return handleRuns(url.pathname, body, env);
+  if (url.pathname.startsWith("/config/")) return handleConfig(url.pathname, body, env);
+
+  if (url.pathname === "/retrieve") {
+    const parsed = parseRetrieve(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const { scopeKey, query, limit } = parsed.value;
+    const stub = env.MEMORY.get(env.MEMORY.idFromName(scopeKey));
+    const records = await stub.retrieve(scopeKey, query, limit);
+    // Observability (counts + scopeKey only, never record content/PII): makes
+    // `wrangler tail switchboard-memory` show retrieve traffic and depth.
+    console.log(`[retrieve] ${scopeKey} -> ${records.length} records`);
+    return json({ records });
+  }
+
+  if (url.pathname === "/list") {
+    const parsed = parseList(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const { scopeKey, limit, query } = parsed.value;
+    const records = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).list(scopeKey, limit, query);
+    console.log(`[list] ${scopeKey} -> ${records.length} records`);
+    return json({ records });
+  }
+  if (url.pathname === "/forget") {
+    const parsed = parseForget(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const { scopeKey, id } = parsed.value;
+    const forgotten = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).forget(scopeKey, id);
+    // Observability: scope + id only (ids carry no record text).
+    console.log(`[forget] ${scopeKey} ${id} -> ${forgotten}`);
+    return json({ ok: true, forgotten });
+  }
+
+  const parsed = parseWrite(body);
+  if (!parsed.ok) return json({ error: parsed.error }, 400);
+  const { scopeKey, records, cap } = parsed.value;
+  const stub = env.MEMORY.get(env.MEMORY.idFromName(scopeKey));
+  const counts = await stub.write(scopeKey, records, cap);
+  // Observability (counts + scopeKey only, never record content/PII): confirms
+  // the reflection write fired, how many candidates it carried, and whether
+  // the per-scope cap evicted anything.
+  console.log(
+    `[write] ${scopeKey} <- ${records.length} candidates${counts.evicted > 0 ? ` (evicted ${counts.evicted})` : ""}`,
+  );
+  return json({ ok: true, ...counts });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // One `state.fetch` root per authenticated, routed request (features/
+    // tracing.md item 22), adopting the bot's trace context — never before the
+    // bearer checked out, so a refusal, an unknown path or the unauthenticated
+    // /healthz leaves no line and the route attr is always a word from ROUTES.
     const url = new URL(request.url);
-    if (url.pathname === "/healthz" && request.method === "GET")
-      return json({ ok: true, build: BUILD, features: ["memory", "schedules", "runs", "config"] });
-    const ROUTES = new Set([
-      ...CONFIG_ROUTES,
-      "/retrieve",
-      "/write",
-      "/list",
-      "/forget",
-      "/schedules/record",
-      "/schedules/latest",
-      "/runs/put",
-      "/runs/get",
-      "/runs/summary",
-      "/runs/list",
-      "/runs/events",
-      "/runs/delete",
-      ...LEDGER_ROUTES,
-    ]);
-    if (!ROUTES.has(url.pathname)) return json({ error: "not found" }, 404);
-    if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
-    if (!authorized(env, request)) return json({ error: "unauthorized" }, 401);
-
-    // Size fence BEFORE parsing: a caller holding a valid bearer still can't
-    // make us JSON-parse an oversized body just to be told 400 by the field
-    // caps. Content-Length must be a plain digit string (RFC 9110) — that
-    // rules out the absent header of a chunked/streamed body, a blank value,
-    // and forms `Number()` would accept ("0x1000", "5e2", "12.5"); each is
-    // 411 Length Required. A well-formed length over the cap is 413. Every
-    // legitimate client (WorkerMemoryStore) sends a sized JSON body. The cap
-    // is per route — decided AFTER routing and before the parse: /runs/put
-    // carries a whole run record (budgeted to 1.5 MiB upstream) and gets 2 MiB;
-    // every other route keeps the 512 KB fence.
-    const header = request.headers.get("content-length");
-    if (header === null || !/^\d+$/.test(header.trim())) {
-      return json({ error: "body must declare a numeric Content-Length" }, 411);
-    }
-    // The ledger's bulk routes carry a finished record, a transcript chunk, or
-    // an event batch (32 × 64 KiB) and share /runs/put's fence.
-    const maxBodyBytes = WIDE_BODY_ROUTES.has(url.pathname) ? MAX_RUN_PUT_BODY_BYTES : MAX_BODY_BYTES;
-    if (Number(header) > maxBodyBytes) {
-      return json({ error: `body must be at most ${maxBodyBytes} bytes` }, 413);
-    }
-
-    let body: unknown;
+    const admission: Admission = { known: ROUTES.has(url.pathname), authorized: authorized(env, request) };
+    if (!admission.known || !admission.authorized) return handleRequest(request, env, admission);
+    const root = startAdoptedRoot(tracer, "state.fetch", {
+      sinks: traceSinks,
+      traceparent: request.headers.get("traceparent"),
+      attrs: { route: url.pathname },
+    });
     try {
-      body = await request.json();
-    } catch {
-      return json({ error: "body must be valid JSON" }, 400);
+      const res = await handleRequest(request, env, admission);
+      root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
+      return res;
+    } catch (err) {
+      root.fail(err);
+      root.end("error");
+      throw err;
     }
-
-    if (url.pathname === "/schedules/record") {
-      const parsed = parseScheduleFiring(body);
-      if (!parsed.ok) return json({ error: parsed.error }, 400);
-      const firing = parsed.value;
-      const retained = await env.SCHEDULES.get(env.SCHEDULES.idFromName(SCHEDULES_OBJECT)).record(firing);
-      console.log(
-        `[schedules/record] ${firing.schedule} ${firing.outcome}${firing.runId ? ` run ${firing.runId}` : ""} (${retained} retained)`,
-      );
-      return json({ ok: true, retained });
-    }
-    if (url.pathname === "/schedules/latest") {
-      const firings = await env.SCHEDULES.get(env.SCHEDULES.idFromName(SCHEDULES_OBJECT)).latest();
-      console.log(`[schedules/latest] -> ${firings.length} schedules`);
-      return json({ firings });
-    }
-    if (url.pathname.startsWith("/runs/")) return handleRuns(url.pathname, body, env);
-    if (url.pathname.startsWith("/config/")) return handleConfig(url.pathname, body, env);
-
-    if (url.pathname === "/retrieve") {
-      const parsed = parseRetrieve(body);
-      if (!parsed.ok) return json({ error: parsed.error }, 400);
-      const { scopeKey, query, limit } = parsed.value;
-      const stub = env.MEMORY.get(env.MEMORY.idFromName(scopeKey));
-      const records = await stub.retrieve(scopeKey, query, limit);
-      // Observability (counts + scopeKey only, never record content/PII): makes
-      // `wrangler tail switchboard-memory` show retrieve traffic and depth.
-      console.log(`[retrieve] ${scopeKey} -> ${records.length} records`);
-      return json({ records });
-    }
-
-    if (url.pathname === "/list") {
-      const parsed = parseList(body);
-      if (!parsed.ok) return json({ error: parsed.error }, 400);
-      const { scopeKey, limit, query } = parsed.value;
-      const records = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).list(scopeKey, limit, query);
-      console.log(`[list] ${scopeKey} -> ${records.length} records`);
-      return json({ records });
-    }
-    if (url.pathname === "/forget") {
-      const parsed = parseForget(body);
-      if (!parsed.ok) return json({ error: parsed.error }, 400);
-      const { scopeKey, id } = parsed.value;
-      const forgotten = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).forget(scopeKey, id);
-      // Observability: scope + id only (ids carry no record text).
-      console.log(`[forget] ${scopeKey} ${id} -> ${forgotten}`);
-      return json({ ok: true, forgotten });
-    }
-
-    const parsed = parseWrite(body);
-    if (!parsed.ok) return json({ error: parsed.error }, 400);
-    const { scopeKey, records, cap } = parsed.value;
-    const stub = env.MEMORY.get(env.MEMORY.idFromName(scopeKey));
-    const counts = await stub.write(scopeKey, records, cap);
-    // Observability (counts + scopeKey only, never record content/PII): confirms
-    // the reflection write fired, how many candidates it carried, and whether
-    // the per-scope cap evicted anything.
-    console.log(
-      `[write] ${scopeKey} <- ${records.length} candidates${counts.evicted > 0 ? ` (evicted ${counts.evicted})` : ""}`,
-    );
-    return json({ ok: true, ...counts });
   },
 } satisfies ExportedHandler<Env>;
