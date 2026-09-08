@@ -1313,7 +1313,13 @@ export class RunHistoryDO extends DurableObject<Env> {
           .exec<{ kind: string; json: string }>(`SELECT kind, json FROM run_jobs WHERE run_id = ?`, row.runId)
           .toArray()
           .map((r) => ({ kind: r.kind, payload: JSON.parse(r.json) as unknown }));
-        out.push({ row: { ...row, ownerGen: gen, leaseUntil: now + leaseMs, phase: "live" }, lastStep, inbox, jobs });
+        out.push({
+          row: { ...row, ownerGen: gen, leaseUntil: now + leaseMs, phase: "live" },
+          reclaimedFrom: row.phase,
+          lastStep,
+          inbox,
+          jobs,
+        });
       }
     });
     return out;
@@ -1321,6 +1327,13 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   async listLive(): Promise<LiveRunRow[]> {
     return this.sql.exec<LiveRow>(`SELECT * FROM live_runs ORDER BY started_at ASC`).toArray().map(rowToLive);
+  }
+
+  /** The events a live run has appended so far (item 30), in seq order — what
+   *  a reclaim closes an unresumable run's record with. The finished-runs
+   *  reads never see a live run, so this is the one way at its events. */
+  async liveEvents(runId: string): Promise<StoredRunEvent[]> {
+    return parseEventRows(this.eventRows(runId, 0, Number.MAX_SAFE_INTEGER));
   }
 
   // ---- policy ---------------------------------------------------------------
@@ -2190,6 +2203,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/finish",
   "/runs/reclaim",
   "/runs/live",
+  "/runs/live-events",
   "/runs/transcript/owner",
   "/runs/transcript/write",
   "/runs/transcript/read",
@@ -2380,6 +2394,7 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (typeof b.message !== "object" || b.message === null) return json({ error: "message must be an object" }, 400);
     return json(await stub.pushInbox(runId.value, b.message as Record<string, unknown>));
   }
+  if (pathname === "/runs/live-events") return json({ events: await stub.liveEvents(runId.value) });
   if (pathname === "/runs/stop") {
     if (b.mode !== "soft" && b.mode !== "hard") return json({ error: "mode must be soft or hard" }, 400);
     return json(await stub.requestStop(runId.value, b.mode, now));

@@ -98,7 +98,7 @@ const openReq = (over: Partial<OpenRunRequest> = {}): OpenRunRequest => ({
   card: { channel: "C1", ts: "1.1" },
   system: "you are a reviewer",
   tools: [{ name: "bash", description: "run", inputSchema: { type: "object" } }],
-  seed: [user("earlier"), assistant("sure"), user("go")],
+  seed: { messages: [user("earlier"), assistant("sure"), user("go")], budgetMs: 600_000 },
   ...over,
 });
 
@@ -206,7 +206,9 @@ describe("open — claim and seed", () => {
 
   it("a seed the transcript refuses (a part over the row budget) detaches the run — it stays claimed, so its finish still clears the row", async () => {
     const { ledger, wt, warnings, fallbackPuts } = harness();
-    const run = (await wt.open(openReq({ seed: [user("x".repeat(TRANSCRIPT_PART_BYTES + 1))] })))!;
+    const run = (await wt.open(
+      openReq({ seed: { messages: [user("x".repeat(TRANSCRIPT_PART_BYTES + 1))], budgetMs: 600_000 } }),
+    ))!;
     expect(run.tracked()).toBe(false);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/detached: seed failed/);
@@ -219,12 +221,27 @@ describe("open — claim and seed", () => {
     expect(fallbackPuts).toEqual([]);
   });
 
+  it("a seed record the ledger refuses detaches the run: the seed landed but nothing judges it, so it is not resumable", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const ledger = overriding(inner, {
+      step: async (runId, gen, record, turns) =>
+        record.step === 0 ? { ok: false, reason: "fenced" } : inner.step(runId, gen, record, turns),
+    });
+    const { wt, warnings } = harness({ ledger });
+    const run = (await wt.open(openReq()))!;
+    expect(run.tracked()).toBe(false);
+    expect(warnings[0]).toMatch(/detached: seed record refused \(fenced\)/);
+    expect((await inner.readTranscript("r1")).turns).toBe(3);
+    expect(inner.steps.get("r1")).toBeUndefined();
+  });
+
   it("a run without a model loop of its own (a ship pipeline) is claimed without a seed", async () => {
     const { ledger, wt } = harness();
     const run = await wt.open(openReq({ seed: undefined, system: "", tools: [] }));
     expect(run?.tracked()).toBe(true);
     expect(ledger.live.get("r1")?.system).toBe("");
     expect(await ledger.readTranscript("r1")).toMatchObject({ complete: true, turns: 0 });
+    expect(ledger.steps.get("r1")).toBeUndefined(); // no seed record either: a reclaim closes it
   });
 });
 
@@ -249,6 +266,17 @@ describe("step — turns first, then the record", () => {
       }),
     );
     expect(ledger.steps.get("r1")).toEqual([
+      // The seed record: step 0, nothing in flight, the seed's length, the whole budget.
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 3,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 600_000,
+        turn: 0,
+        iteration: 0,
+      },
       {
         step: 1,
         seq: 2,
@@ -285,7 +313,7 @@ describe("step — turns first, then the record", () => {
     expect(run.tracked()).toBe(false);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/step 1 refused \(fenced\)/);
-    expect(ledger.steps.get("r1")).toBeUndefined();
+    expect(ledger.steps.get("r1")).toHaveLength(1); // the seed record alone
   });
 
   it("a transient step failure is retried once, then detaches; a permanent one detaches at once", async () => {
@@ -294,6 +322,7 @@ describe("step — turns first, then the record", () => {
     let mode: "flaky" | "dead" | "permanent" = "flaky";
     const ledger = overriding(inner, {
       step: async (...a) => {
+        if (a[2].step === 0) return inner.step(...a); // the seed record is not under test here
         calls.push(mode);
         if (mode === "permanent") throw new PermanentStoreError("413");
         if (mode === "dead" || calls.length === 1) throw new TransientStoreError("timeout");
@@ -306,7 +335,7 @@ describe("step — turns first, then the record", () => {
     expect(calls).toHaveLength(2); // one retry, then it landed
     expect(sleeps).toEqual([200]); // after a backoff, not at once
     expect(run.tracked()).toBe(true);
-    expect(inner.steps.get("r1")).toHaveLength(1);
+    expect(inner.steps.get("r1")).toHaveLength(2); // the seed record + step 1
 
     mode = "dead";
     await run.step(step({ firstIdx: 4, turn: 2 }));

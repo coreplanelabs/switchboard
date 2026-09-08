@@ -89,7 +89,13 @@ export interface OpenRunRequest {
    *  absent for a run without one loop of its own (a ship pipeline), which is
    *  tracked for the live index and the finish but closes `interrupted` at a
    *  reclaim. */
-  seed?: ChatMessage[];
+  seed?: {
+    messages: ChatMessage[];
+    /** The run's whole wall-clock budget (`agent.maxMinutes`), recorded as the
+     *  seed record's `remainingMs` — paired with the messages so a seed can
+     *  never be written without it. */
+    budgetMs: number;
+  };
   /** A stop another generation requested (`/runs/stop` on a different
    *  container), relayed by the heartbeat — once per mode. */
   onStop?: (mode: StopMode) => void;
@@ -253,11 +259,35 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.stopHeartbeat();
     }
 
-    async seed(messages: ChatMessage[]): Promise<void> {
+    /** The seed, then the seed record: step 0 with no calls in flight and
+     *  `turnIndex` = the seed's length, so a reclaim always has a step record
+     *  to judge the transcript against (`transcriptCompleteness`) — a row with
+     *  no record at all was killed before its conversation was stored and
+     *  closes `interrupted`. */
+    async seed(messages: ChatMessage[], budgetMs: number): Promise<void> {
       const turns: TranscriptTurn[] = messages.map((message, idx) => ({ idx, message }));
       try {
-        const result = await ledger.seed(this.runId, gen, turns);
-        if (!result.ok) this.detach(`seed refused (${result.reason})`);
+        const seeded = await ledger.seed(this.runId, gen, turns);
+        if (!seeded.ok) {
+          this.detach(`seed refused (${seeded.reason})`);
+          return;
+        }
+        const recorded = await ledger.step(
+          this.runId,
+          gen,
+          {
+            step: 0,
+            seq: this.lastSeq,
+            turnIndex: messages.length,
+            inFlight: [],
+            inboxConsumedSeq: 0,
+            remainingMs: budgetMs,
+            turn: 0,
+            iteration: 0,
+          },
+          [],
+        );
+        if (!recorded.ok) this.detach(`seed record refused (${recorded.reason})`);
       } catch (err) {
         this.detach(`seed failed: ${describe(err)}`);
       }
@@ -379,7 +409,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     async open(req) {
       if ((await claim(req)) !== "ok") return undefined;
       const run = new TrackedRun(req);
-      if (req.seed) await run.seed(req.seed);
+      if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs);
       run.startHeartbeat();
       return run;
     },

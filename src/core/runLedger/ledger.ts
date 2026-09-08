@@ -70,4 +70,8 @@ export interface RunLedger {
   reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]>;
   listLive(): Promise<LiveRunRow[]>;
   readTranscript(runId: string): Promise<AssembledTranscript>;
+  /** The events appended so far for a LIVE run, in `seq` order — what a
+   *  reclaim closes an unresumable run's record with (the finished-runs routes
+   *  never see a live run). Empty for an unknown run. */
+  readEvents(runId: string): Promise<AppendableEvent[]>;
 }

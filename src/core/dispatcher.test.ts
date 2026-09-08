@@ -8257,7 +8257,7 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     vi.mocked(makeExecutor).mockClear();
   });
 
-  function wired(provider: Provider, over: { ledger?: InMemoryRunLedger; gen?: string } = {}) {
+  function wired(provider: Provider, over: { ledger?: InMemoryRunLedger; gen?: string; yaml?: string } = {}) {
     const registry = new RunRegistry({ genId: () => "run-l", genToken: () => "tok" });
     const store = new InMemoryRunStore();
     const ledger = over.ledger ?? new InMemoryRunLedger();
@@ -8269,7 +8269,7 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
       onPersisted: (id) => registry.markPersisted(id),
       sleep: async () => {},
     });
-    const deps = makeDeps(YAML_FIXTURE, provider);
+    const deps = makeDeps(over.yaml ?? YAML_FIXTURE, provider);
     deps.runRegistry = registry;
     deps.runHistoryWriter = writer;
     deps.runLedger = createLedgerWriteThrough({
@@ -8362,6 +8362,7 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     // transcript grew by this step's assistant turn (and, by the second call,
     // its results turn is not yet written — that rides with the next step).
     expect(seen.stepsAtSecondCall).toEqual([
+      expect.objectContaining({ step: 0, turnIndex: seedTurns, inFlight: [], remainingMs: 5 * 60_000 }), // general: 5 min
       expect.objectContaining({
         step: 1,
         turnIndex: seedTurns + 1,
@@ -8418,6 +8419,36 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     expect(fallbackPuts).toEqual([]);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("belongs to run stale");
+  });
+
+  it("the finish reaches the ledger BEFORE the workspace release completes (item 36), and the final status rides on the row before finishing: a slow sandbox teardown never keeps the thread's row live after the reply", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const ledger = new InMemoryRunLedger();
+    const order: string[] = [];
+    let stateAtReply: unknown;
+    let phaseAtReply: string | undefined;
+    const { deps, writer, fallbackPuts } = wired(capturingProvider("fixed"), { ledger, yaml: REMOTE_YAML_FIXTURE });
+    const { io } = fakeIO();
+    io.reply = async () => {
+      order.push("reply");
+      stateAtReply = structuredClone(ledger.live.get("run-l")?.state);
+      phaseAtReply = ledger.live.get("run-l")?.phase;
+    };
+    const release = vi.fn(async () => {
+      order.push("release-start");
+      await new Promise((r) => setTimeout(r, 25)); // a slow /detach: the finish must not be behind it
+      order.push(`release-end(live=${ledger.live.has("run-l")}, finished=${ledger.finished.has("run-l")})`);
+      return { released: true };
+    });
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "", release };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(order).toEqual(["reply", "release-start", "release-end(live=false, finished=true)"]);
+    expect(stateAtReply).toEqual({ finalStatus: "completed" });
+    expect(phaseAtReply).toBe("finishing");
+    expect(fallbackPuts).toEqual([]);
   });
 
   it("a review's verdict lands in the run's ledger state as it is submitted", async () => {

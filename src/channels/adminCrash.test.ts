@@ -1,0 +1,79 @@
+import { describe, expect, it } from "vitest";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { handleAdminCrash } from "./adminCrash.js";
+
+// `POST /admin/crash` (features/run-history.md item 36, plan D12): the kill
+// injection behind the durable-runs receipts — authorized exactly like
+// `deploy restart` (a `deploy:write` bearer), answered before the process dies.
+
+const TOKENS = JSON.stringify({
+  "tok-deployer": { subject: "ops", scopes: ["deploy:write"] },
+  "tok-reader": { subject: "reader", scopes: ["runs:read"] },
+});
+
+function request(method: string, authorization?: string) {
+  const writes: { status?: number; body?: string } = {};
+  const req = { method, headers: authorization ? { authorization } : {} } as unknown as IncomingMessage;
+  const res = {
+    writeHead: (status: number) => void (writes.status = status),
+    end: (body: string) => void (writes.body = body),
+  } as unknown as ServerResponse;
+  return { req, res, writes };
+}
+
+function harness(over: { tokens?: string | undefined } = {}) {
+  const killed: string[] = [];
+  const deferred: (() => void)[] = [];
+  const logs: string[] = [];
+  const deps = {
+    tokens: "tokens" in over ? over.tokens : TOKENS,
+    generation: "20260907T231512Z-3fa9c1d2",
+    kill: () => void killed.push("SIGKILL"),
+    defer: (fn: () => void) => void deferred.push(fn),
+    log: (l: string) => void logs.push(l),
+  };
+  return { deps, killed, deferred, logs };
+}
+
+describe("POST /admin/crash", () => {
+  it("a deploy:write bearer gets 202 with this generation, and the kill is deferred until after the response", () => {
+    const h = harness();
+    const { req, res, writes } = request("POST", "Bearer tok-deployer");
+    handleAdminCrash(req, res, h.deps);
+    expect(writes.status).toBe(202);
+    expect(JSON.parse(writes.body!)).toEqual({ ok: true, generation: "20260907T231512Z-3fa9c1d2", pid: process.pid });
+    expect(h.killed).toEqual([]); // not yet: the response must leave first
+    expect(h.deferred).toHaveLength(1);
+    h.deferred[0]();
+    expect(h.killed).toEqual(["SIGKILL"]);
+    expect(h.logs[0]).toContain("ops → SIGKILL");
+  });
+
+  it("no bearer → 401, a bearer without deploy:write → 403, no token map → 503; nothing is killed or deferred", () => {
+    for (const [auth, status] of [
+      [undefined, 401],
+      ["Bearer nope", 401],
+      ["Bearer tok-reader", 403],
+    ] as const) {
+      const h = harness();
+      const { req, res, writes } = request("POST", auth);
+      handleAdminCrash(req, res, h.deps);
+      expect(writes.status).toBe(status);
+      expect(JSON.parse(writes.body!).ok).toBe(false);
+      expect(h.deferred).toEqual([]);
+    }
+    const off = harness({ tokens: undefined });
+    const { req, res, writes } = request("POST", "Bearer tok-deployer");
+    handleAdminCrash(req, res, off.deps);
+    expect(writes.status).toBe(503);
+    expect(off.deferred).toEqual([]);
+  });
+
+  it("only POST", () => {
+    const h = harness();
+    const { req, res, writes } = request("GET", "Bearer tok-deployer");
+    handleAdminCrash(req, res, h.deps);
+    expect(writes.status).toBe(405);
+    expect(h.deferred).toEqual([]);
+  });
+});
