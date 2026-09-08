@@ -2,7 +2,7 @@
 title: Run tracing - Plan
 type: feat
 date: 2026-09-08
-status: proposed
+status: implemented
 relates_to: 2026-09-08-001-feat-durable-runs-plan.md
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: review-ready
