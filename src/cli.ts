@@ -28,12 +28,12 @@
 
 import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { openConfigStore, type ConfigStore } from "./config.js";
+import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 import { CLI_ACTOR } from "./core/authz/actor.js";
-import { capabilitiesFrom } from "./core/capabilities.js";
+import { ALL_CAPABILITIES, capabilitiesFrom, type Capabilities } from "./core/capabilities.js";
 import {
   CommandError,
   CommandRegistry,
@@ -314,6 +314,29 @@ export function bindBotConfig(
   };
 }
 
+/**
+ * What the CLI's catalogue hides (features/command-registry.md item 27),
+ * resolved ONCE at startup from the config FILE — a synchronous read, so `help`
+ * and the catalogue never wait on the state Worker (#409). A config that is not
+ * a readable file — a `state://` location, a missing or unparsable file — is
+ * the FULL catalogue: hiding is a courtesy, and a command that needs the config
+ * still fails `unavailable` naming the cause. `ask` resolves its own value from
+ * the opened store (the exact one, `state://` included).
+ */
+export function cliCapabilities(
+  configPath: string,
+  env: NodeJS.ProcessEnv,
+  opts: { exists?: (path: string) => boolean; load?: (path: string) => AppConfig } = {},
+): Capabilities {
+  if (parseConfigLocation(configPath).kind !== "file") return ALL_CAPABILITIES;
+  if (!(opts.exists ?? existsSync)(configPath)) return ALL_CAPABILITIES;
+  try {
+    return capabilitiesFrom((opts.load ?? loadAppConfig)(configPath), env);
+  } catch {
+    return ALL_CAPABILITIES;
+  }
+}
+
 async function main(): Promise<void> {
   const warn = (m: string) => console.error(m);
   // The bot config and, from it, the run history store (#157): a CLI `ask`
@@ -362,6 +385,7 @@ async function main(): Promise<void> {
       dataDir: "./data",
       warn,
       audit: () => {},
+      capabilities: cliCapabilities(CONFIG_PATH, process.env),
       mcp: async () => {
         const w = await mcpWiring();
         return w.service ?? { unavailable: w.unavailable ?? "MCP is not enabled" };

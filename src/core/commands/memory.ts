@@ -142,6 +142,7 @@ function renderList(output: JsonValue): string {
 
 export const memoryList = defineCommand({
   id: "memory.list",
+  enabledWhen: (caps) => caps.memory,
   args: [
     {
       name: "query",
@@ -230,6 +231,7 @@ export const memoryList = defineCommand({
 
 export const memoryForget = defineCommand({
   id: "memory.forget",
+  enabledWhen: (caps) => caps.memory,
   args: [{ name: "id", schema: memoryId, describe: "the record id (`mem:<scope>:<n>`, from `memory list`)" }],
   action: "memory:write",
   effect: "write",

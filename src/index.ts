@@ -286,6 +286,7 @@ async function main() {
     env: process.env,
     dataDir: "./data",
     warn: (m) => console.warn(m),
+    capabilities,
     runs: runsService,
     frictionLedger,
     tracker: deps.issueTracker,

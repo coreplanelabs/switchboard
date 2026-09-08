@@ -14,9 +14,11 @@ import { analyzeRunFriction } from "./core/runFriction.js";
 import { RunRegistry } from "./core/runRegistry.js";
 import { InMemoryRunStore } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
+import { ALL_CAPABILITIES, NO_CAPABILITIES } from "./core/capabilities.js";
 import {
   bindBotConfig,
   CLI_CALLER,
+  cliCapabilities,
   loadBotConfig,
   missingBotConfig,
   parseCliArgv,
@@ -634,5 +636,58 @@ describe("a command that never touches the config never waits for the open (#409
     ]);
     expect(settled).toBe(false);
     expect(asked).toBe(1);
+  });
+});
+
+// Feature: features/command-registry.md item 27 — the CLI's catalogue hides what
+// is off, resolved ONCE at startup from the config FILE (a synchronous read; the
+// async store open of #409 is never waited for).
+describe("cliCapabilities — what the CLI's catalogue is bound to", () => {
+  const yaml = (extra: string) =>
+    `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n${extra}`;
+
+  it("a readable config file decides: memory on/off, run history with its bearer in the env", () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-cli-caps-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, yaml("memory:\n  enabled: true\nrunHistory:\n  worker:\n    baseUrl: https://state.example\n"));
+    expect(cliCapabilities(cfg, {})).toMatchObject({ memory: true, runHistory: false, mcp: false });
+    expect(cliCapabilities(cfg, { MEMORY_TOKEN: "t" })).toMatchObject({
+      memory: true,
+      runHistory: true,
+      runLedger: true,
+    });
+    writeFileSync(cfg, yaml(""));
+    expect(cliCapabilities(cfg, {})).toEqual(NO_CAPABILITIES);
+  });
+
+  it("no file, a `state://` location, or a file that does not parse → the full catalogue (a command that needs the config still fails `unavailable` naming the cause)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-cli-caps-"));
+    expect(cliCapabilities(join(dir, "missing.yaml"), {})).toEqual(ALL_CAPABILITIES);
+    expect(cliCapabilities("state://base", { STATE_WORKER_URL: "https://s", MEMORY_TOKEN: "t" })).toEqual(
+      ALL_CAPABILITIES,
+    );
+    const bad = join(dir, "bad.yaml");
+    writeFileSync(bad, "organization: acme\nproviders: 3\n");
+    expect(cliCapabilities(bad, {})).toEqual(ALL_CAPABILITIES);
+  });
+
+  it("the bound CLI catalogue reflects it: `memory list` is a usage error (exit 2) under a config without memory, a command under one with it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-cli-caps-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, yaml(""));
+    const bind = (path: string) =>
+      buildCoreCommands(bindBotConfig(path, join(dir, "overrides.json"), { env: {} }), () => null, {
+        registry: new RunRegistry({ now: () => NOW }),
+        env: {},
+        dataDir: dir,
+        warn: () => {},
+        capabilities: cliCapabilities(path, {}),
+      });
+    const off = bind(cfg);
+    const parsed = parseCliArgv(["memory", "list"], off);
+    expect(parsed.kind).toBe("usage");
+    expect((await runCli(off, parsed as Extract<CliInvocation, { kind: "usage" }>, CLI_CALLER)).exitCode).toBe(2);
+    writeFileSync(cfg, yaml("memory:\n  enabled: true\n"));
+    expect(parseCliArgv(["memory", "list"], bind(cfg)).kind).toBe("command");
   });
 });
