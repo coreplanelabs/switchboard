@@ -4,7 +4,8 @@ import { handleAdminCrash } from "./adminCrash.js";
 
 // `POST /admin/crash` (features/run-history.md item 36, plan D12): the kill
 // injection behind the durable-runs receipts — authorized exactly like
-// `deploy restart` (a `deploy:write` bearer), answered before the process dies.
+// `deploy restart` (a `deploy:write` bearer), answered before the process
+// exits hard (PID 1 cannot SIGKILL itself; the exit is the same event).
 
 const TOKENS = JSON.stringify({
   "tok-deployer": { subject: "ops", scopes: ["deploy:write"] },
@@ -28,7 +29,7 @@ function harness(over: { tokens?: string | undefined } = {}) {
   const deps = {
     tokens: "tokens" in over ? over.tokens : TOKENS,
     generation: "20260907T231512Z-3fa9c1d2",
-    kill: () => void killed.push("SIGKILL"),
+    kill: () => void killed.push("exit 137"),
     defer: (fn: () => void) => void deferred.push(fn),
     log: (l: string) => void logs.push(l),
   };
@@ -36,7 +37,7 @@ function harness(over: { tokens?: string | undefined } = {}) {
 }
 
 describe("POST /admin/crash", () => {
-  it("a deploy:write bearer gets 202 with this generation, and the kill is deferred until after the response", () => {
+  it("a deploy:write bearer gets 202 with this generation, and the hard exit is deferred until after the response", () => {
     const h = harness();
     const { req, res, writes } = request("POST", "Bearer tok-deployer");
     handleAdminCrash(req, res, h.deps);
@@ -45,8 +46,8 @@ describe("POST /admin/crash", () => {
     expect(h.killed).toEqual([]); // not yet: the response must leave first
     expect(h.deferred).toHaveLength(1);
     h.deferred[0]();
-    expect(h.killed).toEqual(["SIGKILL"]);
-    expect(h.logs[0]).toContain("ops → SIGKILL");
+    expect(h.killed).toEqual(["exit 137"]);
+    expect(h.logs[0]).toContain("ops → hard exit 137");
   });
 
   it("no bearer → 401, a bearer without deploy:write → 403, no token map → 503; nothing is killed or deferred", () => {
