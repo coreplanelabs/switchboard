@@ -1,0 +1,167 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+@plugin "@tailwindcss/typography";
+
+@theme static {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* Status colors as first-class utilities (text-ok, border-warn/30, …): the
+   * values swap with the theme via the --sb-* vars below — the dark set is the
+   * original run-page palette. */
+  --color-ok: var(--sb-ok);
+  --color-bad: var(--sb-bad);
+  --color-warn: var(--sb-warn);
+  --color-info: var(--sb-info);
+  --color-skill: var(--sb-skill);
+  --color-review: var(--sb-review);
+  --color-research: var(--sb-research);
+}
+
+/*
+ * One token set for every page (replaces the four divergent CSS blobs of the
+ * string-rendered frontend). Dark is the product's canonical look; light
+ * values exist so a future color-mode toggle is a class flip, not a redesign.
+ */
+:root {
+  --sb-ok: #1a7f37;
+  --sb-bad: #c93c37;
+  --sb-warn: #9a6700;
+  --sb-info: #0969da;
+  --sb-skill: #6639ba;
+  --sb-review: #8250df;
+  --sb-research: #1b7c83;
+  /* Duration heat (item 24): the ONE lightness every heat colour shares in this
+     theme, so the amber→red ramp keeps constant contrast against the ground. */
+  --sb-heat-l: 0.52;
+  /* The run page's one right gutter: every timestamp and duration column ends
+     this far from the container's right edge, whatever its nesting depth —
+     card headers, step heads, span rows, the pending row and the cards' facts
+     (a bordered card subtracts its border so the text, not the box, lands
+     here). `pr-(--sb-gutter)` in the templates. */
+  --sb-gutter: 0.75rem;
+  --ui-bg: #f5f7fa;
+  --ui-bg-muted: #eef1f5;
+  --ui-bg-elevated: #ffffff;
+  --ui-bg-accented: #e8ecf2;
+  --ui-border: #dbe1ea;
+  --ui-border-muted: #e8ecf2;
+  --ui-border-accented: #cdd5e0;
+  --ui-text: #141a22;
+  --ui-text-muted: #4f5966;
+  --ui-text-dimmed: #7b8593;
+  --ui-text-highlighted: #0a0e13;
+}
+
+.dark {
+  --sb-ok: #7ee787;
+  --sb-bad: #ff7b72;
+  --sb-warn: #d29922;
+  --sb-info: #9ecbff;
+  --sb-skill: #a78bfa;
+  --sb-review: #d2a8ff;
+  --sb-research: #76e3ea;
+  --sb-heat-l: 0.8;
+  --ui-bg: #0b0d12;
+  --ui-bg-muted: #0f1218;
+  --ui-bg-elevated: #12151c;
+  --ui-bg-accented: #181d27;
+  --ui-border: #232836;
+  --ui-border-muted: #1b1f28;
+  --ui-border-accented: #3b4252;
+  --ui-text: #e6e6e6;
+  --ui-text-muted: #8b93a7;
+  --ui-text-dimmed: #5f677a;
+  --ui-text-highlighted: #ffffff;
+}
+
+/*
+ * Duration heat (item 24). `--heat-t` (0..1, set inline by `heatStyle`) is
+ * where a duration landed on its log scale; lightness is the theme's
+ * `--sb-heat-l`, hue walks amber (88°) → red (28°) and chroma 0.06 → 0.17, so
+ * every step of the ramp keeps the same contrast and only warmth changes.
+ */
+@utility heat {
+  color: oklch(var(--sb-heat-l) calc(0.06 + 0.11 * var(--heat-t)) calc(88 - 60 * var(--heat-t)));
+}
+
+/*
+ * The words of the run page's time bar, painted from the theme's own tokens
+ * (web/src/lib/termPaint.ts is the one mapping from word to class). One hue
+ * per counted bucket, each distinct in both themes — blue, the product green,
+ * violet, muted grey — the residual hatched and the two loss terms striped
+ * or hollow, so what is not work never reads as work. The bar's segments,
+ * the legend's swatches and the phase heads' markers all wear these.
+ */
+.paint-ready {
+  background: var(--ui-info);
+}
+.paint-thinking {
+  background: var(--ui-primary);
+}
+.paint-tools {
+  background: var(--sb-skill);
+}
+.paint-finishing {
+  background: var(--ui-text-dimmed);
+}
+.paint-overhead {
+  background: repeating-linear-gradient(135deg, var(--ui-border-accented) 0 3px, transparent 3px 6px);
+}
+.paint-lost {
+  background: repeating-linear-gradient(135deg, var(--ui-warning) 0 3px, transparent 3px 6px);
+}
+.paint-elided {
+  box-shadow: inset 0 0 0 1px var(--ui-border-accented);
+  background: transparent;
+}
+/* The open bucket's in-flight tail, hatched over its bucket's colour. */
+.paint-hatched {
+  background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / 0.45) 0 2px, transparent 2px 5px);
+}
+
+/*
+ * A row the run page scrolled to from the timeline's Longest steps: one fade
+ * of the primary colour, so the reader's eye lands where the link pointed.
+ * Off under prefers-reduced-motion (the scroll itself is enough).
+ */
+.revealed {
+  animation: sb-revealed 1.5s ease-out;
+}
+@keyframes sb-revealed {
+  from {
+    box-shadow: 0 0 0 2px var(--ui-primary);
+  }
+  to {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .revealed {
+    animation: none;
+  }
+}
+
+@layer base {
+  /* ONE scaling knob: phones render ~10% larger. Every font size and spacing
+   * utility in the app is rem-based, so text AND whitespace scale together —
+   * no per-component mobile sizing. (Media queries resolve rem against the
+   * browser's initial size, so the breakpoints themselves do not move.) */
+  html {
+    font-size: 17.5px;
+  }
+  @media (min-width: 640px) {
+    html {
+      font-size: 16px;
+    }
+  }
+  body {
+    @apply bg-default text-default font-mono text-[0.8125rem] leading-normal antialiased;
+  }
+  /* Tailwind v4's preflight leaves buttons on the default cursor and Nuxt UI
+   * does not add one: every enabled button on the dashboard — the run page's
+   * folds, the panel's tabs, chevrons and close — shows the pointer. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+}

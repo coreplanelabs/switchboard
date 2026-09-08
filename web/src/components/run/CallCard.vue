@@ -1,0 +1,133 @@
+<script setup lang="ts">
+import { computed, inject } from "vue";
+import { durationTone, heatStyle } from "../../lib/durationTone";
+import { formatDuration, formatLocalIso } from "../../lib/format";
+import { RunnerClockKey, type CallVm } from "../../lib/runPageModel";
+
+// A call card: <details> — header row is the summary (status glyph, $ or tool
+// chip, the command with a one-line collapsed headline, right-hand facts,
+// chevron), the redacted output inside. The call's start time is pacing
+// information, not a headline: it rides on the card's hover. The card's id
+// (`call-<id>`) is what the timeline's Longest steps scroll to.
+//
+// In-progress work draws where it will end up: while the call runs, the facts
+// slot ticks its elapsed on the page's projected runner clock — the same slot
+// its settled duration lands in. A history page provides no clock, so its
+// cards never tick.
+//
+// The duration fact (always the last one) is painted by the duration heat
+// scale (item 24): quiet when quick, amber→red as it grows, and the `bad`
+// palette plus a "timed out" label when the sandbox killed the command at its
+// deadline. Over budget is a fact about the exit, not the clock: a timed-out
+// call with no computable span (no duration fact) still wears the label, after
+// its last fact.
+
+const props = defineProps<{ call: CallVm }>();
+const clock = inject(RunnerClockKey, null);
+const elapsed = computed(() => {
+  const now = clock?.value;
+  if (props.call.status !== "running" || typeof now !== "number" || props.call.startedAt === undefined) return "";
+  return formatDuration(Math.max(0, now - props.call.startedAt), "clock");
+});
+
+const heat = computed(() => durationTone(props.call.durationMs, "tool", props.call.timedOut));
+const heatPaint = computed(() => heatStyle(heat.value));
+/** Index of the duration fact, or -1 when the call has none yet. */
+const durationIndex = computed(() => (props.call.durationMs === undefined ? -1 : props.call.facts.length - 1));
+
+function toggle(): void {
+  // `open` is UI state on the page's own view-model object, shared with the
+  // Expand-all / Collapse-all control above the log; the model is the single
+  // source of truth for it, so the card writes there rather than emitting.
+  // eslint-disable-next-line vue/no-mutating-props -- see above
+  props.call.open = !props.call.open;
+}
+</script>
+
+<template>
+  <details
+    :id="`call-${call.id}`"
+    class="call rounded-md border border-default bg-elevated open:bg-accented/40"
+    :class="call.status"
+    :open="call.open"
+    :title="typeof call.startedAt === 'number' ? `started ${formatLocalIso(call.startedAt)}` : undefined"
+    :data-status="call.status"
+    :data-heat="heat.level"
+  >
+    <!-- Open on a phone, the full command takes its own line under the glyph
+         row (an inline pre-wrap column would wrap character by character).
+         The chevron leads, as on every other fold of the page, so the facts
+         end on the page's one right gutter (less this card's border). -->
+    <summary
+      class="flex min-w-0 cursor-pointer list-none items-baseline gap-3 rounded-md pl-3 pr-[calc(var(--sb-gutter)-1px)] py-2 hover:bg-accented/60 focus-visible:outline-2 focus-visible:outline-primary max-sm:flex-wrap [&::-webkit-details-marker]:hidden"
+      :class="call.open ? 'rounded-b-none border-b border-default' : ''"
+      @click.prevent="toggle"
+    >
+      <span
+        class="chev shrink-0 select-none text-xs text-dimmed transition-transform motion-reduce:transition-none"
+        :class="call.open ? 'rotate-90' : ''"
+        >❯</span
+      >
+      <span
+        v-if="call.status === 'running'"
+        class="spin inline-block size-[0.7em] shrink-0 animate-spin self-center rounded-full border-2 border-accented border-t-info motion-reduce:animate-none"
+        role="img"
+        aria-label="running"
+      />
+      <span
+        v-else
+        class="glyph w-[1em] shrink-0 text-center font-bold"
+        :class="call.status === 'ok' ? 'text-ok' : call.status === 'failed' ? 'text-bad' : 'text-warn'"
+        >{{ call.status === "ok" ? "✓" : call.status === "failed" ? "✗" : "⚠" }}</span
+      >
+      <span v-if="call.shell" class="dollar shrink-0 select-none text-dimmed">$</span>
+      <span v-else class="tool shrink-0 rounded bg-accented px-1.5 text-xs leading-normal text-muted">{{
+        call.tool
+      }}</span>
+      <template v-if="!call.chipOnly">
+        <!-- Collapsed: the command's first line only (ellipsized); open: all of it. -->
+        <code v-if="!call.open" class="cmd brief min-w-0 flex-1 truncate text-info">{{ call.headline }}</code>
+        <code
+          v-else
+          class="cmd full min-w-0 flex-1 whitespace-pre-wrap break-words text-info max-sm:order-last max-sm:basis-full"
+          >{{ call.title }}</code
+        >
+      </template>
+      <span v-else class="cmd min-w-0 flex-1" />
+      <span class="facts ml-auto flex shrink-0 gap-2.5 text-xs tabular-nums text-muted">
+        <span v-if="elapsed" class="fact elapsed" title="since this call started (runner clock)">{{ elapsed }}</span>
+        <template v-for="(fact, i) in call.facts" :key="i">
+          <span v-if="i === durationIndex && heat.over" class="over rounded bg-bad/15 px-1 font-semibold text-bad"
+            >timed out</span
+          >
+          <span
+            class="fact"
+            :class="[
+              call.status !== 'ok' && i === 0 ? 'text-bad' : '',
+              i === durationIndex && heat.over ? 'font-semibold text-bad' : '',
+              i === durationIndex && heatPaint ? 'heat' : '',
+              i === durationIndex && heat.level >= 2 && !heat.over ? 'font-medium' : '',
+            ]"
+            :style="i === durationIndex ? heatPaint : undefined"
+            >{{ fact }}</span
+          >
+        </template>
+        <span v-if="heat.over && durationIndex === -1" class="over rounded bg-bad/15 px-1 font-semibold text-bad"
+          >timed out</span
+        >
+      </span>
+    </summary>
+    <div class="body">
+      <pre
+        v-if="call.hasResult && call.output"
+        class="out max-h-[28rem] overflow-auto whitespace-pre-wrap break-words px-3.5 py-2.5 font-mono leading-normal"
+        :class="call.status === 'failed' ? 'text-bad' : 'text-toned'"
+        >{{ call.output }}</pre>
+      <div v-else-if="call.hasResult" class="none px-3 py-1.5 text-xs italic text-dimmed">no output</div>
+      <!-- Still running: the spinner in the header is the ONE live mark on a
+           card (the tail names the wait and times it); the body only says
+           what it holds. -->
+      <div v-else class="none px-3 py-1.5 text-xs italic text-dimmed">no output yet</div>
+    </div>
+  </details>
+</template>
