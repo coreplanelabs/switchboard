@@ -55,6 +55,18 @@ RUN npm install -g pnpm@10.34.5 yarn@1.22.22 \
   && pnpm --version | grep -qx '10\.34\.5' \
   && yarn --version | grep -qx '1\.22\.22'
 
+# squashfs-tools (`unsquashfs`): the SDK's presigned restore does not extract
+# an archive, it MOUNTS it (squashfuse + fuse-overlayfs at the handle's dir)
+# and leaves the `.sqsh` under /var/backups — resident-repos item 61. The
+# resident extracts the archive onto its ext4 disk instead (the SDK's own
+# local-dev method) so the mirror, the checkout and the deps store stay one
+# filesystem: `rm -rf` works, hardlink views work, `du -x` is right. The
+# Worker falls back to `cp -a` out of the mount while an older image lacks it.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends squashfs-tools \
+  && rm -rf /var/lib/apt/lists/* \
+  && unsquashfs -version >/dev/null 2>&1
+
 # KTD5: agent commands never run as root. The SDK's exec has no user/uid option
 # (verified against 0.13.0-next.751.1), so the container server itself runs as
 # root and per-command demotion is done with `su -s /bin/bash workerN -c ...`
