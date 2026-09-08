@@ -1,7 +1,9 @@
 import { matchesPredicate } from "./authz/predicate.js";
 import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
 import type { RunActor, RunEvent, StopMode } from "./runEvents.js";
-import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
+import { SPAN_SCHEMA } from "./normalizeSpans.js";
+import { systemClock } from "./trace/clock.js";
+import { analyzeRunFriction, type FrictionOptions, type FrictionDiagnosis } from "./runFriction.js";
 import {
   clampListLimit,
   RUN_ID_PATTERN,
@@ -210,10 +212,12 @@ export interface RunsServiceDeps {
   /** null when run history is off (live-only). */
   store: RunStore | null;
   /** The friction analyzer for live runs; a persisted run returns its stored diagnosis. */
-  analyze?: (events: readonly RunEvent[], opts: { finished: boolean; truncated?: boolean }) => FrictionDiagnosis;
+  analyze?: (events: readonly RunEvent[], opts: FrictionOptions) => FrictionDiagnosis;
   /** Where a store failure is reported (once per failing call, the error's
    *  message — never a token). Default `console.warn`. */
   warn?: (message: string) => void;
+  /** The clock a live run's friction window ends at; `systemClock` by default. */
+  clock?: () => number;
 }
 
 /** A live registry row without its token. A finished registry row carries the
@@ -291,6 +295,7 @@ function pageBounded(events: readonly RunEvent[], limit: number, moreAfter: bool
 export function createRunsService(deps: RunsServiceDeps): RunsService {
   const { registry, store } = deps;
   const analyze = deps.analyze ?? ((events, opts) => analyzeRunFriction(events, opts));
+  const clock = deps.clock ?? systemClock;
   const warn = deps.warn ?? ((m: string) => console.warn(m));
 
   /** `store.get` with the id pre-checked (a malformed id never reaches the store). */
@@ -449,7 +454,16 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           value: {
             id,
             finished: snap.finished,
-            diagnosis: analyze(snap.events, { finished: snap.finished, truncated: snap.truncated }),
+            // A live stream is schema 2; the window is the run's own stamps, to
+            // now while live (features/tracing.md) — the same window the live
+            // route passes, so the two surfaces time a run alike; a finished
+            // run's diagnosis carries the shape.
+            diagnosis: analyze(snap.events, {
+              finished: snap.finished,
+              truncated: snap.truncated,
+              schema: SPAN_SCHEMA,
+              window: { start: snap.receivedAt ?? snap.startedAt, end: snap.finishedAt ?? clock() },
+            }),
           },
         };
       // The stored diagnosis rides on the summary row — the events are not needed.

@@ -483,7 +483,7 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
       clearUserOverride: (u) => s.config.clearUserOverride(u),
       agentNames: () => Object.keys(AGENTS),
     },
-    runs: async () => createRunsService({ registry: s.reg, store: s.store }),
+    runs: async () => createRunsService({ registry: s.reg, store: s.store, clock: () => NOW }), // a live run's friction window ends at the pinned clock on every surface
     friction: {
       ledger: async () => new RunStoreFrictionLedger(s.store),
       tracker: s.tracker,

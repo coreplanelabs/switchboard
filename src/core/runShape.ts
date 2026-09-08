@@ -1,4 +1,11 @@
-import { isInformative, partition, printedShape, type LossInterval, type Window } from "./trace/partition.js";
+import {
+  isInformative,
+  partition,
+  printedShape,
+  type LossInterval,
+  type Partition,
+  type Window,
+} from "./trace/partition.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import type { SpanRecord } from "./trace/types.js";
 import { formatDuration } from "./time/formatDuration.js";
@@ -16,24 +23,33 @@ export interface ShapeInput {
   losses?: readonly LossInterval[];
 }
 
-/** The shape line, or nothing when fewer than two buckets are informative
- *  (the caller then says the total and nothing more). */
-export function shapeLine(spans: readonly SpanRecord[], input: ShapeInput): string | undefined {
-  const p = partition(spans, { ...input, losses: input.losses ?? [] });
-  if (!isInformative(p)) return undefined;
-  const printed = printedShape(p);
+/** The line for a partition already computed (a diagnosis's `shape`), or
+ *  nothing when fewer than two buckets are informative (the caller then says
+ *  the total and nothing more). */
+export function formatShape(p: Partition | Omit<Partition, "backgroundOnlyMs">): string | undefined {
+  const full: Partition = { backgroundOnlyMs: 0, ...p };
+  if (!isInformative(full)) return undefined;
+  const printed = printedShape(full);
   if (printed.items.length === 0) return undefined;
   return printed.items.map(({ term, s }) => `${formatDuration(s * 1000, "clock")} ${term}`).join(" · ");
+}
+
+/** The shape line from a span set. */
+export function shapeLine(spans: readonly SpanRecord[], input: ShapeInput): string | undefined {
+  return formatShape(partition(spans, { ...input, losses: input.losses ?? [] }));
 }
 
 /** The Slack card's own gate on top of the informativeness rule: the shape is
  *  worth a line when the run took a minute or more, or getting ready alone took
  *  15 s or more (features/tracing.md — the card's size threshold). */
+export function cardShapeLineOf(p: Partition | Omit<Partition, "backgroundOnlyMs">): string | undefined {
+  if (p.windowMs < 60_000 && p.gettingReadyMs < 15_000) return undefined;
+  return formatShape(p);
+}
+
+/** The card's gated shape line from a span set (a close before any run existed). */
 export function cardShapeLine(spans: readonly SpanRecord[], input: ShapeInput): string | undefined {
-  const windowMs = input.window.end - input.window.start;
-  const p = partition(spans, { ...input, losses: input.losses ?? [] });
-  if (windowMs < 60_000 && p.gettingReadyMs < 15_000) return undefined;
-  return shapeLine(spans, input);
+  return cardShapeLineOf(partition(spans, { ...input, losses: input.losses ?? [] }));
 }
 
 /** The queued captions, never part of a duration (features/tracing.md): shown

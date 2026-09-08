@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { RunEvent } from "./runEvents.js";
-import { analyzeRunFriction, formatFrictionReport, type FrictionDiagnosis } from "./runFriction.js";
+import {
+  analyzeRunFriction,
+  DENOMINATOR_OF,
+  formatFrictionReport,
+  FRICTION_CATEGORIES,
+  type FrictionDiagnosis,
+} from "./runFriction.js";
 
 // Feature: features/run-friction.md — the pure, deterministic analyzer that
 // turns a run's RunEvent stream into a structured friction diagnosis (#84).
@@ -450,11 +456,13 @@ describe("formatFrictionReport", () => {
     expect(text).toMatch(/tool calls: 3/);
     expect(text).toMatch(/run: 1m 18s/);
     expect(text).toMatch(/tool time: 1m 16s · model time: 2s/); // 1 s + 1 s between the paired calls
-    expect(text).toMatch(/slow_model_turn\s+0\s+-/);
-    expect(text).toMatch(/setup_install\s+1\s+1m 10s/);
-    expect(text).toMatch(/\[setup_install\].*pnpm install/);
-    expect(text).toMatch(/\[failed_tool\].*2 failing/);
-    expect(text).toMatch(/\[retry\].*npm test/);
+    // The table and the finding lines print the human labels, the column sized to the longest.
+    expect(text).toMatch(/slow model turns\s+0\s+-/);
+    expect(text).toMatch(/the repo's setup\/install\s+1\s+1m 10s/);
+    expect(text).toMatch(/\[the repo's setup\/install\].*pnpm install/);
+    expect(text).toMatch(/\[failed tool calls\].*2 failing/);
+    expect(text).toMatch(/\[retries\].*npm test/);
+    expect(text).not.toMatch(/shape:/); // no window → no shape
   });
 
   it("an empty diagnosis renders without throwing and says so", () => {
@@ -522,6 +530,9 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
     expect(d.eventCount).toBe(2);
     expect(d.runMs).toBe(9000);
     expect(d.toolCalls).toBe(1);
+    // A legacy stream WITH turn receipts is timed by them (features/tracing.md
+    // item 14): model time is the receipts' own durations, not the gaps.
+    expect(d.modelTimeMs).toBe(900 + 6000);
   });
 
   it("a stream of only `context` events has no timings and zero events", () => {
@@ -627,7 +638,266 @@ describe("analyzeRunFriction — span records are invisible to counts and to the
     expect(d.modelTimeMs).toBe(4_000 + 61_000 + 2_000);
     expect(categories(d)).toEqual(["slow_model_turn"]);
     expect(d.findings[0]).toMatchObject({ durationMs: 61_000, eventIndex: 4, severity: "medium" });
-    expect(d.findings[0].summary).toContain("(tool_use)");
+    expect(d.findings[0].summary).toBe("model turn took 1m 01s before: $ cat a.ts"); // it names the call it produced
     expect(d.eventCount).toBe(4); // the two tool pairs; spans and narrative are not steps
+  });
+});
+
+// Feature: features/tracing.md item 5; features/run-friction.md items 3–4 — the
+// analyzer on spans: one span set for every duration, the window and the shape,
+// union time for the run-denominated categories, and the report's vocabulary.
+describe("analyzeRunFriction — the window, the shape and the span set (features/tracing.md)", () => {
+  const span = (
+    spanId: string,
+    name: string,
+    startedAt: number,
+    durationMs: number,
+    attrs: Record<string, string | number | boolean> = {},
+    parentSpanId?: string,
+  ): RunEvent[] => [
+    {
+      type: "span_start",
+      spanId,
+      ...(parentSpanId ? { parentSpanId } : {}),
+      name,
+      at: startedAt,
+    } as unknown as RunEvent,
+    {
+      type: "span_end",
+      spanId,
+      ...(parentSpanId ? { parentSpanId } : {}),
+      name,
+      startedAt,
+      durationMs,
+      status: "ok",
+      attrs,
+      at: startedAt + durationMs,
+    } as unknown as RunEvent,
+  ];
+
+  /** A schema-2 stream the way the dispatcher and runner emit one: the root and
+   *  a setup span, the loop with two turns around one tool, the PR post step. */
+  const traced = (): RunEvent[] => [
+    { type: "span_start", spanId: "root", name: "request", at: T0 } as unknown as RunEvent,
+    ...span("s1", "dispatch.workspace.attach", T0, 30_000),
+    { type: "input", text: "fix it", at: T0 + 30_000 },
+    {
+      type: "span_start",
+      spanId: "a",
+      parentSpanId: "root",
+      name: "run.agent",
+      at: T0 + 32_000,
+    } as unknown as RunEvent,
+    ...span("m1", "model.turn", T0 + 32_000, 150_000, { stopReason: "tool_use" }, "a"),
+    { type: "span_start", spanId: "t1", parentSpanId: "a", name: "tool.bash", at: T0 + 182_000 } as unknown as RunEvent,
+    { type: "tool_call", tool: "bash", summary: "$ npm test", callId: "c1", spanId: "t1", at: T0 + 182_000 },
+    { type: "tool_result", tool: "bash", ok: true, summary: "ok", callId: "c1", spanId: "t1", at: T0 + 237_000 },
+    {
+      type: "span_end",
+      spanId: "t1",
+      parentSpanId: "a",
+      name: "tool.bash",
+      startedAt: T0 + 182_000,
+      durationMs: 55_000,
+      status: "ok",
+      attrs: { callId: "c1", ok: true },
+      at: T0 + 237_000,
+    } as unknown as RunEvent,
+    ...span("m2", "model.turn", T0 + 237_000, 5_000, { stopReason: "end_turn" }, "a"),
+    {
+      type: "span_end",
+      spanId: "a",
+      parentSpanId: "root",
+      name: "run.agent",
+      startedAt: T0 + 32_000,
+      durationMs: 210_000,
+      status: "ok",
+      at: T0 + 242_000,
+    } as unknown as RunEvent,
+    ...span("p1", "run.pr_post_step", T0 + 244_000, 8_000),
+    { type: "answer", text: "done", at: T0 + 252_000 },
+  ];
+  const WINDOW = { start: T0, end: T0 + 252_000 };
+
+  it("with a finished window: runMs is the window, model and tool time are the spans' sums, and the shape partitions the window (identity holds)", () => {
+    const d = analyzeRunFriction(traced(), { finished: true, schema: 2, window: WINDOW });
+    expect(d.runMs).toBe(252_000);
+    expect(d.modelTimeMs).toBe(155_000);
+    expect(d.toolTimeMs).toBe(55_000);
+    expect(d.shape).toEqual({
+      windowMs: 252_000,
+      gettingReadyMs: 30_000,
+      thinkingMs: 155_000,
+      toolsMs: 55_000,
+      finishingUpMs: 8_000,
+      overheadMs: 4_000,
+      notRecordedMs: 0,
+      notLoadedMs: 0,
+    });
+    const sh = d.shape!;
+    expect(sh.gettingReadyMs + sh.thinkingMs + sh.toolsMs + sh.finishingUpMs + sh.overheadMs).toBe(sh.windowMs);
+    // The slow turn is anchored to its own span end and names the call it produced; the slow tool to its call.
+    expect(d.findings.map((f) => [f.category, f.eventIndex, f.durationMs])).toEqual([
+      ["slow_model_turn", 6, 150_000],
+      ["slow_tool", 8, 55_000],
+    ]);
+    expect(d.findings[0].summary).toBe("model turn took 2m 30s before: $ npm test");
+    expect(d.verdict).toBe("slow model turns dominated: 1 finding, 2m 30s (60% of run time)");
+  });
+
+  it("without a window (a stdin capture) there is no shape and runMs is first→last over the content; live (unfinished) with a window there is no shape either", () => {
+    const capture = analyzeRunFriction(traced(), { finished: true, schema: 2 });
+    expect(capture.shape).toBeUndefined();
+    expect(capture.runMs).toBe(252_000 - 30_000); // input → answer
+    expect(capture.modelTimeMs).toBe(155_000);
+    const live = analyzeRunFriction(traced(), { finished: false, schema: 2, window: WINDOW });
+    expect(live.shape).toBeUndefined();
+    expect(live.runMs).toBe(252_000);
+  });
+
+  it("a live read: an open model turn runs to the window's end and counts as thinking so far", () => {
+    const events = traced().slice(0, 6); // through the first turn's start — no end yet
+    const d = analyzeRunFriction(events, { finished: false, schema: 2, window: { start: T0, end: T0 + 92_000 } });
+    expect(d.modelTimeMs).toBe(60_000); // T0+32 s → T0+92 s
+    expect(d.findings.map((f) => f.category)).toEqual(["slow_model_turn"]);
+  });
+
+  it("a command run's window: `run.command` is its tools", () => {
+    const events: RunEvent[] = [
+      { type: "span_start", spanId: "root", name: "request", at: T0 } as unknown as RunEvent,
+      { type: "input", text: "friction report", at: T0 + 1_000 },
+      ...span("c", "run.command", T0 + 1_000, 20_000, { command: "friction.report" }),
+      { type: "answer", text: "…", at: T0 + 21_000 },
+    ];
+    const asCommand = analyzeRunFriction(events, {
+      finished: true,
+      schema: 2,
+      owner: "command",
+      window: { start: T0, end: T0 + 22_000 },
+    });
+    expect(asCommand.shape).toMatchObject({ toolsMs: 20_000, gettingReadyMs: 0, overheadMs: 2_000 });
+    const asAgent = analyzeRunFriction(events, { finished: true, schema: 2, window: { start: T0, end: T0 + 22_000 } });
+    expect(asAgent.shape).toMatchObject({ toolsMs: 0, gettingReadyMs: 20_000 });
+  });
+
+  it("run-denominated categories take the UNION of their findings' intervals: three calls of one batch dying together are one interval, and the share never exceeds 100 %", () => {
+    // Three concurrent reads under one turn; the sandbox died under all three at once.
+    const events: RunEvent[] = [
+      { type: "input", text: "go", at: T0 },
+      call("read_file", "a.ts", T0 + 1_000),
+      call("read_file", "b.ts", T0 + 1_000),
+      call("read_file", "c.ts", T0 + 1_000),
+      result("read_file", false, "sandbox worker /exec: 502", T0 + 31_000, true),
+      result("read_file", false, "sandbox worker /exec: 502", T0 + 31_000, true),
+      result("read_file", false, "sandbox worker /exec: 502", T0 + 31_000, true),
+    ];
+    const d = analyzeRunFriction(events, { finished: true, window: { start: T0, end: T0 + 40_000 } });
+    expect(d.findings.filter((f) => f.category === "infra_failure")).toHaveLength(3);
+    expect(d.findings[0].interval).toEqual({ start: T0 + 1_000, end: T0 + 31_000 });
+    expect(d.byCategory.infra_failure).toEqual({ count: 3, durationMs: 30_000 }); // the union, not 90 s
+    expect(d.toolTimeMs).toBe(90_000); // the sum: each call is a summand of tool time
+    expect(DENOMINATOR_OF.infra_failure).toBe("run");
+    expect(d.verdict).toBe("infra failures dominated: 3 findings, 30s (75% of run time)");
+  });
+
+  it("wrap-up runs from the warning to the window's end; a budget hit or a dead sandbox has no extent and prints `-`", () => {
+    const events: RunEvent[] = [
+      { type: "input", text: "go", at: T0 },
+      ...bash("ls", T0 + 1_000, 1_000),
+      note("wrap_up", "3 min left", T0 + 10_000),
+      note("time_budget_exhausted", "25 min", T0 + 30_000),
+      { type: "answer", text: "partial", at: T0 + 31_000 },
+    ];
+    const d = analyzeRunFriction(events, { finished: true, window: { start: T0, end: T0 + 35_000 } });
+    const wrap = d.findings.find((f) => f.category === "wrap_up")!;
+    expect(wrap.interval).toEqual({ start: T0 + 10_000, end: T0 + 35_000 });
+    expect(wrap.durationMs).toBe(25_000);
+    expect(d.byCategory.wrap_up.durationMs).toBe(25_000);
+    const budget = d.findings.find((f) => f.category === "budget_hit")!;
+    expect(budget.interval).toBeUndefined();
+    expect(budget.durationMs).toBeUndefined();
+    expect(formatFrictionReport(d)).toMatch(/budget hits\s+1\s+-/);
+    expect(formatFrictionReport(d)).toMatch(/agent wind-down\s+1\s+25s/);
+  });
+
+  it("every category names its denominator", () => {
+    for (const c of FRICTION_CATEGORIES) expect(["tool", "run"]).toContain(DENOMINATOR_OF[c]);
+  });
+
+  it("the report: the shape line under the totals; `tool calls`/`tool time` only when a tool ran; `model time` only when the model turned", () => {
+    const text = formatFrictionReport(analyzeRunFriction(traced(), { finished: true, schema: 2, window: WINDOW }));
+    expect(text).toContain("run: 4m 12s · tool time: 55s · model time: 2m 35s");
+    expect(text).toContain(
+      "shape: 30s getting ready · 2m 35s thinking · 55s in tools · 8s finishing up · 4s Switchboard overhead",
+    );
+    const command = formatFrictionReport(
+      analyzeRunFriction(
+        [
+          { type: "input", text: "friction report", at: T0 },
+          ...span("c", "run.command", T0, 2_000, { command: "friction.report" }),
+          { type: "answer", text: "…", at: T0 + 2_000 },
+        ],
+        { finished: true, schema: 2, owner: "command", window: { start: T0, end: T0 + 2_000 } },
+      ),
+    );
+    expect(command).not.toMatch(/tool calls:|tool time:|model time:/);
+    expect(command).toMatch(/^verdict: no friction detected\nevents: 0 · run: 2s\nshape: 2s \(one bucket\)/);
+  });
+
+  it("differential: a legacy record (turn receipts, tool pairs, an mcp_tool_use) is timed by its normalized spans — model time from the receipts, tool time from the pairs", () => {
+    const legacy: RunEvent[] = [
+      { type: "input", text: "look", at: T0, seq: 1 },
+      { type: "turn", startedAt: T0, durationMs: 40_000, stopReason: "tool_use", at: T0 + 40_000, seq: 2 },
+      { type: "tool_call", tool: "bash", summary: "$ grep -r x", callId: "c1", at: T0 + 41_000, seq: 3 },
+      { type: "tool_result", tool: "bash", ok: true, summary: "3 hits", callId: "c1", at: T0 + 43_000, seq: 4 },
+      { type: "turn", startedAt: T0 + 44_000, durationMs: 70_000, stopReason: "tool_use", at: T0 + 114_000, seq: 5 },
+      {
+        type: "tool_call",
+        tool: "mcp__linear__search",
+        summary: "mcp__linear__search",
+        callId: "c2",
+        at: T0 + 115_000,
+        seq: 6,
+      },
+      {
+        type: "mcp_tool_use",
+        server: "linear",
+        tool: "search",
+        ok: true,
+        durationMs: 1_500,
+        bytes: 200,
+        at: T0 + 116_500,
+        seq: 7,
+      },
+      {
+        type: "tool_result",
+        tool: "mcp__linear__search",
+        ok: true,
+        summary: "2 issues",
+        callId: "c2",
+        at: T0 + 117_000,
+        seq: 8,
+      },
+      { type: "turn", startedAt: T0 + 118_000, durationMs: 3_000, stopReason: "end_turn", at: T0 + 121_000, seq: 9 },
+      { type: "answer", text: "done", at: T0 + 121_000, seq: 10 },
+    ];
+    const d = analyzeRunFriction(legacy, { finished: true, window: { start: T0 - 5_000, end: T0 + 125_000 } });
+    // Before spans the gap rule read 41 s + 72 s + 4 s of "model time"; the receipts say 40 + 70 + 3.
+    expect(d.modelTimeMs).toBe(113_000);
+    expect(d.toolTimeMs).toBe(2_000 + 2_000);
+    expect(d.findings.map((f) => [f.category, f.eventIndex, f.durationMs, f.summary])).toEqual([
+      ["slow_model_turn", 5, 70_000, "model turn took 1m 10s before: mcp__linear__search"],
+    ]);
+    expect(d.shape).toEqual({
+      windowMs: 130_000,
+      gettingReadyMs: 0,
+      thinkingMs: 113_000,
+      toolsMs: 4_000,
+      finishingUpMs: 0,
+      overheadMs: 13_000,
+      notRecordedMs: 0,
+      notLoadedMs: 0,
+    });
+    expect(d.eventCount).toBe(4); // the two pairs; the receipts, the MCP fact and the narrative are not steps
   });
 });

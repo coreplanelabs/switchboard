@@ -347,6 +347,23 @@ export function isStoredDiagnosis(v: unknown): v is FrictionDiagnosis {
   if (!Array.isArray(d.findings) || !isFiniteNumber(d.eventCount) || typeof d.verdict !== "string") return false;
   if (d.runMs !== undefined && !isFiniteNumber(d.runMs)) return false;
   if (typeof d.byCategory !== "object" || d.byCategory === null) return false;
+  // The shape (features/tracing.md item 5), when the analyzer had a window: seven finite terms.
+  if (d.shape !== undefined) {
+    if (typeof d.shape !== "object" || d.shape === null) return false;
+    const shape = d.shape as Record<string, unknown>;
+    for (const k of [
+      "windowMs",
+      "gettingReadyMs",
+      "thinkingMs",
+      "toolsMs",
+      "finishingUpMs",
+      "overheadMs",
+      "notRecordedMs",
+      "notLoadedMs",
+    ]) {
+      if (!isFiniteNumber(shape[k])) return false;
+    }
+  }
   return Object.values(d.byCategory as Record<string, unknown>).every(isCategoryTotals);
 }
 
