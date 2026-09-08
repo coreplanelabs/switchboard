@@ -370,7 +370,7 @@ function streamExec(
   // Per ATTEMPT, not per request: withSessionRecovery may run the command a
   // second time after a stale-session reset, and a retry's own failure must be
   // judged on its own clock, not the first attempt's.
-  let attemptStartedAt = Date.now();
+  let attemptStartedAt = systemClock();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const beat = setInterval(() => {
@@ -390,7 +390,7 @@ function streamExec(
         }
       };
       withSessionRecovery(sandbox, () => {
-        attemptStartedAt = Date.now();
+        attemptStartedAt = systemClock();
         return sandbox.exec(command, options);
       })
         .then((result) => {
@@ -414,7 +414,7 @@ function streamExec(
             exitCode: timedOut ? 124 : exitCode,
             // The command's wall time in the sandbox, for the bot's `exec.exec`
             // span (features/tracing.md item 19); an older client ignores it.
-            durationMs: Date.now() - attemptStartedAt,
+            durationMs: systemClock() - attemptStartedAt,
           });
         })
         .catch((err: unknown) => {
@@ -443,7 +443,7 @@ function streamExec(
           // so, and that /workspace is gone. Still exit 127: the workspace
           // really is gone.
           const certain = shape.name !== undefined && isRecycleError({ name: shape.name });
-          const msg = recycledMidCommandMessage(Date.now() - attemptStartedAt, raw, certain);
+          const msg = recycledMidCommandMessage(systemClock() - attemptStartedAt, raw, certain);
           // Carry the failure in BOTH shapes so rollout order can't create
           // a silent-success window: a new executor throws on `error`, and
           // an executor that predates in-body errors (only checks exitCode)

@@ -13,6 +13,7 @@ import { ResidentExecutor, ResidentNeedsRefError, type ResidentBinding, type Res
 import { repoResourceId } from "../core/residentAdmin.js";
 import { resolveGithubToken } from "./githubApp.js";
 import { isServiceable } from "./residentState.js";
+import { systemClock } from "../core/trace/clock.js";
 
 export interface ResidentExecutionConfig {
   /** base URL of the resident Worker (deploy/cloudflare-resident/) */
@@ -330,7 +331,7 @@ export function residentSlugsLister(
   const token = cfg?.baseUrl ? env[cfg.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN"] : undefined;
   if (!cfg?.baseUrl || !token) return undefined;
   return async () => {
-    if (probeOutage && Date.now() < probeOutage.until) return undefined;
+    if (probeOutage && systemClock() < probeOutage.until) return undefined;
     let res: Response;
     try {
       res = await fetch(`${cfg.baseUrl.replace(/\/$/, "")}/residents`, {
@@ -339,7 +340,7 @@ export function residentSlugsLister(
       });
     } catch (err) {
       probeOutage = {
-        until: Date.now() + PROBE_OUTAGE_WINDOW_MS,
+        until: systemClock() + PROBE_OUTAGE_WINDOW_MS,
         error: err instanceof Error ? err.message : String(err),
       };
       return undefined;
@@ -364,12 +365,12 @@ async function probeResident(
   resource: string,
   span?: Span,
 ): Promise<ResidentStatusProbe> {
-  if (probeOutage && Date.now() < probeOutage.until) {
+  if (probeOutage && systemClock() < probeOutage.until) {
     return { kind: "unreachable", error: `${probeOutage.error}; probe skipped during outage window`, transport: true };
   }
   const probe = await ResidentExecutor.probeStatus(cfg.baseUrl, token, resource, cfg.probeTimeoutMs ?? 2000, span);
   if (probe.kind === "unreachable" && probe.transport) {
-    probeOutage = { until: Date.now() + PROBE_OUTAGE_WINDOW_MS, error: probe.error };
+    probeOutage = { until: systemClock() + PROBE_OUTAGE_WINDOW_MS, error: probe.error };
   }
   return probe;
 }

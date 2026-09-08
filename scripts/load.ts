@@ -31,6 +31,7 @@ import { runSandboxLoad } from "../src/load/sandboxLoad.js";
 import { codingProfileScript, reviewProfileScript, startScriptedProvider } from "../src/load/scriptedProvider.js";
 import { CloudflareSandboxExecutor } from "../src/execution/cloudflareSandbox.js";
 import { ResidentExecutor } from "../src/execution/resident.js";
+import { systemClock } from "../src/core/trace/clock.js";
 
 const RESULTS_DIR = process.env.SWITCHBOARD_LOAD_RESULTS ?? "load-results";
 
@@ -117,7 +118,7 @@ const secretFile = (name: string): string | undefined => {
 const bearer = (name: string): string => process.env[name] ?? secretFile(name) ?? env(name);
 
 const runId = () =>
-  new Date()
+  new Date(systemClock())
     .toISOString()
     .replace(/[-:]/g, "")
     .replace(/\.\d+Z$/, "Z");
@@ -167,7 +168,7 @@ const E2E_SLO: SloSpec = { zeroFailures: ["run"] };
 
 async function history(f: Flags): Promise<boolean> {
   const id = runId();
-  const startedAt = new Date().toISOString();
+  const startedAt = new Date(systemClock()).toISOString();
   const base = str(f, "state-url", process.env.SWITCHBOARD_STATE_WORKER_URL).replace(/\/$/, "");
   const token = bearer(str(f, "token-env", "MEMORY_TOKEN"));
   const items = await pageAll(
@@ -210,7 +211,7 @@ async function history(f: Flags): Promise<boolean> {
 
 async function resident(f: Flags): Promise<boolean> {
   const id = runId();
-  const startedAt = new Date().toISOString();
+  const startedAt = new Date(systemClock()).toISOString();
   const baseUrl = str(f, "resident-url", process.env.SWITCHBOARD_RESIDENT_URL).replace(/\/$/, "");
   const operator = bearer("RESIDENT_OPERATOR_TOKEN");
   const admin = bearer("RESIDENT_ADMIN_TOKEN");
@@ -280,7 +281,7 @@ async function resident(f: Flags): Promise<boolean> {
 
 async function sandbox(f: Flags): Promise<boolean> {
   const id = runId();
-  const startedAt = new Date().toISOString();
+  const startedAt = new Date(systemClock()).toISOString();
   const url = str(f, "sandbox-url", process.env.SWITCHBOARD_SANDBOX_URL).replace(/\/$/, "");
   const token = bearer("SANDBOX_TOKEN");
   const params = {
@@ -316,7 +317,7 @@ async function sandbox(f: Flags): Promise<boolean> {
 
 async function e2e(f: Flags): Promise<boolean> {
   const id = runId();
-  const startedAt = new Date().toISOString();
+  const startedAt = new Date(systemClock()).toISOString();
   const params = {
     runId: id,
     ingressUrl: str(f, "ingress-url"),
@@ -353,7 +354,7 @@ async function e2e(f: Flags): Promise<boolean> {
 
 async function cards(f: Flags): Promise<boolean> {
   const id = runId();
-  const startedAt = new Date().toISOString();
+  const startedAt = new Date(systemClock()).toISOString();
   const params = {
     cards: num(f, "cards", 50),
     holdMs: num(f, "hold", 600) * 1000,

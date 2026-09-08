@@ -133,11 +133,11 @@
       "when": "Part of `check:consistency`."
     },
     "clock:gen": {
-      "does": "Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree.",
-      "when": "After removing a direct `Date.now()`; part of `fix`."
+      "does": "Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree — empty since the ratchet reached zero, so a regeneration that is not `{}` names a new direct read.",
+      "when": "Part of `fix`."
     },
     "clock:check": {
-      "does": "No production file reads the wall clock more than its allowlist entry permits, and no entry is stale.",
+      "does": "No production file reads the wall clock directly: the allowlist is empty and the tree agrees.",
       "when": "Part of `check:consistency`."
     },
     "docs:changed": {

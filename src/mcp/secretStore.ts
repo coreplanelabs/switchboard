@@ -7,6 +7,7 @@ import {
   type McpTicketState,
   type SealedCredential,
 } from "./registry.js";
+import { systemClock } from "../core/trace/clock.js";
 
 // Where sealed MCP credentials and connect tickets live (features/mcp-tools.md
 // items 15–16). The server ENTRIES are config (`Scope.mcpServers`, persisted
@@ -114,7 +115,7 @@ export class FileMcpSecretStore implements McpSecretStore {
     const doc = this.read();
     doc.tickets[ticket.nonce] = ticket;
     // Sweep tickets expired more than a day ago so the file never grows without bound.
-    const cutoff = Date.now() - 24 * 3600_000;
+    const cutoff = systemClock() - 24 * 3600_000;
     for (const [n, t] of Object.entries(doc.tickets)) if (t.expiresAt < cutoff) delete doc.tickets[n];
     this.write(doc);
   }

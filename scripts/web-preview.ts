@@ -7,6 +7,7 @@ import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
 import { normalizeSpans } from "../src/core/normalizeSpans.js";
 import type { RunEvent } from "../src/core/runEvents.js";
+import { systemClock } from "../src/core/trace/clock.js";
 
 // Local visual preview of the web app (web/) with fixture data — no Slack, no
 // config.yaml, no credentials. Build the app first (`npm run build` in web/),
@@ -18,7 +19,7 @@ import type { RunEvent } from "../src/core/runEvents.js";
 //   /runs/scheduled  the Scheduled tab                     /residents   /costs
 
 const PORT = Number(process.env.PORT ?? 8788);
-const NOW = Date.now();
+const NOW = systemClock();
 
 const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"));
 const shell = makeShellRenderer(assets.entry);
@@ -318,19 +319,19 @@ function serveLiveStream(res: import("node:http").ServerResponse): void {
   res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" });
   res.write("retry: 3000\n\n");
   let i = 0;
-  let nextAt = Date.now();
+  let nextAt = systemClock();
   const timer = setInterval(() => {
     if (i >= HIST_EVENTS.length - 1) {
       res.write(": hb\n\n"); // the answer is held back so the run stays visibly live
       return;
     }
-    if (Date.now() < nextAt) return;
-    const e = { ...HIST_EVENTS[i], at: Date.now() };
+    if (systemClock() < nextAt) return;
+    const e = { ...HIST_EVENTS[i], at: systemClock() };
     res.write(`id: ${e.seq}\ndata: ${JSON.stringify(e)}\n\n`);
     i++;
     // The last command stays out for half a minute so a ticking running card
     // can be seen; then the model "thinks" forever (the pending-turn row).
-    nextAt = Date.now() + (i === LAST_CALL_INDEX + 1 ? 30_000 : 1500);
+    nextAt = systemClock() + (i === LAST_CALL_INDEX + 1 ? 30_000 : 1500);
   }, 500);
   res.on("close", () => clearInterval(timer));
 }

@@ -9,6 +9,7 @@ import TimelineSection from "../components/run/TimelineSection.vue";
 import { buildTimeline, type TimelinePhase } from "../lib/timelineVm";
 import { runOwnerOf } from "@core/core/runOwner.js";
 import { useSeed } from "../lib/seed";
+import { useWallClock } from "../lib/wallClock";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
 import {
@@ -58,7 +59,7 @@ const state = model.state;
 type Phase = "connecting" | "running" | "stopping" | "finished" | "disconnected" | "ended";
 const phase = ref<Phase>(isHistory ? "ended" : "connecting");
 const stopError = ref("");
-const nowWall = ref(Date.now());
+const nowWall = useWallClock();
 // The header's one duration (live-view item 22): the run's stamps from the seed,
 // projected arrival-relative from the server clock the seed carried — never a
 // server stamp minus the browser's clock. Frozen at `end` at the value it had.
@@ -278,7 +279,6 @@ function handle(e: unknown): void {
 // ---- the stream / the seed -----------------------------------------------------
 const makeEventSource = useEventSourceFactory();
 let es: EventSourceLike | null = null;
-let tick: ReturnType<typeof setInterval> | null = null;
 
 // History seeds synchronously: the seed IS the stream, and feeding it before
 // the first render keeps the paint complete (no flash of an empty page).
@@ -290,10 +290,6 @@ if (seed?.mode === "history") {
 }
 
 onMounted(() => {
-  tick = setInterval(() => {
-    nowWall.value = Date.now();
-  }, 1000);
-
   if (seed?.mode !== "live") return;
   es = makeEventSource(seed.eventsUrl);
   es.onopen = () => {
@@ -350,7 +346,6 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  if (tick) clearInterval(tick);
   es?.close();
 });
 

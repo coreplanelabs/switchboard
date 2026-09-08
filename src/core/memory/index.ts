@@ -6,6 +6,7 @@ import { applyBudget, DEFAULT_MEMORY_LIMIT, DEFAULT_MEMORY_TOKENS, renderMemoryB
 import { listScopeKeys, requestScopeKeys } from "./scope.js";
 import { selectMemoryStore } from "./stores.js";
 import { reflect, reflectionActor, shouldReflect, trackReflection, type ReflectGateInput } from "./reflection.js";
+import { systemClock } from "../trace/clock.js";
 
 export type { MemoryRecord, MemoryCandidate, MemoryQuery, MemoryStore, MemoryScope, MemoryConfig } from "./types.js";
 export {
@@ -177,7 +178,7 @@ export async function memoryContextBlock(
   // bumped `lastUsedAt` on every returned record, their recency terms are all
   // ≈1 here and the merge order is decided by keyword match — recency did its
   // work inside each scope's own ranking. Stable sort: ties keep org first.
-  const t = Date.now();
+  const t = systemClock();
   const merged = perScope
     .flat()
     .map((r) => ({ r, score: scoreRecord(r, query, t) }))

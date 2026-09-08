@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import AppShell from "../components/AppShell.vue";
+import { wallNow } from "../lib/wallClock";
 import RunsTabs from "../components/runs/RunsTabs.vue";
 import { useSeed } from "../lib/seed";
 import { formatDateTime, formatLocalIso } from "../lib/format";
@@ -25,7 +26,7 @@ import {
 // only the cron chip keeps its UTC label — the expression is defined in UTC.
 
 const seed = useSeed("scheduled");
-const now = computed(() => seed?.now ?? Date.now());
+const now = computed(() => seed?.now ?? wallNow());
 const rows = computed(() => seed?.rows ?? null);
 
 const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {

@@ -57,6 +57,8 @@ describe("clock ratchet", () => {
     const current = scan(ROOT);
     expect(allowlistProblems(current, listed)).toEqual([]);
     expect(current).toEqual(listed);
+    // The ratchet reached zero (features/tracing.md item 8): nothing is allowed a direct read.
+    expect(listed).toEqual({});
     // the problem report names both directions
     expect(allowlistProblems({ "a.ts": 2 }, { "a.ts": 1, "b.ts": 1 })).toEqual([
       "a.ts: 2 clock read(s), allowlist permits 1",

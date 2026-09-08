@@ -41,6 +41,7 @@ import { reviewTargetBlock } from "./reviewTarget.js";
 import type { RepoContext } from "./repoContext.js";
 import type { RunEvent } from "./runEvents.js";
 import type { RunControl } from "./runRegistry.js";
+import { systemClock } from "./trace/clock.js";
 
 /** The PR's current head as GitHub reports it; undefined (or a throw) means
  *  unknown. The dispatcher passes `deps.fetchPrHead ?? currentPrHeadSha`. */
@@ -414,7 +415,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
       } else if (classified && move?.kind === "substantive") {
         const summary = `head moved ${expected.slice(0, 7)} → ${current.slice(0, 7)} — re-reviewing at ${current.slice(0, 7)}`;
         console.log(`[review] ${logKey} ${summary} (${where})`);
-        turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: Date.now() });
+        turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
         input.notify.headMoved(`head moved → ${current.slice(0, 7)}`);
         await input.notify.reply(headRereviewNote({ where, reviewed: expected, current, move })).catch(() => {});
         // Resident: move the worktree ourselves (one re-attach at the new

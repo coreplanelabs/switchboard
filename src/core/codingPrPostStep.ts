@@ -60,6 +60,7 @@ import {
 import { encodeGithubPathSegments, renderPrDescriptionMarkdown, type PrDescription } from "./prDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { parseExitPrefix, type RunEvent } from "./runEvents.js";
+import { systemClock } from "./trace/clock.js";
 
 /** What the PR post-step observed in the run's workspace, all read BEFORE the
  *  workspace is released. Every field is undefined when its probe failed. */
@@ -367,7 +368,7 @@ export async function runCodingPrPostStep(input: {
         url: opened.htmlUrl,
         number: opened.number,
         created: opened.created,
-        at: Date.now(),
+        at: systemClock(),
       });
       return opened.created
         ? `🔀 PR opened: ${opened.htmlUrl} (\`${branch}\` → \`${base}\`)`

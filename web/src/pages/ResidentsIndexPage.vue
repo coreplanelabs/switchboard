@@ -14,6 +14,7 @@ import {
 } from "@core/channels/residentsModel.js";
 import { formatDiskGauge } from "@core/execution/residentDiskBudget.js";
 import { formatRelative } from "../lib/format";
+import { wallNow } from "../lib/wallClock";
 
 // The residents index: every onboarded repo, its lifecycle state and why,
 // what it is warm on, each row linking to its detail page. The seed is the
@@ -21,7 +22,7 @@ import { formatRelative } from "../lib/format";
 
 const seed = useSeed("residents");
 
-const now = Date.now(); // a snapshot page — one clock reading is the honest one
+const now = wallNow(); // a snapshot page — one clock reading is the honest one
 
 const rows = computed(() =>
   (seed?.residents ?? []).map((raw, i) => {

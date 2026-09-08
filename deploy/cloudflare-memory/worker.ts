@@ -257,7 +257,7 @@ export class MemoryDO extends DurableObject<Env> {
         Math.max(FTS_CANDIDATES_FLOOR, limit * FTS_CANDIDATES_PER_LIMIT),
       )
       .toArray();
-    const now = Date.now();
+    const now = systemClock();
     const ranked = rankRecords(rows.map(toRecord), query, now, limit);
     if (ranked.length > 0) {
       // One batched usage bump for the returned set (ids are server-minted and
@@ -297,7 +297,7 @@ export class MemoryDO extends DurableObject<Env> {
     if (candidates.length === 0) return counts;
     this.ctx.storage.transactionSync(() => {
       let seq = this.sql.exec<{ next: number }>(`SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM records`).one().next;
-      const now = Date.now();
+      const now = systemClock();
       for (const cand of candidates) {
         // Targeted lookups, never a full-active scan (#356 item 10): planWrite
         // only ever inspects (a) the active row `supersedes` names — its
@@ -729,7 +729,7 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
     }
     case "/config/tickets/put": {
       if (!isMcpTicket(b.ticket)) return json({ error: "ticket must be an McpTicket" }, 400);
-      await dO.putTicket(b.ticket, Date.now());
+      await dO.putTicket(b.ticket, systemClock());
       console.log(`[config/tickets/put] ${b.ticket.serverId} state=${b.ticket.state}`);
       return json({ ok: true });
     }
@@ -763,7 +763,7 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "expectedVersion must be a non-negative integer" }, 400);
     if (new TextEncoder().encode(JSON.stringify(b.document)).byteLength > MAX_CONFIG_DOCUMENT_BYTES)
       return json({ error: `document must be at most ${MAX_CONFIG_DOCUMENT_BYTES} bytes` }, 413);
-    const out = await dO.put(b.key, b.document, b.expectedVersion, Date.now());
+    const out = await dO.put(b.key, b.document, b.expectedVersion, systemClock());
     if (!out.ok) return json({ error: "version conflict", version: out.version }, 409);
     console.log(`[config/put] ${b.key} v${out.version}`);
     return json({ ok: true, version: out.version });
@@ -1160,7 +1160,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       out = { ok: true, stored: put.stored };
     });
     if ((await this.ctx.storage.getAlarm()) === null)
-      await this.ctx.storage.setAlarm(Date.now() + RUN_SWEEP_INTERVAL_MS);
+      await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
     return out;
   }
 
@@ -1360,7 +1360,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       result = this.upsertInTransaction(record, proposal);
     });
     if ((await this.ctx.storage.getAlarm()) === null)
-      await this.ctx.storage.setAlarm(Date.now() + RUN_SWEEP_INTERVAL_MS);
+      await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
     return result;
   }
 
@@ -1372,7 +1372,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     proposal?: RunPolicyProposal,
   ): { ok: true; retained: number; stored: boolean; rewritten: boolean } {
     {
-      const now = Date.now();
+      const now = systemClock();
       const policy = proposal ? this.applyProposal(proposal, now).policy : this.policyState().policy;
       const finishedAt = Math.min(record.finishedAt, now + RUN_MAX_FUTURE_MS);
       // The tracing stamps get the same skew clamp (features/tracing.md).
@@ -1467,7 +1467,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** Every 6 h: delete everything outside policy (no fence — this is where a
    *  large shrink finishes), sweep orphaned events, then re-arm. */
   async alarm(): Promise<void> {
-    const now = Date.now();
+    const now = systemClock();
     const { policy } = this.policyState();
     let deleted = 0;
     this.ctx.storage.transactionSync(() => {
@@ -1486,7 +1486,7 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  stored under (the registry's stamp — see `eventSeqs`), or null when
    *  unknown or outside policy — one not-found shape. A corrupt event row is skipped. */
   async get(id: string): Promise<RunRecord | null> {
-    const now = Date.now();
+    const now = systemClock();
     const row = this.sql
       .exec<RunRow>(
         `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`,
@@ -1525,7 +1525,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const row = this.sql
       .exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs WHERE run_id = ?`, id)
       .toArray()[0];
-    if (!row || !this.isKept(row, this.policyState().policy, Date.now())) return null;
+    if (!row || !this.isKept(row, this.policyState().policy, systemClock())) return null;
     const rows = this.eventRows(id, afterSeq, limit + 1);
     const page = rows.slice(0, limit);
     const out: { events: StoredRunEvent[]; nextAfterSeq?: number } = { events: parseEventRows(page) };
@@ -1544,7 +1544,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         id,
       )
       .toArray()[0];
-    if (!row || !this.isKept(row, this.policyState().policy, Date.now())) return null;
+    if (!row || !this.isKept(row, this.policyState().policy, systemClock())) return null;
     const summary = parseSummary(row);
     return summary ? { ...summary, bytes: row.bytes } : null;
   }
@@ -1575,7 +1575,7 @@ export class RunHistoryDO extends DurableObject<Env> {
    * empty page without a query.
    */
   async list(q: RunListOptions): Promise<{ items: RunListItem[]; nextBefore?: { finishedAt: number; id: string } }> {
-    const now = Date.now();
+    const now = systemClock();
     const limit = clampListLimit(q.limit);
     if (q.visibleTo?.kind === "none") return { items: [] };
     const { policy } = this.policyState();
@@ -2248,7 +2248,7 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   const key = parseStoreKey(b);
   if (!key.ok) return json({ error: key.error }, 400);
   const stub = env.RUNS.get(env.RUNS.idFromName(key.value));
-  const now = Date.now();
+  const now = systemClock();
 
   if (pathname === "/runs/claim") {
     const req = parseClaim(b);

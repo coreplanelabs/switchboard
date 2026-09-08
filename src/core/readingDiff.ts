@@ -1,5 +1,6 @@
 import { shellQuote } from "../execution/shellQuote.js";
 import { redactSecrets, stripAnsi, type RunEvent } from "./runEvents.js";
+import { systemClock } from "./trace/clock.js";
 
 // The reading diff (features/reading-diff.md): every PR review run publishes a
 // `review_artifact` event carrying the change as a reviewer would read it —
@@ -184,7 +185,7 @@ export function startReviewReadingDiff(args: {
         meatTimeoutS: resolved.meatTimeoutS,
       });
       if (!artifact) return false;
-      args.publish({ type: "review_artifact", artifact: "reading_diff", ...artifact, at: Date.now() });
+      args.publish({ type: "review_artifact", artifact: "reading_diff", ...artifact, at: systemClock() });
       return true;
     } catch {
       return false;

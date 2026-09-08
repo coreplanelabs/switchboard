@@ -85,8 +85,10 @@ const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
 
 // Process start for `/healthz.startedAt` — `deploy restart`'s live gate tells
-// the restarted container (same image, same `build.commit`) from the old one by it.
-const PROCESS_STARTED_AT = systemClock() - Math.round(process.uptime() * 1000);
+// the restarted container (same image, same `build.commit`) from the old one by
+// it. Read at module load, which is the process start to within its own
+// startup — the one clock, never `process.uptime` (features/tracing.md item 8).
+const PROCESS_STARTED_AT = systemClock();
 // Memory and event-loop lag for `/healthz.process` — the bot is one Node
 // process, and under many concurrent runs it is the first thing to fail.
 const sampleProcessMetrics = startProcessMetrics();
