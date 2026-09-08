@@ -132,6 +132,7 @@ describe("buildTimeline", () => {
     });
     expect(vm.lede).toBe("1m 40s — 30s getting ready · 40s thinking · 20s in tools · 10s Switchboard overhead");
     expect(vm.current).toBe("currently thinking 10s");
+    expect(vm.openStep).toBe("a model turn"); // the tail row's word for the same open span
     const thinking = vm.bar.filter((s) => s.term === "thinking");
     expect(thinking.map((s) => [s.ms, s.hatched])).toEqual([
       [30_000, false],
@@ -148,6 +149,7 @@ describe("buildTimeline", () => {
       phase: "live",
     });
     expect(between.current).toBe("");
+    expect(between.openStep).toBe("");
     expect(between.bar.some((s) => s.hatched)).toBe(false);
   });
 
@@ -245,6 +247,7 @@ describe("buildTimeline", () => {
     expect(setupOnly.lede).toBe("40s — getting ready");
     expect(setupOnly.shown).toBe(false);
     expect(setupOnly.current).toBe("currently getting ready 40s");
+    expect(setupOnly.openStep).toBe("reading the thread");
     const command = [
       sp("root", "request", 0, 10_000),
       sp("cmd", "run.command", 0, 10_000, { parent: "root", attrs: { command: "repo.test" } }),

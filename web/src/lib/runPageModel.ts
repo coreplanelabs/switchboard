@@ -139,7 +139,36 @@ export interface FollowUpVm {
   input: RequestVm;
 }
 
-export type LogItem = StepVm | TurnRowVm | NoteVm | FollowUpVm | SpanRowVm;
+/** The setup spans folded under one head (features/live-view.md item 25):
+ *  `slack.receive`, every `dispatch.*` step and the attach's grafted resident
+ *  steps. Open while the run is still setting up; closes on its own when the
+ *  agent loop starts (so a record opens closed), unless the reader toggled it. */
+export interface SetupGroupVm {
+  kind: "setup";
+  key: string;
+  rows: SpanRowVm[];
+  open: boolean;
+}
+
+export type LogItem = StepVm | TurnRowVm | NoteVm | FollowUpVm | SpanRowVm | SetupGroupVm;
+
+/** A setup span: the receipt and the dispatcher's steps before the loop, the
+ *  attach's grafts included; `run.*` and `post.*` rows stand on their own. */
+export function isSetupSpan(name: string): boolean {
+  return name === "slack.receive" || name.startsWith("dispatch.");
+}
+
+/** The head's text: how many steps and, once every one has ended, their span
+ *  from the first start to the last end. */
+export function setupHeadText(group: Pick<SetupGroupVm, "rows">): string {
+  const n = group.rows.length;
+  const steps = `${n} step${n === 1 ? "" : "s"}`;
+  if (n === 0 || group.rows.some((r) => r.open || r.at === undefined || r.durationMs === undefined))
+    return `Setup · ${steps}`;
+  const start = Math.min(...group.rows.map((r) => r.at!));
+  const end = Math.max(...group.rows.map((r) => r.at! + r.durationMs!));
+  return `Setup · ${steps} · ${formatDuration(Math.max(0, end - start), "precise")}`;
+}
 
 export interface RequestVm {
   text: string;
@@ -217,6 +246,8 @@ export interface RunPageModel {
   flushPendingTurn(note: string): void;
   setAllOpen(open: boolean): void;
   toggleGroup(step: StepVm): void;
+  /** The reader opens or closes the Setup head; from then on it stays as they left it. */
+  toggleSetup(group: SetupGroupVm): void;
   toggleCall(call: CallVm): void;
   markStopping(mode: "soft" | "hard"): void;
   /** True when the call's tags open it by default (failed/infra, or ?open=). */
@@ -321,6 +352,11 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   const stepVms = new Map<number, StepVm>();
   const spanRows = new Map<string, SpanRowVm>();
+  // The one Setup group of the log, once a setup span arrived; `setupToggled`
+  // records that the reader decided its state, so the agent loop's start no
+  // longer closes it.
+  let setupGroup: SetupGroupVm | null = null;
+  let setupToggled = false;
   const callVms = new Map<string, CallVm>();
   /** Quiet calls (update_status) render once; their results only refresh the tally. */
   const quietIds = new Set<string>();
@@ -510,9 +546,23 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
           open: change.open,
           ...(change.durationMs !== undefined ? { durationMs: change.durationMs } : {}),
           ...(change.status ? { status: change.status } : {}),
-          at: change.at,
+          // A row born from a lone end (its start elided from the replay) is stamped
+          // with the span's start, so the Setup head's span is not inflated.
+          at: change.open ? change.at : (change.startedAt ?? change.at),
         });
         spanRows.set(change.spanId, row);
+        if (isSetupSpan(change.name)) {
+          const group: SetupGroupVm =
+            setupGroup ?? reactive<SetupGroupVm>({ kind: "setup", key: key("setup"), rows: [], open: true });
+          if (!setupGroup) {
+            setupGroup = group;
+            state.log.push(group);
+          }
+          group.rows.push(row);
+          return;
+        }
+        // The agent loop starting is the end of setup: the head closes unless the reader holds it open.
+        if (change.name === "run.agent" && change.open && setupGroup && !setupToggled) setupGroup.open = false;
         state.log.push(row);
         return;
       }
@@ -552,6 +602,10 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   function setAllOpen(open: boolean): void {
     state.allOpen = open;
+    if (setupGroup) {
+      setupGroup.open = open;
+      setupToggled = true;
+    }
     for (const c of callVms.values()) c.open = open;
   }
 
@@ -575,6 +629,10 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     pendingCall,
     flushPendingTurn: flushTurn,
     setAllOpen,
+    toggleSetup(group) {
+      group.open = !group.open;
+      setupToggled = true;
+    },
     toggleGroup(step) {
       step.manual = true; // the auto-fold then leaves this group alone forever
       step.groupOpen = !step.groupOpen;

@@ -12,6 +12,7 @@ import {
   createRunClock,
   sameModel,
   type StepVm,
+  setupHeadText,
 } from "./runPageModel";
 
 // The run page's fold, driven by real event streams (the same shapes the SSE
@@ -385,14 +386,20 @@ describe("replay_elided frames (item 5)", () => {
 describe("span rows", () => {
   it("a span_start opens one row under its display name; the matching span_end closes the same row with its duration and status; a tool span opens none", () => {
     const m = model();
-    m.handle({ type: "span_start", spanId: "d1", name: "dispatch.compose", at: 1_000 });
+    m.handle({ type: "span_start", spanId: "d1", name: "run.reading_diff", at: 1_000 });
     expect(m.state.log).toHaveLength(1);
     const row = m.state.log[0];
-    expect(row).toMatchObject({ kind: "span", spanId: "d1", text: "preparing the prompt", open: true, at: 1_000 });
+    expect(row).toMatchObject({
+      kind: "span",
+      spanId: "d1",
+      text: "reading the diff (in parallel)",
+      open: true,
+      at: 1_000,
+    });
     m.handle({
       type: "span_end",
       spanId: "d1",
-      name: "dispatch.compose",
+      name: "run.reading_diff",
       startedAt: 1_000,
       durationMs: 250,
       status: "error",
@@ -403,6 +410,79 @@ describe("span rows", () => {
     m.handle({ type: "span_start", spanId: "t1", name: "tool.bash", attrs: { callId: "c1" }, at: 2_000 });
     expect(m.state.log).toHaveLength(1);
     expect(m.state.placeholder).toBe(false);
+  });
+
+  it("setup spans — slack.receive, dispatch.* and the attach's grafts — fold under one Setup head that is open while the run sets up, closes when the agent loop starts unless the reader toggled it, and never takes a run.* row (features/live-view.md item 25)", () => {
+    const m = model();
+    m.handle({ type: "span_start", spanId: "r1", name: "slack.receive", at: 1_000 });
+    m.handle({
+      type: "span_end",
+      spanId: "r1",
+      name: "slack.receive",
+      startedAt: 1_000,
+      durationMs: 4,
+      status: "ok",
+      at: 1_004,
+    });
+    m.handle({ type: "span_start", spanId: "d1", name: "dispatch.history", at: 1_004 });
+    m.handle({
+      type: "span_end",
+      spanId: "d1",
+      name: "dispatch.history",
+      startedAt: 1_004,
+      durationMs: 196,
+      status: "ok",
+      at: 1_200,
+    });
+    m.handle({ type: "span_start", spanId: "g1", name: "dispatch.workspace.attach.install", at: 1_200 });
+    expect(m.state.log).toHaveLength(1);
+    const group = m.state.log[0];
+    expect(group).toMatchObject({ kind: "setup", open: true });
+    if (group.kind !== "setup") throw new Error("not a setup group");
+    expect(group.rows.map((r) => [r.text, r.open])).toEqual([
+      ["receiving", false],
+      ["reading the thread", false],
+      ["installing dependencies", true],
+    ]);
+    expect(setupHeadText(group)).toBe("Setup · 3 steps"); // a step still open: no duration yet
+    m.handle({
+      type: "span_end",
+      spanId: "g1",
+      name: "dispatch.workspace.attach.install",
+      startedAt: 1_200,
+      durationMs: 8_800,
+      status: "ok",
+      at: 10_000,
+    });
+    expect(setupHeadText(group)).toBe("Setup · 3 steps · 9.0s"); // first start to last end
+    // a setup row born from a lone span_end (its start elided) is stamped with the span's start, not its end
+    m.handle({
+      type: "span_end",
+      spanId: "lone",
+      name: "dispatch.compose",
+      startedAt: 1_200,
+      durationMs: 100,
+      status: "ok",
+      at: 1_300,
+    });
+    expect(group.rows.at(-1)).toMatchObject({ text: "preparing the prompt", open: false, at: 1_200, durationMs: 100 });
+    expect(setupHeadText(group)).toBe("Setup · 4 steps · 9.0s"); // still first start to last end
+    // a run.* span is a row of its own, beside the group
+    m.handle({ type: "span_start", spanId: "rd", name: "run.reading_diff", at: 10_000 });
+    expect(m.state.log.map((i) => i.kind)).toEqual(["setup", "span"]);
+    // the agent loop starts: the head closes
+    m.handle({ type: "span_start", spanId: "a1", name: "run.agent", at: 10_100 });
+    expect(group.open).toBe(false);
+    expect(m.state.log.map((i) => i.kind)).toEqual(["setup", "span", "span"]);
+    // the reader opens it; a later loop start leaves it alone
+    m.toggleSetup(group);
+    expect(group.open).toBe(true);
+    m.handle({ type: "span_start", spanId: "a2", name: "run.agent", at: 20_000 });
+    expect(group.open).toBe(true);
+    // Expand all / collapse all reach the head too
+    m.setAllOpen(false);
+    expect(group.open).toBe(false);
+    expect(setupHeadText({ rows: [] })).toBe("Setup · 0 steps");
   });
 });
 

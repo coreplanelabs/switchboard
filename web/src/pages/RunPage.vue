@@ -5,6 +5,7 @@ import MarkdownText from "../components/MarkdownText.vue";
 import SlackMark from "../components/SlackMark.vue";
 import GithubMark from "../components/GithubMark.vue";
 import StepBlock from "../components/run/StepBlock.vue";
+import SpanRow from "../components/run/SpanRow.vue";
 import TimelineSection from "../components/run/TimelineSection.vue";
 import { buildTimeline, type TimelinePhase } from "../lib/timelineVm";
 import { runOwnerOf } from "@core/core/runOwner.js";
@@ -23,6 +24,7 @@ import {
   parseReplayElided,
   runnerNow,
   RunnerClockKey,
+  setupHeadText,
 } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
@@ -231,10 +233,13 @@ const live = computed(
 const runnerClock = computed(() => (live.value ? runnerNow(state, nowWall.value) : null));
 provide(RunnerClockKey, runnerClock);
 const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall(), nowWall.value) : null));
-// The silent model's verbs: a fixed list, a new word every 6 s in order —
-// predictable, not twitchy — so the row is visibly alive without a spinner.
-// The word is DERIVED from how long this silence has lasted, so every silence
-// starts at "Thinking" and nothing rotates while no one is waiting.
+// The tail names the deepest open counted span when the timeline knows one —
+// `a model turn…`, the same span the lede's `currently thinking …` drills into
+// (features/live-view.md item 25). Before any span, the silent model's verbs:
+// a fixed list, a new word every 6 s in order — predictable, not twitchy — so
+// the row is visibly alive without a spinner. The word is DERIVED from how
+// long this silence has lasted, so every silence starts at "Thinking" and
+// nothing rotates while no one is waiting.
 const THINKING = [
   "Thinking",
   "Pondering",
@@ -249,9 +254,10 @@ const THINKING = [
   "Ruminating",
   "Reticulating splines",
 ];
-const verb = computed(() =>
-  waiting.value?.kind === "thinking" ? THINKING[Math.floor(waiting.value.elapsedMs / 6000) % THINKING.length] : "",
-);
+const verb = computed(() => {
+  if (waiting.value?.kind !== "thinking") return "";
+  return timeline.value?.openStep || THINKING[Math.floor(waiting.value.elapsedMs / 6000) % THINKING.length];
+});
 
 // ---- fold toggle ---------------------------------------------------------------
 function toggleAll(): void {
@@ -615,20 +621,24 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
               >
             </div>
           </li>
-          <!-- A streamed span that is a step of its own (features/tracing.md):
-               its display name, its duration once it ended, a pulse while open. -->
-          <li v-else-if="item.kind === 'span'" class="span flex items-baseline gap-2 py-0.5 text-xs text-muted">
-            <span class="glyph select-none" :class="item.status === 'error' ? 'text-bad' : 'text-dimmed'">{{
-              item.open ? "◌" : item.status === "error" ? "✗" : "◷"
-            }}</span>
-            <span class="what">{{ item.text }}</span>
-            <span v-if="item.open" class="text-dimmed">…</span>
-            <span v-else-if="item.durationMs !== undefined" class="dur tabular-nums text-dimmed">{{
-              formatDuration(item.durationMs, "precise")
-            }}</span>
-            <span v-if="item.at !== undefined" class="ts ml-auto select-none" :title="formatLocalIso(item.at)">{{
-              formatClock(item.at)
-            }}</span>
+          <!-- A streamed span that is a step of its own (features/tracing.md). -->
+          <SpanRow v-else-if="item.kind === 'span'" :item="item" />
+          <!-- The setup spans under one head (features/live-view.md item 25): open
+               while the run sets up, closed once the agent loop starts, the
+               reader's toggle winning from then on. -->
+          <li v-else-if="item.kind === 'setup'" class="setup py-0.5 text-xs">
+            <button
+              type="button"
+              class="setup-head flex w-full items-baseline gap-2 text-left text-muted hover:text-toned"
+              :aria-expanded="item.open"
+              @click.prevent="model.toggleSetup(item)"
+            >
+              <span class="glyph select-none text-dimmed">{{ item.open ? "▾" : "▸" }}</span>
+              <span class="what">{{ setupHeadText(item) }}</span>
+            </button>
+            <ul v-if="item.open" class="m-0 list-none p-0 pl-4">
+              <SpanRow v-for="row in item.rows" :key="row.key" :item="row" />
+            </ul>
           </li>
           <!-- A follow-up steered into this run (features/thread-admission.md
                item 2): the same run, more input — the Request's treatment,

@@ -417,10 +417,20 @@ describe("createRunTimeline — span records", () => {
         durationMs: 250,
         status: "error",
         at: 1_250,
+        startedAt: 1_000,
       },
     ]);
     expect(t.push(end("p1", "post.reply", 5_000, 40))).toEqual([
-      { kind: "span", spanId: "p1", name: "post.reply", open: false, durationMs: 40, status: "ok", at: 5_040 },
+      {
+        kind: "span",
+        spanId: "p1",
+        name: "post.reply",
+        open: false,
+        durationMs: 40,
+        status: "ok",
+        at: 5_040,
+        startedAt: 5_000,
+      },
     ]);
     expect(t.steps()).toEqual([]); // never a step of the agent's
     expect(t.push(start("", "dispatch.compose", 1))).toEqual([]);

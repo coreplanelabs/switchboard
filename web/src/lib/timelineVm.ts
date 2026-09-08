@@ -62,6 +62,10 @@ export interface TimelineVm {
   lede: string;
   /** `currently thinking 1m 26s` / `currently delivering` / `delivered in 2s` / `reply failed` / "". */
   current: string;
+  /** The deepest open counted span's display name (`a model turn`, `attaching the
+   *  workspace`) — what the log's tail row names while live; "" when nothing
+   *  counted is open. The same span `current` drills into. */
+  openStep: string;
   /** The queued captions, from a minute. */
   captions: string[];
   /** The gate: the bar, the gloss and the ranked list are shown together. */
@@ -104,6 +108,7 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
   ].filter((c): c is string => c !== undefined);
   const open = input.phase === "live" ? deepestOpenCounted(spans, owner, window) : undefined;
   const current = currentOf(input, open);
+  const openStep = open ? displayNameOf(open.name) : "";
   const debug = {
     window,
     owner,
@@ -119,7 +124,7 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
       attrs: s.attrs,
     })),
   };
-  const base = { current, captions, gloss: GLOSS, rankedNote: RANKED_NOTE, debug };
+  const base = { current, openStep, captions, gloss: GLOSS, rankedNote: RANKED_NOTE, debug };
   if (!root) {
     // A legacy record (no root) or a live page before its first frame: the
     // header's total, and on a record the one word for the missing setup.
@@ -155,6 +160,8 @@ function numberAttr(span: SpanRecord | undefined, key: "queuedBeforeMs" | "queue
 interface OpenCounted {
   bucket: Bucket;
   elapsedMs: number;
+  /** The span's own name, for the display table. */
+  name: string;
 }
 
 /** The deepest open counted span (ties: the latest start) — what the run is in
@@ -183,7 +190,11 @@ function deepestOpenCounted(spans: readonly SpanRecord[], owner: RunOwner, windo
     }
   }
   if (!best) return undefined;
-  return { bucket: best.bucket, elapsedMs: Math.max(0, window.end - Math.max(window.start, best.span.startedAt)) };
+  return {
+    bucket: best.bucket,
+    name: best.span.name,
+    elapsedMs: Math.max(0, window.end - Math.max(window.start, best.span.startedAt)),
+  };
 }
 
 function underBackground(s: SpanRecord, byId: Map<string, SpanRecord>, owner: RunOwner): boolean {
