@@ -1,4 +1,5 @@
 import type { RunEvent } from "./runEvents.js";
+import { isSpanRecord } from "./runEvents.js";
 import { formatDuration } from "./time/formatDuration.js";
 
 // Run-friction analyzer (Area 7b / #84, first piece): a PURE, deterministic
@@ -156,7 +157,7 @@ function isNarrative(ev: RunEvent): ev is NarrativeEvent {
  *  analyzer reads timing from spans in a later step — until then, and for the
  *  step counts and the stream's first/last stamps always, they are invisible. */
 function isSpanEvent(ev: { type: string }): boolean {
-  return ev.type === "span_start" || ev.type === "span_end";
+  return isSpanRecord(ev);
 }
 
 export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOptions = {}): FrictionDiagnosis {

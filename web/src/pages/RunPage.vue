@@ -13,6 +13,7 @@ import {
   createRunPageModel,
   liveWait,
   modelName,
+  parseFinishedFrame,
   parseReplayElided,
   runnerNow,
   RunnerClockKey,
@@ -254,10 +255,17 @@ onMounted(() => {
     const range = parseReplayElided(data);
     if (range) model.noteElided(range);
   });
+  // The agent stopped: the header's duration freezes at the server's finish
+  // stamp (features/tracing.md), the stream stays open for the span records
+  // until `end`.
+  es.addEventListener("finished", (data) => {
+    const frame = parseFinishedFrame(data);
+    if (frame && runClock) frozenMs.value = runClock.elapsedAt(frame.finishedAt);
+  });
   es.addEventListener("end", () => {
     model.flushPendingTurn("the run ended here"); // a run that ended without an answer still shows its last turn
     actionsHidden.value = true;
-    frozenMs.value = runClock?.elapsedMs(nowWall.value);
+    frozenMs.value ??= runClock?.elapsedMs(nowWall.value); // an `end` with no `finished` before it (a stored stream) freezes here
     phase.value = "ended";
     es?.close();
   });

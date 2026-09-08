@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { REPLAY_EVERYTHING, RunControl, RunRegistry, type IndexEvent, type RunRegistryOptions } from "./runRegistry.js";
+import {
+  REPLAY_EVERYTHING,
+  RunControl,
+  RunRegistry,
+  UNSEALED_HOLD_MS,
+  type FinishedFrame,
+  type IndexEvent,
+  type RunRegistryOptions,
+  type SealedFrame,
+} from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 
 // Feature: features/live-view.md — the in-memory, live-only run registry that
@@ -13,6 +22,9 @@ const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", 
 const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result", tool: "bash", ok, summary });
 /** What `publish` hands back: the input event stamped with its per-run `seq` (#157). */
 const seq = (n: number, e: RunEvent): RunEvent => ({ ...e, seq: n });
+/** A span record (features/tracing.md): the union gains the variant with the emitters. */
+const spanEnd = (name: string): RunEvent =>
+  ({ type: "span_end", spanId: `s-${name}`, name, startedAt: 1, durationMs: 5, status: "ok" }) as unknown as RunEvent;
 
 /** A registry with deterministic ids/tokens/clock for tests. */
 function testRegistry(over: Partial<RunRegistryOptions> = {}) {
@@ -229,7 +241,7 @@ describe("RunRegistry.subscribe — replay budget", () => {
     expect("elided" in got).toBe(false);
   });
 
-  it("a finished run replays within the budget, reports the range, then fires onFinish", () => {
+  it("a finished run replays within the budget, reports the range, then fires onSealed (the end frame)", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     for (let i = 1; i <= 5; i++) reg.publish(id, call(`e${i}`));
@@ -238,7 +250,7 @@ describe("RunRegistry.subscribe — replay budget", () => {
     let finished = false;
     const got = reg.subscribe(id, token, {
       onEvent: (e) => seen.push(e),
-      onFinish: () => (finished = true),
+      onSealed: () => (finished = true),
       limit: 2,
     })!;
     expect(seen.map((e) => e.seq)).toEqual([4, 5]);
@@ -262,12 +274,12 @@ describe("RunRegistry.unsubscribe", () => {
 });
 
 describe("RunRegistry.finish", () => {
-  it("notifies a live subscriber via onFinish and stops forwarding further events", () => {
+  it("notifies a live subscriber via onSealed (the end frame) and stops forwarding content events", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     const seen: RunEvent[] = [];
     let finished = false;
-    reg.subscribe(id, token, { onEvent: (e) => seen.push(e), onFinish: () => (finished = true) });
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e), onSealed: () => (finished = true) });
     reg.publish(id, call("during"));
     reg.finish(id);
     expect(finished).toBe(true);
@@ -275,14 +287,14 @@ describe("RunRegistry.finish", () => {
     expect(seen).toEqual([seq(1, call("during"))]);
   });
 
-  it("a subscriber that arrives after finish (within TTL) replays the backlog then gets onFinish immediately", () => {
+  it("a subscriber that arrives after finish (within TTL) replays the backlog then gets onSealed immediately", () => {
     const { reg } = testRegistry();
     const { id, token } = reg.create();
     reg.publish(id, call("happened"));
     reg.finish(id);
     const seen: RunEvent[] = [];
     let finished = false;
-    const unsub = reg.subscribe(id, token, { onEvent: (e) => seen.push(e), onFinish: () => (finished = true) });
+    const unsub = reg.subscribe(id, token, { onEvent: (e) => seen.push(e), onSealed: () => (finished = true) });
     expect(unsub).not.toBeNull();
     expect(seen).toEqual([seq(1, call("happened"))]);
     expect(finished).toBe(true);
@@ -291,6 +303,149 @@ describe("RunRegistry.finish", () => {
   it("publish to an unknown run is a silent no-op (never throws)", () => {
     const { reg } = testRegistry();
     expect(() => reg.publish("ghost", call("x"))).not.toThrow();
+  });
+});
+
+// Feature: features/live-view.md item 4, features/tracing.md — finish and seal.
+describe("RunRegistry — finish and seal", () => {
+  it("finish sends `finished` to attached subscribers and, under `sealAtFinish`, seals from the same clock read: one index upsert, `finished` then `end`, sealedAt === finishedAt even when the clock ticks between statements", () => {
+    let t = 1000;
+    const reg = new RunRegistry({ genId: () => "id-1", genToken: () => "tok-1", now: () => t++ }); // every read ticks
+    const { id, token } = reg.create();
+    const index: IndexEvent[] = [];
+    reg.subscribeIndex((e) => index.push(e));
+    const order: string[] = [];
+    reg.subscribe(id, token, {
+      onEvent: () => {},
+      onFinished: (f) => order.push(`finished@${f.finishedAt}`),
+      onSealed: (f) => order.push(`end@${f.sealedAt}:${String(f.replyOk)}`),
+    });
+    const before = index.length;
+    reg.finish(id, "completed");
+    expect(index.length - before).toBe(1); // one index event per finish
+    const row = reg.getById(id)!;
+    expect(row.finishedAt).toBeDefined();
+    expect(row.sealedAt).toBe(row.finishedAt);
+    expect(row.replyOk).toBeUndefined();
+    expect(order).toEqual([`finished@${row.finishedAt}`, `end@${row.sealedAt}:undefined`]);
+  });
+
+  it("without `sealAtFinish`: finish keeps subscribers attached; span records publish after finish (forwarded, counted, no index repaint); content after finish is dropped; seal detaches with the `end` frame, upserts once and returns the events since finish", () => {
+    const { reg } = testRegistry({ sealAtFinish: false });
+    const { id, token } = reg.create();
+    reg.publish(id, call("x"));
+    const seen: RunEvent[] = [];
+    const finished: FinishedFrame[] = [];
+    const sealed: SealedFrame[] = [];
+    reg.subscribe(id, token, {
+      onEvent: (e) => seen.push(e),
+      onFinished: (f) => finished.push(f),
+      onSealed: (f) => sealed.push(f),
+    });
+    const index: IndexEvent[] = [];
+    reg.subscribeIndex((e) => index.push(e));
+    reg.finish(id, "completed");
+    expect(finished).toEqual([{ finishedAt: 1000 }]);
+    expect(sealed).toEqual([]);
+    expect(reg.getById(id)).toMatchObject({ finished: true, finishedAt: 1000 });
+    expect(reg.getById(id)?.sealedAt).toBeUndefined();
+    const repaints = index.length;
+    reg.publish(id, spanEnd("run.agent"));
+    expect(seen.at(-1)).toEqual(seq(2, spanEnd("run.agent")));
+    expect(reg.getById(id)?.eventCount).toBe(2);
+    expect(index.length).toBe(repaints); // a span record never repaints the index
+    reg.publish(id, call("late content"));
+    expect(reg.getById(id)?.eventCount).toBe(2); // content stops at finish
+    const res = reg.seal(id, { replyOk: true });
+    expect(res).toEqual({ events: [seq(2, spanEnd("run.agent"))], eventCount: 2, sealedAt: 1000, replyOk: true });
+    expect(sealed).toEqual([{ sealedAt: 1000, replyOk: true }]);
+    expect(index.length).toBe(repaints + 1); // the seal upserts once
+    expect(reg.getById(id)).toMatchObject({ sealedAt: 1000, replyOk: true });
+    reg.publish(id, spanEnd("post.reply"));
+    expect(reg.getById(id)?.eventCount).toBe(2); // everything stops at the seal
+    expect(reg.seal(id, { replyOk: false })).toEqual(res); // re-readable; the first seal's replyOk stands
+    expect(index.length).toBe(repaints + 1);
+  });
+
+  it("a late subscriber to a finished-unsealed run gets the replay and `finished` and stays attached until the seal's `end`; to a sealed run it gets `finished` then `end` at once and never attaches", () => {
+    const { reg } = testRegistry({ sealAtFinish: false });
+    const { id, token } = reg.create();
+    reg.publish(id, call("x"));
+    reg.finish(id);
+    const a = { events: [] as RunEvent[], finished: 0, sealed: [] as SealedFrame[] };
+    reg.subscribe(id, token, {
+      onEvent: (e) => a.events.push(e),
+      onFinished: () => a.finished++,
+      onSealed: (f) => a.sealed.push(f),
+    });
+    expect(a.events).toEqual([seq(1, call("x"))]);
+    expect(a.finished).toBe(1);
+    expect(a.sealed).toEqual([]);
+    reg.publish(id, spanEnd("run.agent"));
+    expect(a.events).toHaveLength(2); // still attached
+    reg.seal(id);
+    expect(a.sealed).toEqual([{ sealedAt: 1000 }]);
+    const b = { finished: 0, sealed: [] as SealedFrame[] };
+    const got = reg.subscribe(id, token, {
+      onEvent: () => {},
+      onFinished: () => b.finished++,
+      onSealed: (f) => b.sealed.push(f),
+    })!;
+    expect(b.finished).toBe(1);
+    expect(b.sealed).toEqual([{ sealedAt: 1000 }]);
+    expect(got.replayed).toBe(2);
+    expect(() => got.unsubscribe()).not.toThrow();
+  });
+
+  it("seal on a live run is a no-op with no stamps; on an unknown run, the empty result", () => {
+    const { reg } = testRegistry({ sealAtFinish: false });
+    const { id, token } = reg.create();
+    expect(reg.seal(id, { replyOk: true })).toEqual({ events: [], eventCount: 0 });
+    const seen: RunEvent[] = [];
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
+    reg.publish(id, call("still live"));
+    expect(seen).toHaveLength(1);
+    expect(reg.getById(id)?.sealedAt).toBeUndefined();
+    expect(reg.seal("ghost")).toEqual({ events: [] });
+  });
+
+  it("the sweep evicts a sealed run at sealedAt + TTL, and holds a finished-unsealed run for UNSEALED_HOLD_MS before sealing it (its subscriber gets `end`, no replyOk) and evicting it", () => {
+    const { reg, tick } = testRegistry({ ttlMs: 60_000, sealAtFinish: false });
+    const removed: string[] = [];
+    reg.subscribeIndex((e) => {
+      if (e.type === "removed") removed.push(e.id);
+    });
+    const a = reg.create("sealed");
+    reg.finish(a.id);
+    reg.seal(a.id, { replyOk: true });
+    const b = reg.create("unsealed");
+    reg.finish(b.id);
+    const bSealed: SealedFrame[] = [];
+    reg.subscribe(b.id, b.token, { onEvent: () => {}, onSealed: (f) => bSealed.push(f) });
+    tick(61_000);
+    expect(reg.has(a.id, a.token)).toBe(false); // sealedAt + 60 s
+    expect(reg.has(b.id, b.token)).toBe(true); // the hold
+    expect(removed).toEqual([a.id]);
+    tick(UNSEALED_HOLD_MS);
+    expect(reg.has(b.id, b.token)).toBe(false);
+    expect(bSealed).toEqual([{ sealedAt: 1000 + 61_000 + UNSEALED_HOLD_MS }]);
+    expect(removed).toEqual([a.id, b.id]);
+  });
+
+  it("sealAllFinished seals every finished-unsealed run with the given replyOk, leaves live and sealed runs alone, and returns the count", () => {
+    const { reg } = testRegistry({ sealAtFinish: false });
+    const live = reg.create("live");
+    const done = reg.create("done");
+    const sealed = reg.create("sealed");
+    reg.finish(done.id);
+    reg.finish(sealed.id);
+    reg.seal(sealed.id, { replyOk: true });
+    expect(reg.sealAllFinished()).toBe(1);
+    expect(reg.getById(done.id)).toMatchObject({ sealedAt: 1000 });
+    expect(reg.getById(done.id)?.replyOk).toBeUndefined();
+    expect(reg.getById(live.id)?.sealedAt).toBeUndefined();
+    expect(reg.getById(sealed.id)).toMatchObject({ sealedAt: 1000, replyOk: true });
+    expect(reg.sealAllFinished()).toBe(0);
   });
 });
 
@@ -612,6 +767,7 @@ describe("RunRegistry.markPersisted", () => {
           finished: true,
           startedAt: 1000,
           finishedAt: 1000,
+          sealedAt: 1000, // sealAtFinish: the seal stamp is the finish stamp
           eventCount: 0,
           persisted: true,
         },

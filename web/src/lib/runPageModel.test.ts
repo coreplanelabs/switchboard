@@ -4,6 +4,7 @@ import {
   elidedText,
   liveWait,
   modelName,
+  parseFinishedFrame,
   parseReplayElided,
   runnerNow,
   createRunClock,
@@ -432,6 +433,23 @@ describe("the run's model — badged on the pending-turn row, flagged when it sw
     expect(modelName("acme/")).toBe("acme/");
     expect(modelName(null)).toBe("model");
     expect(modelName(undefined)).toBe("model");
+  });
+});
+
+describe("the `finished` frame freezes the header at the server's stamp (features/tracing.md)", () => {
+  it("elapsedAt runs the one definition against the frame's finishedAt, from receivedAt when the seed has it", () => {
+    expect(createRunClock({ serverNow: 1_000_000, startedAt: 940_000 }, 5_000).elapsedAt(970_000)).toBe(30_000);
+    expect(
+      createRunClock({ serverNow: 1_000_000, startedAt: 940_000, receivedAt: 900_000 }, 5_000).elapsedAt(970_000),
+    ).toBe(70_000);
+    expect(createRunClock({ serverNow: 1_000_000, startedAt: 940_000 }, 5_000).elapsedAt(900_000)).toBe(0); // skew never negative
+  });
+
+  it("parseFinishedFrame accepts one finite positive stamp and rejects everything else", () => {
+    expect(parseFinishedFrame('{"finishedAt":970000}')).toEqual({ finishedAt: 970_000 });
+    for (const bad of [undefined, "", "garbage", "null", "[]", '{"finishedAt":"970000"}', '{"finishedAt":0}', "{}"]) {
+      expect(parseFinishedFrame(bad)).toBeNull();
+    }
   });
 });
 

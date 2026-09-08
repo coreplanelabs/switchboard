@@ -461,6 +461,22 @@ describe("RunPage — live mode", () => {
     expect(wrapper.findAll("#log .note")).toHaveLength(1);
   });
 
+  it("a `finished` frame freezes the duration at the server's finish stamp; the `end` that follows keeps it, however long the page waited", async () => {
+    vi.useFakeTimers();
+    try {
+      const { wrapper, es } = mountLive();
+      es().emitOpen();
+      es().emitNamed("finished", JSON.stringify({ finishedAt: liveSeed.startedAt + 42_000 }));
+      vi.advanceTimersByTime(27_000); // the page keeps waiting for the seal
+      es().emitNamed("end");
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find(".conn .chip").text()).toBe("ended");
+      expect(wrapper.find(".conn .dur").text()).toBe("42s"); // the stamp, not the page's own clock (which would read 1m 09s)
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a replay_elided frame renders as a replay row naming the range the record still has; a malformed or empty one marks nothing", async () => {
     const { wrapper, es } = mountLive();
     es().emitOpen();
