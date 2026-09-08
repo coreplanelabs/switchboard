@@ -4,7 +4,7 @@ Switchboard is a Slack bot — and a CLI, and an HTTP/MCP surface — that runs 
 
 It's organized by [the Diataxis framework](https://diataxis.fr): four kinds of writing, because "documentation" is really four different jobs that shouldn't be mixed into one page.
 
-You can read this tree here on GitHub or as a site — [docs.switchboard.coreplanelabs.dev](https://docs.switchboard.coreplanelabs.dev), also reachable at `/docs` on the dashboard and from the docs icon in its header. Same markdown, same links: the site is compiled from these files on every push, with search, diagrams, and dark mode.
+You can read this tree here on GitHub or as a site — [openswitchboard.dev](https://openswitchboard.dev), also reachable at `/docs` on the dashboard and from the docs icon in its header. Same markdown, same links: the site is compiled from these files on every push, with search, diagrams, and dark mode.
 
 | Kind | Answers | When you reach for it |
 |---|---|---|

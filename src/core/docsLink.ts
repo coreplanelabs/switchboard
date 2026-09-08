@@ -18,7 +18,7 @@
  *  its own. An installation's own site arrives as the `DOCS_BASE_URL` var the
  *  bot Worker renders from the deployment profile (`workers.docs`); the same
  *  env var points a local run at `npm run docs:dev`. */
-export const PROJECT_DOCS_URL = "https://docs.switchboard.coreplanelabs.dev";
+export const PROJECT_DOCS_URL = "https://openswitchboard.dev";
 
 /** Where `/docs…` should send the caller, or undefined when the path is not a
  *  docs path at all. The subpath is carried across unchanged, so a deep link

@@ -40,6 +40,10 @@ const endpoint = z.object({
   script: z.string().regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, "a Worker script name: lowercase, digits, hyphens"),
   /** The hostname the Worker's custom domain route serves. */
   hostname,
+  /** The zone that hostname lives in, when it is not the profile's `zone` — a
+   *  public docs site on a product domain while the runtime Workers stay on the
+   *  operator's own. Must be a zone in the same account. */
+  zone: hostname.optional(),
 });
 
 /** `path` | `github://owner/repo/path@ref` | `op://Vault/Item/field` — parsed by src/deploy/configSource.ts. */
@@ -48,7 +52,8 @@ const source = z.string().min(1);
 export const profileSchema = z.object({
   /** The Cloudflare account every Worker deploys to (32 hex characters). */
   account: z.string().regex(/^[0-9a-f]{32}$/, "a Cloudflare account id: 32 hex characters"),
-  /** The zone the hostnames live under; every hostname must be in it. */
+  /** The zone the hostnames live under; every hostname must be in it unless its
+   *  Worker names its own `zone`. */
   zone: hostname,
   /** The Workers this installation runs. The bot is the one every installation
    *  has; the state Worker (memory), the resident and the sandbox are optional —
@@ -88,8 +93,10 @@ export function parseProfile(
   const p = parsed.data;
   const problems: string[] = [];
   for (const [kind, ep] of Object.entries(p.workers)) {
-    if (ep && ep.hostname !== p.zone && !ep.hostname.endsWith(`.${p.zone}`))
-      problems.push(`workers.${kind}.hostname: not under zone ${p.zone}`);
+    if (!ep) continue;
+    const zone = ep.zone ?? p.zone;
+    if (ep.hostname !== zone && !ep.hostname.endsWith(`.${zone}`))
+      problems.push(`workers.${kind}.hostname: not under zone ${zone}`);
   }
   const scripts = Object.values(p.workers)
     .filter((e): e is z.infer<typeof endpoint> => !!e)

@@ -30,7 +30,10 @@ export const CHECKED_FILES = [
 ];
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-const DOCS_URL = /https?:\/\/docs\.[A-Za-z0-9.-]+/g;
+/** A docs URL: any `docs.` host (so a stale copy under an old name is caught)
+ *  or the configured docs host itself, which need not start with `docs.`. */
+const docsUrlPattern = (docsHost) =>
+  new RegExp(`https?://(?:docs\\.[A-Za-z0-9.-]+|${docsHost.replace(/\./g, "\\.")}(?![A-Za-z0-9.-]))`, "g");
 
 /**
  * Pure: the disagreements between the facts and one set of file contents
@@ -65,7 +68,7 @@ export function factsProblems(facts, files) {
     for (const m of text.match(EMAIL) ?? []) {
       if (m !== facts.contact) say(file, `contact address "${m}" — project.json says ${facts.contact}`);
     }
-    for (const m of text.match(DOCS_URL) ?? []) {
+    for (const m of text.match(docsUrlPattern(docsHost)) ?? []) {
       const host = new URL(m).host;
       if (host !== docsHost && ours(host)) say(file, `docs URL "${m}" — project.json says ${facts.docs}`);
     }

@@ -69,6 +69,20 @@ describe("factsProblems", () => {
     ]);
   });
 
+  it("a docs host without a `docs.` prefix — a product domain — is checked too: exact copies pass, a stale sibling is flagged", () => {
+    const apex = { ...facts, docs: "https://openswitchboard.example" };
+    const files = {
+      "README.md": "read at https://openswitchboard.example/start and https://docs.github.com/",
+      // A lookalike host must not match the configured host: the dots are literal, not wildcards.
+      "CONTRIBUTING.md": "not ours: https://openswitchboardXexample/",
+      "SUPPORT.md": "old: https://docs.switchboard.example.com/",
+    };
+    const what = factsProblems(apex, files).map((p) => `${p.file}: ${p.what}`);
+    expect(what).toEqual([
+      'SUPPORT.md: docs URL "https://docs.switchboard.example.com" — project.json says https://openswitchboard.example',
+    ]);
+  });
+
   it("leaves other repositories under the org alone, and checks package.json's four fields", () => {
     const files = {
       "package.json": JSON.stringify({ name: "other", homepage: "x", repository: { url: "y" }, bugs: { url: "z" } }),

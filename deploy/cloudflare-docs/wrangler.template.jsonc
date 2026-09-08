@@ -16,11 +16,12 @@
     "html_handling": "auto-trailing-slash",
     "not_found_handling": "404-page"
   },
-  // workers.dev is DISABLED for the same reason as the bot: Cloudflare Access
-  // can only front a real zone hostname, and the docs sit behind the same SSO
-  // as the dashboards — a live workers.dev copy would be an un-SSO'd twin.
-  // The Access application for this hostname is created in the Zero Trust
-  // dashboard by hand (wrangler's token has no Access scope).
+  // workers.dev is DISABLED so the site has exactly one hostname, the one the
+  // profile names. The project's own docs are public on their product domain;
+  // an installation that wants its docs private puts a Cloudflare Access
+  // application in front of this hostname, created in the Zero Trust dashboard
+  // by hand (wrangler's token has no Access scope) — Access can only front a
+  // real zone hostname, never a workers.dev one.
   "workers_dev": false,
   "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
   "observability": { "enabled": true }
