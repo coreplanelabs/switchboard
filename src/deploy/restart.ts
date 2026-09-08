@@ -167,12 +167,23 @@ export function stripRestartSubject(request: Request): Request {
  *  route is disabled, never open); no/unknown bearer → 401. Says nothing about
  *  what the identity may do. Never echoes token material. */
 export function authenticateRestart(authorization: string | undefined, tokensRaw: string | undefined): RestartAuthn {
+  return authenticateIngressBearer(authorization, tokensRaw, "restart");
+}
+
+/** Who the bearer is, from the ingress token map — the same map every
+ *  `/admin/*` route on the bot checks (`feature` names the route in the 503,
+ *  which is what an operator sees when the map is missing). */
+export function authenticateIngressBearer(
+  authorization: string | undefined,
+  tokensRaw: string | undefined,
+  feature: string,
+): RestartAuthn {
   const parsed = parseIngressTokenMap(tokensRaw);
   if (!parsed.ok || Object.keys(parsed.tokens).length === 0) {
     return {
       ok: false,
       status: 503,
-      reason: `restart disabled: SWITCHBOARD_INGRESS_TOKENS is ${parsed.ok ? "not set" : parsed.reason}`,
+      reason: `${feature} disabled: SWITCHBOARD_INGRESS_TOKENS is ${parsed.ok ? "not set" : parsed.reason}`,
     };
   }
   const m = /^Bearer\s+(\S+)$/i.exec(authorization ?? "");
@@ -197,6 +208,28 @@ export function authorizeRestart(
   const authn = authenticateRestart(authorization, tokensRaw);
   if (!authn.ok) return authn;
   return authorizeRestartSubject(authn.identity.subject, grantsFor);
+}
+
+/** Any other `/admin/*` route's whole check: an ingress bearer (401/503) whose
+ *  actor `http:<subject>` holds `scope` (403) — the restart's rule with the
+ *  scope as a parameter, so no route invents its own. */
+export function authorizeIngressBearer(
+  authorization: string | undefined,
+  tokensRaw: string | undefined,
+  grantsFor: GrantsLookup,
+  scope: string,
+  feature: string,
+): RestartAuth {
+  const authn = authenticateIngressBearer(authorization, tokensRaw, feature);
+  if (!authn.ok) return authn;
+  const { identity } = authn;
+  if (!hasAction(grantsFor(`http:${identity.subject}`).actions, scope))
+    return {
+      ok: false,
+      status: 403,
+      reason: `forbidden: identity "${identity.subject}" holds no ${scope} grant (grants["http:${identity.subject}"] in config.yaml)`,
+    };
+  return { ok: true, subject: identity.subject };
 }
 
 /** The bot's `POST /admin/restart/authorize` answer, as the Worker reads it: 200

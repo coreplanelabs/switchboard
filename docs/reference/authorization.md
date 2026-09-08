@@ -43,7 +43,7 @@ Keyed by platform-namespaced actor id. Three axes, each a list of names or the e
 | `schedule:<name>` (a cron firing) | what the schedule registry declares for it | **replaces** the declaration |
 | `cli:local` | everything | — (the local operator is always an admin) |
 
-Never a baseline, held only by a grant (or `all`): `config:write` (`config set/clear/instructions channel`, channel-tier MCP servers), `repo:write` (`repo onboard/offboard/reconfigure/rebuild`, `friction propose`, forgetting shared memories, org-tier MCP servers), every `runs:*` action, every `*:exec`, `dispatch`, `deploy:write`. **No entry with `actions: all` means nobody is an admin** — the fail-closed default; `adminsHint` (the "ask …" in a 🚫 reply) names whoever holds it.
+Never a baseline, held only by a grant (or `all`): `config:write` (`config set/clear/instructions channel`, channel-tier MCP servers), `repo:write` (`repo onboard/offboard/reconfigure/rebuild`, `friction propose`, forgetting shared memories, org-tier MCP servers), every `runs:*` action, every `*:exec`, `dispatch`, `deploy:write`, `trace:read` (the bot's span log, `GET /admin/trace/log`). **No entry with `actions: all` means nobody is an admin** — the fail-closed default; `adminsHint` (the "ask …" in a 🚫 reply) names whoever holds it.
 
 ### Validation
 

@@ -15,6 +15,7 @@ import type { ResumePlan } from "./runLedger/resume.js";
 import { systemClock } from "./trace/index.js";
 import { COMMAND_RUN_AGENT } from "./runOwner.js";
 import type { Clock, Span, SpanSink, Tracer } from "./trace/types.js";
+import type { SpanLog } from "./trace/spanLog.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
 import { cardShapeLine, cardShapeLineOf, queuedCaption } from "./runShape.js";
@@ -142,6 +143,8 @@ export interface CoreDeps {
   tracer?: Tracer;
   /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */
   sinks?: SpanSink[];
+  /** The in-process span log every root also feeds (features/tracing.md item 26); `GET /admin/trace/log` reads it. */
+  spanLog?: SpanLog;
   /** where runtime state (sandboxes.json) lives; default ./data */
   dataDir?: string;
   /**
