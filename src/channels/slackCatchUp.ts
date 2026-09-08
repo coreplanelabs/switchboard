@@ -1,6 +1,7 @@
 import { DEPLOY_RESTART_NOTICE } from "../core/dispatcher.js";
 import { LIVE_CARD_PREFIXES } from "../core/statusCardFrame.js";
 import { MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
+import { systemClock } from "../core/trace/clock.js";
 import { mapLimit } from "../core/mapLimit.js";
 import type { StatusUpdate } from "../core/types.js";
 import { recordCatchUpOutcome, type CatchUpOutcome } from "./slackCatchUpStatus.js";
@@ -324,7 +325,7 @@ export interface CatchUpResult {
  *  outcome — including a failed channel listing, which is the one failure
  *  that makes the whole scan a no-op — is recorded for `/healthz`. */
 export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<CatchUpResult> {
-  const now = opts.now ?? Date.now();
+  const now = opts.now ?? systemClock();
   const windowMs = opts.windowMs ?? DEFAULT_WINDOW_MS;
   const lookbackMs = opts.parentLookbackMs ?? DEFAULT_PARENT_LOOKBACK_MS;
   const log = opts.log ?? ((line) => console.log(line));

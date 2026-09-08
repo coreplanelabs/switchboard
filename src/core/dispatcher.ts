@@ -1160,7 +1160,7 @@ export async function dispatch(
     setupCard = undefined; // from here the run loop owns the card's close
     clearInterval(setupHeartbeat);
     card.update(shell.live()); // the ack card becomes the run card
-    let lastActivityAt = Date.now();
+    let lastActivityAt = clock();
     // Live run view (Area 2 / #43): register the run and mint its capability
     // link AFTER the card exists (so nothing awaits between create() and the
     // run loop's finally that finish()es it). With no PUBLIC_BASE_URL the link
@@ -1225,7 +1225,7 @@ export async function dispatch(
       raw?: string,
     ) => {
       const redacted = redactSecrets(text);
-      const event = { type, text: redacted, ...(source ? { source } : {}), at: Date.now() };
+      const event = { type, text: redacted, ...(source ? { source } : {}), at: clock() };
       // The model's raw answer rides on the event only when normalization
       // changed it AND the event still fits the per-event byte budget — the
       // budget already truncates `text` and must not be starved by a second
@@ -1270,7 +1270,7 @@ export async function dispatch(
         ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
         ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
         ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-        at: Date.now(),
+        at: clock(),
       });
     const liveUrl = liveViewLink(run.id, run.token);
     const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
@@ -1339,7 +1339,7 @@ export async function dispatch(
         ledger.open({
           runId: run.id,
           threadKey: msg.threadKey,
-          startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? Date.now(),
+          startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
           meta: {
             agent: agent.name,
             model: resolved.modelRef,
@@ -1410,7 +1410,7 @@ export async function dispatch(
     // built from `shell.close` and never mentions the restart.
     const currentFrame = () =>
       shell.live({
-        suffix: quietSuffix(Date.now() - lastActivityAt, inFlightTool),
+        suffix: quietSuffix(clock() - lastActivityAt, inFlightTool),
         notice: shutdownNotice,
         detail: [checklist, lastActivity],
       });
@@ -1427,7 +1427,7 @@ export async function dispatch(
     // `turn` event before spans replaced it.
     const onProgress = (note: string) => {
       console.log(`[note] ${msg.threadKey} ${note}`);
-      lastActivityAt = Date.now();
+      lastActivityAt = clock();
       lastActivity = note;
       card.update(currentFrame());
     };
@@ -1457,7 +1457,7 @@ export async function dispatch(
         }
       }
       inFlightTool = inFlightToolAfter(inFlightTool, e);
-      lastActivityAt = Date.now();
+      lastActivityAt = clock();
       lastActivity = activityLine(e);
       console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
       card.update(currentFrame());
@@ -1725,7 +1725,7 @@ export async function dispatch(
         registry.publish(run.id, {
           type: "pr_description",
           description: redactPrDescription(prDescription),
-          at: Date.now(),
+          at: clock(),
         });
       }
       // Deterministic coding PR post-step (features/pr-description.md item 5,
@@ -1818,7 +1818,7 @@ export async function dispatch(
       // writer: the closed card's shape line comes from this diagnosis too.
       const snap = registry.snapshot(run.id, run.token);
       const events = snap?.events ?? [];
-      const finishedAt = snap?.finishedAt ?? Date.now(); // the registry's finish clock: row and record agree
+      const finishedAt = snap?.finishedAt ?? clock(); // the registry's finish clock: row and record agree
       // The diagnosis over the run's window (features/tracing.md): its shape is
       // what the closed card and the record carry.
       const diagnosis = analyzeRunFriction(events, {
@@ -2230,7 +2230,7 @@ async function runShipBranch(
     source?: { url?: string; channel?: string; user?: string },
   ) => {
     const redacted = redactSecrets(text);
-    registry.publish(run.id, { type, text: redacted, ...(source ? { source } : {}), at: Date.now() });
+    registry.publish(run.id, { type, text: redacted, ...(source ? { source } : {}), at: clock() });
     console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
   };
   const humanize = isMrkdwnChannel(msg.channelId);
@@ -2253,7 +2253,7 @@ async function runShipBranch(
     traceId: root.traceId,
     ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
     ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
-    at: Date.now(),
+    at: clock(),
   });
   if (deps.config.config.runHistory?.includeContext !== false) {
     for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
@@ -2296,7 +2296,7 @@ async function runShipBranch(
       ledger.open({
         runId: run.id,
         threadKey: msg.threadKey,
-        startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? Date.now(),
+        startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
         meta: {
           agent: agent.name,
           model: ctx.modelRef,
@@ -2482,7 +2482,7 @@ async function runShipBranch(
     // the ledger row; without one the heartbeat must stop here.
     if (!deps.runHistoryWriter) void ledgerRun?.close();
     const snap = registry.snapshot(run.id, run.token); // the card's shape needs it, writer or not
-    const finishedAt = snap?.finishedAt ?? Date.now();
+    const finishedAt = snap?.finishedAt ?? clock();
     const diagnosis = analyzeRunFriction(snap?.events ?? [], {
       finished: true,
       truncated: snap?.truncated ?? false,
@@ -2712,9 +2712,9 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
   // natural-language fall-through rebinds the same root to the agent run next.
   trace.bindRun(run.id, (e) => registry.publish(run.id, e));
   io.runStarted?.({ id: run.id });
-  registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: Date.now() });
+  registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: clock() });
   // A command run's meta names no model (features/tracing.md): the agent and the trace.
-  registry.publish(run.id, { type: "run_meta", agent: COMMAND_RUN_AGENT, traceId: root.traceId, at: Date.now() });
+  registry.publish(run.id, { type: "run_meta", agent: COMMAND_RUN_AGENT, traceId: root.traceId, at: clock() });
   let result: T | undefined;
   try {
     // The command's deterministic body is the run's one counted step (`tools`
@@ -2736,13 +2736,13 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
       },
       { attrs: { command } },
     );
-    registry.publish(run.id, { type: "answer", text: redactSecrets(result.text), at: Date.now() });
+    registry.publish(run.id, { type: "answer", text: redactSecrets(result.text), at: clock() });
     return result;
   } catch (err) {
     // A thrown command still gets an `answer`: the same `⚠️ <error>` line the
     // dispatcher's outer handler replies with, so the record explains its
     // `failed` status and the channel reply stays a projection of it.
-    registry.publish(run.id, { type: "answer", text: redactSecrets(errorReply(err)), at: Date.now() });
+    registry.publish(run.id, { type: "answer", text: redactSecrets(errorReply(err)), at: clock() });
     throw err;
   } finally {
     const status: RunStatus = result?.ok ? "completed" : "failed";
@@ -2755,7 +2755,7 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
     if (deps.runHistoryWriter) {
       const writer = deps.runHistoryWriter;
       const snap = registry.snapshot(run.id, run.token);
-      const finishedAt = snap?.finishedAt ?? Date.now();
+      const finishedAt = snap?.finishedAt ?? clock();
       // A command run owns its window's tools: `run.command` is the work.
       const diagnosis = analyzeRunFriction(snap?.events ?? [], {
         finished: true,

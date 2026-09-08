@@ -1,3 +1,4 @@
+import { systemClock } from "../core/trace/clock.js";
 // Socket-state observability (companion to slackCatchUpStatus.ts, #271
 // pattern). The HTTP server starts BEFORE the Slack Socket Mode handshake
 // (src/index.ts), so there is a real window where `/healthz` answers while the
@@ -27,12 +28,12 @@ export interface SlackSocketStatus {
 let status: SlackSocketStatus = { connected: false };
 let connects = 0;
 
-export function recordSocketConnected(at: number = Date.now()): void {
+export function recordSocketConnected(at: number = systemClock()): void {
   connects++;
   status = { connected: true, since: new Date(at).toISOString(), connects };
 }
 
-export function recordSocketDisconnected(at: number = Date.now()): void {
+export function recordSocketDisconnected(at: number = systemClock()): void {
   status = { connected: false, since: new Date(at).toISOString(), ...(connects > 0 ? { connects } : {}) };
 }
 

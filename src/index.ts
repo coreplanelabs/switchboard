@@ -54,6 +54,7 @@ import {
 } from "./channels/slack.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
 import { DRAIN_DEADLINE_MS, HANDOFF_BUDGET_MS } from "./core/drain.js";
+import { startProcessRoot } from "./core/requestTrace.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
@@ -84,7 +85,7 @@ const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.js
 
 // Process start for `/healthz.startedAt` — `deploy restart`'s live gate tells
 // the restarted container (same image, same `build.commit`) from the old one by it.
-const PROCESS_STARTED_AT = Date.now() - Math.round(process.uptime() * 1000);
+const PROCESS_STARTED_AT = systemClock() - Math.round(process.uptime() * 1000);
 // Memory and event-loop lag for `/healthz.process` — the bot is one Node
 // process, and under many concurrent runs it is the first thing to fail.
 const sampleProcessMetrics = startProcessMetrics();
@@ -419,7 +420,7 @@ async function main() {
       scheduled: { schedules: SCHEDULES, store: scheduleStore },
     });
     // ── end U8 ───────────────────────────────────────────────────────────────
-    const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => Date.now(), cache: new JwksCache() };
+    const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => systemClock(), cache: new JwksCache() };
     const accessState = accessConfig
       ? `Access SSO configured (${accessConfig.teamDomain})`
       : accessDevBypass
@@ -587,7 +588,7 @@ async function main() {
       // (`httpListeningAt < slack.since`, both on this process's clock).
       // The Worker shim's port polling releases held requests too coarsely
       // (~seconds) for an external prober to land inside the window itself.
-      httpListeningAt = Date.now();
+      httpListeningAt = systemClock();
       console.log(
         `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${commandHttpState} + /docs → ${docsBaseUrl}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
@@ -681,7 +682,7 @@ async function main() {
     const client = ledgerReclaim.client;
     setForeignLiveCardsSource(async () =>
       (await client.listLive())
-        .filter((r) => r.ownerGen !== generation && r.leaseUntil > Date.now())
+        .filter((r) => r.ownerGen !== generation && r.leaseUntil > systemClock())
         .flatMap((r) => (r.card ? [r.card] : [])),
     );
   }
@@ -728,7 +729,13 @@ async function main() {
   const drain = async (signal: string) => {
     if (draining) return;
     draining = true;
-    drainStartedAt = Date.now();
+    drainStartedAt = systemClock();
+    // The drain is one `drain` root on the span log (features/tracing.md item
+    // 20): what signalled it, what it held, what it handed off and abandoned.
+    const root = startProcessRoot(deps, "drain", {
+      startedAt: drainStartedAt,
+      attrs: { signal: signal === "SIGTERM" || signal === "SIGINT" ? signal : "other", runs: activeRunCount() },
+    });
     console.log(
       `[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) + ${pendingReflectionCount()} reflection(s) + ${pendingHistoryWrites()} history write(s) in flight`,
     );
@@ -752,7 +759,7 @@ async function main() {
     const runsHeld = () => defaultRunRegistry.listActive().filter((r) => !r.finished && !handed.has(r.id)).length;
     const stillHere = () => runsHeld() + pendingReflectionCount() + pendingHistoryWrites();
     const deadline = drainStartedAt + (runsHeld() > 0 ? DRAIN_DEADLINE_MS : HANDOFF_BUDGET_MS);
-    while (stillHere() > 0 && Date.now() < deadline) {
+    while (stillHere() > 0 && systemClock() < deadline) {
       await new Promise((r) => setTimeout(r, 500));
     }
     // Every finished run whose reply never settled is sealed now, with no
@@ -774,7 +781,13 @@ async function main() {
     // inside the budget), at most INTERRUPTED_WRITE_BUDGET_MS total — never a
     // second drain.
     if (runHistoryWriter && inFlight() > 0) {
-      const written = writeAbandonedRunRecords(defaultRunRegistry, runHistoryWriter, Date.now(), console.log, handed);
+      const written = writeAbandonedRunRecords(
+        defaultRunRegistry,
+        runHistoryWriter,
+        systemClock(),
+        console.log,
+        handed,
+      );
       if (written > 0) {
         await Promise.race([
           runHistoryWriter.settled(),
@@ -786,6 +799,7 @@ async function main() {
       `[drain] exiting (${activeRunCount()} run(s) of which ${handed.size} handed off, ${pendingReflectionCount()} reflection(s), ${pendingHistoryWrites()} history write(s) abandoned` +
         (runHistoryWriter ? `; ${runHistoryWriter.failures()} history write(s) lost this process)` : ")"),
     );
+    root.end("ok", { handed: handed.size, sealed, abandonedRuns: activeRunCount() });
     process.exit(0);
   };
   process.on("SIGTERM", () => void drain("SIGTERM"));

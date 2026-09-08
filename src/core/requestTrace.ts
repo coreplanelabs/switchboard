@@ -11,13 +11,16 @@ import { systemClock } from "./trace/clock.js";
 import type { Clock, Span, SpanRecord, SpanSink, Tracer } from "./trace/types.js";
 
 // One request, one root (features/tracing.md, Sink scoping). `startRequestRoot`
-// is the ONE constructor of roots: the channel adapters call it at receipt and
-// the dispatcher's fresh turn at its own start, and hand the result to
+// is the constructor of request roots: the channel adapters call it at receipt
+// and the dispatcher's fresh turn at its own start, and hand the result to
 // `dispatch()`. The root's sinks, in order: the process log sink (or the
 // injected sinks — a test's recording sink), the run-stream sink (a Null
 // Object until `bindRun` points it at a registry run), the card sink (a Null
 // Object until `bindCard`), and a collector that keeps every record so far,
 // so a card closed before any run existed can still print the request's shape.
+// `startProcessRoot` is the other constructor: a root for the bot's own work
+// outside any request (item 20) — the reconnect catch-up pass, the drain, a
+// deploy step — with the leading sinks only, since nothing streams or paints.
 
 export interface RequestTrace {
   /** The request's root span; `dispatch()` ends it in its outermost finally. */
@@ -50,6 +53,14 @@ export interface RequestRootOptions {
   attrs?: SpanAttrs;
 }
 
+/** The root's leading sinks: the injected ones (a test's recording sink), else
+ *  the one log sink at `tracing.log`, else nothing. */
+function leadingSinks(deps: RequestTraceDeps): SpanSink[] {
+  if (deps.sinks) return deps.sinks;
+  const level = deps.config?.config.tracing?.log;
+  return [level ? createLogSink({ level, write: (line) => console.log(line) }) : NULL_SINK];
+}
+
 export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOptions): RequestTrace {
   const clock = deps.clock ?? systemClock;
   const tracer = deps.tracer ?? createTracer({ clock });
@@ -60,10 +71,8 @@ export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOption
     onStart: (rec) => void records.set(rec.spanId, rec),
     onEnd: (rec) => void records.set(rec.spanId, rec),
   };
-  const level = deps.config?.config.tracing?.log;
-  const leading = deps.sinks ?? [level ? createLogSink({ level, write: (line) => console.log(line) }) : NULL_SINK];
   const root = tracer.start("request", {
-    sinks: [...leading, stream, card, collector],
+    sinks: [...leadingSinks(deps), stream, card, collector],
     startedAt: opts.receivedAt,
     attrs: { ...(opts.channel ? { channel: opts.channel } : {}), ...(opts.attrs ?? {}) },
   });
@@ -83,6 +92,49 @@ export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOption
       return [...records.values()].filter((r) => r.spanId !== root.id && isStreamed(r.name));
     },
   };
+}
+
+/** The roots the bot starts for its own work, outside any request. */
+export type ProcessRootName = "slack.catch_up" | "drain" | `deploy.step.${string}`;
+
+export interface ProcessRootOptions {
+  attrs?: SpanAttrs;
+  startedAt?: number;
+}
+
+/** A root for work no request caused (features/tracing.md item 20): the
+ *  reconnect catch-up pass, the drain, one deploy step. Leading sinks only —
+ *  it streams to no run and paints no card — so under `tracing.log: roots` it
+ *  is one JSON line when it ends, its facts in `attrs`. The caller ends it. */
+export function startProcessRoot(deps: RequestTraceDeps, name: ProcessRootName, opts: ProcessRootOptions = {}): Span {
+  const clock = deps.clock ?? systemClock;
+  const tracer = deps.tracer ?? createTracer({ clock });
+  return tracer.start(name, {
+    sinks: leadingSinks(deps),
+    ...(opts.startedAt !== undefined ? { startedAt: opts.startedAt } : {}),
+    ...(opts.attrs ? { attrs: opts.attrs } : {}),
+  });
+}
+
+/** Run `fn` under a process root: ended `ok` when it returns, failed (the
+ *  classification or the redacted message) and ended `error` when it throws —
+ *  the throw still propagates. `fn` sets the root's attrs as it learns them. */
+export async function withProcessRoot<T>(
+  deps: RequestTraceDeps,
+  name: ProcessRootName,
+  fn: (root: Span) => Promise<T>,
+  opts: ProcessRootOptions = {},
+): Promise<T> {
+  const root = startProcessRoot(deps, name, opts);
+  try {
+    const value = await fn(root);
+    root.end("ok");
+    return value;
+  } catch (err) {
+    root.fail(err);
+    root.end("error");
+    throw err;
+  }
 }
 
 /** The channel a message came from, read off its namespaced channel id

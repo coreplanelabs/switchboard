@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { startProcessRoot } from "../core/requestTrace.js";
+import { systemClock } from "../core/trace/clock.js";
+import { createLogSink } from "../core/trace/sinks.js";
+import type { Span } from "../core/trace/types.js";
 import { computeAffected, formatAffectedText, type AffectedProbe, type AffectedReport } from "./affected.js";
 import {
   decideLive,
@@ -386,7 +390,7 @@ export async function pushConfigDocument(
   const document = baseConfigDocument(
     read.text,
     read.how.replace(/^config from /, ""),
-    (target.now ?? (() => new Date()))(),
+    (target.now ?? (() => new Date(systemClock())))(),
   );
   const pushed = await client.pushBase(document, target.key);
   if (!pushed.ok) return pushed;
@@ -469,10 +473,11 @@ async function waitUntilLive(
   healthUrl: string,
   expectedCommit: string,
   io: DeployRunnerIO,
+  clock: () => number,
 ): Promise<GateOutcome> {
-  const started = Date.now();
+  const started = clock();
   for (;;) {
-    const elapsed = Date.now() - started;
+    const elapsed = clock() - started;
     const body = await fetchHealthz(healthUrl);
     const d = decideLive(body, expectedCommit, elapsed);
     if (d.kind === "live") return { live: true, detail: `commit ${d.commit.slice(0, 7)}`, waitedMs: elapsed };
@@ -694,7 +699,42 @@ export async function deployStep(
   deps: SandboxGateDeps,
   exec: StepExec = runStepCommand,
 ): Promise<StepOutcome> {
-  const started = Date.now();
+  // One `deploy.step.<worker>` root per step on the runner's own output, its
+  // live gate a `deploy.wait_live` child carrying the `waitedMs` the "live"
+  // line prints (features/tracing.md item 20; release-and-deploy.md item 19).
+  // `slow`: the step always prints, the gate when it took a second or more.
+  const root = startProcessRoot(
+    { clock: deps.now, sinks: [createLogSink({ level: "slow", write: (line) => io.log(line) })] },
+    `deploy.step.${step.name}`,
+  );
+  try {
+    const r = await deployStepTraced(step, plan, expectedCommit, io, deps, exec, root);
+    root.end(r.ok ? "ok" : "error", { outcome: stepOutcomeWord(r) });
+    return r;
+  } catch (err) {
+    root.fail(err);
+    root.end("error", { outcome: "threw" });
+    throw err;
+  }
+}
+
+/** The one word a step's root carries for how it ended. */
+function stepOutcomeWord(r: StepOutcome): string {
+  if (r.ok) return r.live === "live" ? "live" : "deployed";
+  if (r.preflightTimedOut) return "busy";
+  return r.live.startsWith("deployed, not live") ? "not_live" : "failed";
+}
+
+async function deployStepTraced(
+  step: DeployStep,
+  plan: Pick<DeployPlan, "waitMaxMs" | "pollMs">,
+  expectedCommit: string,
+  io: DeployRunnerIO,
+  deps: SandboxGateDeps,
+  exec: StepExec,
+  root: Span,
+): Promise<StepOutcome> {
+  const started = deps.now();
   const deadline = started + plan.waitMaxMs;
   for (;;) {
     io.log(`\n[deploy:all] ▶ ${step.name} (${step.script}) — ${step.dir}: ${step.command.join(" ")}`);
@@ -712,17 +752,24 @@ export async function deployStep(
       io.log(
         `[deploy:all] ${step.name}: version ${outcome.versionId ?? "?"} uploaded — waiting until live (commit ${expectedCommit.slice(0, 7)})`,
       );
-      let gate: GateOutcome;
-      if (sandbox) {
-        const target = rolloutTargetFromDeployOutput(r.output);
-        const from = "value" in sandbox.before ? `version ${sandbox.before.value.version}` : "its pre-deploy version";
-        io.log(
-          target
-            ? `[deploy:all] ${step.name}: wrangler printed a container change — ${target.image ? `image ${shortImage(target.image)}` : "configuration only, image unchanged"}; the application must leave ${from}`
-            : `[deploy:all] ${step.name}: wrangler printed no container change — Worker-only deploy, no rollout expected`,
-        );
-        gate = await waitUntilSandboxLive(step, sandbox.gate, expectedCommit, { ...sandbox, target }, io, deps);
-      } else gate = await waitUntilLive(step, step.liveGate.healthUrl, expectedCommit, io);
+      const liveGate = step.liveGate;
+      // The wait is the step's one child span: `waitedMs` is the number the
+      // "live" line below prints, so the log and the span cannot disagree.
+      const gate = await root.span("deploy.wait_live", async (wait) => {
+        let g: GateOutcome;
+        if (sandbox) {
+          const target = rolloutTargetFromDeployOutput(r.output);
+          const from = "value" in sandbox.before ? `version ${sandbox.before.value.version}` : "its pre-deploy version";
+          io.log(
+            target
+              ? `[deploy:all] ${step.name}: wrangler printed a container change — ${target.image ? `image ${shortImage(target.image)}` : "configuration only, image unchanged"}; the application must leave ${from}`
+              : `[deploy:all] ${step.name}: wrangler printed no container change — Worker-only deploy, no rollout expected`,
+          );
+          g = await waitUntilSandboxLive(step, sandbox.gate, expectedCommit, { ...sandbox, target }, io, deps);
+        } else g = await waitUntilLive(step, liveGate.healthUrl, expectedCommit, io, deps.now);
+        wait.setAttrs(g.live ? { outcome: "live", waitedMs: g.waitedMs } : { outcome: "not_live" });
+        return g;
+      });
       if (gate.live) {
         io.log(
           `[deploy:all] ${step.name}: live (${gate.detail}; ${Math.round(gate.waitedMs / 1000)}s after the upload)`,
@@ -737,7 +784,7 @@ export async function deployStep(
       };
     }
     if (outcome.kind === "preflight-refused" && step.retryOnPreflightRefusal) {
-      const left = deadline - Date.now();
+      const left = deadline - deps.now();
       if (left <= 0)
         return {
           ok: false,
@@ -749,7 +796,7 @@ export async function deployStep(
       const body = step.healthUrl ? await fetchHealthz(step.healthUrl) : undefined;
       io.log(
         step.healthUrl
-          ? heartbeatLine(step.name, body, Date.now() - started, plan.waitMaxMs)
+          ? heartbeatLine(step.name, body, deps.now() - started, plan.waitMaxMs)
           : `[deploy:all] ${step.name}: still waiting — ${outcome.reason}`,
       );
       io.log(`[deploy:all] ${step.name}: retrying in ${plan.pollMs / 1000}s (${Math.ceil(left / 60_000)} min left)`);

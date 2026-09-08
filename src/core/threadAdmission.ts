@@ -1,4 +1,5 @@
 import type { DocumentAttachment, ImageAttachment } from "./types.js";
+import { systemClock } from "./trace/clock.js";
 
 // Thread admission (features/thread-admission.md): ONE live run per thread.
 //
@@ -92,7 +93,11 @@ export class ThreadAdmission<T extends FollowUpInput = FollowUpInput> {
   claim(threadKey: string, run: { agent: string; now?: number }): ClaimOutcome<T> {
     const existing = this.live.get(threadKey);
     if (existing) return { kind: "live", live: existing };
-    const live: LiveThread<T> = { agent: run.agent, inbox: new FollowUpInbox<T>(), startedAt: run.now ?? Date.now() };
+    const live: LiveThread<T> = {
+      agent: run.agent,
+      inbox: new FollowUpInbox<T>(),
+      startedAt: run.now ?? systemClock(),
+    };
     this.live.set(threadKey, live);
     return { kind: "start", live };
   }
