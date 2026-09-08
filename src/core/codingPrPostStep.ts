@@ -311,6 +311,11 @@ export async function runCodingPrPostStep(input: {
    *  base resolution) ONLY when a description was submitted AND none of
    *  `target`'s three fields already name a base. Never called otherwise. */
   fetchRepoInfo: (repo: string) => Promise<RepoShipInfo | undefined>;
+  /** True when the dispatcher already ran the description turn
+   *  (descriptionTurn.ts) for this push and it still submitted nothing — the
+   *  warning then says so, so the reader knows the system asked and the model
+   *  declined, rather than that nothing tried. */
+  descriptionTurnRan?: boolean;
   /** Publish hook into the run's event stream (the registry). */
   publish: (event: RunEvent) => void;
   logKey: string;
@@ -452,7 +457,10 @@ export async function runCodingPrPostStep(input: {
         created: false,
         at: systemClock(),
       });
-      return `⚠️ PR updated by the push: ${existing.htmlUrl} — \`${branch}\`${branchNote} is at \`${headSha.slice(0, 7)}\`, but its description was not resubmitted (submit_pr_description was never called): the PR may now describe an earlier state of its branch — the coding agent must re-evaluate and resubmit the description after every push`;
+      const asked = input.descriptionTurnRan
+        ? "submit_pr_description was never called, even in the dedicated description turn this run was given"
+        : "submit_pr_description was never called";
+      return `⚠️ PR updated by the push: ${existing.htmlUrl} — \`${branch}\`${branchNote} is at \`${headSha.slice(0, 7)}\`, but its description was not resubmitted (${asked}): the PR may now describe an earlier state of its branch — the coding agent must re-evaluate and resubmit the description after every push`;
     }
     console.log(`[pr-post] ${logKey} skipped: no description submitted (repo ${repo}, branch ${branch})`);
     return `ℹ️ No PR was opened: the run pushed \`${branch}\` but submitted no PR description (submit_pr_description was never called) — compare & open manually: ${compareUrl}`;

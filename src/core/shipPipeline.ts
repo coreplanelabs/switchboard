@@ -30,6 +30,7 @@ import { createHash } from "node:crypto";
 import type { AgentDef } from "../agents/registry.js";
 import type { Effort } from "../effort.js";
 import { runAgent } from "../runner.js";
+import { descriptionTurnTarget, runDescriptionTurn } from "./descriptionTurn.js";
 import type { ChatMessage, Provider } from "../providers/types.js";
 import type { ExecutorFactoryOptions } from "../execution/factory.js";
 import {
@@ -799,6 +800,34 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     // the post-step opens from it, and from the checkout only when no
     // push was observed. The latest push wins.
     const pushes = trackPushedBranch();
+    // The branch contract OVERRIDES the coding prompt's generic "create a
+    // branch" step — a child that follows that step pushes its own branch
+    // and strands the pipeline: the thread's
+    // binding stays on the ship branch, so the review round can never see
+    // a PR opened from anywhere else.
+    const system = `${composeSystem({ sha: undefined, verified: false })}\n\n${shipBranchContract(entry.branch)}`;
+    const onEvent = (e: RunEvent) => {
+      pushes.observe(e);
+      input.onEvent(e);
+    };
+    // Where the post-step's PR would open: the PR's true base (entry.base) —
+    // NEVER the thread's resident binding ref, which ship bound to the HEAD
+    // branch itself. Shared by the description turn's decision and the post-step.
+    const prTarget = { repo: entry.repo, baseRef: entry.base, bindingRef: undefined, resolvedRef: undefined };
+    const observeNow = async () => {
+      const pushedBranch = pushes.branch();
+      return observeCodingWorkspace(
+        executor,
+        {
+          probeRemote: false,
+          ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+        },
+        roundSpan,
+      );
+    };
+    // True when the round was given the description turn and it still
+    // submitted nothing — the post-step's warning then says so.
+    let descriptionTurnRan = false;
     try {
       answer = await runAgent({
         provider: spec.provider,
@@ -807,33 +836,60 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         messages: opts.messages,
         ...(roundSpan ? { span: roundSpan } : {}),
         backend: ws.selection.backend,
-        // The branch contract OVERRIDES the coding prompt's generic "create a
-        // branch" step — a child that follows that step pushes its own branch
-        // and strands the pipeline: the thread's
-        // binding stays on the ship branch, so the review round can never see
-        // a PR opened from anywhere else.
-        system: `${composeSystem({ sha: undefined, verified: false })}\n\n${shipBranchContract(entry.branch)}`,
+        system,
         effort: spec.effort,
         toolContext,
         onProgress: input.onProgress,
-        onEvent: (e) => {
-          pushes.observe(e);
-          input.onEvent(e);
-        },
+        onEvent,
         control,
         inbox: input.inbox,
       });
       // A hard stop tore the work down mid-flight — observe nothing, post nothing.
-      const pushedBranch = pushes.branch();
-      if (control.requested !== "hard")
-        observed = await observeCodingWorkspace(
-          executor,
-          {
-            probeRemote: false,
-            ...(pushedBranch !== undefined ? { pushedBranch } : {}),
-          },
-          roundSpan,
-        );
+      if (control.requested !== "hard") observed = await observeNow();
+      // The description turn (docs/reference/specs/pr-description.md item 5,
+      // descriptionTurn.ts) — the same enforcement dispatch() applies to a
+      // plain coding run: a round that pushed onto the pipeline's own open PR
+      // without resubmitting the description gets ONE bounded extra turn
+      // asking for it, while the workspace is still attached. The turn runs
+      // on a COPY of the round's messages (the pipeline's transcript is its
+      // own); the description arrives through this round's onPrDescription
+      // hook, so `description` below sees it.
+      if (observed && description === undefined && control.requested !== "hard") {
+        const turnTarget = await descriptionTurnTarget({
+          observed,
+          description,
+          target: prTarget,
+          findOpenPr: github.findOpenPrByHead,
+          logKey,
+        });
+        if (turnTarget) {
+          descriptionTurnRan = true;
+          const turnMessages = [...opts.messages];
+          const run = (span?: Span) =>
+            runDescriptionTurn({
+              ...(span ? { span } : {}),
+              target: turnTarget,
+              answer,
+              messages: turnMessages,
+              system,
+              turn: {
+                provider: spec.provider,
+                model: spec.model,
+                agent: clip(spec.agent),
+                ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
+                toolContext,
+                onProgress: input.onProgress,
+                onEvent,
+                control,
+                ...(ws.selection.backend ? { backend: ws.selection.backend } : {}),
+              },
+              logKey,
+            });
+          await (roundSpan ? roundSpan.span("run.description_turn", run) : run());
+          // Re-read, not narrowed: a hard stop may have landed during the turn.
+          if (!control.hardSignal.aborted) observed = await observeNow();
+        }
+      }
     } finally {
       await ws.release({ hardStopped: control.requested === "hard", ...(roundSpan ? { span: roundSpan } : {}) });
     }
@@ -858,12 +914,11 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       prNote = await runCodingPrPostStep({
         observed,
         description,
-        // The base is the PR's true base (entry.base) — NEVER the thread's
-        // resident binding ref, which ship bound to the HEAD branch itself.
-        target: { repo: entry.repo, baseRef: entry.base, bindingRef: undefined, resolvedRef: undefined },
+        target: prTarget,
         openPullRequest: github.openPullRequest,
         findOpenPr: github.findOpenPrByHead,
         fetchRepoInfo: github.fetchRepoShipInfo,
+        descriptionTurnRan,
         publish: (e) => {
           if (e.type === "pr_opened") opened = { number: e.number, url: e.url, created: e.created };
           input.publish(e);

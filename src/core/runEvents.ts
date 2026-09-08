@@ -52,7 +52,12 @@ export type RunNoteKind =
   /** The run was resumed by a new bot generation from its ledger transcript
    *  (docs/reference/specs/run-history.md item 37); the summary says how many calls were
    *  in flight at the kill and how each was settled. Published by the runner. */
-  | "resumed";
+  | "resumed"
+  /** A coding run pushed onto a branch that already heads an open PR without
+   *  resubmitting the PR description, and the same run is being given one
+   *  bounded extra model turn to submit it (docs/reference/specs/pr-description.md
+   *  item 5). Published by the dispatcher before that turn. */
+  | "description_turn";
 
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
@@ -69,6 +74,7 @@ export const RUN_NOTE_KINDS = [
   "mcp_unavailable",
   "follow_up",
   "resumed",
+  "description_turn",
 ] as const satisfies readonly RunNoteKind[];
 type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
 const _everyKindListed: _EveryKindListed = true;

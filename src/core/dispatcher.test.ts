@@ -3194,6 +3194,121 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(statuses[statuses.length - 1].title).toContain("✅"); // the run itself completed
   });
 
+  /** A coding provider whose FIRST loop answers without a description, then —
+   *  on the description turn — submits one and answers in a line. The shape of
+   *  a run that skipped the description and is asked for it. */
+  function answerThenDescribeOnTurn(desc: Record<string, unknown>, answer = "Refreshed the allowlist."): Provider {
+    let n = 0;
+    return {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        n++;
+        if (n === 1) return { content: [{ type: "text", text: answer }], stopReason: "end_turn" };
+        if (n === 2)
+          return {
+            content: [{ type: "tool_use", id: "d2", name: "submit_pr_description", input: desc }],
+            stopReason: "tool_use",
+          };
+        return { content: [{ type: "text", text: "Description resubmitted." }], stopReason: "end_turn" };
+      },
+    };
+  }
+
+  // The description turn (pr-description.md item 5, descriptionTurn.ts): the
+  // dependabot shape — a push onto a bot's PR branch, no description — is no
+  // longer reported and left; the run is given one more turn, the turn submits,
+  // and the post-step opens-or-edits exactly as for a run that had submitted.
+  it("a description-less push onto a branch that heads an open PR → ONE description turn; its submitted description edits the PR (updated wording), and pr_description + pr_opened + the description_turn note land in the record", async () => {
+    const deps = codingDeps(answerThenDescribeOnTurn(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "dependabot/github_actions/actions-4c45254bbe", bindingRef: "main" });
+    const spy = openSpy({ number: 700, htmlUrl: "https://github.com/acme/api/pull/700", created: false });
+    deps.openPullRequest = spy.fn;
+    deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/acme/api/pull/700" }));
+    const registry = new RunRegistry({ genId: () => "r701", genToken: () => "t701" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding consistency check failing on acme/api#700", "slack:UADMIN"), io);
+    // The turn's description reached the post-step: open-or-edit ran from typed values at the observed head.
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0]).toMatchObject({
+      repo: "acme/api",
+      headBranch: "dependabot/github_actions/actions-4c45254bbe",
+      title: DESCRIPTION.title,
+    });
+    expect(spy.calls[0].body).toContain(`blob/${HEAD}/`);
+    const note = replies.find((r) => r.includes("https://github.com/acme/api/pull/700"));
+    expect(note).toContain("PR updated:");
+    expect(note).toContain("body re-rendered");
+    expect(note).not.toContain("not resubmitted");
+    expect(replies.some((r) => r.includes("Refreshed the allowlist."))).toBe(true); // the run's own answer still lands
+    const events = registry.snapshot("r701", "t701")?.events ?? [];
+    const turnNote = events.find((e) => e.type === "run_note" && e.kind === "description_turn");
+    expect(turnNote).toBeDefined();
+    if (turnNote?.type === "run_note") expect(turnNote.summary).toContain("acme/api#700");
+    expect(events.some((e) => e.type === "pr_description")).toBe(true);
+    expect(events.find((e) => e.type === "pr_opened")).toMatchObject({ number: 700, created: false });
+    // the turn's own tool call is in the record like any other
+    expect(events.some((e) => e.type === "tool_call" && e.tool === "submit_pr_description")).toBe(true);
+  });
+
+  it("the description turn still submits nothing → the ⚠️ note says the turn was given; the note is published once", async () => {
+    // Every completion is a bare answer: the first loop skips the description, and so does the turn.
+    const deps = codingDeps(describeThenAnswer(undefined, "Pushed the fix."));
+    codingExecutor({ head: HEAD, branch: "dependabot/github_actions/actions-4c45254bbe", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/acme/api/pull/700" }));
+    const registry = new RunRegistry({ genId: () => "r702", genToken: () => "t702" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const note = replies.find((r) => r.includes("https://github.com/acme/api/pull/700"));
+    expect(note).toContain("⚠️ PR updated by the push");
+    expect(note).toContain("even in the dedicated description turn this run was given");
+    const events = registry.snapshot("r702", "t702")?.events ?? [];
+    expect(events.filter((e) => e.type === "run_note" && e.kind === "description_turn")).toHaveLength(1);
+    expect(events.some((e) => e.type === "pr_description")).toBe(false);
+    expect(events.find((e) => e.type === "pr_opened")).toMatchObject({ number: 700, created: false });
+  });
+
+  it("no description turn when a description was submitted, when the push is unproven, or when no open PR heads the branch", async () => {
+    // (a) submitted: the first loop described → open-or-edit runs, no turn asked
+    let deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
+    deps.openPullRequest = openSpy().fn;
+    let registry = new RunRegistry({ genId: () => "ra", genToken: () => "ta" });
+    deps.runRegistry = registry;
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    expect(deps.findOpenPrByHead).not.toHaveBeenCalled(); // open-or-edit does its own lookup inside openPullRequest
+    expect(
+      registry.snapshot("ra", "ta")?.events.some((e) => e.type === "run_note" && e.kind === "description_turn"),
+    ).toBe(false);
+    // (b) unproven: the remote has no such branch → nothing to ask about
+    deps = codingDeps(describeThenAnswer(undefined, "Pushed."));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", remoteHead: null, bindingRef: "main" });
+    deps.openPullRequest = openSpy().fn;
+    registry = new RunRegistry({ genId: () => "rb", genToken: () => "tb" });
+    deps.runRegistry = registry;
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    expect(deps.findOpenPrByHead).not.toHaveBeenCalled();
+    expect(
+      registry.snapshot("rb", "tb")?.events.some((e) => e.type === "run_note" && e.kind === "description_turn"),
+    ).toBe(false);
+    // (c) proven push, no open PR: the compare-URL note, no turn
+    deps = codingDeps(describeThenAnswer(undefined, "Pushed."));
+    codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
+    deps.openPullRequest = openSpy().fn;
+    registry = new RunRegistry({ genId: () => "rc", genToken: () => "tc" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(replies.some((r) => r.includes("No PR was opened") && r.includes("/compare/feat/login-fix"))).toBe(true);
+    expect(
+      registry.snapshot("rc", "tc")?.events.some((e) => e.type === "run_note" && e.kind === "description_turn"),
+    ).toBe(false);
+  });
+
   it("openPullRequest throws → the reply reports the failure with the compare URL; the run still completes normally", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
@@ -7203,6 +7318,48 @@ workspaceDir: __WORKDIR__
     expect(final).toContain("1 review round");
     expect(final).toContain("human merge");
     expect(final).toContain("Declined findings: none");
+  });
+
+  // The description turn inside a ship round (pr-description.md item 5): a
+  // coding child that pushes the pipeline branch and answers without a
+  // description is given the turn while its workspace is still attached; the
+  // turn's description is what the round's post-step then opens the PR from.
+  it("a ship coding round that pushed without a description gets the description turn; the turn's description opens the PR and the round proceeds to review", async () => {
+    const provider = shipProvider({
+      // first loop: answers, no description → the turn: submits, then a line
+      coding: [
+        say("Pushed the change."),
+        toolUse("submit_pr_description", SHIP_DESCRIPTION),
+        say("Description resubmitted."),
+      ],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("Looks great.")],
+    });
+    const { deps, opened, posts } = shipDeps(provider);
+    deps.findOpenPrByHead = vi.fn(async () => ({ number: 7, htmlUrl: PR_URL }));
+    const registry = new RunRegistry({ genId: () => "rship", genToken: () => "tship" });
+    deps.runRegistry = registry;
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+    );
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", SHIP_BRANCH);
+    // the turn's description reached the round's post-step: one open-or-edit, typed values, at the observed head
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({
+      repo: "acme/api",
+      headBranch: SHIP_BRANCH,
+      base: "main",
+      title: SHIP_DESCRIPTION.title,
+    });
+    expect(opened[0].body).toContain(`blob/${HEAD_A}/`);
+    const events = registry.snapshot("rship", "tship")?.events ?? [];
+    expect(events.filter((e) => e.type === "run_note" && e.kind === "description_turn")).toHaveLength(1);
+    expect(events.some((e) => e.type === "pr_description")).toBe(true);
+    // the pipeline went on to its review round and finished merge-ready
+    expect(posts).toHaveLength(1);
+    expect(replies[replies.length - 1]).toContain("Merge-ready");
   });
 
   it("findings round trip: the fix child gets the findings payload verbatim, an unknown disposition id is rejected by name, dispositions reach the final report", async () => {
