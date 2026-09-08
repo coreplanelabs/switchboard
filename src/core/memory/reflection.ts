@@ -1,0 +1,441 @@
+import { z } from "zod";
+import type { Provider } from "../../providers/types.js";
+import { authorize } from "../authz/index.js";
+import type { Actor, ChannelVisibility, Resource } from "../authz/types.js";
+import { redactSecrets } from "../runEvents.js";
+import { jsonOutput } from "../llmOutput/index.js";
+import type { HistoryItem } from "../types.js";
+import type { MemoryCandidate, MemoryRecord, MemoryScope, MemoryStore } from "./types.js";
+import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
+
+// Cross-session memory WRITE path: the post-run reflection
+// pass. After a run's reply has landed, ONE cheap model call distills the thread
+// into ≤MAX_REFLECTION_FACTS durable facts + 1 episodic summary, validated and
+// secret-redacted here, then handed to `store.write` (dedup/supersede inside the
+// store). Everything is fire-and-forget from the dispatcher's point of view —
+// awaited only by the shutdown drain — so reflection latency and failures never
+// touch the user reply. Pure pieces (gate, input builder, parser) are exported
+// for unit tests; `reflect` composes them around a Provider.
+//
+// Scoped routing: the extractor tags each fact with an
+// `audience` — `user` for knowledge about the requesting person (preferences,
+// habits, their own setup), `repo` for knowledge specific to the repository the
+// run worked in, `channel` for what this channel is for, `org` for shared
+// knowledge. Each fact is written to its audience's scope when the run has it
+// (else org); the summary follows the narrowest scope that got a fact — user >
+// repo > channel > org. Still ONE extractor call per run.
+//
+// Write gate (docs/reference/specs/authorization.md item 8): the
+// audience is a HINT the policy may narrow, never widen. Every candidate's
+// write is `authorize(runActor, "memory:write", memory-scope{kind, key,
+// originChannelVisibility})`; a fact whose run originated in a private, DM, or
+// unknown channel has no `org` row and is narrowed to the origin's own
+// audience — the user's scope for a DM, the channel's for a private channel —
+// never dropped silently. Reads (`memoryContextBlock`) are untouched.
+
+/** Toolless threads shorter than this many prior turns are not worth an
+ *  extractor call (a one-shot Q&A rarely yields a durable fact). */
+export const REFLECT_MIN_TURNS = 4;
+/** Cap on facts per run — the whole point is a small, general store. */
+export const MAX_REFLECTION_FACTS = 5;
+/** Facts below this extractor confidence are dropped (anti-poisoning gate). */
+export const MIN_REFLECTION_CONFIDENCE = 0.6;
+/** Max keywords kept per candidate. */
+const MAX_KEYWORDS = 10;
+/** Transcript budget (chars) sent to the extractor; the tail is kept because
+ *  the decision usually lives at the end of a thread. */
+const MAX_TRANSCRIPT_CHARS = 24_000;
+/** Existing records shown to the extractor so it can emit `supersedes`. */
+const EXISTING_LIMIT = 8;
+/** Output budget for the extractor reply (≤5 short facts + 1 summary as JSON). */
+const REFLECTION_MAX_TOKENS = 1024;
+/** Bound on the existing-records lookup query. The Memory Worker caps `query`
+ *  at MAX_QUERY_CHARS (deploy/cloudflare-memory/worker.ts); an over-long query
+ *  400s, the store swallows non-ok to [], and reflection then runs blind (never
+ *  dedups/supersedes). 2000 sits well under that cap and loses nothing —
+ *  retrieval only tokenizes the query for an FTS prefilter, so truncation is
+ *  semantically fine. */
+const MAX_RETRIEVE_QUERY_CHARS = 2000;
+
+/** Signals that a run did real work worth distilling. */
+export interface ReflectGateInput {
+  /** Tool calls the run made (from the run-event stream). */
+  toolCalls: number;
+  /** Prior turns in the thread (`io.history().length`). */
+  historyTurns: number;
+  /** The resolved agent. `review` runs never reflect. Absent → the
+   *  work-based gate alone. */
+  agentName?: string;
+}
+
+/** Agents whose runs are never distilled. A review's findings already land on
+ *  the PR and describe one PR at one moment — distilling them floods the org
+ *  scope with "PR #N approved at <sha>, 1616 tests pass" ephemera.
+ *  `ship` joins it (docs/reference/specs/agent-ship.md item 12): its report is the same
+ *  per-PR findings content, one pipeline's worth. */
+export const NO_REFLECT_AGENTS: ReadonlySet<string> = new Set(["review", "ship"]);
+
+/** Only runs that did real work reflect: used a tool, or sit in a thread that
+ *  already carries some back-and-forth — and never a `review` run, however
+ *  much work it did. Config/deterministic fast-paths never reach this — they
+ *  return before the run. */
+export function shouldReflect(input: ReflectGateInput): boolean {
+  if (input.agentName !== undefined && NO_REFLECT_AGENTS.has(input.agentName)) return false;
+  return input.toolCalls > 0 || input.historyTurns >= REFLECT_MIN_TURNS;
+}
+
+export const REFLECTION_SYSTEM = [
+  "You distill a finished assistant thread into durable, reusable memory for the resource it concerns.",
+  "Return ONLY a JSON object of the form:",
+  '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"audience":"org"|"user"|"repo"|"channel","supersedes":"<existing id, optional>"}],"summary":"..."}',
+  `Rules: at most ${MAX_REFLECTION_FACTS} facts. Each fact is ONE self-contained sentence that will still be true and useful in a future, unrelated thread`,
+  "(commands, conventions, decisions, preferences, architecture). Ignore ephemeral or one-off details (timestamps, transient errors, chit-chat).",
+  'PR-specific state is ephemeral by definition — PR numbers, commit SHAs, test counts, CI results, review verdicts, "approved at …", what a given PR changes — and must never become a fact; only a convention or decision that outlives the PR may.',
+  "Never include secrets, tokens, passwords, or keys — omit the fact instead.",
+  '`audience` is "user" when the fact is about the requesting person specifically (their preferences, habits, personal conventions, their own setup — write it as "this user …"),',
+  '"repo" when the fact is specific to the repository this thread worked in (its code, conventions, commands, layout), "channel" when it is about what this channel is for or how it works,',
+  'and "org" (the default) when it is shared knowledge about the wider organization, tooling, or team. Only the requesting user will ever see "user" facts; "repo"/"channel" facts are shared with everyone who works in that repo/channel.',
+  "`confidence` is how sure you are the fact is durable and correct. If a fact contradicts one of the EXISTING records you were shown, set `supersedes` to that record's id.",
+  "`summary` is one or two impersonal sentences: what was asked and what was concluded about the shared subject. Keep the requesting person's preferences, habits, and other personal details OUT of the summary — they belong in `user` facts.",
+  "Output raw JSON with no code fence and no prose.",
+].join("\n");
+
+export interface ReflectionInput {
+  history: HistoryItem[];
+  request: string;
+  answer: string;
+  existing: MemoryRecord[];
+}
+
+/** The single user message for the extractor: existing records (with ids, so
+ *  the model can supersede), then the redacted, tail-capped transcript. Images
+ *  are dropped — only text is distilled. Redaction happens BEFORE the text
+ *  leaves the process (the extractor is a third-party model too). */
+export function buildReflectionInput(input: ReflectionInput): string {
+  const turns = input.history
+    .map((h) => `${h.role === "user" ? "User" : "Assistant"}: ${h.text}`)
+    .concat([`User: ${input.request}`, `Assistant: ${input.answer}`]);
+  let transcript = turns.join("\n\n");
+  if (transcript.length > MAX_TRANSCRIPT_CHARS) {
+    transcript = `…(earlier turns omitted)…\n\n${transcript.slice(-MAX_TRANSCRIPT_CHARS)}`;
+  }
+  const existing =
+    input.existing.length === 0 ? "(none)" : input.existing.map((r) => `- ${r.id} [${r.kind}]: ${r.text}`).join("\n");
+  return redactSecrets(`EXISTING records for this resource:\n${existing}\n\nTHREAD:\n${transcript}`);
+}
+
+export interface ReflectionProvenance {
+  sourceThreadKey: string;
+  sourceRunId?: string;
+}
+
+/** Who a distilled fact is for: the shared org scope, or the requesting user's
+ *  own scope. Decided by the extractor, defaulting to `org`. */
+export type MemoryAudience = "org" | "user" | "repo" | "channel";
+
+/** Summary inheritance order: the narrowest scope that received
+ *  a fact wins, so a thread that yielded personal knowledge keeps its summary
+ *  personal, a repo-specific thread keeps it in the repo, and so on. */
+const SUMMARY_INHERITANCE: readonly MemoryAudience[] = ["user", "repo", "channel"];
+
+function parseAudience(v: unknown): MemoryAudience {
+  return v === "user" || v === "repo" || v === "channel" ? v : "org";
+}
+
+/** A validated candidate plus its routing tag. The tag is reflection-internal:
+ *  `reflect` resolves it to a scope key and strips it before `store.write`, so
+ *  the `MemoryStore` contract and the Worker's wire format are unchanged. */
+export type RoutedCandidate = MemoryCandidate & { audience: MemoryAudience };
+
+export type ParsedReflection = { ok: true; candidates: RoutedCandidate[] } | { ok: false; error: string };
+
+/** The reflection reply's envelope as a typed LLM output (docs/reference/specs/llm-output.md
+ *  item 6): the JSON type owns the format (fence-strip, parse, shape); the
+ *  fact-level leniency below owns the meaning. */
+const REFLECTION_ENVELOPE = jsonOutput(z.object({ facts: z.array(z.unknown()), summary: z.unknown().optional() }), {
+  name: "reflection-envelope",
+});
+
+/** Validate + sanitize the extractor's reply into routed MemoryCandidates.
+ *  Lenient on shape inside the object (bad facts are dropped, not fatal), strict
+ *  on the envelope (non-JSON / non-object → error). Every text field is
+ *  redacted; `supersedes` survives only when it names a record the extractor was
+ *  shown; `audience` is `user`/`repo`/`channel` only when it says exactly that,
+ *  else `org`. The summary inherits the narrowest audience any fact carried —
+ *  user > repo > channel > org: a thread that yielded personal (or
+ *  repo-/channel-specific) knowledge has a summary that restates it, and
+ *  routing that to org would leak it to everyone. */
+export function parseReflection(raw: string, prov: ReflectionProvenance, knownIds: Set<string>): ParsedReflection {
+  const parsed = REFLECTION_ENVELOPE.parse(raw);
+  if (!parsed.ok) return { ok: false, error: parsed.failure.observed };
+  const obj = parsed.value;
+
+  const candidates: RoutedCandidate[] = [];
+  for (const f of obj.facts) {
+    if (candidates.length >= MAX_REFLECTION_FACTS) break;
+    const fact = parseFact(f, prov, knownIds);
+    if (fact) candidates.push(fact);
+  }
+  const summary = cleanText(obj.summary);
+  if (summary) {
+    const audience = SUMMARY_INHERITANCE.find((a) => candidates.some((c) => c.audience === a)) ?? "org";
+    candidates.push({ kind: "summary", text: summary, audience, ...prov });
+  }
+  return { ok: true, candidates };
+}
+
+function parseFact(raw: unknown, prov: ReflectionProvenance, knownIds: Set<string>): RoutedCandidate | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const f = raw as Record<string, unknown>;
+  const text = cleanText(f.text);
+  if (!text) return undefined;
+  const confidence = f.confidence;
+  if (
+    typeof confidence !== "number" ||
+    !Number.isFinite(confidence) ||
+    confidence < MIN_REFLECTION_CONFIDENCE ||
+    confidence > 1
+  ) {
+    return undefined;
+  }
+  const keywords = parseKeywords(f.keywords);
+  const supersedes = typeof f.supersedes === "string" && knownIds.has(f.supersedes) ? f.supersedes : undefined;
+  return {
+    kind: "fact",
+    text,
+    ...(keywords ? { keywords } : {}),
+    confidence,
+    audience: parseAudience(f.audience),
+    ...(supersedes ? { supersedes } : {}),
+    ...prov,
+  };
+}
+
+/** Redacted, whitespace-collapsed text; undefined when not a non-empty string. */
+function cleanText(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const t = redactSecrets(v).replace(/\s+/g, " ").trim();
+  return t || undefined;
+}
+
+/** Strings only, redacted, lowercased, trimmed, deduped, capped; non-array or
+ *  empty → undefined (the store tokenizes the text instead). */
+function parseKeywords(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: string[] = [];
+  for (const k of v) {
+    if (typeof k !== "string") continue;
+    const t = redactSecrets(k).trim().toLowerCase();
+    if (t && !out.includes(t)) out.push(t);
+    if (out.length >= MAX_KEYWORDS) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** The actor reflection writes as: the run's principal holding the run's own
+ *  channel and repo as memberships. Both are facts the dispatcher established
+ *  before the run (the adapter delivered the message from that channel; the
+ *  repo gate admitted that repo), stated here on the membership axis so the
+ *  table's `member-of` / `owner-of` rows recognize the run's own scopes and the
+ *  one open question left to the policy is the write gate's — may THIS origin write the
+ *  shared org scope. No action is added; `"all"` is left alone; the principal
+ *  is not mutated. */
+export function reflectionActor(principal: Actor, run: { channelId?: string; repo?: string }): Actor {
+  const { channels, repos } = principal.grants;
+  return {
+    ...principal,
+    grants: {
+      actions: principal.grants.actions,
+      channels: channels === "all" || run.channelId === undefined ? channels : new Set([...channels, run.channelId]),
+      repos: repos === "all" || run.repo === undefined ? repos : new Set([...repos, run.repo]),
+    },
+  };
+}
+
+export interface ReflectDeps extends ReflectionProvenance {
+  provider: Provider;
+  /** Bare model id (provider prefix already stripped) — resolved by the caller
+   *  from `memory.model` (AGENTS.md invariant 7: never hardcoded here). */
+  model: string;
+  store: MemoryStore;
+  /** The run's scopes: the org's, plus the repo's / channel's / the requesting
+   *  user's own when the run has them. */
+  scopeKeys: RequestScopeKeys;
+  /** Who the writes are decided for (authorization.md item 8): the run's
+   *  principal as `reflectionActor` prepares it. */
+  actor: Actor;
+  /** The run's stamped `channelVisibility` — the origin every write is
+   *  decided under. Absent → `unknown`: an unstamped run never writes org (fail-closed). */
+  originChannelVisibility?: ChannelVisibility;
+  history: HistoryItem[];
+  request: string;
+  answer: string;
+  onWarn?: (message: string) => void;
+}
+
+/** One of the run's scopes, by kind and key. */
+interface ScopeTarget {
+  kind: MemoryScope;
+  key: string;
+}
+
+const SCOPE_KINDS: readonly MemoryScope[] = ["org", "user", "repo", "channel"];
+
+/** Which of the run's scopes a key names; `undefined` for a key the run does not have. */
+function kindOfKey(keys: RequestScopeKeys, key: string): MemoryScope | undefined {
+  return SCOPE_KINDS.find((kind) => keys[kind] === key);
+}
+
+/** Which scope the extractor's routing puts a candidate in — the HINT the
+ *  policy then decides on (`placeCandidate`): a supersede follows the record it
+ *  corrects (the id was validated against the shown records, whose scopes we
+ *  know); otherwise the audience's scope when the run has it (`user` → the
+ *  requester's own, `repo` → the bound repo's, `channel` → the message's), and
+ *  org for everything else. An audience whose scope this run lacks falls back
+ *  to org rather than being dropped. */
+function routeCandidate(cand: RoutedCandidate, keys: RequestScopeKeys, scopeOf: Map<string, string>): ScopeTarget {
+  const superseded = cand.supersedes ? scopeOf.get(cand.supersedes) : undefined;
+  if (superseded !== undefined) {
+    const kind = kindOfKey(keys, superseded);
+    if (kind) return { kind, key: superseded };
+  }
+  const own = cand.audience === "org" ? undefined : keys[cand.audience];
+  return own === undefined ? { kind: "org", key: keys.org } : { kind: cand.audience, key: own };
+}
+
+/** Where a denied `org` write may go instead, narrowest-faithful first
+ *  (authorization.md item 8): a DM is one person's conversation with the bot,
+ *  so its facts are that person's (`user`); a private (or unknown) channel's
+ *  audience is exactly its participants (`channel`). The other follows when
+ *  the run lacks the first. `repo` is never a target — a repo scope is read
+ *  from every channel the repo is used in, wider than the origin. */
+function narrowingOrder(origin: ChannelVisibility): readonly ("user" | "channel")[] {
+  return origin === "dm" ? ["user", "channel"] : ["channel", "user"];
+}
+
+function scopeResource(target: ScopeTarget, origin: ChannelVisibility): Resource {
+  return { type: "memory-scope", kind: target.kind, key: target.key, originChannelVisibility: origin };
+}
+
+type Placement =
+  | { kind: "write"; target: ScopeTarget; narrowed?: { from: MemoryScope; reason: string } }
+  | { kind: "drop"; from: MemoryScope; reason: string };
+
+/** The policy's decision on one candidate: its routed scope when the
+ *  table allows the write; a denied `org` write narrows down `narrowingOrder`
+ *  to the first scope the run has AND the table allows; any other denial, or
+ *  no allowed narrower scope, drops the candidate — never a wider scope, never
+ *  silently (the caller logs the reason token). */
+function placeCandidate(
+  cand: RoutedCandidate,
+  actor: Actor,
+  origin: ChannelVisibility,
+  keys: RequestScopeKeys,
+  scopeOf: Map<string, string>,
+): Placement {
+  const routed = routeCandidate(cand, keys, scopeOf);
+  const decision = authorize(actor, "memory:write", scopeResource(routed, origin));
+  if (decision.allow) return { kind: "write", target: routed };
+  if (routed.kind !== "org") return { kind: "drop", from: routed.kind, reason: decision.reason };
+  for (const kind of narrowingOrder(origin)) {
+    const key = keys[kind];
+    if (key !== undefined && authorize(actor, "memory:write", scopeResource({ kind, key }, origin)).allow) {
+      return { kind: "write", target: { kind, key }, narrowed: { from: routed.kind, reason: decision.reason } };
+    }
+  }
+  return { kind: "drop", from: routed.kind, reason: decision.reason };
+}
+
+/** One extractor call → validate → `store.write` per scope. Never throws and
+ *  never retries: reflection is best-effort background work, and a failed pass
+ *  simply writes nothing (the thread history still holds the raw material). */
+export async function reflect(deps: ReflectDeps): Promise<void> {
+  const warn = deps.onWarn ?? (() => {});
+  try {
+    const query = `${deps.request} ${deps.answer}`.slice(0, MAX_RETRIEVE_QUERY_CHARS);
+    const existing = (
+      await Promise.all(
+        listScopeKeys(deps.scopeKeys).map((scopeKey) =>
+          deps.store.retrieve({ scopeKey, query, limit: EXISTING_LIMIT }),
+        ),
+      )
+    ).flat();
+    const text = buildReflectionInput({ history: deps.history, request: deps.request, answer: deps.answer, existing });
+    const result = await deps.provider.complete({
+      model: deps.model,
+      system: REFLECTION_SYSTEM,
+      messages: [{ role: "user", content: [{ type: "text", text }] }],
+      maxTokens: REFLECTION_MAX_TOKENS,
+    });
+    const reply = result.content
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    const prov: ReflectionProvenance = { sourceThreadKey: deps.sourceThreadKey, sourceRunId: deps.sourceRunId };
+    const parsed = parseReflection(reply, prov, new Set(existing.map((r) => r.id)));
+    if (!parsed.ok) {
+      warn(`reflection output rejected (${parsed.error}); nothing written`);
+      return;
+    }
+    if (parsed.candidates.length === 0) return;
+    const scopeOf = new Map(existing.map((r) => [r.id, r.scopeKey]));
+    const origin = deps.originChannelVisibility ?? "unknown";
+    const byScope = new Map<string, MemoryCandidate[]>();
+    // Policy outcomes are logged as counts of reason tokens — never a fact's text.
+    const narrowed = new Map<string, number>();
+    const dropped: string[] = [];
+    for (const cand of parsed.candidates) {
+      const { audience: _audience, ...plain } = cand;
+      const placement = placeCandidate(cand, deps.actor, origin, deps.scopeKeys, scopeOf);
+      if (placement.kind === "drop") {
+        dropped.push(`${placement.from} (${placement.reason})`);
+        continue;
+      }
+      let record: MemoryCandidate = plain;
+      if (placement.narrowed) {
+        // A correction cannot follow its target into a scope the origin may
+        // not write: the superseded record stands and the narrowed record is a
+        // plain insert into the narrower scope.
+        const { supersedes: _supersedes, ...withoutSupersede } = record;
+        record = withoutSupersede;
+        const line = `${placement.narrowed.from} → ${placement.target.kind} (${placement.narrowed.reason})`;
+        narrowed.set(line, (narrowed.get(line) ?? 0) + 1);
+      }
+      let batch = byScope.get(placement.target.key);
+      if (!batch) byScope.set(placement.target.key, (batch = []));
+      batch.push(record);
+    }
+    if (narrowed.size > 0)
+      warn(`write narrowed by policy: ${[...narrowed].map(([line, n]) => `${n}× ${line}`).join(", ")}`);
+    if (dropped.length > 0)
+      warn(`write denied by policy, ${dropped.length} candidate(s) dropped: ${dropped.join(", ")}`);
+    for (const [scopeKey, records] of byScope) await deps.store.write(scopeKey, records);
+  } catch (err) {
+    warn(`reflection failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ---- background tracking (shutdown drain) -----------------------------------
+// Reflections are fire-and-forget from dispatch(); the process drain (index.ts)
+// waits on this count alongside activeRunCount() so a restart doesn't drop a
+// distillation that was mid-flight.
+
+const pending = new Set<Promise<void>>();
+
+/** Register an in-flight reflection; it is removed when it settles either way. */
+export function trackReflection(p: Promise<void>): void {
+  const tracked: Promise<void> = p.then(
+    () => void pending.delete(tracked),
+    () => void pending.delete(tracked),
+  );
+  pending.add(tracked);
+}
+
+export function pendingReflectionCount(): number {
+  return pending.size;
+}
+
+/** Resolve once every currently-pending reflection has settled. */
+export async function drainReflections(): Promise<void> {
+  await Promise.all([...pending]);
+}

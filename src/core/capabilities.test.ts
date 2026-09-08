@@ -1,0 +1,203 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { secretsFrom } from "../secrets.js";
+import type { AppConfig } from "../config.js";
+import { parseAccessConfig } from "../channels/accessAuth.js";
+import { resolveDashboardAuthMode } from "./dashboardAuthConfig.js";
+import { parseMcpSettings } from "../mcp/config.js";
+import { ALL_CAPABILITIES, capabilitiesFrom, NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
+import { buildRunLedger } from "./runLedgerWorker.js";
+import { buildRunStore } from "./runStore.js";
+import { buildScheduleStore } from "./scheduleStore.js";
+
+// Feature: docs/reference/specs/routing-and-config.md item 16 — one Capabilities value,
+// computed once from the config and the environment. Every axis is exercised
+// with the config/env that turns it on and off, and each axis that mirrors a
+// builder's selection is pinned to that builder so the two rules cannot drift.
+
+const BASE: AppConfig = {
+  organization: "acme",
+  providers: { anthropic: { type: "anthropic", apiKeyEnv: "ANTHROPIC_API_KEY" } },
+  defaults: { agent: "general", models: { general: "anthropic/m" } },
+};
+
+const STATE = { baseUrl: "https://state.example" };
+const COSTS = { cloudflareAccountId: "acct", groups: { sb: { workers: ["switchboard"] } } };
+
+const caps = (config: Partial<AppConfig> = {}, env: NodeJS.ProcessEnv = {}): Capabilities =>
+  capabilitiesFrom({ ...BASE, ...config }, env, secretsFrom(env));
+
+describe("capabilitiesFrom — every axis, on and off", () => {
+  it("a bare config in an empty environment is the minimal installation: everything off, tools on the bot host, the dashboard local-only", () => {
+    expect(caps()).toEqual(NO_CAPABILITIES);
+  });
+
+  it("execution follows execution.type; local when unset", () => {
+    expect(caps().execution).toBe("local");
+    expect(caps({ execution: { type: "e2b" } }).execution).toBe("e2b");
+    expect(caps({ execution: { type: "cloudflare", url: "https://sb.example" } }).execution).toBe("cloudflare");
+  });
+
+  it("residents: the resident Worker's base URL is configured (the admin bearer is the commands' own concern)", () => {
+    expect(caps({ execution: { resident: { baseUrl: "https://res.example" } } }).residents).toBe(true);
+    expect(caps({ execution: { type: "cloudflare" } }).residents).toBe(false);
+    expect(caps({ execution: { resident: { baseUrl: "  " } } }).residents).toBe(false);
+  });
+
+  it("memory: memory.enabled is true — a block with enabled false is off", () => {
+    expect(caps({ memory: { enabled: true } }).memory).toBe(true);
+    expect(caps({ memory: { enabled: false } }).memory).toBe(false);
+  });
+
+  it("runHistory / runLedger mirror buildRunStore / buildRunLedger: a file store is history without a ledger; a Worker store needs its bearer and carries a ledger; a token env can be renamed", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "swb-caps-"));
+    // No real sweep timer for the file store the pin creates.
+    const deps = { dataDir, warn: () => {}, setInterval: (() => 0) as unknown as typeof setInterval };
+    const cases: Array<{ runHistory: AppConfig["runHistory"]; env: NodeJS.ProcessEnv }> = [
+      { runHistory: undefined, env: {} },
+      { runHistory: { store: "file" }, env: {} },
+      { runHistory: { worker: STATE }, env: {} },
+      { runHistory: { worker: STATE }, env: { MEMORY_TOKEN: "t" } },
+      { runHistory: { worker: { ...STATE, tokenEnv: "RUNS_TOKEN" } }, env: { MEMORY_TOKEN: "t" } },
+      { runHistory: { worker: { ...STATE, tokenEnv: "RUNS_TOKEN" } }, env: { RUNS_TOKEN: "t" } },
+      { runHistory: { store: "worker" }, env: { MEMORY_TOKEN: "t" } },
+    ];
+    for (const c of cases) {
+      const got = caps({ runHistory: c.runHistory }, c.env);
+      const label = JSON.stringify(c);
+      expect(got.runHistory, label).toBe(buildRunStore(c.runHistory, secretsFrom(c.env), deps) !== null);
+      expect(got.runLedger, label).toBe(buildRunLedger(c.runHistory, secretsFrom(c.env)) !== null);
+    }
+    expect(caps({ runHistory: { store: "file" } })).toMatchObject({ runHistory: true, runLedger: false });
+    expect(caps({ runHistory: { worker: STATE } }, { MEMORY_TOKEN: "t" })).toMatchObject({
+      runHistory: true,
+      runLedger: true,
+    });
+  });
+
+  it("mcp mirrors parseMcpSettings: an `mcp` block (even empty) is on; absent is off; a malformed block throws like startup does", () => {
+    for (const mcp of [undefined, {}, { credentialKeyEnv: "K" }]) {
+      expect(caps({ mcp }).mcp, JSON.stringify(mcp)).toBe(parseMcpSettings(mcp) !== undefined);
+    }
+    expect(caps({ mcp: {} }).mcp).toBe(true);
+    expect(() => caps({ mcp: { servers: [] } })).toThrow(/mcp\.servers moved/);
+  });
+
+  it("costs: a costs block AND its Cloudflare token (the default env or the named one); a malformed block throws", () => {
+    expect(caps({ costs: COSTS }).costs).toBe(false);
+    expect(caps({ costs: COSTS }, { CF_ANALYTICS_TOKEN: "t" }).costs).toBe(true);
+    expect(caps({ costs: { ...COSTS, cloudflareTokenEnv: "CF_T" } }, { CF_ANALYTICS_TOKEN: "t" }).costs).toBe(false);
+    expect(caps({ costs: { ...COSTS, cloudflareTokenEnv: "CF_T" } }, { CF_T: "t" }).costs).toBe(true);
+    expect(() => caps({ costs: { groups: {} } })).toThrow(/cloudflareAccountId/);
+  });
+
+  it("schedules mirrors buildScheduleStore: the firing store's URL and its bearer", () => {
+    const cases: Array<{ schedules: AppConfig["schedules"]; env: NodeJS.ProcessEnv }> = [
+      { schedules: undefined, env: {} },
+      { schedules: { worker: STATE }, env: {} },
+      { schedules: { worker: STATE }, env: { MEMORY_TOKEN: "t" } },
+      { schedules: { worker: { ...STATE, tokenEnv: "S_TOKEN" } }, env: { MEMORY_TOKEN: "t" } },
+      { schedules: { worker: { ...STATE, tokenEnv: "S_TOKEN" } }, env: { S_TOKEN: "t" } },
+    ];
+    for (const c of cases) {
+      expect(caps({ schedules: c.schedules }, c.env).schedules, JSON.stringify(c)).toBe(
+        buildScheduleStore(c.schedules, secretsFrom(c.env), () => {}) !== undefined,
+      );
+    }
+    expect(caps({ schedules: { worker: STATE } }, { MEMORY_TOKEN: "t" }).schedules).toBe(true);
+  });
+
+  it("github: the App triple, or the static GH_TOKEN; two of three App vars is nothing", () => {
+    const app = { GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "pem", GITHUB_APP_INSTALLATION_ID: "2" };
+    expect(caps({}, app).github).toBe(true);
+    expect(caps({}, { GH_TOKEN: "ghp" }).github).toBe(true);
+    expect(caps({}, { GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "pem" }).github).toBe(false);
+    expect(caps({}, { GH_TOKEN: "" }).github).toBe(false);
+  });
+
+  it("ingress: at least one bearer in SWITCHBOARD_INGRESS_TOKENS; an empty map or malformed JSON is off", () => {
+    expect(caps({}, { SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "ci" } }) }).ingress).toBe(true);
+    expect(caps({}, { SWITCHBOARD_INGRESS_TOKENS: "{}" }).ingress).toBe(false);
+    expect(caps({}, { SWITCHBOARD_INGRESS_TOKENS: "not json" }).ingress).toBe(false);
+    expect(caps({}, {}).ingress).toBe(false);
+  });
+
+  it("dashboardAuth is the strategy the gate runs (docs/reference/specs/access-gate.md): `dashboard.auth` when set, else `access` iff parseAccessConfig answers, else `none`; ACCESS_DEV_BYPASS is not read", () => {
+    const access = { ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com", ACCESS_AUD: "a".repeat(64) };
+    const envs: NodeJS.ProcessEnv[] = [
+      {},
+      access,
+      { ACCESS_DEV_BYPASS: "1" },
+      { ...access, ACCESS_DEV_BYPASS: "1" },
+      { ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com" },
+    ];
+    for (const env of envs) {
+      // The one rule the verifier follows (src/core/dashboardAuthConfig.ts).
+      const expected = resolveDashboardAuthMode(undefined, parseAccessConfig(env) !== null);
+      expect(caps({}, env).dashboardAuth, JSON.stringify(env)).toBe(expected);
+      expect(caps({ dashboard: { auth: "token" } }, env).dashboardAuth, JSON.stringify(env)).toBe("token");
+      expect(caps({ dashboard: { auth: "none" } }, env).dashboardAuth, JSON.stringify(env)).toBe("none");
+      expect(caps({ dashboard: { auth: "access" } }, env).dashboardAuth, JSON.stringify(env)).toBe("access");
+    }
+    expect(caps({}, access).dashboardAuth).toBe("access");
+    expect(caps({}, {}).dashboardAuth).toBe("none");
+    expect(caps({}, { ACCESS_DEV_BYPASS: "1" }).dashboardAuth).toBe("none");
+    expect(caps({}, { ...access, ACCESS_DEV_BYPASS: "1" }).dashboardAuth).toBe("access");
+  });
+
+  // Feature: docs/reference/specs/reading-diff.md item 1 / capabilities.md item 1 — the
+  // abridged reading diff is on iff the host has the binary, the Anthropic
+  // provider has its credential, and the switch is not `off` (env override included).
+  it("readingDiffAbridge: the meat binary (a host fact handed in), the provider's credential through the one getter, and a provider that is not off — any one missing is off", () => {
+    // The credential rides in `secrets`, the switch's env override in `env`, the binary in `host`.
+    const with_ = (config: Partial<AppConfig>, env: Record<string, string>, host?: { meatBinary: boolean }) =>
+      capabilitiesFrom({ ...BASE, ...config }, env, secretsFrom(env), host).readingDiffAbridge;
+    const on = { ANTHROPIC_API_KEY: "sk" };
+    expect(with_({}, on, { meatBinary: true })).toBe(true);
+    expect(with_({}, on)).toBe(false); // no host fact → no binary
+    expect(with_({}, on, { meatBinary: false })).toBe(false);
+    expect(with_({}, {}, { meatBinary: true })).toBe(false); // credential unset
+    expect(
+      with_(
+        { providers: { ant: { type: "anthropic", apiKeyEnv: "MY_KEY" } } },
+        { MY_KEY: "k", ANTHROPIC_API_KEY: "" },
+        { meatBinary: true },
+      ),
+    ).toBe(true); // the provider's own apiKeyEnv, not a fixed name
+    expect(with_({ review: { readingDiff: { provider: "off" } } }, on, { meatBinary: true })).toBe(false);
+    // meat (auto) and git (on demand) are both "on"
+    expect(with_({ review: { readingDiff: { provider: "meat" } } }, on, { meatBinary: true })).toBe(true);
+    // the env override counts like config
+    expect(with_({}, { ...on, SWITCHBOARD_READING_DIFF: "off" }, { meatBinary: true })).toBe(false);
+  });
+
+  it("the full configuration reaches ALL_CAPABILITIES — the two fixtures are real states, not shapes", () => {
+    const FULL_ENV = {
+      ANTHROPIC_API_KEY: "sk",
+      MEMORY_TOKEN: "t",
+      CF_ANALYTICS_TOKEN: "t",
+      GH_TOKEN: "ghp",
+      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "ci" } }),
+      ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com",
+      ACCESS_AUD: "a".repeat(64),
+    };
+    const full = capabilitiesFrom(
+      {
+        ...BASE,
+        execution: { type: "cloudflare", url: "https://sb.example", resident: { baseUrl: "https://res.example" } },
+        memory: { enabled: true },
+        runHistory: { worker: STATE },
+        schedules: { worker: STATE },
+        mcp: {},
+        costs: COSTS,
+      },
+      FULL_ENV,
+      secretsFrom(FULL_ENV),
+      { meatBinary: true },
+    );
+    expect(full).toEqual(ALL_CAPABILITIES);
+    expect(Object.keys(full).sort()).toEqual(Object.keys(NO_CAPABILITIES).sort());
+  });
+});

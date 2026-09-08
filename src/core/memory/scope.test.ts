@@ -1,0 +1,76 @@
+import { describe, expect, it } from "vitest";
+import { deriveScopeKey, listScopeKeys, requestScopeKeys } from "./scope.js";
+
+// Feature: docs/reference/specs/memory.md — the pure scope deriver. Org-scoped +
+// user-scoped, namespaced per AGENTS.md invariant 4. The org is the
+// config's `organization`, an input like the others — the code names none.
+
+const ORG = "acme";
+
+describe("deriveScopeKey", () => {
+  it("derives the org scope key from the configured organization, platform-namespaced", () => {
+    expect(deriveScopeKey("org", { organization: ORG })).toBe("org:acme");
+    expect(deriveScopeKey("org", { organization: "other-org" })).toBe("org:other-org");
+  });
+
+  it("refuses an org scope without the organization (never a shared bucket across installations)", () => {
+    expect(() => deriveScopeKey("org")).toThrow(/organization/);
+    expect(() => deriveScopeKey("org", { organization: "" })).toThrow(/organization/);
+  });
+
+  it("derives the user scope key from the request's platform-namespaced user id", () => {
+    expect(deriveScopeKey("user", { userId: "slack:U0123" })).toBe("user:slack:U0123");
+  });
+
+  it("refuses a user scope without a user id (never a shared `user:` bucket)", () => {
+    expect(() => deriveScopeKey("user", {})).toThrow(/userId/);
+    expect(() => deriveScopeKey("user", { userId: "" })).toThrow(/userId/);
+  });
+});
+
+// Repo and channel scopes: shared by everyone who runs in that repo /
+// channel, namespaced per invariant 4 (channelId arrives already namespaced).
+describe("deriveScopeKey — repo / channel", () => {
+  it("derives repo and channel keys", () => {
+    expect(deriveScopeKey("repo", { repo: "acme/api" })).toBe("repo:acme/api");
+    expect(deriveScopeKey("channel", { channelId: "slack:C0123" })).toBe("channel:slack:C0123");
+  });
+
+  it("refuses a repo/channel scope without its input (never an anonymous shared bucket)", () => {
+    expect(() => deriveScopeKey("repo", {})).toThrow(/repo/);
+    expect(() => deriveScopeKey("repo", { repo: "" })).toThrow(/repo/);
+    expect(() => deriveScopeKey("channel", {})).toThrow(/channelId/);
+  });
+});
+
+describe("requestScopeKeys", () => {
+  it("returns the org key plus the requesting user's key", () => {
+    expect(requestScopeKeys(ORG, "slack:U0123")).toEqual({ org: "org:acme", user: "user:slack:U0123" });
+  });
+
+  it("adds repo and channel keys when the request has them; listScopeKeys orders org, repo, channel, user", () => {
+    const keys = requestScopeKeys(ORG, "slack:U0123", { repo: "acme/api", channelId: "slack:C0123" });
+    expect(keys).toEqual({
+      org: "org:acme",
+      user: "user:slack:U0123",
+      repo: "repo:acme/api",
+      channel: "channel:slack:C0123",
+    });
+    expect(listScopeKeys(keys)).toEqual(["org:acme", "repo:acme/api", "channel:slack:C0123", "user:slack:U0123"]);
+    expect(requestScopeKeys(ORG, "slack:U0123", { channelId: "slack:C0123" })).toEqual({
+      org: "org:acme",
+      user: "user:slack:U0123",
+      channel: "channel:slack:C0123",
+    });
+    expect(requestScopeKeys(ORG, undefined, { repo: "", channelId: "" })).toEqual({ org: "org:acme" });
+  });
+
+  it("degrades to org-only when the request carries no user identity", () => {
+    expect(requestScopeKeys(ORG, undefined)).toEqual({ org: "org:acme" });
+    expect(requestScopeKeys(ORG, "")).toEqual({ org: "org:acme" });
+  });
+
+  it("refuses without an organization — the shared scope is never anonymous", () => {
+    expect(() => requestScopeKeys("", "slack:U0123")).toThrow(/organization/);
+  });
+});

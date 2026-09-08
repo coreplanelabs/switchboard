@@ -1,0 +1,1271 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`command conformance — catalogue fences > catalogue snapshot: id, arguments, options (names + kinds + enum values), surfaces, action, policy target, effect — update deliberately 1`] = `
+[
+  {
+    "action": "config:write",
+    "args": [
+      {
+        "name": "scope",
+        "required": true,
+        "type": "enum",
+      },
+    ],
+    "effect": "write",
+    "id": "config.clear",
+    "options": [
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "config:write",
+    "args": [
+      {
+        "name": "scope",
+        "required": true,
+        "type": "enum",
+      },
+      {
+        "name": "text",
+        "required": false,
+        "rest": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "config.instructions",
+    "options": [
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "config:write",
+    "args": [
+      {
+        "name": "scope",
+        "required": true,
+        "type": "enum",
+      },
+    ],
+    "effect": "write",
+    "id": "config.set",
+    "options": [
+      {
+        "name": "agent",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "model",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "models",
+        "required": false,
+        "type": "object",
+      },
+      {
+        "name": "effort",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+        ],
+      },
+      {
+        "name": "efforts",
+        "required": false,
+        "type": "object",
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "config:read",
+    "args": [],
+    "effect": "read",
+    "id": "config.show",
+    "options": [
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "write",
+    "id": "deploy.all",
+    "options": [
+      {
+        "name": "only",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "skip",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "affected",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "base",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "force",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "allowBranch",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "waitMax",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "poll",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "write",
+    "id": "deploy.config",
+    "options": [
+      {
+        "name": "source",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "write",
+    "id": "deploy.images",
+    "options": [
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "write",
+    "id": "deploy.init",
+    "options": [
+      {
+        "name": "check",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "deploy:read",
+    "args": [],
+    "effect": "read",
+    "id": "deploy.plan",
+    "options": [
+      {
+        "name": "only",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "skip",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "affected",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "base",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "force",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "allowBranch",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "waitMax",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "poll",
+        "required": false,
+        "type": "integer",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "write",
+    "id": "deploy.restart",
+    "options": [
+      {
+        "name": "only",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "bot",
+        ],
+      },
+      {
+        "name": "force",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "waitMax",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "poll",
+        "required": false,
+        "type": "integer",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "deploy:write",
+    "args": [
+      {
+        "name": "worker",
+        "required": true,
+        "type": "enum",
+      },
+    ],
+    "effect": "write",
+    "id": "deploy.secrets",
+    "options": [
+      {
+        "name": "only",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "env:write",
+    "args": [],
+    "effect": "write",
+    "id": "env.bootstrap",
+    "options": [
+      {
+        "name": "env",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "service",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "apply",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "out",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "manifest",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "friction:read",
+    "args": [
+      {
+        "name": "source",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "friction.analyze",
+    "options": [
+      {
+        "name": "slowMs",
+        "required": false,
+        "type": "number",
+      },
+      {
+        "name": "inProgress",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "friction:write",
+    "args": [],
+    "effect": "write",
+    "id": "friction.propose",
+    "options": [
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "top",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "minRuns",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "repo",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "friction:read",
+    "args": [],
+    "effect": "read",
+    "id": "friction.report",
+    "options": [
+      {
+        "name": "sinceMs",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "limit",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "minRuns",
+        "required": false,
+        "type": "integer",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "help:read",
+    "args": [],
+    "effect": "read",
+    "id": "help.show",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "mcp:write",
+    "args": [
+      {
+        "name": "name",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "mcp.add",
+    "options": [
+      {
+        "name": "url",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "scope",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "me",
+          "channel",
+          "org",
+        ],
+      },
+      {
+        "name": "agents",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "auth",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "oauth",
+          "bearer",
+          "none",
+        ],
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "mcp:write",
+    "args": [
+      {
+        "name": "name",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "mcp.connect",
+    "options": [
+      {
+        "name": "scope",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "me",
+          "channel",
+          "org",
+        ],
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "mcp:read",
+    "args": [],
+    "effect": "read",
+    "id": "mcp.list",
+    "options": [
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "mcp:write",
+    "args": [
+      {
+        "name": "name",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "mcp.remove",
+    "options": [
+      {
+        "name": "scope",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "me",
+          "channel",
+          "org",
+        ],
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "mcp:read",
+    "args": [
+      {
+        "name": "name",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "mcp.show",
+    "options": [
+      {
+        "name": "scope",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "me",
+          "channel",
+          "org",
+        ],
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "memory:write",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "memory.forget",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "memory:read",
+    "args": [
+      {
+        "name": "query",
+        "required": false,
+        "rest": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "memory.list",
+    "options": [
+      {
+        "name": "scope",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "me",
+          "org",
+          "repo",
+          "channel",
+          "all",
+        ],
+      },
+      {
+        "name": "limit",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "repo",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "repo:exec",
+    "args": [
+      {
+        "name": "slug",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "ref",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "repo.build",
+    "options": [],
+    "resource": "agent",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "repo:read",
+    "args": [],
+    "effect": "read",
+    "id": "repo.list",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "repo:write",
+    "args": [
+      {
+        "name": "slug",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "repo.offboard",
+    "options": [
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "repo:write",
+    "args": [
+      {
+        "name": "slug",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "repo.onboard",
+    "options": [
+      {
+        "name": "ref",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "test",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "build",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "install",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "evictColdest",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "repo:write",
+    "args": [
+      {
+        "name": "slug",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "repo.rebuild",
+    "options": [
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "repo:write",
+    "args": [
+      {
+        "name": "slug",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "repo.reconfigure",
+    "options": [
+      {
+        "name": "ref",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "test",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "build",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "install",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "repo:exec",
+    "args": [
+      {
+        "name": "slug",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "ref",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "repo.test",
+    "options": [],
+    "resource": "agent",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "review:write",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "review.abridge",
+    "options": [
+      {
+        "name": "model",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "force",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "wait",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "runs.events",
+    "options": [
+      {
+        "name": "afterSeq",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "limit",
+        "required": false,
+        "type": "integer",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "runs.friction",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "runs.get",
+    "options": [
+      {
+        "name": "include",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "messages",
+        ],
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
+    "args": [],
+    "effect": "read",
+    "id": "runs.list",
+    "options": [
+      {
+        "name": "status",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "active",
+          "finished",
+          "all",
+        ],
+      },
+      {
+        "name": "agent",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "sinceMs",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "limit",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "before",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "beforeId",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:write",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "runs.stop",
+    "options": [
+      {
+        "name": "mode",
+        "required": true,
+        "type": "enum",
+        "values": [
+          "soft",
+          "hard",
+        ],
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "schedule:read",
+    "args": [],
+    "effect": "read",
+    "id": "schedule.list",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "setup:write",
+    "args": [],
+    "effect": "write",
+    "id": "setup.init",
+    "options": [
+      {
+        "name": "organization",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "anthropicKey",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "openaiCompatible",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "model",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "modelKey",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "slackAppToken",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "slackBotToken",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "githubAppId",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "githubInstallationId",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "githubPrivateKeyFile",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "cloudflare",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "zone",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "name",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "force",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "status:read",
+    "args": [],
+    "effect": "read",
+    "id": "status.show",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+]
+`;
