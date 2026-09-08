@@ -1252,10 +1252,11 @@ describe("model turn events (features/live-view.md item 15)", () => {
       now: () => t,
     });
     expect(events.map((e) => e.type)).toEqual(["turn", "tool_call", "tool_result", "turn"]);
-    // every turn names the model that took it (the page badges a silent model and flags a switch)
+    // every turn names the model that took it as the SAME `<provider>/<model>` ref run_meta
+    // carries (the page badges a silent model and flags a switch by comparing the two)
     expect(events[0]).toEqual({
       type: "turn",
-      model: "m",
+      model: "slow/m",
       startedAt: 1_000,
       durationMs: 5_000,
       stopReason: "tool_use",

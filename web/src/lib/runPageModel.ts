@@ -189,8 +189,10 @@ export interface RunPageModel {
 function turnVm(change: Extract<TimelineChange, { kind: "turn" }>, modelBefore: string | null): TurnVm {
   // The model that took the turn: the stamp when the event carries one, else
   // the model the run was on — a stream from before per-turn stamps still
-  // names its `run_meta` model on every head.
-  const model = change.model ?? modelBefore ?? undefined;
+  // names its `run_meta` model on every head. A bare stamp that names the
+  // model the run was on (v0.4.0 stamped bare ids) keeps the fuller ref.
+  const same = !!change.model && modelBefore !== null && sameModel(change.model, modelBefore);
+  const model = same ? (modelBefore as string) : (change.model ?? modelBefore ?? undefined);
   return {
     label: change.label,
     chip: change.label.replace(/^Thought for /, ""),
@@ -200,7 +202,7 @@ function turnVm(change: Extract<TimelineChange, { kind: "turn" }>, modelBefore: 
     ...(model ? { model } : {}),
     // A switch is a change from a KNOWN model; the first stamped turn of a
     // run whose meta never named one is not a switch.
-    switched: !!change.model && modelBefore !== null && change.model !== modelBefore,
+    switched: !!change.model && modelBefore !== null && !same,
     at: change.at,
   };
 }
@@ -380,7 +382,9 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
       case "turn":
         flushTurn("");
         pendingTurn = turnVm(change, state.model);
-        if (change.model) state.model = change.model;
+        // A stamp names the run's model from here on — unless it is a bare id
+        // for the model already known by its fuller ref, which stays.
+        if (change.model && !(state.model !== null && sameModel(change.model, state.model))) state.model = change.model;
         return;
       case "meta":
         // The declared model until a stamped turn says otherwise.
@@ -492,6 +496,19 @@ export function runningHeader(state: RunPageModel["state"], nowWall: number): st
  *  running card can tick its own elapsed in place (null on a history page:
  *  nothing there is live, so nothing ticks). */
 export const RunnerClockKey: InjectionKey<Ref<number | null>> = Symbol("sb-runner-clock");
+
+/** Two model refs name one model when they are equal, or when one is a bare id
+ *  (no provider) and the other is a ref whose name is that id — v0.4.0's runner
+ *  stamped turns with the bare id while `run_meta` carried the ref, which read
+ *  as a model switch on every run's first turn. Two refs with different
+ *  providers are different models even when the names match. */
+export function sameModel(a: string, b: string): boolean {
+  if (a === b) return true;
+  const aBare = !a.includes("/");
+  const bBare = !b.includes("/");
+  if (aBare === bBare) return false;
+  return modelName(a) === modelName(b);
+}
 
 /** The short name a badge shows for a `<provider>/<model>` ref: the part after
  *  the last slash (`anthropic/claude-fable-5` → `claude-fable-5`); a bare
