@@ -8,12 +8,16 @@ import {
   docCommands,
   GENERATED_REGIONS,
   renderApiRoutes,
+  renderCapabilityCommands,
   renderChatCommands,
   renderCliCommands,
   usageFor,
   whoMayRun,
 } from "./reference.js";
 import { declaredRegions } from "./regions.js";
+import type { Capabilities } from "../core/capabilities.js";
+import { CAPABILITY_KEYS, gatedBy } from "../core/capabilityGating.js";
+import { chatForm } from "../core/commandSurface.js";
 
 /** A hand-built catalogue: one command per shape the renderers must handle. */
 function fixture(): CommandDef<unknown>[] {
@@ -146,6 +150,33 @@ describe("renderApiRoutes", () => {
   });
 });
 
+describe("renderCapabilityCommands", () => {
+  /** The hand-built catalogue plus one command that needs memory. */
+  const gated = docCommands([
+    ...fixture(),
+    {
+      id: "thing.remember",
+      action: "memory:read",
+      effect: "read",
+      describe: "Needs memory.",
+      enabledWhen: (caps: Capabilities) => caps.memory,
+      handler: async () => null,
+    },
+  ] as unknown as CommandDef<unknown>[]);
+  const out = renderCapabilityCommands(gated);
+
+  it("has one row per capability axis, in the contract's order, and names a gated command in its axis's row in chat form", () => {
+    const rows = out.split("\n").filter((l) => l.startsWith("| `"));
+    expect(rows.map((r) => r.split("|")[1].trim())).toEqual(CAPABILITY_KEYS.map((k) => `\`${k}\``));
+    expect(out).toContain("| `memory` | `thing remember` |");
+  });
+
+  it("reads — for an axis that turns nothing on, and counts the always-on commands in the closing line", () => {
+    expect(out).toContain("| `costs` | — |");
+    expect(out).toContain("The other 3 commands are on in every installation.");
+  });
+});
+
 describe("the real catalogue", () => {
   const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
   registerCoreCommands(registry);
@@ -158,11 +189,27 @@ describe("the real catalogue", () => {
     expect(out).toContain("deploy restart");
   });
 
+  it("the capability column lists, per axis, exactly the commands gatedBy derives from the registry — a list nobody typed", () => {
+    const out = renderCapabilityCommands(real);
+    const defs = registry.list() as CommandDef<unknown>[];
+    for (const key of CAPABILITY_KEYS) {
+      const expected = defs.filter((cmd) => gatedBy(cmd).includes(key)).map((cmd) => `\`${chatForm(cmd.id)}\``);
+      expect(out).toContain(`| \`${key}\` | ${expected.length === 0 ? "—" : expected.join(", ")} |`);
+    }
+    const alwaysOn = defs.filter((cmd) => gatedBy(cmd).length === 0).length;
+    expect(out).toContain(`The other ${alwaysOn} commands are on in every installation.`);
+  });
+
   it("emits no unescaped pipe inside a table row (each row must have the column count its header declares)", () => {
-    for (const body of [renderCliCommands(real), renderChatCommands(real), renderApiRoutes(real)]) {
+    for (const body of [
+      renderCliCommands(real),
+      renderChatCommands(real),
+      renderApiRoutes(real),
+      renderCapabilityCommands(real),
+    ]) {
       const rows = body.split("\n").filter((l) => l.startsWith("|") && !/^\|[-|]+\|$/.test(l));
       const widths = new Set(rows.map((r) => r.replace(/\\\|/g, "").split("|").length));
-      expect([...widths].every((w) => w === 5 || w === 6)).toBe(true);
+      expect([...widths].every((w) => w === 4 || w === 5 || w === 6)).toBe(true);
     }
   });
 });

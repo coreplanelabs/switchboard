@@ -49,9 +49,10 @@ import {
   type InvokeErrorCode,
   type InvokeResult,
 } from "../commandRegistry.js";
-import { cliFlag, namedToInput, toSurfaceNames } from "../commandSurface.js";
+import { cliFlag, mcpToolName, namedToInput, toSurfaceNames } from "../commandSurface.js";
 import { coreCommandGroups, registerCoreCommands, type CoreCommandDeps } from "../commands/all.js";
 import type { CoreDeps } from "../dispatcher.js";
+import { ALL_CAPABILITIES, type Capabilities } from "../capabilities.js";
 import { RunStoreFrictionLedger } from "../frictionLedger.js";
 import { InMemoryMemoryStore } from "../memory/stores.js";
 import type { MemoryRecord } from "../memory/types.js";
@@ -253,6 +254,8 @@ export interface Fixture {
   commands: CommandInvoker;
   recorded: Recorded[];
   config: ConfigStore;
+  /** What is on in this world (src/core/capabilities.ts) — everything, unless the suite says otherwise. */
+  capabilities: Capabilities;
   liveId: string;
   liveToken: string;
   /** Every call a stubbed executor received (resident admin writes, ops, deploys, bootstraps). */
@@ -513,10 +516,12 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   };
 }
 
-/** `extra` registers commands beside the catalogue (the fence's self-test); `yaml` picks the deployment. */
+/** `extra` registers commands beside the catalogue (the fence's self-test); `yaml` picks the deployment;
+ *  `capabilities` is what is on in this world — the all-on value unless a suite injects another. */
 export async function fixture(
   extra: (registry: CommandRegistry<CoreCommandDeps>) => void = () => {},
   yaml: "config" | "authz" = "config",
+  capabilities: Capabilities = ALL_CAPABILITIES,
 ): Promise<Fixture> {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
@@ -548,7 +553,7 @@ export async function fixture(
     outcome: "completed",
     detail: "filed 0 issues",
   });
-  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, logError: () => {} });
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, logError: () => {}, capabilities });
   registerCoreCommands(registry);
   extra(registry);
   const executed: string[] = [];
@@ -570,6 +575,7 @@ export async function fixture(
     commands: recording(raw, recorded),
     recorded,
     config,
+    capabilities,
     liveId: live.id,
     liveToken: live.token,
     executed,
@@ -953,4 +959,54 @@ export function namesField(message: string, field: string): boolean {
   const error = message.split("\nusage:")[0];
   const spellings = [field, cliFlag(field)].map(escapeRegExp).join("|");
   return new RegExp(`(?<![\\w-])(?:${spellings})(?![\\w-])`).test(error);
+}
+
+// ---- existence, per adapter ----------------------------------------------------------------------
+
+export type AdapterKind = "http" | "mcp" | "cli" | "chat";
+export const ADAPTER_KINDS: readonly AdapterKind[] = ["http", "mcp", "cli", "chat"];
+
+/** The `Caller["kind"]` each adapter resolves — what `CommandRegistry.exposedTo` is asked with. */
+export const ADAPTER_CALLER_KIND: Readonly<Record<AdapterKind, Caller["kind"]>> = {
+  http: "access",
+  mcp: "mcp",
+  cli: "cli",
+  chat: "chat",
+};
+
+/** The tool names `tools/list` answers the power bearer with (the built-in `dispatch` included). */
+export async function mcpToolNames(f: Fixture): Promise<string[]> {
+  const res = await handleMcpRequest(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer power" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    },
+    {} as CoreDeps,
+    { auth: { tokens: { power: { subject: "power" } } }, commands: f.commands, grantsFor: () => ALL_GRANTS },
+  );
+  return (res.body as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
+}
+
+/**
+ * Whether each adapter admits that `cmd` EXISTS for the power caller — the
+ * question a hidden command must answer "no" to on every surface
+ * (features/capabilities.md item 3): HTTP answers `/api/<id>` with anything but
+ * 404 (a write gets an empty body, so a refusal of the input still counts as
+ * present), `tools/list` names the tool, the CLI grammar knows the words, chat
+ * recognises the form. Opted-out surfaces answer "no" too — presence is what the
+ * adapter shows, not what the definition declares.
+ */
+export async function presenceOf(f: Fixture, cmd: CommandDef<unknown>): Promise<Record<AdapterKind, boolean>> {
+  const names = toSurfaceNames(cmd.id);
+  const t = fakeReqRes(cmd.effect === "write" ? "POST" : "GET", names.http, cmd.effect === "write" ? "{}" : undefined, {
+    "content-type": "application/json",
+  });
+  await httpHandler(f)(t.req, t.res, { sub: "power" });
+  return {
+    http: t.status() !== 404,
+    mcp: (await mcpToolNames(f)).includes(mcpToolName(cmd.id)),
+    cli: parseCliArgv([...names.cli, "--help"], f.commands).kind === "command-help",
+    chat: parseChatCommand(`${names.chat} --help`, f.commands)?.kind === "reply",
+  };
 }

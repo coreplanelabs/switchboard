@@ -26,6 +26,8 @@ import { jsonSchemaFor, namedToInput, tokenize, toSurfaceNames } from "./command
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import type { CoreDeps } from "./dispatcher.js";
 import { RunStoreFrictionLedger } from "./frictionLedger.js";
+import { NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
+import { dependsOn, isEnabled, withOff, withOn } from "./capabilityGating.js";
 import { RunRegistry } from "./runRegistry.js";
 import { InMemoryRunStore } from "./runStore.js";
 import {
@@ -147,6 +149,9 @@ import {
   NOW,
   PLANTED_ENV_SECRET,
   powerCaller,
+  presenceOf,
+  ADAPTER_CALLER_KIND,
+  ADAPTER_KINDS,
   reference,
   registryRefused,
   runAsRole,
@@ -305,6 +310,8 @@ describe("command conformance — catalogue fences", () => {
         matrix.commands.find((c) => c.id === cmd.id)?.rows.map((r) => r.variant),
         cmd.id,
       ).toEqual(vs.map((v) => v.name));
+      // The capability column is the registry's own answer (features/capabilities.md item 3).
+      expect(matrix.commands.find((c) => c.id === cmd.id)?.needs, `${cmd.id} needs`).toEqual(dependsOn(cmd));
     }
     expect(matrix.summary).toEqual({ commands: CATALOGUE.length, surfaces: SURFACES.length, variants, cells });
     expect(matrix.authorization.rows.map((r) => r.id)).toEqual(CATALOGUE.map((c) => c.id).sort());
@@ -681,6 +688,37 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         ).toEqual([]);
         expect(f.executed, where).toEqual([]);
         assertNoSecrets(out.wire, f, where);
+      }
+    }
+  });
+
+  it("capability axis: in every world one axis away from all-on or all-off, the command exists exactly where its enabledWhen says — hidden is absent on every adapter and not_found on invoke, never unavailable; present is ok", async () => {
+    const happy = variants.find((v) => v.name === "required-only")!;
+    // Everything else in this suite drives the all-on world; here: all-off, and each axis the
+    // predicate depends on flipped alone in both directions.
+    const worlds: Array<[string, Capabilities]> = [
+      ["everything off", NO_CAPABILITIES],
+      ...dependsOn(cmd).flatMap((key): Array<[string, Capabilities]> => [
+        [`${key} off`, withOff(key)],
+        [`${key} on alone`, withOn(key)],
+      ]),
+    ];
+    for (const [label, caps] of worlds) {
+      const f = await fixture(() => {}, "config", caps);
+      const where = `${cmd.id} with ${label}`;
+      const enabled = isEnabled(cmd, caps);
+      const presence = await presenceOf(f, cmd);
+      for (const kind of ADAPTER_KINDS)
+        expect(presence[kind], `${where}: shown on ${kind}`).toBe(
+          enabled && CommandRegistry.exposedTo(cmd, ADAPTER_CALLER_KIND[kind]),
+        );
+      f.recorded.length = 0;
+      f.executed.length = 0;
+      const res = await reference(f, cmd, happy.named, powerCaller);
+      if (enabled) expect(res.ok, `${where}: ${JSON.stringify(res)}`).toBe(true);
+      else {
+        expect(res, where).toMatchObject({ ok: false, error: "not_found" });
+        expect(f.executed, where).toEqual([]);
       }
     }
   });

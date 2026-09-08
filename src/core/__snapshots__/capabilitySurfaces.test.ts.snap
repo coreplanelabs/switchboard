@@ -1,0 +1,590 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`capability axis — a capability turning on changes exactly the commands its enabledWhen names > which commands each capability turns on, derived from the registry's enabledWhen — update deliberately 1`] = `
+{
+  "friction.propose": [
+    "runHistory",
+  ],
+  "friction.report": [
+    "runHistory",
+  ],
+  "mcp.add": [
+    "mcp",
+  ],
+  "mcp.connect": [
+    "mcp",
+  ],
+  "mcp.list": [
+    "mcp",
+  ],
+  "mcp.remove": [
+    "mcp",
+  ],
+  "mcp.show": [
+    "mcp",
+  ],
+  "memory.forget": [
+    "memory",
+  ],
+  "memory.list": [
+    "memory",
+  ],
+  "repo.build": [
+    "execution",
+    "residents",
+  ],
+  "repo.list": [
+    "residents",
+  ],
+  "repo.offboard": [
+    "residents",
+  ],
+  "repo.onboard": [
+    "residents",
+  ],
+  "repo.rebuild": [
+    "residents",
+  ],
+  "repo.reconfigure": [
+    "residents",
+  ],
+  "repo.test": [
+    "execution",
+    "residents",
+  ],
+  "schedule.list": [
+    "schedules",
+  ],
+}
+`;
+
+exports[`capability surfaces — cloud-full > CLI catalogue 1`] = `
+"usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]
+       npx tsx src/cli.ts <group> <verb> --help
+       npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"
+       npx tsx src/cli.ts help
+
+commands:
+  help show            — What Switchboard can do: agents, per-request directives, and every chat command.
+  config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
+  config set           — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+  config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
+  config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+  runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
+  runs get             — One run's record; \`--include messages\` adds its events with free text wrapped as untrusted content.
+  runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
+  runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
+  runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+  friction report      — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
+  friction propose     — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
+  friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
+  repo list            — Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge.
+  repo onboard         — Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated).
+  repo offboard        — Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only).
+  repo reconfigure     — Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach).
+  repo rebuild         — Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only).
+  repo test            — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  memory list          — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
+  memory forget        — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
+  mcp list             — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.
+  mcp add              — Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.
+  mcp connect          — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
+  mcp show             — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
+  mcp remove           — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
+  schedule list        — Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did.
+  deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
+  deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
+  deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
+  deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
+  deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
+  deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
+  env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply)."
+`;
+
+exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
+[
+  "config.clear",
+  "config.instructions",
+  "config.set",
+  "config.show",
+  "deploy.plan",
+  "friction.propose",
+  "friction.report",
+  "help.show",
+  "mcp.add",
+  "mcp.connect",
+  "mcp.list",
+  "mcp.remove",
+  "mcp.show",
+  "memory.forget",
+  "memory.list",
+  "repo.build",
+  "repo.list",
+  "repo.offboard",
+  "repo.onboard",
+  "repo.rebuild",
+  "repo.reconfigure",
+  "repo.test",
+  "runs.events",
+  "runs.friction",
+  "runs.get",
+  "runs.list",
+  "runs.stop",
+  "schedule.list",
+]
+`;
+
+exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
+[
+  "config_clear",
+  "config_instructions",
+  "config_set",
+  "config_show",
+  "deploy_plan",
+  "dispatch",
+  "friction_propose",
+  "friction_report",
+  "help_show",
+  "mcp_add",
+  "mcp_connect",
+  "mcp_list",
+  "mcp_remove",
+  "mcp_show",
+  "memory_forget",
+  "memory_list",
+  "repo_build",
+  "repo_list",
+  "repo_offboard",
+  "repo_onboard",
+  "repo_rebuild",
+  "repo_reconfigure",
+  "repo_test",
+  "runs_events",
+  "runs_friction",
+  "runs_get",
+  "runs_list",
+  "runs_stop",
+  "schedule_list",
+]
+`;
+
+exports[`capability surfaces — cloud-full > help on chat 1`] = `
+"*Switchboard* — send me a request. Agents:
+• \`general\` — Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.
+• \`coding\` — Implements changes and ships PRs (git + gh in a workspace).
+• \`review\` — Reviews PRs and produces high-quality findings. Read-only.
+• \`ship\` — Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.
+• \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.
+
+*Per-request directives* (anywhere in the message):
+\`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42\` (effort: low | medium | high — lower = faster turns)
+
+*Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
+*help*
+• \`help show\` — What Switchboard can do: agents, per-request directives, and every chat command.
+*config*
+• \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
+• \`config set\` — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+• \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
+• \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+*runs*
+• \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
+• \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+*friction*
+• \`friction report\` — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
+• \`friction propose\` — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
+*repo*
+• \`repo list\` — Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge.
+• \`repo onboard\` — Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated).
+• \`repo offboard\` — Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only).
+• \`repo reconfigure\` — Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach).
+• \`repo rebuild\` — Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only).
+• \`repo test\` — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+• \`repo build\` — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+*memory*
+• \`memory list\` — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
+• \`memory forget\` — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
+*mcp*
+• \`mcp list\` — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.
+• \`mcp add\` — Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.
+• \`mcp connect\` — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
+• \`mcp show\` — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
+• \`mcp remove\` — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
+*schedule*
+• \`schedule list\` — Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did.
+*deploy*
+• \`deploy plan\` — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why."
+`;
+
+exports[`capability surfaces — cloud-full > self-description block (the resident cap is the Worker's answer — 6 where there is a fleet) 1`] = `
+"About Switchboard (yourself): you are Switchboard, the agent gateway of the acme organization. A message arrives on a channel (Slack — an @-mention, thread follow-ups stay on the same agent — plus a CLI, an HTTP /api and an MCP surface), is routed to an agent, runs on a configured provider/model, and executes tools through an executor.
+Agents: \`general\` — Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.; \`coding\` — Implements changes and ships PRs (git + gh in a workspace).; \`review\` — Reviews PRs and produces high-quality findings. Read-only.; \`ship\` — Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.; \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.. Users pick one with an inline \`agent:<name>\` directive (default: general); \`model:\` / \`effort:\` ride the same way (see the runtime-config block).
+Repos: the coding and review agents work in a "resident" — an always-warm per-repo environment (a mirror clone, installed deps, a built checkout, refreshed on a schedule and snapshotted) on the resident Worker; each run attaches a worktree on its branch in seconds. An admin onboards a repo with \`repo onboard <owner/name>\` (install/build/test commands are detected from the repo root, \`--install/--build/--test\` override), sees the fleet with \`repo list\`, changes it with \`repo reconfigure\` / \`repo rebuild\` / \`repo offboard\`; the fleet is capped at 6 residents (\`--evict-coldest\` frees a slot). There is no separate "priority repos" setting: onboarded = warm. Repos that are not onboarded run in a cold per-thread workspace.
+Runs and memory: every run (agent or operator command) has a live page under /runs with its events, kept as run history; runs can be stopped from there. Cross-session memory is per org/repo/channel/user (\`memory list\` / \`memory forget\`). \`help\` lists every chat command.
+Source of truth: the code lives in the GitHub repo coreplanelabs/switchboard — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under features/*.md (e.g. features/resident-repos.md, features/routing-and-config.md, features/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on coreplanelabs/switchboard) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings."
+`;
+
+exports[`capability surfaces — cloud-full > web seeds: /runs (capabilities, retention sentence) and /runs/scheduled (schedules, firing store) 1`] = `
+{
+  "capabilities": {
+    "costs": true,
+    "dashboardAuth": "access",
+    "docs": true,
+    "execution": "cloudflare",
+    "github": true,
+    "ingress": true,
+    "mcp": true,
+    "memory": true,
+    "residents": true,
+    "runHistory": true,
+    "runLedger": true,
+    "schedules": true,
+  },
+  "runs": {
+    "retention": "Finished runs are kept for 30 days, then deleted",
+    "retentionDays": 30,
+    "rows": 0,
+  },
+  "scheduled": {
+    "firingsUnavailable": null,
+    "schedules": [
+      "self-improvement",
+      "resident-watchdog",
+    ],
+  },
+}
+`;
+
+exports[`capability surfaces — local-full > CLI catalogue 1`] = `
+"usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]
+       npx tsx src/cli.ts <group> <verb> --help
+       npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"
+       npx tsx src/cli.ts help
+
+commands:
+  help show            — What Switchboard can do: agents, per-request directives, and every chat command.
+  config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
+  config set           — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+  config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
+  config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+  runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
+  runs get             — One run's record; \`--include messages\` adds its events with free text wrapped as untrusted content.
+  runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
+  runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
+  runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+  friction report      — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
+  friction propose     — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
+  friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
+  repo test            — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  memory list          — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
+  memory forget        — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
+  mcp list             — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.
+  mcp add              — Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.
+  mcp connect          — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
+  mcp show             — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
+  mcp remove           — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
+  deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
+  deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
+  deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
+  deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
+  deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
+  deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
+  env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply)."
+`;
+
+exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
+[
+  "config.clear",
+  "config.instructions",
+  "config.set",
+  "config.show",
+  "deploy.plan",
+  "friction.propose",
+  "friction.report",
+  "help.show",
+  "mcp.add",
+  "mcp.connect",
+  "mcp.list",
+  "mcp.remove",
+  "mcp.show",
+  "memory.forget",
+  "memory.list",
+  "repo.build",
+  "repo.test",
+  "runs.events",
+  "runs.friction",
+  "runs.get",
+  "runs.list",
+  "runs.stop",
+]
+`;
+
+exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
+[
+  "config_clear",
+  "config_instructions",
+  "config_set",
+  "config_show",
+  "deploy_plan",
+  "dispatch",
+  "friction_propose",
+  "friction_report",
+  "help_show",
+  "mcp_add",
+  "mcp_connect",
+  "mcp_list",
+  "mcp_remove",
+  "mcp_show",
+  "memory_forget",
+  "memory_list",
+  "repo_build",
+  "repo_test",
+  "runs_events",
+  "runs_friction",
+  "runs_get",
+  "runs_list",
+  "runs_stop",
+]
+`;
+
+exports[`capability surfaces — local-full > help on chat 1`] = `
+"*Switchboard* — send me a request. Agents:
+• \`general\` — Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.
+• \`coding\` — Implements changes and ships PRs (git + gh in a workspace).
+• \`review\` — Reviews PRs and produces high-quality findings. Read-only.
+• \`ship\` — Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.
+• \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.
+
+*Per-request directives* (anywhere in the message):
+\`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42\` (effort: low | medium | high — lower = faster turns)
+
+*Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
+*help*
+• \`help show\` — What Switchboard can do: agents, per-request directives, and every chat command.
+*config*
+• \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
+• \`config set\` — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+• \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
+• \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+*runs*
+• \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
+• \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+*friction*
+• \`friction report\` — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
+• \`friction propose\` — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
+*repo*
+• \`repo test\` — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+• \`repo build\` — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+*memory*
+• \`memory list\` — Your own memory records and the shared org / repo / channel records, with ids — what influences your runs.
+• \`memory forget\` — Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights).
+*mcp*
+• \`mcp list\` — External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential.
+• \`mcp add\` — Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.
+• \`mcp connect\` — A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.
+• \`mcp show\` — One MCP server's entry plus a live probe of the tools it offers (names, read-only flags); never a credential.
+• \`mcp remove\` — Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights).
+*deploy*
+• \`deploy plan\` — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why."
+`;
+
+exports[`capability surfaces — local-full > self-description block (the resident cap is the Worker's answer — 6 where there is a fleet) 1`] = `
+"About Switchboard (yourself): you are Switchboard, the agent gateway of the acme organization. A message arrives on a channel (Slack — an @-mention, thread follow-ups stay on the same agent — plus a CLI, an HTTP /api and an MCP surface), is routed to an agent, runs on a configured provider/model, and executes tools through an executor.
+Agents: \`general\` — Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.; \`coding\` — Implements changes and ships PRs (git + gh in a workspace).; \`review\` — Reviews PRs and produces high-quality findings. Read-only.; \`ship\` — Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.; \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.. Users pick one with an inline \`agent:<name>\` directive (default: general); \`model:\` / \`effort:\` ride the same way (see the runtime-config block).
+Repos: this installation has no resident (always-warm) repo environments — the coding and review agents clone the repository a request names (an https://github.com/owner/name URL or a PR link) into a per-thread workspace on the bot host for the run. Nothing is kept warm between runs, and there is nothing to onboard.
+Runs and memory: every run (agent or operator command) has a live page under /runs with its events, kept as run history; runs can be stopped from there. Cross-session memory is per org/repo/channel/user (\`memory list\` / \`memory forget\`). \`help\` lists every chat command.
+Source of truth: the code lives in the GitHub repo coreplanelabs/switchboard — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under features/*.md (e.g. features/resident-repos.md, features/routing-and-config.md, features/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on coreplanelabs/switchboard) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings."
+`;
+
+exports[`capability surfaces — local-full > web seeds: /runs (capabilities, retention sentence) and /runs/scheduled (schedules, firing store) 1`] = `
+{
+  "capabilities": {
+    "costs": false,
+    "dashboardAuth": "none",
+    "docs": true,
+    "execution": "local",
+    "github": true,
+    "ingress": true,
+    "mcp": true,
+    "memory": true,
+    "residents": false,
+    "runHistory": true,
+    "runLedger": false,
+    "schedules": false,
+  },
+  "runs": {
+    "retention": "Finished runs are kept for 30 days, then deleted",
+    "retentionDays": 30,
+    "rows": 0,
+  },
+  "scheduled": {
+    "firingsUnavailable": "schedules.worker is not configured",
+    "schedules": [
+      "self-improvement",
+      "resident-watchdog",
+    ],
+  },
+}
+`;
+
+exports[`capability surfaces — minimal > CLI catalogue 1`] = `
+"usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]
+       npx tsx src/cli.ts <group> <verb> --help
+       npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"
+       npx tsx src/cli.ts help
+
+commands:
+  help show            — What Switchboard can do: agents, per-request directives, and every chat command.
+  config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
+  config set           — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+  config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
+  config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+  runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
+  runs get             — One run's record; \`--include messages\` adds its events with free text wrapped as untrusted content.
+  runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
+  runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
+  runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+  friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
+  repo test            — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+  deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
+  deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
+  deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
+  deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
+  deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
+  deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
+  env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply)."
+`;
+
+exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
+[
+  "config.clear",
+  "config.instructions",
+  "config.set",
+  "config.show",
+  "deploy.plan",
+  "help.show",
+  "repo.build",
+  "repo.test",
+  "runs.events",
+  "runs.friction",
+  "runs.get",
+  "runs.list",
+  "runs.stop",
+]
+`;
+
+exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
+[
+  "config_clear",
+  "config_instructions",
+  "config_set",
+  "config_show",
+  "deploy_plan",
+  "dispatch",
+  "help_show",
+  "repo_build",
+  "repo_test",
+  "runs_events",
+  "runs_friction",
+  "runs_get",
+  "runs_list",
+  "runs_stop",
+]
+`;
+
+exports[`capability surfaces — minimal > help on chat 1`] = `
+"*Switchboard* — send me a request. Agents:
+• \`general\` — Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.
+• \`coding\` — Implements changes and ships PRs (git + gh in a workspace).
+• \`review\` — Reviews PRs and produces high-quality findings. Read-only.
+• \`ship\` — Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.
+• \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.
+
+*Per-request directives* (anywhere in the message):
+\`agent:review model:anthropic/claude-opus-5 effort:low look at PR #42\` (effort: low | medium | high — lower = faster turns)
+
+*Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
+*help*
+• \`help show\` — What Switchboard can do: agents, per-request directives, and every chat command.
+*config*
+• \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
+• \`config set\` — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+• \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
+• \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
+*runs*
+• \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
+• \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+*repo*
+• \`repo test\` — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+• \`repo build\` — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
+*deploy*
+• \`deploy plan\` — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why."
+`;
+
+exports[`capability surfaces — minimal > self-description block (the resident cap is the Worker's answer — 6 where there is a fleet) 1`] = `
+"About Switchboard (yourself): you are Switchboard, the agent gateway of the acme organization. A message arrives on a channel (Slack — an @-mention, thread follow-ups stay on the same agent — plus a CLI and an HTTP /api surface), is routed to an agent, runs on a configured provider/model, and executes tools through an executor.
+Agents: \`general\` — Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.; \`coding\` — Implements changes and ships PRs (git + gh in a workspace).; \`review\` — Reviews PRs and produces high-quality findings. Read-only.; \`ship\` — Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.; \`research\` — Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.. Users pick one with an inline \`agent:<name>\` directive (default: general); \`model:\` / \`effort:\` ride the same way (see the runtime-config block).
+Repos: this installation has no resident (always-warm) repo environments — the coding and review agents clone the repository a request names (an https://github.com/owner/name URL or a PR link) into a per-thread workspace on the bot host for the run. Nothing is kept warm between runs, and there is nothing to onboard.
+Runs: every run (agent or operator command) has a live page under /runs with its events while it runs (this installation keeps no run history: a finished run's page goes away about a minute later); runs can be stopped from there. This installation has no cross-session memory: a run knows only its own thread. \`help\` lists every chat command.
+Source of truth: the code lives in the GitHub repo coreplanelabs/switchboard — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under features/*.md (e.g. features/resident-repos.md, features/routing-and-config.md, features/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on coreplanelabs/switchboard) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings."
+`;
+
+exports[`capability surfaces — minimal > web seeds: /runs (capabilities, retention sentence) and /runs/scheduled (schedules, firing store) 1`] = `
+{
+  "capabilities": {
+    "costs": false,
+    "dashboardAuth": "none",
+    "docs": false,
+    "execution": "local",
+    "github": false,
+    "ingress": false,
+    "mcp": false,
+    "memory": false,
+    "residents": false,
+    "runHistory": false,
+    "runLedger": false,
+    "schedules": false,
+  },
+  "runs": {
+    "retention": "Run history is off; finished runs are kept about a minute.",
+    "retentionDays": null,
+    "rows": 0,
+  },
+  "scheduled": {
+    "firingsUnavailable": "schedules.worker is not configured",
+    "schedules": [
+      "self-improvement",
+      "resident-watchdog",
+    ],
+  },
+}
+`;
+
+exports[`deploy plan — what \`deploy plan\` prints > a bot-only profile is a one-step plan with no state Worker to push the config to 1`] = `
+"Profile: deploy/profile.bot-only.json (example); config: config/config.yaml (no state Worker in the profile — not pushed anywhere)
+Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD == origin/main; node_modules present in every dir
+WARNING profile: deploy/profile.bot-only.json is the EXAMPLE — this plan can be read, not deployed; write deploy/profile.json for a real installation
+Steps:
+  1. bot (switchboard) — deploy/cloudflare: npm run deploy — preflight (retry every 60s up to 10 min) — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard.example.com/healthz not draining + build.commit == HEAD)
+     container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: \`wrangler secret put\` alone leaves the running container on its old env — \`deploy restart\` restarts it on the current env
+(dry run — nothing executed)"
+`;
+
+exports[`deploy plan — what \`deploy plan\` prints > the full example profile: every Worker, in the canonical order 1`] = `
+"Profile: deploy/profile.example.json (example); config: config/config.yaml → document "base" on https://switchboard-memory.example.com
+Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD == origin/main; node_modules present in every dir
+WARNING profile: deploy/profile.example.json is the EXAMPLE — this plan can be read, not deployed; write deploy/profile.json for a real installation
+Steps:
+  1. memory (switchboard-memory) — deploy/cloudflare-memory: npm run deploy
+     state Worker — DO migrations land before the bot writes to them
+  2. bot (switchboard) — deploy/cloudflare: npm run deploy — preflight (retry every 60s up to 10 min) — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard.example.com/healthz not draining + build.commit == HEAD)
+     container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: \`wrangler secret put\` alone leaves the running container on its old env — \`deploy restart\` restarts it on the current env
+  3. resident (switchboard-resident) — deploy/cloudflare-resident: npm run deploy — preflight (retry every 60s up to 10 min) — needs one of RESIDENT_ADMIN_TOKEN / RESIDENT_OPERATOR_TOKEN / RESIDENT_READ_TOKEN — credential must pass \`wrangler containers list --json\` (Containers: Edit) and \`wrangler r2 bucket list\` (Workers R2 Storage: Edit)
+     per-repo DOs — preflight refuses while a resident has work in flight
+  4. sandbox (switchboard-sandbox) — deploy/cloudflare-sandbox: npm run deploy — needs SANDBOX_TOKEN — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard-sandbox.example.com/healthz build.commit == HEAD + every running switchboard-sandbox-switchboardsandbox instance on the app version + an /exec probe answers ok from one)
+     per-thread exec proxy — stateless per run; done only when the Worker serves the commit, every running container is on the new image and an \`echo ok\` probe answers from one (#569)
+(dry run — nothing executed)"
+`;
