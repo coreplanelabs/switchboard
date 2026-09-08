@@ -1,0 +1,359 @@
+# Switchboard configuration.
+# Copy to config/config.yaml and adjust. API keys come from env vars only.
+
+# The GitHub organization (or user) this installation serves — the account the
+# GitHub App is installed on. Required. It names the shared memory scope
+# (`org:<organization>`) and the About block every model run carries; nothing
+# in the code assumes a particular organization.
+organization: acme
+
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+  # Any OpenAI-compatible endpoint works with the same adapter:
+  openai:
+    type: openai-compatible
+    baseUrl: https://api.openai.com/v1
+    apiKeyEnv: OPENAI_API_KEY
+  # groq:
+  #   type: openai-compatible
+  #   baseUrl: https://api.groq.com/openai/v1
+  #   apiKeyEnv: GROQ_API_KEY
+  # local:
+  #   type: openai-compatible
+  #   baseUrl: http://localhost:11434/v1   # Ollama
+
+defaults:
+  # Agent used when none is specified (per-channel/user/request can override).
+  agent: general
+  # Default model per agent, as <provider>/<model>.
+  models:
+    general: anthropic/claude-haiku-4-5
+    coding: anthropic/claude-opus-5
+    review: anthropic/claude-opus-5
+  # Default model effort per agent: low | medium | high (how hard the model
+  # thinks per turn; lower = much faster turns). Same layering as models —
+  # per-channel/user `effort` / `efforts.<agent>` and a per-request `effort:`
+  # directive override these; unset → the agent's built-in effort, else the
+  # provider default. Skipped for models without effort support.
+  # efforts:
+  #   coding: medium
+
+# PR reviews and the reading diff (docs/reference/specs/reading-diff.md). Every
+# review records its full `git diff`; the ABRIDGED version (meat.dev, run on
+# the bot host over the complete diff GitHub serves, with this bot's own
+# Anthropic key) is on demand — `review abridge <run id>`, grant `review:write`
+# — unless `provider: meat` makes it automatic after every review's record is
+# written (one Opus-class call per review; meat caches by model + diff). `off`
+# records no reading diff at all. `SWITCHBOARD_READING_DIFF=git|meat|off` in
+# the environment overrides `provider` on a deployed bot. Needs `runHistory`.
+# review:
+#   readingDiff:
+#     provider: git                # git (default) | meat | off
+#     meatModel: claude-opus-5     # meat's -model; Opus-class is the floor that actually abridges
+#     meatTimeoutS: 240            # meat's own budget on the host; past it the abridging fails by name
+
+# Static per-channel defaults (channel ID -> scope). Runtime overrides set via
+# "config set channel ..." are stored in data/overrides.json and win over these.
+# channels:
+#   slack:C012345:
+#     agent: review
+#     models:
+#       review: anthropic/claude-opus-5
+#     efforts:
+#       coding: medium
+
+# Static per-user defaults (user ID -> scope).
+# users:
+#   slack:U012345:
+#     model: openai/gpt-5
+
+# Authorization (docs/reference/specs/authorization.md item 9, docs/reference/authorization.md):
+# two blocks. `restrict` names what is CLOSED unless granted — an agent listed
+# here runs only for an actor whose grants hold agent:run:<name> (or `all`); a
+# repo listed here is used only by an actor whose `repos` axis names it (or
+# `all`). Everything unlisted is open to everyone who can reach the bot.
+# Enforcement is at run time against the resolved agent/repo, so it can't be
+# bypassed via directives or config scopes. Names must be registered agents /
+# owner/name slugs, or the load fails.
+# restrict:
+#   agents: [coding]
+#   repos: [acme/api]
+#
+# `grants`: what ANY actor holds, in one shape, keyed by its platform-namespaced
+# id — `slack:U…`, `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
+# `access:svc:<common_name>`, `schedule:<name>` — or by a whole surface,
+# `<ns>:*`: `access:*` is every Cloudflare Access browser session (the org,
+# granted once instead of enumerated), `slack:*` every workspace member the bot
+# hears, `http:*` / `mcp:*` every ingress token. Each entry has up to three
+# axes; every axis is a list of names or the explicit word `all`, and an ABSENT
+# axis is the empty set (fail-closed). A `slack:` user holds the open chat
+# commands and every unrestricted agent whether listed or not — an entry ADDS to
+# that; an Access browser session holds every group's read the same way;
+# credentials (`http:`, `mcp:`, `access:svc:`) hold exactly their entry and an
+# unlisted one holds nothing, not even `dispatch`. A surface entry is unioned
+# into every actor of its surface on top of its own entry — a person's entry
+# never narrows it; `access:*` never reaches an `access:svc:` token. `config:write`
+# (channel config), `repo:write` (repo onboard/offboard/…, friction propose) and
+# every `runs:*` are never a baseline: nobody holds them until granted, and
+# nobody is an admin without an `all` entry. An unknown id prefix, a misspelled
+# `all` or a `*` that is not a whole surface (`slack:U*`, `schedule:*`,
+# `agent:*`) fails the load, as does any top-level key this file does not document.
+# grants:
+#   access:*:                         # everyone in the org: every Access browser session
+#     actions: all                    # holds everything — the org-wide pattern
+#     channels: all
+#     repos: all
+#   slack:U0ADMIN:                    # an admin, spelled out
+#     actions: all
+#     channels: all
+#     repos: all
+#   slack:U0456DEV:
+#     actions: [agent:run:coding, repo:write, friction:write]
+#     repos: [acme/api]                 # the repos this user may use
+#   access:svc:ops-bot:                 # an Access service token (its common_name)
+#     actions: [runs:read, runs:write, friction:read]
+#     channels: all                     # sees runs from every channel
+#   http:ci:                            # an ingress token's subject, as http: …
+#     actions: [dispatch, runs:read]
+#     channels: [http:ops]              # … the channels whose runs it may read (a
+#                                       # token with no `channel` key and no entry
+#                                       # here reads none — the fail-closed default)
+#   mcp:ci:                             # … and the same subject over MCP
+#     actions: [dispatch, runs:read]
+#     channels: [mcp:ops]
+#   http:cron:                          # the identity the shim fires schedules as
+#     actions: [friction:read, friction:write, repo:write]
+#     channels: all                     # the weekly pass analyzes the whole fleet
+#   schedule:self-improvement:          # the weekly cron's own actor (src/core/schedules.ts
+#     actions: [friction:write]         # declares its grants; an entry here REPLACES them)
+#     channels: all                     # analyzes the whole fleet, not one channel
+
+# Where agent tools execute. "local" runs them on the bot host (dev/CLI);
+# "e2b" runs each thread's tools in its own E2B micro-VM — the repo checkout
+# and GH_TOKEN live in the sandbox, never on the bot host. Recommended for
+# any deployment where untrusted users can reach the coding agent.
+execution:
+  type: local
+  # Cloudflare Sandbox via the proxy Worker (deploy/cloudflare-sandbox/):
+  # type: cloudflare
+  # url: https://switchboard-sandbox.<account>.workers.dev
+  # apiKeyEnv: SANDBOX_TOKEN     # bearer secret shared with the Worker
+  # E2B:
+  # type: e2b
+  # apiKeyEnv: E2B_API_KEY
+  # timeoutMinutes: 30   # sandbox idle lifetime; thread follow-ups reconnect
+  # Resident repo environments (deploy/cloudflare-resident/): when set, a
+  # request whose target repo is onboarded and warm runs against the resident
+  # Worker; any other resident state falls back to the backend above with a
+  # named reason on the status card. Works alongside any per-thread type.
+  # Repos are onboarded from chat: `repo onboard <owner/name>` (see
+  # docs/how-to/onboard-a-repo.md; needs the `repo:write` grant — never a
+  # baseline, admins only until granted). `repo list` shows lifecycle;
+  # `repo offboard`/`repo rebuild` accept --dry-run for an itemized plan
+  # without executing.
+  # Deterministic ops (no model turn): `repo test <owner/name> [<ref>]` /
+  # `repo build <owner/name> [<ref>]` — and natural asks like "run the tests
+  # on main in acme/api" — run the repo's onboarded command in a disposable
+  # resident checkout and post the result with zero model calls. Operator-
+  # level: gated like a coding run — `restrict.agents` / `restrict.repos`
+  # against the caller's grants (NOT `repo:write`). Anything ambiguous falls through to the agent. With
+  # local execution the same asks run fixed Node commands in the thread's
+  # local workspace (dev-only).
+  # resident:
+  #   baseUrl: https://switchboard-resident.<account>.workers.dev
+  #   tokenEnv: RESIDENT_OPERATOR_TOKEN  # operator bearer secret (default)
+  #   adminTokenEnv: RESIDENT_ADMIN_TOKEN # admin bearer for `repo ...` commands (default)
+  #   probeTimeoutMs: 2000               # /status probe budget; timeout = not warm
+
+# Where per-conversation agent workspaces are created (local execution only).
+# Under docker compose this directory is a named volume, so checkouts survive a restart.
+workspaceDir: ./workspaces
+
+# Cross-session self-learning memory (docs/reference/specs/memory.md). DEFAULT OFF: absent, or
+# enabled:false, means the dispatcher uses a NullMemoryStore and the model input
+# is byte-identical to memory-off — zero behavior change. When enabled, before
+# each model turn the dispatcher retrieves scope-relevant distilled records
+# (keyword + recency ranked, hard-budgeted) and injects them as a DEDICATED
+# advisory context block on the system prompt ("Background memory for <resource>
+# (may be outdated — verify before acting):"), never mixed into history. After
+# each reply, a run that did real work (used tools, or a thread ≥4 turns deep)
+# fires ONE async reflection call on `model` that distills ≤5 durable facts + 1
+# summary into the store (secret-redacted, confidence-gated, dedup/supersede on
+# write) — fire-and-forget, so it never delays or fails the reply. Records live
+# in the Memory Worker (deploy/cloudflare-memory/: one SQLite Durable Object per
+# scope, survives bot restarts); with no `worker` configured the bot falls back
+# to an IN-PROCESS store and warns at startup — dev only. See docs/reference/specs/memory.md.
+# memory:
+#   enabled: false      # master switch (default false)
+#   worker:
+#     baseUrl: https://switchboard-memory.example.com
+#     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)
+#   # Scopes are derived per request, not configured: every request reads the
+#   # shared org scope (org:acme), the channel's scope (channel:slack:C…)
+#   # and — when the run is bound to a repo — that repo's scope (repo:owner/name)
+#   # plus the requesting user's own scope (user:slack:U…) — a
+#   # person's records never surface for anyone else.
+#   limit: 8            # max records retrieved/injected per request (default 8)
+#   maxTokens: 800      # hard token budget for the injected block (default 800)
+#   maxRecordsPerScope: 500
+#                       # per-scope cap on ACTIVE records (default 500): a write
+#                       # that would exceed it evicts the least recently used
+#                       # records (soft delete, status `evicted`) in the same write.
+#   model: anthropic/claude-haiku-4-5
+#                       # <provider>/<model> for the reflection pass — pick a
+#                       # cheap tier. Absent → the run's own resolved model.
+
+# Self-improvement proposals (docs/reference/specs/run-friction.md). Every finished run's friction
+# diagnosis (docs/reference/specs/run-friction.md) is stored with its run record, so the
+# runs these commands see are run history's (`runHistory` below; its retention
+# bounds them — without `runHistory` there are no recent runs to analyze).
+# `friction report` (open to everyone) shows the patterns that recur across
+# recent runs; `friction propose [--dry-run]` (admin-gated like repo management)
+# files the top patterns as labeled GitHub issues — evidence, affected runs, a
+# concrete suggested fix — deduped against the proposals already open. It only
+# ever PROPOSES: no PRs, nothing merged. Without `repo`, `friction propose`
+# refuses. See docs/reference/specs/self-improvement.md.
+# selfImprovement:
+#   repo: acme/switchboard      # owner/name the proposals are filed against
+#   label: self-improvement     # triage label (created if missing; default shown)
+#   minRuns: 2                  # a pattern must recur in ≥ this many distinct runs
+#   top: 3                      # proposals filed per pass
+
+# Scheduled jobs. The schedule registry (src/core/schedules.ts) lists every
+# cron the Cloudflare Worker shim runs; a `run` schedule fires as an ordinary run
+# through /ingress as the `cron` identity — give that identity a token in
+# SWITCHBOARD_INGRESS_TOKENS ({"…": {"subject": "cron", "channel": "cron"}}) and
+# grant it what its command needs in `grants.http:cron` (`friction propose` →
+# `friction:write`; a text command through /ingress is decided from the actor's
+# grants like a tool call) with `channels: all` so the pass reads the fleet's
+# runs, not the cron channel's own. The shim records each firing on the state Worker's
+# ScheduleDO; this block tells the /runs "Scheduled" panel where to read them.
+# Without it the panel lists the schedules with no firing history.
+# schedules:
+#   worker:
+#     baseUrl: https://switchboard-memory.example.com
+#     tokenEnv: MEMORY_TOKEN    # env var holding the Worker's bearer (default)
+
+# agent:ship pipeline caps (docs/reference/specs/agent-ship.md). `agent:ship in owner/repo:
+# <task>` runs the coding → review → fix loop to LGTM as one pipeline: at most
+# `maxRounds` review rounds and `maxMinutes` minutes of wall clock — whichever
+# hits first ends the loop, and each child round's own budget is clipped to the
+# remaining pipeline time. Defaults shown; both must be integers >= 1.
+# ship:
+#   maxRounds: 3      # review rounds per pipeline
+#   maxMinutes: 120   # pipeline wall-clock budget in minutes
+
+# Spend reporting: GET /costs (Access-gated). Optional. See docs/reference/specs/costs.md.
+# costs:
+#   cloudflareAccountId: <32-hex account id>
+#   cloudflareTokenEnv: CF_ANALYTICS_TOKEN     # token with Account Analytics:Read
+#   anthropicAdminKeyEnv: ANTHROPIC_ADMIN_KEY  # optional: sk-ant-admin… for LLM spend
+#   groups:
+#     myapp:
+#       label: My App
+#       workers: [myapp, myapp-worker]           # Worker script names — the attribution root: their Durable
+#                                                #   Objects, their requests/CPU, and the R2 buckets named <worker>-cache
+#       containerApps:                            # container application id → label (no dataset ties an app to a Worker)
+#         a0000000-0000-0000-0000-000000000000: server
+#       durableObjectNamespaces:                  # optional: DO namespace id → label; a namespace hosted by a listed
+#         <32-hex namespace id>: server DO        #   Worker is attributed anyway, labelled by that Worker
+#       r2Buckets:                                # optional: bucket name → label for buckets not named <worker>-cache
+#         some-other-bucket: uploads
+#       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
+
+# Dashboard authentication (docs/reference/specs/access-gate.md). Everything the dashboard
+# serves — /runs*, /residents*, /costs*, /mcp/connect/*, and every /api/* command
+# — sits behind ONE identity gate; `auth` picks which credential it checks:
+#   access — the Cloudflare Access JWT the edge injects (ACCESS_TEAM_DOMAIN and
+#            ACCESS_AUD in the environment). Production behind an Access app.
+#   token  — `Authorization: Bearer <token>`, the secret read from the env var
+#            `token.env` names (default DASHBOARD_TOKEN); a match is the one
+#            actor `token.actor` names, granted under `grants` like any browser
+#            session. For an Access-free deployment fronted by a proxy, curl or
+#            a script — a bare browser cannot send the header.
+#   none   — no credential; served ONLY to loopback callers on a localhost
+#            deployment (PUBLIC_BASE_URL unset or naming localhost). A remote
+#            caller is refused, and an explicit `none` on a deployment with a
+#            public PUBLIC_BASE_URL is a startup error. Local development.
+# Default when the block is absent: `access` if both ACCESS_* are set, else `none`.
+# A strategy whose inputs are missing fails at startup, naming the piece.
+# dashboard:
+#   auth: token
+#   token:
+#     env: DASHBOARD_TOKEN   # env var holding the bearer (default)
+#     actor: access:ops      # the actor the bearer resolves to — key its grants entry by this id
+
+# Slack adapter — reconnect catch-up (docs/decisions/0012-reconnect-catch-up-as-recovery.md). Socket Mode drops every mention
+# posted while the websocket is down (each bot deploy = drain + cold start).
+# On every (re)connect the bot re-reads recent history of the channels it is in
+# and runs whatever has no receipt from it (no :eyes:, no bot reply after it).
+# Defaults: enabled, 30-minute window. The drain closes the socket on SIGTERM
+# and the next container starts only after this one exits, so a deploy over a
+# run in flight blacks Slack out for up to the 15-minute drain deadline plus a
+# cold start — the window must be >= 20 minutes to cover that; a smaller
+# value is kept but warned about at startup. Needs channels:read + groups:read
+# (channel listing) on top of the history scopes.
+# slack:
+#   catchUp:
+#     enabled: true
+#     windowMinutes: 30
+
+# Where chat-set runtime overrides (`config set`, `config instructions`, `config clear`)
+# persist (docs/reference/specs/routing-and-config.md item 12). Without this block they go to
+# data/overrides.json on the host disk — EPHEMERAL on Cloudflare Containers. In
+# production name the state Worker's ConfigDO (same Worker + bearer as memory and
+# run history); the bot and the CLI then write one versioned document.
+# runtimeOverrides:
+#   worker:
+#     baseUrl: https://switchboard-memory.example.com
+#     tokenEnv: MEMORY_TOKEN   # default
+
+# Persistent run history (docs/reference/specs/run-history.md). Every finished run's
+# record — identity, timing, terminal status, the redacted event stream, the
+# friction diagnosis — is kept for a retention window instead of evicted 60 s
+# after finish, and the friction ledger's "recent runs" are read from it.
+# Without this block history is OFF (runs stay live-only, as before).
+# runHistory:
+#   retentionDays: 30    # days a finished run stays readable (1–365; default 30)
+#   maxRuns: 5000        # newest runs kept (1–20000; default 5000)
+#   maxBytes: 2147483648 # total stored bytes kept (16 MiB–8 GiB; default 2 GiB)
+#   includeContext: true # include the thread-context turns fed to the model in the
+#                        # run stream — live page and persisted record (default true)
+#   store: worker        # `worker` (default when `worker` is set) or `file` — an
+#                        # explicit opt-in that writes data/runs/<id>.json on the
+#                        # host disk (ephemeral on Cloudflare Containers)
+#   # The durable store: a RunHistoryDO on the state Worker (deploy/cloudflare-memory/,
+#   # the same Worker + bearer as memory and the friction ledger). Must be https:.
+#   worker:
+#     baseUrl: https://switchboard-memory.example.com
+#     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)
+
+# External MCP servers as agent tools (docs/reference/specs/mcp-tools.md). Servers are a
+# SETTING ON THE CONFIG SCOPES, not a list here: `defaults.mcpServers` (org-wide),
+# `channels.<id>.mcpServers`, `users.<id>.mcpServers` — static below, or added at run
+# time with `mcp add` (persisted with the other runtime overrides). A run gets the
+# union of the three tiers; a name in more than one tier resolves to the highest-
+# trust tier (org > channel > user). Only org entries may name coding/review/ship.
+# Tools appear as `mcp__<name>__<tool>`; descriptions and results are untrusted
+# data; every call is budgeted and recorded. URLs are SSRF-checked at load and at
+# connect. This block turns the feature on and names the deployment knobs; without
+# it MCP is off and the `mcp.*` commands answer `unavailable`.
+# mcp:
+#   credentialKeyEnv: MCP_CREDENTIAL_KEY   # default; 32 bytes base64 (`openssl rand -base64 32`),
+#                                          # bot-only — seals tokens entered on the connect page
+#   # secretsPath: ./data/mcp-secrets.json # sealed blobs + tickets when no runtimeOverrides.worker
+#
+# defaults:
+#   mcpServers:
+#     github:
+#       url: https://api.githubcopilot.com/mcp/
+#       auth: bearer
+#       tokenEnv: MCP_GITHUB_TOKEN          # static bearer from the bot env (startup fails if unset)
+#       agents: [general, research, coding] # default [general, research]
+# channels:
+#   "slack:C0123":
+#     mcpServers:
+#       notion: { url: https://mcp.notion.so/mcp, auth: none }   # general/research only
+#       vanta: { url: https://mcp.vanta.com/mcp, auth: oauth }   # OAuth 2.1: a channel-config holder signs in once via `mcp connect vanta --scope channel`

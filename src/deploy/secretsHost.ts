@@ -1,0 +1,147 @@
+// The host half of `deploy secrets`: the real manifest file, the real source
+// (files under a directory, or a 1Password item through the `op` CLI), and the
+// real `wrangler secret put`. The value of a secret is read here and handed to
+// wrangler on STDIN in the same function — it never crosses the command's seam,
+// never touches argv or the environment, and never appears in output. The
+// testable logic (the plan) is src/deploy/secrets.ts; the command
+// (src/core/commands/deploy.ts) calls these through `deps.deploy.secrets` so its
+// tests run over fakes.
+
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { ensureWorkAreaOnHost, OPERATOR_ROOT } from "./host.js";
+import { assetPath, workPath } from "./operatorRoot.js";
+import { MANIFEST_PATH, type SecretsSource } from "./secrets.js";
+
+/** What the command needs from the host — the manifest, which names have a value, and one put. */
+export interface SecretsHostIO {
+  /** The manifest file, parsed as JSON (not yet validated); `undefined` when absent. */
+  manifest(): Promise<unknown>;
+  /** Which of `names` the source holds a value for, or why the source cannot be read at all. */
+  present(
+    source: SecretsSource,
+    names: readonly string[],
+  ): Promise<{ ok: true; present: Set<string> } | { ok: false; problem: string }>;
+  /** Read one value from the source and pipe it into `wrangler secret put <name>` in the Worker's dir. */
+  put(source: SecretsSource, dir: string, name: string): Promise<{ code: number; output: string }>;
+}
+
+/**
+ * `~` at the front of a path is the operator's home; an absolute path is as
+ * written; a relative path is under the operator root — the checkout, or the
+ * directory the published package was run in — where the profile that named
+ * it lives (src/deploy/operatorRoot.ts). Never anywhere inside the installed
+ * package.
+ */
+export function expandDir(path: string, root: string = OPERATOR_ROOT.root): string {
+  if (path === "~" || path.startsWith("~/")) return join(homedir(), path.slice(1));
+  if (isAbsolute(path)) return path;
+  return resolve(root, path);
+}
+
+interface Spawned {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+function spawnCollect(cmd: string, args: string[], opts: { cwd?: string; input?: string } = {}): Promise<Spawned> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
+    child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.on("error", (e) => resolvePromise({ code: 127, stdout, stderr: `${stderr}\n${e.message}` }));
+    child.on("close", (code) => resolvePromise({ code: code ?? 1, stdout, stderr }));
+    if (opts.input !== undefined) child.stdin.write(opts.input);
+    child.stdin.end();
+  });
+}
+
+/** The 1Password item's field labels — one `op item get`, never a read per name. */
+async function opFieldLabels(
+  source: Extract<SecretsSource, { kind: "op" }>,
+): Promise<{ ok: true; labels: Set<string> } | { ok: false; problem: string }> {
+  if (!process.env.OP_SERVICE_ACCOUNT_TOKEN && !process.env.OP_SESSION)
+    return {
+      ok: false,
+      problem: `secretsSource op://${source.vault}/${source.item} needs OP_SERVICE_ACCOUNT_TOKEN (or an \`op signin\` session) in the environment`,
+    };
+  const r = await spawnCollect("op", ["item", "get", source.item, "--vault", source.vault, "--format", "json"]);
+  if (r.code === 127)
+    return {
+      ok: false,
+      problem: `secretsSource op://${source.vault}/${source.item}: the 1Password CLI (op) is not installed`,
+    };
+  if (r.code !== 0)
+    return {
+      ok: false,
+      problem: `secretsSource op://${source.vault}/${source.item}: op item get exited ${r.code} — ${r.stderr.trim().split("\n").at(-1) ?? ""}`,
+    };
+  try {
+    const item = JSON.parse(r.stdout) as { fields?: { label?: string }[] };
+    return { ok: true, labels: new Set((item.fields ?? []).map((f) => f.label ?? "").filter(Boolean)) };
+  } catch {
+    return { ok: false, problem: `secretsSource op://${source.vault}/${source.item}: op item get returned no JSON` };
+  }
+}
+
+/**
+ * Pure over `exists`: the pinned wrangler for a Worker directory — the directory's own
+ * `node_modules/.bin/wrangler` (a nested install), else the workspace root's (npm hoists a shared
+ * version there: the checkout's root, or the work area's after `npm ci --workspace`), else `wrangler`
+ * on PATH. Both placements are real — the memory Worker pins its own vitest and gets a nested
+ * wrangler, the bot Worker's is hoisted — and a miss on the first must never mean "whatever is on PATH".
+ */
+export function wranglerBin(
+  dir: string,
+  workspaceRoot: string,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  for (const base of [dir, workspaceRoot]) {
+    const bin = join(base, "node_modules", ".bin", "wrangler");
+    if (exists(bin)) return bin;
+  }
+  return "wrangler";
+}
+
+export const hostSecretsIO: SecretsHostIO = {
+  manifest: async () => {
+    const abs = assetPath(OPERATOR_ROOT, MANIFEST_PATH);
+    return existsSync(abs) ? (JSON.parse(readFileSync(abs, "utf8")) as unknown) : undefined;
+  },
+  present: async (source, names) => {
+    if (source.kind === "dir") {
+      const dir = expandDir(source.path);
+      if (!existsSync(dir)) return { ok: false, problem: `secretsSource ${source.path}: no such directory (${dir})` };
+      return { ok: true, present: new Set(names.filter((n) => existsSync(join(dir, n)))) };
+    }
+    const labels = await opFieldLabels(source);
+    if (!labels.ok) return labels;
+    return { ok: true, present: new Set(names.filter((n) => labels.labels.has(n))) };
+  },
+  put: async (source, dir, name) => {
+    let value: string;
+    if (source.kind === "dir") {
+      value = readFileSync(join(expandDir(source.path), name), "utf8");
+    } else {
+      const r = await spawnCollect("op", ["read", `op://${source.vault}/${source.item}/${name}`]);
+      if (r.code !== 0) return { code: r.code, output: `op read exited ${r.code} — ${r.stderr.trim()}` };
+      // op appends one trailing newline; the file form keeps the file as written.
+      value = r.stdout.replace(/\n$/, "");
+    }
+    // The Worker's directory, installed — from the package, materialised and `npm ci`'d first (a
+    // checkout is its own work area). Without its wrangler the put would reach for whatever is on PATH.
+    const ready = await ensureWorkAreaOnHost([dir], () => {});
+    if (!ready.ok) return { code: 1, output: ready.problem };
+    const cwd = workPath(OPERATOR_ROOT, dir);
+    const r = await spawnCollect(wranglerBin(cwd, OPERATOR_ROOT.workArea), ["secret", "put", name], {
+      cwd,
+      input: value,
+    });
+    return { code: r.code, output: `${r.stdout}${r.stderr}` };
+  },
+};

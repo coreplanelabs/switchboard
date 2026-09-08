@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // THE PROJECT'S WEBSITE, not a Worker of an installation: the script name is
+  // `<name>-docs` and the hostname the host of `docs`, both from project.json
+  // (src/deploy/wranglerTemplate.ts `siteView`) — an installation never deploys
+  // a copy of the site, and the bot's /docs sends everyone to the published one.
+  "name": "{{script}}",
+  "compatibility_date": "2026-08-01",
+  // The account the project's own CI deploys the site to: the one value the
+  // deployment profile (deploy/profile.json `account`) contributes here.
+  "account_id": "{{account}}",
+  // ASSETS ONLY: no `main`, so there is no Worker script, no Durable Object,
+  // and no container. Nothing here can be mid-rollout or draining, which is
+  // exactly why CI may deploy it on every docs change, while the four runtime
+  // Workers deploy on the release, preflighted and in order (AGENTS.md,
+  // docs/reference/specs/docs-site.md, docs/reference/specs/release-and-deploy.md).
+  "assets": {
+    "directory": "../../docs/.vitepress/dist",
+    // VitePress emits clean URLs (`/reference/cli.html`), so /reference/cli must
+    // resolve to it; a miss serves the built 404 page, not an empty 404.
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  // workers.dev is DISABLED so the site has exactly one hostname, the one
+  // project.json publishes. The site is public: no Access application fronts
+  // it, and nothing here is an installation's to gate.
+  "workers_dev": false,
+  "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
+  "observability": { "enabled": true }
+}

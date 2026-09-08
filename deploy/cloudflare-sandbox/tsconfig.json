@@ -1,0 +1,20 @@
+{
+  // Scoped config so `npx tsc --noEmit` here actually checks worker.ts —
+  // without it, tsc silently falls back to the repo-root tsconfig, which
+  // excludes this directory entirely.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    // worker.ts imports its own package.json for the @cloudflare/sandbox pin
+    // (the version onStart compares the container against); wrangler bundles
+    // the JSON import, tsc needs this to type it.
+    "resolveJsonModule": true
+  },
+  "include": ["worker.ts"]
+}

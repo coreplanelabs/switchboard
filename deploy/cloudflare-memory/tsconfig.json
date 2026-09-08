@@ -1,0 +1,17 @@
+{
+  // Scoped config so `npm run typecheck` here checks worker.ts (and the shared
+  // src/core/memory engine it imports by relative path) — without it, tsc
+  // silently falls back to the repo-root tsconfig, which excludes this dir.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext"],
+    "types": ["@cloudflare/workers-types/experimental", "@cloudflare/vitest-pool-workers/types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["worker.ts", "worker.test.ts", "friction.test.ts", "schedules.test.ts", "test-env.d.ts"]
+}

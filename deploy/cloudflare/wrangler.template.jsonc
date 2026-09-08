@@ -1,0 +1,67 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "{{script}}",
+  "main": "worker.ts",
+  "compatibility_date": "2026-08-01",
+  // The installation's Cloudflare account (deploy/profile.json `account`) — every Worker deploys to it.
+  "account_id": "{{account}}",
+  // Custom domain on the installation's zone (profile `zone`; the state,
+  // resident and sandbox Workers sit beside it). Slack traffic is the
+  // container's outbound websocket; the inbound HTTP surface here is the cron
+  // keep-alive + the authed ingress/MCP endpoints + the live-view dashboard
+  // (/runs). workers.dev is DISABLED: the /runs dashboard must sit behind
+  // Cloudflare Access (SSO), and Access can only front a real zone domain —
+  // leaving the workers.dev URL up would expose an un-SSO'd copy of /runs.
+  "workers_dev": false,
+  "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
+  // Non-secret, deploy-constant config for the container. PUBLIC_BASE_URL: the
+  // live-view link base — the dispatcher (in the container) reads
+  // process.env.PUBLIC_BASE_URL to put the /runs/<id>?t=… link on the status
+  // card; worker.ts forwards it into envVars. ACCESS_*: the Cloudflare Access
+  // app this bot sits behind (profile `access`) — the app-layer gate
+  // (src/channels/accessAuth.ts) verifies the Cf-Access-Jwt-Assertion JWT
+  // against this team's keys and AUD, fail-closed, so /runs is denied without
+  // a valid Access identity. Neither ACCESS_ value is a secret (forging a JWT
+  // needs Cloudflare's private key, not these). A profile without `access`
+  // renders neither var, and the gate then treats Access as not configured:
+  // every dashboard request is denied.
+  "vars": {
+    "PUBLIC_BASE_URL": "{{urls.publicBaseUrl}}",
+    // {{#if access}}
+    "ACCESS_TEAM_DOMAIN": "{{access.teamDomain}}",
+    "ACCESS_AUD": "{{access.aud}}",
+    // {{/if}}
+    // The state Worker (deploy/cloudflare-memory/): where worker.ts records each
+    // scheduled firing for the /runs Scheduled panel, with MEMORY_TOKEN.
+    // A profile without a memory Worker renders no var: firings go unrecorded.
+    // {{#if urls.stateWorkerUrl}}
+    "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}"
+    // {{/if}}
+  },
+  "observability": { "enabled": true, "traces": { "enabled": true } },
+  "containers": [
+    {
+      "class_name": "SwitchboardServer",
+      // The profile's image mode decides (src/deploy/images.ts): `build` renders
+      // ../../Dockerfile (the same image docker-compose uses), built by wrangler
+      // at deploy time; `registry` renders the release's published image as
+      // copied into this account's registry by `deploy images`.
+      "image": "{{image}}",
+      "instance_type": "basic",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "SWITCHBOARD", "class_name": "SwitchboardServer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SwitchboardServer"] }],
+  // Every cron here IS a schedule in src/core/schedules.ts (the registry; a unit
+  // test fails when the two sets differ) and worker.ts looks each firing up there.
+  // "* * * * *": keep-alive (/healthz) — also what RESTARTS the container after a
+  // deploy rollout, a `deploy restart` (POST /admin/restart → DO stop()), or
+  // platform maintenance; the interval bounds the deaf window
+  // (Socket Mode events during downtime are lost, never redelivered). Not a run.
+  // "0 14 * * 1": the weekly self-improvement pass — POST /ingress as the
+  // `cron` identity with `friction propose`; an ordinary run on /runs.
+  "triggers": { "crons": ["* * * * *", "0 14 * * 1"] }
+}

@@ -1,0 +1,13 @@
+{
+  "$comment": "The deployment profile: where THIS installation runs. Copy to deploy/profile.json and fill it in (or run `switchboard deploy init`). The account is your Cloudflare account id; every hostname must be under `zone`, a zone in that account, unless the Worker names its own `zone` (also in the account); `workers.bot` is the one required Worker — leave `memory`, `resident` or `sandbox` out and `deploy plan` has no step for them (a bot-only profile is a one-step plan; without `memory` the config is not pushed anywhere). The project's docs site is not a Worker of an installation: it is the project's website, deployed by the project's own CI from project.json, so there is no `docs` entry. `configSource` is where `deploy all` reads the bot's runtime config from before building the image — a path, `github://owner/repo/path@ref` (needs CONFIG_REPO_TOKEN), or `op://Vault/Item/field` (needs OP_SERVICE_ACCOUNT_TOKEN); `secretsSource` is where `secrets put` reads values from — a directory of <NAME> files (the default when absent) or `op://Vault/Item`. `images` is where the bot, resident and sandbox container images come from: `registry` — the release's published images, copied once per version into your account registry by `deploy all` itself (or `deploy images` ahead of it) over HTTPS and referenced from there — no Docker anywhere, a Cloudflare API token with Containers Edit in CLOUDFLARE_API_TOKEN for the copy (an installation deploying published images; what `init` writes from the published package); or `build` (the default when absent) — each Worker's Dockerfile, built by wrangler where `deploy all` runs (a checkout; the project's own production). `deploy plan` reads this example when no profile exists; `deploy all` refuses it.",
+  "account": "00000000000000000000000000000000",
+  "zone": "example.com",
+  "workers": {
+    "memory": { "script": "switchboard-memory", "hostname": "switchboard-memory.example.com" },
+    "bot": { "script": "switchboard", "hostname": "switchboard.example.com" },
+    "resident": { "script": "switchboard-resident", "hostname": "switchboard-resident.example.com" },
+    "sandbox": { "script": "switchboard-sandbox", "hostname": "switchboard-sandbox.example.com" }
+  },
+  "configSource": "config/config.yaml",
+  "images": "registry"
+}

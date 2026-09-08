@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Query historical Workers Logs for one of the installation's Workers (the
+# "what did the sandbox/resident/bot Worker log at 15:26?" question `wrangler
+# tail` can't answer — tail is live-only, and the wrangler OAuth login has no
+# observability scope). Needs an API token with Account → Workers
+# Observability: Read (+ Workers Scripts: Read) in CLOUDFLARE_OBS_TOKEN —
+# deliberately NOT CLOUDFLARE_API_TOKEN, which wrangler would pick up. The
+# account is the deployment profile's (deploy/profile.json, or the file
+# SWITCHBOARD_DEPLOY_PROFILE names).
+#
+#   deploy/bin/cf-logs <service> [minutes-back=60] [grep-pattern]
+#   deploy/bin/cf-logs switchboard-sandbox 240 'exit|OOM|error'
+set -euo pipefail
+PROFILE=${SWITCHBOARD_DEPLOY_PROFILE:-"$(dirname "$0")/../profile.json"}
+ACCOUNT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).account' "$PROFILE")
+SERVICE=${1:?service (switchboard | switchboard-sandbox | switchboard-resident | switchboard-memory)}
+MINUTES=${2:-60}
+PATTERN=${3:-}
+: "${CLOUDFLARE_OBS_TOKEN:?set CLOUDFLARE_OBS_TOKEN (Workers Observability: Read on the profile's account)}"
+NOW=$(date +%s)
+FROM=$(( (NOW - MINUTES * 60) * 1000 )); TO=$(( NOW * 1000 ))
+BODY=$(cat <<JSON
+{"queryId":"cf-logs","timeframe":{"from":$FROM,"to":$TO},
+ "parameters":{"datasets":["cloudflare-workers"],
+   "filters":[{"key":"\$metadata.service","operation":"eq","value":"$SERVICE","type":"string"}]},
+ "view":"events","limit":500}
+JSON
+)
+curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT/workers/observability/telemetry/query" \
+  -H "Authorization: Bearer $CLOUDFLARE_OBS_TOKEN" -H 'content-type: application/json' -d "$BODY" \
+  | jq -r '.result.events.events[]? | "\(.timestamp | tostring | .[0:10] | tonumber | todate)  \(.["$metadata"].level // "log")  \(.["$metadata"].message // (.["$workers"].event // "" | tostring))"' \
+  | { if [ -n "$PATTERN" ]; then grep -E "$PATTERN" || true; else cat; fi; }

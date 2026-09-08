@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "{{script}}",
+  "main": "worker.ts",
+  "compatibility_date": "2026-08-01",
+  // The installation's Cloudflare account (deploy/profile.json `account`) — every Worker deploys to it.
+  "account_id": "{{account}}",
+  // Reachable only with the MEMORY_TOKEN bearer secret (plus an unauthenticated
+  // GET /healthz wake ping). Custom domain on the installation's zone so the
+  // bot config (memory.worker.baseUrl) has a stable URL.
+  "workers_dev": false,
+  "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
+  "observability": { "enabled": true },
+  "durable_objects": {
+    // One MemoryDO per scopeKey (the DO name IS the scope key, e.g.
+    // "org:<organization>") — the scope partition is the object boundary, so a
+    // scope's rows live in one SQLite database and cross-scope reads are
+    // impossible by construction.
+    "bindings": [
+      { "name": "MEMORY", "class_name": "MemoryDO" },
+      // ONE ScheduleDO (named "schedules"): every cron firing the bot's Worker
+      // shim makes, for the /runs Scheduled panel (docs/reference/specs/live-view.md).
+      { "name": "SCHEDULES", "class_name": "ScheduleDO" },
+      // One RunHistoryDO per store key (`runs:default`): persistent run history
+      // (docs/reference/specs/run-history.md) — runs + run_events + the retention policy.
+      { "name": "RUNS", "class_name": "RunHistoryDO" },
+      // ONE ConfigDO (named "config"): the bot's runtime config documents — the
+      // chat-set `overrides` (docs/reference/specs/routing-and-config.md item 12) — versioned.
+      { "name": "CONFIG", "class_name": "ConfigDO" },
+      // One RunTranscriptDO per LIVE run (the DO name is the run id): the raw
+      // transcript a resumed run continues from (docs/reference/specs/run-history.md item
+      // 32). Kept apart from the history object so transcript bytes never queue
+      // behind an admission decision; cleared at finish.
+      { "name": "RUN_TRANSCRIPTS", "class_name": "RunTranscriptDO" }
+    ]
+  },
+  // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MemoryDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["FrictionDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["ScheduleDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["RunHistoryDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["ConfigDO"] },
+    { "tag": "v6", "new_sqlite_classes": ["RunTranscriptDO"] },
+    // The friction ledger is read from run history (RunHistoryDO carries every
+    // run's diagnosis); the FrictionDO that once mirrored those diagnoses is
+    // retired with its rows — docs/reference/specs/self-improvement.md item 1.
+    { "tag": "v7", "deleted_classes": ["FrictionDO"] }
+  ]
+}

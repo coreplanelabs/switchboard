@@ -1,0 +1,29 @@
+{
+  "name": "switchboard-resident-worker",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check:image": "docker build --quiet .",
+    "deploy": "node preflight.mjs && node ../bin/build-stamp.mjs",
+    "preflight": "node preflight.mjs",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "verify": "npm --prefix ../.. run --silent deploy:gen && npm run typecheck && npm test",
+    "typegen": "wrangler types",
+    "tail": "wrangler tail",
+    "secrets": "npm --prefix ../.. run --silent cli -- deploy secrets resident"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "0.13.0-next.751.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260904.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0",
+    "wrangler": "^4.129.0"
+  }
+}
