@@ -542,6 +542,16 @@ async function runLoop(
   };
   // How much of `messages` the last step report covered: the seed to begin with.
   let reportedUpTo = messages.length;
+  // The text of a bookkeeping-only turn (every tool_use is `update_status`) is
+  // held back rather than narrated (features/run-loop.md item 15): a
+  // model that answers and updates the card in one turn may be done, and the
+  // forced extra turn then has nothing to say. The next completion decides —
+  // empty: the held text is the answer; anything else: it was narration.
+  let heldAnswer: string | undefined;
+  const narrateHeld = () => {
+    if (heldAnswer !== undefined) emit({ type: "assistant", text: redactSecrets(heldAnswer) });
+    heldAnswer = undefined;
+  };
   // Resume (features/run-history.md item 37): re-enter from a reclaimed run's
   // transcript. The counters and the wall-clock budget come from its last step
   // record; the calls that were in flight at the kill are settled by the plan
@@ -589,6 +599,9 @@ async function runLoop(
       messages.push({ role: "user", content: settled });
       iteration0 = resume.iteration + 1;
     }
+    // A bookkeeping-only turn that carried text and was answered before the
+    // kill is held again (item 15): its deciding completion is this loop's first.
+    heldAnswer = heldTextOf(messages);
   }
   // A requested stop (soft or hard) ends the loop before the NEXT step — the
   // step already in flight completes (soft) or is abandoned (hard, via the race
@@ -609,13 +622,19 @@ async function runLoop(
     });
 
     if (result.stopReason === "refusal") {
+      narrateHeld(); // a held bookkeeping-turn answer stays on the record as narration
       return "The model declined this request (safety refusal). Try rephrasing, or switch models with `model:<provider>/<model>`.";
     }
 
     const toolUses = result.content.filter((p): p is ToolUsePart => p.type === "tool_use");
 
     if (toolUses.length === 0 || result.stopReason !== "tool_use") {
-      const text = collectText(result.content);
+      const written = collectText(result.content);
+      // An empty turn after a held bookkeeping-turn answer: that answer stands
+      // (item 15). A written one demotes the held text to narration.
+      if (written) narrateHeld();
+      const text = written || heldAnswer || "";
+      heldAnswer = undefined;
       if (result.stopReason === "max_tokens") {
         return text + "\n\n_(output truncated: hit the token limit)_";
       }
@@ -637,15 +656,20 @@ async function runLoop(
       return text || "_(no response)_";
     }
 
-    if (!toolUses.every((t) => t.name === "update_status")) turn++;
+    const bookkeepingOnly = toolUses.every((t) => t.name === "update_status");
+    if (!bookkeepingOnly) turn++;
 
     // The model "talking" between tool calls is part of the run's timeline:
     // text that rode alongside this turn's tool_use goes out as an `assistant`
     // event (redacted, uncapped like `answer`) BEFORE the tool rows it explains.
     // A text-only completion never reaches here — it returned above as the
     // answer, which the dispatcher publishes — so nothing is emitted twice.
+    // The model went on, so a held bookkeeping-turn answer was narration after
+    // all; this turn's own text is held when the turn is bookkeeping only.
+    narrateHeld();
     const spoken = collectText(result.content);
-    if (spoken) emit({ type: "assistant", text: redactSecrets(spoken) });
+    if (spoken && bookkeepingOnly) heldAnswer = spoken;
+    else if (spoken) emit({ type: "assistant", text: redactSecrets(spoken) });
 
     // Echo the assistant turn, run tools, append results as one user turn.
     messages.push({ role: "assistant", content: result.content });
@@ -696,7 +720,9 @@ async function runLoop(
   // The loop ended for one of three reasons; all end through this one
   // guaranteed finale (a final tool-less call) so the run always closes with a
   // useful message instead of a silent drain. (A HARD stop never reaches here —
-  // it unwinds through runAgent's catch with no finale.)
+  // it unwinds through runAgent's catch with no finale.) A held
+  // bookkeeping-turn answer is narration now: the finale writes the answer.
+  narrateHeld();
   if (control?.requested === "soft") {
     note("stopped", "soft stop — no further steps, writing up findings so far", "soft");
     return await finishSoftStop(complete, opts, messages, system);
@@ -847,6 +873,18 @@ async function finishSandboxDead(
   );
   const headline = `${diagnosis}. Aborting instead of retrying into a dead sandbox.`;
   return text ? `⚠️ _${headline}_\n\n${text}` : `⚠️ ${headline}`;
+}
+
+/** The text of the transcript's last assistant turn when that turn was bookkeeping only
+ *  (every tool_use `update_status`) and its results are already the last user turn — the
+ *  text a fresh loop over this transcript must hold (features/run-loop.md item 15). */
+function heldTextOf(messages: readonly ChatMessage[]): string | undefined {
+  const tail = messages[messages.length - 1];
+  const last = messages[messages.length - 2];
+  if (!last || last.role !== "assistant" || !tail || tail.role !== "user") return undefined;
+  const uses = last.content.filter((p): p is ToolUsePart => p.type === "tool_use");
+  if (uses.length === 0 || !uses.every((u) => u.name === "update_status")) return undefined;
+  return collectText(last.content) || undefined;
 }
 
 function collectText(parts: ContentPart[]): string {

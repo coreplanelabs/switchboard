@@ -2459,3 +2459,127 @@ describe("resume (features/run-history.md item 37)", () => {
     expect(events.some((e) => e.type === "tool_call")).toBe(false);
   });
 });
+
+describe("an answer written alongside a bookkeeping call (features/run-loop.md item 15)", () => {
+  const pongWithStatus: CompletionResult = {
+    content: [
+      { type: "text", text: "pong" },
+      { type: "tool_use", id: "s1", name: "update_status", input: { checklist: "✓ replied" } },
+    ],
+    stopReason: "tool_use",
+  };
+  const run = async (results: CompletionResult[], extra: Partial<Parameters<typeof runAgent>[0]> = {}) => {
+    const events: RunEvent[] = [];
+    const answer = await runAgent({
+      provider: scripted(results),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+      ...extra,
+    });
+    return { answer, seen: events.filter((e) => e.type !== "turn") };
+  };
+
+  it("is the answer when the forced extra turn comes back empty — and it is not narrated too", async () => {
+    const { answer, seen } = await run([pongWithStatus, text("")]);
+    expect(answer).toBe("pong");
+    expect(seen.map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
+  });
+
+  it("becomes narration when the model goes on to write a different answer", async () => {
+    const { answer, seen } = await run([pongWithStatus, text("done")]);
+    expect(answer).toBe("done");
+    // demoted when the next completion arrives, so it follows the checklist rows it was held behind
+    expect(seen.map((e) => e.type)).toEqual(["tool_call", "tool_result", "assistant"]);
+    expect(seen[2]).toMatchObject({ type: "assistant", text: "pong" });
+  });
+
+  it("becomes narration when the model goes on to call a real tool", async () => {
+    const { answer, seen } = await run([pongWithStatus, bashUse("t1"), text("final")]);
+    expect(answer).toBe("final");
+    expect(seen.map((e) => e.type)).toEqual(["tool_call", "tool_result", "assistant", "tool_call", "tool_result"]);
+    expect(seen[0]).toMatchObject({ type: "tool_call", tool: "update_status" });
+    expect(seen[2]).toMatchObject({ type: "assistant", text: "pong" });
+    expect(seen[3]).toMatchObject({ type: "tool_call", tool: "bash" });
+  });
+
+  it("becomes narration before a budget finale, so the record keeps it exactly once", async () => {
+    let t = 0;
+    const { answer, seen } = await run([pongWithStatus, text("wrapped")], {
+      now: () => t,
+      toolContext: {
+        executor: fakeExecutor,
+        // the checklist update lands past the deadline: the loop ends and the finale writes up
+        reportProgress: () => {
+          t = 60 * 60_000;
+        },
+      },
+    });
+    expect(answer).toContain("wrapped");
+    expect(answer).toMatch(/budget/);
+    const narrated = seen.filter((e) => e.type === "assistant" || e.type === "tool_call" || e.type === "tool_result");
+    expect(narrated.map((e) => e.type)).toEqual(["tool_call", "tool_result", "assistant"]);
+    expect(narrated[2]).toMatchObject({ type: "assistant", text: "pong" });
+  });
+
+  it("text alongside a REAL tool call stays narration: an empty final turn is still `(no response)`", async () => {
+    const { answer, seen } = await run([
+      {
+        content: [
+          { type: "text", text: "Let me look." },
+          { type: "tool_use", id: "t1", name: "bash", input: { command: "echo hi" } },
+        ],
+        stopReason: "tool_use",
+      },
+      text(""),
+    ]);
+    expect(answer).toBe("_(no response)_");
+    expect(seen.map((e) => e.type)).toEqual(["assistant", "tool_call", "tool_result"]);
+  });
+
+  it("a refusal right after the bookkeeping turn keeps the held text on the record as narration", async () => {
+    const { answer, seen } = await run([pongWithStatus, { content: [], stopReason: "refusal" }]);
+    expect(answer).toMatch(/declined/);
+    expect(seen.map((e) => e.type)).toEqual(["tool_call", "tool_result", "assistant"]);
+    expect(seen[2]).toMatchObject({ type: "assistant", text: "pong" });
+  });
+
+  it("a resume whose transcript ends on the bookkeeping turn and its result holds that text again: an empty first completion answers it", async () => {
+    const { answer, seen } = await run([text("")], {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "go" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "pong" },
+            { type: "tool_use", id: "s1", name: "update_status", input: { checklist: "✓ replied" } },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "s1", content: "status updated" }] },
+      ],
+      resume: { settlements: [], stepRecorded: true, inboxConsumedSeq: 0, turn: 0, iteration: 1, remainingMs: 600_000 },
+    });
+    expect(answer).toBe("pong");
+    expect(seen.filter((e) => e.type === "assistant")).toEqual([]);
+  });
+
+  it("a resume whose transcript ends on a real tool turn holds nothing", async () => {
+    const { answer } = await run([text("")], {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "go" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "looking" },
+            { type: "tool_use", id: "b1", name: "bash", input: { command: "echo hi" } },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "b1", content: "hi" }] },
+      ],
+      resume: { settlements: [], stepRecorded: true, inboxConsumedSeq: 0, turn: 1, iteration: 1, remainingMs: 600_000 },
+    });
+    expect(answer).toBe("_(no response)_");
+  });
+});
