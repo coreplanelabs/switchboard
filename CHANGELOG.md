@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0](https://github.com/coreplanelabs/switchboard/compare/v0.5.0...v0.6.0) (2026-09-08)
+
+
+### Features
+
+* **deploy:** `deploy secrets` puts a Worker's secrets from the profile's source ([#593](https://github.com/coreplanelabs/switchboard/issues/593)) ([98cbb9e](https://github.com/coreplanelabs/switchboard/commit/98cbb9e1cd3344fe207dcf7c7863b9db1d012de8))
+* **deploy:** render each Worker's wrangler.jsonc from a template and the deployment profile ([#588](https://github.com/coreplanelabs/switchboard/issues/588)) ([d76a38a](https://github.com/coreplanelabs/switchboard/commit/d76a38ad9d7063e6ed07c8cad552704750977716))
+* **ledger:** the live-run ledger on the state Worker — lease with a fencing token, step records, an append route, a per-run transcript object, reclaim ([#592](https://github.com/coreplanelabs/switchboard/issues/592)) ([7166399](https://github.com/coreplanelabs/switchboard/commit/716639909d9b8debb987be6fceff45342c666c5b))
+
+
+### Bug fixes
+
+* **ci:** pr-title runs are queued, never cancelled — a release-please update fires synchronize and edited together, and the cancelled twin blocked the release PR ([#586](https://github.com/coreplanelabs/switchboard/issues/586)) ([dd2d32e](https://github.com/coreplanelabs/switchboard/commit/dd2d32ed4ea071d740b4564ef4c60b4ccb9def01))
+* **ci:** the Worker legs are named for what they do (workers / verify deploy/&lt;dir&gt;), and a stalled npm-cache segment gives up after 1 min, not 10 ([#590](https://github.com/coreplanelabs/switchboard/issues/590)) ([2e0ccfa](https://github.com/coreplanelabs/switchboard/commit/2e0ccfa9d95bf3f9d1d8fe299fb283dde82d70f4))
+* **deploy:** the memory Worker's template carries the ledger's RunTranscriptDO ([#596](https://github.com/coreplanelabs/switchboard/issues/596)) ([d945f33](https://github.com/coreplanelabs/switchboard/commit/d945f3389723cc1d35c51b9cf4014c5104996286))
+* **resident:** restore progress is measured where the bytes land — the SDK's staging archive plus the target, not the target alone ([#591](https://github.com/coreplanelabs/switchboard/issues/591)) ([08c5232](https://github.com/coreplanelabs/switchboard/commit/08c52322db430c5762a8fa47b96a68f596cb72a8))
+
+
+### Documentation
+
+* **plans:** durable runs — a run outlives the bot container, so the deploy gate can go ([#585](https://github.com/coreplanelabs/switchboard/issues/585)) ([8657388](https://github.com/coreplanelabs/switchboard/commit/865738881e948b424168e3d59887ff1721ae0e1c))
+
 ## [0.5.0](https://github.com/coreplanelabs/switchboard/compare/v0.4.0...v0.5.0) (2026-09-08)
 
 
