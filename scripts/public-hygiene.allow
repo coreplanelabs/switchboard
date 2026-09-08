@@ -121,17 +121,17 @@ src/core/commands/schedule.test.ts	"• `resident-watchdog` — `*/10 * * * *` �
 src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00 UTC → completed (run run-abcd)");
 
 # Our production deployment: the release and docs workflows read this installation's profile from our infrastructure repository with our GitHub App, whose credentials the 1Password action loads; one line each to change for another operator.
-.github/workflows/ci.yml	uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+.github/workflows/ci.yml	uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
 .github/workflows/ci.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/ci.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 .github/workflows/ci.yml	owner: coreplanelabs
 .github/workflows/ci.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
-.github/workflows/deploy-production.yml	uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+.github/workflows/deploy-production.yml	uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
 .github/workflows/deploy-production.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/deploy-production.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 .github/workflows/deploy-production.yml	owner: coreplanelabs
 .github/workflows/deploy-production.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
-.github/workflows/release-please.yml	uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+.github/workflows/release-please.yml	uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
 .github/workflows/release-please.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/release-please.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 .github/workflows/release-please.yml	owner: coreplanelabs
