@@ -7,7 +7,8 @@
 // scripts/public-hygiene.allowlist.json, and that list can only shrink: a file
 // that gained a hit fails, a file that lost one asks to be re-recorded, and a
 // line that is legitimately allowed ("nominal" as English) is named verbatim
-// in scripts/public-hygiene.allow so the reason travels with it.
+// in scripts/public-hygiene.allow so the reason travels with it — or, when the
+// line's text moves without its reason changing (a pinned action), by pattern.
 //
 //   npm run hygiene:check                 # the tree equals the list, no stale allow entries
 //   npm run hygiene:gen                   # record the tree after a scrub (refuses growth; -- --force to insist)
@@ -63,9 +64,54 @@ export function classesFor(path) {
   return record ? all.filter((c) => c !== "trackers" && c !== "dates") : all;
 }
 
-/** The allow file: `path<TAB>trimmed line`, one per line; `#` comments and blanks ignored. */
+const PATTERN_MARK = "=~ ";
+
+/**
+ * The allow file's entries. Each is `path<TAB>trimmed line`, or `path<TAB>=~ regex`
+ * for a line whose text moves without its reason changing (a pinned action's sha
+ * and version): the regex must match the whole trimmed line. Iterating yields the
+ * entries verbatim, which is what `used` and the stale report are keyed by.
+ */
+export class AllowLines {
+  #exact = new Set();
+  #patterns = [];
+
+  add(entry) {
+    const tab = entry.indexOf("\t");
+    const rest = tab < 0 ? "" : entry.slice(tab + 1);
+    if (!rest.startsWith(PATTERN_MARK)) {
+      this.#exact.add(entry);
+      return;
+    }
+    let re;
+    try {
+      re = new RegExp(`^(?:${rest.slice(PATTERN_MARK.length)})$`);
+    } catch (err) {
+      throw new Error(`${ALLOW_LINES_PATH}: bad pattern in entry \`${entry}\` — ${err.message}`, { cause: err });
+    }
+    this.#patterns.push({ entry, path: entry.slice(0, tab), re });
+  }
+
+  /** The entry that allows this line of this path, or undefined. */
+  match(path, trimmed) {
+    const exact = `${path}\t${trimmed}`;
+    if (this.#exact.has(exact)) return exact;
+    return this.#patterns.find((p) => p.path === path && p.re.test(trimmed))?.entry;
+  }
+
+  get size() {
+    return this.#exact.size + this.#patterns.length;
+  }
+
+  *[Symbol.iterator]() {
+    yield* this.#exact;
+    for (const p of this.#patterns) yield p.entry;
+  }
+}
+
+/** The allow file: one entry per line (see AllowLines); `#` comments and blanks ignored. */
 export function parseAllowLines(text) {
-  const out = new Set();
+  const out = new AllowLines();
   for (const raw of text.split("\n")) {
     const line = raw.trimEnd();
     if (line === "" || line.startsWith("#")) continue;
@@ -86,9 +132,9 @@ export function scanText(path, text, allow) {
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
-    const key = `${path}\t${trimmed}`;
-    if (allow.has(key)) {
-      used.add(key);
+    const entry = allow.match(path, trimmed);
+    if (entry !== undefined) {
+      used.add(entry);
       continue;
     }
     for (const cls of classes) {

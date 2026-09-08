@@ -122,7 +122,7 @@ describe("scanText", () => {
     const { counts, hits } = scanText(
       "src/x.ts",
       ["// see #157 and KTD16", "const ok = 1;", "// Justin on 2026-09-04: coreplane"].join("\n"),
-      new Set(),
+      parseAllowLines(""),
     );
     expect(counts).toEqual({ names: 1, trackers: 1, planIds: 1, dates: 1 });
     expect(hits.map((h) => [h.line, h.cls])).toEqual([
@@ -135,16 +135,32 @@ describe("scanText", () => {
   });
 
   it("a line named verbatim in the allow file is skipped and reported as used; classes the path is exempt from are not counted", () => {
-    const allowed = new Set(['src/x.ts\tconst repo = "nominal"; // the English word: a nominal backoff']);
+    const entry = 'src/x.ts\tconst repo = "nominal"; // the English word: a nominal backoff';
     const { counts, hits, used } = scanText(
       "src/x.ts",
       'const repo = "nominal"; // the English word: a nominal backoff\n// coreplane\n',
-      allowed,
+      parseAllowLines(entry),
     );
     expect(counts).toEqual({ names: 1 });
     expect(hits).toHaveLength(1);
-    expect([...used]).toEqual([...allowed]);
-    expect(scanText("docs/decisions/0001-x.md", "cites #43\n", new Set()).counts).toEqual({});
+    expect([...used]).toEqual([entry]);
+    expect(scanText("docs/decisions/0001-x.md", "cites #43\n", parseAllowLines("")).counts).toEqual({});
+  });
+
+  it("a pattern entry skips every line of its path the pattern matches whole, and is reported used once; another path's identical line is not covered", () => {
+    const entry = ".github/workflows/ci.yml\t=~ uses: 1password/load-secrets-action@[0-9a-f]{40} # v\\S+";
+    const pinned = "uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1";
+    const bumped = "uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1";
+    const allow = parseAllowLines(entry);
+    const { counts, hits, used } = scanText(
+      ".github/workflows/ci.yml",
+      `${pinned}\n${bumped}\n# uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1\n`,
+      allow,
+    );
+    expect(counts).toEqual({ names: 1 });
+    expect(hits.map((h) => h.line)).toEqual([3]);
+    expect([...used]).toEqual([entry]);
+    expect(scanText(".github/workflows/other.yml", `${pinned}\n`, allow).counts).toEqual({ names: 1 });
   });
 });
 
@@ -153,12 +169,38 @@ describe("the allow file", () => {
     const allow = parseAllowLines(
       "# why each line is allowed\n\nsrc/a.ts\tconst x = 'nominal'; // English\n\nweb/a.css\tcolor: #111;\n",
     );
+    expect(allow.size).toBe(2);
     expect([...allow]).toEqual(["src/a.ts\tconst x = 'nominal'; // English", "web/a.css\tcolor: #111;"]);
   });
 
-  it("an entry whose line no longer exists is stale and named", () => {
-    const allow = new Set(["src/a.ts\tgone line", "src/b.ts\tstill here"]);
-    expect(staleAllowEntries(allow, new Set(["src/b.ts\tstill here"]))).toEqual(["src/a.ts\tgone line"]);
+  it("a line part starting `=~ ` is a regular expression the whole trimmed line must match; a literal line that merely starts with a slash is not one", () => {
+    const allow = parseAllowLines(
+      'src/a.ts\t=~ const pin = "[0-9a-f]{40}";\nsrc/b.ts\t/** the 1Password item */\nsrc/c.ts\t=~ v\\d+\n',
+    );
+    expect(allow.size).toBe(3);
+    expect(allow.match("src/a.ts", 'const pin = "0123456789abcdef0123456789abcdef01234567";')).toBe(
+      'src/a.ts\t=~ const pin = "[0-9a-f]{40}";',
+    );
+    expect(allow.match("src/a.ts", 'const pin = "short";')).toBeUndefined();
+    expect(allow.match("src/b.ts", "/** the 1Password item */")).toBe("src/b.ts\t/** the 1Password item */");
+    expect(allow.match("src/b.ts", "/** the 1Password item */ // more")).toBeUndefined();
+    expect(allow.match("src/c.ts", "v12")).toBe("src/c.ts\t=~ v\\d+");
+    expect(allow.match("src/c.ts", "v12 and more"), "anchored at both ends").toBeUndefined();
+    expect(allow.match("src/a.ts", "v12"), "another path's pattern does not apply").toBeUndefined();
+  });
+
+  it("a pattern that does not compile names its entry instead of crashing the scan", () => {
+    expect(() => parseAllowLines("src/a.ts\t=~ v(\n")).toThrow(
+      /scripts\/public-hygiene\.allow: bad pattern in entry `src\/a\.ts\t=~ v\(` — /,
+    );
+  });
+
+  it("an entry whose line no longer exists is stale and named — a pattern no line matched too", () => {
+    const allow = parseAllowLines("src/a.ts\tgone line\nsrc/b.ts\tstill here\nsrc/c.ts\t=~ nothing .*\n");
+    expect(staleAllowEntries(allow, new Set(["src/b.ts\tstill here"]))).toEqual([
+      "src/a.ts\tgone line",
+      "src/c.ts\t=~ nothing .*",
+    ]);
   });
 });
 
