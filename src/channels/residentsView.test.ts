@@ -8,6 +8,7 @@ import {
   type ResidentListing,
 } from "./residentsView.js";
 import { makeShellRenderer } from "./webShell.js";
+import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { SEED_ELEMENT_ID, type ResidentDetailSeed, type ResidentsIndexSeed } from "./webSeed.js";
 
 // The residents dash handler: routing, the live-per-request registry read, the
@@ -43,7 +44,7 @@ const DOWN = {
 
 const LISTING: ResidentListing = { cap: 5, count: 2, residents: [WARM, DOWN] };
 
-const shell = makeShellRenderer({ js: "/assets/main-test.js", css: [] });
+const shell = makeShellRenderer({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
 
 function seedOf(html: string): ResidentsIndexSeed | ResidentDetailSeed {
   const m = new RegExp(`<script type="application/json" id="${SEED_ELEMENT_ID}">([\\s\\S]*?)</script>`).exec(html);

@@ -62,6 +62,7 @@ import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
+import { capabilitiesFrom } from "./capabilities.js";
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
 
@@ -136,7 +137,13 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   writeFileSync(cfgPath, fixtureYaml.replaceAll("__WORKDIR__", join(dir, "workspaces")));
   const config = new ConfigStore(cfgPath, join(dir, "overrides.json"));
   const providers = { get: () => provider } as unknown as ProviderRegistry;
-  const deps: TestDeps = { config, providers, dataDir: dir, invoked: [] };
+  const deps: TestDeps = {
+    config,
+    providers,
+    capabilities: capabilitiesFrom(config.config, process.env),
+    dataDir: dir,
+    invoked: [],
+  };
   wireCommands(deps);
   return deps;
 }

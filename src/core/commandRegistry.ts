@@ -5,6 +5,7 @@ import type { Span, TraceOptions } from "./trace/types.js";
 import { formatDuration } from "./time/formatDuration.js";
 import { authorize } from "./authz/authorize.js";
 import type { Actor, Resource } from "./authz/types.js";
+import type { Capabilities } from "./capabilities.js";
 
 // Command registry (#157, U6 — KD2/KTD1; typed model KTD20): the ONE seam
 // behind every operator surface. The lowest level is plain TypeScript: a
@@ -135,6 +136,13 @@ export interface CommandDef<
   resource?(input: RawInput, caller: Caller): Resource;
   effect: CommandEffect;
   surfaces?: CommandSurfaces;
+  /** The capability this command needs (src/core/capabilities.ts). Absent →
+   *  always on. When the predicate is false for the process's capabilities the
+   *  command is HIDDEN on every surface — absent from `help`, `<group> help`,
+   *  `tools/list`, `/api/<id>`, the CLI catalogue and chat, `not_found` when
+   *  named — instead of answering `unavailable`; the handler's own
+   *  `unavailable` stays as the defence in depth. */
+  enabledWhen?(caps: Capabilities): boolean;
   describe: string;
   handler(ctx: CommandContext<A, O, D>): Promise<JsonValue>;
   /** The command's own plain-text projection for the text surfaces (chat, CLI)

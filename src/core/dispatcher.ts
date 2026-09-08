@@ -1,4 +1,5 @@
 import type { ConfigStore } from "../config.js";
+import type { Capabilities } from "./capabilities.js";
 import { configAwarenessBlock } from "./configAwareness.js";
 import { selfDescriptionBlock } from "./selfDescription.js";
 import { customInstructionsBlock } from "./customInstructions.js";
@@ -125,6 +126,11 @@ import type {
 export interface CoreDeps {
   config: ConfigStore;
   providers: ProviderRegistry;
+  /** What is on in this process (src/core/capabilities.ts): computed ONCE at
+   *  startup from the config and the environment, read by every surface —
+   *  the prompt blocks, the status card, the command catalogue, the web seed.
+   *  Nothing below re-derives a capability from `config`. */
+  capabilities: Capabilities;
   /** The wall clock (features/tracing.md): `systemClock` in production, a ticking clock in tests. */
   clock?: Clock;
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */

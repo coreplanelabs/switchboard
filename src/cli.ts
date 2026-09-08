@@ -33,6 +33,7 @@ import { parseConfigLocation } from "./configDocument.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 import { CLI_ACTOR } from "./core/authz/actor.js";
+import { capabilitiesFrom } from "./core/capabilities.js";
 import {
   CommandError,
   CommandRegistry,
@@ -386,9 +387,14 @@ async function main(): Promise<void> {
     : undefined;
   // The chat fast path (`runs list`, `friction report`, …) answers from the same
   // catalogue the bot binds — without it those messages would go to the model.
+  // What is on in this process (src/core/capabilities.ts): the CLI's `ask`
+  // resolves it once from the same config the bot would, so a run started here
+  // carries the same prompt blocks and card notes as one started in Slack.
+  const capabilities = capabilitiesFrom(config.config, process.env);
   const deps: CoreDeps = {
     config,
     providers,
+    capabilities,
     skills,
     mcp,
     mcpRegistryOn: mcpLoadedWiring.service !== undefined,

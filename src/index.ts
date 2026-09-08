@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { openConfigStore } from "./config.js";
+import { capabilitiesFrom } from "./core/capabilities.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { createSlackApp } from "./channels/slack.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
@@ -127,6 +128,11 @@ async function main() {
     commandGroups: coreCommandGroups(),
   });
   console.log(`[config] runtime overrides: ${config.overridesLocation()}`);
+  // What is on in this process (src/core/capabilities.ts): resolved ONCE, here,
+  // from the config and the environment; every surface below reads this value
+  // and none re-derives a capability from `config`.
+  const capabilities = capabilitiesFrom(config.config, process.env);
+  console.log(`[capabilities] ${JSON.stringify(capabilities)}`);
   const providers = new ProviderRegistry(config.config.providers);
   // Bundled skills (#100): loaded once from the seeded `skills/` dir and shared
   // across all channels via CoreDeps, so review/coding get their scoped skill
@@ -253,6 +259,7 @@ async function main() {
   const deps: CoreDeps = {
     config,
     providers,
+    capabilities,
     skills,
     mcp,
     mcpRegistryOn: mcpWiring.service !== undefined,
@@ -346,7 +353,7 @@ async function main() {
     // boot error (the Docker image builds it; local dev runs `npm run build`
     // in web/ once, or points SWITCHBOARD_WEB_DIST elsewhere).
     const webAssets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"));
-    const shell = makeShellRenderer(webAssets.entry);
+    const shell = makeShellRenderer(webAssets.entry, capabilities);
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
     // /residents route live on every request with the same bearer the chat
