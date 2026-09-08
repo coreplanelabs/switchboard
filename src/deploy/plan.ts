@@ -36,7 +36,7 @@ export const UNSET_ENV = ["CLOUDFLARE_ACCOUNT_ID"] as const;
 export type WorkerName = "memory" | "bot" | "resident" | "sandbox";
 
 /** What a Worker is built from, beyond the import closure of its `entry`
- *  (features/release-and-deploy.md item 5). `paths`: a dir prefix (ends with
+ *  (docs/reference/specs/release-and-deploy.md item 5). `paths`: a dir prefix (ends with
  *  `/`) or an exact file. `lockfile`: how the ONE root `package-lock.json`
  *  (npm workspaces) is judged for this Worker — the dependency closure
  *  of each named workspace (`""` = the root package): production only for a
@@ -164,7 +164,7 @@ export const CONTAINERS_CAPABILITY: CapabilityCheck = {
 
 /** Each Worker's directory: package.json, wrangler.template.jsonc and the wrangler.jsonc rendered from
  *  it (src/deploy/wranglerTemplate.ts). The docs Worker is here too — it has a config to render even
- *  though it deploys on its own (features/docs-site.md), never as a `deploy all` step. */
+ *  though it deploys on its own (docs/reference/specs/docs-site.md), never as a `deploy all` step. */
 export const WORKER_DIRS: Readonly<Record<WorkerKind, string>> = {
   memory: "deploy/cloudflare-memory",
   bot: "deploy/cloudflare",

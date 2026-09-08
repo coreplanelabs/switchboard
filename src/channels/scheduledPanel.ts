@@ -38,7 +38,7 @@ export interface ScheduledRow {
      *  otherwise (served tokenless from run history to a viewer who may read it). */
     runHref?: string;
     detail?: string;
-    /** The trace the firing's root started (features/tracing.md item 22): the id
+    /** The trace the firing's root started (docs/reference/specs/tracing.md item 22): the id
      *  the shim's `cron.<schedule>` line and the run's `run_meta` share. */
     traceId?: string;
   };

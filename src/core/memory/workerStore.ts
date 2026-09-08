@@ -119,7 +119,7 @@ export class WorkerMemoryStore implements MemoryStore {
   }
 
   /** One `http.client` span under `span` when the caller has one (the
-   *  dispatcher's `dispatch.memory_read`; features/tracing.md item 24), the
+   *  dispatcher's `dispatch.memory_read`; docs/reference/specs/tracing.md item 24), the
    *  route being the path literal; the plain fetch otherwise. */
   private post(path: MemoryRoute, body: unknown, span?: Span): Promise<Response> {
     return tracedFetch(

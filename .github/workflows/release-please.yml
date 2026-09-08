@@ -1,5 +1,5 @@
 # Releases from conventional commits, and the production deploy that follows
-# them (features/release-and-deploy.md). Every merge to main updates (or opens)
+# them (docs/reference/specs/release-and-deploy.md). Every merge to main updates (or opens)
 # one release PR carrying the next version and the changelog entry; merging
 # that PR tags the version, publishes the GitHub release — and deploys
 # production: deploy-production.yml runs `deploy all --affected`, so only the
@@ -64,7 +64,7 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # The release PR carries its deploy plan (features/release-and-deploy.md
+  # The release PR carries its deploy plan (docs/reference/specs/release-and-deploy.md
   # item 8). Posted from HERE, on the push to main that opened or updated the
   # release PR: the PR's own `deploy targets` job judges a diff against its
   # base, while the release needs judging against PRODUCTION — each Worker's

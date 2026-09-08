@@ -11,7 +11,7 @@ import {
   type SlackHistoryMessage,
 } from "./slackCatchUp.js";
 
-// Feature: features/slack-channel.md item 7 — mentions that land while the
+// Feature: docs/reference/specs/slack-channel.md item 7 — mentions that land while the
 // Socket Mode websocket is down (bot rollover) are caught up from channel
 // history on (re)connect, never run twice.
 
@@ -395,7 +395,7 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 8 — a status card left spinning by a
+// Feature: docs/reference/specs/slack-channel.md item 8 — a status card left spinning by a
 // process that died mid-run (a deploy rollout that killed the container before
 // the drain finished leaves a card frozen mid-"thinking" for good) is closed
 // as interrupted by the next connect's sweep, so

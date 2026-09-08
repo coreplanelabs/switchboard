@@ -2,7 +2,7 @@ import { resolveGithubToken } from "./githubApp.js";
 import type { RepoRootFacts } from "../core/repoToolchain.js";
 
 // What `repo onboard` reads before it chooses a command table
-// (features/resident-repos.md item 52): the repo root's entry names and its
+// (docs/reference/specs/resident-repos.md item 52): the repo root's entry names and its
 // package.json, over the GitHub REST API with the App's READ-scoped installation
 // token (AGENTS.md invariant 5 — never a `gh` shell-out, never a clone). Two
 // GET calls, ~200 ms; a failure is reported, never guessed around: the command

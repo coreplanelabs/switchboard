@@ -1,6 +1,6 @@
 import { redactSecrets, stripAnsi } from "../core/redact.js";
 
-// How a failed resident step describes itself (features/resident-repos.md
+// How a failed resident step describes itself (docs/reference/specs/resident-repos.md
 // item 53). Pure, so the shape is a unit test and not a live post-mortem.
 //
 // The rule this module exists to enforce: a failure report may never CHOOSE

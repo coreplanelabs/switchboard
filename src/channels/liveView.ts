@@ -50,7 +50,7 @@ export type IndexRow = RunIndexRowSeed;
 // — is a 404 (never reveal existence). A FINISHED run (still in the registry, or
 // persisted in the run store) is served tokenless in history mode to the
 // Access-authenticated viewer, through the same page renderer — and only when
-// the policy table lets that viewer's ACTOR read it (features/authorization.md
+// the policy table lets that viewer's ACTOR read it (docs/reference/specs/authorization.md
 // items 5–7): index.ts resolves the Access identity with the same
 // `accessActor` the `/api/*` adapter uses and hands it in as `ctx.actor`; the
 // index lists through `predicateFor(actor, "runs:read", "run")`, a tokenless
@@ -368,7 +368,7 @@ export function createLiveViewHandler(
 
     // The index has NO token gate — Cloudflare Access is the "who" gate in front
     // of it. It renders the per-run capability links, so it must only be exposed
-    // behind Access (see features/live-view.md) — and it renders them only for
+    // behind Access (see docs/reference/specs/live-view.md) — and it renders them only for
     // the runs the viewer's actor may read: the default live rows, the `?all=1`
     // page and the `?stream=1` feed all go through the ONE predicate, so a
     // capability link for a run the viewer may not read never reaches the page.
@@ -418,7 +418,7 @@ export function createLiveViewHandler(
       return true;
     }
 
-    // The Scheduled tab (features/live-view.md item 18): the registry's schedules with each one's
+    // The Scheduled tab (docs/reference/specs/live-view.md item 18): the registry's schedules with each one's
     // last firing; a live firing links with its token, so the panel reads the
     // live rows — only those the viewer may read, so it never hands out a token
     // for a run the viewer could not open (a finished firing links tokenless,
@@ -473,7 +473,7 @@ export function createLiveViewHandler(
             // Stop control: same token, POST-only; `&mode=` is appended client-side.
             eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
             stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}`,
-            // The stamps the header's one duration reads (features/tracing.md).
+            // The stamps the header's one duration reads (docs/reference/specs/tracing.md).
             serverNow: now(),
             startedAt: snap?.startedAt ?? now(),
             ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
@@ -490,7 +490,7 @@ export function createLiveViewHandler(
           text(res, 404, NOT_FOUND);
           return true;
         }
-        // The window is the run's own stamps, to now while live (features/tracing.md):
+        // The window is the run's own stamps, to now while live (docs/reference/specs/tracing.md):
         // a finished run's diagnosis here equals its record's shape.
         const diagnosis = analyzeRunFriction(snap.events, {
           finished: snap.finished,
@@ -630,7 +630,7 @@ export function createLiveViewHandler(
             id: route.id,
             // The stored stream with the truncation made visible (AE11): the
             // seed IS the stream on a history page — normalized first
-            // (features/tracing.md), so a legacy record's `turn` and
+            // (docs/reference/specs/tracing.md), so a legacy record's `turn` and
             // `mcp_tool_use` reach the fold as the spans a live run emits.
             events: withOmittedMarkers(normalizeSpans(view.events ?? [], { schema: view.schema }), view.eventCount),
             ...(view.status ? { status: view.status } : {}),

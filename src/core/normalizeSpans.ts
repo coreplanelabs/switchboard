@@ -4,7 +4,7 @@ import type { SpanRecord } from "./trace/types.js";
 import type { SpanAttrs } from "./trace/attrs.js";
 
 // The one Adapter between a run stream and the span set the partition, the
-// analyzer and the timeline read (features/tracing.md). A stream is either
+// analyzer and the timeline read (docs/reference/specs/tracing.md). A stream is either
 // legacy (schema absent: `turn` and `mcp_tool_use` events carry the timing) or
 // schema 2 (spans carry it); on either, a content pair whose twin span was
 // dropped by the record budget still deserves a span. `normalizeSpans` adds a

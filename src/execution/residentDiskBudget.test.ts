@@ -26,7 +26,7 @@ import {
   type DiskSample,
 } from "./residentDiskBudget.js";
 
-// Feature: features/resident-repos.md item 55 — disk is measured on every
+// Feature: docs/reference/specs/resident-repos.md item 55 — disk is measured on every
 // cycle and attach, persisted on the live view, and a thread tree is admitted
 // only when its projected cost fits under free − reserve; the coldest clean
 // idle trees are evicted first, then the attach is refused as `disk-pressure`

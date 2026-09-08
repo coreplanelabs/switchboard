@@ -1,4 +1,4 @@
-// Render a PrDescription JSON file to the GitHub PR body (features/pr-description.md).
+// Render a PrDescription JSON file to the GitHub PR body (docs/reference/specs/pr-description.md).
 //
 //   npx tsx scripts/render-pr-description.ts <description.json> --repo <owner/name> --head <40-char sha>
 //

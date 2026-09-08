@@ -10,7 +10,7 @@ import {
   withActivityKeepalive,
 } from "./sandboxKeepalive.js";
 
-// Feature: features/execution.md item 2 — one in-flight exec never outlives
+// Feature: docs/reference/specs/execution.md item 2 — one in-flight exec never outlives
 // the container's activity timeout. The Container base class renews its
 // activity clock once per proxied fetch, BEFORE the fetch; a command longer
 // than sleepAfter therefore expires the clock at exactly sleepAfter and the
@@ -228,7 +228,7 @@ describe("sandbox Worker wiring (static)", () => {
     expect(executor).not.toMatch(/x-env-/i);
   });
 
-  // features/execution.md items 3 and 6: a failure text is never
+  // docs/reference/specs/execution.md items 3 and 6: a failure text is never
   // empty, and a container on a previous image is named and healed. Both
   // Worker catches go through `thrownText`; the bare `shape.message ??
   // String(err)` that kept the SDK's "" is gone.

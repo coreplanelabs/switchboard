@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Feature: features/agent-ship.md item 10 — the identity ship's own PRs are
+// Feature: docs/reference/specs/agent-ship.md item 10 — the identity ship's own PRs are
 // authored by is RESOLVED from GitHub, never named in the code: the App's bot
 // user (`GET /app` → `<slug>[bot]` → its immutable id) when an App is
 // configured, the static token's user otherwise, undefined with neither. The

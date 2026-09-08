@@ -106,7 +106,7 @@ export function wrapEvent(e: RunEvent): RunEvent {
     case "run_note":
       return { ...e, summary: wrapUntrusted(e.summary) };
     case "span_end":
-      // The one free-text field a span record carries (features/tracing.md).
+      // The one free-text field a span record carries (docs/reference/specs/tracing.md).
       return e.error !== undefined ? { ...e, error: wrapUntrusted(e.error) } : e;
     default:
       return e;

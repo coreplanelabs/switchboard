@@ -22,7 +22,7 @@ import {
   usageLine,
 } from "./commandSurface.js";
 
-// Feature: features/command-registry.md — everything a surface shows is DERIVED
+// Feature: docs/reference/specs/command-registry.md — everything a surface shows is DERIVED
 // from the typed definition: naming, the one grammar CLI and chat
 // share, the merged JSON Schema, and help. No adapter owns any of this.
 

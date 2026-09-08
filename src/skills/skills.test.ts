@@ -7,7 +7,7 @@ import { BundledSkillStore, InMemorySkillStore, loadBundledSkills } from "./stor
 import { skillGuidanceBlock } from "./index.js";
 import type { Skill } from "./types.js";
 
-// Feature: features/skills.md — the SkillStore seam, frontmatter parsing,
+// Feature: docs/reference/specs/skills.md — the SkillStore seam, frontmatter parsing,
 // per-agent scoping, and the progressive-disclosure prompt block.
 
 const REVIEW_SKILL = `---
@@ -56,7 +56,7 @@ describe("parseSkillMarkdown", () => {
     expect(parseSkillMarkdown(CODING_SKILL).upstream).toBeUndefined();
   });
 
-  // Vendoring provenance (features/skills.md item 10): optional, but complete when present.
+  // Vendoring provenance (docs/reference/specs/skills.md item 10): optional, but complete when present.
   it("parses the `upstream` block written by skills:sync", () => {
     const raw = REVIEW_SKILL.replace(
       "source: https://example.com/code-review\n",

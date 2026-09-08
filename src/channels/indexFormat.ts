@@ -1,4 +1,4 @@
-// Display helpers for the runs index (features/live-view.md item 16), shared
+// Display helpers for the runs index (docs/reference/specs/live-view.md item 16), shared
 // by the server and the dashboard bundle (web/src/lib/format.ts imports them
 // straight from here), so a server-rendered row and its client repaint agree
 // byte for byte. Pure leaf module: no imports, no module-scope state.

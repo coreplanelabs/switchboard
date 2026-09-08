@@ -41,7 +41,7 @@ export interface CloudflareSandboxOptions {
   ref?: string;
 }
 
-/** The Worker named a full fleet (features/execution.md item 14): in-body on
+/** The Worker named a full fleet (docs/reference/specs/execution.md item 14): in-body on
  *  the streamed /exec answer, or as an HTTP 503 on /read and /write. Matched on
  *  the machine token only — an older Worker's bare SDK message stays an
  *  ordinary in-body error (infra), so a bot deployed ahead of its Worker
@@ -52,7 +52,7 @@ function isFleetBusyAnswer(res: Response, data: Record<string, unknown>): boolea
 
 /** The bot-side wait for ONE send: the operation's budget plus the margin
  *  that lets the Worker's own answer (a streamed exit 124 at the command
- *  budget) win the race against this deadline (features/execution.md item
+ *  budget) win the race against this deadline (docs/reference/specs/execution.md item
  *  11). Every route has one: without it a single `/exec` whose sandbox
  *  container is gone can wait for hours — the Worker keeps heartbeating while
  *  its exec promise never settles, and a body read with no deadline sits out
@@ -176,7 +176,7 @@ export class CloudflareSandboxExecutor implements Executor {
       // — the body read is where that wait sits, not the headers.
       const deadline = execDeadline(sendDeadlineMs(budgetMs), signal);
       try {
-        // One `http.client` span per send under the caller's (features/tracing.md
+        // One `http.client` span per send under the caller's (docs/reference/specs/tracing.md
         // item 21); the trace context rides only because the sandbox is ours.
         res = await tracedFetch(
           span,
@@ -256,7 +256,7 @@ export class CloudflareSandboxExecutor implements Executor {
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
-    // Per-call budget (features/execution.md item 11): rides in the body only
+    // Per-call budget (docs/reference/specs/execution.md item 11): rides in the body only
     // when the caller asked for one, so an older sandbox Worker sees the body
     // it always did (it enforces its tuned 280s limit); the Worker clamps
     // server-side with the same [1s, 20 min] bounds — never this number alone.

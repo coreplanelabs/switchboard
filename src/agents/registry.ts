@@ -20,7 +20,7 @@ export interface AgentDef {
    *  every config layer (directive, thread, user, channel, `defaults.efforts`)
    *  beats it; see `src/effort.ts`. Omit to leave it to config / the model. */
   effort?: Effort;
-  /** Prompt-cache TTL for this agent's model calls (features/run-loop.md item
+  /** Prompt-cache TTL for this agent's model calls (docs/reference/specs/run-loop.md item
    *  11). Omit for the provider default (`5m`); set `1h` where one step (a long
    *  model turn plus its tool run) can exceed 5 minutes, or the cache written
    *  by each call expires before the next call can read it. */
@@ -29,7 +29,7 @@ export interface AgentDef {
    *  executor factory). No `repo` declared → no workspace/sandbox is ever
    *  provisioned for this agent's runs. */
   resources?: { repo?: "required" | "none" };
-  /** System prompt variant for resident-repo runs (features/resident-repos.md):
+  /** System prompt variant for resident-repo runs (docs/reference/specs/resident-repos.md):
    *  the workspace is a ready worktree — no cloning, no installs, no repo
    *  discovery, no gh CLI. Selected by the dispatcher AFTER executor
    *  resolution via RunOptions.system; the shared AgentDef is never mutated. */
@@ -39,7 +39,7 @@ export interface AgentDef {
 // Every PR the coding agent ships carries a rich description by default —
 // never only on request. Right after implementing, the agent understands the
 // change better than anyone; the contract below makes it bring that context
-// forward for the reviewer. The description is DATA (features/pr-description.md):
+// forward for the reviewer. The description is DATA (docs/reference/specs/pr-description.md):
 // the agent submits a typed object through submit_pr_description and
 // Switchboard renders the GitHub body from it at the pushed head and opens or
 // edits the PR itself — the agent never authors body markdown and never opens
@@ -48,7 +48,7 @@ export interface AgentDef {
 // hyperlinked; validation states exactly what was run (never fabricated);
 // concise, not padded. Shared by both coding prompts.
 //
-// The Tour (features/agent-coding.md item 3) replaced the prose "Changes" and
+// The Tour (docs/reference/specs/agent-coding.md item 3) replaced the prose "Changes" and
 // "How to review" sections: a walkthrough that never points at the code was
 // what made bodies hard to consume. Anchors are stored as (path, from, to)
 // and rendered against the head sha at render time, so a repush is a
@@ -97,7 +97,7 @@ If the request doesn't name a repository and you can't infer it, ask for it inst
 Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
 Your final message is posted to Slack — keep it readable, lead with the outcome.`;
 
-// Resident-path variant (features/resident-repos.md): the run landed in a
+// Resident-path variant (docs/reference/specs/resident-repos.md): the run landed in a
 // resident repo environment — a per-thread worktree that is already cloned,
 // on the thread's bound ref, deps installed, build warm. The scope-first /
 // clone workflow above would waste the head start (and `gh` does not exist in
@@ -131,7 +131,7 @@ Report outcomes faithfully: if tests fail or a step was skipped, say so plainly.
 Your final message is posted to Slack — keep it readable, lead with the outcome.`;
 
 // Both review prompts carry this verbatim. The findings contract
-// (features/agent-ship.md item 6) lives here once — stable ids, the severity
+// (docs/reference/specs/agent-ship.md item 6) lives here once — stable ids, the severity
 // vocabulary, the approve-over-blocking downgrade — so the sandbox and
 // resident variants can never drift apart on it.
 const REVIEW_VERDICT_INSTRUCTION = `VERDICT: before your final message, call the submit_verdict tool exactly once with \`approve\` (no blocking issues — nits alone are not blocking) or \`request_changes\`, a one-line summary, \`head\` = the output of \`git rev-parse HEAD\` in the checkout you reviewed, and \`findings\` — every issue you report as a structured entry with a stable id you assign in order (F1, F2, …), a severity of exactly blocking|major|minor|nit, the file (plus line when it points at one), and a one-line title. The findings array is the index of your review: the full explanation of each finding stays in your prose, keyed by the same ids. Switchboard writes the verdict as the first line of the GitHub comment itself and lists the findings under it; a review with no submitted verdict is posted as not approving, so never skip it. An \`approve\` carrying a blocking finding is downgraded to \`request_changes\` — approve only when nothing blocking remains. Do not write "LGTM" in your own text — the verdict line carries it.`;
@@ -160,7 +160,7 @@ Maintain the user-facing status card with the update_status tool: post your plan
 
 Your final message is posted to Slack. Lead with a one-line verdict, then the findings.`;
 
-// Resident-path variant for review (features/resident-repos.md): same
+// Resident-path variant for review (docs/reference/specs/resident-repos.md): same
 // gather-once discipline, but against the ready worktree with git — the
 // resident image has no `gh` CLI.
 export const REVIEW_SYSTEM_RESIDENT = `You are Switchboard's code review agent, operating from a Slack request.
@@ -196,7 +196,7 @@ const RESEARCH_SYSTEM = `You are Switchboard's research agent, answering a reque
 You have no workspace and cannot run commands or clone repos. Your tools: \`web_search\` (find sources), \`web_fetch\` (read a public URL — pages as text; image and PDF links come back as the image/document itself), and the GitHub tools — \`github_repos\` (the org repositories you can reach, private ones included), \`github_tree\` / \`github_file\` (browse and read their files at any ref), \`github_search_code\`, and \`github_issue_list\` / \`github_issue_get\`. They use Switchboard's own GitHub credential, so a private repo of ours is readable — never conclude a repo is inaccessible from a public-web 404; use the GitHub tools.
 
 How to work:
-1. If the user gave a URL, read it first — a github.com URL to one of our repos with github_file/github_tree (web_fetch cannot see private repos), anything else with web_fetch. If they asked about Switchboard or one of our repos, read the repo (README, AGENTS.md, \`features/*.md\` specs, the code) with github_tree / github_file / github_search_code before answering. For a general question, web_search for good sources, then web_fetch the most promising 1-3 to read the actual content — don't answer from snippets alone when the page is readable.
+1. If the user gave a URL, read it first — a github.com URL to one of our repos with github_file/github_tree (web_fetch cannot see private repos), anything else with web_fetch. If they asked about Switchboard or one of our repos, read the repo (README, AGENTS.md, \`docs/reference/specs/*.md\` specs, the code) with github_tree / github_file / github_search_code before answering. For a general question, web_search for good sources, then web_fetch the most promising 1-3 to read the actual content — don't answer from snippets alone when the page is readable.
 2. Prefer primary sources; corroborate a surprising claim with a second source.
 3. Answer concisely and cite the URLs (or repo paths) you used. If sources conflict or you couldn't verify something, say so plainly. If web search is unconfigured, use web_fetch / the GitHub tools on what you have and say search was unavailable.
 
@@ -204,7 +204,7 @@ Maintain the user-facing status card with the update_status tool: post a short c
 
 Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack — lead with the answer, then supporting detail and sources.`;
 
-// The general agent (features/agent-general.md): the plain mention. Fast
+// The general agent (docs/reference/specs/agent-general.md): the plain mention. Fast
 // model, few turns, no workspace or shell — but it can read the org's repos
 // and act on their issues through the GitHub tools, and read a URL, so the
 // everyday asks ("open an issue on X", "what does our resident system do?",

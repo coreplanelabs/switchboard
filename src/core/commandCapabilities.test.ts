@@ -18,7 +18,7 @@ import type { CoreDeps } from "./dispatcher.js";
 import { docCommands } from "../docs/reference.js";
 import { RunRegistry } from "./runRegistry.js";
 
-// Feature: features/command-registry.md item 28 — a command whose capability is
+// Feature: docs/reference/specs/command-registry.md item 28 — a command whose capability is
 // off is HIDDEN on every surface, not answered `unavailable`. The real catalogue
 // is bound twice (everything on, everything off) and each adapter is asked what
 // it shows and what it answers when the hidden command is named anyway.

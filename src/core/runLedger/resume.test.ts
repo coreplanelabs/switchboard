@@ -3,7 +3,7 @@ import type { ChatMessage } from "../../providers/types.js";
 import { planResume, settlementFor, type KnownTool, type ToolUsePart } from "./resume.js";
 import type { StepRecord } from "./types.js";
 
-// The resume plan (features/run-history.md item 37): the pure rule for what a
+// The resume plan (docs/reference/specs/run-history.md item 37): the pure rule for what a
 // new generation does with a reclaimed transcript and step record, and the D4
 // settlement of the calls that were in flight at the kill.
 

@@ -3,7 +3,7 @@
 The UI for **reading a pull-request review**: the change as a reviewer reads it
 (the full `git diff`, or an abridged "reading diff" from a model-backed
 producer such as meat.dev), with links back to the PR. Feature contract:
-[`features/reading-diff.md`](../../../../features/reading-diff.md) item 6.
+[`docs/reference/specs/reading-diff.md`](../../../../docs/reference/specs/reading-diff.md) item 6.
 
 ## Boundary — deliberately liftable
 

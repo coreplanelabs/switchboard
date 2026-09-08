@@ -1,4 +1,4 @@
-// Feature: features/tracing.md item 5 — the shape line and the card's gate on it.
+// Feature: docs/reference/specs/tracing.md item 5 — the shape line and the card's gate on it.
 import { describe, expect, it } from "vitest";
 import { cardShapeLine, queuedCaption, shapeLine } from "./runShape.js";
 import type { SpanRecord } from "./trace/types.js";

@@ -1,6 +1,6 @@
 import { MCP_TICKET_TTL_MS, MCP_TOKEN_MAX_CHARS, type McpTicket } from "./registry.js";
 
-// The connect flow's state machine (features/mcp-tools.md item 15) as PURE
+// The connect flow's state machine (docs/reference/specs/mcp-tools.md item 15) as PURE
 // decisions — the HTTP handler (src/channels/mcpConnectView.ts) applies them.
 // A ticket is minted by `mcp add`/`mcp connect`, lives MCP_TICKET_TTL_MS, is
 // single-use, and is bound to the requester: by email when the channel could

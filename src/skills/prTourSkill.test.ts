@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parseSkillMarkdown } from "./frontmatter.js";
 
-// Feature: features/agent-coding.md item 3 — the Tour's CRAFT lives in the
+// Feature: docs/reference/specs/agent-coding.md item 3 — the Tour's CRAFT lives in the
 // first-party `pr-tour` skill (loaded on demand via use_skill, so every load is
 // a visible skill_use event), while the template keeps only the section list
 // and the mandatory-load instruction. These tests pin the rules that used to be

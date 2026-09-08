@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { MemoryCandidate, MemoryRecord } from "./types.js";
 import { InMemoryMemoryStore, NullMemoryStore, selectMemoryStore } from "./stores.js";
 
-// Feature: features/memory.md — the two MemoryStore implementations (AGENTS.md
+// Feature: docs/reference/specs/memory.md — the two MemoryStore implementations (AGENTS.md
 // invariant 2) and the store selector.
 
 const NOW = 1_700_000_000_000;
@@ -38,7 +38,7 @@ describe("NullMemoryStore", () => {
   });
 });
 
-// Feature: features/memory.md §24 — human controls: list a scope's active
+// Feature: docs/reference/specs/memory.md §24 — human controls: list a scope's active
 // records newest first; forget = soft-delete (status `forgotten`, provenance
 // kept) that hides the record from retrieval, list, and dedup.
 describe("InMemoryMemoryStore.list / forget", () => {
@@ -290,7 +290,7 @@ describe("selectMemoryStore", () => {
   });
 });
 
-// Feature: features/memory.md — per-scope cap: applied on write in the
+// Feature: docs/reference/specs/memory.md — per-scope cap: applied on write in the
 // in-process store; evicted rows are soft-deleted and invisible everywhere.
 describe("InMemoryMemoryStore per-scope cap", () => {
   const c = (text: string): MemoryCandidate => ({

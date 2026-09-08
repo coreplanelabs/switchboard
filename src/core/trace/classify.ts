@@ -3,7 +3,7 @@
  *  `needs`, the leading token of a resident reason), and read the mark back at
  *  any depth. A span that fails with a classified error records `errorKind` and
  *  `errorCode` and no message at all — free text from a remote body never
- *  reaches a span, a log line or the wire (features/tracing.md). */
+ *  reaches a span, a log line or the wire (docs/reference/specs/tracing.md). */
 import type { ErrorKind } from "./types.js";
 
 export interface ErrorClassification {

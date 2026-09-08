@@ -8,7 +8,7 @@
   // and no container. Nothing here can be mid-rollout or draining, which is
   // exactly why CI may deploy it on every docs change, while the four runtime
   // Workers deploy on the release, preflighted and in order (AGENTS.md,
-  // features/docs-site.md, features/release-and-deploy.md).
+  // docs/reference/specs/docs-site.md, docs/reference/specs/release-and-deploy.md).
   "assets": {
     "directory": "../../docs/.vitepress/dist",
     // VitePress emits clean URLs (`/reference/cli.html`), so /reference/cli must

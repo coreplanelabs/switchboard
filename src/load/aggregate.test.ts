@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { evaluateSlo, percentile, renderMarkdown, summarize, type Sample } from "./aggregate.js";
 
-// The load harness's result math (features/load-harness.md items 1–3): every
+// The load harness's result math (docs/reference/specs/load-harness.md items 1–3): every
 // command records one Sample per operation and this module turns them into the
 // per-operation latency table, the refusal count by named reason, and the D10
 // pass/fail lines a receipt carries. Pure — the harness commands only feed it.

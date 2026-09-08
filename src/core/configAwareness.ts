@@ -1,7 +1,7 @@
 import type { Scope } from "../config.js";
 import type { Effort } from "../effort.js";
 
-// Config awareness (features/routing-and-config.md behavior 8). The config
+// Config awareness (docs/reference/specs/routing-and-config.md behavior 8). The config
 // system — per-user / per-channel / per-agent layers, runtime overrides,
 // per-message directives — exists and is applied on every dispatch, but until
 // this block the model was never TOLD, so a config-blind agent (general: no
@@ -30,7 +30,7 @@ export interface ConfigAwarenessInput {
   threadDirective: DirectiveSet;
   /** Whether the invoking user may run `config set channel`. */
   canEditChannelConfig: boolean;
-  /** External MCP servers (features/mcp-tools.md item 17): whether the
+  /** External MCP servers (docs/reference/specs/mcp-tools.md item 17): whether the
    *  self-serve registry is on, and which servers answered / did not for THIS
    *  run — so an agent never says "I cannot load MCPs" when a user can add one.
    *  Absent → no line (byte-identical to before the feature). */

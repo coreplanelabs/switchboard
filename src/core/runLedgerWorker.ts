@@ -1,5 +1,5 @@
 // The production ledger: HTTPS to the state Worker's `/runs/*` ledger routes
-// (features/run-history.md items 28–34), beside `WorkerRunStore`. Same bearer,
+// (docs/reference/specs/run-history.md items 28–34), beside `WorkerRunStore`. Same bearer,
 // same error classes, same body convention (a STRING JSON body so the runtime
 // derives Content-Length). Fenced answers are results, not errors: a
 // `409 fenced` is what a zombie generation is supposed to see, and the caller

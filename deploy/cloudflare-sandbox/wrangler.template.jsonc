@@ -25,7 +25,7 @@
       // cold path clones + installs + tests a whole repo per thread.
       "instance_type": "standard-3",
       // The fleet's ceiling on AWAKE per-thread sandboxes; the next thread past
-      // it waits (features/execution.md item 14). Billing is per awake
+      // it waits (docs/reference/specs/execution.md item 14). Billing is per awake
       // instance, so a higher ceiling costs nothing while instances sleep, and
       // the account has ~150x headroom on the containers limits (6 TiB memory /
       // 1500 vCPU against 25 × 8 GiB / 25 × 2 vCPU). Seen live: thirteen cold
@@ -42,7 +42,7 @@
       // instances die in any rollout mode (each old instance is SIGTERMed
       // eventually; the grace period is already 0) — one wave only moves that
       // moment earlier, and shrinks the window a new thread can fall into
-      // from minutes to seconds (features/execution.md item 6).
+      // from minutes to seconds (docs/reference/specs/execution.md item 6).
       "rollout_step_percentage": 100
     }
   ],

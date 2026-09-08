@@ -67,7 +67,7 @@ export interface IncomingMessage {
   /**
    * When OUR process saw the message (ms epoch, from the adapter's clock at its
    * entry — never from a body or a platform stamp): the run's window opens
-   * here (features/tracing.md). Absent (tests, older callers) → the dispatcher
+   * here (docs/reference/specs/tracing.md). Absent (tests, older callers) → the dispatcher
    * reads its own clock at entry.
    */
   receivedAt?: number;
@@ -110,7 +110,7 @@ export interface StatusHandle {
   done(frame: StatusUpdate): Promise<void>;
   /** Where the indicator lives, when it is a message another process could
    *  edit (Slack: channel + ts) — recorded on the run ledger so a resumed run
-   *  closes the same card (features/run-history.md item 35). Absent for a
+   *  closes the same card (docs/reference/specs/run-history.md item 35). Absent for a
    *  no-op handle. */
   handle?: { channel: string; ts: string };
 }

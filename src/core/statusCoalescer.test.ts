@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { coalesceStatus } from "./statusCoalescer.js";
 import type { StatusHandle, StatusUpdate } from "./types.js";
 
-// Feature: features/run-visibility.md — the status card is refreshed per event
+// Feature: docs/reference/specs/run-visibility.md — the status card is refreshed per event
 // but edited at most once per interval, always landing on the newest frame.
 
 function harness(minIntervalMs = 3000) {

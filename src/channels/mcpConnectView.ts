@@ -6,7 +6,7 @@ import type { McpService } from "../mcp/service.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { FORM_PAGE_CSP, WEB_HTML_HEADERS } from "./webShell.js";
 
-// The connect page (features/mcp-tools.md items 15 + 18): GET /mcp/connect/<nonce>
+// The connect page (docs/reference/specs/mcp-tools.md items 15 + 18): GET /mcp/connect/<nonce>
 // shows a one-field token form for a bearer server, or a "continue to <host>"
 // button for an OAuth one; POST stores the pasted token (bearer) or starts the
 // authorization and redirects the browser (OAuth, `action=start`); GET

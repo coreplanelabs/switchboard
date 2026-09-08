@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { NO_OP_COMMAND, NPM_FALLBACK_COMMANDS, detectCommands } from "./repoToolchain.js";
 
-// Feature: features/resident-repos.md item 52 — the onboard command table is
+// Feature: docs/reference/specs/resident-repos.md item 52 — the onboard command table is
 // derived from the repo root, never assumed. The two shapes the npm-only
 // defaults broke on (a pnpm workspace and a repo with no package.json) are pinned.
 

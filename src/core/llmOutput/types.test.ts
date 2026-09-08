@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { acceptOutput, type OutputFailure, type OutputType } from "./types.js";
 
-// Feature: features/llm-output.md item 2 — the control loop is deterministic
+// Feature: docs/reference/specs/llm-output.md item 2 — the control loop is deterministic
 // and type-blind: parse → ok done; a retryable failure re-asks with `observed`
 // up to `maxRetries`; non-retryable or no callback returns the failure without
 // throwing (the caller decides fail-open vs fail-closed).

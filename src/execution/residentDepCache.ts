@@ -1,5 +1,5 @@
 /** Per-directory mechanism for the resident's dep/build cache
- *  (features/resident-repos.md item 18), kept pure and dependency-free so it
+ *  (docs/reference/specs/resident-repos.md item 18), kept pure and dependency-free so it
  *  is unit-testable from src/ and imported by the resident Worker
  *  (deploy/cloudflare-resident/worker.ts `materializeThreadDeps`) like
  *  residentReadonly / residentHead — the tested code IS the shipped code.

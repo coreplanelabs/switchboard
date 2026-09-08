@@ -11,7 +11,7 @@ import { systemClock } from "./trace/clock.js";
 import type { Clock, Span, SpanRecord, SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
 
-// One request, one root (features/tracing.md, Sink scoping). `startRequestRoot`
+// One request, one root (docs/reference/specs/tracing.md, Sink scoping). `startRequestRoot`
 // is the constructor of request roots: the channel adapters call it at receipt
 // and the dispatcher's fresh turn at its own start, and hand the result to
 // `dispatch()`. The root's sinks, in order: the process log sink (or the
@@ -46,7 +46,7 @@ export interface RequestTraceDeps {
   tracer?: Tracer;
   /** The root's leading sinks; defaults to the one log sink at `tracing.log`. */
   sinks?: SpanSink[];
-  /** The in-process span log (features/tracing.md item 26): joins the leading sinks whenever they are not injected. */
+  /** The in-process span log (docs/reference/specs/tracing.md item 26): joins the leading sinks whenever they are not injected. */
   spanLog?: SpanLog;
 }
 
@@ -109,7 +109,7 @@ export interface ProcessRootOptions {
   startedAt?: number;
 }
 
-/** A root for work no request caused (features/tracing.md item 20): the
+/** A root for work no request caused (docs/reference/specs/tracing.md item 20): the
  *  reconnect catch-up pass, the drain, one deploy step. Leading sinks only —
  *  it streams to no run and paints no card — so under `tracing.log: roots` it
  *  is one JSON line when it ends, its facts in `attrs`. The caller ends it. */

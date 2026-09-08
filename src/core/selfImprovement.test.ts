@@ -6,7 +6,7 @@ import type { FrictionRunRecord } from "./frictionProposals.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { countTruncatedInputs, formatSelfImprovementReport, runSelfImprovement } from "./selfImprovement.js";
 
-// Feature: features/self-improvement.md — the orchestrated step: ledger →
+// Feature: docs/reference/specs/self-improvement.md — the orchestrated step: ledger →
 // cluster → propose → dedupe against open proposals → file issues (or not, in
 // dry-run). Human-gated by construction: the ONLY side effect is opening
 // labeled issues; it never opens PRs, never merges, never touches a run.

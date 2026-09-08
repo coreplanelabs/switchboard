@@ -24,7 +24,7 @@ import {
 } from "./runRecord.js";
 import type { Predicate } from "./authz/types.js";
 
-// Feature: features/run-history.md — the node-free run-record contract shared
+// Feature: docs/reference/specs/run-history.md — the node-free run-record contract shared
 // by the bot and the state Worker: the record shape + structural validator,
 // the retention helper both sides run, and the byte-budget helper that keeps a
 // record storable (head+tail event truncation, per-event cap).
@@ -100,7 +100,7 @@ describe("fitRecordToBudget", () => {
     expect(fitted.storedEventCount).toBe(2);
   });
 
-  // Feature: features/tracing.md — spans displace no content.
+  // Feature: docs/reference/specs/tracing.md — spans displace no content.
   it("over budget, span records go first — pair by pair from the middle outward, never from the protected head — and the content greedy runs only if that was not enough", () => {
     const head: RunEvent[] = [
       { type: "input", text: "go", seq: 1, at: 0 },
@@ -295,7 +295,7 @@ describe("isRunRecord", () => {
     expect(isRunRecord(JSON.parse(JSON.stringify(record({ label: undefined, agent: undefined }))))).toBe(true);
   });
 
-  it("accepts the tracing stamps when typed (features/tracing.md) and refuses them otherwise", () => {
+  it("accepts the tracing stamps when typed (docs/reference/specs/tracing.md) and refuses them otherwise", () => {
     expect(isRunRecord(record({ receivedAt: 1, sealedAt: 2, replyOk: true, stepCount: 3, schema: 2 }))).toBe(true);
     expect(isRunRecord(record({ replyOk: false, schema: 0 }))).toBe(true);
     expect(isRunRecord({ ...record(), receivedAt: "1" })).toBe(false);

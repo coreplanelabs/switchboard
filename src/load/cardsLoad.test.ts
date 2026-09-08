@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { simulateCards } from "./cardsLoad.js";
 
-// `load:cards` (features/load-harness.md item 9): the real coalescer, the fake
+// `load:cards` (docs/reference/specs/load-harness.md item 9): the real coalescer, the fake
 // Slack limits, virtual time. One card is well-behaved; fifty cards at the
 // dispatcher's cadence blow through the Tier 3 budget — the plan's second
 // tipping point, as a number.

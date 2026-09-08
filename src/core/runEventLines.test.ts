@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseRunEventLines } from "./runEventLines.js";
 
-// Feature: features/run-friction.md — the input of `friction analyze`: JSON
+// Feature: docs/reference/specs/run-friction.md — the input of `friction analyze`: JSON
 // lines of RunEvents, or a raw SSE capture of `/runs/:id/events` (`data: {...}`
 // frames), which is the same thing with a prefix — so `curl <live link>/events
 // > run.sse` is directly analyzable.
@@ -39,7 +39,7 @@ describe("parseRunEventLines", () => {
     expect(out.skipped).toBe(0); // the `{}` end payload is transport, not garbage
   });
 
-  it("a payload with no type field is a transport frame, never garbage; an event-shaped payload this reader does not know is skipped and counted (features/tracing.md)", () => {
+  it("a payload with no type field is a transport frame, never garbage; an event-shaped payload this reader does not know is skipped and counted (docs/reference/specs/tracing.md)", () => {
     const out = parseRunEventLines(
       [
         'data: {"sealedAt":1,"replyOk":true}',
@@ -61,11 +61,11 @@ describe("parseRunEventLines", () => {
     ].join("\n");
     const out = parseRunEventLines(text);
     expect(out.events).toHaveLength(1);
-    // `{"no":"type"}` is a transport frame (features/tracing.md), not garbage; the other three are.
+    // `{"no":"type"}` is a transport frame (docs/reference/specs/tracing.md), not garbage; the other three are.
     expect(out.skipped).toBe(3);
   });
 
-  it("accepts every declared run_note kind, fleet_busy included (features/execution.md item 14)", () => {
+  it("accepts every declared run_note kind, fleet_busy included (docs/reference/specs/execution.md item 14)", () => {
     const text = [
       '{"type":"run_note","kind":"fleet_busy","summary":"⏳ Sandbox fleet busy — no free per-thread sandbox after waiting 300s","at":5}',
       '{"type":"run_note","kind":"sandbox_dead","summary":"dead","at":6}',
@@ -110,7 +110,7 @@ describe("parseRunEventLines", () => {
     expect(turns.events.map((e) => e.type)).toEqual(["turn"]);
     expect(turns.skipped).toBe(1);
     // `run_meta` (live-view item 19) needs its agent; the model is optional (a
-    // command run resolves none — features/tracing.md) and so are the repo fields
+    // command run resolves none — docs/reference/specs/tracing.md) and so are the repo fields
     const metas = parseRunEventLines(
       [
         '{"type":"run_meta","agent":"review","model":"anthropic/claude-fable-5","repo":"acme/web","pr":281,"at":1}',
@@ -122,7 +122,7 @@ describe("parseRunEventLines", () => {
     expect(metas.skipped).toBe(1);
   });
 
-  it("accepts the span records (features/tracing.md): a start needs spanId + name, an end also numeric startedAt/durationMs and an ok|error status", () => {
+  it("accepts the span records (docs/reference/specs/tracing.md): a start needs spanId + name, an end also numeric startedAt/durationMs and an ok|error status", () => {
     const out = parseRunEventLines(
       [
         '{"type":"span_start","spanId":"s1","name":"dispatch.compose","at":1}',

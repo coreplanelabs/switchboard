@@ -1,4 +1,4 @@
-// The coding run's deterministic PR post-step (features/pr-description.md
+// The coding run's deterministic PR post-step (docs/reference/specs/pr-description.md
 // item 5, agent-coding.md item 2), extracted from dispatch() as callable
 // units so a ship round can run them for its coding and
 // fix rounds without being the dispatch's top-level agent. Two phases with an
@@ -109,7 +109,7 @@ export interface WorkspaceObservation {
 export async function observeCodingWorkspace(
   executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
   opts: { probeRemote: boolean; pushedBranch?: string },
-  /** The step's span (`run.observe_workspace`, or the ship round): every probe's exec hangs under it (features/tracing.md item 17). */
+  /** The step's span (`run.observe_workspace`, or the ship round): every probe's exec hangs under it (docs/reference/specs/tracing.md item 17). */
   span?: Span,
 ): Promise<WorkspaceObservation> {
   const trace = span ? { span } : undefined;
@@ -234,7 +234,7 @@ export function trackPushedBranch(initial?: string): { observe(event: RunEvent):
   // leave on their result, so the set never outgrows one turn's tool calls.
   const pushCalls = new Set<string>();
   // `initial`: the branch a resumed run had already pushed before the restart
-  // (features/run-history.md item 38), restored from the ledger row's state.
+  // (docs/reference/specs/run-history.md item 38), restored from the ledger row's state.
   let branch: string | undefined = initial;
   return {
     observe(event) {

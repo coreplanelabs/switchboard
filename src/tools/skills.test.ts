@@ -4,7 +4,7 @@ import type { Skill } from "../skills/index.js";
 import { listSkillsTool, useSkillTool } from "./skills.js";
 import { TOOLSETS, type ToolContext } from "./workspace.js";
 
-// Feature: features/skills.md — the read-only list_skills/use_skill tools:
+// Feature: docs/reference/specs/skills.md — the read-only list_skills/use_skill tools:
 // scoped to the calling agent, present in BOTH the readonly (review) and full
 // (coding) toolsets, and unavailable-graceful when no store is injected.
 
@@ -60,7 +60,7 @@ describe("use_skill tool", () => {
     expect(out).toContain("https://example.com/cr"); // source footer
   });
 
-  // features/skills.md — a load is a first-class fact in the run data: the tool
+  // docs/reference/specs/skills.md — a load is a first-class fact in the run data: the tool
   // publishes a typed `skill_use` event with the skill's metadata (the generic
   // tool_call only says `use_skill <name>`).
   it("publishes a `skill_use` event with the skill's metadata on a successful load", async () => {

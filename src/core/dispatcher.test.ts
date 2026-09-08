@@ -117,9 +117,9 @@ function wireCommands(deps: TestDeps): { invoked: string[] } {
   return { invoked };
 }
 
-// Feature: features/routing-and-config.md — end-to-end dispatch: config
+// Feature: docs/reference/specs/routing-and-config.md — end-to-end dispatch: config
 // commands, permission gates, and thread-sticky agent resolution.
-// Feature: features/execution.md, features/agent-general.md — per-agent
+// Feature: docs/reference/specs/execution.md, docs/reference/specs/agent-general.md — per-agent
 // executor provisioning (general touches no sandbox).
 
 // Pass-through spy: behavior is the real factory's, but calls/results are
@@ -225,12 +225,12 @@ beforeEach(() => {
   vi.stubEnv("PUBLIC_BASE_URL", "");
 });
 
-// Feature: features/live-view.md — the human-readable run label the dispatcher
+// Feature: docs/reference/specs/live-view.md — the human-readable run label the dispatcher
 // stamps on each run for the Access-gated /runs index. `composeRunLabel` is the
 // pure, channel-agnostic composer: agent-first, repo-identified for repo runs,
 // channel+user (names or stripped ids) for chat runs, always with a short quoted
 // snippet of the request, capped to a sane length.
-// Feature: features/live-view.md item 12 — the one-line attachment note the
+// Feature: docs/reference/specs/live-view.md item 12 — the one-line attachment note the
 // dispatcher appends to the `input` event's text.
 describe("attachmentSuffix", () => {
   const img = { name: "a.png", mediaType: "image/png" as const, data: "" };
@@ -452,7 +452,7 @@ describe("dispatch", () => {
 
 // The answer path is deterministic: one model call, the answer replied
 // verbatim through `io.reply` — no model ever sits between the run record and
-// a surface (features/llm-output.md item 7; an earlier flag-gated structuring
+// a surface (docs/reference/specs/llm-output.md item 7; an earlier flag-gated structuring
 // pass was retired).
 describe("answer reply path", () => {
   it("sends the answer verbatim via reply, with exactly one model call", async () => {
@@ -508,7 +508,7 @@ describe("executor provisioning by agent resources", () => {
     expect(ctx).toMatchObject({ threadKey: "slack:CX:1.0", agent: { name: "general" } });
   });
 
-  // features/resident-repos.md item 51: the resolved PR head reaches executor
+  // docs/reference/specs/resident-repos.md item 51: the resolved PR head reaches executor
   // selection (→ the resident's /attach `sha`) so a mirror whose ref tip lags
   // the push is fetched — a re-review would review a stale tip otherwise.
   it("passes the resolved repo, ref and PR head to executor selection", async () => {
@@ -582,7 +582,7 @@ describe("executor provisioning by agent resources", () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  // Feature: features/run-loop.md item 8 — a HARD stop tears the
+  // Feature: docs/reference/specs/run-loop.md item 8 — a HARD stop tears the
   // workspace down (`release("always")`, even for a coding run that would
   // otherwise keep dirty work), and the card/answer say the run was stopped.
   it("a hard stop from /runs releases the executor with 'always' and reports the abort", async () => {
@@ -693,7 +693,7 @@ describe("executor provisioning by agent resources", () => {
     expect(statuses[statuses.length - 1].title).toContain("✅");
   });
 
-  // Feature: features/tracing.md item 7 — through a slow setup the card ticks
+  // Feature: docs/reference/specs/tracing.md item 7 — through a slow setup the card ticks
   // from the ack and names the step in flight, off the card sink's label.
   it("a slow attach shows on the card: the setup heartbeat paints `— attaching the workspace…` with the elapsed time, and the run's frames drop it", async () => {
     vi.useFakeTimers();
@@ -721,7 +721,7 @@ describe("executor provisioning by agent resources", () => {
     expect(statuses.at(-1)!.title).toContain("✅");
   });
 
-  // Feature: features/tracing.md item 19 — a resident's attach steps graft
+  // Feature: docs/reference/specs/tracing.md item 19 — a resident's attach steps graft
   // under the run's `dispatch.workspace.attach` span, rebased to its start.
   it("a resident attach's step trace lands on the run's stream as dispatch.workspace.attach.<step> spans under the attach span, clipped to the attach, with the resident backend and a clock-skew attr on the parent", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
@@ -772,7 +772,7 @@ describe("executor provisioning by agent resources", () => {
     expect(events.indexOf(grafts[0]!)).toBeLessThan(inputAt);
   });
 
-  // Feature: features/tracing.md item 19 — a resident attach that FAILS still
+  // Feature: docs/reference/specs/tracing.md item 19 — a resident attach that FAILS still
   // grafts the steps it ran under the (failed) attach span; no run exists, so
   // they reach the process sinks.
   it("a failed resident attach's step trace grafts under the failed dispatch.workspace.attach span, on the process sink", async () => {
@@ -901,7 +901,7 @@ describe("executor provisioning by agent resources", () => {
   });
 });
 
-// Feature: features/resident-repos.md — the per-repo gate (a refused user
+// Feature: docs/reference/specs/resident-repos.md — the per-repo gate (a refused user
 // sees a NAMED refusal, never a silent per-thread fallback) and the
 // fallback note surfacing on the status card.
 const REPO_PERMS_YAML = `
@@ -1011,7 +1011,7 @@ describe("resident repo dispatch", () => {
     expect(statuses[statuses.length - 1].title).toContain("not started");
   });
 
-  // Feature: features/routing-and-config.md item 16 — the note names `repo
+  // Feature: docs/reference/specs/routing-and-config.md item 16 — the note names `repo
   // onboard`, a command an installation without residents does not have: the
   // gate reads the capability, and a rejected slug is then no reason to stop.
   it("the not-onboarded note is a resident installation's: with residents off the same rejected slug starts no such refusal and never mentions `repo onboard`", async () => {
@@ -1110,7 +1110,7 @@ describe("resident repo dispatch", () => {
   });
 });
 
-// Feature: features/resident-repos.md — repo/ref resolved BEFORE the model
+// Feature: docs/reference/specs/resident-repos.md — repo/ref resolved BEFORE the model
 // turn (production default resolver), the needs-ref ask-once flow (one
 // clarifying question, no model turn burned), and the resident prompt variant
 // selected AFTER executor resolution via RunOptions.system.
@@ -1145,7 +1145,7 @@ function residentFetchStub(
   return { fn, calls };
 }
 
-// Feature: features/resident-repos.md — repo-management commands are
+// Feature: docs/reference/specs/resident-repos.md — repo-management commands are
 // config-family (answered inline, never a model turn); all but `list` gated
 // by canManageRepos (fail-closed).
 describe("repo management commands", () => {
@@ -1183,7 +1183,7 @@ describe("repo management commands", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("repo list binds the admin client to the command's run.command span through withSpan (features/tracing.md item 24)", async () => {
+  it("repo list binds the admin client to the command's run.command span through withSpan (docs/reference/specs/tracing.md item 24)", async () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     const base = mockAdmin();
     const bound: string[] = [];
@@ -1238,7 +1238,7 @@ describe("repo management commands", () => {
   });
 });
 
-// Feature: features/resident-repos.md, features/routing-and-config.md — the
+// Feature: docs/reference/specs/resident-repos.md, docs/reference/specs/routing-and-config.md — the
 // deterministic ops fast-path: recognized ops answer with a real op
 // execution and ZERO model turns, mirroring the config-command inline-reply
 // shape. Only the model call is skipped — the implicit target agent (coding)
@@ -1658,7 +1658,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(system).not.toContain("gh pr create");
   });
 
-  // Feature: features/agent-review.md item 9 — a review run with a resolved PR
+  // Feature: docs/reference/specs/agent-review.md item 9 — a review run with a resolved PR
   // is TOLD its target (repo, PR, head branch/commit, base) in the system
   // prompt, on both paths, from RepoContext — never left to find it.
   it("a resident review of a resolved PR gets the REVIEW TARGET block with the resolved head sha", async () => {
@@ -1682,7 +1682,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(system).not.toMatch(/verified it before this run/);
   });
 
-  // Feature: features/agent-review.md item 10 — the dispatcher compares
+  // Feature: docs/reference/specs/agent-review.md item 10 — the dispatcher compares
   // the sha the resident ATTACHED the worktree at with the PR head it resolved,
   // before any model turn. Left to probe on its own, an agent that wanders out
   // of the worktree (`cd /workspace`, `find … .git`) finds the resident's warm
@@ -1979,7 +1979,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
   });
 });
 
-// Feature: features/agent-review.md — the deterministic review post-step:
+// Feature: docs/reference/specs/agent-review.md — the deterministic review post-step:
 // a `review` run against a resolved PR posts its findings back to that PR
 // by default (no "and post to the PR" needed). The system decides and posts (via
 // the injected postReviewComment seam — no real network here); opt-out and
@@ -2041,7 +2041,7 @@ describe("review post-step", () => {
     ]);
   });
 
-  // features/agent-review.md item 10: a push that lands mid-run makes the
+  // docs/reference/specs/agent-review.md item 10: a push that lands mid-run makes the
   // posted review one of an outdated commit — still posted, still pinned to
   // the reviewed head (so auto-approve skips it), but the thread is TOLD.
   describe("head-moved note (item 10)", () => {
@@ -2117,7 +2117,7 @@ describe("review post-step", () => {
     });
   });
 
-  // features/agent-review.md item 12: a head that moved while the review ran
+  // docs/reference/specs/agent-review.md item 12: a head that moved while the review ran
   // is classified from GitHub's compare lists — a rebase of the same commits
   // carries the review to the new head; anything else makes the SAME run
   // re-review at the new head before posting. Unknown → item 10's pinned post
@@ -2194,7 +2194,7 @@ describe("review post-step", () => {
         moveSpans: [] as string[],
       };
       const executor: Record<string, unknown> = {
-        // The settle's probe and move carry their span (features/tracing.md item 17): recorded by name.
+        // The settle's probe and move carry their span (docs/reference/specs/tracing.md item 17): recorded by name.
         exec: async (cmd: string, opts?: { span?: { name: string } }) => {
           if (!/git rev-parse HEAD/.test(cmd)) return "";
           state.probeSpans.push(opts?.span?.name ?? "none");
@@ -2437,7 +2437,7 @@ describe("review post-step", () => {
     });
   });
 
-  // Feature: features/run-loop.md item 8 — a HARD-stopped review has no
+  // Feature: docs/reference/specs/run-loop.md item 8 — a HARD-stopped review has no
   // findings (its answer is the abort line), so nothing is posted to the PR.
   it("a hard-stopped review posts nothing to the PR", async () => {
     const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
@@ -2618,7 +2618,7 @@ describe("review post-step", () => {
     expect(replies.some((r) => /not started/i.test(r))).toBe(false);
   });
 
-  // Feature: features/agent-review.md item 8 — the reviewed-head guard.
+  // Feature: docs/reference/specs/agent-review.md item 8 — the reviewed-head guard.
   // An agent that fetches another PR's branch and reviews it would otherwise
   // have its LGTM posted (and auto-approved) on the wrong PR. The post-step
   // refuses to post unless the head the agent actually reviewed IS the PR
@@ -2759,7 +2759,7 @@ describe("review post-step", () => {
   });
 });
 
-// Feature: features/pr-description.md item 5, features/agent-coding.md item 2 —
+// Feature: docs/reference/specs/pr-description.md item 5, docs/reference/specs/agent-coding.md item 2 —
 // the coding PR post-step: after a writable coding run pushed a branch and
 // submitted its typed PrDescription, the DISPATCHER observes the pushed head +
 // branch in the workspace (before release), renders the body at that head, and
@@ -2767,7 +2767,7 @@ describe("review post-step", () => {
 // seam — no real network here) — from typed values only. Failure honesty: no
 // description / no observable push / a failed open never fabricates a URL; the
 // thread gets the branch compare URL and a plain reason.
-describe("coding PR post-step (features/pr-description.md)", () => {
+describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -3399,11 +3399,11 @@ describe("coding PR post-step (features/pr-description.md)", () => {
   });
 });
 
-// Feature: features/live-view.md — the dispatcher registers every run in the
+// Feature: docs/reference/specs/live-view.md — the dispatcher registers every run in the
 // RunRegistry, publishes each RunEvent to it (feeding the external /runs
 // stream), finishes it in the run-loop finally, and puts the per-run capability
 // link on the status card ONLY when PUBLIC_BASE_URL is set (graceful otherwise).
-/** A stream's shape with its span records named: `+name` opens, `-name` closes (features/tracing.md). */
+/** A stream's shape with its span records named: `+name` opens, `-name` closes (docs/reference/specs/tracing.md). */
 const shapeOf = (events: readonly RunEvent[]) =>
   events.map((e) => (e.type === "span_start" ? `+${e.name}` : e.type === "span_end" ? `-${e.name}` : e.type));
 /** The shape without the setup steps (`dispatch.*`), whose number and order depend on the fixture's fakes. */
@@ -3454,7 +3454,7 @@ describe("live run-view wiring (Area 2)", () => {
         log.push("finish");
       },
       has: () => true,
-      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
+      snapshot: () => null, // the finish reads the backlog for the card's shape (docs/reference/specs/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3470,7 +3470,7 @@ describe("live run-view wiring (Area 2)", () => {
     // The record is bookended by the request (`input`, live-view item 12) and
     // the final answer (the run record is the source of truth; Slack is a
     // projection of it), the latter before the run finishes.
-    // Spans, not `turn` events, carry the timing (features/tracing.md): the
+    // Spans, not `turn` events, carry the timing (docs/reference/specs/tracing.md): the
     // run's root opens the stream, the setup steps (`dispatch.*`, filtered
     // here) precede the request, the loop is `run.agent`, each model call a
     // `model.turn`, the tool call a `tool.bash` around its pair; after the
@@ -3518,7 +3518,7 @@ describe("live run-view wiring (Area 2)", () => {
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 
-  // Feature: features/run-visibility.md item 5 — the final answer is a run
+  // Feature: docs/reference/specs/run-visibility.md item 5 — the final answer is a run
   // event: published to the registry (SoT) BEFORE the channel reply, with the
   // same redaction as every other event, so the run page shows what the thread
   // got — including a soft stop's "findings so far".
@@ -3547,7 +3547,7 @@ describe("live run-view wiring (Area 2)", () => {
         order.push("finish");
       },
       has: () => true,
-      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
+      snapshot: () => null, // the finish reads the backlog for the card's shape (docs/reference/specs/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3575,7 +3575,7 @@ describe("live run-view wiring (Area 2)", () => {
     expect(order.indexOf("publish:answer")).toBeLessThan(order.indexOf("reply"));
   });
 
-  // Feature: features/live-view.md item 12 — the request is the first event of
+  // Feature: docs/reference/specs/live-view.md item 12 — the request is the first event of
   // the run record (`input`), published straight after create() so the run page
   // can show it above the log; redacted like everything in the stream.
   it("publishes the request as a redacted `input` event before any tool event, with an attachment suffix", async () => {
@@ -3590,7 +3590,7 @@ describe("live run-view wiring (Area 2)", () => {
       },
       finish() {},
       has: () => true,
-      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
+      snapshot: () => null, // the finish reads the backlog for the card's shape (docs/reference/specs/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3609,7 +3609,7 @@ describe("live run-view wiring (Area 2)", () => {
       },
       fakeIO().io,
     );
-    // Spans, not `turn` events, carry the timing (features/tracing.md): the
+    // Spans, not `turn` events, carry the timing (docs/reference/specs/tracing.md): the
     // run's root opens the stream, the setup steps (`dispatch.*`, filtered
     // here) precede the request, the loop is `run.agent`, each model call a
     // `model.turn`, the tool call a `tool.bash` around its pair; after the
@@ -3666,7 +3666,7 @@ describe("live run-view wiring (Area 2)", () => {
     });
     // what the run is about, right after the request (live-view item 19): the
     // resolved agent + model; no repo context for a repo-less general run;
-    // the request's trace id (features/tracing.md)
+    // the request's trace id (docs/reference/specs/tracing.md)
     const meta = events.find((e) => e.type === "run_meta")!;
     if (meta.type !== "run_meta") throw new Error("unreachable");
     expect(meta).toEqual({
@@ -3690,7 +3690,7 @@ describe("live run-view wiring (Area 2)", () => {
       },
       finish() {},
       has: () => true,
-      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
+      snapshot: () => null, // the finish reads the backlog for the card's shape (docs/reference/specs/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3769,10 +3769,10 @@ describe("live run-view wiring (Area 2)", () => {
   });
 });
 
-// Feature: features/run-visibility.md item 2 — the closed ✅ card keeps the
+// Feature: docs/reference/specs/run-visibility.md item 2 — the closed ✅ card keeps the
 // checklist with EVERY item checked off (the run completing is the proof they
 // happened), and an empty update_status never erases progress.
-// Feature: features/agent-review.md item 13 — the review verdict reply carries
+// Feature: docs/reference/specs/agent-review.md item 13 — the review verdict reply carries
 // the run link at the projection layer only: never in the `answer` event or
 // the GitHub post body.
 const REVIEW_PR_HEAD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
@@ -3881,7 +3881,7 @@ describe("closed-card checklist and review verdict run link", () => {
       publish: (_id: string, e: RunEvent) => void events.push(e),
       finish: () => {},
       has: () => true,
-      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
+      snapshot: () => null, // the finish reads the backlog for the card's shape (docs/reference/specs/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3915,12 +3915,12 @@ describe("closed-card checklist and review verdict run link", () => {
   });
 });
 
-// Feature: features/llm-output.md item 5 — the answer is canonicalized ONCE at
+// Feature: docs/reference/specs/llm-output.md item 5 — the answer is canonicalized ONCE at
 // the typed-output boundary: the answer event, the channel reply, and the
 // GitHub post body all carry the canonical Markdown; the model's raw text
 // rides on the event only when normalization changed it (redacted, and dropped
 // when it would blow the per-event byte budget).
-describe("typed answer output (features/llm-output.md)", () => {
+describe("typed answer output (docs/reference/specs/llm-output.md)", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.mocked(makeExecutor).mockClear();
@@ -3933,7 +3933,7 @@ describe("typed answer output (features/llm-output.md)", () => {
       publish: (_id: string, e: RunEvent) => void events.push(e),
       finish: () => {},
       has: () => true,
-      snapshot: () => null, // the finish reads the backlog for the card's shape (features/tracing.md)
+      snapshot: () => null, // the finish reads the backlog for the card's shape (docs/reference/specs/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
     } as unknown as RunRegistry;
@@ -3998,7 +3998,7 @@ describe("typed answer output (features/llm-output.md)", () => {
   });
 });
 
-// Feature: features/memory.md — cross-session memory READ path.
+// Feature: docs/reference/specs/memory.md — cross-session memory READ path.
 // The load-bearing guarantee: with memory off (or a NullMemoryStore) the request
 // sent to the provider is byte-identical to today; when enabled with a seeded
 // store the advisory block rides on the system prompt, never in history.
@@ -4104,7 +4104,7 @@ describe("cross-session memory READ path", () => {
   });
 });
 
-// Feature: features/skills.md — progressive disclosure. When a skill
+// Feature: docs/reference/specs/skills.md — progressive disclosure. When a skill
 // store is on CoreDeps, the dispatcher appends the calling agent's scoped skill
 // name+description list to its system prompt (bodies load on demand via
 // use_skill, never dumped) and passes the store to the tool context. An agent
@@ -4225,7 +4225,7 @@ describe("turnContent (attachment assembly)", () => {
   });
 });
 
-// Feature: features/memory.md — cross-session memory WRITE path.
+// Feature: docs/reference/specs/memory.md — cross-session memory WRITE path.
 // After the reply lands, a qualifying run (used tools, or a long thread) fires
 // ONE async reflection call on `memory.model`; disabled → nothing; fast paths
 // (config/deterministic) never reflect; reflection failures never touch the
@@ -4246,7 +4246,7 @@ const REFLECTION_REPLY = JSON.stringify({
 
 /** A directory that calls the fixture's `slack:CX` a PUBLIC channel. The static
  *  default knows a Slack `C…` id only as `unknown`, and the write gate
- *  (features/authorization.md item 8) never lets an unknown origin write the
+ *  (docs/reference/specs/authorization.md item 8) never lets an unknown origin write the
  *  org scope (the fact is narrowed to the channel's), so the routing tests
  *  that expect org writes speak from a public channel — as the deployed bot's
  *  Slack directory would say of one. */
@@ -4316,7 +4316,7 @@ describe("cross-session memory WRITE path", () => {
     expect(written.every((r) => typeof r.sourceRunId === "string" && r.sourceRunId.length > 0)).toBe(true);
   });
 
-  // Feature: features/memory.md §10 — a `review` run never reflects: its
+  // Feature: docs/reference/specs/memory.md §10 — a `review` run never reflects: its
   // findings land on the PR, and distilling them floods org memory with
   // per-PR ephemera. Other agents keep the work-based gate.
   it("a `review` run that used tools in a long thread does NOT reflect — no extra model call, nothing written", async () => {
@@ -4350,7 +4350,7 @@ describe("cross-session memory WRITE path", () => {
     expect(written).toEqual([]);
   });
 
-  // Feature: features/run-loop.md item 8 — a HARD-stopped run has no
+  // Feature: docs/reference/specs/run-loop.md item 8 — a HARD-stopped run has no
   // summary to distill (its answer is the abort line), so it never reflects even
   // when the gate (long thread) would otherwise qualify it.
   it("a hard-stopped run does NOT reflect, even when the gate would qualify it", async () => {
@@ -4385,7 +4385,7 @@ describe("cross-session memory WRITE path", () => {
     expect(await store.retrieve({ scopeKey: "org:acme", query: "deploy command", limit: 10 })).toEqual([]);
   });
 
-  // Feature: features/memory.md — user-scoped memory end to end: a
+  // Feature: docs/reference/specs/memory.md — user-scoped memory end to end: a
   // `user`-audience fact from alice's run lands in alice's scope, surfaces on
   // her next request, and never on bob's; org facts reach both.
   it("user-scoped memory: a user's own records surface for them and never for another user", async () => {
@@ -4438,7 +4438,7 @@ describe("cross-session memory WRITE path", () => {
     expect(u2System).toContain("the deploy command is npm run deploy");
   });
 
-  // Feature: features/authorization.md item 8, features/memory.md §23
+  // Feature: docs/reference/specs/authorization.md item 8, docs/reference/specs/memory.md §23
   // (deliberate change c) — end to end: the run's stamped channel visibility is
   // the origin the write gate decides under. A DM (`slack:D…`, dm by the static
   // directory) may not write the org scope: its `org` fact lands in the
@@ -4494,7 +4494,7 @@ describe("cross-session memory WRITE path", () => {
     expect(await pub.list("user:slack:UALICE", 10)).toEqual([]);
   });
 
-  // Feature: features/memory.md §21–23 — repo + channel scopes end to end:
+  // Feature: docs/reference/specs/memory.md §21–23 — repo + channel scopes end to end:
   // a repo-bound coding run writes a `repo` fact into `repo:acme/api` and a
   // `channel` fact into this channel's scope; a request from another channel
   // still gets the org fact but not the channel fact.
@@ -4665,12 +4665,12 @@ describe("cross-session memory WRITE path", () => {
   });
 });
 
-// Feature: features/routing-and-config.md behavior 8 — config awareness. The
+// Feature: docs/reference/specs/routing-and-config.md behavior 8 — config awareness. The
 // regression: asked "what are your settings, can I tune them?", the toolless
 // general agent answered "stateless, no per-user/per-channel tuning" — false;
 // the config system existed, the model was simply never told. Every run's
 // system prompt now carries the RESOLVED agent/model/scope and how to tune it.
-describe("self-description in the system prompt (routing-and-config behavior 11) and the github_* tools (features/github-tools.md)", () => {
+describe("self-description in the system prompt (routing-and-config behavior 11) and the github_* tools (docs/reference/specs/github-tools.md)", () => {
   it("every run's prompt carries the About block right after the config block, naming the agents, residents, and the repo + specs", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
@@ -4985,7 +4985,7 @@ describe("self-improvement wiring", () => {
     expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
   });
 
-  // Feature: features/memory.md §24 — `memory list`/`memory forget` are
+  // Feature: docs/reference/specs/memory.md §24 — `memory list`/`memory forget` are
   // config-family: answered inline from the store, never a model turn.
   it("`memory list` is answered inline from the memory store through the registry — no model turn, no repo resolution unless the repo scope is asked for", async () => {
     const provider = capturingProvider();
@@ -5062,7 +5062,7 @@ describe("self-improvement wiring", () => {
   });
 });
 
-// Feature: features/routing-and-config.md behavior 9 — per-scope custom
+// Feature: docs/reference/specs/routing-and-config.md behavior 9 — per-scope custom
 // instructions folded into the system prompt at the same seam
 // as memory/skills/config-awareness. Advisory only.
 describe("custom instructions in the system prompt", () => {
@@ -5239,7 +5239,7 @@ describe("custom instructions in the system prompt", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 8 \u2014 a run that is still in flight when
+// Feature: docs/reference/specs/slack-channel.md item 8 \u2014 a run that is still in flight when
 // the process is told to shut down (SIGTERM from a deploy rollout) says so on
 // its live card, so a reader can tell "finishing before a restart" from a run
 // that is simply slow. The closed card never carries the notice.
@@ -5288,7 +5288,7 @@ describe("shutdown notice on the live status card", () => {
   });
 });
 
-// Feature: features/run-visibility.md item 2 — the live card's title suffix
+// Feature: docs/reference/specs/run-visibility.md item 2 — the live card's title suffix
 // tells model time from tool time: a `pnpm typecheck` in flight for an hour
 // must never render as `thinking (3601s since last tool)`.
 describe("in-flight tool label on the live status card", () => {
@@ -5343,7 +5343,7 @@ describe("in-flight tool label on the live status card", () => {
   });
 });
 
-// Feature: features/self-improvement.md item 7 + features/live-view.md item 13
+// Feature: docs/reference/specs/self-improvement.md item 7 + docs/reference/specs/live-view.md item 13
 // — `friction report|propose` are RUNS \u2014 a registry record (input \u2192
 // answer), listed on /runs, with a receipt to the channel \u2014 so a scheduled
 // firing arriving through /ingress as `http:cron` leaves the same trace as
@@ -5520,7 +5520,7 @@ describe("inline command runs + run receipts", () => {
   });
 });
 
-// Feature: features/run-visibility.md \u2014 the exchange in the run stream:
+// Feature: docs/reference/specs/run-visibility.md \u2014 the exchange in the run stream:
 // the stream carries the full exchange \u2014 the request (`input`), the thread
 // context fed to the model (`context`), the reply (`answer`) \u2014 as redacted,
 // uncapped events, so the live page and the run record show what the model saw
@@ -5722,7 +5722,7 @@ describe("input / context / answer events in the run stream", () => {
   });
 });
 
-// Feature: features/live-view.md \u2014 one backlog: the dispatcher's
+// Feature: docs/reference/specs/live-view.md \u2014 one backlog: the dispatcher's
 // friction diagnosis is computed from the registry snapshot, not a second ring.
 describe("friction diagnosis reads the registry backlog", () => {
   afterEach(() => {
@@ -5760,7 +5760,7 @@ describe("friction diagnosis reads the registry backlog", () => {
     const snap = registry.snapshot("run-f", "tok");
     expect(snap).not.toBeNull();
     // The record's diagnosis is the finish-site one: over the run's window
-    // (the registry row's stamps), so it carries the shape (features/tracing.md).
+    // (the registry row's stamps), so it carries the shape (docs/reference/specs/tracing.md).
     const row = registry.getById("run-f")!;
     expect(rec.diagnosis).toEqual(
       analyzeRunFriction(snap!.events, {
@@ -5774,7 +5774,7 @@ describe("friction diagnosis reads the registry backlog", () => {
   });
 });
 
-// Feature: features/run-history.md — the dispatcher write path:
+// Feature: docs/reference/specs/run-history.md — the dispatcher write path:
 // the run record is built synchronously at finish (inside the run's try/catch,
 // so failed runs take the same path) and handed to the history writer only
 // AFTER the reply is sent; the write never delays or fails the reply.
@@ -5895,7 +5895,7 @@ describe("run history write path", () => {
     ).toBe(true);
   });
 
-  // Feature: features/authorization.md item 7 — the Slack directory behind
+  // Feature: docs/reference/specs/authorization.md item 7 — the Slack directory behind
   // the stamp: `conversations.info` decides a `slack:C…` channel's visibility, so
   // a run in a PUBLIC channel is readable by every actor (`member-of`'s public
   // half) while a private channel's or a DM's stays grants-only; one Slack call
@@ -6013,7 +6013,7 @@ describe("run history write path", () => {
     const rec = await store.get("run-h");
     expect(rec).not.toBeNull();
     expect(rec!.status).toBe("completed");
-    // The record carries the window's opening (features/tracing.md): the same
+    // The record carries the window's opening (docs/reference/specs/tracing.md): the same
     // `receivedAt` the registry row has, so every reader's window starts there.
     expect(rec!.receivedAt).toBeDefined();
     expect(rec!.receivedAt).toBe(registry.getById("run-h")!.receivedAt);
@@ -6021,7 +6021,7 @@ describe("run history write path", () => {
     expect(rec!.storedEventCount).toBe(rec!.events.length);
     expect(rec!.eventCount).toBe(rec!.events.length);
     expect(rec!.truncated).toBe(false);
-    expect(rec!.schema).toBe(2); // the stream carries spans, never `turn` events (features/tracing.md)
+    expect(rec!.schema).toBe(2); // the stream carries spans, never `turn` events (docs/reference/specs/tracing.md)
     expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input", "answer"]);
     expect(textEventsOf(rec!.events)[1].text).toBe("answer");
     expect(rec!.channelId).toBe("slack:CX");
@@ -6079,7 +6079,7 @@ describe("run history write path", () => {
     expect(rec!.diagnosis.truncatedInput).toBe(true);
   });
 
-  it("an inline `friction report` run is persisted like an agent run: agent `command`, the caller's identity, status from `ok`, events [input, answer] — the `http:cron` identity holds `friction:read` (a machine identity's text command needs the grant its tool call would, features/authorization.md)", async () => {
+  it("an inline `friction report` run is persisted like an agent run: agent `command`, the caller's identity, status from `ok`, events [input, answer] — the `http:cron` identity holds `friction:read` (a machine identity's text command needs the grant its tool call would, docs/reference/specs/authorization.md)", async () => {
     let n = 0;
     const registry = new RunRegistry({ genId: () => `cmd-${++n}`, genToken: () => "tok" });
     const { deps, store, writer } = wired(capturingProvider(), {
@@ -6104,7 +6104,7 @@ describe("run history write path", () => {
       threadKey: "http:cron:1",
       status: "completed",
       // the root's start, the channel-visibility pair, input, run_meta, the
-      // run.command pair, answer, the post.reply pair (features/tracing.md)
+      // run.command pair, answer, the post.reply pair (docs/reference/specs/tracing.md)
       eventCount: 10,
       truncated: false,
     });
@@ -6303,7 +6303,7 @@ describe("run history write path", () => {
     expect(snapAtReply).toBeDefined();
     expect(snapAtReply!.length).toBeGreaterThan(2);
     // The record is the snapshot at finish plus the seal delta: the reply's
-    // own span end, which landed after the reply returned (features/tracing.md).
+    // own span end, which landed after the reply returned (docs/reference/specs/tracing.md).
     expect(rec!.events.slice(0, snapAtReply!.length)).toEqual(snapAtReply);
     expect(rec!.events.slice(snapAtReply!.length).map((e) => (e.type === "span_end" ? `-${e.name}` : e.type))).toEqual([
       "-post.reply",
@@ -6545,7 +6545,7 @@ describe("run history write path", () => {
   });
 });
 
-// Feature: features/command-registry.md (chat adapter) / features/routing-and-config.md
+// Feature: docs/reference/specs/command-registry.md (chat adapter) / docs/reference/specs/routing-and-config.md
 // item 10 — the registry chat parse is the LAST text-only fast path:
 // as the whole of stage A, before io.history()/recognizeOperation.
 // Since phase 4b EVERY chat command is registry-owned; nothing is reserved
@@ -6764,7 +6764,7 @@ describe("registry chat commands in the fast-path chain", () => {
   });
 });
 
-// Feature: features/reading-diff.md item 4 — a PR review run publishes ONE
+// Feature: docs/reference/specs/reading-diff.md item 4 — a PR review run publishes ONE
 // `review_artifact` reading diff into its own stream (before the answer, so it
 // lands in the run record); a coding run never does, and `off` disables it.
 describe("reading-diff artifact on review runs", () => {
@@ -6858,7 +6858,7 @@ describe("reading-diff artifact on review runs", () => {
   });
 });
 
-// Feature: features/agent-ship.md — the agent:ship pipeline: one dispatch,
+// Feature: docs/reference/specs/agent-ship.md — the agent:ship pipeline: one dispatch,
 // one card, one run record; strictly serial coding → review → fix child
 // rounds on clipped budgets; typed artifacts end to end; never a merge.
 describe("agent:ship (pipeline)", () => {
@@ -7123,7 +7123,7 @@ workspaceDir: __WORKDIR__
     );
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    // Each round's workspace was released under its own `ship.round` span (features/tracing.md item 17).
+    // Each round's workspace was released under its own `ship.round` span (docs/reference/specs/tracing.md item 17).
     expect(releases).toEqual(["ship.round", "ship.round"]);
     // PR opened from typed values: ship-named branch as head, repo default as base.
     expect(opened).toHaveLength(1);
@@ -7750,7 +7750,7 @@ workspaceDir: __WORKDIR__
     for (const t of opened) expect(Object.keys(t).sort()).toEqual(["base", "body", "headBranch", "repo", "title"]);
   });
 
-  // Feature: features/agent-ship.md item 12 — rounds are legible: typed
+  // Feature: docs/reference/specs/agent-ship.md item 12 — rounds are legible: typed
   // `ship_round` boundary events on the one stream, and an orchestrator-owned
   // round header on the card that a child's update_status cannot erase.
   /** The 2-round script (request_changes → fix → approve) the round-visibility
@@ -8311,7 +8311,7 @@ workspaceDir: __WORKDIR__
   });
 });
 
-describe("MCP tools (features/mcp-tools.md)", () => {
+describe("MCP tools (docs/reference/specs/mcp-tools.md)", () => {
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -8369,7 +8369,7 @@ describe("MCP tools (features/mcp-tools.md)", () => {
     await dispatch(deps, msg("find the login bug in linear"), io);
     expect(replies.join("\n")).toContain("3 issues match");
     // Tools + block on the first request.
-    // general's own `assistant` toolset (features/github-tools.md item 5) comes first; the bridged MCP tool rides after it.
+    // general's own `assistant` toolset (docs/reference/specs/github-tools.md item 5) comes first; the bridged MCP tool rides after it.
     const names = provider.requests[0].tools?.map((t) => t.name) ?? [];
     expect(names.at(-1)).toBe("mcp__linear__search_issues");
     expect(names).toEqual(expect.arrayContaining(["web_fetch", "github_repos", "github_issue_create"]));
@@ -8384,7 +8384,7 @@ describe("MCP tools (features/mcp-tools.md)", () => {
     expect(JSON.stringify(provider.requests[1].messages)).toContain("LINEAR RESULT for login bug");
     expect(JSON.stringify(provider.requests[1].messages)).toContain("UNTRUSTED CONTENT");
     // The run stream carries the remote call as an `mcp.<server>.<tool>` span
-    // under the tool call's own span, between the generic pair (features/tracing.md
+    // under the tool call's own span, between the generic pair (docs/reference/specs/tracing.md
     // — the legacy `mcp_tool_use` event is reader-only).
     const events = [...runIds].flatMap((id) => registry.snapshotById(id)?.events ?? []);
     const call = events.findIndex((e) => e.type === "tool_call");
@@ -8445,13 +8445,13 @@ describe("MCP tools (features/mcp-tools.md)", () => {
   });
 });
 
-// Feature: features/thread-admission.md — ONE live run per thread. A thread
+// Feature: docs/reference/specs/thread-admission.md — ONE live run per thread. A thread
 // reply while a run is in flight is steered into that run (its inbox; the
 // runner reads it at the next step) or refused with a pointer to the live run —
 // never started as a second, rival run in the same thread/workspace. What the
 // run never consumed is run as a fresh turn when it ends by itself, and
 // answered with a note when an operator stopped it.
-describe("thread admission (features/thread-admission.md)", () => {
+describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.mocked(makeExecutor).mockClear();
@@ -8752,7 +8752,7 @@ describe("thread admission (features/thread-admission.md)", () => {
   });
 });
 
-describe("run ledger write-through (features/run-history.md item 35)", () => {
+describe("run ledger write-through (docs/reference/specs/run-history.md item 35)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.mocked(makeExecutor).mockClear();
@@ -9986,12 +9986,12 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
   });
 });
 
-// Feature: features/tracing.md — the no-gaps test. Every awaited fake runs
+// Feature: docs/reference/specs/tracing.md — the no-gaps test. Every awaited fake runs
 // under a `span(fn)` (a `null` span is a gap), the clock advances only when a
 // fake settles, and the window then partitions into exactly the ticks each
 // bucket's spans spent: overhead is the ticks under uncounted spans that no
 // counted span covers (none on these paths) plus the background-only time.
-describe("no gaps: every awaited step runs inside a span (features/tracing.md)", () => {
+describe("no gaps: every awaited step runs inside a span (docs/reference/specs/tracing.md)", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.mocked(makeExecutor).mockClear();

@@ -1,4 +1,4 @@
-// The ledger's decisions (features/run-history.md items 28–31), pure. The
+// The ledger's decisions (docs/reference/specs/run-history.md items 28–31), pure. The
 // Durable Object applies them inside one transaction; the in-memory ledger
 // applies them in tests; both agree because this is the only copy.
 

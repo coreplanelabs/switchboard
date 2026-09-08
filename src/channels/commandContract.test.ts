@@ -26,7 +26,7 @@ import { createRunsService } from "../core/runsService.js";
 import { createCommandHttpHandler } from "./commandHttp.js";
 import { handleMcpRequest } from "./mcp.js";
 
-// Feature: features/command-registry.md — the SHARED ADAPTER CONTRACT. One
+// Feature: docs/reference/specs/command-registry.md — the SHARED ADAPTER CONTRACT. One
 // fixture (a live run with a `tok-` capability token and a
 // persisted run, the friction ledger served from the same store, and a resident
 // registry stub) is driven through every adapter; each row must hand back the

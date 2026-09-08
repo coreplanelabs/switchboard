@@ -9,7 +9,7 @@ import {
   sameCommit,
 } from "./liveGate.js";
 
-// features/slack-channel.md item 8 — deployed ≠ live: `deploy:all` exits 0 for
+// docs/reference/specs/slack-channel.md item 8 — deployed ≠ live: `deploy:all` exits 0 for
 // the bot only once `/healthz` is answered by the NEW container (not draining,
 // `build.commit` == the deployed commit). Without the gate the script says
 // `deployed` while the old container is still draining runs

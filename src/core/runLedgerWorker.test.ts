@@ -4,7 +4,7 @@ import { buildRunLedger, WorkerRunLedger } from "./runLedgerWorker.js";
 import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 
-// The Worker client (features/run-history.md item 28): routes, bodies, the
+// The Worker client (docs/reference/specs/run-history.md item 28): routes, bodies, the
 // step write's order (transcript before record), fenced answers as results,
 // and the same error classes as the run store.
 

@@ -1,4 +1,4 @@
-// The pr-review module's OWN input contract (features/reading-diff.md item 6).
+// The pr-review module's OWN input contract (docs/reference/specs/reading-diff.md item 6).
 //
 // This folder is deliberately self-contained — no imports from the app's lib/,
 // pages/, or the runs domain — so the whole module can be lifted into another

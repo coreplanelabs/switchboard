@@ -2,7 +2,7 @@
 // resource, retrieved by keyword+recency and injected as a dedicated advisory
 // context block before the model turn. The READ path sits behind a flag
 // (default off → zero behavior change); the write/reflection path and the
-// durable Worker store hang off the same interface. See features/memory.md and
+// durable Worker store hang off the same interface. See docs/reference/specs/memory.md and
 // docs/decisions/0017-memory-off-by-default.md.
 
 /** A distilled, self-contained memory record. Never a raw transcript — those

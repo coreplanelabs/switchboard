@@ -16,7 +16,7 @@ import {
 } from "./affected.js";
 import { WORKER_SPECS as WORKERS, type WorkerName } from "./plan.js";
 
-// Feature: features/release-and-deploy.md items 4–7 — which Workers a release
+// Feature: docs/reference/specs/release-and-deploy.md items 4–7 — which Workers a release
 // deploys is DERIVED from the tree: each Worker's base is the commit it serves,
 // its inputs are its bundle's import closure + its directory + its production
 // dependencies (+ the bot's image sources), inert paths are an explicit list,
@@ -127,7 +127,7 @@ const BASE_TREE: Tree = {
   "deploy/cloudflare-resident/wrangler.jsonc": '{ "name": "switchboard-resident" }',
   "deploy/cloudflare-resident/Dockerfile": "FROM docker.io/cloudflare/sandbox:0.13.0\n",
   "docs/how-to/x.md": "# x\n",
-  "features/execution.md": "# spec\n",
+  "docs/reference/specs/execution.md": "# spec\n",
   "src/core/drain.test.ts": "test\n",
 };
 
@@ -185,7 +185,7 @@ describe("classifyPath", () => {
       "vitest.config.ts",
       "docs/how-to/x.md",
       "docs/.vitepress/config.ts",
-      "features/execution.md",
+      "docs/reference/specs/execution.md",
       "README.md",
       "deploy/cloudflare-resident/README.md",
       ".github/workflows/ci.yml",
@@ -590,7 +590,7 @@ describe("computeAffected", () => {
   it("docs, specs and tests alone deploy nothing", async () => {
     const head = withChanges({
       "docs/how-to/x.md": "# y\n",
-      "features/execution.md": "# spec 2\n",
+      "docs/reference/specs/execution.md": "# spec 2\n",
       "src/core/drain.test.ts": "test 2\n",
       ".github/workflows/ci.yml": "name: ci\n",
       "CHANGELOG.md": "## 0.2.0\n",

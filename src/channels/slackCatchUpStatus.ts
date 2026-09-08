@@ -1,4 +1,4 @@
-// Catch-up observability (features/slack-channel.md item 7). Without it the
+// Catch-up observability (docs/reference/specs/slack-channel.md item 7). Without it the
 // reconnect catch-up can be a silent no-op indefinitely: a bot token that
 // lacks `channels:read`/`groups:read` gets `missing_scope` from
 // `users.conversations`, the runner logs one line to container stdout — which

@@ -1,4 +1,4 @@
-// The resident's step vocabulary (features/tracing.md item 15): every command
+// The resident's step vocabulary (docs/reference/specs/tracing.md item 15): every command
 // the resident Worker runs is named here, and only here. The Worker's runners
 // (`runOk`, `gitWithCred`, `buildUserRun`, `restoreExtracted` in
 // deploy/cloudflare-resident/worker.ts) take a `ResidentStepName`, so a step

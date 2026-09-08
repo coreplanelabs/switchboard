@@ -4,7 +4,7 @@ import { internalHosts, type InternalHosts } from "./internalHosts.js";
 import { formatTraceparent } from "./traceparent.js";
 import type { Span } from "./types.js";
 
-// One outbound HTTP call as a span (features/tracing.md item 21): `http.client`
+// One outbound HTTP call as a span (docs/reference/specs/tracing.md item 21): `http.client`
 // under the caller's span, log-only, ending at the response headers — the body
 // is the caller's to read under its own deadline. The span carries the host,
 // the caller's closed-table route, the method and the status; never a header,

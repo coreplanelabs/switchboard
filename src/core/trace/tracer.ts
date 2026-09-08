@@ -1,4 +1,4 @@
-/** The one production `Tracer` (features/tracing.md).
+/** The one production `Tracer` (docs/reference/specs/tracing.md).
  *
  *  Pinned semantics, each with a test:
  *  - `span(fn)` invokes `fn` synchronously and ends the child in `finally`:

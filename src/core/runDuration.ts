@@ -1,4 +1,4 @@
-/** The one definition of a run's duration (features/tracing.md; live-view item
+/** The one definition of a run's duration (docs/reference/specs/tracing.md; live-view item
  *  22). Every surface that prints one — the run page header and timeline lede,
  *  the runs index row, `runs list`, the history seed, the Slack card — calls
  *  this, so no two of them can disagree.

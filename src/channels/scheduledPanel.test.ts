@@ -36,7 +36,7 @@ export const FIXTURE_SCHEDULES: readonly ScheduleDef[] = [
 ];
 import { buildScheduledRows, firingDetailSummary, formatRelative, type FiringsState } from "./scheduledPanel.js";
 
-// Feature: features/live-view.md item 14: the /runs "Scheduled" panel —
+// Feature: docs/reference/specs/live-view.md item 14: the /runs "Scheduled" panel —
 // what is armed, next fire (computed), last fire + outcome, link to the run.
 // Rendering lives in web/src/pages/ScheduledPage.vue (tested there); these
 // tests own the pure row model both sides share.
@@ -94,7 +94,7 @@ describe("buildScheduledRows", () => {
     });
   });
 
-  it("carries the firing's trace id when the recorder stored one, and omits the key otherwise (features/tracing.md item 22)", () => {
+  it("carries the firing's trace id when the recorder stored one, and omits the key otherwise (docs/reference/specs/tracing.md item 22)", () => {
     const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
     const [withTrace] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ traceId })] }, [], NOW);
     expect(withTrace.last?.traceId).toBe(traceId);

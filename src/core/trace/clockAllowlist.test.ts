@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — the clock ratchet: the allowlist of direct
+// Feature: docs/reference/specs/tracing.md — the clock ratchet: the allowlist of direct
 // wall-clock reads can only shrink, and the ESLint rule and the scanner agree
 // on what a read is.
 import { readFileSync } from "node:fs";
@@ -57,7 +57,7 @@ describe("clock ratchet", () => {
     const current = scan(ROOT);
     expect(allowlistProblems(current, listed)).toEqual([]);
     expect(current).toEqual(listed);
-    // The ratchet reached zero (features/tracing.md item 8): nothing is allowed a direct read.
+    // The ratchet reached zero (docs/reference/specs/tracing.md item 8): nothing is allowed a direct read.
     expect(listed).toEqual({});
     // the problem report names both directions
     expect(allowlistProblems({ "a.ts": 2 }, { "a.ts": 1, "b.ts": 1 })).toEqual([

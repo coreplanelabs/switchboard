@@ -1,4 +1,4 @@
-// Sandbox activity keepalive (features/execution.md item 2): one in-flight
+// Sandbox activity keepalive (docs/reference/specs/execution.md item 2): one in-flight
 // exec never outlives the container's activity timeout.
 //
 // On @cloudflare/containers 0.0.28 the base class kept an activity clock that

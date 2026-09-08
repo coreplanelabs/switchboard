@@ -10,7 +10,7 @@ import tseslint from "typescript-eslint";
 import vueParser from "vue-eslint-parser";
 import { CLOCK_BAN_EXEMPT, CLOCK_BAN_FILES, CLOCK_READS } from "./src/core/trace/clockReads.mjs";
 
-// The clock ratchet (features/tracing.md item 8): production code reads the wall
+// The clock ratchet (docs/reference/specs/tracing.md item 8): production code reads the wall
 // clock only through the injected `clock()` — `src/core/trace/clock.ts` and the
 // web's `wallClock.ts` are the two files that touch `Date`. The allowlist that
 // once exempted files still reading directly is empty; `clock-ban` applies

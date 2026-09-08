@@ -1,4 +1,4 @@
-/** The card sink (features/tracing.md): while a run is still setting up, the
+/** The card sink (docs/reference/specs/tracing.md): while a run is still setting up, the
  *  Slack card's title shows which setup step is running. The sink maps each
  *  streamed `dispatch.*` start to a display label (the table ships with the
  *  readers) and clears it when `run.agent` starts; it observes nothing until a

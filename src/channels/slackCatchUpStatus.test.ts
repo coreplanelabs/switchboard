@@ -8,7 +8,7 @@ import {
   resetCatchUpStatus,
 } from "./slackCatchUpStatus.js";
 
-// Feature: features/slack-channel.md item 7 — the reconnect catch-up's last
+// Feature: docs/reference/specs/slack-channel.md item 7 — the reconnect catch-up's last
 // outcome and the bot token's missing scopes are observable without container
 // logs: a token missing `channels:read`/`groups:read` makes the scan a silent
 // no-op — `users.conversations` answers `missing_scope` and the only trace is

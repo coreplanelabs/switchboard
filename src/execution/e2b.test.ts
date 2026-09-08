@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { E2BExecutor } from "./e2b.js";
 
-// Feature: features/execution.md item 11 — per-call bash timeout on the E2B
+// Feature: docs/reference/specs/execution.md item 11 — per-call bash timeout on the E2B
 // path: ExecOptions.timeoutMs (already clamped by the tool layer, re-clamped
 // here defensively) is passed to the SDK's commands.run, and the SDK's
 // TimeoutError renders as exit 124 naming the limit and the timeoutMs knob.
@@ -26,7 +26,7 @@ function e2bWith(
 
 const OK = { stdout: "ok", stderr: "", exitCode: 0 };
 
-// Feature: features/execution.md item 5 — the credential is resolved per
+// Feature: docs/reference/specs/execution.md item 5 — the credential is resolved per
 // command on this path too: the micro-VM's creation-time env would otherwise
 // carry the token minted for the thread's FIRST command forever.
 describe("E2BExecutor credential freshness", () => {

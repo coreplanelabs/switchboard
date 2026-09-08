@@ -1,5 +1,5 @@
 // The resident keeps a thread binding after eviction by design
-// (features/resident-repos.md item 23): the ref stays sticky for the next
+// (docs/reference/specs/resident-repos.md item 23): the ref stays sticky for the next
 // attach. A load run that attaches fifty synthetic threads therefore leaves
 // fifty evicted rows on the resident's detail page forever. `POST /debug
 // {op: "purge-bindings", prefix}` (item 60) deletes exactly the bindings a
@@ -13,7 +13,7 @@ export interface PurgeableBinding {
 
 export type PurgeDecision = { ok: true; purge: string[]; keptLive: string[] } | { ok: false; error: string };
 
-/** Thread-key namespaces real channels mint (features/http-ingress.md item 1,
+/** Thread-key namespaces real channels mint (docs/reference/specs/http-ingress.md item 1,
  *  slack, mcp, the CLI). A purge is for synthetic keys only. */
 const PRODUCTION_NAMESPACES = new Set(["slack", "http", "mcp", "cli"]);
 

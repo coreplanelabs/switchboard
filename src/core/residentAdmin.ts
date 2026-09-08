@@ -30,7 +30,7 @@ export interface ResidentAdminClient {
    *  onboarded) — what the onboard/rebuild follow-up polls. */
   status(resource: string): Promise<ResidentAdminResponse>;
   /** The same client bound to one span: every call the view makes is an
-   *  `http.client` child of it (features/tracing.md item 24). Optional so a
+   *  `http.client` child of it (docs/reference/specs/tracing.md item 24). Optional so a
    *  test double stays a plain object; a command uses a client without the
    *  view as is. */
   withSpan?(span: Span): ResidentAdminClient;

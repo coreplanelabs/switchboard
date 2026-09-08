@@ -18,7 +18,7 @@ import {
   type ResidentAdminClient,
 } from "./residentAdmin.js";
 
-// Feature: features/resident-repos.md (item 32) — the bot's client for the
+// Feature: docs/reference/specs/resident-repos.md (item 32) — the bot's client for the
 // resident Worker's admin routes, its config-driven construction, and the two
 // validators every repo surface shares.
 
@@ -144,7 +144,7 @@ describe("makeResidentAdminClient (real fetch client)", () => {
   });
 });
 
-// Feature: features/resident-repos.md item 62 — the admin client's bodies
+// Feature: docs/reference/specs/resident-repos.md item 62 — the admin client's bodies
 // reach Slack replies (`repo list`, `repo rebuild --dry-run`), so they cross the
 // same parse-time sanitizer as the operator client.
 describe("makeResidentAdminClient sanitizes resident text at the parse (item 62)", () => {
@@ -198,7 +198,7 @@ describe("makeResidentAdminClient sanitizes resident text at the parse (item 62)
   });
 });
 
-// features/tracing.md item 24: a command binds the admin client to its span;
+// docs/reference/specs/tracing.md item 24: a command binds the admin client to its span;
 // every call the view makes is an `http.client` child with the route literal.
 describe("makeResidentAdminClient trace context", () => {
   afterEach(() => {
@@ -246,7 +246,7 @@ describe("makeResidentAdminClient trace context", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 16 — the Special Case a process
+// Feature: docs/reference/specs/routing-and-config.md item 16 — the Special Case a process
 // without residents is wired with: every route answers 503 with the reason.
 describe("NullResidentAdminClient — the admin plane of a process without residents", () => {
   it("every route answers 503 with the configured reason (the no-resident sentence by default); withSpan is itself; nothing is fetched", async () => {

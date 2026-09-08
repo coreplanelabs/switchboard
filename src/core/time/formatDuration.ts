@@ -1,4 +1,4 @@
-/** The one duration formatter (features/tracing.md). Three styles, one place:
+/** The one duration formatter (docs/reference/specs/tracing.md). Three styles, one place:
  *
  *  - `precise` — a single measured step: `800ms`, `1.3s`, `5m 04s`.
  *  - `clock`   — a stopwatch reading that ticks: `0s`, `38s`, `4m 12s`, `1h 03m`;

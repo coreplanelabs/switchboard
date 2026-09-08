@@ -64,7 +64,7 @@ export interface Scope {
    */
   instructions?: string;
   /**
-   * External MCP servers this scope contributes to runs (features/mcp-tools.md
+   * External MCP servers this scope contributes to runs (docs/reference/specs/mcp-tools.md
    * items 11–17), by name. Runs see the UNION of the org (`defaults`), channel,
    * and user tiers; a name present in more than one tier resolves to the
    * highest-trust tier (org > channel > user) — the opposite of the other
@@ -83,7 +83,7 @@ export interface AppConfig {
   /**
    * The GitHub organization (or user) this installation serves — the account
    * its GitHub App is installed on. Required: it names the shared memory scope
-   * (`org:<organization>`, features/memory.md item 4) and the About block every
+   * (`org:<organization>`, docs/reference/specs/memory.md item 4) and the About block every
    * model run carries (routing-and-config item 11). The code never assumes one.
    */
   organization: string;
@@ -96,13 +96,13 @@ export interface AppConfig {
      *  definition's effort, else the provider's default */
     efforts?: Record<string, Effort>;
     maxTokens?: number;
-    /** Org-wide MCP servers pinned by the operator (features/mcp-tools.md item 11). */
+    /** Org-wide MCP servers pinned by the operator (docs/reference/specs/mcp-tools.md item 11). */
     mcpServers?: Record<string, McpServerEntry>;
   };
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
   /**
-   * The one authorization shape (features/authorization.md item 9; see
+   * The one authorization shape (docs/reference/specs/authorization.md item 9; see
    * docs/decisions/0007-authorization-policy-table.md): actor id (`slack:U…`,
    * `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
    * `access:svc:<cn>`, `schedule:<name>`) → `{ actions, channels, repos }`, each
@@ -127,21 +127,21 @@ export interface AppConfig {
   /**
    * Cross-session self-learning memory. Absent or `enabled:
    * false` (the default) → the dispatcher uses a NullMemoryStore and model
-   * input is byte-identical to memory-off. See features/memory.md.
+   * input is byte-identical to memory-off. See docs/reference/specs/memory.md.
    */
   memory?: MemoryConfig;
   /**
    * Self-improvement proposals: where `friction propose` files
    * issues and how it clusters. Absent → every run's diagnosis still lands in
    * run history, but `friction propose` refuses until `repo` is set.
-   * See features/self-improvement.md.
+   * See docs/reference/specs/self-improvement.md.
    */
   selfImprovement?: SelfImprovementConfig;
   /**
    * Scheduled jobs: where the Worker shim's cron firings are recorded
    * (the state Worker's ScheduleDO) so the /runs "Scheduled" panel can show last
    * fire / outcome / run. Absent → the panel lists the schedules without firing
-   * history. See features/live-view.md item 14.
+   * history. See docs/reference/specs/live-view.md item 14.
    */
   schedules?: SchedulesConfig;
   /**
@@ -151,7 +151,7 @@ export interface AppConfig {
    */
   costs?: unknown;
   /**
-   * Dashboard authentication (features/access-gate.md, plan D5): which
+   * Dashboard authentication (docs/reference/specs/access-gate.md, plan D5): which
    * credential gates `/runs*`, `/residents*`, `/costs*`, `/mcp/connect/*` and
    * `/api/*` — `auth: access | token | none`, plus the `token` strategy's `env`
    * (default `DASHBOARD_TOKEN`) and `actor` (`access:<name>`). Absent → `access`
@@ -162,10 +162,10 @@ export interface AppConfig {
   dashboard?: DashboardConfig;
   /** Review-run behavior: the reading-diff artifact's provider switch
    *  (`git` | `meat` | `off`; env `SWITCHBOARD_READING_DIFF` overrides).
-   *  See features/reading-diff.md. */
+   *  See docs/reference/specs/reading-diff.md. */
   review?: { readingDiff?: import("./core/readingDiff.js").ReadingDiffConfig };
   /**
-   * agent:ship pipeline caps (features/agent-ship.md item 8): `maxRounds`
+   * agent:ship pipeline caps (docs/reference/specs/agent-ship.md item 8): `maxRounds`
    * review rounds (default 3) and `maxMinutes` of pipeline wall clock
    * (default 120) — whichever hits first ends the loop, and each child round
    * runs its own agent budget clipped to the remaining pipeline time.
@@ -178,25 +178,25 @@ export interface AppConfig {
    * Persistent run history. Absent → history is OFF: finished runs stay
    * live-only, as before. `store: "file"` is an explicit host-disk opt-in;
    * otherwise `worker` names the RunHistoryDO on the state Worker. Retention
-   * is `retentionDays` / `maxRuns` / `maxBytes`. See features/run-history.md.
+   * is `retentionDays` / `maxRuns` / `maxBytes`. See docs/reference/specs/run-history.md.
    */
   runHistory?: RunHistoryConfig;
   /**
    * Where chat-set runtime overrides (`config set`, `config instructions`, …)
-   * persist (features/routing-and-config.md item 12). Absent → the JSON file
+   * persist (docs/reference/specs/routing-and-config.md item 12). Absent → the JSON file
    * (`data/overrides.json`; ephemeral on Cloudflare Containers). `worker`
    * names the ConfigDO on the state Worker — the production choice; the bearer
    * comes from `tokenEnv` (default `MEMORY_TOKEN`). Validated at load.
    */
   runtimeOverrides?: { worker?: { baseUrl: string; tokenEnv?: string } };
   /**
-   * Span log verbosity (features/tracing.md): `roots` prints one JSON line per
+   * Span log verbosity (docs/reference/specs/tracing.md): `roots` prints one JSON line per
    * root span (a request, a cron firing); `slow` adds every span of 1 s or
    * more. Absent → `roots`. Never text, summary or output on a line.
    */
   tracing?: TracingConfig;
   /**
-   * External MCP servers as agent tools (features/mcp-tools.md item 11):
+   * External MCP servers as agent tools (docs/reference/specs/mcp-tools.md item 11):
    * `servers[]` of `{ name, url, auth?: { type: bearer, tokenEnv }, agents? }`.
    * Parsed and validated by `parseMcpConfig` (src/mcp/config.ts) at startup —
    * the bearer is read from the environment there, never stored here. Absent
@@ -234,7 +234,7 @@ export interface Overrides {
 }
 
 /**
- * Where runtime overrides live (features/routing-and-config.md item 12). Two
+ * Where runtime overrides live (docs/reference/specs/routing-and-config.md item 12). Two
  * implementations behind one seam (AGENTS.md invariant 2): `FileOverridesBacking`
  * — a JSON file, the local-dev / single-host choice — and `WorkerOverridesBacking`
  * — the `ConfigDO` on the state Worker, the production choice, because the
@@ -598,7 +598,7 @@ export class ConfigStore {
 
   /**
    * The MCP servers a run in `channelId` requested by `userId` may use
-   * (features/mcp-tools.md item 17): the union of the three tiers, highest
+   * (docs/reference/specs/mcp-tools.md item 17): the union of the three tiers, highest
    * trust first; a name that appears in a lower tier too is reported once with
    * `shadowedBy` so the run notes can say why the user's copy was ignored.
    */
@@ -994,7 +994,7 @@ function validateScopeEfforts(
 }
 
 /**
- * Every `mcpServers` map a config layer can carry (features/mcp-tools.md items
+ * Every `mcpServers` map a config layer can carry (docs/reference/specs/mcp-tools.md items
  * 11 + 14), static or stored: names are slugs, URLs http(s) and not an internal
  * address (the same guard `web_fetch` uses), agents known, `auth` known, a
  * bearer's `tokenEnv` a name — and a channel or user entry may reach the
@@ -1126,7 +1126,7 @@ function validateRestrict(raw: unknown): Restriction {
   return parsed.restrict;
 }
 
-/** `ship` caps (features/agent-ship.md item 8): both bounds enforced at load
+/** `ship` caps (docs/reference/specs/agent-ship.md item 8): both bounds enforced at load
  *  so a typo cannot silently become "no cap" (mirrors validateRunHistory). */
 function validateShip(ship: ShipConfig): void {
   if (typeof ship !== "object" || ship === null) throw new Error("config.yaml: ship must be a mapping");
@@ -1141,7 +1141,7 @@ export interface TracingConfig {
   log?: TracingLogLevel;
 }
 
-/** `tracing.log` (features/tracing.md): the two verbosity levels the log sink
+/** `tracing.log` (docs/reference/specs/tracing.md): the two verbosity levels the log sink
  *  knows; anything else is a typo, refused at load. */
 function validateTracing(t: TracingConfig): void {
   if (typeof t !== "object" || t === null) throw new Error("config.yaml: tracing must be a mapping");
@@ -1150,7 +1150,7 @@ function validateTracing(t: TracingConfig): void {
   }
 }
 
-/** `runHistory` (features/run-history.md): retention bounds are enforced
+/** `runHistory` (docs/reference/specs/run-history.md): retention bounds are enforced
  *  at load so a typo cannot silently become "keep nothing"; the Worker URL must
  *  be https: because the bearer rides every request. */
 function validateRunHistory(rh: RunHistoryConfig): void {

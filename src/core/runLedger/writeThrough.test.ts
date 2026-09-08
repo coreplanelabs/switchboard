@@ -13,7 +13,7 @@ import {
   type OpenRunRequest,
 } from "./writeThrough.js";
 
-// The write-through (features/run-history.md item 35): what a dispatched run
+// The write-through (docs/reference/specs/run-history.md item 35): what a dispatched run
 // leaves in the ledger while it runs, and the Phase 2 rule that a refused or
 // failed write detaches the run (one warning) without changing what it does —
 // except the finish record, which always lands somewhere.
@@ -792,7 +792,7 @@ describe("finishing and finish", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 16 — the Null Object a process
+// Feature: docs/reference/specs/routing-and-config.md item 16 — the Null Object a process
 // without a ledger is wired with: the dispatcher claims, steers and hands off
 // unconditionally and every answer is the one an untracked run gets.
 describe("NullLedgerWriteThrough — the write-through of a process without a ledger", () => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { durationTone, heatStyle, heatT, isTimedOutExit } from "./durationTone";
 
-// The duration heat scale (features/live-view.md item 24): quiet below the
+// The duration heat scale (docs/reference/specs/live-view.md item 24): quiet below the
 // floor, a monotonic amber→red ramp to the ceiling, and a categorical
 // over-budget state that no duration can reach on its own.
 

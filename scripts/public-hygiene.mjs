@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The public-hygiene ratchet (features/public-hygiene.md). The public tree
+// The public-hygiene ratchet (docs/reference/specs/public-hygiene.md). The public tree
 // carries no imprint of the company that grew it: no company, sibling-product
 // or person names beyond the integrations the code talks to, no private
 // tracker references, no plan ids, no platform ids, no dated incident
@@ -34,7 +34,7 @@ export const CLASSES = {
   dates: /\b20\d\d-\d\d-\d\d\b/,
 };
 
-const SCOPE_PREFIXES = ["src/", "deploy/", "web/", "scripts/", "config/", "docs/", "features/", ".github/"];
+const SCOPE_PREFIXES = ["src/", "deploy/", "web/", "scripts/", "config/", "docs/", ".github/"];
 const EXCLUDED_PREFIXES = ["docs/plans/"];
 const EXCLUDED_FILES = new Set([
   "CHANGELOG.md",

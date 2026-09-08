@@ -50,7 +50,7 @@ export interface RunOptions {
   messages: ChatMessage[];
   toolContext: ToolContext;
   /** Tools that exist for THIS run only, beside the agent's static toolset —
-   *  today the bridged external MCP tools (features/mcp-tools.md item 12). A
+   *  today the bridged external MCP tools (docs/reference/specs/mcp-tools.md item 12). A
    *  name that collides with a built-in throws at run start: a remote server
    *  must never shadow `bash`. Absent → the static toolset alone. */
   extraTools?: RunnableTool[];
@@ -71,7 +71,7 @@ export interface RunOptions {
   onEvent?: (event: RunEvent) => void;
   /** injectable clock for tests; defaults to Date.now */
   now?: () => number;
-  /** The parent of this run's spans (features/tracing.md): `run.agent` is
+  /** The parent of this run's spans (docs/reference/specs/tracing.md): `run.agent` is
    *  opened under it, and every model turn (`model.turn`) and tool call
    *  (`tool.<name>`, with its `exec.*` children) under that. Absent (CLI,
    *  tests without a tracer) → the run emits no spans and is otherwise
@@ -89,7 +89,7 @@ export interface RunOptions {
    *  tests can prove the timeout path without waiting. */
   finaleTimeoutMs?: number;
   /** Follow-ups steered into this run by the dispatcher while it is in flight
-   *  (features/thread-admission.md). Drained at every step boundary the loop
+   *  (docs/reference/specs/thread-admission.md). Drained at every step boundary the loop
    *  is about to cross — never mid-step, never when the loop is ending — and
    *  appended to the next user turn. Whatever is left when the loop ends is the
    *  dispatcher's to run as a fresh turn. Absent (CLI, tests) → the loop is
@@ -97,11 +97,11 @@ export interface RunOptions {
   inbox?: FollowUpInbox;
   /** Awaited BEFORE each step's tools run, with the transcript turns appended
    *  since the previous report and the calls about to be dispatched — what the
-   *  run ledger's step write needs (features/run-history.md item 35). A throw
+   *  run ledger's step write needs (docs/reference/specs/run-history.md item 35). A throw
    *  fails the step before any tool runs: the hook decides whether a refused
    *  write may proceed, the runner never swallows it. Absent → no report. */
   onStep?: (step: StepReport) => Promise<void>;
-  /** Re-enter the loop from a reclaimed run (features/run-history.md item 37):
+  /** Re-enter the loop from a reclaimed run (docs/reference/specs/run-history.md item 37):
    *  `messages` is then the transcript the ledger held, and this carries the
    *  last step record's counters and budget plus how each call in flight at the
    *  kill is settled (`planResume`). Absent → a fresh run. */
@@ -248,7 +248,7 @@ async function runLoop(
   // A provider call under the hard signal, optionally joined with a deadline
   // (the finale's timeout). A hard stop always unwinds as HardStopError; a
   // deadline that fires first is a FinaleTimeoutError the finale caller handles.
-  // Every provider call is one `model.turn` span (features/tracing.md;
+  // Every provider call is one `model.turn` span (docs/reference/specs/tracing.md;
   // live-view item 15): the span ends the moment the provider returns, before
   // anything the completion produced is emitted, carrying the stop reason, the
   // token counts and the time to first token. A call that throws (hard stop,
@@ -316,7 +316,7 @@ async function runLoop(
   // The wall clock is the real budget; turns are a backstop. At the deadline
   // the loop ends and the agent is forced to write up findings so far. Tools
   // get the deadline too, so the bash tool can clip a command that would
-  // otherwise outlive the run (features/execution.md item 12).
+  // otherwise outlive the run (docs/reference/specs/execution.md item 12).
   const deadline = now() + (opts.resume ? opts.resume.remainingMs : opts.agent.maxMinutes * 60_000);
   const warnAt = deadline - Math.min(3 * 60_000, opts.agent.maxMinutes * 15_000);
   toolContext.remainingMs = () => deadline - now();
@@ -334,7 +334,7 @@ async function runLoop(
   // or left for the dispatcher (the loop is ending; a fresh turn runs it).
   const wouldStep = (turns: number, iteration: number) =>
     turns < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2 && now() < deadline && !control?.requested;
-  // Follow-ups steered into this run (features/thread-admission.md item 2):
+  // Follow-ups steered into this run (docs/reference/specs/thread-admission.md item 2):
   // everything pending becomes ONE text part (plus the inputs' attachments) on
   // the next user turn, each input recorded on the stream as it is consumed.
   const pendingFollowUps = () => (opts.inbox?.size ?? 0) > 0;
@@ -367,7 +367,7 @@ async function runLoop(
     return parts;
   };
   // One tool_use → its tool_result part (and the events it produces), inside
-  // its own `tool.<name>` span (features/tracing.md): the `tool_call` is
+  // its own `tool.<name>` span (docs/reference/specs/tracing.md): the `tool_call` is
   // announced inside the span so it carries the span's id, the tool runs with
   // a per-call context (the span, a tracing executor, a publisher that stamps
   // the span on what the tool publishes), and the span ends with the call's
@@ -404,7 +404,7 @@ async function runLoop(
             executor: new TracingExecutor(execTracker, callSpan, opts.backend),
             publish: (e) => emit(withSpanId(e, callSpan.id)),
             // The GitHub client as a view under this call: its requests and any
-            // token mint become `github.*` children (features/tracing.md item 23).
+            // token mint become `github.*` children (docs/reference/specs/tracing.md item 23).
             ...(toolContext.github?.api.withSpan
               ? { github: { ...toolContext.github, api: toolContext.github.api.withSpan(callSpan) } }
               : {}),
@@ -442,7 +442,7 @@ async function runLoop(
           throw err;
         }
         const message = err instanceof Error ? err.message : String(err);
-        // A full sandbox fleet (features/execution.md item 14) is capacity, not
+        // A full sandbox fleet (docs/reference/specs/execution.md item 14) is capacity, not
         // a dead sandbox: the executor already waited its bounded time, nothing
         // ran, and the tracker did not count it — so the run goes on. The model
         // is told plainly what happened and its two ways forward; the stream
@@ -543,7 +543,7 @@ async function runLoop(
   // How much of `messages` the last step report covered: the seed to begin with.
   let reportedUpTo = messages.length;
   // The text of a bookkeeping-only turn (every tool_use is `update_status`) is
-  // held back rather than narrated (features/run-loop.md item 15): a
+  // held back rather than narrated (docs/reference/specs/run-loop.md item 15): a
   // model that answers and updates the card in one turn may be done, and the
   // forced extra turn then has nothing to say. The next completion decides —
   // empty: the held text is the answer; anything else: it was narration.
@@ -552,7 +552,7 @@ async function runLoop(
     if (heldAnswer !== undefined) emit({ type: "assistant", text: redactSecrets(heldAnswer) });
     heldAnswer = undefined;
   };
-  // Resume (features/run-history.md item 37): re-enter from a reclaimed run's
+  // Resume (docs/reference/specs/run-history.md item 37): re-enter from a reclaimed run's
   // transcript. The counters and the wall-clock budget come from its last step
   // record; the calls that were in flight at the kill are settled by the plan
   // (re-run, or answered with a synthetic result) and their results appended
@@ -673,7 +673,7 @@ async function runLoop(
 
     // Echo the assistant turn, run tools, append results as one user turn.
     messages.push({ role: "assistant", content: result.content });
-    // The step report (features/run-history.md item 35): everything appended
+    // The step report (docs/reference/specs/run-history.md item 35): everything appended
     // since the last report — so the seed plus every report is the exact
     // conversation — and the calls about to run, awaited before any of them
     // does. Its order against the tools is the contract a resume rests on.
@@ -878,7 +878,7 @@ async function finishSandboxDead(
 
 /** The text of the transcript's last assistant turn when that turn was bookkeeping only
  *  (every tool_use `update_status`) and its results are already the last user turn — the
- *  text a fresh loop over this transcript must hold (features/run-loop.md item 15). */
+ *  text a fresh loop over this transcript must hold (docs/reference/specs/run-loop.md item 15). */
 function heldTextOf(messages: readonly ChatMessage[]): string | undefined {
   const tail = messages[messages.length - 1];
   const last = messages[messages.length - 2];

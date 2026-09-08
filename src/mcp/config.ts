@@ -1,4 +1,4 @@
-// The `mcp` block of config.yaml (features/mcp-tools.md item 13). Servers
+// The `mcp` block of config.yaml (docs/reference/specs/mcp-tools.md item 13). Servers
 // themselves are NOT here — they are `mcpServers` on the config scopes
 // (`defaults`, `channels.<id>`, `users.<id>`; src/config.ts) so they layer
 // like every other setting. This block only names the deployment-level knobs:
@@ -23,7 +23,7 @@ export function parseMcpSettings(raw: unknown): McpSettings | undefined {
   const m = raw as Record<string, unknown>;
   if (m.servers !== undefined)
     throw new Error(
-      "mcp.servers moved: declare servers as `defaults.mcpServers`, `channels.<id>.mcpServers`, or `users.<id>.mcpServers` (features/mcp-tools.md item 11)",
+      "mcp.servers moved: declare servers as `defaults.mcpServers`, `channels.<id>.mcpServers`, or `users.<id>.mcpServers` (docs/reference/specs/mcp-tools.md item 11)",
     );
   const credentialKeyEnv = m.credentialKeyEnv === undefined ? DEFAULT_MCP_KEY_ENV : m.credentialKeyEnv;
   if (typeof credentialKeyEnv !== "string" || !credentialKeyEnv)

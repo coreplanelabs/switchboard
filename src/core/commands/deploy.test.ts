@@ -23,7 +23,7 @@ import {
   type DeployCommandDeps,
 } from "./deploy.js";
 
-// Feature: features/command-registry.md (phase 4b): the production deploy order
+// Feature: docs/reference/specs/command-registry.md (phase 4b): the production deploy order
 // as commands — `deploy plan` (pure, every surface) and `deploy all` (CLI only;
 // the former `npm run deploy:all`), sharing one option set so the plan you read
 // is the plan you run. The runner is injected; nothing here spawns a process.
@@ -460,7 +460,7 @@ describe("deploy.all", () => {
   });
 });
 
-// `deploy restart` (features/slack-channel.md item 8): restart the bot container
+// `deploy restart` (docs/reference/specs/slack-channel.md item 8): restart the bot container
 // without a build so a rotated secret goes live — the runner is injected.
 describe("deploy.restart", () => {
   const BEFORE = "2026-08-30T10:00:00.000Z";
@@ -885,7 +885,7 @@ describe("deploy.config", () => {
     bytes: 9007,
   };
 
-  // Feature: features/release-and-deploy.md item 14 — a profile without a state Worker has no document to push to.
+  // Feature: docs/reference/specs/release-and-deploy.md item 14 — a profile without a state Worker has no document to push to.
   it("a profile with no memory (state) Worker → `unavailable` naming the profile, and nothing is pushed", async () => {
     const p = pusher(PUSHED);
     const botOnly: LoadedProfile = {

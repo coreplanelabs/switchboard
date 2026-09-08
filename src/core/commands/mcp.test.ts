@@ -18,7 +18,7 @@ import {
 import { callerWith } from "../testing/callers.js";
 import { MCP_COMMANDS, MCP_OFF_MESSAGE, registerMcpCommands, type McpCommandDeps } from "./mcp.js";
 
-// features/mcp-tools.md items 13–15: the `mcp.*` commands are thin writes into
+// docs/reference/specs/mcp-tools.md items 13–15: the `mcp.*` commands are thin writes into
 // the config layers through the service; these tests pin the surface contract
 // — gates, codes, the render text, and that no output ever carries a credential.
 

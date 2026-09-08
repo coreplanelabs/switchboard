@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { MemoryDO } from "./worker.ts";
 
-// Feature: features/memory.md — the Memory Worker: the durable
+// Feature: docs/reference/specs/memory.md — the Memory Worker: the durable
 // backend behind WorkerMemoryStore. Runs in workerd against the real
 // SQLite-backed Durable Object, so FTS5 + persistence are exercised for real.
 
@@ -38,7 +38,7 @@ describe("auth + routing", () => {
     const res = await SELF.fetch(`${BASE}/healthz`);
     expect(res.status).toBe(200);
     // `features` lets the bot's boot probe see which routes this deploy carries;
-    // `build` names the commit the deploy injected (features/execution.md item 13) —
+    // `build` names the commit the deploy injected (docs/reference/specs/execution.md item 13) —
     // this bundle carries no `--define`, so it must say `unknown` rather than break.
     expect(await res.json()).toEqual({
       ok: true,
@@ -251,7 +251,7 @@ describe("write → retrieve round trip", () => {
   });
 });
 
-// Feature: features/memory.md §24 — human controls: /list + /forget.
+// Feature: docs/reference/specs/memory.md §24 — human controls: /list + /forget.
 describe("list / forget (human controls)", () => {
   it("/list returns the scope's ACTIVE records newest first, capped at limit, without bumping usage", async () => {
     const s = scope();
@@ -417,7 +417,7 @@ describe("dedup / supersede (shared engine rules)", () => {
   });
 });
 
-// Feature: features/memory.md — per-scope cap: applied inside the write
+// Feature: docs/reference/specs/memory.md — per-scope cap: applied inside the write
 // transaction; evicted rows are soft-deleted and hidden from retrieve + list.
 describe("per-scope cap", () => {
   it("an over-cap write evicts the least recently used records down to the cap and reports `evicted`", async () => {
@@ -456,7 +456,7 @@ describe("per-scope cap", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Feature: features/memory.md §15/§17/§18 — SQL/FTS efficiency.
+// Feature: docs/reference/specs/memory.md §15/§17/§18 — SQL/FTS efficiency.
 // These tests reach inside the DO (runInDurableObject) to observe what the
 // route surface cannot: FTS row counts, index presence, and the exact SQL
 // statements a call runs (the spySql pattern shared with runs.test.ts).

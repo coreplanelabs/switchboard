@@ -11,7 +11,7 @@ import {
   type VerifyDeps,
 } from "./accessAuth.js";
 
-// Feature: features/access-gate.md — fail-closed, app-layer Cloudflare Access
+// Feature: docs/reference/specs/access-gate.md — fail-closed, app-layer Cloudflare Access
 // (SSO) verification behind the dashboard's `access` strategy. Cloudflare's edge
 // injects a signed RS256 JWT in `Cf-Access-Jwt-Assertion`; we re-verify it
 // ourselves so the dashboard refuses to serve if the edge rule is ever

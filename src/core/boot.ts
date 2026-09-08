@@ -1,4 +1,4 @@
-// The boot sequence's ledger step (features/run-history.md item 36): before
+// The boot sequence's ledger step (docs/reference/specs/run-history.md item 36): before
 // the Slack socket opens, this generation takes over every run the previous
 // one left on the ledger — an expired lease (the owner died), a handoff (the
 // owner drained), or a `finishing` row (the owner replied and died before

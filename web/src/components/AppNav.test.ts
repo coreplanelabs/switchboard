@@ -6,7 +6,7 @@ import AppNav, { navSections } from "./AppNav.vue";
 import AppShell from "./AppShell.vue";
 import { ALL_ON, mountApp } from "../testing/mount";
 
-// Feature: features/live-view.md — the site nav and the shell follow the
+// Feature: docs/reference/specs/live-view.md — the site nav and the shell follow the
 // installation's capabilities (the seed): Residents needs `residents`, Costs
 // `costs`, the docs link `docs`; Runs is always there, and so is the section
 // the viewer is on.

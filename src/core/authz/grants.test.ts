@@ -18,7 +18,7 @@ import {
 } from "./grants.js";
 import { NO_GRANTS, type Grants } from "./types.js";
 
-// Feature: features/authorization.md item 9 — one authorization shape: the
+// Feature: docs/reference/specs/authorization.md item 9 — one authorization shape: the
 // native `grants` block (what an actor holds) and `restrict` (which agents and
 // repos are closed unless granted). Baselines are what a namespace holds
 // unlisted: a Slack user the open chat commands and every unrestricted agent, a

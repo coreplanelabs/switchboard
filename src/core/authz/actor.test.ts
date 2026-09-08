@@ -10,7 +10,7 @@ import {
 } from "./grants.js";
 import { NO_GRANTS, type Grants } from "./types.js";
 
-// Feature: features/authorization.md item 1 (docs/decisions/0007-authorization-policy-table.md).
+// Feature: docs/reference/specs/authorization.md item 1 (docs/decisions/0007-authorization-policy-table.md).
 // Adapters resolve identity, never authority: `resolveActor` turns what an
 // adapter can prove into an `Actor` whose grants come from config.
 

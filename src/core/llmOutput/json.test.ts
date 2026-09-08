@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { jsonOutput, stripJsonFence } from "./json.js";
 
-// Feature: features/llm-output.md item 4 — the JSON output type: fence-strip
+// Feature: docs/reference/specs/llm-output.md item 4 — the JSON output type: fence-strip
 // (normalization, not failure), syntax vs schema failures classified with an
 // `observed` line phrased for a model re-ask, zod-typed value on ok.
 

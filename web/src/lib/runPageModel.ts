@@ -115,7 +115,7 @@ export interface NoteVm {
   text: string;
 }
 
-/** A streamed span that is a step of its own (features/tracing.md): what it
+/** A streamed span that is a step of its own (docs/reference/specs/tracing.md): what it
  *  was (the display name), how long, and whether it is still open. */
 export interface SpanRowVm {
   kind: "span";
@@ -129,7 +129,7 @@ export interface SpanRowVm {
   at?: number;
 }
 
-/** A thread follow-up steered into this run (features/thread-admission.md
+/** A thread follow-up steered into this run (docs/reference/specs/thread-admission.md
  *  item 2): every `input` after the first, rendered as its own block in the
  *  timeline at the moment the run read it — the Request's visual treatment,
  *  not a note. One run, several inputs; never a second request block. */
@@ -139,7 +139,7 @@ export interface FollowUpVm {
   input: RequestVm;
 }
 
-/** The setup spans folded under one head (features/live-view.md item 25):
+/** The setup spans folded under one head (docs/reference/specs/live-view.md item 25):
  *  `slack.receive`, every `dispatch.*` step and the attach's grafted resident
  *  steps. Open while the run is still setting up; closes on its own when the
  *  agent loop starts (so a record opens closed), unless the reader toggled it. */
@@ -221,14 +221,14 @@ export interface RunPageModel {
      *  reconnect can never restart a stopwatch. */
     lastAtWall: number | null;
     /** Retained `seq` ranges the live replay did not send (`replay_elided`
-     *  frames, features/live-view.md item 5): the record still has them. Kept
-     *  for the partition's `not loaded` term (features/tracing.md). */
+     *  frames, docs/reference/specs/live-view.md item 5): the record still has them. Kept
+     *  for the partition's `not loaded` term (docs/reference/specs/tracing.md). */
     elided: ReplayElidedRange[];
     /** Bumped on every frame the fold saw: what the timeline recomputes on. */
     traceVersion: number;
   };
   handle(event: unknown): void;
-  /** The span set so far (features/tracing.md), folded per frame from the same
+  /** The span set so far (docs/reference/specs/tracing.md), folded per frame from the same
    *  stream the log reads — the timeline's input. */
   spanSet(): SpanRecord[];
   /** The loss intervals so far — `seq` gaps (lost, or elided when a
@@ -575,7 +575,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   function handle(event: unknown): void {
     const e = event as { at?: unknown; type?: unknown } | null;
-    // Span records (features/tracing.md) are timing, not content: they never
+    // Span records (docs/reference/specs/tracing.md) are timing, not content: they never
     // move the stream's first/last stamps or the runner clock.
     const isSpan = e?.type === "span_start" || e?.type === "span_end";
     if (e && typeof e.type === "string") {
@@ -658,7 +658,7 @@ export function runnerNow(state: RunPageModel["state"], nowWall: number): number
   return state.lastAt + (nowWall - state.lastAtWall);
 }
 
-/** The header's one duration (live-view item 22; features/tracing.md): the
+/** The header's one duration (live-view item 22; docs/reference/specs/tracing.md): the
  *  whole run from `receivedAt` (falling back to `startedAt`) on the SERVER
  *  clock, projected forward arrival-relative — `serverNow` plus the browser
  *  time since the seed arrived — so the tick never subtracts a server stamp
@@ -694,7 +694,7 @@ export function createRunClock(seed: RunClockSeed, browserNowAtSeed: number): Ru
 }
 
 /** Parse an `end` frame's payload: the seal stamp and the tri-state `replyOk`
- *  (features/tracing.md). A stored stream's `end` carries `{}` — no stamp, no
+ *  (docs/reference/specs/tracing.md). A stored stream's `end` carries `{}` — no stamp, no
  *  caption; anything malformed reads the same. */
 export function parseEndFrame(data: string | undefined): { sealedAt?: number; replyOk?: boolean } {
   if (typeof data !== "string") return {};

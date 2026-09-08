@@ -10,7 +10,7 @@
  *  it refused by the reviewed-head guard (agent-review.md item 8) on a head
  *  the bot had already resolved (`RepoContext.headSha`). So `/attach` carries
  *  that head as `sha`, and a mirror whose ref tip is not that commit is
- *  fetched before the clone (features/resident-repos.md item 51). */
+ *  fetched before the clone (docs/reference/specs/resident-repos.md item 51). */
 
 export type ParsedWantSha = { sha: string | null } | { error: string };
 

@@ -6,7 +6,7 @@ import { profileUrls, type DeploymentProfile } from "./profile.js";
 
 // `deploy restart` — restart the bot container WITHOUT an image build, so a
 // rotated bot secret goes live in seconds instead of a full `deploy all --only
-// bot` (features/slack-channel.md item 8). Cloudflare's model: `wrangler secret
+// bot` (docs/reference/specs/slack-channel.md item 8). Cloudflare's model: `wrangler secret
 // put` updates the Worker's env, but a running container keeps the env it
 // started with, and a rollout only happens on an image/config change. The
 // documented restart is the Container DO calling `stop()` (SIGTERM → the bot's
@@ -62,7 +62,7 @@ export interface RestartVerdict {
 /**
  * Whether the container may be stopped now — the deploy preflight's rules
  * (deploy/cloudflare/preflight.mjs `decide`) minus the rollout-state check (a
- * restart is not a rollout). Since the handoff (features/run-history.md item
+ * restart is not a rollout). Since the handoff (docs/reference/specs/run-history.md item
  * 39) runs in flight and a drain under way are WARNINGS, not refusals: SIGTERM
  * hands every resumable run to the next generation. Fail closed on a body
  * that is not JSON or an impossible count; `force` allows those anyway, with

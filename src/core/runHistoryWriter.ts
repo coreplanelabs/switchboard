@@ -50,10 +50,10 @@ export interface RunHistoryWriter {
    *  provisional write makes no further attempt. Retries and drain accounting
    *  (`pending()`) apply to both kinds alike. `via` routes THIS record to
    *  another sink than the store — the run ledger's one-transaction `finish`
-   *  for a tracked run (features/run-history.md item 35) — with the same
+   *  for a tracked run (docs/reference/specs/run-history.md item 35) — with the same
    *  retries, accounting and final-beats-provisional rule. */
   /** `span`: the request's root, handed to the sink's `put` so a Worker store's
-   *  request is an `http.client` child of it (features/tracing.md item 24);
+   *  request is an `http.client` child of it (docs/reference/specs/tracing.md item 24);
    *  the record is written after the reply, so that child is usually late —
    *  recorded with its true times, log-only. */
   write(record: RunRecord, opts?: { provisional?: boolean; via?: RecordSink; span?: Span }): void;

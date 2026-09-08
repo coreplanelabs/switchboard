@@ -8,7 +8,7 @@ import {
   type Script,
 } from "./scriptedProvider.js";
 
-// `load:e2e` drives the bot with a model that never thinks (features/
+// `load:e2e` drives the bot with a model that never thinks (docs/reference/specs/
 // load-harness.md item 6): an OpenAI-compatible server answering the
 // `openaiCompat` provider's Chat Completions request from a fixed script. The
 // script is a state machine keyed on how many tool results the conversation

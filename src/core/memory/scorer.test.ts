@@ -14,7 +14,7 @@ import {
   tokenize,
 } from "./scorer.js";
 
-// Feature: features/memory.md — the pure retrieval scorer (keyword+recency),
+// Feature: docs/reference/specs/memory.md — the pure retrieval scorer (keyword+recency),
 // the hard budget cap, and the injected-block rendering.
 
 const NOW = 1_700_000_000_000;

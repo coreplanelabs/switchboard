@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — one duration definition for the six surfaces.
+// Feature: docs/reference/specs/tracing.md — one duration definition for the six surfaces.
 import { describe, expect, it } from "vitest";
 import { runDurationMs } from "./runDuration.js";
 

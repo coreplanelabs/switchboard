@@ -1,4 +1,4 @@
-// Feature: features/tracing.md item 19 — the resident's steps are rebuilt from
+// Feature: docs/reference/specs/tracing.md item 19 — the resident's steps are rebuilt from
 // an allowlist and grafted under the calling span, rebased and clipped; nothing
 // a resident sends can widen, rename or word a span.
 import { describe, expect, it } from "vitest";

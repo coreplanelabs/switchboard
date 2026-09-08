@@ -4,7 +4,7 @@ import { formatLocalIso } from "../../lib/format";
 import type { StepItem } from "../../lib/runPageModel";
 
 // The rows inside a step, in arrival order: call cards, quiet bookkeeping
-// lines (update_status), and loaded-skill rows (features/skills.md). Two row
+// lines (update_status), and loaded-skill rows (docs/reference/specs/skills.md). Two row
 // shapes only: calls are CARDS; everything else is a FLAT line — no borders,
 // no backgrounds — so the cards read as the work and the flat lines as asides.
 // The step's meta row owns the clock; flat rows keep their exact local time

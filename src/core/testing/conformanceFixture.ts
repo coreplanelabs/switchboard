@@ -1,5 +1,5 @@
 // The conformance suite's world, shared. `src/core/commandConformance.test.ts`
-// (features/command-registry.md item 25) drives every command × variant ×
+// (docs/reference/specs/command-registry.md item 25) drives every command × variant ×
 // surface against ONE generic in-memory fixture — `fixture()` here: a
 // `RunRegistry` with a live run, an `InMemoryRunStore` with two persisted runs,
 // a `ConfigStore` with a power user and a nobody, and `fakeDeps`, a recording
@@ -991,7 +991,7 @@ export async function mcpToolNames(f: Fixture): Promise<string[]> {
 /**
  * Whether each adapter admits that `cmd` EXISTS for the power caller — the
  * question a hidden command must answer "no" to on every surface
- * (features/capabilities.md item 3): HTTP answers `/api/<id>` with anything but
+ * (docs/reference/specs/capabilities.md item 3): HTTP answers `/api/<id>` with anything but
  * 404 (a write gets an empty body, so a refusal of the input still counts as
  * present), `tools/list` names the tool, the CLI grammar knows the words, chat
  * recognises the form. Opted-out surfaces answer "no" too — presence is what the

@@ -13,7 +13,7 @@ import { coreCommandGroups } from "../commands/all.js";
 import { callerWith } from "./callers.js";
 
 // Pure helpers for the registry-driven conformance suite
-// (src/core/commandConformance.test.ts, features/command-registry.md item 25).
+// (src/core/commandConformance.test.ts, docs/reference/specs/command-registry.md item 25).
 // Nothing here knows a command by name: every case is derived from a
 // definition's declared `args`/`options` zod schemas, so a command added to the
 // catalogue is exercised the moment it is registered. No vitest import — this
@@ -430,7 +430,7 @@ export function expectedFlags(cmd: Pick<CommandDef<unknown>, "options">): string
 // ---- docs -----------------------------------------------------------------------------------------
 
 /**
- * The command ids listed in the catalogue table of features/command-registry.md:
+ * The command ids listed in the catalogue table of docs/reference/specs/command-registry.md:
  * the first markdown table after the `## Catalogue` heading, first column,
  * backticked `<group>.<verb>` ids. Empty when the section or table is missing.
  */
@@ -652,7 +652,7 @@ export interface ConformanceMatrix {
 }
 
 // ---- authorization: the fixed actor set × every command, decided by the table --------------
-// Every gate is a policy row (features/authorization.md). The suite derives
+// Every gate is a policy row (docs/reference/specs/authorization.md). The suite derives
 // the expected admission of each command for each actor here — `authorize` over
 // the resource the command names for its happy-path input — and drives the real
 // adapters as those identities to check they agree. The roles are one `grants`

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { githubRepoInspector } from "./githubRepoInspect.js";
 
-// Feature: features/resident-repos.md item 52 — the root inspection behind
+// Feature: docs/reference/specs/resident-repos.md item 52 — the root inspection behind
 // `repo onboard`'s command detection: two REST reads with the read-scoped App
 // token; every failure is a named reason, never a guess.
 

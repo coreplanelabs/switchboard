@@ -1,4 +1,4 @@
-// The bot's side of the resident's step trace (features/tracing.md item 19):
+// The bot's side of the resident's step trace (docs/reference/specs/tracing.md item 19):
 // an Anti-Corruption Layer at the parse boundary. Whatever the resident sent
 // is rebuilt field by field from an allowlist — names sanitized, numbers
 // finite and clamped, status a literal, error text dropped — and then grafted

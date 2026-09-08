@@ -20,7 +20,7 @@ import { createTracer } from "./core/trace/tracer.js";
 import { createRunStreamSink } from "./core/trace/runStreamSink.js";
 import { recordingSink } from "./core/testing/recordingSink.js";
 
-// Feature: features/run-loop.md — turn/time budgets and forced write-up.
+// Feature: docs/reference/specs/run-loop.md — turn/time budgets and forced write-up.
 
 const fakeExecutor: Executor = {
   exec: async () => "ok",
@@ -107,7 +107,7 @@ describe("runAgent budgets", () => {
     expect(answer).toBe("all done");
   });
 
-  // Feature: features/execution.md item 12 — tools learn the run's remaining
+  // Feature: docs/reference/specs/execution.md item 12 — tools learn the run's remaining
   // wall clock (on the runner's own clock) so the bash tool can clip a command
   // that would otherwise outlive the run.
   it("hands tools the run's remaining wall clock (maxMinutes at the start)", async () => {
@@ -358,7 +358,7 @@ describe("runAgent budgets", () => {
   });
 });
 
-describe("effort (features/routing-and-config.md: resolved per run, like model)", () => {
+describe("effort (docs/reference/specs/routing-and-config.md: resolved per run, like model)", () => {
   const run = (provider: Provider, effort?: "low" | "medium" | "high") =>
     runAgent({
       provider,
@@ -524,7 +524,7 @@ describe("fail-fast on an unrecoverable sandbox", () => {
   });
 });
 
-// Feature: features/run-loop.md item 7 + features/execution.md item 14 — a full
+// Feature: docs/reference/specs/run-loop.md item 7 + docs/reference/specs/execution.md item 14 — a full
 // sandbox fleet is capacity, not a dead sandbox: two identical `Failed to
 // create session: 503` errors from a full fleet would otherwise read to the
 // breaker as a wedged sandbox and abort the run within seconds of its start.
@@ -648,7 +648,7 @@ describe("run-visibility events", () => {
     ]);
   });
 
-  // features/skills.md — tools publish through the runner's emitter: a
+  // docs/reference/specs/skills.md — tools publish through the runner's emitter: a
   // use_skill load lands in the stream as a stamped `skill_use` event between
   // its own tool_call and tool_result.
   it("a tool's ctx.publish reaches onEvent, stamped and ordered with the tool events", async () => {
@@ -849,7 +849,7 @@ describe("run-visibility events", () => {
   });
 });
 
-// Feature: features/run-visibility.md item 1 / live-view.md item 12 — the model's
+// Feature: docs/reference/specs/run-visibility.md item 1 / live-view.md item 12 — the model's
 // prose BETWEEN tool calls is a timeline event. It is emitted only when a
 // completion carries text alongside tool_use; the final text-only completion is
 // the `answer` the dispatcher publishes, so it is never duplicated here.
@@ -967,7 +967,7 @@ describe("tool results carrying non-text parts (M1b)", () => {
 });
 
 describe("run-friction signals in the event stream", () => {
-  // Feature: features/run-friction.md — the analyzer needs timestamps, an
+  // Feature: docs/reference/specs/run-friction.md — the analyzer needs timestamps, an
   // infra marker, and typed lifecycle notes. All additive to the stream.
   const go = { role: "user" as const, content: [{ type: "text" as const, text: "go" }] };
 
@@ -990,7 +990,7 @@ describe("run-friction signals in the event stream", () => {
       onEvent: (e) => events.push(e),
       now: () => t,
     });
-    // tool_call · tool_result — the model calls are spans, not events (features/tracing.md)
+    // tool_call · tool_result — the model calls are spans, not events (docs/reference/specs/tracing.md)
     expect(events.map((e) => [e.type, e.at])).toEqual([
       ["tool_call", 1000],
       ["tool_result", 1500],
@@ -1094,7 +1094,7 @@ describe("run-friction signals in the event stream", () => {
   });
 });
 
-// Feature: features/run-loop.md item 8 — run control: a soft stop wraps
+// Feature: docs/reference/specs/run-loop.md item 8 — run control: a soft stop wraps
 // up through the guaranteed finale with no further tool steps; a hard stop
 // aborts the in-flight provider/tool call immediately with no finale.
 describe("run control: soft / hard stop", () => {
@@ -1340,10 +1340,10 @@ describe("run control: soft / hard stop", () => {
   });
 });
 
-// Feature: features/tracing.md; features/live-view.md item 15 — every model
+// Feature: docs/reference/specs/tracing.md; docs/reference/specs/live-view.md item 15 — every model
 // call is one `model.turn` span, every tool call one `tool.<name>` span, the
 // whole loop one `run.agent`; the stream carries the spans, never a `turn`.
-describe("model turn and tool spans (features/tracing.md)", () => {
+describe("model turn and tool spans (docs/reference/specs/tracing.md)", () => {
   const withUsage = (r: CompletionResult, usage: CompletionResult["usage"]): CompletionResult => ({ ...r, usage });
 
   it("a provider that streams block boundaries gives the turn its block count, thinking and writing time and first token; a block still open at the return ends there (live-view item 15)", async () => {
@@ -1523,7 +1523,7 @@ describe("model turn and tool spans (features/tracing.md)", () => {
     expect(spanNames(all).slice(0, 5)).toEqual(["+run.agent", "+model.turn", "-model.turn", "assistant", "+tool.bash"]);
   });
 
-  // Feature: features/tracing.md item 23 — the GitHub client a tool sees is a view under its own span.
+  // Feature: docs/reference/specs/tracing.md item 23 — the GitHub client a tool sees is a view under its own span.
   it("a tool call's github capability is the client's withSpan view for that call's span; a client without withSpan is passed as is", async () => {
     const bound: string[] = [];
     const api = {
@@ -1668,7 +1668,7 @@ describe("model turn and tool spans (features/tracing.md)", () => {
   });
 });
 
-// Feature: features/run-loop.md — side-effect-free tools in one turn run concurrently.
+// Feature: docs/reference/specs/run-loop.md — side-effect-free tools in one turn run concurrently.
 describe("runAgent tool concurrency", () => {
   /** An executor whose ops resolve only when the test releases them, recording
    *  how many were in flight at once. */
@@ -1797,7 +1797,7 @@ describe("runAgent tool concurrency", () => {
   });
 });
 
-describe("model-call hygiene (features/run-loop.md item 11)", () => {
+describe("model-call hygiene (docs/reference/specs/run-loop.md item 11)", () => {
   it("passes the agent's cacheTtl on every provider request, including the final one", async () => {
     const provider = scripted([bashUse("t1"), text("done")]);
     await runAgent({
@@ -1843,7 +1843,7 @@ describe("model-call hygiene (features/run-loop.md item 11)", () => {
   });
 });
 
-describe("extra tools (MCP — features/mcp-tools.md item 12)", () => {
+describe("extra tools (MCP — docs/reference/specs/mcp-tools.md item 12)", () => {
   const extra = (name: string, out = "extra ran") => ({
     name,
     description: "per-run tool",
@@ -1911,13 +1911,13 @@ describe("extra tools (MCP — features/mcp-tools.md item 12)", () => {
   });
 });
 
-// Feature: features/thread-admission.md items 2–3 — a follow-up steered into a
+// Feature: docs/reference/specs/thread-admission.md items 2–3 — a follow-up steered into a
 // live run is read at the next step boundary: appended to the tool-results
 // user turn (no new step is started for it, nothing in flight is interrupted),
 // recorded as an `input` event + a `follow_up` note, and a follow-up that lands
 // while the model was writing its final answer turns that answer into narration
 // and the follow-up into the next user turn instead of ending the run.
-describe("follow-up inbox (features/thread-admission.md)", () => {
+describe("follow-up inbox (docs/reference/specs/thread-admission.md)", () => {
   const followUp = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput => ({
     text,
     userId: "slack:UB",
@@ -2204,7 +2204,7 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
   });
 });
 
-describe("step reports (features/run-history.md item 35)", () => {
+describe("step reports (docs/reference/specs/run-history.md item 35)", () => {
   it("reports each step BEFORE its tools run: the turns appended since the last report, their first index, and the calls in flight", async () => {
     const order: string[] = [];
     const reports: StepReport[] = [];
@@ -2295,7 +2295,7 @@ describe("step reports (features/run-history.md item 35)", () => {
   });
 });
 
-describe("resume (features/run-history.md item 37)", () => {
+describe("resume (docs/reference/specs/run-history.md item 37)", () => {
   const probe = (log: string[]): RunnableTool => ({
     name: "probe",
     description: "a side-effect-free read",
@@ -2461,7 +2461,7 @@ describe("resume (features/run-history.md item 37)", () => {
   });
 });
 
-describe("an answer written alongside a bookkeeping call (features/run-loop.md item 15)", () => {
+describe("an answer written alongside a bookkeeping call (docs/reference/specs/run-loop.md item 15)", () => {
   const pongWithStatus: CompletionResult = {
     content: [
       { type: "text", text: "pong" },

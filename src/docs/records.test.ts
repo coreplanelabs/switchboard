@@ -12,7 +12,7 @@ import {
   statusProblems,
 } from "./records.js";
 
-// The records gate (features/docs-site.md, the documentation rule): every
+// The records gate (docs/reference/specs/docs-site.md, the documentation rule): every
 // decision record and dated plan carries a status from the closed set, a
 // superseded record names what replaced it, and an accepted record's body is
 // frozen against the base branch — a change is a new record, never an edit.

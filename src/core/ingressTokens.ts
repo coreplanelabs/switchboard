@@ -5,7 +5,7 @@
 //   {"<raw bearer token>": {"subject": "alice", "channel": "ops"}, ...}
 // A token is a CREDENTIAL, nothing more: what its bearer may do — start a run
 // (`dispatch`), read runs, anything else — is the `grants` entry for
-// `http:<subject>` / `mcp:<subject>` in config.yaml (features/authorization.md
+// `http:<subject>` / `mcp:<subject>` in config.yaml (docs/reference/specs/authorization.md
 // item 9). Absent, empty, or malformed => an empty map. Callers treat an empty
 // map as "ingress disabled" (fail-closed) — this module never decides that, it
 // only parses. Token material is never logged here; the caller may log the reason.

@@ -19,7 +19,7 @@ import {
   trackReflection,
 } from "./reflection.js";
 
-// Feature: features/memory.md — cross-session memory WRITE path.
+// Feature: docs/reference/specs/memory.md — cross-session memory WRITE path.
 // The reflection pass distills a finished run into MemoryCandidates via one
 // cheap model call. Everything here is pure or fake-provider-driven.
 
@@ -80,7 +80,7 @@ describe("shouldReflect", () => {
     expect(shouldReflect({ toolCalls: 9, historyTurns: 9, agentName: "review" })).toBe(false);
   });
 
-  // features/agent-ship.md item 12: a ship run's report is per-PR
+  // docs/reference/specs/agent-ship.md item 12: a ship run's report is per-PR
   // findings ephemera — the exact content excluded for `review`.
   it("never qualifies a `ship` run either (agent-ship item 12)", () => {
     expect(shouldReflect({ toolCalls: 9, historyTurns: 9, agentName: "ship" })).toBe(false);
@@ -395,11 +395,11 @@ describe("reflect (one extractor call → store.write)", () => {
   });
 });
 
-// Feature: features/memory.md — reflection writes user records
+// Feature: docs/reference/specs/memory.md — reflection writes user records
 // alongside org records: the extractor tags each fact with an `audience`;
 // `user` facts land in the requesting user's scope, everything else (and the
 // summary) in the org scope; a supersede follows the superseded record's scope.
-// Feature: features/memory.md §23 — repo/channel audiences route to the
+// Feature: docs/reference/specs/memory.md §23 — repo/channel audiences route to the
 // run's repo/channel scope when present, else fall back to org; the summary
 // follows user > repo > channel > org.
 describe("reflect — repo / channel routing", () => {
@@ -622,7 +622,7 @@ describe("reflect — user scope routing", () => {
   });
 });
 
-// Feature: features/authorization.md item 8, features/memory.md §23: every
+// Feature: docs/reference/specs/authorization.md item 8, docs/reference/specs/memory.md §23: every
 // candidate's write is a policy decision —
 // `authorize(runActor, "memory:write", memory-scope{kind, key,
 // originChannelVisibility})` — and a fact from a private, DM, or unknown origin

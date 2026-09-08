@@ -71,7 +71,7 @@ RUN apt-get update \
   && command -v unsquashfs >/dev/null
 
 # Agent commands never run as root (repo code runs unprivileged, one user per
-# thread — features/resident-repos.md). The SDK's exec has no user/uid option
+# thread — docs/reference/specs/resident-repos.md). The SDK's exec has no user/uid option
 # (verified against 0.13.0-next.751.1), so the container server itself runs as
 # root and per-command demotion is done with `su -s /bin/bash workerN -c ...`
 # (verified live: exec via su lands at uid 200N). Provision a pool of

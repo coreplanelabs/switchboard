@@ -40,7 +40,7 @@ import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
 import { FIXTURE_SCHEDULES } from "./scheduledPanel.test.js";
 import { InMemoryScheduleStore, type ScheduleStore } from "../core/scheduleStore.js";
 
-// Feature: features/live-view.md — the external live-view surface. Every HTML
+// Feature: docs/reference/specs/live-view.md — the external live-view surface. Every HTML
 // route serves the web-app shell with this page's SEED embedded (rendering
 // itself is tested in web/); these tests own the server side: routing, the
 // capability-token and Access gates, the seeds' content (token rules, 404
@@ -76,7 +76,7 @@ function fixedRegistry(over: Partial<RunRegistryOptions> = {}) {
   let n = 0;
   return new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, ...over });
 }
-/** A span record (features/tracing.md): the union gains the variant with the emitters. */
+/** A span record (docs/reference/specs/tracing.md): the union gains the variant with the emitters. */
 const spanEnd = (name: string): RunEvent =>
   ({ type: "span_end", spanId: `s-${name}`, name, startedAt: 1, durationMs: 5, status: "ok" }) as unknown as RunEvent;
 const FINISHED_THEN_END = /event: finished\ndata: \{"finishedAt":\d+\}\n\nevent: end\ndata: \{"sealedAt":\d+\}\n\n$/;
@@ -438,7 +438,7 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
   });
 });
 
-// Feature: features/live-view.md item 14 — the Scheduled tab: its seed
+// Feature: docs/reference/specs/live-view.md item 14 — the Scheduled tab: its seed
 // is built from the schedule registry + the ScheduleStore's latest firings
 // before the page is written; a missing/failing store is reported as such.
 describe("scheduled tab — GET /runs/scheduled (item 18)", () => {
@@ -892,7 +892,7 @@ describe("GET /runs/:id/friction — read-only friction diagnosis", () => {
   });
 });
 
-// Feature: features/live-view.md item 10 — run control from /runs:
+// Feature: docs/reference/specs/live-view.md item 10 — run control from /runs:
 // `POST /runs/:id/stop?t=…&mode=soft|hard` behind the same token gate.
 describe("run control: POST /runs/:id/stop", () => {
   it("parseRunRoute matches the stop route", () => {
@@ -982,7 +982,7 @@ describe("run control: POST /runs/:id/stop", () => {
   });
 });
 
-// Feature: features/live-view.md — the live replay budget (item 5).
+// Feature: docs/reference/specs/live-view.md — the live replay budget (item 5).
 describe("serveEvents — live replay budget (item 5)", () => {
   const elidedFrame = (fromSeq: number, toSeq: number) =>
     `event: replay_elided\ndata: ${JSON.stringify({ fromSeq, toSeq })}\n\n`;
@@ -1084,7 +1084,7 @@ describe("serveEvents — live replay budget (item 5)", () => {
   });
 });
 
-// Feature: features/live-view.md / run-history.md — the live view on
+// Feature: docs/reference/specs/live-view.md / run-history.md — the live view on
 // `RunsService`: finished/persisted runs are seeded tokenless in
 // history mode; the index seeds active runs by default (never touching the
 // store) and everything with `?all=1`; live rows keep their capability tokens
@@ -1166,7 +1166,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
       const seed = runSeedOf(t.body()) as RunHistorySeed;
       expect(seed.mode).toBe("history");
-      // The seed is the record's stream normalized (features/tracing.md): this
+      // The seed is the record's stream normalized (docs/reference/specs/tracing.md): this
       // legacy record's tool pair gains its `tool.bash` twin, nothing else moves.
       expect(seed.events).toEqual(normalizeSpans(record("r1").events));
       expect(seed.events.filter((e) => e.type === "span_end")).toMatchObject([{ name: "tool.bash", status: "ok" }]);
@@ -1181,7 +1181,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(t.body()).not.toContain("tok-");
     });
 
-    it("a record carrying receivedAt seeds a duration that opens there — the one definition (features/tracing.md)", async () => {
+    it("a record carrying receivedAt seeds a duration that opens there — the one definition (docs/reference/specs/tracing.md)", async () => {
       const h = harness();
       const base = record("r2");
       await h.store!.put({
@@ -1709,7 +1709,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
     });
   });
 
-  // Feature: features/authorization.md items 5–7 on the HTML surface.
+  // Feature: docs/reference/specs/authorization.md items 5–7 on the HTML surface.
   // The viewer is the Access identity's actor (index.ts resolves it with the
   // same `accessActor` /api/* uses): the index lists through the actor's
   // predicate, and a tokenless read of a finished run is `authorize`d against

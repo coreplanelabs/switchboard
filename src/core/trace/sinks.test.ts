@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — the log sink's line shape and verbosity.
+// Feature: docs/reference/specs/tracing.md — the log sink's line shape and verbosity.
 import { describe, expect, it } from "vitest";
 import { createTickingClock } from "../testing/tickingClock.js";
 import { classifyError } from "./classify.js";

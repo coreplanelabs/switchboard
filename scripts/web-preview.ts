@@ -159,7 +159,7 @@ const HIST_EVENTS = [
     at: NOW - 2_350_000,
     seq: 9,
   },
-  // A thread follow-up steered into the run (features/thread-admission.md
+  // A thread follow-up steered into the run (docs/reference/specs/thread-admission.md
   // item 2): the `input` + `follow_up` note pair the runner records when it
   // drains the inbox at a step boundary.
   {
@@ -268,7 +268,7 @@ const HIST_EVENTS = [
   },
 ];
 
-/** The history run as a traced stream (features/tracing.md): the request root
+/** The history run as a traced stream (docs/reference/specs/tracing.md): the request root
  *  and the setup spans ahead of the events, the agent loop around them, the
  *  post step after — and `normalizeSpans` making the legacy `turn`s and the
  *  tool pairs their spans, exactly as the history route does. */

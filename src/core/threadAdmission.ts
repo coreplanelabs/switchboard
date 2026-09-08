@@ -1,7 +1,7 @@
 import type { DocumentAttachment, ImageAttachment } from "./types.js";
 import { systemClock } from "./trace/clock.js";
 
-// Thread admission (features/thread-admission.md): ONE live run per thread.
+// Thread admission (docs/reference/specs/thread-admission.md): ONE live run per thread.
 //
 // A thread reply that arrives while a run is already in flight in that thread
 // used to start a second, fully independent run — two agents editing the same

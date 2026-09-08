@@ -15,7 +15,7 @@ import {
 } from "./sandboxErrors.js";
 import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
 
-// Feature: features/execution.md item 14 — a full sandbox fleet is capacity,
+// Feature: docs/reference/specs/execution.md item 14 — a full sandbox fleet is capacity,
 // not a dead sandbox. When concurrent cold runs exhaust max_instances the
 // 0.3.x client throws `Failed to create session: 503`; read as an ordinary
 // in-body error, two identical ones in a row look like a wedged sandbox and
@@ -86,7 +86,7 @@ describe("the executor's bounded wait", () => {
   });
 });
 
-// Feature: features/execution.md item 14 — on 0.12.x the SDK throws a typed
+// Feature: docs/reference/specs/execution.md item 14 — on 0.12.x the SDK throws a typed
 // `ContainerUnavailableError`; after the Durable Object RPC boundary only its
 // name/message survive, so classification takes the name (or code) first and
 // the text second. `thrownShape` is the one place that reads a thrown value.
@@ -125,7 +125,7 @@ describe("isFleetBusyError / thrownShape", () => {
   });
 });
 
-// Feature: features/execution.md item 4 — a booting container is the one
+// Feature: docs/reference/specs/execution.md item 4 — a booting container is the one
 // failure the Worker still retries itself: nothing ran.
 describe("isContainerStarting", () => {
   it("recognizes the 0.12.x boot-time answer and nothing else", () => {
@@ -136,7 +136,7 @@ describe("isContainerStarting", () => {
   });
 });
 
-// Feature: features/execution.md items 3 and 6 — a failure text is never
+// Feature: docs/reference/specs/execution.md items 3 and 6 — a failure text is never
 // empty. During a Worker+image rollout a new thread's Durable Object can be
 // placed on a container still running the previous 0.3.x image; the 0.12.x
 // client turns its `{error}` 400 body into a `SandboxError`
@@ -171,7 +171,7 @@ describe("thrownText", () => {
   });
 });
 
-// Feature: features/execution.md items 6 and 9 — the legacy-container shape a
+// Feature: docs/reference/specs/execution.md items 6 and 9 — the legacy-container shape a
 // 0.12.x client produces against a 0.3.x server: `SandboxError` (the base
 // class, not a typed subclass), an empty message, no code. Matched INSIDE the
 // Durable Object, where the prototype and the `code` getter are intact, so

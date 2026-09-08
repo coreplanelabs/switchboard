@@ -34,7 +34,7 @@ import {
   type CommandHttpOptions,
 } from "./commandHttp.js";
 
-// Feature: features/command-registry.md — the generic HTTP adapter for `/api/*`
+// Feature: docs/reference/specs/command-registry.md — the generic HTTP adapter for `/api/*`
 // No per-command code: every registered command is
 // served by name; write safety and caller resolution are the adapter's only
 // logic (who may reach /api at all is the dashboard auth strategy's decision,

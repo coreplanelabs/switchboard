@@ -1,4 +1,4 @@
-// REVIEW TARGET block (features/agent-review.md item 9).
+// REVIEW TARGET block (docs/reference/specs/agent-review.md item 9).
 //
 // The dispatcher resolves the PR under review BEFORE the model turn — repo,
 // number, head branch, head commit, base branch (RepoContext) — and until now

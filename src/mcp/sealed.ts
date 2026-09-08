@@ -1,6 +1,6 @@
 import type { SealedCredential } from "./registry.js";
 
-// Credential sealing (features/mcp-tools.md item 16): AES-256-GCM under a key
+// Credential sealing (docs/reference/specs/mcp-tools.md item 16): AES-256-GCM under a key
 // the BOT holds (`MCP_CREDENTIAL_KEY`, 32 bytes base64). The state Worker
 // stores ciphertext only — a dump of the McpDO yields nothing usable without
 // the bot's secret, and the bot never writes a plaintext token anywhere but

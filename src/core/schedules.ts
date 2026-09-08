@@ -257,7 +257,7 @@ export interface ScheduleFiring {
   outcome: FiringOutcome;
   /** A short human note: the reply's first line, or the HTTP status + error. Capped. */
   detail?: string;
-  /** The shim's trace for the firing (features/tracing.md item 21), once the shim has roots. */
+  /** The shim's trace for the firing (docs/reference/specs/tracing.md item 21), once the shim has roots. */
   traceId?: string;
 }
 
@@ -367,7 +367,7 @@ export interface WatchdogSummary {
   count: number;
   /** `error` is already a message (`runWatchdog` passes rejections through `errMsg`).
    *  `disk` is the resident's last disk sample gauge (`{usedKiB, totalKiB, …}`,
-   *  features/resident-repos.md item 55) when it has one. */
+   *  docs/reference/specs/resident-repos.md item 55) when it has one. */
   results: ReadonlyArray<{
     resource: string;
     state?: unknown;

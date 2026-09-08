@@ -274,7 +274,7 @@ export async function resolveUserName(client: NameLookupClient, user: string): P
 /** A user's email (`profile.email`), present only when the app holds
  *  `users:read.email`; undefined otherwise or on any failure. Uncached: it is
  *  read once per `mcp add`/`mcp connect` to bind the connect ticket
- *  (features/mcp-tools.md item 15), never on the message path. */
+ *  (docs/reference/specs/mcp-tools.md item 15), never on the message path. */
 export async function resolveUserEmail(client: NameLookupClient, user: string): Promise<string | undefined> {
   try {
     const u = (await client.users.info({ user })).user;
@@ -345,7 +345,7 @@ export function createSlackApp(deps: CoreDeps) {
         // first so a generation that died since the last connect no longer
         // shields its cards (run-history item 36).
         await refreshForeignLiveCards();
-        // The pass is one `slack.catch_up` root on the span log (features/
+        // The pass is one `slack.catch_up` root on the span log (docs/reference/specs/
         // tracing.md item 20), its counts as attrs; a throw fails it and still
         // reaches the catch below.
         await withProcessRoot(deps, "slack.catch_up", async (root) => {
@@ -586,7 +586,7 @@ async function resolveTeamUrl(client: SlackClient): Promise<string | undefined> 
 }
 
 async function handle(deps: CoreDeps, client: SlackClient, ev: SlackEvent): Promise<void> {
-  // The request's root (features/tracing.md): our process saw the message NOW,
+  // The request's root (docs/reference/specs/tracing.md): our process saw the message NOW,
   // before the redelivery guard — a dropped redelivery is a root with one
   // child and no run. Everything the adapter does before `dispatch()` is one
   // `slack.receive` span; `dispatch()` ends the root, this finally is the
@@ -815,7 +815,7 @@ export async function fetchDocuments(
 }
 
 /** Exported for tests. */
-/** The channel IO for a run resumed after a restart (features/run-history.md
+/** The channel IO for a run resumed after a restart (docs/reference/specs/run-history.md
  *  item 38): the thread from the ledger row's `threadKey`, the requester from
  *  its meta, and the card it already has. There is no triggering event — the
  *  message that started the run was handled by the previous generation. */
@@ -842,7 +842,7 @@ export class SlackIO implements ChannelIO {
     private client: SlackClient,
     private ev: SlackEvent,
     /** `existingCard`: the status message a resumed run already has in the
-     *  thread (features/run-history.md item 38) — `status()` edits it instead
+     *  thread (docs/reference/specs/run-history.md item 38) — `status()` edits it instead
      *  of posting a second card. */
     private opts: { existingCard?: { ts: string } } = {},
   ) {}
@@ -1039,7 +1039,7 @@ export function ownsLiveCard(channel: string, ts: string): boolean {
   return liveCards.has(liveCardKey(channel, ts));
 }
 // Cards of runs another generation still holds a current lease on (the boot
-// reclaim's `liveElsewhere`, features/run-history.md item 36): a rollout
+// reclaim's `liveElsewhere`, docs/reference/specs/run-history.md item 36): a rollout
 // overlap, or a container that kept running. The orphan sweep must not close
 // them — their runs are live, just not here.
 const foreignLiveCards = new Set<string>();
@@ -1065,7 +1065,7 @@ export async function refreshForeignLiveCards(warn: (line: string) => void = con
   }
 }
 /** Close the cards of the runs a boot reclaim finished on the ledger with a
- *  terminal status other than `interrupted` (features/run-history.md item 36):
+ *  terminal status other than `interrupted` (docs/reference/specs/run-history.md item 36):
  *  their reply is in the thread, so the card says how the run ended rather
  *  than being swept as interrupted. Interrupted runs' cards are left for the
  *  sweep. Best-effort per card; a failure is logged and the rest go on. */

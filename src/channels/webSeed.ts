@@ -61,7 +61,7 @@ export interface RunLiveSeed {
    *  arrival-relative (`serverNow` + time since the seed arrived), so a live
    *  stopwatch never subtracts a server stamp from the browser's clock. */
   serverNow: number;
-  /** The run's stamps (features/tracing.md): the header's one duration opens at
+  /** The run's stamps (docs/reference/specs/tracing.md): the header's one duration opens at
    *  `receivedAt` (falling back to `startedAt`) and freezes at `finishedAt`. */
   startedAt: number;
   receivedAt?: number;
@@ -79,7 +79,7 @@ export interface RunHistorySeed {
   events: LiveFrame[];
   status?: RunStatus;
   eventCount: number;
-  /** The record's stamps (features/tracing.md). */
+  /** The record's stamps (docs/reference/specs/tracing.md). */
   startedAt: number;
   receivedAt?: number;
   finishedAt?: number;

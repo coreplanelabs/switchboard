@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildStamp, defineArgs, spawnOutcome, DEFINE_COMMIT, DEFINE_BUILT_AT } from "../../deploy/bin/build-stamp.mjs";
 import { buildId, injectedBuildStamp, resolveBuildStamp, UNKNOWN_COMMIT } from "./buildStamp.js";
 
-// Feature: features/execution.md item 13 — every Worker script reports the
+// Feature: docs/reference/specs/execution.md item 13 — every Worker script reports the
 // commit it was built from on its own /healthz, injected at deploy time. This
 // replaces a hand-edited build marker, which a deploy could forget to bump and
 // then could neither prove a deploy nor expire a stale test override.

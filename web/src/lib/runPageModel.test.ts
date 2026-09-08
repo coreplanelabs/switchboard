@@ -26,7 +26,7 @@ const input = {
   source: { channel: "dev", user: "alice", url: "https://acme.slack.com/x" },
 };
 const assistant = (text: string, at: number) => ({ type: "assistant", text, at });
-/** A model turn's timing record (features/tracing.md): the `model.turn` span end the runner emits. */
+/** A model turn's timing record (docs/reference/specs/tracing.md): the `model.turn` span end the runner emits. */
 const modelTurn = (t: {
   durationMs: number;
   at: number;
@@ -345,7 +345,7 @@ describe("notes and stops", () => {
   });
 });
 
-// Feature: features/live-view.md item 5 — a live replay that skipped retained events.
+// Feature: docs/reference/specs/live-view.md item 5 — a live replay that skipped retained events.
 describe("replay_elided frames (item 5)", () => {
   it("parseReplayElided accepts two positive integers in order and rejects everything else", () => {
     expect(parseReplayElided('{"fromSeq":1,"toSeq":1000}')).toEqual({ fromSeq: 1, toSeq: 1000 });
@@ -382,7 +382,7 @@ describe("replay_elided frames (item 5)", () => {
   });
 });
 
-// Feature: features/tracing.md — a streamed span is one row, named through the display table.
+// Feature: docs/reference/specs/tracing.md — a streamed span is one row, named through the display table.
 describe("span rows", () => {
   it("a span_start opens one row under its display name; the matching span_end closes the same row with its duration and status; a tool span opens none", () => {
     const m = model();
@@ -412,7 +412,7 @@ describe("span rows", () => {
     expect(m.state.placeholder).toBe(false);
   });
 
-  it("setup spans — slack.receive, dispatch.* and the attach's grafts — fold under one Setup head that is open while the run sets up, closes when the agent loop starts unless the reader toggled it, and never takes a run.* row (features/live-view.md item 25)", () => {
+  it("setup spans — slack.receive, dispatch.* and the attach's grafts — fold under one Setup head that is open while the run sets up, closes when the agent loop starts unless the reader toggled it, and never takes a run.* row (docs/reference/specs/live-view.md item 25)", () => {
     const m = model();
     m.handle({ type: "span_start", spanId: "r1", name: "slack.receive", at: 1_000 });
     m.handle({
@@ -559,7 +559,7 @@ describe("the run's model — badged on the pending-turn row, flagged when it sw
   });
 });
 
-describe("the `finished` frame freezes the header at the server's stamp (features/tracing.md)", () => {
+describe("the `finished` frame freezes the header at the server's stamp (docs/reference/specs/tracing.md)", () => {
   it("elapsedAt runs the one definition against the frame's finishedAt, from receivedAt when the seed has it", () => {
     expect(createRunClock({ serverNow: 1_000_000, startedAt: 940_000 }, 5_000).elapsedAt(970_000)).toBe(30_000);
     expect(
@@ -576,7 +576,7 @@ describe("the `finished` frame freezes the header at the server's stamp (feature
   });
 });
 
-describe("the `end` frame's stamps and the delivery caption (features/tracing.md)", () => {
+describe("the `end` frame's stamps and the delivery caption (docs/reference/specs/tracing.md)", () => {
   it("parseEndFrame keeps a finite positive sealedAt and a boolean replyOk, and nothing else; a stored stream's `{}` is empty", () => {
     expect(parseEndFrame('{"sealedAt":1003000,"replyOk":true}')).toEqual({ sealedAt: 1_003_000, replyOk: true });
     expect(parseEndFrame('{"sealedAt":1003000}')).toEqual({ sealedAt: 1_003_000 });
@@ -699,7 +699,7 @@ describe("live wait — what the run is waiting on, and for how long", () => {
     expect(m.pendingCall()?.id).toBe("c1");
   });
 });
-// Feature: features/live-view.md item 25 — the timeline's inputs: the span set
+// Feature: docs/reference/specs/live-view.md item 25 — the timeline's inputs: the span set
 // and the loss intervals, folded from the same frames the log reads.
 describe("span set and losses (the timeline's inputs)", () => {
   it("folds span records into one span set, keeps every frame for the loss intervals, bumps traceVersion per frame; an elided range turns a seq gap from lost into not-loaded", () => {

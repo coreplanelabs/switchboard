@@ -9,7 +9,7 @@ import {
 } from "./registry.js";
 import { systemClock } from "../core/trace/clock.js";
 
-// Where sealed MCP credentials and connect tickets live (features/mcp-tools.md
+// Where sealed MCP credentials and connect tickets live (docs/reference/specs/mcp-tools.md
 // items 15–16). The server ENTRIES are config (`Scope.mcpServers`, persisted
 // through the config store's overrides backing); only the two things that must
 // never be in a config document — ciphertext and one-time tickets — live here,

@@ -13,7 +13,7 @@ import {
 import type { RunEvent } from "./runEvents.js";
 import { MAX_EVENT_BYTES } from "./runRecord.js";
 
-// Feature: features/live-view.md — the in-memory, live-only run registry that
+// Feature: docs/reference/specs/live-view.md — the in-memory, live-only run registry that
 // backs the external live-view page. It mints an unguessable id+token per run,
 // buffers a bounded backlog so a viewer who opens the link mid-run sees what
 // already happened, fans events out to live subscribers, and evicts finished
@@ -24,7 +24,7 @@ const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", 
 const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result", tool: "bash", ok, summary });
 /** What `publish` hands back: the input event stamped with its per-run `seq`. */
 const seq = (n: number, e: RunEvent): RunEvent => ({ ...e, seq: n });
-/** A span record (features/tracing.md): the union gains the variant with the emitters. */
+/** A span record (docs/reference/specs/tracing.md): the union gains the variant with the emitters. */
 const spanEnd = (name: string): RunEvent =>
   ({ type: "span_end", spanId: `s-${name}`, name, startedAt: 1, durationMs: 5, status: "ok" }) as unknown as RunEvent;
 
@@ -63,7 +63,7 @@ describe("RunRegistry.create", () => {
     expect(a.token).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  // Feature: features/run-history.md item 37 — a resumed run keeps its identity
+  // Feature: docs/reference/specs/run-history.md item 37 — a resumed run keeps its identity
   // and its past: the ledger's run id, and the events published before the
   // restart under their original seqs, so the stream stays one contiguous record.
   it("a resume creates the run under a given id, with its original start and its earlier events replayed under their seqs; new events continue past the highest", () => {
@@ -160,7 +160,7 @@ describe("RunRegistry — backlog replay for a late subscriber", () => {
   });
 });
 
-// Feature: features/live-view.md — the replay budget (item 5).
+// Feature: docs/reference/specs/live-view.md — the replay budget (item 5).
 describe("RunRegistry.subscribe — replay budget", () => {
   const stampedBytes = (i: number) => Buffer.byteLength(JSON.stringify({ ...call(`e${i}`), seq: i }), "utf8");
 
@@ -312,7 +312,7 @@ describe("RunRegistry.finish", () => {
   });
 });
 
-// Feature: features/live-view.md item 4, features/tracing.md — finish and seal.
+// Feature: docs/reference/specs/live-view.md item 4, docs/reference/specs/tracing.md — finish and seal.
 describe("RunRegistry — finish and seal", () => {
   it("finish sends `finished` to attached subscribers and leaves them attached; the seal, later, sends `end` from its own clock read — two index upserts per run, one each", () => {
     let t = 1000;
@@ -777,7 +777,7 @@ describe("snapshot — token-gated read of a run's backlog", () => {
   });
 });
 
-// Feature: features/run-history.md — `markPersisted`: the history
+// Feature: docs/reference/specs/run-history.md — `markPersisted`: the history
 // writer confirms a run is in the durable store; the index learns it through
 // an upsert whose summary carries `persisted: true`.
 describe("RunRegistry.markPersisted", () => {
@@ -842,7 +842,7 @@ describe("RunRegistry.snapshot — record inputs", () => {
     expect(snap?.events).toHaveLength(2);
   });
 
-  it("carries receivedAt from the RunMeta onto the summary and the snapshot, and omits it when absent (features/tracing.md)", () => {
+  it("carries receivedAt from the RunMeta onto the summary and the snapshot, and omits it when absent (docs/reference/specs/tracing.md)", () => {
     const { reg } = testRegistry();
     const stamped = reg.create("x", {
       channelId: "slack:C1",
@@ -858,7 +858,7 @@ describe("RunRegistry.snapshot — record inputs", () => {
   });
 });
 
-// Feature: features/live-view.md item 10 — run control. Every run owns a
+// Feature: docs/reference/specs/live-view.md item 10 — run control. Every run owns a
 // RunControl (soft/hard stop request + a hard AbortSignal); `requestStop` is the
 // token-gated control-plane entry the /runs surface calls.
 describe("RunControl", () => {
@@ -953,7 +953,7 @@ describe("RunRegistry.requestStop — run control", () => {
   });
 });
 
-// Feature: features/run-visibility.md — the exchange in the stream: every
+// Feature: docs/reference/specs/run-visibility.md — the exchange in the stream: every
 // published event is stamped with a monotonic per-run `seq`, an event published
 // after finish() is dropped (the dispatcher must publish the answer BEFORE finishing),
 // and the label is redacted at create() so a secret in the request snippet never
@@ -998,7 +998,7 @@ describe("RunRegistry — text events, seq, label redaction", () => {
   });
 });
 
-// Feature: features/live-view.md — one backlog bounded by count AND bytes: the
+// Feature: docs/reference/specs/live-view.md — one backlog bounded by count AND bytes: the
 // registry backlog is the only per-run event store (the dispatcher's
 // separate ring is gone), so its bounds are what the friction diagnosis and the
 // live replay see. A throwing per-run subscriber is isolated like index sinks.
@@ -1044,7 +1044,7 @@ describe("RunRegistry — backlog bounds and subscriber isolation", () => {
     expect(used).toBeLessThanOrEqual(3 * stampedSize);
   });
 
-  // Feature: features/tracing.md; features/live-view.md item 2 — the protected head.
+  // Feature: docs/reference/specs/tracing.md; docs/reference/specs/live-view.md item 2 — the protected head.
   describe("the protected head", () => {
     const ctx = (n: number): RunEvent => ({ type: "context", text: "c".repeat(n) });
     const big = (n: number): RunEvent => ({ type: "tool_result", tool: "bash", ok: true, summary: "x".repeat(n) });

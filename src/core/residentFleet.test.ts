@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { NullResidentAdminClient, type ResidentAdminResponse } from "./residentAdmin.js";
 import { FLEET_REFRESH_MS, NO_FLEET, residentFleetWatcherFor, watchResidentFleet } from "./residentFleet.js";
 
-// Feature: features/routing-and-config.md item 11 — the resident cap the About
+// Feature: docs/reference/specs/routing-and-config.md item 11 — the resident cap the About
 // block names comes from the resident Worker's own listing, read in the
 // background, never a constant in the bot.
 

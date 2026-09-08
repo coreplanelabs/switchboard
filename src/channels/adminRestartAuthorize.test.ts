@@ -4,7 +4,7 @@ import { handleAdminRestartAuthorize } from "./adminRestartAuthorize.js";
 import { RESTART_SUBJECT_HEADER } from "../deploy/restart.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 
-// `POST /admin/restart/authorize` (features/slack-channel.md item 8): the Worker
+// `POST /admin/restart/authorize` (docs/reference/specs/slack-channel.md item 8): the Worker
 // shim asks the bot whether a `deploy restart` bearer's actor holds
 // `deploy:write` — the bot's config is the one grants source, the Worker only
 // holds the token map. Answers exactly what `authorizeRestart` decides.

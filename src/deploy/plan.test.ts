@@ -412,7 +412,7 @@ describe("planDeploy", () => {
   });
 });
 
-// Feature: features/release-and-deploy.md item 14 — the plan iterates the
+// Feature: docs/reference/specs/release-and-deploy.md item 14 — the plan iterates the
 // profile's Workers: an installation with only the bot is a one-step plan, the
 // bot plus the state Worker a two-step plan, and our production profile's plan
 // is byte-identical to before Workers became optional.

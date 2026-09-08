@@ -1,4 +1,4 @@
-# Third-party skills vendored into skills/<name>/SKILL.md (features/skills.md
+# Third-party skills vendored into skills/<name>/SKILL.md (docs/reference/specs/skills.md
 # items 9–10). Never edit a vendored SKILL.md by hand — edit this file and run
 # `npm run skills:sync`: it resolves each source's ref to a commit, pins it
 # here, fetches every listed file at that commit, and rewrites the vendored

@@ -40,7 +40,7 @@ export type GithubTokenScope = "write" | "read";
 // `gh pr view`/`gh pr diff` and `git clone`/checkout on a PRIVATE repo, nothing
 // that writes. contents:read → clone/checkout; pull_requests:read → PR
 // metadata + diff; issues:read → the `github_issue_list/get` tools
-// (features/github-tools.md) on the read path; metadata:read → always
+// (docs/reference/specs/github-tools.md) on the read path; metadata:read → always
 // required by GitHub.
 const READ_ONLY_PERMISSIONS = {
   contents: "read",
@@ -152,7 +152,7 @@ async function githubJson(url: string, bearer: string): Promise<unknown> {
 }
 
 /** The mint as the caller's `github.token_mint` child when it has a span
- *  (features/tracing.md item 23): `scope`, whether the cache answered, and how
+ *  (docs/reference/specs/tracing.md item 23): `scope`, whether the cache answered, and how
  *  long the token lives. Without a span the same work, unmeasured. */
 async function mintInstallationToken(scope: GithubTokenScope, span?: Span): Promise<string> {
   if (!span) return mintCore(scope);

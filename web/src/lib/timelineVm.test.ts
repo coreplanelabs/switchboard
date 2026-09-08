@@ -1,4 +1,4 @@
-// Feature: features/live-view.md item 25; features/tracing.md — the timeline's
+// Feature: docs/reference/specs/live-view.md item 25; docs/reference/specs/tracing.md — the timeline's
 // view-model: the lede closes to the header's total on every fixture, the
 // drill-down is a subset, the ranked list never prints a raw span name.
 import { describe, expect, it } from "vitest";
@@ -33,7 +33,7 @@ function sp(
   };
 }
 
-/** The worked review (features/tracing.md): 4m 12s, every bucket present. */
+/** The worked review (docs/reference/specs/tracing.md): 4m 12s, every bucket present. */
 const REVIEW: SpanRecord[] = [
   sp("root", "request", 0, 252_000, { attrs: { channel: "slack", queuedBeforeMs: 360_000 } }),
   sp("recv", "slack.receive", 0, 2_000, { parent: "root" }),

@@ -20,7 +20,7 @@ import { acceptsUndefined, type CommandDef, type CommandInput, type InvokeErrorC
 //   help     — `usageLine` / `helpText` / `catalogueText` from the definition
 //              (zod `.describe()` texts), so `runs get --help` and chat
 //              `runs help` are never hand-written.
-// Adapters call these and add transport only (features/command-registry.md).
+// Adapters call these and add transport only (docs/reference/specs/command-registry.md).
 
 export type CommandShape = Pick<CommandDef<unknown>, "id" | "args" | "options" | "describe">;
 

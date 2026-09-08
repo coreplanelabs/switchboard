@@ -27,7 +27,7 @@ import {
   type FrictionCommandDeps,
 } from "./friction.js";
 
-// Feature: features/self-improvement.md (triggers) / features/command-registry.md
+// Feature: docs/reference/specs/self-improvement.md (triggers) / docs/reference/specs/command-registry.md
 // (migration): `friction.report` and `friction.propose` as registry
 // commands — the same step the chat command has always run, now reachable on
 // every surface, with the chat gates unchanged (`report` open, `propose` =

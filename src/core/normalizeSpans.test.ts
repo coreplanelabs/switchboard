@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — the one Adapter from a run stream to its span set.
+// Feature: docs/reference/specs/tracing.md — the one Adapter from a run stream to its span set.
 import { describe, expect, it } from "vitest";
 import { createLossTracker, lossesFromStream, normalizeSpans, spansFromEvents } from "./normalizeSpans.js";
 import type { RunEvent } from "./runEvents.js";

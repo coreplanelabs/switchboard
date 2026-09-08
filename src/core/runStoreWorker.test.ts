@@ -14,7 +14,7 @@ import {
   WorkerRunStore,
 } from "./runStoreWorker.js";
 
-// Feature: features/run-history.md — the HTTPS RunStore client to the state
+// Feature: docs/reference/specs/run-history.md — the HTTPS RunStore client to the state
 // Worker's RunHistoryDO (POST /runs/put|get|list|events|delete).
 
 const NOW = 1_800_000_000_000;
@@ -231,7 +231,7 @@ describe("describeError — the cause chain survives into the warn line", () => 
   });
 });
 
-// features/tracing.md item 24: the record write hangs under the request's root
+// docs/reference/specs/tracing.md item 24: the record write hangs under the request's root
 // as an `http.client` child; the trace context rides to our own Worker.
 describe("WorkerRunStore trace context", () => {
   it("put under a span is an http.client child with route /runs/put, POST and the status, no bearer or record text; traceparent rides for the configured host; a put without a span is a plain fetch", async () => {

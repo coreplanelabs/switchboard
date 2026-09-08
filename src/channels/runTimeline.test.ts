@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createRunTimeline, type TimelineChange } from "./runTimeline.js";
 
-// Feature: features/live-view.md item 13 — the run page folds the flat event
+// Feature: docs/reference/specs/live-view.md item 13 — the run page folds the flat event
 // stream into steps (the model's prose + the calls it explains) and call cards
 // (command + its result, with truthful status/exit/size/duration facts).
 
@@ -273,7 +273,7 @@ describe("createRunTimeline — DOM-free", () => {
   });
 });
 
-// features/skills.md — a `skill_use` event becomes a `skill` change inside the
+// docs/reference/specs/skills.md — a `skill_use` event becomes a `skill` change inside the
 // current step (the step whose use_skill call it belongs to), never a call.
 describe("createRunTimeline — skill_use", () => {
   it("folds `skill_use` into a `skill` change on the current step, keeping only an http(s) source", () => {
@@ -322,7 +322,7 @@ describe("createRunTimeline — skill_use", () => {
   });
 });
 
-describe("createRunTimeline — review_artifact (features/reading-diff.md item 5)", () => {
+describe("createRunTimeline — review_artifact (docs/reference/specs/reading-diff.md item 5)", () => {
   it("folds a review_artifact to nothing — the panel renders it, the step story does not change shape", () => {
     const t = createRunTimeline();
     t.push(call("bash", "$ ls"));
@@ -376,7 +376,7 @@ describe("createRunTimeline — run_meta (item 19)", () => {
   });
 });
 
-// Feature: features/tracing.md — span records on the stream: step rows, the
+// Feature: docs/reference/specs/tracing.md — span records on the stream: step rows, the
 // model-turn decoration and the tool twin rule.
 describe("createRunTimeline — span records", () => {
   const start = (spanId: string, name: string, at: number, attrs?: Record<string, unknown>) => ({
@@ -496,7 +496,7 @@ describe("createRunTimeline — span records", () => {
 });
 
 describe("createRunTimeline — model turns (item 15)", () => {
-  // The runner's one timing record for a model call (features/tracing.md): a
+  // The runner's one timing record for a model call (docs/reference/specs/tracing.md): a
   // `model.turn` span whose end carries the stop reason, the usage and the
   // model as attrs. A legacy record's `turn` reaches the fold as one of these
   // through `normalizeSpans` on the history seed.

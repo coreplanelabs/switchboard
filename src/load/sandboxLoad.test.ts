@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { summarize } from "./aggregate.js";
 import { runSandboxLoad, SANDBOX_LOAD_MAX_THREADS } from "./sandboxLoad.js";
 
-// `load:sandbox` against a stubbed fleet (features/load-harness.md item 11):
+// `load:sandbox` against a stubbed fleet (docs/reference/specs/load-harness.md item 11):
 // the first command per thread is the cold start, a full fleet answers the
 // capacity error the executor raises, and the ceiling guard holds.
 

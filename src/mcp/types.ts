@@ -1,4 +1,4 @@
-// External MCP servers as agent tools (features/mcp-tools.md). The core
+// External MCP servers as agent tools (docs/reference/specs/mcp-tools.md). The core
 // depends on these interfaces only: `McpClient` (one server: list + call) and
 // `McpToolSource` (per run: the bridged tools for an agent). Two clients ship
 // (`StreamableHttpMcpClient` in client.ts, `InMemoryMcpClient` in fake.ts —

@@ -5,7 +5,7 @@ import type { CatchUpStatus } from "./slackCatchUpStatus.js";
 import type { SlackSocketStatus } from "./slackSocketStatus.js";
 
 // `GET /healthz` body. Beyond liveness it is the bot deploy preflight's source
-// of truth (deploy/cloudflare/preflight.mjs, features/slack-channel.md item 8):
+// of truth (deploy/cloudflare/preflight.mjs, docs/reference/specs/slack-channel.md item 8):
 // a `wrangler deploy` rolls the container, and a rollout that lands on a run
 // in flight — or on an instance already draining from a previous rollout —
 // kills the run and freezes its status card. The preflight refuses while
@@ -72,7 +72,7 @@ export interface HealthState {
   /** The running build (`readBuildInfo`), when the entrypoint knows it. */
   build?: BuildInfo;
   /** The run ledger generation this process writes under (its fencing token,
-   *  `mintGeneration` at boot; features/run-history.md item 35) — the id the
+   *  `mintGeneration` at boot; docs/reference/specs/run-history.md item 35) — the id the
    *  ledger's live rows name as `ownerGen`, so a row can be matched to the
    *  container that holds it. Absent when the ledger is off. */
   generation?: string;

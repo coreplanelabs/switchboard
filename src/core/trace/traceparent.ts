@@ -1,6 +1,6 @@
 /** W3C Trace Context `traceparent` (version 00), strict: exactly
  *  `00-<32 hex>-<16 hex>-<2 hex>`, lowercase, and neither id all zero. Used
- *  only between our own Workers (features/tracing.md: container edges ignore an
+ *  only between our own Workers (docs/reference/specs/tracing.md: container edges ignore an
  *  inbound header and mint their own; internal Workers adopt one only inside
  *  their authenticated branch). */
 

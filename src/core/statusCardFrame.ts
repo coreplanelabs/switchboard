@@ -1,8 +1,8 @@
 import type { StatusUpdate } from "./types.js";
 import { formatDuration } from "./time/formatDuration.js";
 
-// The status card's one frame builder (features/run-visibility.md item 2;
-// features/tracing.md). Every paint of the card — the 👀 ack, the spinner
+// The status card's one frame builder (docs/reference/specs/run-visibility.md item 2;
+// docs/reference/specs/tracing.md). Every paint of the card — the 👀 ack, the spinner
 // frames the heartbeat and each event refresh, the closes before a run started,
 // the done frame — comes from one `CardShell`, so the title vocabulary lives in
 // one place and a change to what a title carries (a duration, a shape line)
@@ -14,7 +14,7 @@ export const SPINNER_GLYPHS = ["◐", "◓", "◑", "◒"];
 /** Prefixes that mean "this card's run is still in flight": the spinner, and
  *  the 👀 setup card posted before the run loop owns it. A card that still
  *  starts with one of these after its process is gone is an orphan — the
- *  Slack adapter's reconnect sweep closes it as interrupted (features/
+ *  Slack adapter's reconnect sweep closes it as interrupted (docs/reference/specs/
  *  slack-channel.md item 8). Kept next to the glyphs it derives from so the
  *  two cannot drift apart. */
 export const LIVE_CARD_PREFIXES = [...SPINNER_GLYPHS, "👀"];
@@ -32,7 +32,7 @@ export type CardClose = (
   | { kind: "refused"; icon: string; reason: string }
   | { kind: "setup_failed"; reason: string }
 ) & {
-  /** The request's shape line (features/tracing.md item 5), when informative: the first detail line. */
+  /** The request's shape line (docs/reference/specs/tracing.md item 5), when informative: the first detail line. */
   shape?: string;
   /** The queued caption, when a minute or more: the second detail line. */
   queued?: string;
@@ -55,7 +55,7 @@ export interface CardShell {
   setLink(link: StatusUpdate["link"]): void;
   /** The run finished at this clock stamp: every later frame's elapsed time
    *  ends here, so the closed card's total is the run's, not the moment of the
-   *  close (features/tracing.md — the card is one of the duration surfaces). */
+   *  close (docs/reference/specs/tracing.md — the card is one of the duration surfaces). */
   freeze(finishedAt: number): void;
   /** The setup step in flight (the card sink's display label) — shown on live
    *  frames after the elapsed time until the agent loop starts (undefined). */
@@ -83,7 +83,7 @@ export function createCardShell(opts: CardShellOptions): CardShell {
   let finishedAt: number | undefined;
   let setupLabel: string | undefined;
   // The one duration formatter, clock style: floored like every other surface
-  // (features/tracing.md item 5), so the card never reads a second more than
+  // (docs/reference/specs/tracing.md item 5), so the card never reads a second more than
   // the run page and the index for the same window.
   const elapsed = () => formatDuration((finishedAt ?? opts.now()) - opts.startedAt, "clock");
   const headline = (icon: string) => `${icon} ${label} · ${elapsed()}`;
@@ -124,7 +124,7 @@ export function createCardShell(opts: CardShellOptions): CardShell {
     },
     close(close) {
       // Every close carries how long the request took, from the ack's clock —
-      // a refusal that waited on a slow attach says so (features/tracing.md).
+      // a refusal that waited on a slow attach says so (docs/reference/specs/tracing.md).
       const detail = closeDetail(close, close.kind === "done" ? close.detail : undefined);
       switch (close.kind) {
         case "done":

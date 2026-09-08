@@ -143,7 +143,7 @@ export async function updatePullRequest(
 
 /**
  * Create `refs/heads/<branch>` at the current tip of `fromRef` (ship round 0,
- * features/agent-ship.md item 3). The resident binds a thread's
+ * docs/reference/specs/agent-ship.md item 3). The resident binds a thread's
  * worktree to a ref that must already exist on origin — an attach naming a
  * branch GitHub has never heard of is refused, and the executor factory's
  * sandbox fallback would then misreport "onboard the repo" on every fresh
@@ -188,7 +188,7 @@ export async function createBranchRef(repo: string, branch: string, fromRef: str
   throw new Error(`branch create failed for ${branch}: HTTP ${res.status} ${redactAndCap(text, 300)}`);
 }
 
-// ---- read-only repo/PR facts for the ship gate (features/agent-ship.md) ----
+// ---- read-only repo/PR facts for the ship gate (docs/reference/specs/agent-ship.md) ----
 // Same REST-with-App-token conventions as the writes above; both lookups are
 // advisory reads whose UNKNOWN answer the caller treats fail-closed, so they
 // return undefined on any failure instead of throwing.

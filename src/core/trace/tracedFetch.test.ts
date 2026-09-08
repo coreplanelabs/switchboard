@@ -1,4 +1,4 @@
-// Feature: features/tracing.md item 21 — one outbound call, one `http.client`
+// Feature: docs/reference/specs/tracing.md item 21 — one outbound call, one `http.client`
 // span; the trace context leaves only for our own hosts.
 import { describe, expect, it } from "vitest";
 import { recordingSink } from "../testing/recordingSink.js";

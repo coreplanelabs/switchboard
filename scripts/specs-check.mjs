@@ -2,7 +2,7 @@
 // Every feature spec binds each validation criterion to its proof: a test
 // named as `file::describe::it` (with `…` or `*` as wildcards, and a bare
 // `::it` continuing the previous reference's file), or an `[agent]`
-// procedure, or a `[gap]` that links the tracker item that will close it. A
+// procedure, or a `[gap]` — a criterion held but not yet proven. A
 // binding that names a test which no longer exists is a spec describing code
 // that is not there — this check makes that a failing build instead of a
 // stale document. It also requires every path in a spec's **Code** and
@@ -16,8 +16,8 @@
 // a wildcard at the parameter.
 //
 //   npm run specs:check                                # every spec
-//   npm run specs:check -- features/x.md               # one spec
-//   npm run specs:check -- --no-baseline features/x.md # list its known-stale references too
+//   npm run specs:check -- docs/reference/specs/x.md               # one spec
+//   npm run specs:check -- --no-baseline docs/reference/specs/x.md # list its known-stale references too
 //   npm run specs:check -- --fix                       # `title` → `title…` where that is the one match
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -111,20 +111,6 @@ export function parseHeaderPaths(markdown) {
     }
   }
   return paths;
-}
-
-/** Pure: `[gap]` rows, with whether the row links a tracker item. */
-export function parseGapRows(markdown) {
-  const rows = [];
-  const lines = markdown.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.startsWith("|") || !line.includes("[gap]")) continue;
-    const linked = /https:\/\/github\.com\/[^/\s)]+\/[^/\s)]+\/(?:issues|pull)\/\d+/.test(line);
-    const criterion = line.split("|")[1]?.trim() ?? "";
-    rows.push({ line: i + 1, linked, criterion });
-  }
-  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +286,7 @@ export function resolveRefs(refs, titlesFor) {
 // ---------------------------------------------------------------------------
 // The check over the tree.
 
-export const SPECS_DIR = "features";
+export const SPECS_DIR = "docs/reference/specs";
 
 export function checkSpec(specPath, { root, titlesFor, testFiles }) {
   const markdown = readFileSync(join(root, specPath), "utf8");
@@ -325,16 +311,6 @@ export function checkSpec(specPath, { root, titlesFor, testFiles }) {
         line: h.line,
         raw: h.path,
         reason: `path in the Code/Tests header does not exist: ${h.path}`,
-      });
-  }
-  for (const g of parseGapRows(markdown)) {
-    if (!g.linked)
-      problems.push({
-        kind: "gap",
-        key: `${specPath} gap ${g.criterion.slice(0, 60)}`,
-        line: g.line,
-        raw: "[gap]",
-        reason: "a [gap] row must link its tracker issue",
       });
   }
   return problems;
@@ -527,7 +503,7 @@ function main() {
     process.exit(1);
   }
   console.log(
-    `specs:check ok — ${specs.length} spec(s), ${refCount} proof reference(s) checked, every Code/Tests path exists, every [gap] links its issue${knownNote}`,
+    `specs:check ok — ${specs.length} spec(s), ${refCount} proof reference(s) checked, every Code/Tests path exists${knownNote}`,
   );
 }
 

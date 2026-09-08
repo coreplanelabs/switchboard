@@ -1,4 +1,4 @@
-// The load harness entrypoint (features/load-harness.md).
+// The load harness entrypoint (docs/reference/specs/load-harness.md).
 //
 //   npm run load -- history                       peak concurrency from the run store
 //   npm run load -- resident --resource repo:owner/name --threads 16 --hold 600

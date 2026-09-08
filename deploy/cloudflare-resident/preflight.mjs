@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Deploy preflight for the resident Worker (features/resident-repos.md item 44).
+// Deploy preflight for the resident Worker (docs/reference/specs/resident-repos.md item 44).
 //
 // `wrangler deploy` replaces every ResidentDO isolate and invalidates the
 // Sandbox SDK process handles held by in-flight runs ("Process handle refers

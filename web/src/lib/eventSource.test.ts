@@ -1,4 +1,4 @@
-// Feature: features/live-view.md — the EventSource seam's production adapter.
+// Feature: docs/reference/specs/live-view.md — the EventSource seam's production adapter.
 import { describe, expect, it } from "vitest";
 import { wrapNativeEventSource, type NativeEventSource } from "./eventSource";
 

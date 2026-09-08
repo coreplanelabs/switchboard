@@ -65,7 +65,7 @@ export interface RunEventsPage {
 
 export interface RunStore {
   /** `trace.span`: the caller's span, under which a Worker store's request is an
-   *  `http.client` span (features/tracing.md item 24); the local stores ignore it. */
+   *  `http.client` span (docs/reference/specs/tracing.md item 24); the local stores ignore it. */
   put(record: RunRecord, trace?: TraceOptions): Promise<PutResult>;
   /** The record, or null when unknown, expired, or the id is malformed — one not-found shape. */
   get(id: string): Promise<RunRecord | null>;
@@ -85,7 +85,7 @@ export interface RunStore {
   delete(id: string): Promise<void>;
 }
 
-/** The store of a process without run history (features/routing-and-config.md
+/** The store of a process without run history (docs/reference/specs/routing-and-config.md
  *  item 16 — a Null Object, so no caller branches on a missing store): every
  *  read is the not-found shape, `list` is empty, `put` accepts and keeps
  *  nothing (`stored: false`, the same word a record outside retention gets). */

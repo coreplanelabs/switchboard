@@ -17,7 +17,7 @@ import {
 import type { RepoInspector } from "../../execution/githubRepoInspect.js";
 import { createTracer } from "../trace/tracer.js";
 
-// Feature: features/resident-repos.md (items 32, 41) / features/command-registry.md
+// Feature: docs/reference/specs/resident-repos.md (items 32, 41) / docs/reference/specs/command-registry.md
 // (phase 4b): the whole `repo.*` group as registry commands — `repo.list` (open,
 // `repo:read`), the mutating verbs `onboard/offboard/reconfigure/rebuild`
 // (`repoManager`, `repo:write`), and the deterministic ops `test/build`
@@ -950,7 +950,7 @@ describe("repo test / repo build (deterministic ops)", () => {
   });
 });
 
-describe("adminOf — the command's span (features/tracing.md item 24)", () => {
+describe("adminOf — the command's span (docs/reference/specs/tracing.md item 24)", () => {
   it("binds the admin client to the handler's span through withSpan, never without a span, and uses a client without the view as is", async () => {
     const base = mockClient();
     const bound: unknown[] = [];

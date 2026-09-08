@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { formatDateTime, formatRelative, splitRunLabel } from "./indexFormat.js";
 
-// Feature: features/live-view.md item 16 — the runs index shows how long each
+// Feature: docs/reference/specs/live-view.md item 16 — the runs index shows how long each
 // run has been going (live) or took (finished), and renders the run label as
 // agent · scope · request so the eye lands on what matters.
 

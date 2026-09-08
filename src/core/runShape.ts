@@ -10,7 +10,7 @@ import type { RunOwner } from "./trace/streamSpans.js";
 import type { SpanRecord } from "./trace/types.js";
 import { formatDuration } from "./time/formatDuration.js";
 
-// The shape line (features/tracing.md item 5): the window partitioned into its
+// The shape line (docs/reference/specs/tracing.md item 5): the window partitioned into its
 // buckets and printed as `32s getting ready · 2m 30s thinking · 55s in tools ·
 // 8s finishing up · 7s Switchboard overhead` — the residual last, no repeated
 // total, every non-zero bucket, the printed items summing to the printed total.
@@ -41,7 +41,7 @@ export function shapeLine(spans: readonly SpanRecord[], input: ShapeInput): stri
 
 /** The Slack card's own gate on top of the informativeness rule: the shape is
  *  worth a line when the run took a minute or more, or getting ready alone took
- *  15 s or more (features/tracing.md — the card's size threshold). */
+ *  15 s or more (docs/reference/specs/tracing.md — the card's size threshold). */
 export function cardShapeLineOf(p: Partition | Omit<Partition, "backgroundOnlyMs">): string | undefined {
   if (p.windowMs < 60_000 && p.gettingReadyMs < 15_000) return undefined;
   return formatShape(p);
@@ -52,7 +52,7 @@ export function cardShapeLine(spans: readonly SpanRecord[], input: ShapeInput): 
   return cardShapeLineOf(partition(spans, { ...input, losses: input.losses ?? [] }));
 }
 
-/** The queued captions, never part of a duration (features/tracing.md): shown
+/** The queued captions, never part of a duration (docs/reference/specs/tracing.md): shown
  *  from a minute of waiting. */
 export function queuedCaption(kind: "before" | "behind", ms: number | undefined): string | undefined {
   if (ms === undefined || ms < 60_000) return undefined;

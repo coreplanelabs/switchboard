@@ -6,7 +6,7 @@ import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../t
 import { parseTraceparent } from "../trace/traceparent.js";
 import { createTracer } from "../trace/tracer.js";
 
-// Feature: features/memory.md — the durable MemoryStore: an HTTPS
+// Feature: docs/reference/specs/memory.md — the durable MemoryStore: an HTTPS
 // client to the Memory Worker, mirroring ResidentExecutor's remote plane. The
 // contract is asserted here against a fake fetch; the Worker's own behavior is
 // proven by deploy/cloudflare-memory/worker.test.ts.
@@ -116,7 +116,7 @@ describe("WorkerMemoryStore.write", () => {
   });
 });
 
-// Feature: features/memory.md §24 — human controls over the wire.
+// Feature: docs/reference/specs/memory.md §24 — human controls over the wire.
 describe("WorkerMemoryStore.list / forget", () => {
   it("list POSTs /list {scopeKey, limit} and returns the Worker's records (malformed ones dropped)", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ records: [record, { junk: true }] }));
@@ -168,7 +168,7 @@ describe("WorkerMemoryStore construction", () => {
   });
 });
 
-// Feature: features/memory.md — per-scope cap reaches the Worker on the /write body.
+// Feature: docs/reference/specs/memory.md — per-scope cap reaches the Worker on the /write body.
 describe("WorkerMemoryStore cap on the wire", () => {
   it("sends `cap` on /write when configured, and omits it (server default) when not", async () => {
     const capped = fakeFetch(() => jsonRes({ ok: true, inserted: 1, deduped: 0, superseded: 0, evicted: 0 }));
@@ -188,7 +188,7 @@ describe("WorkerMemoryStore cap on the wire", () => {
   });
 });
 
-// features/tracing.md item 24: the retrieve a dispatch makes is an `http.client`
+// docs/reference/specs/tracing.md item 24: the retrieve a dispatch makes is an `http.client`
 // child of `dispatch.memory_read`; the trace context rides to our own Worker.
 describe("WorkerMemoryStore trace context", () => {
   it("retrieve under a span is an http.client child with route /retrieve, POST and the status, no bearer or query text; traceparent rides for the configured host; without a span the call is a plain fetch", async () => {

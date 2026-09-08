@@ -9,7 +9,7 @@ import {
   verdictLine,
 } from "./reviewVerdict.js";
 
-// Feature: features/agent-review.md — deterministic verdict token. The
+// Feature: docs/reference/specs/agent-review.md — deterministic verdict token. The
 // auto-approve workflow keys on `startsWith(body, "LGTM:")`, so the first line
 // is produced by code from the structured verdict, never by the model's prose.
 describe("review verdict → post body", () => {
@@ -52,7 +52,7 @@ describe("review verdict → post body", () => {
     expect(parseVerdictInput({ verdict: 1 })).toBeNull();
   });
 
-  // Feature: features/agent-ship.md item 6 — typed findings on the verdict.
+  // Feature: docs/reference/specs/agent-ship.md item 6 — typed findings on the verdict.
   // Validated fail-closed PER finding: a malformed finding drops with a note,
   // a malformed findings array drops the whole field — the verdict itself
   // still stands either way.
@@ -175,7 +175,7 @@ describe("review verdict → post body", () => {
     });
   });
 
-  // features/agent-ship.md item 6 — the coding side's typed dispositions,
+  // docs/reference/specs/agent-ship.md item 6 — the coding side's typed dispositions,
   // validated in parseVerdictInput's fail-closed style: a malformed entry
   // drops with a note, a non-array input rejects the whole call (null).
   describe("dispositions (agent-ship item 6)", () => {
@@ -220,7 +220,7 @@ describe("review verdict → post body", () => {
     });
   });
 
-  // features/agent-review.md item 8: the agent reports the commit it reviewed
+  // docs/reference/specs/agent-review.md item 8: the agent reports the commit it reviewed
   // (`git rev-parse HEAD`); the dispatcher checks it against the PR head.
   it("parseVerdictInput carries a well-formed reported head (7–40 hex, lowercased) and drops anything else", () => {
     const sha = "E8E43F480a09b76989b85ebe6a2a254d99a4d2a3";

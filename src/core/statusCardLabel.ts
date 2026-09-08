@@ -1,6 +1,6 @@
 import type { RunEvent } from "./runEvents.js";
 
-// The live status card's transient title suffix (features/run-visibility.md
+// The live status card's transient title suffix (docs/reference/specs/run-visibility.md
 // item 2): what the run has been waiting on since its last event, once that
 // wait is long enough to be worth a word. Pure, so the two answers — the
 // model is thinking, or a tool is running — are asserted apart from the

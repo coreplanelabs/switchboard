@@ -21,7 +21,7 @@ import {
   type OAuthPending,
 } from "./oauth.js";
 
-// features/mcp-tools.md item 18: OAuth 2.1 against a fake authorization
+// docs/reference/specs/mcp-tools.md item 18: OAuth 2.1 against a fake authorization
 // server shaped like Vanta's (RFC 9728 resource metadata at the root, RFC 8414
 // metadata with the path inserted after the host, dynamic registration, PKCE
 // S256 checked for real, authorization_code + refresh_token, public client).

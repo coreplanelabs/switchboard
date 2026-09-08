@@ -1,4 +1,4 @@
-// What commit a Worker script is running (features/execution.md item 13).
+// What commit a Worker script is running (docs/reference/specs/execution.md item 13).
 //
 // The bot has always known this: `npm run deploy` writes `build.json`, the
 // image COPYs it, and `/healthz` serves `build: {commit, builtAt}` — which is

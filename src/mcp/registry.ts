@@ -1,5 +1,5 @@
 // The MCP server contract shared by the config layer, the bot's service, and
-// the state Worker (features/mcp-tools.md items 11–17). Node-free and I/O-free:
+// the state Worker (docs/reference/specs/mcp-tools.md items 11–17). Node-free and I/O-free:
 // `deploy/cloudflare-memory/worker.ts` imports the ticket and sealed-credential
 // validators by relative path so both ends check one shape. A server is a
 // `Scope` setting (`Scope.mcpServers[name]`, src/config.ts) — resolved through

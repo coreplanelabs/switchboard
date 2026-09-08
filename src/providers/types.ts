@@ -13,7 +13,7 @@ export type ContentPart =
    *  runner (never shown, never redacted — `collectText` skips it) and echoed
    *  back byte-for-byte in the next request: Anthropic verifies `signature`
    *  and rejects a modified or reordered block, and dropping them breaks the
-   *  turn on Claude Fable 5 (features/run-loop.md item 11). Providers without
+   *  turn on Claude Fable 5 (docs/reference/specs/run-loop.md item 11). Providers without
    *  the concept drop them on the way out. */
   | { type: "thinking"; thinking: string; signature: string }
   | { type: "redacted_thinking"; data: string };
@@ -97,7 +97,7 @@ export interface CompletionRequest {
   /** Prompt-cache TTL for this call's breakpoints; providers that cache apply
    *  it to every breakpoint. Absent → the provider default (`5m`). */
   cacheTtl?: CacheTtl;
-  /** Timing hooks for the call's span (features/tracing.md): a streaming
+  /** Timing hooks for the call's span (docs/reference/specs/tracing.md): a streaming
    *  provider reports the first token; the span layer stamps the time. A
    *  provider that cannot observe its stream simply never calls them. */
   observer?: CompletionObserver;
@@ -107,7 +107,7 @@ export interface CompletionObserver {
   onFirstToken?(): void;
   /** A content block began / ended, by kind (`text`, `thinking`, `redacted_thinking`,
    *  `tool_use`, …) and stream index: the span layer sums a turn's thinking and
-   *  writing time from these (features/tracing.md; live-view item 15). */
+   *  writing time from these (docs/reference/specs/tracing.md; live-view item 15). */
   onBlockStart?(kind: string, index: number): void;
   onBlockEnd?(kind: string, index: number): void;
 }

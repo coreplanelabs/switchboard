@@ -1,4 +1,4 @@
-// Safe-subset markdown for the run page (features/live-view.md item 12).
+// Safe-subset markdown for the run page (docs/reference/specs/live-view.md item 12).
 //
 // The run page renders model-authored text (the request, the model's prose
 // between tool calls, the final answer) under a strict CSP with no external

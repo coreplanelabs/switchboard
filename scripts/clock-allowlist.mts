@@ -1,4 +1,4 @@
-// The clock ratchet's CLI (features/tracing.md). `npm run clock:gen`
+// The clock ratchet's CLI (docs/reference/specs/tracing.md). `npm run clock:gen`
 // regenerates src/core/trace/clockAllowlist.json from the tree; `npm run
 // clock:check` fails when a file's count grew or a listed file has fewer reads
 // than recorded — the list can only shrink. The scanner itself lives beside the

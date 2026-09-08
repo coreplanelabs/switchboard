@@ -2,7 +2,7 @@
 // docs/plans/ — are written once and never edited: a record that no longer
 // holds is superseded by a new one, so the reasoning that was current at the
 // time is never lost. Two things keep that true by a check rather than by
-// discipline (features/docs-site.md item 16). Every record carries a `status`
+// discipline (docs/reference/specs/docs-site.md item 16). Every record carries a `status`
 // from a closed set (and a `superseded_by` that resolves when it is
 // superseded), so a record whose state nobody wrote down is a failing build,
 // not a document of unknown standing. And once a record is accepted, its body

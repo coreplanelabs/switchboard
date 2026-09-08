@@ -15,7 +15,7 @@ import {
   type OpReader,
 } from "./bootstrap.js";
 
-// Feature: features/agent-env-bootstrap.md — materialize a DOWNSTREAM service's
+// Feature: docs/reference/specs/agent-env-bootstrap.md — materialize a DOWNSTREAM service's
 // UAT environment variables into the agent's execution environment, resolved
 // with the `op` CLI via a READ-ONLY, UAT-vault-scoped service account. UAT-only by
 // an env-name allowlist (never prod), dry-run shows NAMES + secret refs (never

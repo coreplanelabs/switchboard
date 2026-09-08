@@ -14,7 +14,7 @@ import {
   runReviewPostStep,
 } from "./reviewRound.js";
 
-// Feature: features/agent-ship.md — the review-round and coding-PR machinery
+// Feature: docs/reference/specs/agent-ship.md — the review-round and coding-PR machinery
 // extracted from dispatch() as callable units, each parameterized on an
 // explicit AgentDef instead of the dispatch's top-level resolved agent, so a
 // ship round can invoke them per child round. The

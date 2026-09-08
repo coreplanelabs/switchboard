@@ -1,4 +1,4 @@
-/** The process log sink and the Null Object sink (features/tracing.md).
+/** The process log sink and the Null Object sink (docs/reference/specs/tracing.md).
  *
  *  A `LogSink` writes one JSON line per span end:
  *  `{"span","traceId","spanId","parentSpanId","startedAt","ms","status",

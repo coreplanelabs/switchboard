@@ -1,5 +1,5 @@
 // Fleet-capacity classification for the per-thread sandbox path
-// (features/execution.md item 14): ONE recognizer and one answer shape, shared
+// (docs/reference/specs/execution.md item 14): ONE recognizer and one answer shape, shared
 // by the sandbox Worker (which names the condition) and the bot's executor
 // (which waits on it). Deliberately free of node: imports so wrangler can
 // bundle it into the Worker, like bashTimeout.ts and shellQuote.ts.
@@ -133,7 +133,7 @@ export function fleetBusyExhaustedMessage(waitedMs: number): string {
 /** The text the Worker carries in-body for a thrown value: the SDK's own
  *  message when it has one, else a sentence that says the SDK gave none —
  *  naming the error's name and code, and the one condition known to produce
- *  it. Never the empty string (features/execution.md items 3 and 6).
+ *  it. Never the empty string (docs/reference/specs/execution.md items 3 and 6).
  *
  *  Why: during a Worker+image rollout a new thread's Durable Object can land
  *  on a container still running the previous (0.3.x) image. The 0.12.x

@@ -12,7 +12,7 @@ import {
   type DashboardRequest,
 } from "./dashboardAuth.js";
 
-// Feature: features/access-gate.md — dashboard auth is a Strategy. Three
+// Feature: docs/reference/specs/access-gate.md — dashboard auth is a Strategy. Three
 // verifiers behind one `verify(req) → identity | refusal`, each strategy's
 // allow and refuse cases, `none`'s one rule (loopback on a localhost
 // deployment), and the composition that fails fast by name.

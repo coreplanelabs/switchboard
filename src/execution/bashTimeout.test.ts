@@ -8,7 +8,7 @@ import {
   clampBashTimeout,
 } from "./bashTimeout.js";
 
-// Feature: features/execution.md item 11 — the per-call bash timeout policy.
+// Feature: docs/reference/specs/execution.md item 11 — the per-call bash timeout policy.
 // One clamp, shared by the tool layer, every executor, and both deploy
 // Workers, so the bounds can never drift apart. The documented rule: a finite
 // number is truncated and clamped into [1s, 20 min]; anything else (absent,

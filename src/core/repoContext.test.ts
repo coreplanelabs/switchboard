@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prCommitsSince, repoFromThread, resolveRepoContext } from "./repoContext.js";
 
-// Feature: features/resident-repos.md item 29 — repo/ref resolution BEFORE the
+// Feature: docs/reference/specs/resident-repos.md item 29 — repo/ref resolution BEFORE the
 // model turn: explicit signals in the current message (owner/name slug,
 // github.com repo/PR URL, conservative branch phrasing) → the thread's
 // previously-established repo (derived from history, restart-safe, never
@@ -254,7 +254,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
   });
 });
 
-// Feature: features/agent-ship.md item 10 — the resolver flags a PR
+// Feature: docs/reference/specs/agent-ship.md item 10 — the resolver flags a PR
 // named in the CURRENT message (`prFromMessage`) and a ref taken from a cited
 // PR's head branch (`refFromPr`). Ship reads both: prFromMessage tells a foreign
 // PR quoted as evidence from the thread's own in-flight PR, and refFromPr keeps
@@ -352,21 +352,21 @@ describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail
     expect(fn).not.toHaveBeenCalled();
   });
 
-  // A re-review reply saying "(index.ts + features/memory.md §22)" carries a
-  // bare path token outside backticks. Parsed as repo `features/memory.md` it
+  // A re-review reply saying "(index.ts + docs/reference/specs/memory.md §22)" carries a
+  // bare path token outside backticks. Parsed as repo `docs/reference/specs/memory.md` it
   // would unbind the thread's PR, so the second LGTM never reaches GitHub and
   // the run goes to a cold sandbox for a repo that does not exist. A thread
   // bound to a repo by a STRONG signal (PR URL, repo URL, owner/name#N) is
   // never rebound by a bare slug-shaped token.
   it("a bare slug-shaped token never rebinds a thread bound by URL — the PR is still inherited", async () => {
     stubFetch({ body: { state: "open", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
-    const text = "both nits addressed (index.ts + features/memory.md §22). Please re-review; comment only.";
+    const text = "both nits addressed (index.ts + docs/reference/specs/memory.md §22). Please re-review; comment only.";
     await expect(resolveRepoContext(msg(text), history)).resolves.toEqual({ repo: "acme/api", pr: 7, headSha: SHA });
   });
 
   it("a bare slug in an EARLIER follow-up does not rebind a URL-bound thread either", async () => {
     stubFetch({ body: { state: "open", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
-    const h = [...history, { role: "user" as const, text: "see features/memory.md for the rule" }];
+    const h = [...history, { role: "user" as const, text: "see docs/reference/specs/memory.md for the rule" }];
     await expect(resolveRepoContext(msg("re-review"), h)).resolves.toEqual({ repo: "acme/api", pr: 7, headSha: SHA });
   });
 
@@ -557,7 +557,7 @@ describe("resolveRepoContext: thread history inheritance", () => {
   });
 });
 
-// Feature: features/agent-review.md item 9 — the PR's base branch rides along
+// Feature: docs/reference/specs/agent-review.md item 9 — the PR's base branch rides along
 // from the same REST call so the review agent can be told its diff base.
 describe("PR base branch for the review target", () => {
   const SHA = "d".repeat(40);
@@ -602,7 +602,7 @@ describe("PR base branch for the review target", () => {
   });
 });
 
-// Feature: features/agent-review.md — the PR head SHA rides along with the PR
+// Feature: docs/reference/specs/agent-review.md — the PR head SHA rides along with the PR
 // number so the posted review is pinned via commit_id.
 describe("PR head SHA for review pinning", () => {
   const SHA = "a".repeat(40);
@@ -751,7 +751,7 @@ describe("bare prose slugs never hijack a thread", () => {
 // `in <owner/name>` / `in <name>` names the TARGET of a request. Vetted
 // against the resident registry, an addressed repo is a STRONG signal — it
 // binds a fresh thread and rebinds a bound one — because a registry-confirmed
-// repo is unambiguous in a way a prose slug (`features/memory.md`) never is.
+// repo is unambiguous in a way a prose slug (`docs/reference/specs/memory.md`) never is.
 // A bare NAME resolves only through the registry listing and only when exactly
 // one onboarded repo carries it ("in atlas" → acme/atlas); an
 // unknown or ambiguous name is prose and binds nothing.

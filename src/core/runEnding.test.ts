@@ -1,4 +1,4 @@
-// Feature: features/live-view.md item 4, features/run-history.md item 15 — the
+// Feature: docs/reference/specs/live-view.md item 4, docs/reference/specs/run-history.md item 15 — the
 // dispatch's run ending: seal after the reply, records after the seal.
 import { describe, expect, it } from "vitest";
 import { createRunEnding } from "./runEnding.js";

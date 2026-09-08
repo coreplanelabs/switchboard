@@ -1,7 +1,7 @@
 import type { AgentDef } from "../agents/registry.js";
 import type { Capabilities } from "./capabilities.js";
 
-// Self-description (features/routing-and-config.md behavior 11). Every agent's
+// Self-description (docs/reference/specs/routing-and-config.md behavior 11). Every agent's
 // system prompt carries a short, factual account of WHAT SWITCHBOARD IS — its
 // agents, how it is addressed, what a resident repo is and how one is
 // onboarded, where its runs and memory live, and where its source and specs
@@ -14,7 +14,7 @@ import type { Capabilities } from "./capabilities.js";
 // history or a memory this installation does not have; the resident cap is the
 // resident Worker's own answer, never a constant here. The rest is prose about
 // mechanisms that are stable, kept short because it rides on every turn. It
-// names the repo and the `features/*.md` specs as the place to read for detail
+// names the repo and the `docs/reference/specs/*.md` specs as the place to read for detail
 // — an agent with the GitHub tools reads them; one without says where the
 // answer lives.
 
@@ -64,6 +64,6 @@ export function selfDescriptionBlock(
     `Agents: ${agentLines}. Users pick one with an inline \`agent:<name>\` directive (default: general); \`model:\` / \`effort:\` ride the same way (see the runtime-config block).`,
     repos,
     `Runs${caps.memory ? " and memory" : ""}: every run (agent or operator command) has a live page under /runs with its events${history}; runs can be stopped from there.${memory} \`help\` lists every chat command.`,
-    `Source of truth: the code lives in the GitHub repo ${SWITCHBOARD_REPO} — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under features/*.md (e.g. features/resident-repos.md, features/routing-and-config.md, features/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on ${SWITCHBOARD_REPO}) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings.`,
+    `Source of truth: the code lives in the GitHub repo ${SWITCHBOARD_REPO} — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under docs/reference/specs/*.md (e.g. docs/reference/specs/resident-repos.md, docs/reference/specs/routing-and-config.md, docs/reference/specs/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on ${SWITCHBOARD_REPO}) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings.`,
   ].join("\n");
 }

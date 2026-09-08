@@ -80,7 +80,7 @@ describe("ScheduledPage", () => {
     const run = w.findAll("a").find((a) => a.text().startsWith("run "));
     expect(run?.attributes("href")).toBe("/runs/0a1b2c3d4e5f6789?t=tok-live");
     expect(run?.text()).toBe("run 0a1b2c3d");
-    // the firing's trace id, shortened, the full id on hover (features/tracing.md item 22)
+    // the firing's trace id, shortened, the full id on hover (docs/reference/specs/tracing.md item 22)
     expect(w.find(".trace").text()).toBe("trace 4bf92f35");
     expect(w.find(".trace").attributes("title")).toBe("trace 4bf92f3577b34da6a3ce929d0e0e4736");
     // the detail drops the reply's own title and keeps the facts, full text on hover

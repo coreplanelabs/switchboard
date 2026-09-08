@@ -20,7 +20,7 @@ import { InMemoryRunStore } from "./runStore.js";
 import { createRunsService } from "./runsService.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
 
-// Feature: features/command-registry.md — the chat adapter:
+// Feature: docs/reference/specs/command-registry.md — the chat adapter:
 // `<group> <verb> <args…> [--kebab-flag value…]` recognized for
 // registered, chat-exposed, non-reserved ids and bound by the SAME grammar the
 // CLI uses; a recognized form with a malformed tail is a usage reply; help is
@@ -578,7 +578,7 @@ describe("runs list on chat", () => {
   });
 });
 
-describe("invokeChatCommand — the dispatcher's span (features/tracing.md item 24)", () => {
+describe("invokeChatCommand — the dispatcher's span (docs/reference/specs/tracing.md item 24)", () => {
   it("forwards the run.command span to the registry's invoke, and nothing without one", async () => {
     const commands = bindCommands(demoRegistry(), { hits: [] });
     const spy = vi.spyOn(commands, "invoke");

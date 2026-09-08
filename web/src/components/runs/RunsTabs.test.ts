@@ -4,7 +4,7 @@ import type { WebSeed } from "@core/channels/webSeed.js";
 import RunsTabs, { runsTabs } from "./RunsTabs.vue";
 import { ALL_ON, mountApp } from "../../testing/mount";
 
-// Feature: features/live-view.md — the runs page's tabs follow the
+// Feature: docs/reference/specs/live-view.md — the runs page's tabs follow the
 // installation's capabilities: Scheduled exists only with firing history
 // configured (`schedules`) or when the viewer is on it; a lone tab draws no bar.
 

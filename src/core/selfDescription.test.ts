@@ -11,7 +11,7 @@ import {
   selfDescriptionBlock,
 } from "./selfDescription.js";
 
-// Feature: features/routing-and-config.md behavior 11 — the self-description
+// Feature: docs/reference/specs/routing-and-config.md behavior 11 — the self-description
 // block every agent carries, a function of the process's capabilities. Pinned
 // against the live registries so the block can never name an agent or a chat
 // command that does not exist in the installation it describes.
@@ -107,7 +107,7 @@ describe("selfDescriptionBlock", () => {
   it("always says where the source and specs live, and never lets the model call itself stateless", () => {
     for (const block of [allOn, allOff]) {
       expect(block).toContain(SWITCHBOARD_REPO);
-      expect(block).toContain("features/resident-repos.md");
+      expect(block).toContain("docs/reference/specs/resident-repos.md");
       expect(block).toContain("github_file");
       expect(block).toMatch(/Never describe yourself as stateless/);
     }

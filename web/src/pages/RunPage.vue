@@ -57,7 +57,7 @@ const state = model.state;
 
 // ---- header state ----------------------------------------------------------
 /** `finished`: the agent stopped (the `finished` frame); the reply is on its way
- *  and the stream stays open until `end` (features/tracing.md). */
+ *  and the stream stays open until `end` (docs/reference/specs/tracing.md). */
 type Phase = "connecting" | "running" | "stopping" | "finished" | "disconnected" | "ended";
 const phase = ref<Phase>(isHistory ? "ended" : "connecting");
 const stopError = ref("");
@@ -235,7 +235,7 @@ provide(RunnerClockKey, runnerClock);
 const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall(), nowWall.value) : null));
 // The tail names the deepest open counted span when the timeline knows one —
 // `a model turn…`, the same span the lede's `currently thinking …` drills into
-// (features/live-view.md item 25). Before any span, the silent model's verbs:
+// (docs/reference/specs/live-view.md item 25). Before any span, the silent model's verbs:
 // a fixed list, a new word every 6 s in order — predictable, not twitchy — so
 // the row is visibly alive without a spinner. The word is DERIVED from how
 // long this silence has lasted, so every silence starts at "Thinking" and
@@ -269,7 +269,7 @@ const logEnd = ref<HTMLElement | null>(null);
 function atTail(): boolean {
   return window.innerHeight + window.scrollY >= document.body.scrollHeight - 60;
 }
-// PR-review panel (features/reading-diff.md item 6): the collector is the
+// PR-review panel (docs/reference/specs/reading-diff.md item 6): the collector is the
 // runs→module adapter — it reads the same frames the timeline gets and, when
 // this run is a PR review carrying reading-diff artifacts, gates the button.
 const prReview = createPrReviewCollector();
@@ -327,7 +327,7 @@ onMounted(() => {
     if (range) model.noteElided(range);
   });
   // The agent stopped: the header's duration freezes at the server's finish
-  // stamp (features/tracing.md), the stream stays open for the span records
+  // stamp (docs/reference/specs/tracing.md), the stream stays open for the span records
   // until `end`.
   es.addEventListener("finished", (data) => {
     const frame = parseFinishedFrame(data);
@@ -514,7 +514,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
               <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
             </a>
           </template>
-          <!-- The review's reading diff (features/reading-diff.md item 6):
+          <!-- The review's reading diff (docs/reference/specs/reading-diff.md item 6):
                present exactly when the run published reading-diff artifacts. -->
           <UButton
             v-if="prReview.state.ready"
@@ -621,9 +621,9 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
               >
             </div>
           </li>
-          <!-- A streamed span that is a step of its own (features/tracing.md). -->
+          <!-- A streamed span that is a step of its own (docs/reference/specs/tracing.md). -->
           <SpanRow v-else-if="item.kind === 'span'" :item="item" />
-          <!-- The setup spans under one head (features/live-view.md item 25): open
+          <!-- The setup spans under one head (docs/reference/specs/live-view.md item 25): open
                while the run sets up, closed once the agent loop starts, the
                reader's toggle winning from then on. -->
           <li v-else-if="item.kind === 'setup'" class="setup py-0.5 text-xs">
@@ -640,7 +640,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
               <SpanRow v-for="row in item.rows" :key="row.key" :item="row" />
             </ul>
           </li>
-          <!-- A follow-up steered into this run (features/thread-admission.md
+          <!-- A follow-up steered into this run (docs/reference/specs/thread-admission.md
                item 2): the same run, more input — the Request's treatment,
                at the moment the run read it, with who sent it and when. -->
           <li

@@ -8,7 +8,7 @@ import {
   updatePullRequest,
 } from "./githubPulls.js";
 
-// Feature: features/pr-description.md — the bot process opens and edits PRs
+// Feature: docs/reference/specs/pr-description.md — the bot process opens and edits PRs
 // itself over the GitHub REST API with the App token (never the model, never
 // `gh`), open-or-edit: an existing open PR for the head branch is edited,
 // never duplicated, and title/head/base come only from the typed inputs —
@@ -211,10 +211,10 @@ describe("githubPulls", () => {
     expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
   });
 
-  // Feature: features/agent-ship.md items 9–10 — the read-only repo/PR facts
+  // Feature: docs/reference/specs/agent-ship.md items 9–10 — the read-only repo/PR facts
   // the ship gate consumes. Both lookups answer undefined on ANY failure (the
   // caller fail-closes); neither ever throws.
-  // Feature: features/agent-ship.md item 3 — ship round 0 creates the
+  // Feature: docs/reference/specs/agent-ship.md item 3 — ship round 0 creates the
   // pipeline branch on origin BEFORE the first attach: the resident refuses to
   // bind a thread to a ref GitHub does not have. 422 "already exists" is
   // success (a restarted pipeline reuses its own deterministic branch name).

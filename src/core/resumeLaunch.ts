@@ -1,4 +1,4 @@
-// Launching the resumes (features/run-history.md item 38): after the Slack
+// Launching the resumes (docs/reference/specs/run-history.md item 38): after the Slack
 // socket is up, every run the boot reclaim found resumable is planned
 // (`planResume`) and dispatched through the ordinary `dispatch()` with a
 // `ResumeContext` — so it runs through the same admission, workspace attach,

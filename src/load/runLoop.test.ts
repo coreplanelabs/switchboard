@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runThreads } from "./runLoop.js";
 
-// The N-thread driver every load command shares (features/load-harness.md
+// The N-thread driver every load command shares (docs/reference/specs/load-harness.md
 // item 5): threads start staggered over a window, each runs setup → iterate
 // (until the hold ends) → teardown, and teardown ALWAYS runs — a crashed
 // iteration or an abort must still release whatever setup acquired (a resident

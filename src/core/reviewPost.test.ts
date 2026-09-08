@@ -21,7 +21,7 @@ describe("reviewPostIntended", () => {
   });
 });
 
-// Feature: features/agent-review.md — posting a review back to the PR is the
+// Feature: docs/reference/specs/agent-review.md — posting a review back to the PR is the
 // DEFAULT for a review run against a resolved PR. These pin the pure decision
 // (review + resolved PR + not-opted-out → post) and the opt-out parse, so the
 // side-effect wiring in the dispatcher stays a thin call over tested logic.

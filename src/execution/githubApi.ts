@@ -5,7 +5,7 @@ import { classifyError } from "../core/trace/classify.js";
 import { redactAndCap } from "../core/redact.js";
 
 // The GitHub capability behind the `github_*` agent tools
-// (features/github-tools.md): repository reads (files, trees, code search, the
+// (docs/reference/specs/github-tools.md): repository reads (files, trees, code search, the
 // installation's repo list) and issue reads/writes over the GitHub REST API
 // from the bot process, authenticated with the App's installation token —
 // never a `gh` shell-out, never a clone (AGENTS.md invariant 5). `GithubApi`
@@ -93,7 +93,7 @@ export interface IssuePatch {
 
 export interface GithubApi {
   /** A view of this client whose calls are `github.rest` children of `span`
-   *  (features/tracing.md item 23) — the runner binds one per tool call. A
+   *  (docs/reference/specs/tracing.md item 23) — the runner binds one per tool call. A
    *  client without it (a test double) is used as is. */
   withSpan?(span: Span): GithubApi;
   listRepos(): Promise<InstallationRepo[]>;
@@ -381,7 +381,7 @@ export class RestGithubApi implements GithubApi {
   ): Promise<Response> {
     const token = await this.token(scope, this.parent);
     if (!token) throw new GithubApiError(401, "no GitHub credential available (configure the GitHub App or GH_TOKEN)");
-    // One `github.rest` span under the view's parent (features/tracing.md item
+    // One `github.rest` span under the view's parent (docs/reference/specs/tracing.md item
     // 23): the route word, the method and the status — never the path. GitHub
     // is not one of our hosts, so no trace context leaves with the request.
     const res = await tracedFetch(
@@ -410,7 +410,7 @@ export class RestGithubApi implements GithubApi {
       } catch {
         /* keep the raw slice */
       }
-      // Classified for the spans above it (features/tracing.md item 2): the
+      // Classified for the spans above it (docs/reference/specs/tracing.md item 2): the
       // status is the peer's own discriminator, the body never an attr.
       throw classifyError(
         new GithubApiError(res.status, `GitHub ${method} ${path} failed: HTTP ${res.status} ${detail}`.trim()),

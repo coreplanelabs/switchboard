@@ -17,7 +17,7 @@ import { MAX_BODY_BYTES, readBody } from "./http.js";
 // Generic HTTP adapter for the command registry: `/api/<group>.<verb>` for
 // every registered command, with NO
 // per-command code. Its only logic is transport: resolve the Caller (identity
-// only — the policy table decides, features/authorization.md) from the
+// only — the policy table decides, docs/reference/specs/authorization.md) from the
 // Access identity the gate in index.ts already verified, enforce write safety,
 // map the by-name query/body onto the definition's `{ args, options }`
 // (`namedToInput` — kebab-case query keys, camelCase JSON keys), pass it to
@@ -100,7 +100,7 @@ export function callerIdFor(identity: AccessIdentity): string {
  * The `Actor` an Access identity resolves to — the ONE resolver for every
  * surface the Access gate fronts: `/api/*` here (through `callerFor`) and the
  * `/runs` pages (index.ts hands it to the live-view handler as `ctx.actor`,
- * features/authorization.md item 1). A browser session is the `user`
+ * docs/reference/specs/authorization.md item 1). A browser session is the `user`
  * `access:<sub>`, a service token the `service` `access:svc:<common_name>`,
  * each with the grants config names for that id (`grantsFor`). Nothing here
  * decides what either may do (docs/decisions/0007-authorization-policy-table.md).

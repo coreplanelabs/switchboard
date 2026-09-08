@@ -34,7 +34,7 @@ import {
   type Fixture,
 } from "./testing/conformanceFixture.js";
 
-// Feature: features/capabilities.md — the product adapts to what is on. One
+// Feature: docs/reference/specs/capabilities.md — the product adapts to what is on. One
 // `Capabilities` value (src/core/capabilities.ts) is computed at startup and
 // every surface reads it. This suite is the PROOF, in two halves:
 //

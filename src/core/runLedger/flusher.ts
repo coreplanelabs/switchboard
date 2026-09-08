@@ -1,4 +1,4 @@
-// The append flusher (features/run-history.md item 30): the run registry
+// The append flusher (docs/reference/specs/run-history.md item 30): the run registry
 // publishes events synchronously and in-process; this carries them to the
 // ledger in batches — every `flushMs` or `maxEvents`, whichever first — so the
 // hot path never waits on the network. A push never throws. A failed send is

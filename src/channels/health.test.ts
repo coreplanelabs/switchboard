@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DRAIN_DEADLINE_MS } from "../core/drain.js";
 import { healthPayload, readBuildInfo, UNKNOWN_BUILD } from "./health.js";
 
-// Feature: features/slack-channel.md item 8 — deployed ≠ live: `/healthz`
+// Feature: docs/reference/specs/slack-channel.md item 8 — deployed ≠ live: `/healthz`
 // carries the build identity (`build: { commit, builtAt }`) baked into the
 // image by `deploy/cloudflare/write-build.mjs`, so `deploy:all`'s live gate can
 // tell the NEW container from the old one still draining.
@@ -38,7 +38,7 @@ describe("build identity on /healthz", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 8 — `deploy restart` restarts the
+// Feature: docs/reference/specs/slack-channel.md item 8 — `deploy restart` restarts the
 // container without a build, so `build.commit` is unchanged; `startedAt`
 // (process start, ISO) is how its live gate tells the new instance from the old.
 describe("startedAt on /healthz", () => {
@@ -57,7 +57,7 @@ describe("startedAt on /healthz", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 8 — `GET /healthz` is the bot deploy
+// Feature: docs/reference/specs/slack-channel.md item 8 — `GET /healthz` is the bot deploy
 // preflight's source of truth (deploy/cloudflare/preflight.mjs): it must say
 // how many runs are in flight and whether a drain is already under way; and
 // item 7 — an operator must be able to see how long the Slack blackout
@@ -87,7 +87,7 @@ describe("healthPayload", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 7 — /healthz also carries the
+// Feature: docs/reference/specs/slack-channel.md item 7 — /healthz also carries the
 // reconnect catch-up's last outcome and the bot token's missing scopes, so a
 // silent catch-up is visible without container logs.
 describe("healthPayload — catchUp", () => {
@@ -122,7 +122,7 @@ describe("healthPayload — catchUp", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 8 — /healthz reports the Socket Mode
+// Feature: docs/reference/specs/slack-channel.md item 8 — /healthz reports the Socket Mode
 // state. The HTTP server starts before the Slack handshake, so a cold start
 // legitimately answers `slack: {connected:false}` until the socket lands; the
 // validation poller (and any operator) reads deafness here, not in stdout.

@@ -2,7 +2,7 @@
 
 **"Why does it work this way?"** Explanation is the discussion that builds a mental model: the design constraints, the alternatives that were rejected, the shape of the thing. It is the only kind of page here that is allowed to have an opinion — and the only one you can read without a keyboard in front of you.
 
-It is still not the contract: the versioned behavioral contract is [`features/`](https://github.com/coreplanelabs/switchboard/tree/main/features).
+It is still not the contract: the versioned behavioral contract is [`docs/reference/specs/`](../reference/specs/README.md).
 
 - [How a request flows](how-a-request-flows.md) — channel → dispatcher → provider/executor, the one pipeline everything shares.
 - [Why config is layered](config-layers.md) — six independent layers, and why effort is one of them.

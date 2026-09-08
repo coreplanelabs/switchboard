@@ -1,6 +1,6 @@
 // Duration heat: the ONE mapping from "how long did this take" to a colour, so a
 // 15-minute command cannot hide as one more grey line among 200 ms greps
-// (features/live-view.md item 24). Two independent signals, never mixed:
+// (docs/reference/specs/live-view.md item 24). Two independent signals, never mixed:
 //
 //   - HEAT is continuous. A duration is placed on a log scale between the
 //     kind's quiet floor and its ceiling; that position (`--heat-t`, 0..1) is

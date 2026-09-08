@@ -1,6 +1,6 @@
 import type { RunRegistry, SealResult } from "./runRegistry.js";
 
-// How a dispatch ends its runs (features/tracing.md; live-view item 4). A run
+// How a dispatch ends its runs (docs/reference/specs/tracing.md; live-view item 4). A run
 // FINISHES when the agent stops (`registry.finish`) and is SEALED when the
 // first reply attempt has completed — success or failure — or its branch was
 // abandoned without one. Between the two the stream is open for the span
@@ -29,7 +29,7 @@ export interface PendingRecord {
 export interface RunEnding {
   /** The run finished: seal it at the next drain. `afterSeal` runs right after
    *  that seal, whether or not it succeeded — the run's root span ends there
-   *  (features/tracing.md), so its `span_end` lands after the stream closed and
+   *  (docs/reference/specs/tracing.md), so its `span_end` lands after the stream closed and
    *  the record shows the request as the one span still open. */
   finished(runId: string, hooks?: { afterSeal?: () => void }): void;
   /** Its record writer, run once after the seal. */

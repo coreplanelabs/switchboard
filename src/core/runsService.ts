@@ -78,7 +78,7 @@ export interface RunView {
   startedAt: number;
   /** Absent while the run is live. */
   finishedAt?: number;
-  /** The seven stamps and the one duration (features/tracing.md). `receivedAt`:
+  /** The seven stamps and the one duration (docs/reference/specs/tracing.md). `receivedAt`:
    *  our process saw the message, from the adapter's clock (stamped by the
    *  dispatcher once the adapters carry it; absent until then, so every reader
    *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
@@ -595,7 +595,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             id,
             finished: snap.finished,
             // A live stream is schema 2; the window is the run's own stamps, to
-            // now while live (features/tracing.md) — the same window the live
+            // now while live (docs/reference/specs/tracing.md) — the same window the live
             // route passes, so the two surfaces time a run alike; a finished
             // run's diagnosis carries the shape.
             diagnosis: analyze(snap.events, {

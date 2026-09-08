@@ -11,9 +11,9 @@ import type { RunStore } from "./runStore.js";
 
 export { isFrictionRunRecord };
 
-// The friction ledger (features/self-improvement.md): where each finished run's diagnosis is
+// The friction ledger (docs/reference/specs/self-improvement.md): where each finished run's diagnosis is
 // read from so the proposer can look ACROSS runs. The live run registry evicts
-// a finished run 60s after it ends; run history (features/run-history.md) is
+// a finished run 60s after it ends; run history (docs/reference/specs/run-history.md) is
 // where every finished run's record — diagnosis included — lands, so the
 // ledger is a READ over the run store (`RunStoreFrictionLedger`): one
 // population for the dashboard and the self-improvement loop, nothing written

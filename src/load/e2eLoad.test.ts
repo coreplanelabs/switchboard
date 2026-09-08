@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { summarize } from "./aggregate.js";
 import { e2eThreadFor, runE2eLoad } from "./e2eLoad.js";
 
-// `load:e2e` against a stubbed bot (features/load-harness.md item 10): each
+// `load:e2e` against a stubbed bot (docs/reference/specs/load-harness.md item 10): each
 // thread posts one synchronous ingress request per iteration and records the
 // run receipt's status; /healthz is sampled alongside.
 

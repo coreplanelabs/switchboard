@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — error classification survives wrapping.
+// Feature: docs/reference/specs/tracing.md — error classification survives wrapping.
 import { describe, expect, it } from "vitest";
 import { CAUSE_DEPTH, classificationOf, classifyError, httpStatusCode } from "./classify.js";
 

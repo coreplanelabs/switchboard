@@ -72,14 +72,14 @@ import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrac
  *  (`deploy/bin/build-stamp.mjs`) and answered on GET /healthz as `build`. */
 const BUILD = injectedBuildStamp();
 
-// The Worker's own spans (features/tracing.md item 22): one `state.fetch` root
+// The Worker's own spans (docs/reference/specs/tracing.md item 22): one `state.fetch` root
 // per authenticated request, joining the bot's trace, on a `slow` log sink
 // whose filter drops the line a refusal would leave.
 const tracer = createTracer({ clock: systemClock });
 const traceSinks = [workerLogSink((line) => console.log(line))];
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
-// (src/core/memory/workerStore.ts) — cross-session memory (features/memory.md). One
+// (src/core/memory/workerStore.ts) — cross-session memory (docs/reference/specs/memory.md). One
 // SQLite-backed Durable Object per scopeKey (the DO name IS the scope key), so
 // a scope's records live in one database that survives every bot restart
 // (AGENTS.md invariant 6) and cross-scope reads are impossible by construction.
@@ -100,7 +100,7 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 //   POST /schedules/record {firing: ScheduleFiring} → {ok:true, retained}
 //   POST /schedules/latest {}                       → {firings: ScheduleFiring[]} (newest per schedule)
 // Run history routes (the durable RunStore behind the bot's WorkerRunStore,
-// src/core/runStoreWorker.ts; features/run-history.md): one RunHistoryDO per
+// src/core/runStoreWorker.ts; docs/reference/specs/run-history.md): one RunHistoryDO per
 // store key, owning the retention policy. Same bearer; /runs/put has its own 2 MiB
 // body fence (a record is budgeted to 1.5 MiB upstream), every other route
 // keeps the 512 KB one.
@@ -383,7 +383,7 @@ export class MemoryDO extends DurableObject<Env> {
     return counts;
   }
 
-  /** Human view (features/memory.md item 24): the scope's ACTIVE rows, newest first, no usage
+  /** Human view (docs/reference/specs/memory.md item 24): the scope's ACTIVE rows, newest first, no usage
    *  bump. With `query`, only rows an FTS token hits (the same quoted-OR MATCH
    *  as retrieve, so user text never reaches the FTS parser as syntax); a
    *  query with no tokens lists nothing. */
@@ -551,7 +551,7 @@ export class ScheduleDO extends DurableObject<Env> {
 }
 
 // ---------------------------------------------------------------------------
-// Durable Object: runtime config documents (features/routing-and-config.md item
+// Durable Object: runtime config documents (docs/reference/specs/routing-and-config.md item
 // 10). ONE object, a table of small JSON documents by key — today the bot's
 // `overrides` document (chat-set channel/user settings) — each with a version
 // for optimistic concurrency: a `put` whose `expectedVersion` is stale is a 409,
@@ -583,7 +583,7 @@ export class ConfigDO extends DurableObject<Env> {
     `);
   }
 
-  // ---- MCP sealed credentials + connect tickets (features/mcp-tools.md items 15–16).
+  // ---- MCP sealed credentials + connect tickets (docs/reference/specs/mcp-tools.md items 15–16).
   // Ciphertext the bot sealed — opaque here — and one-time tickets: the two
   // things a config document must never carry, kept beside it on this object.
 
@@ -1433,7 +1433,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       const now = systemClock();
       const policy = proposal ? this.applyProposal(proposal, now).policy : this.policyState().policy;
       const finishedAt = Math.min(record.finishedAt, now + RUN_MAX_FUTURE_MS);
-      // The tracing stamps get the same skew clamp (features/tracing.md).
+      // The tracing stamps get the same skew clamp (docs/reference/specs/tracing.md).
       const stored: RunRecord = {
         ...record,
         finishedAt,
@@ -1525,7 +1525,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** Every 6 h: delete everything outside policy (no fence — this is where a
    *  large shrink finishes), sweep orphaned events, then re-arm. */
   async alarm(): Promise<void> {
-    // The sweep nobody asked for is a root of its own (features/tracing.md
+    // The sweep nobody asked for is a root of its own (docs/reference/specs/tracing.md
     // item 25): `state.alarm`, ending with how many rows it swept.
     const root = startAdoptedRoot(tracer, "state.alarm", { sinks: traceSinks });
     try {
@@ -2610,7 +2610,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // One `state.fetch` root per authenticated, routed request (features/
+    // One `state.fetch` root per authenticated, routed request (docs/reference/specs/
     // tracing.md item 22), adopting the bot's trace context — never before the
     // bearer checked out, so a refusal, an unknown path or the unauthenticated
     // /healthz leaves no line and the route attr is always a word from ROUTES.

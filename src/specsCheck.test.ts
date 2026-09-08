@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import {
   BASELINE_FILE,
   collectTestTitles,
-  parseGapRows,
   parseHeaderPaths,
   parseProofRefs,
   partitionAgainstBaseline,
@@ -79,7 +78,7 @@ describe("resolveBareTestFile", () => {
   });
 });
 
-describe("parseHeaderPaths / parseGapRows", () => {
+describe("parseHeaderPaths", () => {
   it("takes paths with a directory from the Code and Tests headers, not symbols or routes", () => {
     const md = [
       "- **Code**: `src/a.ts`, `Actor`, `conversations.info`, `/runs`, `deploy/cloudflare/`",
@@ -87,18 +86,6 @@ describe("parseHeaderPaths / parseGapRows", () => {
       "- **Tests**: `src/a.test.ts`",
     ].join("\n");
     expect(parseHeaderPaths(md).map((p) => p.path)).toEqual(["src/a.ts", "deploy/cloudflare/", "src/a.test.ts"]);
-  });
-
-  it("a [gap] row is linked when it carries a GitHub issue or PR URL", () => {
-    const md = [
-      "| a | `[gap]` nothing yet |",
-      "| b | `[gap]` tracked in https://github.com/o/r/issues/12 |",
-      "| c | `[unit]` fine |",
-    ].join("\n");
-    expect(parseGapRows(md)).toEqual([
-      { line: 1, linked: false, criterion: "a" },
-      { line: 2, linked: true, criterion: "b" },
-    ]);
   });
 });
 
@@ -284,7 +271,7 @@ describe("partitionAgainstBaseline", () => {
 
 describe("the repository's own specs", () => {
   it("carry over a thousand proof references, so the parser is reading the real convention", () => {
-    const md = readFileSync(new URL("features/slack-channel.md", `file://${root}`), "utf8");
+    const md = readFileSync(new URL("docs/reference/specs/slack-channel.md", `file://${root}`), "utf8");
     expect(parseProofRefs(md).length).toBeGreaterThan(20);
   });
 

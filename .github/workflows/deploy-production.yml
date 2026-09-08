@@ -1,11 +1,11 @@
-# Production deploy — the one path (features/release-and-deploy.md items 2–3,
+# Production deploy — the one path (docs/reference/specs/release-and-deploy.md items 2–3,
 # 9–11). release-please.yml calls this when a release is cut; a maintainer can
 # dispatch it from main. Either way it runs the registry's `deploy all` — the
 # same pre-checks, order, preflights and live gate an operator's laptop used
 # to run — with `--affected` by default, so only the Workers whose inputs the
 # release changed roll (judged per Worker against the commit it is serving).
 #
-# A busy bot is not busy (features/release-and-deploy.md item 13). Since the
+# A busy bot is not busy (docs/reference/specs/release-and-deploy.md item 13). Since the
 # run ledger's handoff (run-history item 39) the bot hands its runs to the next
 # container on SIGTERM and exits within seconds, so the bot preflight no longer
 # refuses for runs in flight and this job never waits on them or re-dispatches

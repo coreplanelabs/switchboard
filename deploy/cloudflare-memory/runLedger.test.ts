@@ -4,7 +4,7 @@ import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
 
-// Feature: features/run-history.md items 28–34 — the live-run ledger on the
+// Feature: docs/reference/specs/run-history.md items 28–34 — the live-run ledger on the
 // RunHistoryDO: claim (one live run per thread), the fence on every owner
 // write, step records, the inbox, stop, handoff, finishing, finish in one
 // transaction, reclaim. Runs in workerd against the real SQLite object; a

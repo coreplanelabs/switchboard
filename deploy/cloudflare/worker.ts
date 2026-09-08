@@ -35,7 +35,7 @@ import { systemClock } from "../../src/core/trace/clock.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
 import { shimRoute, stripTraceContext, withTraceContext, workerLogSink } from "../../src/core/trace/workerTrace.ts";
 
-// The Worker's own spans (features/tracing.md item 22): one `bot-shim.fetch`
+// The Worker's own spans (docs/reference/specs/tracing.md item 22): one `bot-shim.fetch`
 // root per routed request and one `cron.<schedule>` root per fired schedule,
 // on a `slow` log sink whose filter drops the line an unauthenticated refusal
 // would leave. The public edge never adopts a caller's trace context.
@@ -273,7 +273,7 @@ async function recordFiring(env: Env, firing: ScheduleFiring): Promise<void> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
-    // The public edge (features/tracing.md item 22): whatever trace context the
+    // The public edge (docs/reference/specs/tracing.md item 22): whatever trace context the
     // caller sent is stripped, and what the container sees carries this
     // Worker's own root. A static asset or the live view's SSE stream gets no
     // root; a refusal's line is dropped by the sink's filter.
@@ -340,7 +340,7 @@ export default {
       );
       return;
     }
-    // The firing is one `cron.<schedule>` root (features/tracing.md item 22):
+    // The firing is one `cron.<schedule>` root (docs/reference/specs/tracing.md item 22):
     // the ingress request carries it, and the recorded firing names its trace.
     const root = tracer.start(`cron.${schedule.name}`, { sinks: traceSinks, startedAt: firedAt });
     let firing: ScheduleFiring;

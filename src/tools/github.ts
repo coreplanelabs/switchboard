@@ -1,7 +1,7 @@
 import { GithubApiError, type GithubApi, type IssueSummary } from "../execution/githubApi.js";
 import type { RunnableTool } from "./workspace.js";
 
-// The `github_*` tools (features/github-tools.md): every agent with a tool
+// The `github_*` tools (docs/reference/specs/github-tools.md): every agent with a tool
 // loop can read the org's repositories and read/write their issues through the
 // bot's own GitHub App credential — in the bot process over REST (invariant 5),
 // with no workspace, so the no-repo `general` and `research` agents can answer
@@ -108,7 +108,7 @@ export const githubFileTool: RunnableTool = {
     type: "object",
     properties: {
       repo: { type: "string", description: "owner/name" },
-      path: { type: "string", description: "Path within the repo, e.g. features/resident-repos.md" },
+      path: { type: "string", description: "Path within the repo, e.g. docs/reference/specs/resident-repos.md" },
       ref: { type: "string", description: "Branch, tag, or commit sha (optional)" },
     },
     required: ["repo", "path"],

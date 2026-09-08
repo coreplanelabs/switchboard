@@ -1,4 +1,4 @@
-// Disk as a measured, budgeted resource on a resident (features/
+// Disk as a measured, budgeted resource on a resident (docs/reference/specs/
 // resident-repos.md item 55). Pure decisions the resident Worker (deploy/
 // cloudflare-resident/worker.ts) imports, like residentDisk / residentRefresh:
 // no I/O, no clock — `now` is an input, `df`/`du` output comes in as text.

@@ -1,4 +1,4 @@
-// The ledger seam (features/run-history.md item 28): what the bot calls, with
+// The ledger seam (docs/reference/specs/run-history.md item 28): what the bot calls, with
 // two implementations — `WorkerRunLedger` (HTTPS to the state Worker; the
 // production choice) and `InMemoryRunLedger` (tests, and the shape every
 // decision is checked against). The step write's order is part of the

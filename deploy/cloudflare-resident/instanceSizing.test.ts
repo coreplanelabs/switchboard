@@ -10,7 +10,7 @@ import {
 // The resident container's instance type is sized by arithmetic over MEASURED
 // parts, and this test is where the arithmetic lives — wrangler.jsonc carries
 // the number, this file carries the proof, and a change to either without the
-// other fails here. Background (features/resident-repos.md items 54–55): the
+// other fails here. Background (docs/reference/specs/resident-repos.md items 54–55): the
 // resident of a large monorepo once filled its 8 GB disk 45 minutes after a
 // fresh provision with ONE thread attached, and nothing had measured the disk
 // before ENOSPC. 8 GB was the platform default, never a budget. Since item 55

@@ -16,7 +16,7 @@ import type { CoreDeps } from "../core/dispatcher.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
 
-// Feature: features/http-ingress.md — adapter #3 (HTTP). Auth is fail-closed +
+// Feature: docs/reference/specs/http-ingress.md — adapter #3 (HTTP). Auth is fail-closed +
 // constant-time; a token maps to a namespaced identity that flows into the same
 // dispatch() the Slack/CLI adapters use. A fake dispatch keeps these off real
 // providers.
@@ -113,7 +113,7 @@ describe("handleIngressRequest (transport gating + dispatch)", () => {
       channelId: "http:ops",
       threadKey: "http:ops:t1",
       text: "hi",
-      receivedAt: expect.any(Number), // stamped at receipt (features/tracing.md)
+      receivedAt: expect.any(Number), // stamped at receipt (docs/reference/specs/tracing.md)
     });
   });
 
@@ -448,7 +448,7 @@ describe("parseIngressTokens (env → config, fail-closed)", () => {
   });
 });
 
-// Feature: features/authorization.md item 9 — a token entry identifies; what the
+// Feature: docs/reference/specs/authorization.md item 9 — a token entry identifies; what the
 // token may do is config's `grants["http:<subject>"]` / `["mcp:<subject>"]`.
 describe("parseIngressTokens — a token is a credential, its rights are config's", () => {
   it("an entry is subject + optional channel; nothing about what it may do", () => {

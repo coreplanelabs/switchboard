@@ -1,4 +1,4 @@
-// Feature: features/tracing.md item 19; features/resident-repos.md item 63 —
+// Feature: docs/reference/specs/tracing.md item 19; docs/reference/specs/resident-repos.md item 63 —
 // the resident's step trace: offsets from the request start, bounded, sanitized.
 import { describe, expect, it } from "vitest";
 import { createStepTrace, sanitizeStepName, STEP_TRACE_MAX, STEP_TRACE_MAX_BYTES } from "./residentStepTrace.js";

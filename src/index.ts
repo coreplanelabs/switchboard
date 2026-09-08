@@ -83,7 +83,7 @@ const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.js
 // Process start for `/healthz.startedAt` — `deploy restart`'s live gate tells
 // the restarted container (same image, same `build.commit`) from the old one by
 // it. Read at module load, which is the process start to within its own
-// startup — the one clock, never `process.uptime` (features/tracing.md item 8).
+// startup — the one clock, never `process.uptime` (docs/reference/specs/tracing.md item 8).
 const PROCESS_STARTED_AT = systemClock();
 // Memory and event-loop lag for `/healthz.process` — the bot is one Node
 // process, and under many concurrent runs it is the first thing to fail.
@@ -102,18 +102,18 @@ async function main() {
     }
   }
 
-  // Build identity for /healthz (features/slack-channel.md item 8): written by
+  // Build identity for /healthz (docs/reference/specs/slack-channel.md item 8): written by
   // `deploy/cloudflare/write-build.mjs` into the image; "unknown" when built by hand.
   const build = readBuildInfo(process.env.SWITCHBOARD_BUILD_INFO ?? "./build.json");
   console.log(`[build] ${build.commit}${build.builtAt ? ` @ ${build.builtAt}` : ""}`);
   // The ingress token map is read once, here: it authenticates POST /ingress
   // and POST /mcp below. What a token's bearer may do is config's `grants`
   // entry for `http:<subject>` / `mcp:<subject>` (one authorization model,
-  // features/authorization.md).
+  // docs/reference/specs/authorization.md).
   const auth = parseIngressTokens(process.env);
   // Runtime overrides (`config set …`) live where `runtimeOverrides.worker`
   // says — the state Worker's ConfigDO in prod, so a container restart keeps
-  // them (features/routing-and-config.md item 12); the JSON file otherwise.
+  // them (docs/reference/specs/routing-and-config.md item 12); the JSON file otherwise.
   // The command groups are what an Access browser session's implicit reads span.
   const config = await openConfigStore(CONFIG_PATH, {
     overridesPath: OVERRIDES_PATH,
@@ -127,15 +127,15 @@ async function main() {
   const capabilities = capabilitiesFrom(config.config, process.env);
   console.log(`[capabilities] ${JSON.stringify(capabilities)}`);
   const providers = new ProviderRegistry(config.config.providers);
-  // Bundled skills (features/skills.md): loaded once from the seeded `skills/` dir and shared
+  // Bundled skills (docs/reference/specs/skills.md): loaded once from the seeded `skills/` dir and shared
   // across all channels via CoreDeps, so review/coding get their scoped skill
   // list in-prompt and can load bodies on demand with use_skill.
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
-  // External MCP servers as tools (features/mcp-tools.md): the static
+  // External MCP servers as tools (docs/reference/specs/mcp-tools.md): the static
   // `mcp.servers` list, validated loudly here (a bad URL or a missing bearer
   // env var stops startup), served per run by ONE source whose clients ride
   // the SSRF-pinned web fetch. No servers → undefined → requests unchanged.
-  // External MCP servers (features/mcp-tools.md): entries live in the
+  // External MCP servers (docs/reference/specs/mcp-tools.md): entries live in the
   // config scopes (already loaded above); credentials and connect tickets go
   // where the overrides go (the ConfigDO, or a file); `mcp add|list|…` and the
   // Access-gated connect page work off ONE service, and its servers are the
@@ -147,26 +147,26 @@ async function main() {
     warn: (m) => console.warn(`[mcp] ${m}`),
   });
   // Every optional subsystem below is wired as a real implementation or its
-  // Null Object (features/routing-and-config.md item 16): the core never asks
+  // Null Object (docs/reference/specs/routing-and-config.md item 16): the core never asks
   // whether a store, a ledger or a source exists — it calls it.
   const mcp = mcpWiring.source ?? new NullMcpToolSource();
   console.log(
     `[mcp] ${capabilities.mcp ? `on (secrets: ${mcpWiring.service!.secrets.describe()})` : `off — ${mcpWiring.unavailable}`}`,
   );
-  // Cross-session memory (features/memory.md): ONE store instance shared by every channel so
+  // Cross-session memory (docs/reference/specs/memory.md): ONE store instance shared by every channel so
   // what the reflection pass writes after a run is what the next run reads.
   // Durable WorkerMemoryStore when memory.worker (+ its bearer) is configured;
   // otherwise an in-process store with a loud warning (a restart loses it).
   // Disabled (default) → the NullMemoryStore: nothing read, nothing written.
   const memory =
     buildMemoryStore(config.config.memory, process.env, (m) => console.warn(`[memory] ${m}`)) ?? new NullMemoryStore();
-  // Run history (features/run-history.md): the durable store every finished run's record lands in.
+  // Run history (docs/reference/specs/run-history.md): the durable store every finished run's record lands in.
   // With `runHistory` unconfigured (or misconfigured — buildRunStore warned) it
   // is the NullRunStore → history off, live-only as before. The friction ledger
   // (what `friction propose` clusters across) is READ from it:
   // the record carries the diagnosis, so nothing is written twice.
   const runHistoryCfg = config.config.runHistory;
-  // The hosts our own Workers answer on (features/tracing.md item 21): the one
+  // The hosts our own Workers answer on (docs/reference/specs/tracing.md item 21): the one
   // set a `traceparent` may leave for. Computed once from the configured URLs,
   // named once — nothing else decides where trace context travels.
   const hosts = internalHostsOf([
@@ -198,7 +198,7 @@ async function main() {
       ? `[run-history] store: ${runStore instanceof FileRunStore ? "host-disk file (data/runs)" : `durable Worker (${runHistoryCfg?.worker?.baseUrl})`}`
       : "[run-history] off (no runHistory config) — runs are live-only",
   );
-  // The run ledger's write-through (features/run-history.md item 35): this
+  // The run ledger's write-through (docs/reference/specs/run-history.md item 35): this
   // process's generation — its fencing token on every ledger write — is minted
   // once here, and every run is mirrored onto the state Worker's ledger (claim,
   // seed, steps, events, state, finishing, finish) so the next generation can
@@ -270,7 +270,7 @@ async function main() {
   const fleetWatcher = residentFleetWatcherFor(residentAdminClient, { warn: (m) => console.warn(m) });
   fleetWatcher?.start();
   const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;
-  // The bot's span log (features/tracing.md item 26): every root this process
+  // The bot's span log (docs/reference/specs/tracing.md item 26): every root this process
   // starts also writes here, bounded, and `GET /admin/trace/log` reads it for a
   // `trace:read` bearer — the container's stdout, without the container.
   const spanLog = createSpanLog();
@@ -435,7 +435,7 @@ async function main() {
     // token in the URL); finished/persisted runs are served tokenless to the
     // Access-authenticated viewer, so — like the index — they must only be
     // exposed behind Access, and both are bound to that viewer's actor
-    // (features/authorization.md items 5–7): the gate's identity is
+    // (docs/reference/specs/authorization.md items 5–7): the gate's identity is
     // resolved with the SAME `accessActor` the /api adapter uses and handed to
     // the handler as `ctx.actor` below, so the index lists and the run page
     // reads exactly what `/api/runs.*` would for that identity — under the
@@ -462,7 +462,7 @@ async function main() {
     });
     // ── end live view ────────────────────────────────────────────────────────
     const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => systemClock(), cache: new JwksCache() };
-    // The dashboard auth strategy (features/access-gate.md, plan D5): ONE
+    // The dashboard auth strategy (docs/reference/specs/access-gate.md, plan D5): ONE
     // verifier, asked once per request below, for everything the dashboard
     // serves. `dashboard.auth` picks it — `access` (the Cloudflare Access JWT,
     // re-verified here, fail-closed), `token` (a bearer → one configured actor)
@@ -522,7 +522,7 @@ async function main() {
       }
       // Kill injection for the durable-runs receipts (run-history item 36):
       // a `deploy:write` bearer SIGKILLs this process after a 202.
-      // The span log (features/tracing.md item 26): a `trace:read` bearer reads
+      // The span log (docs/reference/specs/tracing.md item 26): a `trace:read` bearer reads
       // what this process's roots recorded, at every level, filtered.
       if (path === TRACE_LOG_PATH) {
         handleAdminTraceLog(req, res, {
@@ -634,7 +634,7 @@ async function main() {
       }
       // Health probe: liveness for the Worker's keep-alive cron and the deploy
       // `wake` (status only), plus the in-flight/draining facts the bot deploy
-      // preflight refuses on (features/slack-channel.md item 8).
+      // preflight refuses on (docs/reference/specs/slack-channel.md item 8).
       if (path === "/healthz") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
@@ -812,7 +812,7 @@ async function main() {
     if (draining) return;
     draining = true;
     drainStartedAt = systemClock();
-    // The drain is one `drain` root on the span log (features/tracing.md item
+    // The drain is one `drain` root on the span log (docs/reference/specs/tracing.md item
     // 20): what signalled it, what it held, what it handed off and abandoned.
     const root = startProcessRoot(deps, "drain", {
       startedAt: drainStartedAt,
@@ -845,7 +845,7 @@ async function main() {
       await new Promise((r) => setTimeout(r, 500));
     }
     // Every finished run whose reply never settled is sealed now, with no
-    // `replyOk` (features/tracing.md): its viewers get their `end` frame, and
+    // `replyOk` (docs/reference/specs/tracing.md): its viewers get their `end` frame, and
     // one event-loop turn hands those frames to the sockets before the exit
     // (best effort — the process is going away).
     const sealed = defaultRunRegistry.sealAllFinished();

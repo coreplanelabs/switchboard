@@ -15,7 +15,7 @@ import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
 
-// Feature: features/mcp-ingress.md — adapter #4 (MCP). A minimal MCP server over
+// Feature: docs/reference/specs/mcp-ingress.md — adapter #4 (MCP). A minimal MCP server over
 // streamable-HTTP (JSON-RPC 2.0 over POST /mcp). It reuses http.ts's fail-closed,
 // constant-time bearer auth; a token maps to a `mcp:`-namespaced identity that
 // flows into the same dispatch() the Slack/CLI/HTTP adapters use. A fake dispatch
@@ -120,7 +120,7 @@ describe("handleMcpRequest — tools/call", () => {
       channelId: "mcp:ops",
       threadKey: "mcp:ops:t1",
       text: "hi",
-      receivedAt: expect.any(Number), // stamped at receipt (features/tracing.md)
+      receivedAt: expect.any(Number), // stamped at receipt (docs/reference/specs/tracing.md)
     });
   });
 

@@ -4,7 +4,7 @@ import type { RunnableTool } from "../tools/workspace.js";
 import { bridgeMcpTools, newRunBudget } from "./bridge.js";
 import type { McpClient, McpClientFactory, McpServerSpec, McpToolInfo } from "./types.js";
 
-// The per-run source of MCP tools (features/mcp-tools.md items 8–9): which
+// The per-run source of MCP tools (docs/reference/specs/mcp-tools.md items 8–9): which
 // servers this agent may see, discovery with a bounded fan-out and an
 // in-process tools/list cache, one bridge per server sharing ONE call budget,
 // and the outcome the dispatcher turns into run notes + the MCP prompt block.

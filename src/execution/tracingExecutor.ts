@@ -2,7 +2,7 @@ import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
 import type { ExecOptions, Executor, ReleaseMode, ReleaseResult } from "./executor.js";
 
-// The executor as the run's spans see it (features/tracing.md): every
+// The executor as the run's spans see it (docs/reference/specs/tracing.md): every
 // operation a tool asks of the workspace runs inside a log-only `exec.*` span
 // under the tool call's own span — `exec.exec`, `exec.read_file`,
 // `exec.write_file`, and `exec.release` / `exec.move_to` when the wrapped

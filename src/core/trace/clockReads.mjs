@@ -1,4 +1,4 @@
-// The clock ratchet's one predicate list (features/tracing.md): which
+// The clock ratchet's one predicate list (docs/reference/specs/tracing.md): which
 // expressions count as a direct wall-clock read. ESLint's `clock-ban` rule
 // (eslint.config.mjs) and the allowlist scanner (scripts/clock-allowlist.mts)
 // both read this file, so the two cannot drift. Plain JS so the lint config can

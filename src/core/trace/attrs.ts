@@ -1,5 +1,5 @@
 /** Span attributes: one flat key union with a value domain per key, and the
- *  keys each span name may carry (features/tracing.md). Literal unions,
+ *  keys each span name may carry (docs/reference/specs/tracing.md). Literal unions,
  *  numbers and booleans only; the string-valued keys (`host`, `route`,
  *  `command`, `agent`, `model`) come from closed tables at the emitter — a
  *  model is the parsed `<provider>/<model>` ref the registry resolved, never

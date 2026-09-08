@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mdToMrkdwn } from "./mrkdwn.js";
 
-// Feature: features/slack-channel.md — agents write standard Markdown; the
+// Feature: docs/reference/specs/slack-channel.md — agents write standard Markdown; the
 // Slack adapter converts to mrkdwn without ever touching code content.
 
 describe("mdToMrkdwn", () => {

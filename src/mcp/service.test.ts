@@ -10,7 +10,7 @@ import { InMemoryMcpSecretStore } from "./secretStore.js";
 import { McpService, McpServiceError, type McpActor, type McpTarget } from "./service.js";
 import type { McpServerSpec } from "./types.js";
 
-// features/mcp-tools.md items 13–17: the MCP rules over the CONFIG layers.
+// docs/reference/specs/mcp-tools.md items 13–17: the MCP rules over the CONFIG layers.
 
 const KEY = importCredentialKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
 const YAML = `

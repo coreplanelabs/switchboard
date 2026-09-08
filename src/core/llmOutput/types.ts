@@ -1,4 +1,4 @@
-// Typed LLM output contract (features/llm-output.md): every LLM call's output
+// Typed LLM output contract (docs/reference/specs/llm-output.md): every LLM call's output
 // is an assumption the system made. A per-datatype module makes the assumption
 // explicit — what shape was requested, how to classify what came back, whether
 // a violation is worth asking the model again — and everything downstream of

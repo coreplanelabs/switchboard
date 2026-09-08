@@ -1,7 +1,7 @@
 // `load:history`: the production concurrency baseline, reproducible. The run
 // store lists finished runs newest-first with a (finishedAt, id) cursor; this
 // pages it, drops the provisional start-of-run tombstones (finishedAt equals
-// startedAt — features/run-history.md item 27), and sweeps the intervals for
+// startedAt — docs/reference/specs/run-history.md item 27), and sweeps the intervals for
 // the peak number of runs live at once. The plan's "peak 8" came from here.
 
 import { percentile } from "./aggregate.js";

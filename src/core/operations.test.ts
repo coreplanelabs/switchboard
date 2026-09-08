@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { recognizeOperation } from "./operations.js";
 
-// Feature: features/resident-repos.md, features/routing-and-config.md —
+// Feature: docs/reference/specs/resident-repos.md, docs/reference/specs/routing-and-config.md —
 // deterministic-ops recognition: natural language only, for the
 // conservative explicit forms ("run the tests on <ref> [in <owner/name>]",
 // "build <ref> [in <owner/name>]") with the repo resolved from the message or

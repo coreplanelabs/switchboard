@@ -1,4 +1,4 @@
-// Feature: features/tracing.md — one request, one root: the constructor of
+// Feature: docs/reference/specs/tracing.md — one request, one root: the constructor of
 // roots, its sinks, and what a bound run and a bound card see.
 import { describe, expect, it } from "vitest";
 import { channelOf, startProcessRoot, startRequestRoot, withProcessRoot } from "./requestTrace.js";
@@ -96,7 +96,7 @@ describe("startRequestRoot", () => {
     }
   });
 
-  it("the process's span log joins the leading sinks beside the log sink, whatever the level, and every span end lands in it (features/tracing.md item 26)", async () => {
+  it("the process's span log joins the leading sinks beside the log sink, whatever the level, and every span end lands in it (docs/reference/specs/tracing.md item 26)", async () => {
     const spanLog = createSpanLog();
     const orig = console.log;
     console.log = () => {};
@@ -125,7 +125,7 @@ describe("startRequestRoot", () => {
     expect(channelOf("nocolon")).toBeUndefined();
   });
 });
-// Feature: features/tracing.md item 20 — a root for the bot's own work outside
+// Feature: docs/reference/specs/tracing.md item 20 — a root for the bot's own work outside
 // any request: leading sinks only, the caller's attrs, ended by the caller or
 // by withProcessRoot.
 describe("startProcessRoot", () => {

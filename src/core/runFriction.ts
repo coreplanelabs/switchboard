@@ -7,13 +7,13 @@ import { partition, type LossInterval, type Partition, type Window } from "./tra
 import type { RunOwner } from "./trace/streamSpans.js";
 import type { SpanRecord } from "./trace/types.js";
 
-// Run-friction analyzer (features/run-friction.md): a PURE, deterministic
+// Run-friction analyzer (docs/reference/specs/run-friction.md): a PURE, deterministic
 // function from a run's RunEvent stream to a structured diagnosis of what cost
 // the run time or made it stumble — slow/failed tool calls, slow model turns,
 // retries, setup/install time, wrap-up, budget hits, exec-infrastructure
 // failures — and, for a finished run with a window, its shape: how the window
 // splits into getting ready, thinking, tools, finishing up and overhead
-// (features/tracing.md item 5). It is the observe→diagnose half of the
+// (docs/reference/specs/tracing.md item 5). It is the observe→diagnose half of the
 // self-improvement loop; proposing fix PRs from a diagnosis is a later piece
 // and deliberately NOT here. No clock, no I/O: the same events always yield the
 // same diagnosis, so it runs identically over a live backlog
@@ -108,7 +108,7 @@ export interface CategoryTotals {
   durationMs: number;
 }
 
-/** The run's shape (features/tracing.md item 5): the seven terms of a finished
+/** The run's shape (docs/reference/specs/tracing.md item 5): the seven terms of a finished
  *  window. Absent while a run is live or when no window was given. */
 export type RunShape = Omit<Partition, "backgroundOnlyMs">;
 
@@ -153,7 +153,7 @@ export interface FrictionOptions {
   /** Whether `events` is a truncated stream (`RunSnapshot.truncated`): the
    *  diagnosis is then stamped `truncatedInput: true`. Default false. */
   truncated?: boolean;
-  /** The run's window (features/tracing.md): `receivedAt` to `finishedAt` (a
+  /** The run's window (docs/reference/specs/tracing.md): `receivedAt` to `finishedAt` (a
    *  record), or to now (a live read). With it `runMs` is the window and a
    *  finished diagnosis carries `shape`; open spans run to its end while live.
    *  Absent (a stdin capture): `runMs` is first→last over the content events
@@ -380,7 +380,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   // toward `eventCount`.
   let narrativeEvents = 0;
   let sideFactEvents = 0; // skill_use / review_artifact / pr_description / pr_opened / ship_round: facts about the run, not steps
-  let spanEvents = 0; // span_start / span_end (features/tracing.md): timing records, not steps
+  let spanEvents = 0; // span_start / span_end (docs/reference/specs/tracing.md): timing records, not steps
   let wrapUp: { index: number; at?: number } | undefined;
   events.forEach((ev, index) => {
     flushTurns(index);

@@ -18,7 +18,7 @@
 //   still decode to more than charCap chars and the flag stays exact;
 // - a `cd` failure surfaces as before: message on stderr, non-zero exit.
 //
-// Known, accepted edges (named in features/resident-repos.md item 21):
+// Known, accepted edges (named in docs/reference/specs/resident-repos.md item 21):
 // - ANY timeout kill (the SDK's is TERM-based; KILL behaves the same here)
 //   ends the wrapper before its own head/cleanup lines run, leaving the two
 //   files behind. That is why callers that care about hung-run output pass

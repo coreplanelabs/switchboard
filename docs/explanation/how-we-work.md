@@ -17,7 +17,7 @@ flowchart LR
   release --> deploy[CI deploys the<br/>affected Workers]
 ```
 
-**1. The spec says what should be true.** Every behavior has a row in a feature spec under `features/`: the criterion, and the proof that holds it — a named test (`file::describe::it`), a written procedure an agent runs against the live system, or an honest `[gap]` linked to the issue that will close it. A change starts by writing or editing that row. The spec is the contract, so a spec that describes code that no longer exists is a bug, and the same PR that changes the code changes the spec.
+**1. The spec says what should be true.** Every behavior has a row in a feature spec under `docs/reference/specs/`: the criterion, and the proof that holds it — a named test (`file::describe::it`), a written procedure an agent runs against the live system, or an honest `[gap]` linked to the issue that will close it. A change starts by writing or editing that row. The spec is the contract, so a spec that describes code that no longer exists is a bug, and the same PR that changes the code changes the spec.
 
 **2. A failing test, then the code.** The proof comes before the implementation. Unit tests are the default because they are the fastest proof that can be run anywhere; a live procedure is the exception for what a unit test genuinely cannot reach (a Slack flow, a sandbox, a deploy).
 

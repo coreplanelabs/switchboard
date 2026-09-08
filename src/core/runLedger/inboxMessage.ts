@@ -1,4 +1,4 @@
-// The durable shape of a message on the run ledger (features/run-history.md
+// The durable shape of a message on the run ledger (docs/reference/specs/run-history.md
 // items 40 and 42): a steered follow-up in `run_inbox`, and the request a run
 // was admitted for in its row's `meta.request`. One writer, one reader, so a
 // row written by one generation is read the same way by the next.

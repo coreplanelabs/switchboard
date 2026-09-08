@@ -1,7 +1,7 @@
 // Model effort: how hard the model thinks per turn (Anthropic
 // `output_config.effort`; skipped for models without support). A first-class
 // config dimension resolved through the SAME layers as the model ref
-// (features/routing-and-config.md item 2): request directive > thread-sticky
+// (docs/reference/specs/routing-and-config.md item 2): request directive > thread-sticky
 // > user scope > channel scope > defaults > the agent definition > the
 // provider's own default. Lower effort = much faster turns; the wall clock is
 // the real budget, so effort is what decides how much of it goes to thinking.

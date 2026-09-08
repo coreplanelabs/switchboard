@@ -1,4 +1,4 @@
-// Vendor third-party skills from skills/manifest.yaml (features/skills.md items 9–10).
+// Vendor third-party skills from skills/manifest.yaml (docs/reference/specs/skills.md items 9–10).
 //
 //   npx tsx scripts/skills-sync.ts           resolve each source's ref → commit, pin it in the
 //                                            manifest, fetch every listed SKILL.md at that commit,

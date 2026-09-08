@@ -138,13 +138,13 @@ export interface CoreDeps {
    *  background so the About block names the Worker's number, never a constant
    *  (routing-and-config item 11). `NO_FLEET` without residents. */
   residentFleet: ResidentFleetFacts;
-  /** The wall clock (features/tracing.md): `systemClock` in production, a ticking clock in tests. */
+  /** The wall clock (docs/reference/specs/tracing.md): `systemClock` in production, a ticking clock in tests. */
   clock?: Clock;
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
   tracer?: Tracer;
   /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */
   sinks?: SpanSink[];
-  /** The in-process span log every root also feeds (features/tracing.md item 26); `GET /admin/trace/log` reads it. */
+  /** The in-process span log every root also feeds (docs/reference/specs/tracing.md item 26); `GET /admin/trace/log` reads it. */
   spanLog?: SpanLog;
   /** where runtime state (sandboxes.json) lives; default ./data */
   dataDir?: string;
@@ -164,7 +164,7 @@ export interface CoreDeps {
    */
   runRegistry?: RunRegistry;
   /**
-   * Thread admission (features/thread-admission.md): the per-process map of
+   * Thread admission (docs/reference/specs/thread-admission.md): the per-process map of
    * threads with a run in flight, so a follow-up in such a thread is steered
    * into that run or refused instead of starting a rival one. Defaults to the
    * process-wide singleton; injectable for tests.
@@ -181,14 +181,14 @@ export interface CoreDeps {
   /**
    * Opens the PR for a coding run's pushed branch — or edits the one already
    * open for it (open-or-edit idempotency) — after the run submitted its typed
-   * `PrDescription` (features/pr-description.md item 5). Default: the real
+   * `PrDescription` (docs/reference/specs/pr-description.md item 5). Default: the real
    * GitHub REST call with the App installation token
    * (src/execution/githubPulls.ts; no `gh` shell-out — AGENTS.md invariant 5).
    * Injectable so tests assert the typed inputs without a network call.
    */
   openPullRequest?: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
   /**
-   * Ship round 0's pipeline-branch create (features/agent-ship.md item 3):
+   * Ship round 0's pipeline-branch create (docs/reference/specs/agent-ship.md item 3):
    * `refs/heads/<branch>` at the base ref's tip, so the ref exists on
    * origin BEFORE the resident is asked to bind the thread to it. Default:
    * githubPulls' `createBranchRef` (App token REST, 422 already-exists is
@@ -204,7 +204,7 @@ export interface CoreDeps {
    */
   fetchPrHead?: (pr: { repo: string; number: number }) => Promise<string | undefined>;
   /**
-   * Repo facts for the agent:ship gate (features/agent-ship.md item 9): the
+   * Repo facts for the agent:ship gate (docs/reference/specs/agent-ship.md item 9): the
    * `allow_auto_merge` flag — ship refuses when it is enabled OR unknown
    * (fail-closed: an LGTM into auto-merge would merge with no human) — and
    * the repo's default branch, the PR base of last resort. Default: one REST
@@ -256,7 +256,7 @@ export interface CoreDeps {
    */
   skills?: SkillStore;
   /**
-   * External MCP servers as tools (features/mcp-tools.md). Asked once
+   * External MCP servers as tools (docs/reference/specs/mcp-tools.md). Asked once
    * per run, before the first model turn, for the servers scoped to the
    * resolved agent; the bridged tools ride `RunOptions.extraTools` and the
    * outcome becomes the MCP prompt block + one `mcp_unavailable` note per
@@ -264,11 +264,11 @@ export interface CoreDeps {
    * `NullMcpToolSource` of a process without MCP included — → the request is
    * byte-identical to before the feature. Whether the self-serve surface
    * (`mcp add …`) exists is `capabilities.mcp`, which the config awareness
-   * block tells the model (features/mcp-tools.md item 17).
+   * block tells the model (docs/reference/specs/mcp-tools.md item 17).
    */
   mcp: McpToolSource;
   /**
-   * The GitHub API behind the `github_*` tools (features/github-tools.md).
+   * The GitHub API behind the `github_*` tools (docs/reference/specs/github-tools.md).
    * Absent → the production REST client on the App credential; tests inject an
    * `InMemoryGithubApi`. The per-run capability adds the requesting user's
    * `canUseRepo` write gate (`githubCapabilityFor`).
@@ -284,7 +284,7 @@ export interface CoreDeps {
    */
   runHistoryWriter: RunHistoryWriter;
   /**
-   * The run ledger's write-through (features/run-history.md item 35): every
+   * The run ledger's write-through (docs/reference/specs/run-history.md item 35): every
    * agent run and ship pipeline is claimed on the state Worker's ledger when
    * its run is created, mirrors its steps/events/state while it runs, takes
    * `finishing` before the reply and finishes through the ledger's one
@@ -373,7 +373,7 @@ const CONTEXT_MAX_BYTES = 256 * 1024;
 let sharedWeb: ReturnType<typeof makeWebCapability> | undefined;
 const webCapability = () => (sharedWeb ??= makeWebCapability(process.env));
 
-/** The `github_*` tools' capability for one run (features/github-tools.md):
+/** The `github_*` tools' capability for one run (docs/reference/specs/github-tools.md):
  *  the process-wide REST client on the App credential (or the injected test
  *  double) plus the REQUESTING USER's per-repo write gate — `canUseRepo`, the
  *  same allowlist that admits a user to a repo's resident — so an issue
@@ -390,7 +390,7 @@ let activeRuns = 0;
 
 /** A follow-up as the dispatcher admits it: the runner's `FollowUpInput` plus
  *  the message and channel handle it arrived on — what a fresh turn needs if
- *  the live run ends without consuming it (features/thread-admission.md item 4). */
+ *  the live run ends without consuming it (docs/reference/specs/thread-admission.md item 4). */
 export type DispatchFollowUp = FollowUpInput & { msg: IncomingMessage; io: ChannelIO };
 
 /** The process-wide admission map (one bot process = one map; the registry's
@@ -405,7 +405,7 @@ export function activeRunCount(): number {
   return activeRuns;
 }
 
-/** A run this generation reclaimed at boot and is continuing (features/
+/** A run this generation reclaimed at boot and is continuing (docs/reference/specs/
  *  run-history.md item 38): the ledger row as it stands, the last step record,
  *  the resume plan built from the transcript, the events published before the
  *  restart (replayed into the registry under their seqs), and the repo context
@@ -458,7 +458,7 @@ export interface DispatchOptions {
   resume?: ResumeContext;
   restart?: RestartContext;
   /** The request's root, started by the channel adapter at receipt
-   *  (features/tracing.md). Absent (tests, a caller without one) → the
+   *  (docs/reference/specs/tracing.md). Absent (tests, a caller without one) → the
    *  dispatcher starts its own at entry. Ended in the outermost finally. */
   trace?: RequestTrace;
   /** A fresh turn's wait behind the run it was parked on (the `queued …
@@ -509,7 +509,7 @@ export async function dispatch(
   const resume = opts.resume;
   const restart = opts.restart;
   const clock = deps.clock ?? systemClock;
-  // The request's root (features/tracing.md): the adapter's, started when our
+  // The request's root (docs/reference/specs/tracing.md): the adapter's, started when our
   // process saw the message, or our own now. Every awaited step below is a
   // `span(fn)` child of it; the run-stream sink delivers the streamed ones to
   // the run once it exists; the outermost finally ends it. The window opens at
@@ -532,12 +532,12 @@ export async function dispatch(
     refused = true;
     return root.span("dispatch.refuse", fn, { attrs: { outcome } });
   };
-  // The card's shape and queued lines at a close (features/tracing.md item 5):
+  // The card's shape and queued lines at a close (docs/reference/specs/tracing.md item 5):
   // a runless close reads the root's children so far over a live window; a
   // done close the whole window to the finish.
   const closeLines = (end: number, finished: boolean, owner: RunOwner = "agent") =>
     cardLines(trace, { end, finished, owner, queued });
-  // A done close reads the finish-site diagnosis (features/tracing.md item 5):
+  // A done close reads the finish-site diagnosis (docs/reference/specs/tracing.md item 5):
   // the same shape the record carries and the friction report prints.
   const doneLines = (diagnosis: FrictionDiagnosis | undefined) => {
     const shape = diagnosis?.shape ? cardShapeLineOf(diagnosis.shape) : undefined;
@@ -553,7 +553,7 @@ export async function dispatch(
   // Config commands and refusals hold the slot for their few hundred
   // milliseconds too — cheaper than a second gap.
   activeRuns++;
-  // How this dispatch's runs end (runEnding.ts; features/tracing.md): a run is
+  // How this dispatch's runs end (runEnding.ts; docs/reference/specs/tracing.md): a run is
   // SEALED once its first reply attempt has completed, and its record — its
   // inputs (the registry snapshot, the diagnosis) captured synchronously at
   // finish inside the run's try/catch, so a failed run has them too — is
@@ -572,11 +572,11 @@ export async function dispatch(
   // left open — a run failure is closed (with its checklist) by the run loop.
   let setupCard: StatusHandle | undefined;
   let setupShell: CardShell | undefined;
-  // The card ticks from the ack (features/tracing.md): a 5 s heartbeat repaints
+  // The card ticks from the ack (docs/reference/specs/tracing.md): a 5 s heartbeat repaints
   // it through setup — the elapsed time and the setup step in flight — until
   // the run loop's own heartbeat takes over (or the request ends without one).
   let setupHeartbeat: ReturnType<typeof setInterval> | undefined;
-  // Thread admission (features/thread-admission.md): the slot this dispatch
+  // Thread admission (docs/reference/specs/thread-admission.md): the slot this dispatch
   // holds on its thread while its run is in flight, claimed after the agent
   // gate below and released in the outer finally — where whatever follow-ups
   // the run never consumed are run as a fresh turn (or, after an operator
@@ -712,7 +712,7 @@ export async function dispatch(
 
     const agent = getAgent(resolved.agentName);
 
-    // Thread admission (features/thread-admission.md item 1): ONE live run per
+    // Thread admission (docs/reference/specs/thread-admission.md item 1): ONE live run per
     // thread. Claimed HERE — after the agent gate (a follow-up's sender must be
     // allowed to run the live agent, exactly like a first message) and before
     // anything slow (the setup card, repo resolution, the executor attach), so
@@ -1050,7 +1050,7 @@ export async function dispatch(
     // leaving a spinner behind.
     // A resumed run's clock is the original start (its ledger row's), so the
     // card's elapsed time spans the whole run, not the resume.
-    // The card's clock is the request's: it ticks from receipt (features/tracing.md).
+    // The card's clock is the request's: it ticks from receipt (docs/reference/specs/tracing.md).
     const startedAt = carriedRow?.startedAt ?? receivedAt;
     // One builder for every paint of this card (statusCardFrame.ts): the ack,
     // the spinner frames, the closes before the run starts, the done frame.
@@ -1155,7 +1155,7 @@ export async function dispatch(
       return;
     }
 
-    // agent:ship fork (features/agent-ship.md): after agent resolution and the
+    // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the
     // repo gates above, BEFORE the top-level attach — ship names its own
     // pipeline branch and each child round attaches its own workspace
     // (shipPipeline.ts). The branch owns everything from here: the preflight
@@ -1194,7 +1194,7 @@ export async function dispatch(
     // decide whether anything is provisioned at all (general gets nothing),
     // and repo/ref carry resident-repo inference. A resident fallback comes
     // back with a named note that rides on every status frame below.
-    // Unknown-head check (features/agent-review.md item 11): a review whose PR
+    // Unknown-head check (docs/reference/specs/agent-review.md item 11): a review whose PR
     // head could not be resolved is a guaranteed refusal downstream — not
     // started instead, before any attach, one named reply (the decision and
     // the reply live in `checkPrHeadPreflight`; otherwise a minute and a
@@ -1269,10 +1269,10 @@ export async function dispatch(
     let round: RoundWorkspace;
     try {
       // The attach is one `dispatch.workspace.attach` span naming its backend
-      // (features/tracing.md): the setup step that takes minutes on a cold clone.
+      // (docs/reference/specs/tracing.md): the setup step that takes minutes on a cold clone.
       round = await root.span("dispatch.workspace.attach", async (span) => {
         // The resident's own steps (clone, install, the mutex wait…) graft under
-        // this span, rebased to its start (features/tracing.md item 19) — on a
+        // this span, rebased to its start (docs/reference/specs/tracing.md item 19) — on a
         // failed attach too, where the trace says which step blew the budget.
         const graft = (steps: readonly ResidentStep[], residentTotalMs?: number) =>
           graftResidentSteps(steps, {
@@ -1339,7 +1339,7 @@ export async function dispatch(
       return;
     }
 
-    // Attach-head check (features/agent-review.md item 10): for a PR
+    // Attach-head check (docs/reference/specs/agent-review.md item 10): for a PR
     // review on the resident path, the sha the resident ATTACHED the worktree
     // at is compared with the PR head resolved above — before any model turn
     // (the comparison, the current-head second lookup and the refusal reply
@@ -1385,7 +1385,7 @@ export async function dispatch(
     // REVIEW TARGET block, item 9) — the same predicate the post-step and the
     // head-settle key on.
     const isPrReview = agent.name === "review" && repoCtx.repo !== undefined && repoCtx.pr !== undefined;
-    // Coding PR post-step gate (features/pr-description.md item 5): only a
+    // Coding PR post-step gate (docs/reference/specs/pr-description.md item 5): only a
     // writable-toolset run can have pushed a branch — readonly (review) and
     // none/web toolsets never trigger the post-step. The repo is deliberately
     // NOT part of the gate: a dispatch that resolved no slug can still open
@@ -1399,7 +1399,7 @@ export async function dispatch(
     // store, or an agent with no scoped skills (general/research) → undefined
     // and the prompt is untouched.
     const skillsBlock = deps.skills ? skillGuidanceBlock(deps.skills, agent.name) : undefined;
-    // External MCP tools (features/mcp-tools.md item 8): discovery for
+    // External MCP tools (docs/reference/specs/mcp-tools.md item 8): discovery for
     // the servers scoped to THIS agent, once, before the model turn. A server
     // that does not answer contributes no tools and is named in the MCP block
     // (and, once the run is registered, in an `mcp_unavailable` note). Nothing
@@ -1535,7 +1535,7 @@ export async function dispatch(
         userId: msg.userId,
         threadKey: msg.threadKey,
         channelVisibility,
-        ...(carriedRow ? {} : { receivedAt }), // the window opens at receipt (features/tracing.md); a resume or restart keeps its original stamps
+        ...(carriedRow ? {} : { receivedAt }), // the window opens at receipt (docs/reference/specs/tracing.md); a resume or restart keeps its original stamps
         ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
         ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
         ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
@@ -1549,7 +1549,7 @@ export async function dispatch(
     // A stop another container asked for while this run was still attaching.
     if (earlyStop) void run.control.requestStop(earlyStop);
     // The run's stream now carries the request's spans: the setup so far is
-    // backfilled, everything from here is live (features/tracing.md item 6).
+    // backfilled, everything from here is live (docs/reference/specs/tracing.md item 6).
     trace.bindRun(run.id, (e) => registry.publish(run.id, e));
     if (resume) {
       console.log(
@@ -1575,7 +1575,7 @@ export async function dispatch(
       // The model's raw answer rides on the event only when normalization
       // changed it AND the event still fits the per-event byte budget — the
       // budget already truncates `text` and must not be starved by a second
-      // copy (features/llm-output.md item 5).
+      // copy (docs/reference/specs/llm-output.md item 5).
       const withRaw = raw !== undefined ? { ...event, raw: redactSecrets(raw) } : event;
       registry.publish(run.id, utf8ByteLength(JSON.stringify(withRaw)) <= MAX_EVENT_BYTES ? withRaw : event);
       console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
@@ -1670,7 +1670,7 @@ export async function dispatch(
         );
       }
     }
-    // The ledger claim (features/run-history.md item 35): the run's row on the
+    // The ledger claim (docs/reference/specs/run-history.md item 35): the run's row on the
     // state Worker, with everything a resume must hand the model again — the
     // composed system prompt and the tool definitions verbatim, the card, the
     // repo context — plus the conversation as its seed. Claimed HERE, once the
@@ -1777,7 +1777,7 @@ export async function dispatch(
     const finalDetail = () => checklist;
     const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
     // The runner's progress notes carry the 💭 thought line at each model turn
-    // (features/tracing.md): the card shows it as activity, as it showed the
+    // (docs/reference/specs/tracing.md): the card shows it as activity, as it showed the
     // `turn` event before spans replaced it.
     const onProgress = (note: string) => {
       console.log(`[note] ${msg.threadKey} ${note}`);
@@ -1789,7 +1789,7 @@ export async function dispatch(
     // immediately, so activity is visible without waiting for the heartbeat.
     let toolCalls = 0; // "did real work" signal for the memory reflection gate
     // The branch the run's own `git push` named, read off its bash calls and
-    // results as they stream by (features/pr-description.md item 5):
+    // results as they stream by (docs/reference/specs/pr-description.md item 5):
     // the PR post-step opens from THIS branch, and from the checkout only
     // when no push was observed — the checkout can move between the push and
     // the post. The latest push wins.
@@ -1800,7 +1800,7 @@ export async function dispatch(
     let recordedPushedBranch: string | undefined;
     const onEvent = (e: RunEvent) => {
       registry.publish(run.id, e); // feed the external live-view stream
-      if (isSpanRecord(e)) return; // timing, not activity (features/tracing.md): the card and its clock ignore it
+      if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
       if (e.type === "tool_call") toolCalls++;
       if (isCodingPrRun) {
         pushes.observe(e);
@@ -1817,7 +1817,7 @@ export async function dispatch(
       card.update(currentFrame());
     };
     // A configured MCP server that did not answer discovery is a fact of the
-    // run (features/mcp-tools.md item 8): one note per server, before the
+    // run (docs/reference/specs/mcp-tools.md item 8): one note per server, before the
     // first tool event, so the run page explains a missing tool.
     for (const s of mcpForRun?.servers ?? []) {
       if (s.unavailable !== undefined)
@@ -1842,7 +1842,7 @@ export async function dispatch(
     // can always tell the difference.
     const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
 
-    // Reading-diff artifacts (features/reading-diff.md): a PR review run gets
+    // Reading-diff artifacts (docs/reference/specs/reading-diff.md): a PR review run gets
     // the change as a reviewer reads it, produced CONCURRENTLY with the review
     // by the run's own executor (read-only commands; the resident runs execs
     // beside the model's) and published straight to the registry like the
@@ -1854,7 +1854,7 @@ export async function dispatch(
     // the registry's finished-run rule, and the baseline still stands).
     let readingDiffBaseline: Promise<boolean> | undefined;
     if (agent.name === "review" && repoCtx.pr !== undefined) {
-      // Two background spans (features/tracing.md): concurrent with the loop,
+      // Two background spans (docs/reference/specs/tracing.md): concurrent with the loop,
       // structure for the partition, never a counted term — started under the
       // root inside `startReviewReadingDiff`, so each diff's exec is a child.
       const started = startReviewReadingDiff({
@@ -1934,7 +1934,7 @@ export async function dispatch(
     let runFailed = false; // the runner threw → terminal status `failed`
     let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
     // Give the workspace back now rather than at the inactivity sweep: a
-    // resident's pool user is a scarce slot (features/resident-repos.md item
+    // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
     // 16a). The release mode is paired to the round's agent by the attach
     // helper (reviewRound.ts): read-only agents hold nothing worth keeping; a
     // coding run keeps its worktree only while it has uncommitted/unpushed
@@ -1974,7 +1974,7 @@ export async function dispatch(
         ...(mcpForRun && mcpForRun.tools.length > 0 ? { extraTools: mcpForRun.tools } : {}),
         onProgress,
         onEvent,
-        span: root, // the loop is `run.agent` under the run's root (features/tracing.md)
+        span: root, // the loop is `run.agent` under the run's root (docs/reference/specs/tracing.md)
         ...(round.selection.backend ? { backend: round.selection.backend } : {}),
         control: run.control, // operator stop from /runs
         inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
@@ -1994,7 +1994,7 @@ export async function dispatch(
             }
           : {}),
       });
-      // Reviewed-head settle (features/agent-review.md items 8 + 12,
+      // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
       // settleReviewedHead in reviewRound.ts): for a PR review, read the
       // workspace HEAD NOW — after the model is done, BEFORE the finally
       // below releases the workspace — and reconcile a PR head that moved
@@ -2043,7 +2043,7 @@ export async function dispatch(
         observedHead = settled.observedHead;
         carried = settled.carried;
       }
-      // PR post-step observation (features/pr-description.md item 5): for a
+      // PR post-step observation (docs/reference/specs/pr-description.md item 5): for a
       // writable coding run, read the workspace's head branch — the one the
       // run's `git push` named, else the checkout — its tip, and the remote's
       // head for that branch NOW — after the model is done, BEFORE the
@@ -2085,7 +2085,7 @@ export async function dispatch(
           at: clock(),
         });
       }
-      // Deterministic coding PR post-step (features/pr-description.md item 5,
+      // Deterministic coding PR post-step (docs/reference/specs/pr-description.md item 5,
       // agent-coding.md item 2, runCodingPrPostStep in codingPrPostStep.ts):
       // a writable coding run that pushed a branch and submitted its typed
       // PrDescription gets its PR opened — or edited, the open-or-edit
@@ -2136,7 +2136,7 @@ export async function dispatch(
       // upgrade is deliberately NOT awaited — see the comment at the start.
       const baseline = readingDiffBaseline;
       if (baseline) await root.span("run.reading_diff_join", () => baseline);
-      // Typed-output boundary (features/llm-output.md item 5): the answer is
+      // Typed-output boundary (docs/reference/specs/llm-output.md item 5): the answer is
       // canonicalized ONCE here, so the event text, the channel reply, the
       // GitHub post, and memory all read one Markdown dialect; the model's raw
       // text rides on the event only when normalization changed it.
@@ -2176,7 +2176,7 @@ export async function dispatch(
       const snap = registry.snapshot(run.id, run.token);
       const events = snap?.events ?? [];
       const finishedAt = snap?.finishedAt ?? clock(); // the registry's finish clock: row and record agree
-      // The diagnosis over the run's window (features/tracing.md): its shape is
+      // The diagnosis over the run's window (docs/reference/specs/tracing.md): its shape is
       // what the closed card and the record carry.
       const diagnosis = analyzeRunFriction(events, {
         finished: true,
@@ -2272,7 +2272,7 @@ export async function dispatch(
       // the reply went and its record goes to the store — BEFORE the
       // workspace release below: the record does not depend on it, and on the
       // ledger the finish is what frees the thread, which must not wait ~90 s on
-      // a sandbox teardown (features/run-history.md item 36). Fire-and-forget;
+      // a sandbox teardown (docs/reference/specs/run-history.md item 36). Fire-and-forget;
       // the writer's `pending()` is incremented inside the drain, before the
       // outer finally's `activeRuns--`, so the shutdown drain never observes
       // "0 runs, 0 writes". A reply that threw still seals (`replyOk: false`)
@@ -2407,7 +2407,7 @@ export async function dispatch(
         `[resume] ${msg.threadKey} run ${resume.row.runId} closed interrupted: the resumed dispatch ended before the run started`,
       );
     }
-    // Thread admission (features/thread-admission.md item 4): free the thread,
+    // Thread admission (docs/reference/specs/thread-admission.md item 4): free the thread,
     // and settle what the run never consumed. A run that ended by itself (an
     // answer, a budget, a failure, a dead sandbox) hands its unconsumed
     // follow-ups on as ONE fresh turn — on the most recent sender's channel
@@ -2433,7 +2433,7 @@ export async function dispatch(
       const merged = mergeFollowUps(pending)!;
       const last = pending[pending.length - 1];
       console.log(`[dispatch] ${msg.threadKey} ${pending.length} unconsumed follow-up(s) → fresh turn`);
-      // The fresh turn is a request of its own (features/tracing.md): it was
+      // The fresh turn is a request of its own (docs/reference/specs/tracing.md): it was
       // received NOW, and it waited behind this run since its earliest
       // follow-up arrived — the `queued … behind the previous run` caption.
       const freshAt = clock();
@@ -2498,7 +2498,7 @@ interface ShipBranchContext {
   live: LiveThread<DispatchFollowUp>;
   /** The dispatch's run ending: the ship run seals after its reply like any other. */
   ending: RunEnding;
-  /** The request's trace (features/tracing.md): the ship run binds to it, its steps are spans under the root. */
+  /** The request's trace (docs/reference/specs/tracing.md): the ship run binds to it, its steps are spans under the root. */
   trace: RequestTrace;
   /** The card's shape and queued lines at a close, from the dispatch's window. */
   closeLines: (end: number, finished: boolean, owner?: RunOwner) => { shape?: string; queued?: string };
@@ -2509,7 +2509,7 @@ interface ShipBranchContext {
 }
 
 /**
- * The agent:ship branch (features/agent-ship.md): preflight refusals, then
+ * The agent:ship branch (docs/reference/specs/agent-ship.md): preflight refusals, then
  * the ONE run record + card shell around `runShipPipeline`'s round loop —
  * the ship counterpart of the main path's run shell, reusing the same label,
  * event, record, and friction vocabulary so /runs shows a pipeline exactly
@@ -2698,7 +2698,7 @@ async function runShipBranch(
   const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
   const onEvent = (e: RunEvent) => {
     registry.publish(run.id, e);
-    if (isSpanRecord(e)) return; // timing, not activity (features/tracing.md)
+    if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md)
     lastActivity = activityLine(e);
     console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
     card.update(currentFrame());
@@ -2752,7 +2752,7 @@ async function runShipBranch(
       messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
       threadDirective: { agent: ctx.sticky.agent, model: ctx.sticky.model, effort: ctx.sticky.effort },
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
-      // No `mcp` here: ship rounds receive no MCP tools yet (features/mcp-tools.md
+      // No `mcp` here: ship rounds receive no MCP tools yet (docs/reference/specs/mcp-tools.md
       // roadmap), and a line inviting `mcp add` into a run that could not use
       // the result would mislead. The line arrives with the tools.
     }),
@@ -3063,7 +3063,7 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
   trace.bindRun(run.id, (e) => registry.publish(run.id, e));
   io.runStarted?.({ id: run.id });
   registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: clock() });
-  // A command run's meta names no model (features/tracing.md): the agent and the trace.
+  // A command run's meta names no model (docs/reference/specs/tracing.md): the agent and the trace.
   registry.publish(run.id, { type: "run_meta", agent: COMMAND_RUN_AGENT, traceId: root.traceId, at: clock() });
   let result: T | undefined;
   try {
@@ -3219,7 +3219,7 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
 }
 
 /**
- * The record a booting generation closes a reclaimed run with (features/
+ * The record a booting generation closes a reclaimed run with (docs/reference/specs/
  * run-history.md item 36): the ledger row's identity and meta, the events it
  * appended while it ran (the registry that published them died with the old
  * process, so the ledger's copy is the whole stream — `eventCount` is its
@@ -3326,7 +3326,7 @@ function assembleRunRecord(input: {
   finishedAt: number;
   status: RunStatus;
   diagnosis: FrictionDiagnosis;
-  /** The run's seal (features/tracing.md): the events published between finish
+  /** The run's seal (docs/reference/specs/tracing.md): the events published between finish
    *  and seal are appended, the published total takes the larger count, and the
    *  two seal stamps ride the record — omitted when the seal has none. */
   seal?: SealResult;
@@ -3344,7 +3344,7 @@ function assembleRunRecord(input: {
     threadKey: msg.threadKey,
     channelVisibility: input.channelVisibility,
     ...(input.repo !== undefined ? { repo: input.repo } : {}),
-    // The window's opening rides the record (features/tracing.md): every
+    // The window's opening rides the record (docs/reference/specs/tracing.md): every
     // duration surface and the diagnosis's window start here, not at create.
     ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
     startedAt: snap?.startedAt ?? input.finishedAt,
@@ -3356,7 +3356,7 @@ function assembleRunRecord(input: {
     eventCount: Math.max(snap?.eventCount ?? atFinish.length, seal?.eventCount ?? 0),
     storedEventCount: events.length,
     truncated: false,
-    schema: SPAN_SCHEMA, // the stream carries spans, never `turn` events (features/tracing.md)
+    schema: SPAN_SCHEMA, // the stream carries spans, never `turn` events (docs/reference/specs/tracing.md)
     events,
     diagnosis: input.diagnosis,
     // What the run was last doing / how it ended, and where it came from — so the
@@ -3591,13 +3591,13 @@ function activityLine(e: RunEvent): string {
       return `round ${e.index} (${e.agent}): ${e.outcome}`; // published straight to the registry — never arrives here
     case "span_start":
     case "span_end":
-      return ""; // timing, not activity (features/tracing.md): the card's activity line never shows a span
+      return ""; // timing, not activity (docs/reference/specs/tracing.md): the card's activity line never shows a span
   }
 }
 
 /**
  * One-line note of what rode along with the request, for the `input` event
- * (features/live-view.md item 12): `[+2 images, 1 document]`. Counts only — the
+ * (docs/reference/specs/live-view.md item 12): `[+2 images, 1 document]`. Counts only — the
  * payloads never enter the run stream. Empty when nothing was attached.
  */
 export function attachmentSuffix(
@@ -3788,7 +3788,7 @@ async function resolveRepoForCommand(
   }
 }
 
-/** The card's shape and queued lines at a close (features/tracing.md item 5):
+/** The card's shape and queued lines at a close (docs/reference/specs/tracing.md item 5):
  *  the root's streamed children so far, partitioned over the request's window
  *  — to the finish for a run that ran, to now for a close before any run. The
  *  card's own gate (a minute, or 15 s of getting ready) applies. */
