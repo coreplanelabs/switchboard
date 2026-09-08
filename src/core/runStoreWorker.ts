@@ -1,4 +1,4 @@
-import { errorSuffix } from "./frictionLedgerWorker.js";
+import { errorSuffix } from "./workerError.js";
 import {
   isRunListItem,
   isRunRecord,
@@ -15,7 +15,7 @@ import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./run
 // The DURABLE RunStore (#157, U2): an HTTPS client to the RunHistoryDO on the
 // state Worker (deploy/cloudflare-memory/ — one SQLite Durable Object per store
 // key), so run history survives bot restarts and redeploys (AGENTS.md
-// invariant 6). Mirrors WorkerFrictionLedger: the core sees the RunStore
+// invariant 6). Mirrors WorkerMemoryStore: the core sees the RunStore
 // interface, the fetch client lives at this boundary. Route contract (JSON
 // in/out, bearer = the Worker's MEMORY_TOKEN, string body — the runtime
 // derives the numeric Content-Length the Worker's size fence needs from it,

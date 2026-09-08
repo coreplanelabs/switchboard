@@ -344,7 +344,7 @@ export async function readConfigForPush(
   const read = await readConfigSource(parsed.source, sourceIO);
   if (!read.ok) return { ok: false, problem: read.problem };
   try {
-    parseAppConfigText(read.text, () => {});
+    parseAppConfigText(read.text);
   } catch (err) {
     return {
       ok: false,

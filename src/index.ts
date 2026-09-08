@@ -33,7 +33,6 @@ import { buildMcp } from "./mcp/index.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
 import { resolveUserEmail } from "./channels/slack.js";
 import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
-import { buildFrictionLedger, WorkerFrictionLedger } from "./core/frictionLedgerWorker.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
 import { startProcessMetrics } from "./channels/processMetrics.js";
 import { selectFrictionLedger } from "./core/frictionLedger.js";
@@ -143,21 +142,11 @@ async function main() {
   // otherwise an in-process store with a loud warning (a restart loses it).
   // Disabled (default) → undefined → the dispatcher uses a NullMemoryStore.
   const memory = buildMemoryStore(config.config.memory, process.env, (m) => console.warn(`[memory] ${m}`));
-  // Friction ledger (Area 7b, #84): every finished run's friction diagnosis, so
-  // `friction propose` can cluster across recent runs. Durable WorkerFrictionLedger
-  // (a Durable Object on the state Worker) when selfImprovement.worker + its
-  // bearer are set; otherwise the host-disk JSONL file with a loud warning (an
-  // ephemeral-disk deploy loses it on redeploy).
-  const selfImprovement = config.config.selfImprovement;
-  const legacyFrictionLedger = buildFrictionLedger(selfImprovement, process.env, {
-    dataDir: "./data",
-    warn: (m) => console.warn(`[friction] ${m}`),
-  });
   // Run history (#157): the durable store every finished run's record lands in.
   // `null` when `runHistory` is unconfigured (or misconfigured — buildRunStore
-  // warned) → history off, live-only as before. With a store, the friction
-  // ledger is READ from it (legacy FrictionDO rows unioned for the rollout
-  // window) while `record()` keeps writing the legacy ledger (KD3 call-out).
+  // warned) → history off, live-only as before. The friction ledger (Area 7b,
+  // #84 — what `friction propose` clusters across) is READ from it: the record
+  // carries the diagnosis, so nothing is written twice.
   const runHistoryCfg = config.config.runHistory;
   const runStore = buildRunStore(runHistoryCfg, process.env, {
     dataDir: "./data",
@@ -196,9 +185,10 @@ async function main() {
       ? `[ledger] generation ${generation}: runs are mirrored onto the ledger (${runHistoryCfg?.worker?.baseUrl})`
       : `[ledger] generation ${generation}: write-through off (${runStore ? "host-disk history has no ledger" : "history off"})`,
   );
-  const frictionLedger = selectFrictionLedger(runStore, legacyFrictionLedger);
+  const selfImprovement = config.config.selfImprovement;
+  const frictionLedger = selectFrictionLedger(runStore);
   console.log(
-    `[friction] ledger: ${runStore ? "run store (legacy rows unioned); legacy write: " : ""}${legacyFrictionLedger instanceof WorkerFrictionLedger ? `durable (${selfImprovement?.worker?.baseUrl})` : "host-disk file"}; ` +
+    `[friction] ledger: ${frictionLedger ? "run history" : "none (no runHistory config — `friction report` has no runs to analyze)"}; ` +
       (selfImprovement?.repo
         ? `\`friction propose\` files to ${selfImprovement.repo}`
         : "`friction propose` disabled until selfImprovement.repo is set"),
@@ -234,7 +224,6 @@ async function main() {
     mcp,
     mcpRegistryOn: mcpWiring.service !== undefined,
     memory,
-    frictionLedger,
     runHistoryWriter,
     ...(runLedger ? { runLedger } : {}),
   };

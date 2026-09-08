@@ -209,10 +209,9 @@ describe("friction.report", () => {
     return store;
   }
 
-  it("analyzes only the runs the actor can see (authorization.md item 6, OQ2): a token granted one channel sees that channel; an all-channels actor sees the fleet; legacy bare rows count only for an all-channels actor", async () => {
+  it("analyzes only the runs the actor can see (authorization.md item 6, OQ2): a token granted one channel sees that channel; an all-channels actor sees the fleet", async () => {
     const store = await fleetStore();
-    const legacy = await seededLedger(); // legacy rows carry no channel → excluded under any narrower predicate
-    const { commands } = bind({ ledger: ledgerDep(new RunStoreFrictionLedger(store, legacy)) });
+    const { commands } = bind({ ledger: ledgerDep(new RunStoreFrictionLedger(store)) });
 
     const tokenX: Caller = {
       ...mcp("friction:read"),
@@ -229,7 +228,7 @@ describe("friction.report", () => {
     const labels = report.patterns.flatMap((p) => p.examples.map((e) => e.label));
     expect(labels.every((l) => l?.includes("x-repo"))).toBe(true);
     expect(JSON.stringify(report)).not.toContain("y-repo");
-    expect(JSON.stringify(report)).not.toContain("acme/r1");
+    expect(JSON.stringify(report)).not.toContain("y-repo"); // another channel's runs never appear
 
     const fleet: Caller = {
       ...mcp("friction:read"),
@@ -240,7 +239,7 @@ describe("friction.report", () => {
       },
     };
     expect(reportOf(await commands.invoke("friction.report", { options: { minRuns: "1" } }, fleet)).runsAnalyzed).toBe(
-      7 + 2,
+      7,
     );
 
     // No channel grants at all (an unpinned token, OQ4 a): nothing to analyze — never the runs of the channel it speaks in.

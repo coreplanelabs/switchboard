@@ -14,7 +14,6 @@ export default defineConfig({
   test: {
     include: [
       "worker.test.ts",
-      "friction.test.ts",
       "schedules.test.ts",
       "runs.test.ts",
       "config.test.ts",

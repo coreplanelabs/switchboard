@@ -85,7 +85,6 @@ flowchart LR
     subgraph stateplane ["State plane — deploy/cloudflare-memory"]
         SW["state Worker<br/>bearer-gated routes"]
         MDO[("memory DOs<br/>per scope, FTS5")]
-        FDO[("FrictionDO<br/>per-run diagnoses")]
         HDO[("RunHistoryDO<br/>finished runs + events,<br/>retention policy, sweep alarm")]
     end
 
@@ -102,14 +101,14 @@ flowchart LR
     RX -->|attach / exec / read / write| RW
     RW --> RDO
     RDO <--> R2
-    D -->|memory read/write · friction row · run record after the reply| SW
-    SW --> MDO & FDO & HDO
+    D -->|memory read/write · run record after the reply| SW
+    SW --> MDO & HDO
     API --> CR -->|RunsService: live registry ∪ run history| D
     CR -.->|reads| SW
     D -->|status + replies via ChannelIO| SL & CLI
 ```
 
-**State plane** (`deploy/cloudflare-memory/`): one Worker, three Durable Object classes behind a constant-time bearer — cross-session memory, the friction ledger, and the run history. Every finished run is built into a record at finish and written after the reply (retried, drain-tracked); the `RunHistoryDO` owns the retention policy (`retentionDays` / `maxRuns` / `maxBytes`, applied identically by the bot and the Worker through one shared module) and sweeps on an alarm. Without a `runHistory` config block, history is off and runs are live-only. Contract: [features/run-history.md](features/run-history.md).
+**State plane** (`deploy/cloudflare-memory/`): one Worker, its Durable Object classes behind a constant-time bearer — cross-session memory, run history (which the friction ledger reads), schedule firings, config documents. Every finished run is built into a record at finish and written after the reply (retried, drain-tracked); the `RunHistoryDO` owns the retention policy (`retentionDays` / `maxRuns` / `maxBytes`, applied identically by the bot and the Worker through one shared module) and sweeps on an alarm. Without a `runHistory` config block, history is off and runs are live-only. Contract: [features/run-history.md](features/run-history.md).
 
 **Commands** ([features/command-registry.md](features/command-registry.md)): an operator command is a typed TypeScript method registered once — id, positional `args` and camelCase `options` declared with zod (and inferred into the handler), scope, chat gate, effect, handler — and every surface is derived from that definition with no per-command code: HTTP `GET|POST /api/<group>.<verb>` (arguments and options by name; kebab-case query keys, camelCase JSON) behind Cloudflare Access (browser session or service token), MCP tool `<group>_<verb>` with a derived `inputSchema`, CLI `npx tsx src/cli.ts <group> <verb> <args…> [--kebab-option value…] [--json]`, and chat — the same grammar as a message (`runs stop <id> --mode soft`, `friction propose --dry-run --top 3`, `config set me --effort low`), with `--help`, `<group> help` and the bare `help` derived too. Every operator command is one of these — there is no other kind: `help show`, `config show|set|clear|instructions`, `runs list|get|events|friction|stop`, `friction report|propose|analyze`, `repo list|onboard|offboard|reconfigure|rebuild|test|build`, `memory list|forget`, `schedule list`, `deploy plan|all`, `env bootstrap` (the last three that spawn processes — `deploy all`, `env bootstrap`, `friction analyze` — are CLI-only). Authorization is resolved by the adapter (token scopes, Access identity + `permissions.operators` / `permissions.serviceTokens`, Slack admin gates) and checked before the input is parsed; no command ever starts an agent run — that path is `dispatch()` alone, reached from the CLI's `ask` built-in (`npx tsx src/cli.ts ask "…"`) and MCP's `dispatch` tool, which are channels, not commands.
 

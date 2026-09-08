@@ -1,4 +1,5 @@
 import { isScheduleFiring, type ScheduleFiring } from "./schedules.js";
+import { errorSuffix } from "./workerError.js";
 
 // Where scheduled firings are recorded (#244). The Worker shim writes one
 // `ScheduleFiring` per cron firing; the bot's /runs "Scheduled" panel reads the
@@ -85,16 +86,6 @@ export class WorkerScheduleStore implements ScheduleStore {
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(SCHEDULE_WORKER_TIMEOUT_MS),
     });
-  }
-}
-
-async function errorSuffix(res: Response): Promise<string> {
-  const text = await res.text().catch(() => "");
-  try {
-    const parsed = JSON.parse(text) as { error?: unknown };
-    return parsed?.error ? `: ${String(parsed.error)}` : "";
-  } catch {
-    return "";
   }
 }
 

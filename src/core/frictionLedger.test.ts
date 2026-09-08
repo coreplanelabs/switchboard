@@ -1,17 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Predicate } from "./authz/types.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import {
   DEFAULT_LEDGER_MAX,
-  FileFrictionLedger,
   InMemoryFrictionLedger,
   isFrictionRunRecord,
   RunStoreFrictionLedger,
   selectFrictionLedger,
-  type FrictionLedger,
 } from "./frictionLedger.js";
 import type { FrictionRunRecord } from "./frictionProposals.js";
 import type { RunEvent } from "./runEvents.js";
@@ -19,10 +14,10 @@ import type { RunRecord } from "./runRecord.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
 
 // Feature: features/self-improvement.md — the FrictionLedger seam: where each
-// finished run's diagnosis is kept so the proposer can look ACROSS runs (the
-// live registry evicts a finished run after 60s). Two implementations
-// (AGENTS.md invariant 2): in-memory (tests/dev) and an append-only JSONL file
-// under data/ (the same durability as data/overrides.json).
+// finished run's diagnosis is READ from so the proposer can look ACROSS runs
+// (the live registry evicts a finished run after 60s). Production reads run
+// history (`RunStoreFrictionLedger`); the in-memory ledger is the test double
+// that pins the seam's ordering and trimming rules over bare records.
 
 const rec = (runId: string, finishedAt: number): FrictionRunRecord => ({
   runId,
@@ -32,105 +27,68 @@ const rec = (runId: string, finishedAt: number): FrictionRunRecord => ({
   diagnosis: analyzeRunFriction([]),
 });
 
-const dirs: string[] = [];
-afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
-});
-function tmpPath(): string {
-  const d = mkdtempSync(join(tmpdir(), "friction-ledger-"));
-  dirs.push(d);
-  return join(d, "nested", "friction.jsonl"); // the parent dir must be created on first write
-}
-
-/** Contract shared by every implementation. */
-function contract(name: string, make: (max?: number) => FrictionLedger) {
-  describe(`${name} — FrictionLedger contract`, () => {
-    it("starts empty", async () => {
-      expect(await make().recent()).toEqual([]);
-    });
-
-    it("returns recorded runs oldest-first regardless of record order", async () => {
-      const l = make();
-      await l.record(rec("b", 200));
-      await l.record(rec("a", 100));
-      await l.record(rec("c", 300));
-      expect((await l.recent()).map((r) => r.runId)).toEqual(["a", "b", "c"]);
-    });
-
-    it("`limit` keeps the NEWEST n; `sinceMs` drops older runs", async () => {
-      const l = make();
-      for (let i = 1; i <= 5; i++) await l.record(rec(`r${i}`, i * 100));
-      expect((await l.recent({ limit: 2 })).map((r) => r.runId)).toEqual(["r4", "r5"]);
-      expect((await l.recent({ sinceMs: 300 })).map((r) => r.runId)).toEqual(["r3", "r4", "r5"]);
-      expect((await l.recent({ sinceMs: 300, limit: 1 })).map((r) => r.runId)).toEqual(["r5"]);
-    });
-
-    it("is bounded: beyond `max` records the oldest are dropped", async () => {
-      const l = make(3);
-      for (let i = 1; i <= 5; i++) await l.record(rec(`r${i}`, i * 100));
-      expect((await l.recent()).map((r) => r.runId)).toEqual(["r3", "r4", "r5"]);
-    });
-
-    it("upserts by run id: a retried or duplicated write replaces, never double-counts", async () => {
-      const l = make();
-      await l.record(rec("a", 100));
-      await l.record(rec("b", 200));
-      const again = rec("a", 100);
-      again.label = "replaced";
-      await l.record(again);
-      const all = await l.recent();
-      expect(all.map((r) => r.runId)).toEqual(["a", "b"]);
-      expect(all[0].label).toBe("replaced");
-    });
-
-    it("hands back copies — mutating a result does not change the ledger", async () => {
-      const l = make();
-      await l.record(rec("a", 100));
-      const [first] = await l.recent();
-      first.runId = "mutated";
-      expect((await l.recent())[0].runId).toBe("a");
-    });
-  });
-}
-
-contract("InMemoryFrictionLedger", (max) => new InMemoryFrictionLedger({ max }));
-contract("FileFrictionLedger", (max) => new FileFrictionLedger(tmpPath(), { max }));
-
-describe("FileFrictionLedger", () => {
-  it("persists across instances (a restart reads what the previous process wrote)", async () => {
-    const path = tmpPath();
-    await new FileFrictionLedger(path).record(rec("a", 100));
-    await new FileFrictionLedger(path).record(rec("b", 200));
-    expect((await new FileFrictionLedger(path).recent()).map((r) => r.runId)).toEqual(["a", "b"]);
-    expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(2); // one JSON line per run
+describe("InMemoryFrictionLedger — the seam's rules over bare records", () => {
+  it("starts empty", async () => {
+    expect(await new InMemoryFrictionLedger().recent()).toEqual([]);
   });
 
-  it("skips corrupt or wrong-shaped lines instead of failing the read", async () => {
-    const path = tmpPath();
-    const l = new FileFrictionLedger(path);
-    await l.record(rec("a", 100));
-    writeFileSync(path, `${readFileSync(path, "utf8")}not json\n{"runId":"x"}\n{"type":"tool_call"}\n`);
-    await l.record(rec("b", 200));
-    expect((await l.recent()).map((r) => r.runId)).toEqual(["a", "b"]);
+  it("returns seeded runs oldest-first regardless of seed order", async () => {
+    const ledger = new InMemoryFrictionLedger();
+    await ledger.record(rec("b", 200));
+    await ledger.record(rec("a", 100));
+    await ledger.record(rec("c", 300));
+    expect((await ledger.recent()).map((r) => r.runId)).toEqual(["a", "b", "c"]);
   });
 
-  it("compacts the file when it grows past the bound", async () => {
-    const path = tmpPath();
-    const l = new FileFrictionLedger(path, { max: 2 });
-    for (let i = 1; i <= 6; i++) await l.record(rec(`r${i}`, i));
-    const lines = readFileSync(path, "utf8").trim().split("\n");
-    expect(lines.length).toBeLessThanOrEqual(4); // ≤ 2×max between compactions
-    expect((await l.recent()).map((r) => r.runId)).toEqual(["r5", "r6"]);
+  it("`limit` keeps the NEWEST n; `sinceMs` drops older runs", async () => {
+    const ledger = new InMemoryFrictionLedger();
+    for (const [id, at] of [
+      ["a", 100],
+      ["b", 200],
+      ["c", 300],
+    ] as const)
+      await ledger.record(rec(id, at));
+    expect((await ledger.recent({ limit: 2 })).map((r) => r.runId)).toEqual(["b", "c"]);
+    expect((await ledger.recent({ sinceMs: 200 })).map((r) => r.runId)).toEqual(["b", "c"]);
   });
 
-  it("a missing file reads as empty, never throws", async () => {
-    expect(await new FileFrictionLedger(tmpPath()).recent()).toEqual([]);
+  it("is bounded: beyond `max` records the oldest are dropped", async () => {
+    const ledger = new InMemoryFrictionLedger({ max: 2 });
+    for (const [id, at] of [
+      ["a", 100],
+      ["b", 200],
+      ["c", 300],
+    ] as const)
+      await ledger.record(rec(id, at));
+    expect((await ledger.recent()).map((r) => r.runId)).toEqual(["b", "c"]);
+  });
+
+  it("upserts by run id: a repeated seed replaces, never double-counts", async () => {
+    const ledger = new InMemoryFrictionLedger();
+    await ledger.record(rec("a", 100));
+    await ledger.record({ ...rec("a", 150), agent: "coding" });
+    const out = await ledger.recent();
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ runId: "a", finishedAt: 150, agent: "coding" });
+  });
+
+  it("hands back copies — mutating a result does not change the ledger", async () => {
+    const ledger = new InMemoryFrictionLedger();
+    await ledger.record(rec("a", 100));
+    const [first] = await ledger.recent();
+    first.label = "mutated";
+    expect((await ledger.recent())[0].label).toBe(rec("a", 100).label);
+  });
+
+  it("bare records answer only a predicate that admits everything: anything narrower yields nothing (fail closed)", async () => {
+    const ledger = new InMemoryFrictionLedger();
+    await ledger.record(rec("a", 100));
+    const inX: Predicate = { kind: "channels-in", channelIds: new Set(["http:x"]) };
+    expect(await ledger.recent({ visibleTo: inX })).toEqual([]);
+    expect((await ledger.recent({ visibleTo: { kind: "all" } })).map((r) => r.runId)).toEqual(["a"]);
   });
 });
 
-// Feature: features/run-history.md / self-improvement.md — the friction ledger is
-// SERVED from the run store (KD3, KTD12): `recent()` projects run-store list
-// rows to FrictionRunRecords and unions the legacy ledger for one retention window.
 describe("RunStoreFrictionLedger", () => {
   const NOW = 1_800_000_000_000;
   const runRecord = (id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord => {
@@ -162,12 +120,12 @@ describe("RunStoreFrictionLedger", () => {
     ["d", NOW - 50],
   ] as const;
 
-  it("recent() matches FileFrictionLedger.recent() ordering over the same fixture (differential)", async () => {
+  it("recent() orders and trims exactly like the in-memory ledger over the same fixture (differential)", async () => {
     const store = new InMemoryRunStore({ now: () => NOW });
-    const file = new FileFrictionLedger(tmpPath());
+    const reference = new InMemoryFrictionLedger();
     for (const [id, at] of fixture) {
       await store.put(runRecord(id, at));
-      await file.record({
+      await reference.record({
         runId: id,
         label: `coding · o/r · "${id}"`,
         agent: "coding",
@@ -176,7 +134,7 @@ describe("RunStoreFrictionLedger", () => {
       });
     }
     const viaStore = await new RunStoreFrictionLedger(store).recent();
-    expect(viaStore).toEqual(await file.recent());
+    expect(viaStore).toEqual(await reference.recent());
     expect(viaStore.map((r) => r.runId)).toEqual(["a", "b", "c", "d"]);
     expect((await new RunStoreFrictionLedger(store).recent({ limit: 2 })).map((r) => r.runId)).toEqual(["c", "d"]);
     expect((await new RunStoreFrictionLedger(store).recent({ sinceMs: NOW - 100 })).map((r) => r.runId)).toEqual([
@@ -185,15 +143,13 @@ describe("RunStoreFrictionLedger", () => {
     ]);
   });
 
-  it("recent() takes the actor's predicate (authorization.md item 6): the run store is asked with it as `visibleTo`; legacy rows carry nothing a predicate could check and are excluded under any narrower one; a bare-record ledger yields nothing", async () => {
+  it("recent() takes the actor's predicate (authorization.md item 6): the run store is asked with it as `visibleTo`; `none` reads nothing; `all` and no predicate ask without a filter", async () => {
     const store = new InMemoryRunStore({ now: () => NOW });
     await store.put(runRecord("x1", NOW - 300, { channelId: "http:x", channelVisibility: "machine" }));
     await store.put(runRecord("x2", NOW - 100, { channelId: "http:x", channelVisibility: "machine" }));
     await store.put(runRecord("y1", NOW - 200, { channelId: "http:y", channelVisibility: "machine" }));
     await store.put(runRecord("p1", NOW - 250, { channelId: "slack:C_PUB", channelVisibility: "public" }));
-    const legacy = new InMemoryFrictionLedger();
-    await legacy.record(rec("legacy-1", NOW - 150));
-    const ledger = new RunStoreFrictionLedger(store, legacy);
+    const ledger = new RunStoreFrictionLedger(store);
     const list = vi.spyOn(store, "list");
     const inX: Predicate = { kind: "channels-in", channelIds: new Set(["http:x"]) };
     expect((await ledger.recent({ visibleTo: inX })).map((r) => r.runId)).toEqual(["x1", "x2"]);
@@ -205,24 +161,12 @@ describe("RunStoreFrictionLedger", () => {
     // member-of as the compiler emits it: the granted channel OR the public runs.
     const memberOf: Predicate = { kind: "or", of: [inX, { kind: "visibility-in", visibilities: new Set(["public"]) }] };
     expect((await ledger.recent({ visibleTo: memberOf })).map((r) => r.runId)).toEqual(["x1", "p1", "x2"]);
-    // `none` reads nothing; `all` (and no predicate) unions the legacy rows too, and the store is asked without a filter.
     list.mockClear();
     expect(await ledger.recent({ visibleTo: { kind: "none" } })).toEqual([]);
     expect(list).not.toHaveBeenCalled();
-    expect((await ledger.recent({ visibleTo: { kind: "all" } })).map((r) => r.runId)).toEqual([
-      "x1",
-      "p1",
-      "y1",
-      "legacy-1",
-      "x2",
-    ]);
+    expect((await ledger.recent({ visibleTo: { kind: "all" } })).map((r) => r.runId)).toEqual(["x1", "p1", "y1", "x2"]);
     expect(list.mock.calls[0][0]).not.toHaveProperty("visibleTo");
-    expect((await ledger.recent()).map((r) => r.runId)).toEqual(["x1", "p1", "y1", "legacy-1", "x2"]);
-    expect(await legacy.recent({ visibleTo: inX })).toEqual([]);
-    const file = new FileFrictionLedger(tmpPath());
-    await file.record(rec("f1", NOW));
-    expect(await file.recent({ visibleTo: inX })).toEqual([]);
-    expect((await file.recent({ visibleTo: { kind: "all" } })).map((r) => r.runId)).toEqual(["f1"]);
+    expect((await ledger.recent()).map((r) => r.runId)).toEqual(["x1", "p1", "y1", "x2"]);
   });
 
   it("projects only { runId, label, agent, finishedAt, diagnosis } — no message text, no ids beyond the run id", async () => {
@@ -235,61 +179,18 @@ describe("RunStoreFrictionLedger", () => {
     expect(isFrictionRunRecord(rec)).toBe(true);
   });
 
-  it("unions the legacy ledger: the run-store row wins on a shared id, a legacy-only run still appears", async () => {
-    const store = new InMemoryRunStore({ now: () => NOW });
-    const legacy = new InMemoryFrictionLedger();
-    await store.put(runRecord("shared", NOW - 10, { label: "from store" }));
-    await legacy.record({
-      runId: "shared",
-      label: "from legacy",
-      finishedAt: NOW - 10,
-      diagnosis: analyzeRunFriction([]),
-    });
-    await legacy.record({ runId: "legacy-only", finishedAt: NOW - 20, diagnosis: analyzeRunFriction([]) });
-    const out = await new RunStoreFrictionLedger(store, legacy).recent();
-    expect(out.map((r) => r.runId)).toEqual(["legacy-only", "shared"]);
-    expect(out[1].label).toBe("from store");
-  });
-
-  const failing = (): FrictionLedger => ({
-    record: async () => {},
-    recent: async () => {
-      throw new Error("legacy down");
-    },
-  });
-  const brokenStore = (): RunStore => ({
-    put: async () => ({ ok: true, retained: 0, stored: false, rewritten: false }),
-    get: async () => null,
-    getSummary: async () => null,
-    list: async () => {
-      throw new Error("store down");
-    },
-    events: async () => null,
-    delete: async () => {},
-  });
-
-  it("a failing legacy ledger is warned about once and the run-store rows are still served", async () => {
-    const store = new InMemoryRunStore({ now: () => NOW });
-    await store.put(runRecord("a", NOW));
-    const warnings: string[] = [];
-    const out = await new RunStoreFrictionLedger(store, failing(), (m) => warnings.push(m)).recent();
-    expect(out.map((r) => r.runId)).toEqual(["a"]);
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("legacy down");
-  });
-
-  it("a failing run store is warned about once and the legacy rows are still served", async () => {
-    const legacy = new InMemoryFrictionLedger();
-    await legacy.record({ runId: "l", finishedAt: NOW - 5, diagnosis: analyzeRunFriction([]) });
-    const warnings: string[] = [];
-    const out = await new RunStoreFrictionLedger(brokenStore(), legacy, (m) => warnings.push(m)).recent();
-    expect(out.map((r) => r.runId)).toEqual(["l"]);
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("store down");
-  });
-
-  it("when both sources fail, recent() rejects with the run store's error", async () => {
-    await expect(new RunStoreFrictionLedger(brokenStore(), failing(), () => {}).recent()).rejects.toThrow("store down");
+  it("a run store that cannot be read rejects with its error — the friction command names the cause", async () => {
+    const brokenStore: RunStore = {
+      put: async () => ({ ok: true, retained: 0, stored: false, rewritten: false }),
+      get: async () => null,
+      getSummary: async () => null,
+      list: async () => {
+        throw new Error("store down");
+      },
+      events: async () => null,
+      delete: async () => {},
+    };
+    await expect(new RunStoreFrictionLedger(brokenStore).recent()).rejects.toThrow("store down");
   });
 
   it("pages the run store by {before, beforeId}: 202 runs sharing one finishedAt all reach the ledger", async () => {
@@ -302,27 +203,12 @@ describe("RunStoreFrictionLedger", () => {
 
   it("projects a stored record missing a diagnosis category with that category zero-filled", async () => {
     const store = new InMemoryRunStore({ now: () => NOW });
-    const rec = runRecord("legacy", NOW);
+    const rec = runRecord("older", NOW);
     const { slow_tool: _drop, ...rest } = rec.diagnosis.byCategory;
     await store.put({ ...rec, diagnosis: { ...rec.diagnosis, byCategory: rest as typeof rec.diagnosis.byCategory } });
     const [row] = await new RunStoreFrictionLedger(store).recent();
     expect(row.diagnosis.byCategory.slow_tool).toEqual({ count: 0, durationMs: 0 });
     expect(isFrictionRunRecord(row)).toBe(true);
-  });
-
-  it("record() forwards to the legacy ledger (FrictionDO keeps its writes until decommission) and is a no-op without one", async () => {
-    const store = new InMemoryRunStore({ now: () => NOW });
-    const legacy = new InMemoryFrictionLedger();
-    await new RunStoreFrictionLedger(store, legacy).record({
-      runId: "x",
-      finishedAt: 1,
-      diagnosis: analyzeRunFriction([]),
-    });
-    expect((await legacy.recent()).map((r) => r.runId)).toEqual(["x"]);
-    await expect(
-      new RunStoreFrictionLedger(store).record({ runId: "y", finishedAt: 1, diagnosis: analyzeRunFriction([]) }),
-    ).resolves.toBeUndefined();
-    expect(await store.list({})).toEqual([]); // never writes the run store
   });
 
   it("bounds the run-store read to the ledger default (500) and never calls get", async () => {
@@ -351,10 +237,9 @@ describe("RunStoreFrictionLedger", () => {
     expect(calls).toEqual([`list ${DEFAULT_LEDGER_MAX}`, "list 2"]);
   });
 
-  it("selectFrictionLedger: a null run store → the legacy ledger unchanged", () => {
-    const legacy = new InMemoryFrictionLedger();
-    expect(selectFrictionLedger(null, legacy)).toBe(legacy);
-    expect(selectFrictionLedger(new InMemoryRunStore(), legacy)).toBeInstanceOf(RunStoreFrictionLedger);
+  it("selectFrictionLedger: a run store → the store-served ledger; no run store → no ledger (the commands say so)", () => {
+    expect(selectFrictionLedger(new InMemoryRunStore())).toBeInstanceOf(RunStoreFrictionLedger);
+    expect(selectFrictionLedger(null)).toBeUndefined();
   });
 });
 
@@ -370,9 +255,9 @@ describe("isFrictionRunRecord", () => {
   });
 
   it("accepts a record written by an OLDER analyzer whose byCategory lacks categories added since (absent = zero)", () => {
-    // The durable ledger holds records for months; a new FrictionCategory
+    // Run history holds records for weeks; a new FrictionCategory
     // (`slow_model_turn`, 2026-08-30) must not make every existing record
-    // unreadable — `WorkerFrictionLedger.recent` filters through this guard.
+    // unreadable — the projection zero-fills what an older diagnosis lacks.
     const old = rec("a", 1);
     const { slow_model_turn: _dropped, ...legacy } = old.diagnosis.byCategory;
     expect(isFrictionRunRecord({ ...old, diagnosis: { ...old.diagnosis, byCategory: legacy } })).toBe(true);
