@@ -94,6 +94,14 @@ describe("buildScheduledRows", () => {
     });
   });
 
+  it("carries the firing's trace id when the recorder stored one, and omits the key otherwise (features/tracing.md item 22)", () => {
+    const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const [withTrace] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing({ traceId })] }, [], NOW);
+    expect(withTrace.last?.traceId).toBe(traceId);
+    const [without] = buildScheduledRows(FIXTURE_SCHEDULES, { ok: true, firings: [firing()] }, [], NOW);
+    expect(without.last).not.toHaveProperty("traceId");
+  });
+
   it("links the run WITH its capability token while it is live in the registry", () => {
     const [si] = buildScheduledRows(
       FIXTURE_SCHEDULES,
