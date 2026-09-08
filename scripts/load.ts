@@ -50,7 +50,7 @@ commands
              --ingress-url URL  --healthz-url URL  --text "agent:coding in owner/name: load"  --threads N  --hold S  --stagger S
              env: SWITCHBOARD_LOAD_INGRESS_TOKEN (or --token-env)
   cards      the status-card path in virtual time (no network)
-             --cards N  --hold S  --channels N  [--per-app-per-minute N --per-channel-per-second N]
+             --cards N  --hold S  --channels N  [--client budgeted|retrying  --budget-per-minute N  --per-app-per-minute N  --per-channel-per-second N]
   provider   serve the scripted model for a local bot (blocks)
              --port N  --profile review|coding  --cpu-seconds S  --terminal
 `;
@@ -83,6 +83,8 @@ function flags(argv: string[]): Flags {
       "token-env": { type: "string" },
       "per-app-per-minute": { type: "string" },
       "per-channel-per-second": { type: "string" },
+      client: { type: "string" },
+      "budget-per-minute": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -358,6 +360,9 @@ async function cards(f: Flags): Promise<boolean> {
     cards: num(f, "cards", 50),
     holdMs: num(f, "hold", 600) * 1000,
     channels: num(f, "channels", 5),
+    // `--client retrying` is the pre-budget adapter, the baseline the budget is measured against.
+    client: str(f, "client", "budgeted") === "retrying" ? ("retrying" as const) : ("budgeted" as const),
+    ...(f["budget-per-minute"] !== undefined ? { budgetPerMinute: num(f, "budget-per-minute", 50) } : {}),
     ...(f["per-app-per-minute"] !== undefined ? { perAppPerMinute: num(f, "per-app-per-minute", 50) } : {}),
     ...(f["per-channel-per-second"] !== undefined ? { perChannelPerSecond: num(f, "per-channel-per-second", 1) } : {}),
   };
@@ -399,7 +404,9 @@ async function cards(f: Flags): Promise<boolean> {
     },
   ];
   const notes = [
-    `frames produced ${out.framesProduced}, accepted edits ${out.stats.updates}, refused ${out.stats.ratelimited}, retries ${out.retries}, stale retries dropped ${out.staleDropped}, given up ${out.givenUp}`,
+    out.client === "budgeted"
+      ? `client budgeted: frames produced ${out.framesProduced}, accepted edits ${out.stats.updates}, held back by the budget ${out.budgetDropped}, refused by Slack ${out.stats.ratelimited}, terminal frames re-sent ${out.terminalResent}`
+      : `client retrying: frames produced ${out.framesProduced}, accepted edits ${out.stats.updates}, refused ${out.stats.ratelimited}, retries ${out.retries}, stale retries dropped ${out.staleDropped}, given up ${out.givenUp}`,
     `virtual span ${Math.round(out.spanMs / 1000)} s (the simulation is instant; the latency column is card lag, not request time)`,
   ];
   return writeResults("cards", id, startedAt, params, summary, checks, { outcome: out }, notes);
