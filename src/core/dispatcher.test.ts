@@ -7017,9 +7017,18 @@ workspaceDir: __WORKDIR__
     // resolveRepoContext resolves the cited PR's head and binds it as `ref`
     // (repoContext.ts: `if (head?.ref) ref = head.ref`) — the head branch of
     // the human PR (SHIP_BRANCH here, matching openBotPr's headRef). The mock
-    // MUST carry that ref, or it hides the fall-through re-basing round 0 on
-    // the stranger's head branch (F1).
-    deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 508, ref: SHIP_BRANCH, headSha: HEAD_A, baseRef: "main" });
+    // MUST carry that ref AND the `refFromPr` flag the resolver sets with it, or
+    // it hides the fall-through re-basing round 0 on the stranger's head branch
+    // (F1). `prFromMessage` marks the reference as in-message (not inherited).
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 508,
+      prFromMessage: true,
+      ref: SHIP_BRANCH,
+      refFromPr: true,
+      headSha: HEAD_A,
+      baseRef: "main",
+    });
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "justin", id: 42 } }));
     const branch = shipBranchName(shipTaskText(TASK, "acme/api"), "slack:CX:1.0");
     queueWorkspaces(shipWorkspace({ head: HEAD_A, branch, remoteHead: null }));
@@ -7032,6 +7041,78 @@ workspaceDir: __WORKDIR__
     // stranger's commits and dangle when #508 merges (F1).
     expect(deps.createBranchRef).toHaveBeenCalledWith("acme/api", branch, "main");
     for (const r of replies) expect(r).not.toContain("not ship's to drive");
+  });
+
+  it("in-message cited PR + new task text + FAILING prFacts fetch → round 0 starts off the DEFAULT branch, no refusal (#567)", async () => {
+    const TASK = "investigate the review-agent bug seen on acme/api#508";
+    const provider = shipProvider({ coding: [say("Which review run did you mean?")] });
+    const { deps } = shipDeps(provider);
+    // The resolver flagged the cited PR as in-message (prFromMessage) with its
+    // head ref bound (refFromPr). Ship's OWN facts fetch then fails transiently
+    // — the unlucky #512 case. prFromMessage + task text is the fall-through, so
+    // ship must NOT refuse; and because facts.headRef is now UNKNOWN, only
+    // refFromPr keeps round 0 off the stranger's PR head branch (#567 F1).
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 508,
+      prFromMessage: true,
+      ref: SHIP_BRANCH,
+      refFromPr: true,
+      headSha: HEAD_A,
+      baseRef: "main",
+    });
+    deps.fetchPrFacts = vi.fn(async () => undefined); // transient fetch failure
+    const branch = shipBranchName(shipTaskText(TASK, "acme/api"), "slack:CX:1.0");
+    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch, remoteHead: null }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(`agent:ship ${TASK}`, "slack:UADMIN"), io);
+    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].agent.name).toBe("coding"); // round 0, not a refusal
+    // Round 0 branches from the repo default — NEVER the cited PR's head branch
+    // (SHIP_BRANCH), which the failed facts fetch left unverifiable (#567 F1).
+    expect(deps.createBranchRef).toHaveBeenCalledWith("acme/api", branch, "main");
+    for (const r of replies) expect(r).not.toContain("PR unverifiable");
+    for (const r of replies) expect(r).not.toContain("refusing fail-closed");
+  });
+
+  it("inherited unreachable PR (prUnpostable) + new task text → still refused fail-closed (#567 keeps inherited PRs closed)", async () => {
+    const provider = shipProvider();
+    const { deps } = shipDeps(provider);
+    // An INHERITED thread PR that could not be fetched — prFromMessage is unset,
+    // so the fall-through never applies; the thread's own in-flight PR stays
+    // fail-closed even with new task text beside it.
+    deps.resolveRepoContext = () => ({ repo: "acme/api", prUnpostable: { number: 42, reason: "unreachable" } });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:ship also add rate limiting", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("🚫");
+    expect(replies[0]).toContain("acme/api#42");
+    expect(replies[0]).toContain("could not be fetched");
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+  });
+
+  it("in-message cited PR + NO task text + failing prFacts fetch → still refused (a bare reference is a resume attempt) (#567)", async () => {
+    const provider = shipProvider();
+    const { deps } = shipDeps(provider);
+    // In-message, but no task text — a bare URL is a resume request, so the PR
+    // MUST be verified before resuming; a failed fetch stays fail-closed.
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 508,
+      prFromMessage: true,
+      ref: SHIP_BRANCH,
+      refFromPr: true,
+      headSha: HEAD_A,
+    });
+    deps.fetchPrFacts = vi.fn(async () => undefined); // transient fetch failure
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("🚫");
+    expect(replies[0]).toContain("Could not fetch acme/api#508");
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
   });
 
   it("thread PR authored by a human → refusal (not ship's to drive), no child run", async () => {

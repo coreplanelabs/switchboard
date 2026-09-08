@@ -177,7 +177,10 @@ export interface ShipPreflightInput {
   threadKey: string;
   /** Directive-stripped request text. */
   requestText: string;
-  repoCtx: Pick<RepoContext, "repo" | "pr" | "ref" | "baseRef" | "headSha" | "prUnpostable">;
+  repoCtx: Pick<
+    RepoContext,
+    "repo" | "pr" | "prFromMessage" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
+  >;
   gates: { canRunAgent: (agent: string) => boolean; adminsHint: () => string };
   /** Repo facts for the gate: auto-merge flag + default branch. Undefined =
    *  unknown → refused fail-closed. */
@@ -252,82 +255,92 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       `🚫 This thread names PR ${repo}#${repoCtx.prUnpostable.number} but it could not be fetched to run ship's entry checks — refusing fail-closed. Retry in a moment, or check the PR on GitHub.`,
     );
   }
-  // resolveRepoContext sets repoCtx.ref to a cited PR's head branch. When that
-  // PR does not bind as ship's target (a foreign PR quoted as evidence, #512),
-  // its head branch must not become round 0's base — remember it here so the
-  // fall-through can drop it and start from the default branch instead.
-  let citedPrHeadRef: string | undefined;
   if (repoCtx.pr !== undefined) {
     const where = `${repo}#${repoCtx.pr}`;
     const facts = await input.prFacts({ repo, number: repoCtx.pr }).catch(() => undefined);
-    if (!facts) {
+    // A cited PR whose facts we cannot fetch is fail-closed — EXCEPT the #512
+    // fall-through case (#567): a PR named in THIS message and quoted as
+    // evidence inside NEW task text is context, not the target, so a transient
+    // fetch failure must not block the task. It falls through to round 0 below,
+    // which drops the PR-derived ref (repoCtx.refFromPr) and starts a fresh
+    // deterministic ship branch off the default branch — the cited PR's commits
+    // are never touched. Kept fail-closed: an INHERITED PR (prFromMessage
+    // unset — the thread's own in-flight PR), or a BARE in-message reference
+    // (no task = a resume attempt, which must verify the PR before resuming).
+    const fallThrough = !facts && task !== "" && repoCtx.prFromMessage === true;
+    if (!facts && !fallThrough) {
       return refuse(
         "PR facts unavailable",
         "not started (PR unverifiable)",
         `🚫 Could not fetch ${where} to run ship's entry checks (open? bot-authored? same-repo head?) — refusing fail-closed. Retry in a moment.`,
       );
     }
-    citedPrHeadRef = facts.headRef;
-    const author = facts.author;
-    const shipAuthored = author?.login === SHIP_PR_AUTHOR.login && author?.id === SHIP_PR_AUTHOR.id;
-    if (facts.state === "open" && !(task && !shipAuthored)) {
-      // Binding rule (#512): a PR quoted as evidence inside a NEW task is not
-      // the PR to drive — with task text present, someone ELSE's PR mention
-      // does not bind; execution falls through to round 0 below and the
-      // reference stays in the task text as context for the coding child.
-      if (task) {
-        // Ship's OWN open PR + new task text: the refusal protecting the
-        // thread's in-flight PR is still correct.
-        return refuse(
-          "new task over open PR",
-          "not started (open PR)",
-          `🚫 This thread's PR ${where} is still open — a new task over it is refused. Re-issue \`agent:ship\` with only the PR URL to resume its review loop, or finish/close ${where} and start the new task in a fresh thread.`,
-        );
-      }
-      // A bare PR reference (no task text) IS a resume request — authorship
-      // decides whether it is ship's to drive (spec item 10).
-      if (!shipAuthored) {
-        return refuse(
-          "human-authored PR",
-          "not started (not ship's PR)",
-          `🚫 ${where} was not authored by \`${SHIP_PR_AUTHOR.login}\` — it is not ship's to drive. Use \`agent:review\` for a one-off review, or drive the loop manually.`,
-        );
-      }
-      if (!facts.sameRepoHead) {
-        return refuse(
-          "fork-head PR",
-          "not started (fork head)",
-          `🚫 ${where}'s head branch lives on a fork, not on \`${repo}\` — ship cannot drive it.`,
-        );
-      }
-      const branch = facts.headRef ?? repoCtx.ref;
-      if (!branch) {
-        return refuse(
-          "head branch unknown",
-          "not started (head branch unknown)",
-          `🚫 Could not determine ${where}'s head branch, so ship cannot bind the thread's worktree to it — refusing fail-closed.`,
-        );
-      }
-      return {
-        ok: true,
-        entry: {
-          repo,
-          branch,
-          // The PR's OWN base wins on resume: a ship PR opened against a
-          // non-default base must not run its re-reviews (or re-open a closed
-          // PR) against the default branch. repoCtx.baseRef carries the same
-          // fact when the thread context resolved the PR; the default branch
-          // is the last resort.
-          base: resolveBaseRef([facts.baseRef, repoCtx.baseRef], info.defaultBranch),
-          resume: {
-            pr: repoCtx.pr,
-            headSha: facts.headSha ?? repoCtx.headSha,
-            ...(facts.htmlUrl !== undefined ? { url: facts.htmlUrl } : {}),
+    if (facts) {
+      const author = facts.author;
+      const shipAuthored = author?.login === SHIP_PR_AUTHOR.login && author?.id === SHIP_PR_AUTHOR.id;
+      if (facts.state === "open" && !(task && !shipAuthored)) {
+        // Binding rule (#512): a PR quoted as evidence inside a NEW task is not
+        // the PR to drive — with task text present, someone ELSE's PR mention
+        // does not bind; execution falls through to round 0 below and the
+        // reference stays in the task text as context for the coding child.
+        if (task) {
+          // Ship's OWN open PR + new task text: the refusal protecting the
+          // thread's in-flight PR is still correct.
+          return refuse(
+            "new task over open PR",
+            "not started (open PR)",
+            `🚫 This thread's PR ${where} is still open — a new task over it is refused. Re-issue \`agent:ship\` with only the PR URL to resume its review loop, or finish/close ${where} and start the new task in a fresh thread.`,
+          );
+        }
+        // A bare PR reference (no task text) IS a resume request — authorship
+        // decides whether it is ship's to drive (spec item 10).
+        if (!shipAuthored) {
+          return refuse(
+            "human-authored PR",
+            "not started (not ship's PR)",
+            `🚫 ${where} was not authored by \`${SHIP_PR_AUTHOR.login}\` — it is not ship's to drive. Use \`agent:review\` for a one-off review, or drive the loop manually.`,
+          );
+        }
+        if (!facts.sameRepoHead) {
+          return refuse(
+            "fork-head PR",
+            "not started (fork head)",
+            `🚫 ${where}'s head branch lives on a fork, not on \`${repo}\` — ship cannot drive it.`,
+          );
+        }
+        const branch = facts.headRef ?? repoCtx.ref;
+        if (!branch) {
+          return refuse(
+            "head branch unknown",
+            "not started (head branch unknown)",
+            `🚫 Could not determine ${where}'s head branch, so ship cannot bind the thread's worktree to it — refusing fail-closed.`,
+          );
+        }
+        return {
+          ok: true,
+          entry: {
+            repo,
+            branch,
+            // The PR's OWN base wins on resume: a ship PR opened against a
+            // non-default base must not run its re-reviews (or re-open a closed
+            // PR) against the default branch. repoCtx.baseRef carries the same
+            // fact when the thread context resolved the PR; the default branch
+            // is the last resort.
+            base: resolveBaseRef([facts.baseRef, repoCtx.baseRef], info.defaultBranch),
+            resume: {
+              pr: repoCtx.pr,
+              headSha: facts.headSha ?? repoCtx.headSha,
+              ...(facts.htmlUrl !== undefined ? { url: facts.htmlUrl } : {}),
+            },
           },
-        },
-      };
+        };
+      }
+      // A closed/merged PR is done — the thread may start a fresh task below.
     }
-    // A closed/merged PR is done — the thread may start a fresh task below.
+    // Otherwise `facts` is undefined and this is the #567 fall-through (an
+    // in-message PR cited as evidence in new task text): execution drops to the
+    // round-0 return below, which starts a fresh ship branch off the default
+    // branch and leaves the reference in the task text for the coding child.
   }
   if (!task) {
     return refuse(
@@ -339,14 +352,14 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   // The round-0 base is a user-phrased "on <ref>" or the repo default — never
   // a ref that resolveRepoContext derived from a cited PR's head branch (#512
   // F1): that PR did not bind as ship's target, so basing the new work on its
-  // head would carry the stranger's commits and dangle when the PR merges.
+  // head would carry the stranger's commits and dangle when the PR merges. The
+  // resolver flags such a ref (`refFromPr`) at the source, so this holds even
+  // when the facts fetch failed and the head ref is otherwise unknown (#567).
   // Belt-and-braces guard stays: a repo-shaped ref (the slug itself, or any
   // owner/name the API would 404 on as a ref) can only be a misparse —
   // createBranchRef would fail on it. Any of these → the repo's default branch.
   const ref =
-    repoCtx.ref && repoCtx.ref.toLowerCase() !== repo.toLowerCase() && repoCtx.ref !== citedPrHeadRef
-      ? repoCtx.ref
-      : undefined;
+    repoCtx.ref && !repoCtx.refFromPr && repoCtx.ref.toLowerCase() !== repo.toLowerCase() ? repoCtx.ref : undefined;
   return {
     ok: true,
     entry: { repo, branch: shipBranchName(task, input.threadKey), base: resolveBaseRef([ref], info.defaultBranch) },
