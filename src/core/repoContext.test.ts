@@ -95,7 +95,9 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     await expect(resolveRepoContext(msg("review <https://github.com/jshttp/vary/pull/42|#42>"), [])).resolves.toEqual({
       repo: "jshttp/vary",
       ref: "patch-1",
+      refFromPr: true,
       pr: 42,
+      prFromMessage: true,
     });
     expect(fn).toHaveBeenCalledTimes(1);
     expect(calls[0].url).toBe("https://api.github.com/repos/jshttp/vary/pulls/42");
@@ -106,7 +108,9 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     await expect(resolveRepoContext(msg("agent:review acme/api#7"), [])).resolves.toEqual({
       repo: "acme/api",
       ref: "patch-1",
+      refFromPr: true,
       pr: 7,
+      prFromMessage: true,
     });
   });
 
@@ -122,6 +126,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
       pr: 42,
+      prFromMessage: true,
     });
   });
 
@@ -130,6 +135,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
       pr: 42,
+      prFromMessage: true,
     });
   });
 
@@ -138,6 +144,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
       pr: 42,
+      prFromMessage: true,
     });
   });
 
@@ -149,6 +156,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
       pr: 42,
+      prFromMessage: true,
     });
   });
 
@@ -157,6 +165,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42"), [])).resolves.toEqual({
       repo: "jshttp/vary",
       pr: 42,
+      prFromMessage: true,
     });
   });
 
@@ -183,7 +192,15 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
         ),
         [],
       ),
-    ).resolves.toEqual({ repo: "acme/api", ref: "feat/prompt-caching", pr: 300, headSha: SHA, baseRef: "main" });
+    ).resolves.toEqual({
+      repo: "acme/api",
+      ref: "feat/prompt-caching",
+      refFromPr: true,
+      pr: 300,
+      prFromMessage: true,
+      headSha: SHA,
+      baseRef: "main",
+    });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/300");
   });
@@ -191,7 +208,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
   it("an explicit 'on branch X' beside a PR URL does not redirect the review either — the PR head is fetched and its branch bound", async () => {
     stubFetch({ body: { state: "open", head: { ref: "patch-1", sha: SHA, repo: { full_name: "jshttp/vary" } } } });
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42 on branch main"), [])).resolves.toEqual(
-      { repo: "jshttp/vary", ref: "patch-1", pr: 42, headSha: SHA },
+      { repo: "jshttp/vary", ref: "patch-1", refFromPr: true, pr: 42, prFromMessage: true, headSha: SHA },
     );
   });
 
@@ -199,8 +216,9 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
     stubFetch({ reject: "fetch failed" });
     await expect(resolveRepoContext(msg("https://github.com/jshttp/vary/pull/42 on main"), [])).resolves.toEqual({
       repo: "jshttp/vary",
-      ref: "main",
+      ref: "main", // the prose fallback, NOT the PR head — so refFromPr stays unset
       pr: 42,
+      prFromMessage: true,
     });
   });
 
@@ -233,6 +251,44 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
   });
 });
 
+// Feature: features/agent-ship.md item 10 (#512/#567) — the resolver flags a PR
+// named in the CURRENT message (`prFromMessage`) and a ref taken from a cited
+// PR's head branch (`refFromPr`). Ship reads both: prFromMessage tells a foreign
+// PR quoted as evidence from the thread's own in-flight PR, and refFromPr keeps
+// round 0 off the stranger's PR head even when a later facts fetch fails and the
+// head ref is otherwise unknown.
+describe("resolveRepoContext: PR-source flags for ship (#512/#567)", () => {
+  const SHA = "e".repeat(40);
+
+  it("a PR named in the current message sets prFromMessage, and its bound head ref sets refFromPr", async () => {
+    stubFetch({ body: { state: "open", head: { ref: "feat/x", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const ctx = await resolveRepoContext(msg("look into https://github.com/acme/api/pull/508 for the regression"), []);
+    expect(ctx.pr).toBe(508);
+    expect(ctx.prFromMessage).toBe(true);
+    expect(ctx.ref).toBe("feat/x");
+    expect(ctx.refFromPr).toBe(true);
+  });
+
+  it("a PR INHERITED from the thread sets neither flag — it is not an in-message reference", async () => {
+    stubFetch({ body: { state: "open", head: { ref: "p9", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/7" }];
+    const ctx = await resolveRepoContext(msg("re-review"), history);
+    expect(ctx.pr).toBe(7);
+    expect(ctx.prFromMessage).toBeUndefined();
+    // The ref is never rebound from an inherited PR, so refFromPr never applies.
+    expect(ctx.refFromPr).toBeUndefined();
+  });
+
+  it("an in-message PR whose head fetch FAILS keeps prFromMessage but never sets refFromPr (#567 F1 guard on the failed-fetch path)", async () => {
+    stubFetch({ reject: "fetch failed" });
+    const ctx = await resolveRepoContext(msg("look into https://github.com/acme/api/pull/508 for the regression"), []);
+    expect(ctx.pr).toBe(508);
+    expect(ctx.prFromMessage).toBe(true);
+    expect(ctx.ref).toBeUndefined();
+    expect(ctx.refFromPr).toBeUndefined();
+  });
+});
+
 describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail-closed)", () => {
   const SHA = "c".repeat(40);
   const history = [
@@ -253,7 +309,9 @@ describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail
     await expect(resolveRepoContext(msg("now review acme/api#9"), history)).resolves.toEqual({
       repo: "acme/api",
       ref: "p9",
+      refFromPr: true,
       pr: 9,
+      prFromMessage: true,
       headSha: SHA,
     });
   });
@@ -437,7 +495,14 @@ describe("resolveRepoContext: thread history inheritance", () => {
     stubFetch({ body: { head: { ref: "feat/x", sha: "b".repeat(40), repo: { full_name: "acme/api" } } } });
     await expect(
       resolveRepoContext(msg("re-review https://github.com/acme/api/pull/9 — I removed the unset/unset sentinel"), []),
-    ).resolves.toEqual({ repo: "acme/api", ref: "feat/x", pr: 9, headSha: "b".repeat(40) });
+    ).resolves.toEqual({
+      repo: "acme/api",
+      ref: "feat/x",
+      refFromPr: true,
+      pr: 9,
+      prFromMessage: true,
+      headSha: "b".repeat(40),
+    });
   });
 
   it("repoFromThread ignores code-spanned tokens in history too", () => {
@@ -504,7 +569,9 @@ describe("PR base branch for the review target", () => {
     await expect(resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), [])).resolves.toEqual({
       repo: "acme/api",
       ref: "p1",
+      refFromPr: true,
       pr: 3,
+      prFromMessage: true,
       headSha: SHA,
       baseRef: "release/2.x",
     });
@@ -540,7 +607,14 @@ describe("PR head SHA for review pinning", () => {
   it("a same-repo PR carries headSha alongside ref and pr", async () => {
     stubFetch({ body: { head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } });
     const ctx = await resolveRepoContext({ text: "review https://github.com/acme/api/pull/7" });
-    expect(ctx).toEqual({ repo: "acme/api", ref: "patch-1", pr: 7, headSha: SHA });
+    expect(ctx).toEqual({
+      repo: "acme/api",
+      ref: "patch-1",
+      refFromPr: true,
+      pr: 7,
+      prFromMessage: true,
+      headSha: SHA,
+    });
   });
 
   it("a cross-fork PR still carries headSha even though its ref is not bound", async () => {

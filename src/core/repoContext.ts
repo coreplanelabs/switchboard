@@ -81,6 +81,20 @@ export interface RepoContext {
    *  fetched now, be `open`, and yield a well-formed head SHA; anything else →
    *  no `pr`, Slack-only. */
   pr?: number;
+  /** True when `pr` was named by the CURRENT message (a URL or `owner/name#N`),
+   *  false/unset when `pr` was INHERITED from the thread. Ship reads it to tell
+   *  a foreign PR quoted as evidence inside new task text (in-message → may fall
+   *  through to a fresh round 0, #512/#567) from the thread's own in-flight PR
+   *  (inherited → still fail-closed when the PR's facts cannot be fetched). */
+  prFromMessage?: boolean;
+  /** True when `ref` was taken from a cited PR's head branch (the REST head
+   *  fetch below), false/unset when `ref` came from message phrasing (`on X`,
+   *  `/tree/<ref>`) or is absent. A consumer that does NOT bind that PR as its
+   *  target must DROP `ref` — basing new work on a stranger's PR head branch
+   *  would carry its commits and dangle when the PR merges (ship #512 F1). The
+   *  flag is decided HERE so it holds even when a later facts fetch fails and
+   *  the head ref is otherwise unknown (#567). */
+  refFromPr?: boolean;
   /** Head commit SHA of that PR at resolution time (from the same REST call as
    *  the head ref). Pins the posted review via `commit_id`, so the org's
    *  auto-approve guard refuses a verdict that predates a newer push. Explicit
@@ -459,6 +473,7 @@ export async function resolveRepoContext(
   if (!repo && thread.repo && (await vet(thread.repo))) repo = thread.repo;
   if (!repo && s.repo && (await vet(s.repo))) repo = s.repo;
   let ref = s.ref;
+  let refFromPr = false;
 
   // "on <owner/name-shaped>": a ref when a repo is independently established
   // (current message or thread), otherwise a (vetted) repo mention. When the
@@ -490,7 +505,10 @@ export async function resolveRepoContext(
   let baseRef: string | undefined;
   if (s.pr && repo === s.pr.repo) {
     const head = await prHead(s.pr).catch(() => undefined);
-    if (head?.ref) ref = head.ref;
+    if (head?.ref) {
+      ref = head.ref;
+      refFromPr = true;
+    }
     headSha = head?.sha;
     baseRef = head?.base;
   }
@@ -500,6 +518,7 @@ export async function resolveRepoContext(
   else if (unverified) out.unverifiedRepo = unverified;
   else if (rejected) out.rejectedRepo = rejected;
   if (ref) out.ref = ref;
+  if (refFromPr) out.refFromPr = true;
   // PR for the deterministic review post-step. Named in the current message →
   // set regardless of whether the head fetch succeeded (the reference itself
   // is the user's instruction). Otherwise inherit the thread's PR — the
@@ -512,6 +531,7 @@ export async function resolveRepoContext(
   // "on <branch>" keeps that binding.
   if (repo && s.pr && repo === s.pr.repo) {
     out.pr = s.pr.number;
+    out.prFromMessage = true;
     if (headSha) out.headSha = headSha;
     if (baseRef) out.baseRef = baseRef;
   } else if (repo && !s.pr) {
