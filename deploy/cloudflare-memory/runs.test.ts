@@ -4,7 +4,7 @@ import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { RUN_EVENT_INSERT_BATCH, RunHistoryDO } from "./worker.ts";
 
-// Feature: features/run-history.md — the RunHistoryDO (#157, U3): the durable
+// Feature: features/run-history.md — the RunHistoryDO: the durable
 // run store behind the bot's WorkerRunStore. Runs in workerd against the real
 // SQLite-backed Durable Object; a unique store key per test.
 
@@ -63,7 +63,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     agent: "review",
     model: "anthropic/m",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1",
     channelVisibility: "unknown",
     startedAt: finishedAt - 5000,
@@ -140,7 +140,7 @@ describe("run history routes", () => {
       {
         type: "input",
         text: "please review",
-        source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "justin" },
+        source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "alice" },
         at: 1,
       },
       {
@@ -256,7 +256,7 @@ describe("run history routes", () => {
     expect(await rowCount(key, "run_events")).toBe(3);
   });
 
-  it("tombstone-first (#375): the DO accepts status `interrupted` (shared validator), and the finish put replaces the provisional record whole", async () => {
+  it("tombstone-first: the DO accepts status `interrupted` (shared validator), and the finish put replaces the provisional record whole", async () => {
     const key = storeKey();
     const now = Date.now();
     // The provisional tombstone written at run start: terminal, finishedAt = startedAt, few events.
@@ -779,7 +779,7 @@ describe("run history routes", () => {
       record("pub", now - 1000, {
         events: events(1),
         channelId: "slack:C_PUB",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         channelVisibility: "public",
       }),
     );
@@ -788,7 +788,7 @@ describe("run history routes", () => {
       record("priv", now - 2000, {
         events: events(1),
         channelId: "slack:G1",
-        userId: "slack:U2",
+        userId: "slack:UBOB",
         channelVisibility: "private",
       }),
     );
@@ -820,7 +820,7 @@ describe("run history routes", () => {
     expect(await ids({ kind: "channels-in", channelIds: ["http:ops", "mcp:dev"] })).toEqual(["ops", "dev"]);
     expect(await ids({ kind: "channels-in", channelIds: [] })).toEqual([]);
     expect(await ids({ kind: "visibility-in", visibilities: ["public"] })).toEqual(["pub"]);
-    expect(await ids({ kind: "user-is", userId: "slack:U2" })).toEqual(["priv"]);
+    expect(await ids({ kind: "user-is", userId: "slack:UBOB" })).toEqual(["priv"]);
     // member-of as the compiler emits it for a token granted http:ops, plus its own runs.
     expect(
       await ids({
@@ -837,7 +837,7 @@ describe("run history routes", () => {
         kind: "and",
         of: [
           { kind: "channels-in", channelIds: ["slack:G1"] },
-          { kind: "user-is", userId: "slack:U2" },
+          { kind: "user-is", userId: "slack:UBOB" },
         ],
       }),
     ).toEqual(["priv"]);
@@ -846,7 +846,7 @@ describe("run history routes", () => {
         kind: "and",
         of: [
           { kind: "channels-in", channelIds: ["slack:G1"] },
-          { kind: "user-is", userId: "slack:U1" },
+          { kind: "user-is", userId: "slack:UALICE" },
         ],
       }),
     ).toEqual([]);

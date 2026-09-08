@@ -1,178 +1,4 @@
 {
-  ".github/ISSUE_TEMPLATE/config.yml": {
-    "names": 2,
-    "trackers": 2
-  },
-  ".github/dependabot.yml": {
-    "trackers": 4
-  },
-  ".github/workflows/auto-approve-claude-lgtm.yml": {
-    "names": 3,
-    "trackers": 1
-  },
-  ".github/workflows/ci.yml": {
-    "dates": 2,
-    "names": 9
-  },
-  ".github/workflows/deploy-production.yml": {
-    "names": 13
-  },
-  ".github/workflows/pr-title.yml": {
-    "trackers": 1,
-    "dates": 1
-  },
-  ".github/workflows/release-please.yml": {
-    "names": 19
-  },
-  ".github/workflows/scorecard.yml": {
-    "trackers": 1,
-    "dates": 1
-  },
-  "AGENTS.md": {
-    "names": 1
-  },
-  "CODE_OF_CONDUCT.md": {
-    "names": 1
-  },
-  "CONTRIBUTING.md": {
-    "names": 1,
-    "trackers": 1
-  },
-  "GOVERNANCE.md": {
-    "names": 3
-  },
-  "README.md": {
-    "names": 14,
-    "trackers": 5,
-    "ids": 1
-  },
-  "SECURITY.md": {
-    "names": 1
-  },
-  "SUPPORT.md": {
-    "names": 1,
-    "trackers": 1
-  },
-  "config/config.example.yaml": {
-    "ids": 4,
-    "trackers": 8,
-    "names": 5
-  },
-  "deploy/agent-env-bootstrap.sh": {
-    "names": 2,
-    "trackers": 1
-  },
-  "deploy/agent-env.jsonc": {
-    "names": 9,
-    "trackers": 1
-  },
-  "deploy/bin/cf-logs": {
-    "names": 1
-  },
-  "deploy/cloudflare-docs/wrangler.template.jsonc": {
-    "dates": 1
-  },
-  "deploy/cloudflare-memory/config.test.ts": {
-    "planIds": 2
-  },
-  "deploy/cloudflare-memory/runLedger.test.ts": {
-    "planIds": 2
-  },
-  "deploy/cloudflare-memory/runs.test.ts": {
-    "trackers": 2,
-    "planIds": 7,
-    "names": 1
-  },
-  "deploy/cloudflare-memory/schedules.test.ts": {
-    "trackers": 1
-  },
-  "deploy/cloudflare-memory/worker.test.ts": {
-    "trackers": 11
-  },
-  "deploy/cloudflare-memory/worker.ts": {
-    "trackers": 24,
-    "planIds": 5,
-    "dates": 1,
-    "names": 1
-  },
-  "deploy/cloudflare-memory/wrangler.template.jsonc": {
-    "dates": 1,
-    "trackers": 2
-  },
-  "deploy/cloudflare-resident/Dockerfile": {
-    "dates": 3,
-    "names": 1,
-    "trackers": 1,
-    "planIds": 1
-  },
-  "deploy/cloudflare-resident/gc.test.ts": {
-    "trackers": 4
-  },
-  "deploy/cloudflare-resident/gc.ts": {
-    "trackers": 2,
-    "dates": 1
-  },
-  "deploy/cloudflare-resident/instanceSizing.test.ts": {
-    "trackers": 4,
-    "names": 13,
-    "dates": 6
-  },
-  "deploy/cloudflare-resident/preflight.mjs": {
-    "trackers": 2,
-    "dates": 1
-  },
-  "deploy/cloudflare-resident/preflight.test.mjs": {
-    "trackers": 1,
-    "dates": 1
-  },
-  "deploy/cloudflare-resident/worker.ts": {
-    "planIds": 108,
-    "trackers": 77,
-    "dates": 23,
-    "names": 2
-  },
-  "deploy/cloudflare-resident/wrangler.template.jsonc": {
-    "dates": 5,
-    "trackers": 5,
-    "names": 2,
-    "planIds": 1
-  },
-  "deploy/cloudflare-sandbox/Dockerfile": {
-    "trackers": 1
-  },
-  "deploy/cloudflare-sandbox/worker.ts": {
-    "trackers": 10,
-    "dates": 3
-  },
-  "deploy/cloudflare-sandbox/wrangler.template.jsonc": {
-    "dates": 3,
-    "trackers": 2
-  },
-  "deploy/cloudflare/preflight.mjs": {
-    "dates": 1,
-    "trackers": 2
-  },
-  "deploy/cloudflare/preflight.test.mjs": {
-    "dates": 1,
-    "trackers": 1
-  },
-  "deploy/cloudflare/worker.ts": {
-    "names": 1,
-    "trackers": 3
-  },
-  "deploy/cloudflare/wrangler.template.jsonc": {
-    "dates": 1,
-    "trackers": 3
-  },
-  "deploy/profile.example.json": {
-    "names": 1,
-    "ids": 1
-  },
-  "deploy/secrets.manifest.json": {
-    "names": 1,
-    "trackers": 1,
-    "dates": 1
-  },
   "features/README.md": {
     "names": 2,
     "trackers": 12,
@@ -277,7 +103,7 @@
   },
   "features/memory.md": {
     "names": 16,
-    "trackers": 34,
+    "trackers": 25,
     "planIds": 3
   },
   "features/pr-description.md": {
@@ -313,7 +139,7 @@
   },
   "features/run-history.md": {
     "names": 10,
-    "trackers": 16,
+    "trackers": 15,
     "planIds": 5,
     "dates": 6
   },
@@ -356,22 +182,6 @@
     "planIds": 2,
     "names": 2,
     "trackers": 2
-  },
-  "package.json": {
-    "names": 3,
-    "trackers": 3
-  },
-  "scripts/check-sandbox-pair.mjs": {
-    "trackers": 4
-  },
-  "scripts/load.ts": {
-    "dates": 1
-  },
-  "scripts/web-preview.ts": {
-    "planIds": 1,
-    "names": 9,
-    "trackers": 4,
-    "dates": 1
   },
   "src/agentEnv/bootstrap.test.ts": {
     "names": 35

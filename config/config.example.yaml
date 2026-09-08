@@ -43,7 +43,7 @@ defaults:
 # Static per-channel defaults (channel ID -> scope). Runtime overrides set via
 # "config set channel ..." are stored in data/overrides.json and win over these.
 # channels:
-#   slack:C0123456789:
+#   slack:C012345:
 #     agent: review
 #     models:
 #       review: anthropic/claude-opus-5
@@ -52,7 +52,7 @@ defaults:
 
 # Static per-user defaults (user ID -> scope).
 # users:
-#   slack:U0123456789:
+#   slack:U012345:
 #     model: openai/gpt-5
 
 # Authorization (features/authorization.md item 9, docs/reference/authorization.md):
@@ -81,7 +81,7 @@ defaults:
 # an admin without an `all` entry. An unknown id prefix or a misspelled `all`
 # fails the load; so does the retired `permissions` block.
 # grants:
-#   slack:U0123ADMIN:                   # an admin, spelled out
+#   slack:U0ADMIN:                    # an admin, spelled out
 #     actions: all
 #     channels: all
 #     repos: all
@@ -146,7 +146,7 @@ execution:
 # On Fly.io set this to ./data/workspaces so checkouts live on the volume.
 workspaceDir: ./workspaces
 
-# Cross-session self-learning memory (Area 7c, #85). DEFAULT OFF: absent, or
+# Cross-session self-learning memory (features/memory.md). DEFAULT OFF: absent, or
 # enabled:false, means the dispatcher uses a NullMemoryStore and the model input
 # is byte-identical to memory-off — zero behavior change. When enabled, before
 # each model turn the dispatcher retrieves scope-relevant distilled records
@@ -163,12 +163,12 @@ workspaceDir: ./workspaces
 # memory:
 #   enabled: false      # master switch (default false)
 #   worker:
-#     baseUrl: https://switchboard-memory.coreplanelabs.dev
+#     baseUrl: https://switchboard-memory.example.com
 #     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)
 #   # Scopes are derived per request, not configured: every request reads the
-#   # shared org scope (org:coreplanelabs), the channel's scope (channel:slack:C…)
+#   # shared org scope (org:acme), the channel's scope (channel:slack:C…)
 #   # and — when the run is bound to a repo — that repo's scope (repo:owner/name)
-#   # (#253), plus the requesting user's own scope (user:slack:U…, #107) — a
+#   # plus the requesting user's own scope (user:slack:U…) — a
 #   # person's records never surface for anyone else.
 #   limit: 8            # max records retrieved/injected per request (default 8)
 #   maxTokens: 800      # hard token budget for the injected block (default 800)
@@ -180,7 +180,7 @@ workspaceDir: ./workspaces
 #                       # <provider>/<model> for the reflection pass — pick a
 #                       # cheap tier. Absent → the run's own resolved model.
 
-# Self-improvement proposals (Area 7b, #84). Every finished run's friction
+# Self-improvement proposals (features/run-friction.md). Every finished run's friction
 # diagnosis (features/run-friction.md) is stored with its run record, so the
 # runs these commands see are run history's (`runHistory` below; its retention
 # bounds them — without `runHistory` there are no recent runs to analyze).
@@ -196,7 +196,7 @@ workspaceDir: ./workspaces
 #   minRuns: 2                  # a pattern must recur in ≥ this many distinct runs
 #   top: 3                      # proposals filed per pass
 
-# Scheduled jobs (#244). The schedule registry (src/core/schedules.ts) lists every
+# Scheduled jobs. The schedule registry (src/core/schedules.ts) lists every
 # cron the Cloudflare Worker shim runs; a `run` schedule fires as an ordinary run
 # through /ingress as the `cron` identity — give that identity a token in
 # SWITCHBOARD_INGRESS_TOKENS ({"…": {"subject": "cron", "channel": "cron"}}) and
@@ -208,7 +208,7 @@ workspaceDir: ./workspaces
 # Without it the panel lists the schedules with no firing history.
 # schedules:
 #   worker:
-#     baseUrl: https://switchboard-memory.coreplanelabs.dev
+#     baseUrl: https://switchboard-memory.example.com
 #     tokenEnv: MEMORY_TOKEN    # env var holding the Worker's bearer (default)
 
 # agent:ship pipeline caps (features/agent-ship.md). `agent:ship in owner/repo:
@@ -232,7 +232,7 @@ workspaceDir: ./workspaces
 #       containerApps:                            # container application id → label
 #         a0000000-0000-0000-0000-000000000000: server
 #       durableObjectNamespaces:                  # DO namespace id → label (billable duration is per namespace)
-#         00000000000000000000000000000000: server DO
+#         <32-hex namespace id>: server DO
 #       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
 
 # Dashboard authentication (features/access-gate.md). Everything the dashboard
@@ -257,14 +257,14 @@ workspaceDir: ./workspaces
 #     env: DASHBOARD_TOKEN   # env var holding the bearer (default)
 #     actor: access:ops      # the actor the bearer resolves to — key its grants entry by this id
 
-# Slack adapter — reconnect catch-up (#184). Socket Mode drops every mention
+# Slack adapter — reconnect catch-up (docs/decisions/0012-reconnect-catch-up-as-recovery.md). Socket Mode drops every mention
 # posted while the websocket is down (each bot deploy = drain + cold start).
 # On every (re)connect the bot re-reads recent history of the channels it is in
 # and runs whatever has no receipt from it (no :eyes:, no bot reply after it).
 # Defaults: enabled, 30-minute window. The drain closes the socket on SIGTERM
 # and the next container starts only after this one exits, so a deploy over a
 # run in flight blacks Slack out for up to the 15-minute drain deadline plus a
-# cold start (#272) — the window must be >= 20 minutes to cover that; a smaller
+# cold start — the window must be >= 20 minutes to cover that; a smaller
 # value is kept but warned about at startup. Needs channels:read + groups:read
 # (channel listing) on top of the history scopes.
 # slack:
@@ -279,10 +279,10 @@ workspaceDir: ./workspaces
 # run history); the bot and the CLI then write one versioned document.
 # runtimeOverrides:
 #   worker:
-#     baseUrl: https://switchboard-memory.coreplanelabs.dev
+#     baseUrl: https://switchboard-memory.example.com
 #     tokenEnv: MEMORY_TOKEN   # default
 
-# Persistent run history (#157, features/run-history.md). Every finished run's
+# Persistent run history (features/run-history.md). Every finished run's
 # record — identity, timing, terminal status, the redacted event stream, the
 # friction diagnosis — is kept for a retention window instead of evicted 60 s
 # after finish, and the friction ledger's "recent runs" are read from it.
@@ -299,10 +299,10 @@ workspaceDir: ./workspaces
 #   # The durable store: a RunHistoryDO on the state Worker (deploy/cloudflare-memory/,
 #   # the same Worker + bearer as memory and the friction ledger). Must be https:.
 #   worker:
-#     baseUrl: https://switchboard-memory.coreplanelabs.dev
+#     baseUrl: https://switchboard-memory.example.com
 #     tokenEnv: MEMORY_TOKEN   # env var holding the Worker's bearer (default)
 
-# External MCP servers as agent tools (#394, features/mcp-tools.md). Servers are a
+# External MCP servers as agent tools (features/mcp-tools.md). Servers are a
 # SETTING ON THE CONFIG SCOPES, not a list here: `defaults.mcpServers` (org-wide),
 # `channels.<id>.mcpServers`, `users.<id>.mcpServers` — static below, or added at run
 # time with `mcp add` (persisted with the other runtime overrides). A run gets the

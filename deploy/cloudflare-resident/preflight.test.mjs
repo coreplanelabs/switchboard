@@ -57,10 +57,10 @@ describe("resident deploy preflight — decide()", () => {
     expect(d.message).toMatch(/RESIDENT_DEPLOY_FORCE=1/);
   });
 
-  // #188: a deploy swaps every ResidentDO isolate; a refresh cycle's fetch/
-  // rebuild or a restore in progress is killed just like a thread run (live
-  // 2026-08-29: `degraded(build-failed: exit 143: Session terminated)` on
-  // repo:acme/widgets right after a deploy that passed preflight).
+  // A deploy swaps every ResidentDO isolate; a refresh cycle's fetch/rebuild
+  // or a restore in progress is killed just like a thread run (seen live:
+  // `degraded(build-failed: exit 143: Session terminated)` on repo:acme/widgets
+  // right after a deploy that passed preflight).
   it("a resident provisioning (onboarding) → refuse, naming the state, even with 0 in flight: an isolate swap fails the provision and only a rebuild recovers it", () => {
     const d = decide(
       payload([

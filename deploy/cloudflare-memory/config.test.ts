@@ -107,7 +107,7 @@ describe("ConfigDO secrets + tickets (features/mcp-tools.md items 15–16)", () 
     const ticket = {
       nonce,
       serverId,
-      requesterId: "slack:U1",
+      requesterId: "slack:UALICE",
       createdAt: 1,
       expiresAt: Date.now() + 600_000,
       state: "pending",
@@ -131,7 +131,7 @@ describe("ConfigDO secrets + tickets (features/mcp-tools.md items 15–16)", () 
     const ticket = {
       nonce,
       serverId,
-      requesterId: "slack:U1",
+      requesterId: "slack:UALICE",
       createdAt: 1,
       expiresAt: Date.now() + 600_000,
       state: "pending",

@@ -37,7 +37,7 @@ const row = (over: Partial<RunIndexRowSeed>): RunIndexRowSeed => ({
   id: "run-x",
   label: 'coding · acme/web · "fix the build"',
   channelId: "slack:C1",
-  userId: "slack:U1",
+  userId: "slack:UALICE",
   finished: false,
   startedAt: NOW - 252_000,
   eventCount: 17,
@@ -48,16 +48,16 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
   row({
     id: "live-1",
     token: "tok-live-1",
-    label: 'review · coreplanelabs/switchboard · "re-review PR #268 after the repush"',
+    label: 'review · acme/api · "re-review after the repush"',
     activity: "$ npm test",
-    userName: "justin",
+    userName: "alice",
     sourceUrl: "https://example.slack.com/archives/C1/p1",
     startedAt: NOW - 252_000,
   }),
   row({
     id: "live-2",
     token: "tok-live-2",
-    label: 'general · #dev · justin · "what changed in the last deploy?"',
+    label: 'general · #dev · alice · "what changed in the last deploy?"',
     startedAt: NOW - 61_000,
     eventCount: 3,
   }),
@@ -71,7 +71,7 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
     status: "completed",
     eventCount: 214,
     channelId: "cli:local",
-    userId: "cli:justin",
+    userId: "cli:alice",
   }),
   row({
     id: "hist-2",
@@ -96,7 +96,7 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
     status: "stopped_soft",
     eventCount: 12,
     channelId: "mcp:claude",
-    userId: "mcp:justin",
+    userId: "mcp:alice",
   }),
 ];
 
@@ -106,7 +106,7 @@ const HIST_EVENTS = [
     text: "Add **retry logic** to the webhook sender:\n\n- exponential backoff\n- max 5 attempts\n- give up on 4xx",
     at: NOW - 2_400_000,
     seq: 1,
-    source: { channel: "dev", user: "justin", url: "https://example.slack.com/archives/C1/p1" },
+    source: { channel: "dev", user: "alice", url: "https://example.slack.com/archives/C1/p1" },
   },
   { type: "context", text: "earlier: we agreed the sender should never retry a 4xx", at: NOW - 2_400_000, seq: 2 },
   {
@@ -167,7 +167,7 @@ const HIST_EVENTS = [
     text: "additional constraints for this change, please fold them in: (1) the `sendWebhook` signature stays as-is — callers in `src/jobs/` must not change; (2) jitter the backoff (±20%) so a burst of failures doesn't retry in lockstep; (3) log each give-up with the status code at `warn`.",
     at: NOW - 2_345_000,
     seq: 10,
-    source: { user: "justin", url: "https://example.slack.com/archives/C1/p2" },
+    source: { user: "alice", url: "https://example.slack.com/archives/C1/p2" },
   },
   {
     type: "run_note",
@@ -373,7 +373,7 @@ const RESIDENTS = {
           checkoutBackupId: "bk_2",
         },
         schedules: { refresh: 1, provisionRun: 0, provisionDeadline: 0 },
-        // The last disk sample (resident-repos item 55) — the nominal shape measured 2026-09-07.
+        // The last disk sample (resident-repos item 55) — a measured resident disk sample.
         disk: {
           at: "2026-09-07T15:30:00.000Z",
           totalKiB: 15_086_920,
@@ -408,7 +408,7 @@ const RESIDENTS = {
             lastAttachAt: "2026-08-20T10:05:00.000Z",
             evicted: true,
             evictedAt: "2026-08-27T10:00:00.000Z",
-            evictedWhy: "merged #12",
+            evictedWhy: "merged",
           },
         ],
       },
@@ -547,7 +547,7 @@ function page(pathname: string, all: boolean): { title: string; seed: PageSeed; 
   if (pathname.startsWith("/costs"))
     return {
       title: "Switchboard spend",
-      seed: { page: "costs", report: COSTS as never, groups: ["switchboard", "polylane"] },
+      seed: { page: "costs", report: COSTS as never, groups: ["api", "web"] },
     };
   return null;
 }
@@ -587,11 +587,11 @@ createServer((req, res) => {
     const frames = pages
       .map(
         (p) =>
-          `<iframe src="${p.replace(/"/g, "")}" style="width:${w}px;height:800px;border:1px solid #666;margin:8px;vertical-align:top;background:#0b0d12"></iframe>`,
+          `<iframe src="${p.replace(/"/g, "")}" style="width:${w}px;height:800px;border:1px solid #6b6b6b;margin:8px;vertical-align:top;background:#0b0d12"></iframe>`,
       )
       .join("");
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(`<!doctype html><html><body style="background:#333;margin:0">${frames}</body></html>`);
+    res.end(`<!doctype html><html><body style="background:#3a3a3a;margin:0">${frames}</body></html>`);
     return;
   }
   const p = page(url.pathname, url.searchParams.get("all") === "1");

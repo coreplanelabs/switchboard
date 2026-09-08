@@ -15,18 +15,18 @@
   "observability": { "enabled": true },
   "vars": {
     // The state Worker (deploy/cloudflare-memory/): where scheduled() records
-    // each resident-watchdog firing (#244/#307). Public URL — a var, not a
+    // each resident-watchdog firing. Public URL — a var, not a
     // secret; the bearer is the MEMORY_TOKEN secret (deploy/secrets.manifest.json).
     // A profile without a memory Worker renders no var: firings go unrecorded.
     // {{#if urls.stateWorkerUrl}}
     "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}",
     // {{/if}}
-    // Presigned snapshot transfers (features/resident-repos.md item 61, #614):
+    // Presigned snapshot transfers (features/resident-repos.md item 61):
     // with these two vars AND the R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
     // secrets (deploy/secrets.manifest.json) present, the container moves
     // archive bytes itself over presigned R2 URLs and the Durable Object stays
-    // out of the data path; any one absent → the SDK's local-bucket mode, the
-    // pre-#614 behavior. BACKUP_BUCKET_NAME MUST equal the BACKUP_BUCKET
+    // out of the data path; any one absent → the SDK's local-bucket mode.
+    // BACKUP_BUCKET_NAME MUST equal the BACKUP_BUCKET
     // binding's bucket below — the SDK signs URLs for this name, the offboard
     // sweep deletes through the binding. Public config, not secrets.
     "CLOUDFLARE_ACCOUNT_ID": "{{account}}",
@@ -44,10 +44,10 @@
       // the largest onboarded repo — and the disk is the binding constraint,
       // not memory: Cloudflare caps disk at 2 GB per GiB of memory, so 16 GB
       // of disk requires 8 GiB. The sizing is arithmetic over measured parts,
-      // checked by instanceSizing.test.ts against this file: 2026-09-04 the
-      // nominal resident filled the previous 8 GB in 45 min (provision 21:02Z,
-      // one thread attached 21:44Z, ENOSPC at 21:50Z). Re-measured 2026-09-07
-      // inside the resident (features/resident-repos.md item 55, #448): image
+      // checked by instanceSizing.test.ts against this file: the resident of
+      // a large monorepo filled the previous 8 GB in 45 min (provision, one
+      // thread attached 42 min later, ENOSPC 6 min after that). Measured
+      // inside the resident (features/resident-repos.md item 55): image
       // 552 MB + mirror 380 + warm checkout 2772 (history 380, tree 94, pnpm
       // node_modules 2298) + the reserve the attach admission holds back
       // (snapshot staging + a 1 GiB floor, 2965) = 6669 MB base; a hardlinked
@@ -64,9 +64,9 @@
       // provisioned size while awake, and a resident is effectively always-on
       // (10-min refresh alarm < 20m sleepAfter) — memory-only ~$52/mo at
       // 8 GiB vs ~$26/mo at 4 GiB, per resident. History: standard-1 (½ vCPU /
-      // 4 GiB / 8 GB) → 2026-08-29 doubled CPU (a resident pinned at 100% of
-      // ½ vCPU, memory fine) → 2026-09-04 doubled memory for the disk it
-      // unlocks. nominal's console build asks for a 16 GB node heap, so if
+      // 4 GiB / 8 GB) → doubled CPU (a resident pinned at 100% of ½ vCPU,
+      // memory fine) → doubled memory for the disk it unlocks. That
+      // monorepo's console build asks for a 16 GB node heap, so if
       // `build` ever becomes a real command this is still not the ceiling.
       // Custom-type constraints: whole vCPUs 1-4, >=3 GiB per vCPU, <=2 GB
       // disk per GiB. (The thread-sandbox Worker is standard-3 — it lives only
@@ -92,7 +92,7 @@
   // metadata reads and the offboard sweep go through it, and the SDK's
   // local-bucket mode (createBackup({ localBucket: true })) moves the archive
   // bytes through it too — via the Durable Object, which is what put a 128 MB
-  // isolate in the data path of a 1.16 GB restore (item 61, #614). Production
+  // isolate in the data path of a 1.16 GB restore (item 61). Production
   // mode is presigned: the CLOUDFLARE_ACCOUNT_ID / BACKUP_BUCKET_NAME vars
   // above plus the R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets let the
   // container move the bytes itself; with any of the four absent the Worker
@@ -100,7 +100,7 @@
   // this Worker's script (`<script>-cache`), so two installations on one
   // account never share one — and BACKUP_BUCKET_NAME must say the same name.
   "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "{{script}}-cache" }],
-  // Watchdog cadence (KTD4): every 10 minutes, strictly BELOW the container
+  // Watchdog cadence: every 10 minutes, strictly BELOW the container
   // sleep window (SLEEP_AFTER = "20m" in worker.ts) so a healthy resident is
   // re-warmed before the platform can ever sleep it. Invariant: watchdog/alarm
   // cadence < sleepAfter — bump the two together. This list must equal the

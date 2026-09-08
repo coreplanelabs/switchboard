@@ -19,10 +19,10 @@
     "bindings": [
       { "name": "MEMORY", "class_name": "MemoryDO" },
       // ONE ScheduleDO (named "schedules"): every cron firing the bot's Worker
-      // shim makes, for the /runs Scheduled panel (#244, features/live-view.md).
+      // shim makes, for the /runs Scheduled panel (features/live-view.md).
       { "name": "SCHEDULES", "class_name": "ScheduleDO" },
       // One RunHistoryDO per store key (`runs:default`): persistent run history
-      // (#157, features/run-history.md) — runs + run_events + the retention policy.
+      // (features/run-history.md) — runs + run_events + the retention policy.
       { "name": "RUNS", "class_name": "RunHistoryDO" },
       // ONE ConfigDO (named "config"): the bot's runtime config documents — the
       // chat-set `overrides` (features/routing-and-config.md item 12) — versioned.

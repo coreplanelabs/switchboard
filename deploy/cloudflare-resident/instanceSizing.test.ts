@@ -10,8 +10,8 @@ import {
 // The resident container's instance type is sized by arithmetic over MEASURED
 // parts, and this test is where the arithmetic lives — wrangler.jsonc carries
 // the number, this file carries the proof, and a change to either without the
-// other fails here. Background (features/resident-repos.md items 54–55, #448):
-// on 2026-09-04 the nominal resident filled its 8 GB disk 45 minutes after a
+// other fails here. Background (features/resident-repos.md items 54–55): the
+// resident of a large monorepo once filled its 8 GB disk 45 minutes after a
 // fresh provision with ONE thread attached, and nothing had measured the disk
 // before ENOSPC. 8 GB was the platform default, never a budget. Since item 55
 // the disk IS a budget: the attach admission (`residentDiskBudget.ts`) admits a
@@ -72,13 +72,13 @@ const MAX_DISK_MB_PER_MEMORY_GIB = 2000;
 const MAX_MEMORY_MIB = 12 * 1024;
 const MAX_DISK_MB = 20_000;
 
-// MEASURED 2026-09-07 15:27Z inside the nominal resident (a read-only attach as
+// MEASURED inside the resident of a large pnpm monorepo (a read-only attach as
 // a pool user; `df -Pk`, ONE `du -xsk` invocation so hardlinks count once,
 // `stat -c %h`), the largest onboarded repo — the one the shared type has to fit.
-// nominal @ 6756da8, freshly restored from R2 with one hardlinked thread tree.
+// Freshly restored from R2 with one hardlinked thread tree.
 const KIB_PER_MB = 1000 / 1.024; // du/df report KiB; the instance type is in MB
 const mb = (kib: number): number => Math.round(kib / KIB_PER_MB);
-const NOMINAL = {
+const LARGE_MONOREPO = {
   historyMb: mb(371_264), // `.git` of the checkout = the mirror = each thread clone's own history (380 MB)
   treeMb: mb(91_624), // the working tree (94 MB)
   nodeModulesMb: mb(2_244_052), // pnpm node_modules (2298 MB); hardlinked into a thread tree UNLESS its lockfile differs
@@ -89,18 +89,19 @@ const NOMINAL = {
   hardlinkedThreadMb: mb(541_860),
 };
 // The OS image on the same filesystem: /usr 522 MB + /var 10 + /etc 2 + /tmp 6
-// measured the same day (the 2026-09-04 estimate of ~500 MB held up).
+// measured the same way (the earlier estimate of ~500 MB held up).
 const IMAGE_MB = mb(539_480);
 // A 16 000 MB instance mounts as a 15 086 920 KiB ext4 filesystem: 3.4 % goes
 // to the filesystem itself. The budget works in what `df` reports.
 const FS_USABLE_RATIO = mb(15_086_920) / 16_000;
-// The pnpm store term is ZERO — measured, not assumed (#448's open question):
+// The pnpm store term is ZERO — measured, not assumed:
 // `/home/worker1` is 4 KiB on a restored disk (the store is not in the R2
 // snapshot), and where an install has run, pnpm hardlinks node_modules from the
 // store on the same ext4 filesystem (link count 2 on every `.pnpm` file =
 // checkout + one thread tree; a store copy would read 3), so the store never
-// holds a second copy of the deps. The issue's "2.5 GiB outside /workspace"
-// was the pre-#464 thread tree carrying a full plain copy of node_modules.
+// holds a second copy of the deps. The "2.5 GiB outside /workspace" seen at
+// the ENOSPC was a thread tree carrying a full plain copy of node_modules,
+// before item 18's `.pnpm` swap made thread trees hardlinked views.
 const PNPM_STORE_MB = 0;
 
 /** What a resident holding `repo` needs on disk with `hardlinked` thread trees
@@ -109,7 +110,12 @@ const PNPM_STORE_MB = 0;
  *  install as that thread's user — its pnpm store hardlinks the same bytes, so
  *  the store adds nothing on top). The reserve is exactly what the attach
  *  admission holds back: snapshot staging + the floor. */
-function requiredDiskMb(repo: typeof NOMINAL, hardlinked: number, installing: number, usableDiskMb: number): number {
+function requiredDiskMb(
+  repo: typeof LARGE_MONOREPO,
+  hardlinked: number,
+  installing: number,
+  usableDiskMb: number,
+): number {
   const mirror = repo.historyMb;
   const checkout = repo.historyMb + repo.treeMb + repo.nodeModulesMb;
   const installingThread = repo.hardlinkedThreadMb + repo.nodeModulesMb;
@@ -142,32 +148,34 @@ describe("resident instance type (deploy/cloudflare-resident/wrangler.jsonc)", (
   // The shapes below are asserted RELATIONALLY (against the configured disk),
   // not as fixed sums: the model's inputs are the single source, so
   // re-measuring a part is a one-line edit here and nowhere else. For the
-  // record, at the 2026-09-07 inputs: base (image + mirror + checkout + reserve)
+  // record, at the measured inputs: base (image + mirror + checkout + reserve)
   // 6669 MB; a hardlinked tree 555 MB; an installing tree 2853 MB; usable 15 449.
 
-  it("the previous 8 GB did not fit even ONE installing thread plus the reserve — the 2026-09-04 shape", () => {
-    // On 2026-09-04 EVERY pnpm thread carried a full copy of node_modules (the
-    // `.pnpm` swap fixed by #464), so one thread cost what an installing thread
-    // costs today; with the reserve the admission holds back, 8 GB was over
-    // before the second attach.
+  it("the previous 8 GB did not fit even ONE installing thread plus the reserve — the shape that hit ENOSPC", () => {
+    // Before item 18's `.pnpm` swap EVERY pnpm thread carried a full copy of
+    // node_modules, so one thread cost what an installing thread costs today;
+    // with the reserve the admission holds back, 8 GB was over before the
+    // second attach.
     const previousDiskMb = 8000;
-    expect(requiredDiskMb(NOMINAL, 0, 1, Math.round(previousDiskMb * FS_USABLE_RATIO))).toBeGreaterThan(previousDiskMb);
+    expect(requiredDiskMb(LARGE_MONOREPO, 0, 1, Math.round(previousDiskMb * FS_USABLE_RATIO))).toBeGreaterThan(
+      previousDiskMb,
+    );
   });
 
   it("the configured disk fits the target working set: 10 hardlinked + 1 deps-installing trees, or 5 hardlinked + 2 deps-installing, each with the reserve", () => {
-    expect(requiredDiskMb(NOMINAL, 10, 1, usable)).toBeLessThanOrEqual(usable);
-    expect(requiredDiskMb(NOMINAL, 5, 2, usable)).toBeLessThanOrEqual(usable);
+    expect(requiredDiskMb(LARGE_MONOREPO, 10, 1, usable)).toBeLessThanOrEqual(usable);
+    expect(requiredDiskMb(LARGE_MONOREPO, 5, 2, usable)).toBeLessThanOrEqual(usable);
     // Not over-provisioned either: memory (and so cost) follows disk.
-    expect(usable).toBeLessThan(requiredDiskMb(NOMINAL, 5, 2, usable) * 1.25);
+    expect(usable).toBeLessThan(requiredDiskMb(LARGE_MONOREPO, 5, 2, usable) * 1.25);
   });
 
   it("the pool's theoretical maximum (16 hardlinked + 2 installing) fits NEITHER this disk NOR the 20 GB platform ceiling — admission is not optional at any affordable size", () => {
-    expect(requiredDiskMb(NOMINAL, 16, 2, usable)).toBeGreaterThan(usable);
+    expect(requiredDiskMb(LARGE_MONOREPO, 16, 2, usable)).toBeGreaterThan(usable);
     const ceilingUsable = Math.round(MAX_DISK_MB * FS_USABLE_RATIO);
-    expect(requiredDiskMb(NOMINAL, 16, 2, ceilingUsable)).toBeGreaterThan(ceilingUsable);
+    expect(requiredDiskMb(LARGE_MONOREPO, 16, 2, ceilingUsable)).toBeGreaterThan(ceilingUsable);
     // What the +$26/mo step to 12 GiB / 20 GB would buy: 16 + 1, or 12 + 2.
-    expect(requiredDiskMb(NOMINAL, 16, 1, ceilingUsable)).toBeLessThanOrEqual(ceilingUsable);
-    expect(requiredDiskMb(NOMINAL, 12, 2, ceilingUsable)).toBeLessThanOrEqual(ceilingUsable);
+    expect(requiredDiskMb(LARGE_MONOREPO, 16, 1, ceilingUsable)).toBeLessThanOrEqual(ceilingUsable);
+    expect(requiredDiskMb(LARGE_MONOREPO, 12, 2, ceilingUsable)).toBeLessThanOrEqual(ceilingUsable);
   });
 
   it("memory is the minimum the disk requires, not a memory decision (2 GB disk per GiB)", () => {

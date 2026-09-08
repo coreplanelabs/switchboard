@@ -38,7 +38,7 @@
     "ACCESS_AUD": "{{access.aud}}",
     // {{/if}}
     // The state Worker (deploy/cloudflare-memory/): where worker.ts records each
-    // scheduled firing for the /runs Scheduled panel (#244), with MEMORY_TOKEN.
+    // scheduled firing for the /runs Scheduled panel, with MEMORY_TOKEN.
     // A profile without a memory Worker renders no var: firings go unrecorded.
     // {{#if urls.stateWorkerUrl}}
     "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}"
@@ -64,7 +64,7 @@
   // deploy rollout, a `deploy restart` (POST /admin/restart → DO stop()), or
   // platform maintenance; the interval bounds the deaf window
   // (Socket Mode events during downtime are lost, never redelivered). Not a run.
-  // "0 14 * * 1": the weekly self-improvement pass (#84) — POST /ingress as the
-  // `cron` identity with `friction propose`; an ordinary run on /runs (#244).
+  // "0 14 * * 1": the weekly self-improvement pass — POST /ingress as the
+  // `cron` identity with `friction propose`; an ordinary run on /runs.
   "triggers": { "crons": ["* * * * *", "0 14 * * 1"] }
 }

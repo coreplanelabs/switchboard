@@ -23,7 +23,7 @@ updates:
       prefix: "chore(deps)"
     ignore:
       # Types follow the runtime: the Node major moves with the image, CI and
-      # .nvmrc in one deliberate change (#497), not one package at a time.
+      # .nvmrc in one deliberate change, not one package at a time.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
       # One TypeScript for the whole workspace, and two of its consumers need
@@ -47,7 +47,7 @@ updates:
       # The @cloudflare/sandbox SDK and the container image it drives are one
       # protocol in two artifacts; `check:sandbox-pair` fails verify when a
       # package pin and its Dockerfile tag differ. They move together, by hand,
-      # with a deploy validation (#498), so no automated bump of any size.
+      # with a deploy validation, so no automated bump of any size.
       - dependency-name: "@cloudflare/sandbox"
 
   - package-ecosystem: github-actions
@@ -73,10 +73,10 @@ updates:
       prefix: "chore(deps)"
     ignore:
       # The bot runtime moves to an LTS line deliberately, together with CI,
-      # .nvmrc and @types/node (#497).
+      # .nvmrc and @types/node.
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
       # The sandbox image and the @cloudflare/sandbox SDK are one protocol in
       # two artifacts; they move together, by hand, with a deploy validation
-      # (#498). Covers the cold sandbox and the resident.
+      # Covers the cold sandbox and the resident.
       - dependency-name: "cloudflare/sandbox"

@@ -15,14 +15,13 @@
 #
 # Secrets (repository secrets, set once by a maintainer — never by code):
 #   CLOUDFLARE_DEPLOY_TOKEN  wrangler's credential for the four runtime Workers on
-#                         the coreplane-infra account. Its own token, distinct
-#                         from the docs job's: Account → Workers Scripts: Edit,
+#                         the profile's account. Its own token, distinct from
+#                         the docs job's: Account → Workers Scripts: Edit,
 #                         Containers: Edit, Workers R2 Storage: Edit, Account
-#                         Settings: Read; Zone coreplanelabs.dev → Workers
-#                         Routes: Edit, DNS: Edit (the custom domains). The
-#                         v0.2.1 deploy (run 34162851123) proved a token without
+#                         Settings: Read; the profile's zone → Workers Routes:
+#                         Edit, DNS: Edit (the custom domains). A token without
 #                         the Containers scope deploys the memory Worker and then
-#                         can never pass the bot's preflight; `deploy all` now
+#                         can never pass the bot's preflight, so `deploy all`
 #                         checks these capabilities before any Worker deploys.
 #   CLOUDFLARE_API_TOKEN  fallback while CLOUDFLARE_DEPLOY_TOKEN is unset (the
 #                         docs Worker's narrower token)
@@ -118,24 +117,24 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      # The profile and config are read from coreplanelabs/infrastructure with an
-      # App token that can read exactly that repository — the same App
+      # The profile and config are read from our infrastructure repository with
+      # an App token that can read exactly that repository — the same App
       # release-please.yml acts as, minted here so a dispatched run has it too.
-      - name: load the App's credentials from 1Password
+      - name: load the App's credentials
         uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
         with:
           export-env: true
           version: 2.39.0
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          COREPLANE_CLIENT_ID: op://CI/coreplane-bot/client-id
-          COREPLANE_PRIVATE_SIGNING_KEY: op://CI/coreplane-bot/private-key
+          APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+          APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
       - name: mint the App token that reads the infrastructure repository
         id: infra-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ env.COREPLANE_CLIENT_ID }}
-          private-key: ${{ env.COREPLANE_PRIVATE_SIGNING_KEY }}
+          client-id: ${{ env.APP_CLIENT_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
           owner: coreplanelabs
           repositories: infrastructure
           permission-contents: read

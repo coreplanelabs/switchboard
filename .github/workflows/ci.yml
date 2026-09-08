@@ -25,9 +25,9 @@ permissions:
 env:
   # actions/cache (inside setup-node's `cache: npm`) downloads the cache in
   # segments and, by default, waits 10 MINUTES for a segment that stopped
-  # arriving before it gives up and falls through to `npm ci`. Live 2026-09-07:
-  # a job's restore hung for exactly that while its sibling jobs restored the
-  # same key in seconds — ten idle minutes for a cache the job then did without.
+  # arriving before it gives up and falls through to `npm ci`. A job's restore
+  # has hung for exactly that while its sibling jobs restored the same key in
+  # seconds — ten idle minutes for a cache the job then did without.
   # One minute is plenty for a segment on a healthy connection; a stalled one
   # costs 60 s and a full install instead of 600 s.
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
@@ -169,8 +169,8 @@ jobs:
     # contexts, that wrangler builds on a release: the bot's (the root
     # Dockerfile, also docker-compose's), the resident's and the sandbox's.
     # Until this job existed a broken bot Dockerfile was found at deploy time;
-    # until it covered every image, so was a broken resident one (release
-    # 1.2.0, 2026-09-08: a RUN whose last command exits 1 on the base image).
+    # until it covered every image, so was a broken resident one (a RUN whose
+    # last command exits 1 on the base image).
     # The runner's own npm is enough to invoke the script; whatever runs inside
     # an image comes from its Dockerfile.
     name: image / build ${{ matrix.worker }}
@@ -251,10 +251,10 @@ jobs:
       - id: touched
         run: npm run docs:changed
       # The docs Worker's wrangler.jsonc is generated from the deployment
-      # profile (account, hostname), and production's profile lives in
-      # coreplanelabs/infrastructure — read with a read-only App token minted
-      # for that repository alone, like the release deploy's.
-      - name: load the App's credentials from 1Password
+      # profile (account, hostname), and production's profile lives in our
+      # infrastructure repository — read with a read-only App token minted for
+      # that repository alone, like the release deploy's.
+      - name: load the App's credentials
         if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
         uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
         with:
@@ -262,15 +262,15 @@ jobs:
           version: 2.39.0
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          COREPLANE_CLIENT_ID: op://CI/coreplane-bot/client-id
-          COREPLANE_PRIVATE_SIGNING_KEY: op://CI/coreplane-bot/private-key
+          APP_CLIENT_ID: op://CI/coreplane-bot/client-id
+          APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
       - name: mint the App token that reads the infrastructure repository
         id: infra-token
         if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ env.COREPLANE_CLIENT_ID }}
-          private-key: ${{ env.COREPLANE_PRIVATE_SIGNING_KEY }}
+          client-id: ${{ env.APP_CLIENT_ID }}
+          private-key: ${{ env.APP_PRIVATE_KEY }}
           owner: coreplanelabs
           repositories: infrastructure
           permission-contents: read

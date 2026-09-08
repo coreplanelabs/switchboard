@@ -36,13 +36,12 @@ describe("bot deploy preflight — wranglerFailureText()", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 8 — the bot deploy preflight. Live
-// 2026-08-29: two `wrangler deploy`s 90 s apart (23:49:45Z, 23:51:15Z) landed on
-// a review run started 23:48:40Z; the second rollout replaced the instance the
-// first had already put into its graceful drain, killing the run at 153 s and
-// freezing its status card forever. A single deploy at 00:11:31Z during the
-// re-run finished normally (drain works) — the killer is a deploy on top of a
-// draining instance or a rollout still in progress.
+// Feature: features/slack-channel.md item 8 — the bot deploy preflight. Seen
+// live: two `wrangler deploy`s 90 s apart landed on a review run; the second
+// rollout replaced the instance the first had already put into its graceful
+// drain, killing the run at 153 s and freezing its status card forever. A
+// single deploy during the re-run finished normally (drain works) — the killer
+// is a deploy on top of a draining instance or a rollout still in progress.
 
 const health = (inFlight, draining = false) => ({ ok: true, payload: { ok: true, inFlight, draining } });
 const apps = (state, name = APP_NAME) => ({
@@ -128,7 +127,7 @@ describe("bot deploy preflight — decide()", () => {
   });
 });
 
-// #271 — a catch-up that is silently failing (missing scopes, listing error) is
+// A catch-up that is silently failing (missing scopes, listing error) is
 // surfaced as a WARNING at deploy time; never a refusal, the deploy may be the fix.
 describe("bot deploy preflight — catchUpWarnings()", () => {
   it("nothing to say when the catch-up is healthy or the payload predates the field", () => {

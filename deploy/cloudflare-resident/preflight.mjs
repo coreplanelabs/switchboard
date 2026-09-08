@@ -31,7 +31,7 @@ const HOW_TO_FORCE =
 /** Lifecycle states in which NOTHING is executing on the resident — the only
  *  states a deploy may land on. Every other state is either known mid-cycle
  *  (the engine is running a refresh's fetch/rebuild, a restore, or
- *  provisioning — an isolate swap kills that like a thread run, #188) or a
+ *  provisioning — an isolate swap kills that like a thread run) or a
  *  state this script does not know, which fails closed as `unknown`: this is
  *  plain JS outside the shared `ResidentLifecycleState` type, so an allow-list
  *  of settled states is what keeps vocabulary drift from silently allowing. */
@@ -118,10 +118,10 @@ export function decide(fetched, { force = false } = {}) {
           // who waits for the runs to drain is not surprised by a second refusal.
           if (live.inFlight > 0) busy.push({ resource, inFlight: live.inFlight });
           if (PROVISIONING_STATES.has(live.state)) {
-            // #188: provisioning is mid-flight. An isolate swap kills it just
-            // like a thread run (live 2026-08-29: `build-failed: exit 143:
-            // Session terminated` right after a deploy that passed the
-            // inFlight check), and unlike a refresh it cannot resume.
+            // Provisioning is mid-flight. An isolate swap kills it just like a
+            // thread run (seen live: `build-failed: exit 143: Session
+            // terminated` right after a deploy that passed the inFlight
+            // check), and unlike a refresh it cannot resume.
             provisioning.push({ resource, state: live.state });
           } else if (INTERRUPTIBLE_STATES.has(live.state)) {
             interrupting.push({ resource, state: live.state });

@@ -1,4 +1,4 @@
-// Residency garbage collection (#50) — the PURE decision logic, kept free of
+// Residency garbage collection — the PURE decision logic, kept free of
 // the Sandbox SDK and DO storage so it runs under plain-Node vitest
 // (gc.test.ts). worker.ts feeds it what it observed (mirror refs, the GitHub
 // pulls list, tree cleanliness, live views) and acts on the answers.
@@ -54,7 +54,7 @@ export function parsePullsBody(body: unknown): PullSummary[] | null {
 /** Parse `git for-each-ref --format='%(refname:short)' refs/heads/` output
  *  into the set of branches the mirror holds — ONE spawn feeding every
  *  binding's "branch gone?" membership test in the reclamation pass, instead
- *  of a `rev-parse --verify` container round-trip per ref (#356 item 5). */
+ *  of a `rev-parse --verify` container round-trip per ref. */
 export function parseRefListing(stdout: string): Set<string> {
   return new Set(
     stdout
@@ -126,7 +126,7 @@ export function reclaimDecision(input: ReclaimInput): { reclaim: boolean; why: R
 // Why this exists: the over-cap behavior (429, `rejected[]`, the eviction and
 // its 1 h floor) is only reachable when the registry is FULL, and the
 // production cap (RESIDENT_CAP) is sized for the team's real fleet. Proving
-// item 46 on 2026-08-29 needed two deploys (cap 8→2, then →6) plus an hour of
+// item 46 the first time needed two deploys (cap 8→2, then →6) plus an hour of
 // clock time for the floor — and becomes impossible once six real residents
 // exist, because lowering the compiled cap below the fleet size would refuse
 // the team's own onboards. This is the resident's usual fault-injection

@@ -16,7 +16,7 @@ ACCOUNT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"
 SERVICE=${1:?service (switchboard | switchboard-sandbox | switchboard-resident | switchboard-memory)}
 MINUTES=${2:-60}
 PATTERN=${3:-}
-: "${CLOUDFLARE_OBS_TOKEN:?set CLOUDFLARE_OBS_TOKEN (Workers Observability: Read on coreplane-infra)}"
+: "${CLOUDFLARE_OBS_TOKEN:?set CLOUDFLARE_OBS_TOKEN (Workers Observability: Read on the profile's account)}"
 NOW=$(date +%s)
 FROM=$(( (NOW - MINUTES * 60) * 1000 )); TO=$(( NOW * 1000 ))
 BODY=$(cat <<JSON

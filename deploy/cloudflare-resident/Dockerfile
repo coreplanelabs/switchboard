@@ -17,7 +17,7 @@ RUN git config --system user.name "switchboard-resident" \
 # The container is ONE vCPU (wrangler.jsonc). Node test runners size their
 # worker pools from the CPU count the kernel reports — the HOST's, not the
 # cgroup's — so an unconfigured `vitest`/`jest` run forks a dozen workers onto
-# one core and thrashes (2026-08-29: a resident pinned at 100% CPU, 2.2 GiB).
+# one core and thrashes (seen live: a resident pinned at 100% CPU, 2.2 GiB).
 # These defaults inherit into every thread's `su … -c` shell (su without `-`
 # keeps the environment) and are the runners' documented env knobs; a repo's
 # own config or CLI flags still win. CI=1 makes runners non-interactive (no
@@ -37,19 +37,19 @@ ENV CI=1 \
 # bootstraps through it via the `yarnPath` release it commits under
 # `.yarn/releases`.
 #
-# EXACT versions, enforced by src/deploy/imagePins.test.ts. This line read
-# `pnpm@latest yarn@latest` until 2026-09-04, which made the pnpm major a
-# property of the last image build: the 2026-09-03 rebuild moved it 10 -> 11,
-# and pnpm 11 no longer reads `package.json`'s `pnpm` field (overrides,
+# EXACT versions, enforced by src/deploy/imagePins.test.ts. This line once read
+# `pnpm@latest yarn@latest`, which made the pnpm major a property of the last
+# image build: one rebuild moved it 10 -> 11 unannounced, and pnpm 11 no
+# longer reads `package.json`'s `pnpm` field (overrides,
 # patchedDependencies, onlyBuiltDependencies), so a repo keeping its settings
 # there fails `--frozen-lockfile` with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
 # pnpm is pinned to the 10 line ON PURPOSE: 10.x reads that field, and pnpm
 # >=10 self-manages `packageManager`, so a repo pinning 11/12 still gets its
 # own version — the pin is a floor, not a ceiling. Which means the version
 # baked here is NOT necessarily the one that runs: a repo with a
-# `packageManager` field downloads that version on first install (nominal
-# pins pnpm@10.10.0), so provisioning needs the registry, not just the image.
-# The grep asserts the pin took (the #372 pattern), so a resolution surprise
+# `packageManager` field downloads that version on first install (a repo
+# pinning pnpm@10.10.0 gets exactly that), so provisioning needs the registry,
+# not just the image. The grep asserts the pin took, so a resolution surprise
 # fails the build instead of a provision.
 RUN npm install -g pnpm@10.34.5 yarn@1.22.22 \
   && pnpm --version | grep -qx '10\.34\.5' \
@@ -70,7 +70,8 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && command -v unsquashfs >/dev/null
 
-# KTD5: agent commands never run as root. The SDK's exec has no user/uid option
+# Agent commands never run as root (repo code runs unprivileged, one user per
+# thread — features/resident-repos.md). The SDK's exec has no user/uid option
 # (verified against 0.13.0-next.751.1), so the container server itself runs as
 # root and per-command demotion is done with `su -s /bin/bash workerN -c ...`
 # (verified live: exec via su lands at uid 200N). Provision a pool of

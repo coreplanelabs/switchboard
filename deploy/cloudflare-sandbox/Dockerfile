@@ -31,7 +31,7 @@ RUN apt-get update \
 
 # Node comes from the base: the published 0.12.9 image ships Node 22.23 (copied
 # from node:22-slim, with npm; no NodeSource deb), so the retarget-and-upgrade
-# layer the 0.3.x image needed (#372) is gone. This repo pins `engines: node
+# layer the 0.3.x image needed is gone. This repo pins `engines: node
 # >=22` (undici@8 needs Node 22's `webidl.util.markAsUncloneable`), and a
 # review run that falls back off the resident onto a fresh sandbox must load
 # the full vitest suite; the assertion fails the build if a base bump ever

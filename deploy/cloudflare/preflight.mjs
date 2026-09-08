@@ -9,13 +9,14 @@
 // them. `npm run deploy` runs it first and refuses only while
 //   - the container application is not in a settled state (a rollout is still
 //     provisioning/updating — `wrangler containers list --json`): a second
-//     rollout on top of one in progress is what killed a review at 153 s on
-//     2026-08-29 (deploys at 23:49:45Z and 23:51:15Z on a run started 23:48:40Z).
+//     rollout on top of one in progress replaces the instance the first put
+//     into its graceful drain and kills whatever it was running (two deploys
+//     90 s apart once killed a review at 153 s).
 // It WARNS (never refuses) when the bot reports runs in flight (`inFlight > 0`
 // — they hand off) or is already draining (`draining: true` — its resumable
 // runs were handed off; a ship pipeline still in flight would be killed), and
 // when /healthz says the reconnect catch-up is failing or the bot token lacks
-// required scopes (#271; `catchUp.error`, `catchUp.missingScopes`).
+// required scopes (`catchUp.error`, `catchUp.missingScopes`).
 //
 // Fail closed: unreachable bot, a body without the JSON shape (a Worker that
 // predates this preflight answers a bare `ok`), a wrangler failure, or an app
@@ -120,7 +121,7 @@ export function listContainerApps({ cwd = dirname(fileURLToPath(import.meta.url)
 
 /**
  * Warnings (never refusals) from the reconnect catch-up's status on /healthz
- * (#271, features/slack-channel.md item 7): a scan that could not run at all
+ * (features/slack-channel.md item 7): a scan that could not run at all
  * (`catchUp.error`, e.g. `missing_scope`) or a bot token missing required
  * scopes. Pure; an older payload without `catchUp` says nothing.
  * @returns {string[]}

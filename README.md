@@ -15,8 +15,6 @@ The **core dispatcher** (`src/core/dispatcher.ts`) is the only place orchestrati
 
 Behavioral expectations live in [`features/`](features/README.md) — one spec per feature with validation criteria (unit tests or agent-runnable instructions), updated in the same PR as any behavior change, so every git SHA carries the criteria that describe it. This README is the engineering reference (architecture, deploy runbooks, setup); **for the human-facing docs — tutorials, how-to guides, reference, and explanation, organized per [Diataxis](https://diataxis.fr) — start at [`docs/README.md`](docs/README.md).**
 
-- **How does it stack up against Claude in Slack?** See the [Switchboard-vs-Claude-Tag parity report (issue #81)](https://github.com/coreplanelabs/switchboard/issues/81) — a measured, receipt-linked side-by-side (same prompts, both bots, per-test metrics), not an asserted comparison.
-
 ## Agents
 
 | Agent | What it does | Toolset (`src/agents/registry.ts`) |
@@ -35,7 +33,7 @@ Onboarded repos run in an always-warm **resident worktree** ([features/resident-
 
 Resolution order (highest wins):
 
-1. **Per-request** — inline directives in the message: `agent:review model:openai/gpt-5 effort:low look at PR #42`
+1. **Per-request** — inline directives in the message: `agent:review model:openai/gpt-5 effort:low look at the open PR`
 2. **Per-thread (sticky)** — a follow-up without directives stays on the agent/model/effort this thread last used (derived from the thread's history, never stored)
 3. **Per-user** — `config set me --model openai/gpt-5 --effort medium`
 4. **Per-channel** — `config set channel --agent review --efforts.coding medium`
@@ -44,7 +42,7 @@ Resolution order (highest wins):
 
 Runtime overrides persist where `runtimeOverrides.worker` in `config.yaml` says — the state Worker's `ConfigDO` in production, so they survive container restarts — or to `data/overrides.json` when no Worker is configured. Static defaults for channels/users can also live in `config.yaml`. **Effort** (`low | medium | high`, how hard the model thinks per turn) is a first-class dimension with the same ladder as model — forced (`effort=`) or per agent (`efforts.<agent>=`) at every scope — because the wall clock is an agent's real budget and effort decides how much of it goes to thinking rather than work.
 
-**Custom instructions** (per user / per channel, [#107](https://github.com/coreplanelabs/switchboard/issues/107)): `config instructions me "Always reply in bullet points"` and `config instructions channel "This channel is about billing"` store free text (≤2000 chars) on the same scopes. The dispatcher folds it into the system prompt as a clearly labeled advisory block — channel text on every run in that channel, a user's text only on runs that user requests; user wins on conflict. Instructions are prompt content only: they never change agent/model resolution or permission gates. A bare `config set me instructions` shows the current text; an explicit empty value (`config set me instructions ""`) clears it (any static `config.yaml` text then applies again, and the reply says so); `config show` displays them.
+**Custom instructions** (per user / per channel): `config instructions me "Always reply in bullet points"` and `config instructions channel "This channel is about billing"` store free text (≤2000 chars) on the same scopes. The dispatcher folds it into the system prompt as a clearly labeled advisory block — channel text on every run in that channel, a user's text only on runs that user requests; user wins on conflict. Instructions are prompt content only: they never change agent/model resolution or permission gates. A bare `config set me instructions` shows the current text; an explicit empty value (`config set me instructions ""`) clears it (any static `config.yaml` text then applies again, and the reply says so); `config show` displays them.
 
 ## Architecture
 
@@ -167,7 +165,7 @@ flowchart LR
     subgraph img ["One Docker image"]
         P["node dist/index.js<br/>+ git + gh<br/>health probe on :8080"]
     end
-    img -->|A · wrangler deploy — recommended, house pattern| CF["Cloudflare Containers<br/>deploy/cloudflare/, terrateam-style"]
+    img -->|A · wrangler deploy — recommended| CF["Cloudflare Containers<br/>deploy/cloudflare/"]
     img -->|B · fly deploy| FLY["Fly.io Machine<br/>fly.toml + volume at /app/data"]
     img -->|C · docker compose up -d| VPS["Any VPS / home server"]
     subgraph companions ["Companion Workers — own wrangler deploys"]
@@ -183,7 +181,7 @@ flowchart LR
 
 | Option | Fit | Notes |
 |---|---|---|
-| **A. Cloudflare Containers** (`deploy/cloudflare/`) — **recommended: the house pattern** | Proven in this org — `coreplanelabs/infrastructure` runs Terrateam (a long-lived server) exactly this way: singleton DO, `sleepAfter: 2h`, 5-min cron keep-alive. Our shim mirrors it, same account | Disk is ephemeral — but with `execution.type: e2b` workspaces live in sandboxes anyway, and runtime overrides live on the state Worker (`runtimeOverrides.worker`), so an instance restart loses nothing. Thread context always rebuilds from Slack |
+| **A. Cloudflare Containers** (`deploy/cloudflare/`) — **recommended** | The shape of any long-lived server on Cloudflare Containers ([ADR 0016](docs/decisions/0016-long-lived-process-not-serverless.md)): singleton DO, `sleepAfter: 2h`, 5-min cron keep-alive | Disk is ephemeral — but with `execution.type: e2b` workspaces live in sandboxes anyway, and runtime overrides live on the state Worker (`runtimeOverrides.worker`), so an instance restart loses nothing. Thread context always rebuilds from Slack |
 | **B. Fly.io Machine** (`fly.toml`) | Cheapest managed always-on (~$3–6/mo + volume) if org constraints don't apply | One volume at `/app/data` persists overrides + workspaces (set `workspaceDir: ./data/workspaces`) |
 | **C. Docker on any VPS** (`docker-compose.yml`) | Max control / dev box | Volumes persist `data/` and `workspaces/`; compose restart policy covers supervision |
 
@@ -193,7 +191,7 @@ Railway/Render/k8s also work with the same image — anything that runs an alway
 
 ### Deploying on Cloudflare Containers (recommended)
 
-Four Workers, deployed the same way `terrateam/` is in `coreplanelabs/infrastructure` (per-worker `package.json` with pinned wrangler, `wrangler deploy` with Docker running). Secrets are declared once in [`deploy/secrets.manifest.json`](deploy/secrets.manifest.json) — every secret, which Worker(s) hold it, and a note on what it is; each Worker's `npm run secrets` runs `deploy/bin/put-secrets.mjs <worker>`, which pipes `~/.secrets/switchboard/<NAME>` into `wrangler secret put` for that Worker's entries and refuses (uploading nothing) when a required value has no local file. The canonical copy of every value is the 1Password item `Switchboard: <NAME>` (Employee vault, tags `switchboard`, `switchboard/<worker>`), mirrored to `~/.secrets/switchboard/<NAME>` (mode 600). Rotating a shared bearer means putting the new value on every Worker the manifest lists for it. A unit test (`src/core/secretsManifest.test.ts`) checks each entry against its Worker's `Env` interface.
+Four Workers, each deployed the same way (per-worker `package.json` with pinned wrangler, `wrangler deploy` with Docker running). Secrets are declared once in [`deploy/secrets.manifest.json`](deploy/secrets.manifest.json) — every secret, which Worker(s) hold it, and a note on what it is; each Worker's `npm run secrets` runs `deploy/bin/put-secrets.mjs <worker>`, which pipes `~/.secrets/switchboard/<NAME>` into `wrangler secret put` for that Worker's entries and refuses (uploading nothing) when a required value has no local file. Keep the canonical copy of every value in your secrets manager and mirror it to `~/.secrets/switchboard/<NAME>` (mode 600). Rotating a shared bearer means putting the new value on every Worker the manifest lists for it. A unit test (`src/core/secretsManifest.test.ts`) checks each entry against its Worker's `Env` interface.
 
 **Routine production deploy = merge the release PR.** Every merge to `main` accumulates into one release-please PR (`chore(main): release <version>`); merging it tags the version, publishes the GitHub release, and CI deploys production ([`release-please.yml`](.github/workflows/release-please.yml) → [`deploy-production.yml`](.github/workflows/deploy-production.yml)) by running the registry's own command:
 
@@ -203,15 +201,15 @@ npx tsx src/cli.ts deploy all --affected   # what CI runs on the release commit;
 
 `--affected` deploys only the Workers whose inputs the release changed — judged **per Worker against the commit it is serving** (`build.commit` on its `/healthz`; the last `v*` tag as the fallback; no base at all → "unsure" → deployed). A Worker's inputs are the import closure of its `worker.ts`, its own directory, and its workspace's *production* closure in the root lockfile (a `vitest` bump deploys nothing; an `@cloudflare/sandbox` bump deploys the resident); the bot's also include everything its Dockerfile copies and installs. Tests, docs, CI and the deploy tooling are an explicit inert list; a path no rule claims makes the whole fleet deploy and names itself. The release PR carries this plan as a sticky comment before anyone merges it, and every PR's `deploy targets` check shows what its own diff would deploy. Contract: [features/release-and-deploy.md](features/release-and-deploy.md). Manual deploys (a Worker whose release deploy failed, a deliberate full roll) go through the same workflow: `gh workflow run deploy-production.yml --ref main -f targets=all` (or `-f targets=bot,resident`, `-f force=true`) — never from a laptop.
 
-Whatever selects the Workers, the deploy runs the four `npm run deploy`s in the **only supported order — memory (state Worker) → bot → resident → sandbox** — after checking the account (wrangler's login lists `coreplane-infra`, or `CLOUDFLARE_API_TOKEN` verifies against it; a token for another account is refused, never silently swapped), a clean tree, and — outside CI — `HEAD == origin/main`; the plan names any deploy dir without `node_modules` and the runner `npm ci`s it first. The CLI needs no git-ignored `config/config.yaml` for this (bot config loads only for the commands that read it), so it runs from a worktree or a fresh clone. **Rotating any bot secret requires a container restart, not a build**: `wrangler secret put` creates a new Worker version but the running container keeps the env it started with — after the put run `SWITCHBOARD_DEPLOY_TOKEN=… npm run cli -- deploy restart`: the Worker's `POST /admin/restart` stops the container (SIGTERM → graceful drain; refused while runs are in flight unless `--force`) and the next request starts it on the current secrets; the command is done once `/healthz` reports a later `startedAt` (~30 s when idle). The bearer is an entry of `SWITCHBOARD_INGRESS_TOKENS` whose identity carries `deploy:write`. The Worker-side put alone is never live. The state Worker goes first because its Durable Object migrations must exist before the bot writes to them; the bot and resident steps are preflighted and the runner **waits and retries** (every 60 s, up to 30 min; 45 in CI) while runs are in flight instead of killing them — `--force` is the only way to bypass, and it says what it will kill. `--only bot,resident` / `--skip sandbox` keep the order (with `--affected` they only narrow the selection); `--allow-branch` relaxes only the `origin/main` check (CI passes it: the release commit is what it deploys, and `main` may already have moved). The resident step needs one of `RESIDENT_ADMIN_TOKEN` / `RESIDENT_OPERATOR_TOKEN` / `RESIDENT_READ_TOKEN` — CI holds the read token. `CLOUDFLARE_ACCOUNT_ID` is stripped from every step (it would override the pinned account). The wait is never silent — every retry prints `bot: still waiting — N run(s) in flight (draining: yes/no), waited Xm of 30m`. **Deployed ≠ live:** `wrangler deploy` uploads the bot's Worker version, but the *old* container keeps answering while it drains in-flight runs (up to 15 min), so the bot step is finished only when `GET /healthz` is answered by a container that is not draining and reports the deployed commit as its `build.commit` (stamped into the image by `deploy/cloudflare/write-build.mjs` → `build.json`, gitignored). The command exits 0 only then; if the old container is still draining at the deadline it prints what is in flight and exits 1 — never "success" while the old code is serving. Selection (`src/deploy/affected.ts`), plan (`src/deploy/plan.ts`) and live decision (`src/deploy/liveGate.ts`) are pure and unit-tested; the runner is `src/deploy/run.ts`.
+Whatever selects the Workers, the deploy runs the four `npm run deploy`s in the **only supported order — memory (state Worker) → bot → resident → sandbox** — after checking the account (wrangler's login lists the profile's account, or `CLOUDFLARE_API_TOKEN` verifies against it; a token for another account is refused, never silently swapped), a clean tree, and — outside CI — `HEAD == origin/main`; the plan names any deploy dir without `node_modules` and the runner `npm ci`s it first. The CLI needs no git-ignored `config/config.yaml` for this (bot config loads only for the commands that read it), so it runs from a worktree or a fresh clone. **Rotating any bot secret requires a container restart, not a build**: `wrangler secret put` creates a new Worker version but the running container keeps the env it started with — after the put run `SWITCHBOARD_DEPLOY_TOKEN=… npm run cli -- deploy restart`: the Worker's `POST /admin/restart` stops the container (SIGTERM → graceful drain; refused while runs are in flight unless `--force`) and the next request starts it on the current secrets; the command is done once `/healthz` reports a later `startedAt` (~30 s when idle). The bearer is an entry of `SWITCHBOARD_INGRESS_TOKENS` whose identity carries `deploy:write`. The Worker-side put alone is never live. The state Worker goes first because its Durable Object migrations must exist before the bot writes to them; the bot and resident steps are preflighted and the runner **waits and retries** (every 60 s, up to 30 min; 45 in CI) while runs are in flight instead of killing them — `--force` is the only way to bypass, and it says what it will kill. `--only bot,resident` / `--skip sandbox` keep the order (with `--affected` they only narrow the selection); `--allow-branch` relaxes only the `origin/main` check (CI passes it: the release commit is what it deploys, and `main` may already have moved). The resident step needs one of `RESIDENT_ADMIN_TOKEN` / `RESIDENT_OPERATOR_TOKEN` / `RESIDENT_READ_TOKEN` — CI holds the read token. `CLOUDFLARE_ACCOUNT_ID` is stripped from every step (it would override the pinned account). The wait is never silent — every retry prints `bot: still waiting — N run(s) in flight (draining: yes/no), waited Xm of 30m`. **Deployed ≠ live:** `wrangler deploy` uploads the bot's Worker version, but the *old* container keeps answering while it drains in-flight runs (up to 15 min), so the bot step is finished only when `GET /healthz` is answered by a container that is not draining and reports the deployed commit as its `build.commit` (stamped into the image by `deploy/cloudflare/write-build.mjs` → `build.json`, gitignored). The command exits 0 only then; if the old container is still draining at the deadline it prints what is in flight and exits 1 — never "success" while the old code is serving. Selection (`src/deploy/affected.ts`), plan (`src/deploy/plan.ts`) and live decision (`src/deploy/liveGate.ts`) are pure and unit-tested; the runner is `src/deploy/run.ts`.
 
 The per-Worker steps below are what the runner executes, for first-time setup (secrets) or when you need one Worker by hand (a laptop whose shell carries another account's `CLOUDFLARE_API_TOKEN` unsets it — `env -u` — so wrangler falls back to its login):
 
 ```bash
-# one-time: wrangler login (account: coreplane-infra), Docker running
+# one-time: wrangler login (the profile's account), Docker running
 
 # 0. Values: the profile's `secretsSource` — ~/.secrets/switchboard/<NAME> by default, or a
-#    1Password item `op://Vault/Item` with one field per name — for every entry in
+#    secrets-manager item with one field per name — for every entry in
 #    deploy/secrets.manifest.json (self-minted bearers are `openssl rand -hex 32`).
 #    Shared bearers (SANDBOX_TOKEN, RESIDENT_*_TOKEN, MEMORY_TOKEN) must be the same
 #    value on every Worker the manifest lists — the manifest is the list. `npm run secrets`
@@ -222,13 +220,13 @@ The per-Worker steps below are what the runner executes, for first-time setup (s
 #     docs/, and all five Workers (npm workspaces).
 npm ci
 
-# 1. Sandbox worker — per-thread execution VMs at switchboard-sandbox.coreplanelabs.dev
+# 1. Sandbox worker — per-thread execution VMs at switchboard-sandbox.<your zone>
 cd deploy/cloudflare-sandbox
 npm run secrets   # SANDBOX_TOKEN (manifest: sandbox)
 npm run deploy
 
 # 2. Resident worker — always-warm per-repo environments at
-#    switchboard-resident.coreplanelabs.dev (per-repo Durable Objects on
+#    switchboard-resident.<your zone> (per-repo Durable Objects on
 #    Cloudflare Sandbox 1.0, R2 bucket for stamped snapshots, watchdog cron)
 cd ../cloudflare-resident
 npm run secrets   # manifest: resident — RESIDENT_ADMIN/OPERATOR/READ_TOKEN, GITHUB_APP_*,
@@ -241,7 +239,7 @@ RESIDENT_ADMIN_TOKEN=… env -u CLOUDFLARE_API_TOKEN npm run deploy
                   # RESIDENT_DEPLOY_FORCE=1 bypasses. Ends with a wake ping: /healthz 200
 
 # 3. Memory worker — durable cross-session memory at
-#    switchboard-memory.coreplanelabs.dev (one SQLite Durable Object per memory
+#    switchboard-memory.<your zone> (one SQLite Durable Object per memory
 #    scope; no container, no Docker needed). Optional: only if memory.enabled.
 cd ../cloudflare-memory
 npm test          # runs the DO tests inside workerd
@@ -256,7 +254,7 @@ npm run secrets   # manifest: bot — Slack, Anthropic, Brave, SANDBOX_TOKEN, RE
 env -u CLOUDFLARE_API_TOKEN npm run deploy
                   # preflight first: refuses while the bot has runs in flight, is still
                   # draining from an earlier deploy, or the container app is mid-rollout
-                  # (a second rollout on a draining instance kills the run — #250).
+                  # (a second rollout on a draining instance kills the run).
                   # No token needed (/healthz). SWITCHBOARD_DEPLOY_FORCE=1 bypasses.
                   # Ends with a wake ping: /healthz 200
 npm run tail      # watch it connect: "switchboard running (providers: anthropic...)"
@@ -268,7 +266,7 @@ SWITCHBOARD_DEPLOY_TOKEN=… npm run cli -- deploy restart  # from the repo root
                   # done once /healthz reports a later startedAt
 ```
 
-The bot shim mirrors terrateam exactly: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env, `startAndWaitForPorts` with generous timeout. Production behavior comes from the `base` config document on the state Worker — `deploy all` pushes it from the profile's `configSource` before the bot step, `deploy config` pushes it alone, and the container reads it at start (`SWITCHBOARD_CONFIG=state://base`); the image holds no config; the sandbox and resident Workers get stable custom domains on the `coreplanelabs.dev` zone so that config never changes. Repos are onboarded to the resident Worker at runtime from chat (`repo onboard` — next section), never at deploy time.
+The bot shim is the shape of any long-lived server on Cloudflare Containers: singleton Durable Object, `sleepAfter: 2h`, 5-minute cron keep-alive, secrets forwarded as container env, `startAndWaitForPorts` with generous timeout. Production behavior comes from the `base` config document on the state Worker — `deploy all` pushes it from the profile's `configSource` before the bot step, `deploy config` pushes it alone, and the container reads it at start (`SWITCHBOARD_CONFIG=state://base`); the image holds no config; the sandbox and resident Workers get stable custom domains on the profile's zone so that config never changes. Repos are onboarded to the resident Worker at runtime from chat (`repo onboard` — next section), never at deploy time.
 
 ### What any host must provide
 
@@ -291,7 +289,7 @@ fly deploy && fly logs   # set workspaceDir: ./data/workspaces in config.yaml fi
 
 ### Deployment FAQ
 
-**Can the bot itself run in a Cloudflare Sandbox?** Technically yes — a Cloudflare Sandbox is a container underneath, and terrateam proves long-lived processes run fine on Cloudflare Containers. But hosting the bot *via the Sandbox SDK* just re-implements deployment option A with an extra orchestration layer, so there's no reason to: deploy on Containers directly. Sandboxes earn their keep as the **execution plane** — where the agents' tools run (`execution.type: e2b` today; a Cloudflare Sandbox executor backend is one file plus a small proxy Worker, since its SDK runs Worker-side).
+**Can the bot itself run in a Cloudflare Sandbox?** Technically yes — a Cloudflare Sandbox is a container underneath, and long-lived processes run fine on Cloudflare Containers. But hosting the bot *via the Sandbox SDK* just re-implements deployment option A with an extra orchestration layer, so there's no reason to: deploy on Containers directly. Sandboxes earn their keep as the **execution plane** — where the agents' tools run (`execution.type: e2b` today; a Cloudflare Sandbox executor backend is one file plus a small proxy Worker, since its SDK runs Worker-side).
 
 **Can it run on the Workers runtime / serverless-native?** Not as-is: the Slack adapter is a Socket Mode daemon and config/state use the filesystem. A serverless-native version means switching the Slack adapter to HTTP Events API (ack within 3s, continue work durably) and moving config/state off disk — the problem durable-agent frameworks (Vercel's eve, Cloudflare's Agents SDK) productize. Our seams map 1:1 onto those frameworks, so that door stays open; there's no reason to pay for it before horizontal scale matters.
 
@@ -320,7 +318,7 @@ restrict:
   repos: [acme/api]               # used only by actors whose `repos` axis names it (or `all`);
                                   # everyone else is refused BY NAME; unlisted repos stay open
 grants:
-  slack:U0123ADMIN:               # an admin: everything
+  slack:U0ADMIN:                  # an admin: everything
     actions: all
     channels: all
     repos: all
@@ -344,7 +342,7 @@ Full vocabulary, the machine surfaces, and the per-namespace baselines: [docs/re
    - Enable **Socket Mode**; create an app-level token with `connections:write` → `SLACK_APP_TOKEN`.
    - **OAuth scopes** (Bot Token): `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `im:history`, `im:read`, `im:write`, `files:read` (image attachments are downloaded and passed to the model; without this scope they're reported as unavailable), `reactions:write` (the bot reacts :eyes: to a message the moment it accepts it; without this scope requests still work, just without the receipt), `channels:read`, `groups:read`, `users:read` (channel/user display names for run labels, and the channel listing the reconnect catch-up scans — see below).
    - **Event subscriptions**: `app_mention`, `message.im`, `message.channels`, `message.groups` (the channel/group message events deliver thread follow-ups so no re-mention is needed mid-conversation).
-   - **Reconnect catch-up** ([#184](https://github.com/coreplanelabs/switchboard/issues/184)): Socket Mode drops every event that arrives while the bot is disconnected (each deploy = drain + cold start). On every (re)connect the bot re-reads the recent history of the channels it is in and runs whatever has no receipt from it (no :eyes:, no bot reply after it) — dedupe is Slack itself, no persisted cursor. On by default with a 30-minute window — sized to the drain: a deploy over a run in flight closes the socket and blacks Slack out for the run's remaining duration (up to the 15-minute drain deadline plus a cold start, [#272](https://github.com/coreplanelabs/switchboard/issues/272)), and the catch-up is the only recovery for that gap; `slack.catchUp` in `config.yaml` tunes it (a window under 20 minutes is warned about at startup). It needs `channels:read`/`groups:read` to list channels — without them it silently does nothing, so on first connect the bot compares the token's granted scopes with the required set, logs any missing ones, and reports them (with the last scan's outcome or error) under `catchUp` on `GET /healthz`; the deploy preflight prints a warning from the same fields.
+   - **Reconnect catch-up** ([ADR 0012](docs/decisions/0012-reconnect-catch-up-as-recovery.md)): Socket Mode drops every event that arrives while the bot is disconnected (each deploy = drain + cold start). On every (re)connect the bot re-reads the recent history of the channels it is in and runs whatever has no receipt from it (no :eyes:, no bot reply after it) — dedupe is Slack itself, no persisted cursor. On by default with a 30-minute window — sized to the drain: a deploy over a run in flight closes the socket and blacks Slack out for the run's remaining duration (up to the 15-minute drain deadline plus a cold start), and the catch-up is the only recovery for that gap; `slack.catchUp` in `config.yaml` tunes it (a window under 20 minutes is warned about at startup). It needs `channels:read`/`groups:read` to list channels — without them it silently does nothing, so on first connect the bot compares the token's granted scopes with the required set, logs any missing ones, and reports them (with the last scan's outcome or error) under `catchUp` on `GET /healthz`; the deploy preflight prints a warning from the same fields.
    - Install to workspace → `SLACK_BOT_TOKEN`.
 2. **Configure**:
    ```bash

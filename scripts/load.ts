@@ -1,5 +1,4 @@
-// The load harness entrypoint (features/load-harness.md; the plan
-// docs/plans/2026-09-07-001-feat-fifty-concurrent-runs-plan.md, Phase 0).
+// The load harness entrypoint (features/load-harness.md).
 //
 //   npm run load -- history                       peak concurrency from the run store
 //   npm run load -- resident --resource repo:owner/name --threads 16 --hold 600
