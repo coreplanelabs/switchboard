@@ -1318,7 +1318,16 @@ export class ResidentDO extends Sandbox<Env> {
       await this.restoreWithProgress({ ...backup, dir: mountDir }, what, deadlineMs);
       const t0 = systemClock();
       const r = await this.runOk(
-        ["sh", "-c", extractRestoreScript({ mountDir, archivePath: restoreArchivePath(backup.id), targetDir })],
+        [
+          "sh",
+          "-c",
+          extractRestoreScript({
+            mountDir,
+            backupId: backup.id,
+            archivePath: restoreArchivePath(backup.id),
+            targetDir,
+          }),
+        ],
         `${step}-extract`,
         { timeoutMs: Math.max(60_000, deadlineMs - systemClock()) },
       );
@@ -1328,7 +1337,7 @@ export class ResidentDO extends Sandbox<Env> {
       // attempt: a later clean would hit "Device or resource busy" on the
       // mount, and a half-extracted tree is multi-GiB debris on a
       // disk-budgeted resident. Best effort — the clean steps sweep both too.
-      await this.run(["sh", "-c", unmountRestoreScript(mountDir)]).catch(() => {});
+      await this.run(["sh", "-c", unmountRestoreScript({ mountDir, backupId: backup.id })]).catch(() => {});
       await this.run(["rm", "-rf", `${targetDir}.extract-${attempt}`]).catch(() => {});
       throw err;
     }
