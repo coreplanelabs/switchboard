@@ -29,7 +29,7 @@ const resident = (resource, inFlight) => ({ resource, live: { state: "warm", inF
 
 describe("resident deploy preflight — decide()", () => {
   it("idle everywhere → allow, not forced", () => {
-    const d = decide(payload([resident("repo:jshttp/vary", 0), resident("repo:coreplanelabs/switchboard", 0)]));
+    const d = decide(payload([resident("repo:jshttp/vary", 0), resident("repo:acme/widgets", 0)]));
     expect(d.allow).toBe(true);
     expect(d.forced).toBe(false);
     expect(d.busy).toEqual([]);
@@ -44,18 +44,14 @@ describe("resident deploy preflight — decide()", () => {
 
   it("busy → refuse, naming every busy resident with its count", () => {
     const d = decide(
-      payload([
-        resident("repo:jshttp/vary", 0),
-        resident("repo:coreplanelabs/switchboard", 2),
-        resident("repo:a/b", 1),
-      ]),
+      payload([resident("repo:jshttp/vary", 0), resident("repo:acme/widgets", 2), resident("repo:a/b", 1)]),
     );
     expect(d.allow).toBe(false);
     expect(d.busy).toEqual([
-      { resource: "repo:coreplanelabs/switchboard", inFlight: 2 },
+      { resource: "repo:acme/widgets", inFlight: 2 },
       { resource: "repo:a/b", inFlight: 1 },
     ]);
-    expect(d.message).toContain("repo:coreplanelabs/switchboard (2 in flight)");
+    expect(d.message).toContain("repo:acme/widgets (2 in flight)");
     expect(d.message).toContain("repo:a/b (1 in flight)");
     expect(d.message).not.toContain("repo:jshttp/vary");
     expect(d.message).toMatch(/RESIDENT_DEPLOY_FORCE=1/);
@@ -64,19 +60,34 @@ describe("resident deploy preflight — decide()", () => {
   // #188: a deploy swaps every ResidentDO isolate; a refresh cycle's fetch/
   // rebuild or a restore in progress is killed just like a thread run (live
   // 2026-08-29: `degraded(build-failed: exit 143: Session terminated)` on
-  // repo:coreplanelabs/switchboard right after a deploy that passed preflight).
-  it("a resident mid-cycle (refreshing / restoring / onboarding) → refuse, naming the state, even with 0 in flight", () => {
-    for (const state of ["refreshing", "restoring", "onboarding"]) {
+  // repo:acme/widgets right after a deploy that passed preflight).
+  it("a resident provisioning (onboarding) → refuse, naming the state, even with 0 in flight: an isolate swap fails the provision and only a rebuild recovers it", () => {
+    const d = decide(
+      payload([
+        resident("repo:jshttp/vary", 0),
+        { resource: "repo:acme/widgets", live: { state: "onboarding", inFlight: 0 } },
+      ]),
+    );
+    expect(d.allow).toBe(false);
+    expect(d.provisioning).toEqual([{ resource: "repo:acme/widgets", state: "onboarding" }]);
+    expect(d.interrupting).toEqual([]);
+    expect(d.message).toContain("repo:acme/widgets (onboarding)");
+    expect(d.message).toMatch(/RESIDENT_DEPLOY_FORCE=1/);
+  });
+
+  it("a resident refreshing or restoring with 0 in flight → allow with a WARNING naming the state: the cycle re-arms in 45 s after the swap (item 44), a restore is retried by the next hydrate (item 61)", () => {
+    for (const state of ["refreshing", "restoring"]) {
       const d = decide(
-        payload([
-          resident("repo:jshttp/vary", 0),
-          { resource: "repo:coreplanelabs/switchboard", live: { state, inFlight: 0 } },
-        ]),
+        payload([resident("repo:jshttp/vary", 0), { resource: "repo:acme/widgets", live: { state, inFlight: 0 } }]),
       );
-      expect(d.allow, state).toBe(false);
-      expect(d.midCycle).toEqual([{ resource: "repo:coreplanelabs/switchboard", state }]);
-      expect(d.message).toContain(`repo:coreplanelabs/switchboard (${state})`);
-      expect(d.message).toMatch(/RESIDENT_DEPLOY_FORCE=1/);
+      expect(d.allow, state).toBe(true);
+      expect(d.forced).toBe(false);
+      expect(d.provisioning).toEqual([]);
+      expect(d.interrupting).toEqual([{ resource: "repo:acme/widgets", state }]);
+      expect(d.message).toMatch(/^preflight ok:/);
+      expect(d.message).toContain("WARNING");
+      expect(d.message).toContain(`repo:acme/widgets (${state})`);
+      expect(d.message).not.toContain("REFUSED");
     }
   });
 
@@ -89,16 +100,20 @@ describe("resident deploy preflight — decide()", () => {
       ]),
     );
     expect(d.allow).toBe(true);
-    expect(d.midCycle).toEqual([]);
+    expect(d.provisioning).toEqual([]);
   });
 
-  it("busy AND mid-cycle are both reported — neither shadows the other", () => {
-    const d = decide(payload([{ resource: "repo:x/y", live: { state: "refreshing", inFlight: 2 } }]));
+  it("busy AND mid-cycle are both reported — neither shadows the other; runs in flight refuse even when the cycle alone would only warn", () => {
+    const d = decide(payload([{ resource: "repo:x/y", live: { state: "onboarding", inFlight: 2 } }]));
     expect(d.allow).toBe(false);
     expect(d.busy).toEqual([{ resource: "repo:x/y", inFlight: 2 }]);
-    expect(d.midCycle).toEqual([{ resource: "repo:x/y", state: "refreshing" }]);
+    expect(d.provisioning).toEqual([{ resource: "repo:x/y", state: "onboarding" }]);
     expect(d.message).toContain("repo:x/y (2 in flight)");
-    expect(d.message).toContain("repo:x/y (refreshing)");
+    expect(d.message).toContain("repo:x/y (onboarding)");
+    const refreshingBusy = decide(payload([{ resource: "repo:x/y", live: { state: "refreshing", inFlight: 1 } }]));
+    expect(refreshingBusy.allow).toBe(false);
+    expect(refreshingBusy.interrupting).toEqual([{ resource: "repo:x/y", state: "refreshing" }]);
+    expect(refreshingBusy.message).toContain("repo:x/y (1 in flight)");
   });
 
   // Allow-list of settled states: this script is plain JS outside the shared
@@ -107,17 +122,17 @@ describe("resident deploy preflight — decide()", () => {
   it("an unrecognized lifecycle state is unknown → refuse (fail closed on vocabulary drift)", () => {
     const d = decide(payload([{ resource: "repo:x/y", live: { state: "hibernating", inFlight: 0 } }]));
     expect(d.allow).toBe(false);
-    expect(d.midCycle).toEqual([]);
+    expect(d.provisioning).toEqual([]);
     expect(d.unknown).toEqual([
       { resource: "repo:x/y", error: expect.stringContaining('unrecognized state "hibernating"') },
     ]);
   });
 
-  it("force overrides mid-cycle — allowed, flagged, and the warning names the state", () => {
-    const d = decide(payload([{ resource: "repo:x/y", live: { state: "refreshing", inFlight: 0 } }]), { force: true });
+  it("force overrides a provisioning — allowed, flagged, and the warning names the state", () => {
+    const d = decide(payload([{ resource: "repo:x/y", live: { state: "onboarding", inFlight: 0 } }]), { force: true });
     expect(d.allow).toBe(true);
     expect(d.forced).toBe(true);
-    expect(d.message).toContain("repo:x/y (refreshing)");
+    expect(d.message).toContain("repo:x/y (onboarding)");
   });
 
   it("a resident whose live view failed is unknown → refuse (fail closed)", () => {
@@ -161,11 +176,11 @@ describe("resident deploy preflight — decide()", () => {
   });
 
   it("force overrides busy — allowed, flagged, and the warning still names the busy residents", () => {
-    const d = decide(payload([resident("repo:coreplanelabs/switchboard", 1)]), { force: true });
+    const d = decide(payload([resident("repo:acme/widgets", 1)]), { force: true });
     expect(d.allow).toBe(true);
     expect(d.forced).toBe(true);
     expect(d.message).toMatch(/WARNING/);
-    expect(d.message).toContain("repo:coreplanelabs/switchboard (1 in flight)");
+    expect(d.message).toContain("repo:acme/widgets (1 in flight)");
   });
 
   it("force overrides unreachable — allowed and flagged", () => {
