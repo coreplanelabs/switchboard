@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.6.0](https://github.com/coreplanelabs/switchboard/compare/v1.5.0...v1.6.0) (2026-09-08)
+
+
+### Features
+
+* **coding:** every push to an existing PR re-evaluates and resubmits its description, whoever opened it ([#715](https://github.com/coreplanelabs/switchboard/issues/715)) ([b2b9855](https://github.com/coreplanelabs/switchboard/commit/b2b9855a0cc53886a275dbe9fd2ade18c49874bf))
+* **coding:** the description turn — a run that pushed onto an open PR without resubmitting its description gets one bounded model turn asking for it ([#716](https://github.com/coreplanelabs/switchboard/issues/716)) ([00f0a10](https://github.com/coreplanelabs/switchboard/commit/00f0a1082850b419d773ab84cfc91f0bf5bf6716))
+* **docs:** the docs site lives at openswitchboard.dev — a Worker may name its own zone, and the project's docs are public ([#720](https://github.com/coreplanelabs/switchboard/issues/720)) ([e3e615e](https://github.com/coreplanelabs/switchboard/commit/e3e615e039fd79a9b555121abe9fb41d95e48d13))
+
+
+### Bug fixes
+
+* **coding:** a description-less push onto a branch that already heads an open PR is reported as that PR updated, not "no PR was opened" ([#709](https://github.com/coreplanelabs/switchboard/issues/709)) ([2da3178](https://github.com/coreplanelabs/switchboard/commit/2da3178b383bee08d77425d8f4400f6aad268af8))
+* **dispatcher:** the registry row is created at the reservation — the runs index never shows a labelless ledger row for a run this process is attaching ([#714](https://github.com/coreplanelabs/switchboard/issues/714)) ([8189738](https://github.com/coreplanelabs/switchboard/commit/8189738f3880c8362d8410ee76432a6dd2ec3ddf))
+* **resident:** the live view reports runs apart from the refresh cycle (runsInFlight), and the deploy preflight judges busy on that ([#706](https://github.com/coreplanelabs/switchboard/issues/706)) ([fd91678](https://github.com/coreplanelabs/switchboard/commit/fd91678caf6ae9ab02f841c28b065714c2a0721e))
+* **review:** a PR's head is read from its head branch's ref tip, not only from GitHub's pull-request object, which lags the ref after a force-push ([#721](https://github.com/coreplanelabs/switchboard/issues/721)) ([297331d](https://github.com/coreplanelabs/switchboard/commit/297331dfd70b23a864d0060840a371d060e55728))
+* **run-ledger:** a generation never reclaims its own run, a fence gates the finish for good, and an interrupted pipeline's thread is told how to continue ([#717](https://github.com/coreplanelabs/switchboard/issues/717)) ([714958d](https://github.com/coreplanelabs/switchboard/commit/714958d720a372e89f9d6d64c0ae82160ff93d91))
+* **runner:** an answer written alongside an update_status call is the answer when the forced extra turn is empty ([#701](https://github.com/coreplanelabs/switchboard/issues/701)) ([27ff46f](https://github.com/coreplanelabs/switchboard/commit/27ff46f4538355e3bfb4ddced7be248dee3d38c9))
+* **slack:** card edits draw from one process-wide status budget on their own Web API client, so a rate-limited heartbeat never holds the reply ([#719](https://github.com/coreplanelabs/switchboard/issues/719)) ([9ed2a28](https://github.com/coreplanelabs/switchboard/commit/9ed2a284bfb690aface5a242a9eaff3e2d3cf6ff))
+
+
+### Documentation
+
+* **agents:** AGENTS.md reads as the contract, not an index — the area map moves into the code map ([#708](https://github.com/coreplanelabs/switchboard/issues/708)) ([490e861](https://github.com/coreplanelabs/switchboard/commit/490e861e672ae45d206e61a497a6aed30b7fa593))
+
 ## [1.5.0](https://github.com/coreplanelabs/switchboard/compare/v1.4.0...v1.5.0) (2026-09-08)
 
 
