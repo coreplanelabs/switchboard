@@ -1016,8 +1016,11 @@ export async function dispatch(
     // 2026-08-30, `coreplanelabs/try-catch`) — say why instead, before any
     // attach or model turn. A thread that already has a repo never reaches
     // here with `rejectedRepo` (prose slugs there are never probed — #289), so
-    // the silence that fix bought is untouched.
-    if (needsRepo && !repoCtx.repo && repoCtx.rejectedRepo) {
+    // the silence that fix bought is untouched. Only where residents exist
+    // (`capabilities.residents`): without a fleet there is nothing to onboard,
+    // and a note inviting `repo onboard` would point at a command this
+    // installation does not have.
+    if (deps.capabilities.residents && needsRepo && !repoCtx.repo && repoCtx.rejectedRepo) {
       const slug = repoCtx.rejectedRepo;
       console.log(`[dispatch] ${msg.threadKey} not started: repo not onboarded (${slug})`);
       // `repo onboard` is admin-gated (canManageRepos, fail-closed): only tell
