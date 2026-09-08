@@ -102,8 +102,10 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
         prFromMessage: true,
       },
     );
-    expect(fn).toHaveBeenCalledTimes(1);
+    // Two reads: the PR object, then the head branch's ref tip (the PR object lags the ref after a force-push).
+    expect(fn).toHaveBeenCalledTimes(2);
     expect(calls[0].url).toBe("https://api.github.com/repos/jshttp/vary/pulls/42");
+    expect(calls[1].url).toBe("https://api.github.com/repos/jshttp/vary/git/ref/heads/patch-1");
   });
 
   it("owner/name#N shorthand resolves the same way", async () => {
@@ -204,8 +206,10 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
       headSha: SHA,
       baseRef: "main",
     });
-    expect(calls).toHaveLength(1);
+    // The PR object, then the head branch's ref tip (the PR object lags the ref after a force-push).
+    expect(calls).toHaveLength(2);
     expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/300");
+    expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/feat/prompt-caching");
   });
 
   it("an explicit 'on branch X' beside a PR URL does not redirect the review either — the PR head is fetched and its branch bound", async () => {
@@ -249,7 +253,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
       pr: 7,
       headSha: SHA,
     });
-    expect(fn).toHaveBeenCalledTimes(1);
+    expect(fn).toHaveBeenCalledTimes(2); // the PR object, then its head branch's ref tip
     expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
   });
 });
@@ -620,12 +624,55 @@ describe("PR head SHA for review pinning", () => {
     });
   });
 
-  it("a cross-fork PR still carries headSha even though its ref is not bound", async () => {
-    stubFetch({ body: { head: { ref: "fork-branch", sha: SHA, repo: { full_name: "other/fork" } } } });
+  it("a cross-fork PR still carries headSha even though its ref is not bound — and asks for no ref tip (the fork's ref is not on this repo)", async () => {
+    const { calls } = stubFetch({
+      body: { head: { ref: "fork-branch", sha: SHA, repo: { full_name: "other/fork" } } },
+    });
     const ctx = await resolveRepoContext({ text: "review https://github.com/acme/api/pull/7" });
     expect(ctx.ref).toBeUndefined();
     expect(ctx.headSha).toBe(SHA);
     expect(ctx.pr).toBe(7);
+    expect(calls).toHaveLength(1);
+  });
+
+  // GitHub's pull-request object lags the branch ref after a force-push (seen
+  // live: four minutes, the new commit already fetchable by sha). The ref IS
+  // the PR's head; a review attached at the lagging head.sha refuses with a
+  // mismatch. So the head is read from the ref when it can be.
+  it("the head branch's ref tip wins over a lagging PR head.sha, and the disagreement is logged with both shas", async () => {
+    const TIP = "b".repeat(40);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { calls } = stubFetch(
+      { body: { head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } },
+      { body: { ref: "refs/heads/patch-1", object: { sha: TIP, type: "commit" } } },
+    );
+    const ctx = await resolveRepoContext({ text: "review https://github.com/acme/api/pull/7" });
+    expect(ctx.headSha).toBe(TIP);
+    expect(ctx.ref).toBe("patch-1");
+    expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/patch-1");
+    const line = log.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith("[pr-head] acme/api#7"));
+    expect(line).toContain(SHA.slice(0, 7));
+    expect(line).toContain(TIP.slice(0, 7));
+    expect(line).toContain("refs/heads/patch-1");
+    log.mockRestore();
+  });
+
+  it("ref tip equal to head.sha → that sha, no log line; an unreadable ref (404, network) → the PR object's sha stands", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    stubFetch(
+      { body: { head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } },
+      { body: { object: { sha: SHA, type: "commit" } } },
+    );
+    expect((await resolveRepoContext({ text: "https://github.com/acme/api/pull/7" })).headSha).toBe(SHA);
+    expect(log.mock.calls.some((c) => String(c[0]).startsWith("[pr-head]"))).toBe(false);
+    stubFetch({ body: { head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } }, { status: 404 });
+    expect((await resolveRepoContext({ text: "https://github.com/acme/api/pull/7" })).headSha).toBe(SHA);
+    stubFetch(
+      { body: { head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } },
+      { reject: "fetch failed" },
+    );
+    expect((await resolveRepoContext({ text: "https://github.com/acme/api/pull/7" })).headSha).toBe(SHA);
+    log.mockRestore();
   });
 
   it("a malformed sha is dropped; a failed fetch leaves headSha undefined", async () => {

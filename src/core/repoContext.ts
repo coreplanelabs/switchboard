@@ -1,4 +1,5 @@
 import { resolveGithubToken } from "../execution/githubApp.js";
+import { headRefTipSha, preferRefTip } from "../execution/githubPulls.js";
 import { validRef } from "./residentAdmin.js";
 import type { PrCommitList } from "./headMoved.js";
 import { normalizeHead } from "./reviewedHead.js";
@@ -651,7 +652,7 @@ async function prHead(pr: {
   };
   // Base branch: validated like every ref candidate (never partial garbage).
   const base = typeof data.base?.ref === "string" ? validRef(data.base.ref) : undefined;
-  const sha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
+  const prSha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
   const headRepo = data.head?.repo?.full_name?.toLowerCase();
   // Require a POSITIVE same-repo match for the REF: a null head.repo (deleted
   // fork) must not bind the base repo's ref to a fork PR. Dropping the
@@ -659,5 +660,15 @@ async function prHead(pr: {
   // ref undefined.
   const ref = data.head?.ref && headRepo === pr.repo ? validRef(data.head.ref) : undefined;
   const state = data.state === "open" || data.state === "closed" ? data.state : undefined;
+  // The head sha every reader pins to (the attach, the reviewed-head guard,
+  // the head-moved settle and note): the REF's tip when the head lives on this
+  // repo and the ref can be read, else the PR object's — GitHub's PR object
+  // lags the ref after a force-push (githubPulls.ts `headRefTipSha`; issue
+  // shape: a re-review attached at the lagging head and refused). Best-effort:
+  // an unreadable ref keeps the PR object's sha.
+  const sha =
+    ref !== undefined
+      ? preferRefTip(`${pr.repo}#${pr.number}`, prSha, await headRefTipSha(pr.repo, ref, headers), ref)
+      : prSha;
   return { ref, sha, base, state };
 }

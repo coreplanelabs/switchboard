@@ -348,6 +348,44 @@ describe("githubPulls", () => {
       expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
     });
 
+    // The PR object lags the branch ref after a force-push; the ref is the head.
+    it("a same-repo head reads the head ref's tip and prefers it over a lagging head.sha; a fork head asks for no ref", async () => {
+      stubToken();
+      const TIP = "d".repeat(40);
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const calls = stubFetch((url) =>
+        String(url).includes("/git/ref/heads/")
+          ? new Response(JSON.stringify({ object: { sha: TIP, type: "commit" } }), { status: 200 })
+          : new Response(JSON.stringify(openPr), { status: 200 }),
+      );
+      const facts = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(facts?.headSha).toBe(TIP);
+      expect(facts?.headRef).toBe("ship/fix-x-abc123");
+      expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/ship/fix-x-abc123");
+      expect(log.mock.calls.some((c) => String(c[0]).startsWith("[pr-head] acme/api#7"))).toBe(true);
+      log.mockRestore();
+      // a fork head: the PR object's sha, one call
+      const forkCalls = stubFetch(
+        () => new Response(JSON.stringify({ ...openPr, head: { ...openPr.head, repo: { full_name: "other/fork" } } })),
+      );
+      const fork = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(fork?.headSha).toBe("c".repeat(40));
+      expect(fork?.sameRepoHead).toBe(false);
+      expect(forkCalls).toHaveLength(1);
+    });
+
+    it("a ref that does not point at a commit object (a tag, a type-less answer) is not a head: the PR object's sha stands", async () => {
+      stubToken();
+      for (const object of [{ sha: "e".repeat(40), type: "tag" }, { sha: "e".repeat(40) }]) {
+        stubFetch((url) =>
+          String(url).includes("/git/ref/heads/")
+            ? new Response(JSON.stringify({ object }), { status: 200 })
+            : new Response(JSON.stringify(openPr), { status: 200 }),
+        );
+        expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.headSha).toBe("c".repeat(40));
+      }
+    });
+
     it("parses the PR's own base ref — the resume path's true merge base", async () => {
       stubToken();
       stubFetch(() => new Response(JSON.stringify({ ...openPr, base: { ref: "release/1.x" } }), { status: 200 }));
