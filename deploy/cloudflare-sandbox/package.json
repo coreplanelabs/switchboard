@@ -6,6 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "check:image": "docker build --quiet .",
     "deploy": "node ../bin/build-stamp.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "verify": "npm --prefix ../.. run --silent deploy:gen && npm run typecheck",

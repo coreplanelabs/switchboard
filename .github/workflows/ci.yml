@@ -164,16 +164,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: npm run ci:gate
 
-  image:
-    name: image
+  image-each:
+    # One leg per image the deploy builds — the same Dockerfiles, from the same
+    # contexts, that wrangler builds on a release: the bot's (the root
+    # Dockerfile, also docker-compose's), the resident's and the sandbox's.
+    # Until this job existed a broken bot Dockerfile was found at deploy time;
+    # until it covered every image, so was a broken resident one (release
+    # 1.2.0, 2026-09-08: a RUN whose last command exits 1 on the base image).
+    # The runner's own npm is enough to invoke the script; whatever runs inside
+    # an image comes from its Dockerfile.
+    name: image / build ${{ matrix.worker }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [deploy/cloudflare, deploy/cloudflare-resident, deploy/cloudflare-sandbox]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The same image docker-compose and the Cloudflare deploy build. Until
-      # this job existed, a broken Dockerfile was found at deploy time. The
-      # runner's own npm is enough to invoke the script; Node inside the image
-      # comes from the Dockerfile.
-      - run: npm run check:image
+      - run: npm run check:image -w ${{ matrix.worker }}
+
+  image:
+    # The required check `image`: green only when every image built.
+    name: image
+    needs: [image-each]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    env:
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm run ci:gate
 
   # Which Workers this PR's diff would deploy (features/release-and-deploy.md
   # item 8): `deploy plan --affected --base HEAD^` — HEAD is the merge commit,

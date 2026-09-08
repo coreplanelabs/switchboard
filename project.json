@@ -93,8 +93,8 @@
       "when": "After a docs change; part of `verify`."
     },
     "check:image": {
-      "does": "Builds the Docker image.",
-      "when": "After touching the Dockerfile or what it copies; needs Docker. Its own CI job."
+      "does": "Builds every Worker's image.",
+      "when": "After touching a Dockerfile; needs Docker. One CI leg per image."
     },
     "check:project-facts": {
       "does": "Every copy of the project's name, repository, docs URL and contact address equals `project.json`.",

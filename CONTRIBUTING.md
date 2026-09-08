@@ -55,8 +55,9 @@ npm run fix           # regenerate what can be regenerated (docs tables, vendore
 ```
 
 `npm test` is fast (a few seconds) and is the proof layer: a behavior without a
-test is a behavior we do not know we have. The Docker image has its own check,
-`npm run check:image`, which CI runs and which needs Docker locally.
+test is a behavior we do not know we have. The Docker images — the bot's, the
+resident's and the sandbox's — have their own check, `npm run check:image`
+(one CI leg per image), which needs Docker locally.
 
 ## Running tests
 

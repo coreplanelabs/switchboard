@@ -6,6 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "check:image": "docker build --quiet .",
     "deploy": "node preflight.mjs && node ../bin/build-stamp.mjs",
     "preflight": "node preflight.mjs",
     "dev": "wrangler dev",
