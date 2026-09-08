@@ -70,8 +70,8 @@ export function createTracer(opts: TracerOptions): Tracer {
     clock: opts.clock,
     start(name, root: RootOptions) {
       const span = new SpanImpl(shared, {
-        traceId: newTraceId(),
-        parentId: undefined,
+        traceId: root.parent?.traceId ?? newTraceId(),
+        parentId: root.parent?.parentId,
         name,
         sinks: root.sinks,
         startedAt: root.startedAt,

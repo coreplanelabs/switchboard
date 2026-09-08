@@ -15,6 +15,29 @@ function setup() {
 }
 
 describe("createTracer", () => {
+  // Feature: features/tracing.md item 22 — a Worker's root joins the bot's trace.
+  it("a root started with a remote parent carries that trace id and parent span id; without one it mints its own", () => {
+    const log = recordingSink();
+    const tracer = createTracer({ clock: () => 1_000 });
+    const adopted = tracer.start("state.fetch", {
+      sinks: [log],
+      parent: { traceId: "4bf92f3577b34da6a3ce929d0e0e4736", parentId: "00f067aa0ba902b7" },
+    });
+    expect(adopted.traceId).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+    expect(adopted.record().parentSpanId).toBe("00f067aa0ba902b7");
+    const child = adopted.start("state.put");
+    expect(child.traceId).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+    expect(child.record().parentSpanId).toBe(adopted.id);
+    adopted.end("ok");
+    expect(log.ends.at(-1)).toMatchObject({
+      traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+      parentSpanId: "00f067aa0ba902b7",
+    });
+    const own = tracer.start("request", { sinks: [log] });
+    expect(own.traceId).not.toBe("4bf92f3577b34da6a3ce929d0e0e4736");
+    expect(own.record().parentSpanId).toBeUndefined();
+  });
+
   it("span(fn) invokes fn synchronously, ends ok on return with the measured duration, and nests under its parent", async () => {
     const { clock, sink, root } = setup();
     let ranSynchronously = false;

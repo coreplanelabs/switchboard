@@ -177,6 +177,11 @@ import {
   type StepResult,
 } from "../../src/execution/residentStepReport.js";
 import { createStepTrace, type ResidentStep, type StepTrace } from "../../src/execution/residentStepTrace.js";
+import { graftResidentSteps } from "../../src/execution/residentTrace.js";
+import type { SpanAttrs } from "../../src/core/trace/attrs.js";
+import { systemClock } from "../../src/core/trace/clock.js";
+import { createTracer } from "../../src/core/trace/tracer.js";
+import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrace.js";
 import { backupTransferMode } from "../../src/execution/residentBackupTransfer.js";
 import {
   DEPS_STORE_DIR,
@@ -206,6 +211,36 @@ const BUILD = injectedBuildStamp();
 /** The identity stored test overrides are expired against — see `buildId`:
  *  the commit alone cannot tell two builds of one dirty tree apart. */
 const BUILD_ID = buildId(BUILD);
+
+// The Worker's own spans (features/tracing.md item 22): the streamed routes
+// (/attach, /exec, /op) are rooted inside the DO where the work is, their
+// collector's steps as `resident.<step>` children; every other authenticated
+// route is a `resident.fetch` root at the edge. Each joins the bot's trace when
+// the request carried one. A `slow` log sink whose filter drops a refusal's line.
+const tracer = createTracer({ clock: systemClock });
+const traceSinks = [workerLogSink((line) => console.log(line))];
+const STREAMED_ROUTES: ReadonlySet<string> = new Set(["/attach", "/exec", "/op"]);
+
+/** One request as the resident's own root: started at its t0, joining the
+ *  bot's trace when `traceparent` parses, the collector's steps grafted as
+ *  `resident.<step>` children, ended with the one outcome word. */
+function emitStepRoot(
+  name: "resident.attach" | "resident.op" | "resident.exec",
+  t0: number,
+  steps: readonly ResidentStep[],
+  traceparent: string | undefined,
+  outcome: string,
+  attrs: SpanAttrs = {},
+): void {
+  const root = startAdoptedRoot(tracer, name, { sinks: traceSinks, startedAt: t0, traceparent, attrs });
+  graftResidentSteps(steps, { parent: root, prefix: "resident", baseAt: t0, clipAt: systemClock() });
+  root.end(outcome === "ok" ? "ok" : "error", { outcome });
+}
+
+/** The one word a refusal's root carries: what it needed, else `error`. */
+function refusalOutcome(err: ThreadErr): string {
+  return err.needs ? `needs_${err.needs}` : "error";
+}
 
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
@@ -3003,6 +3038,7 @@ export class ResidentDO extends Sandbox<Env> {
     readonly = false,
     wantSha: string | null = null,
     record?: ResidentRecord,
+    traceparent?: string,
   ): Promise<AttachOk | ThreadErr> {
     // One step trace per attach (features/tracing.md item 19): every command
     // the attach runs lands on it, and the answer carries it.
@@ -3011,6 +3047,8 @@ export class ResidentDO extends Sandbox<Env> {
     const res = await this.stepTrace.run(trace, () =>
       this.attachThreadTraced(threadKey, refHint, readonly, wantSha, record, t0),
     );
+    // The same steps as the resident's own `resident.attach` root (item 22).
+    emitStepRoot("resident.attach", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok");
     // A refusal carries the steps that led to it; a success already does.
     return "error" in res ? { ...res, trace: trace.steps() } : res;
   }
@@ -3888,8 +3926,21 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     command: string,
     timeoutMs: number,
+    traceparent?: string,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
-    return this.withThreadBusy(threadKey, () => this.execThreadImpl(threadKey, command, timeoutMs));
+    const queuedAt = systemClock();
+    let startedAt = queuedAt;
+    const res = await this.withThreadBusy(threadKey, () => {
+      startedAt = systemClock();
+      return this.execThreadImpl(threadKey, command, timeoutMs);
+    });
+    // The command as the resident's own `resident.exec` root (features/tracing.md
+    // item 22): started when the command did, the wait for the thread's turn an attr.
+    emitStepRoot("resident.exec", startedAt, [], traceparent, "error" in res ? refusalOutcome(res) : "ok", {
+      waitedMs: startedAt - queuedAt,
+      ...("error" in res ? {} : { exitCode: res.exitCode }),
+    });
+    return res;
   }
 
   private async execThreadImpl(
@@ -4312,11 +4363,14 @@ export class ResidentDO extends Sandbox<Env> {
    *  materialize through the exact thread mechanism (KTD7): the shared
    *  lockfile-keyed cache, scoped token-free install only when the committed
    *  key differs. No snapshot is ever written here (KTD3). */
-  async runOp(op: "test" | "build", refArg: string | null): Promise<OpRunOk | ThreadErr> {
+  async runOp(op: "test" | "build", refArg: string | null, traceparent?: string): Promise<OpRunOk | ThreadErr> {
     // One step trace per op (features/tracing.md item 19), like an attach.
     const t0 = Date.now();
     const trace = createStepTrace(t0);
     const res = await this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0));
+    emitStepRoot("resident.op", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok", {
+      command: op,
+    });
     return "error" in res ? { ...res, trace: trace.steps() } : res;
   }
 
@@ -5265,47 +5319,58 @@ export default {
     const body: Record<string, unknown> =
       route.method === "POST" ? ((await request.json().catch(() => ({}))) as Record<string, unknown>) : {};
 
-    try {
-      switch (url.pathname) {
-        case "/onboard":
-          return await handleOnboard(env, body);
-        case "/offboard":
-          return await handleOffboard(env, body);
-        case "/reconfigure":
-          return await handleReconfigure(env, body);
-        case "/rebuild":
-          return await handleRebuild(env, body);
-        case "/residents":
-          return await handleResidents(env);
-        case "/debug": {
-          // Read scope may only run the pure-read ops; the check happens AFTER
-          // auth so an unauthenticated caller still learns nothing extra.
-          const op = typeof body.op === "string" ? body.op : "";
-          // Authenticated but under-scoped → 403 (401 is reserved for "no valid bearer").
-          if (!isAdmin && !READ_DEBUG_OPS.has(op))
-            return json({ error: "forbidden: admin scope required for this op" }, 403);
-          return await handleDebug(env, body);
+    // Authenticated from here (features/tracing.md item 22): the bot's trace
+    // context is read only now. The streamed routes hand it to the DO, whose
+    // own root covers the work; every other route is one `resident.fetch` root.
+    const traceparent = request.headers.get("traceparent") ?? undefined;
+    const root = STREAMED_ROUTES.has(url.pathname)
+      ? undefined
+      : startAdoptedRoot(tracer, "resident.fetch", { sinks: traceSinks, traceparent, attrs: { route: url.pathname } });
+    const res = await (async (): Promise<Response> => {
+      try {
+        switch (url.pathname) {
+          case "/onboard":
+            return await handleOnboard(env, body);
+          case "/offboard":
+            return await handleOffboard(env, body);
+          case "/reconfigure":
+            return await handleReconfigure(env, body);
+          case "/rebuild":
+            return await handleRebuild(env, body);
+          case "/residents":
+            return await handleResidents(env);
+          case "/debug": {
+            // Read scope may only run the pure-read ops; the check happens AFTER
+            // auth so an unauthenticated caller still learns nothing extra.
+            const op = typeof body.op === "string" ? body.op : "";
+            // Authenticated but under-scoped → 403 (401 is reserved for "no valid bearer").
+            if (!isAdmin && !READ_DEBUG_OPS.has(op))
+              return json({ error: "forbidden: admin scope required for this op" }, 403);
+            return await handleDebug(env, body);
+          }
+          case "/status":
+            return await handleStatus(env, url);
+          case "/attach":
+            return await handleAttach(env, body, traceparent);
+          case "/detach":
+            return await handleDetach(env, body);
+          case "/exec":
+            return await handleExec(env, body, traceparent);
+          case "/read":
+            return await handleRead(env, body);
+          case "/write":
+            return await handleWrite(env, body);
+          case "/op":
+            return await handleOp(env, body, traceparent);
+          default:
+            return json({ error: "unknown route" }, 404);
         }
-        case "/status":
-          return await handleStatus(env, url);
-        case "/attach":
-          return await handleAttach(env, body);
-        case "/detach":
-          return await handleDetach(env, body);
-        case "/exec":
-          return await handleExec(env, body);
-        case "/read":
-          return await handleRead(env, body);
-        case "/write":
-          return await handleWrite(env, body);
-        case "/op":
-          return await handleOp(env, body);
-        default:
-          return json({ error: "unknown route" }, 404);
+      } catch (err) {
+        return json({ error: errMsg(err) }, 500);
       }
-    } catch (err) {
-      return json({ error: errMsg(err) }, 500);
-    }
+    })();
+    root?.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
+    return res;
   },
 
   /** Watchdog cron (KTD4): one sparse pass that re-arms dead refresh chains
@@ -5779,7 +5844,7 @@ function threadErrResponse(result: ThreadErr): Response {
   return json(rest, status);
 }
 
-async function handleAttach(env: Env, body: Record<string, unknown>): Promise<Response> {
+async function handleAttach(env: Env, body: Record<string, unknown>, traceparent?: string): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body, true);
   if (ctx instanceof Response) return ctx;
   let refHint: string | null = null;
@@ -5798,7 +5863,7 @@ async function handleAttach(env: Env, body: Record<string, unknown>): Promise<Re
   // response did live 2026-09-07 (`fetch failed` at 272 s, #552). A refusal
   // carries its `status` in the body; `ResidentExecutor.attach` reads it there.
   return streamHeartbeatJson(
-    ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha, ctx.record),
+    ctx.stub.attachThread(ctx.threadKey, refHint, readonly.readonly, want.sha, ctx.record, traceparent),
     (result) => result,
     (err) => ({ error: errMsg(err), status: 500 }),
   );
@@ -5812,7 +5877,7 @@ async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Re
   return json(result);
 }
 
-async function handleExec(env: Env, body: Record<string, unknown>): Promise<Response> {
+async function handleExec(env: Env, body: Record<string, unknown>, traceparent?: string): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
   if (typeof body.command !== "string" || body.command.length === 0 || body.command.length > MAX_EXEC_COMMAND_LENGTH) {
@@ -5823,7 +5888,7 @@ async function handleExec(env: Env, body: Record<string, unknown>): Promise<Resp
   // a string) runs at the 5-minute default. A clamp, not a 400: an out-of-range
   // ask still runs, at the nearest bound.
   const timeoutMs = clampBashTimeout(body.timeoutMs);
-  return streamThreadExec(ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs));
+  return streamThreadExec(ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent));
 }
 
 /** Stream one pending result with the thread-sandbox Worker's heartbeat
@@ -5931,7 +5996,7 @@ const OP_NAMES = ["test", "build", "status"] as const;
  *  refusal is the guard rail for future entries). test/build run in a
  *  disposable per-op checkout (see ResidentDO.runOp) and stream like /exec;
  *  status touches no checkout at all — DO storage reads only. */
-async function handleOp(env: Env, body: Record<string, unknown>): Promise<Response> {
+async function handleOp(env: Env, body: Record<string, unknown>, traceparent?: string): Promise<Response> {
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
   const op = body.op;
@@ -5983,7 +6048,7 @@ async function handleOp(env: Env, body: Record<string, unknown>): Promise<Respon
       summary,
     });
   }
-  return streamOp(stub.runOp(op as "test" | "build", ref));
+  return streamOp(stub.runOp(op as "test" | "build", ref, traceparent));
 }
 
 /** /op's payload mapping: results pass through; a named error sheds its

@@ -37,6 +37,10 @@ import {
   thrownText,
 } from "../../src/execution/sandboxErrors.js";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
+import { classifyError } from "../../src/core/trace/classify.js";
+import { systemClock } from "../../src/core/trace/clock.js";
+import { createTracer } from "../../src/core/trace/tracer.js";
+import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrace.js";
 import sandboxPkg from "./package.json" with { type: "json" };
 
 /** The `@cloudflare/sandbox` version this Worker is built against — the pin
@@ -221,6 +225,17 @@ const EXEC_TIMEOUT_SECS = 280;
  *  (`deploy/bin/build-stamp.mjs`) and answered on GET /healthz as `build`. */
 const BUILD = injectedBuildStamp();
 
+// The Worker's own spans (features/tracing.md item 22): one `sandbox.exec`
+// root per command, started at the attempt that produced the answer, joining
+// the bot's trace (the bearer checked out before the header is read).
+const tracer = createTracer({ clock: systemClock });
+const traceSinks = [workerLogSink((line) => console.log(line))];
+
+/** One command's root, started at the attempt that answered, joining the bot's trace. */
+function execRoot(attemptStartedAt: number, traceparent: string | undefined) {
+  return startAdoptedRoot(tracer, "sandbox.exec", { sinks: traceSinks, startedAt: attemptStartedAt, traceparent });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const auth = request.headers.get("authorization");
@@ -305,6 +320,7 @@ export default {
             `timeout -k 10 ${execTimeoutSecs} bash -c ${shellQuote(full)}`,
             { env: envVars },
             execTimeoutSecs,
+            request.headers.get("traceparent") ?? undefined,
           );
         }
         case "/read": {
@@ -348,6 +364,7 @@ function streamExec(
   command: string,
   options: ExecOptions,
   execTimeoutSecs: number,
+  traceparent: string | undefined,
 ): Response {
   const encoder = new TextEncoder();
   // Per ATTEMPT, not per request: withSessionRecovery may run the command a
@@ -386,6 +403,11 @@ function streamExec(
             ? `command timed out in the sandbox after ${execTimeoutSecs}s (pass the bash tool's timeoutMs for longer commands, max ${BASH_TIMEOUT_MAX_MS} ms); ` +
               "re-run as smaller/faster steps or background it with nohup"
             : "";
+          // The command as the Worker's own root (features/tracing.md item 22).
+          execRoot(attemptStartedAt, traceparent).end(exitCode === 0 ? "ok" : "error", {
+            exitCode: timedOut ? 124 : exitCode,
+            ...(timedOut ? { timedOut: true } : {}),
+          });
           finish({
             stdout: result.stdout ?? "",
             stderr: [result.stderr ?? "", note].filter(Boolean).join("\n"),
@@ -396,6 +418,10 @@ function streamExec(
           });
         })
         .catch((err: unknown) => {
+          // A command the sandbox never answered for: an infra failure, classified, no message.
+          const root = execRoot(attemptStartedAt, traceparent);
+          root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
+          root.end("error");
           const shape = thrownShape(err);
           // The text that leaves the Worker is never empty (item 3): a
           // message-less SDK error — the legacy-image 400 of #569 after the

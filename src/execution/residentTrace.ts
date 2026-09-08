@@ -73,7 +73,7 @@ export interface GraftInput {
   /** The span that made the call (`dispatch.workspace.attach`, `run.command`). */
   parent: Span;
   /** The graft prefix: the parent's own name, so the steps read `<parent>.<step>`. */
-  prefix: "dispatch.workspace.attach" | "run.command";
+  prefix: "dispatch.workspace.attach" | "run.command" | "resident";
   /** The bot's stamp for the request's start — the parent span's start. */
   baseAt: number;
   /** The bot's now: no grafted span ends after it. */
