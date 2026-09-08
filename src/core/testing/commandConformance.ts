@@ -6,6 +6,7 @@ import type { IngressTokenMap } from "../ingressTokens.js";
 import { POLICY, ruleTarget } from "../authz/policy.js";
 import { targetOfResource } from "../authz/resource.js";
 import type { Actor } from "../authz/types.js";
+import { dependsOn, type CapabilityKey } from "../capabilityGating.js";
 import { acceptsUndefined, resourceOf, type Caller, type CommandDef, type SurfaceName } from "../commandRegistry.js";
 import { camelToKebab, cliFlag, isBooleanSchema, jsonSchemaFor, namedToInput } from "../commandSurface.js";
 import { coreCommandGroups } from "../commands/all.js";
@@ -639,6 +640,8 @@ export interface MatrixRow {
 export interface MatrixCommand {
   id: string;
   describe: string;
+  /** The capability axes that hide this command when off (src/core/capabilityGating.ts `dependsOn`); empty = always on. */
+  needs: CapabilityKey[];
   rows: MatrixRow[];
 }
 
@@ -831,7 +834,7 @@ export function buildConformanceMatrix(catalogue: readonly CommandDef<unknown>[]
         ) as Record<SurfaceKey, MatrixCell>;
         return { variant: variant.name, input, ...(rejection === undefined ? {} : { rejection }), cells };
       });
-      return { id: cmd.id, describe: cmd.describe, rows };
+      return { id: cmd.id, describe: cmd.describe, needs: dependsOn(cmd), rows };
     });
   const variants = commands.reduce((n, c) => n + c.rows.length, 0);
   const cells = commands.reduce(
@@ -908,6 +911,11 @@ export const CROSS_CUTTING_ASSERTIONS: ReadonlyArray<{ name: string; assertion: 
     assertion:
       "Every executing dependency (resident admin, deterministic ops, deploy runner, env bootstrap, run-stream source) is a recording stub; `fetch` and `node:child_process` are disarmed for the whole suite.",
   },
+  {
+    name: "Capability axis",
+    assertion:
+      "With every capability on (the world of every other cell) the command is present on each exposed surface. With everything off, and with each axis its `enabledWhen` depends on flipped alone in either direction, it exists exactly where the predicate says: hidden is absent everywhere — `/api` 404, no MCP tool, CLI usage, not a chat command — and a direct `invoke` is `not_found`, never `unavailable`; present is an `ok` invoke. A command without `enabledWhen` is present with everything off.",
+  },
 ];
 
 const CELL_TEXT: Record<MatrixCell["kind"], string> = { ok: "✅", rejected: "⛔", "not-exposed": "—" };
@@ -930,6 +938,8 @@ export function renderConformanceMatrix(matrix: ConformanceMatrix): string {
       `### \`${cmd.id}\``,
       "",
       cmd.describe,
+      "",
+      `Depends on: ${cmd.needs.length === 0 ? "nothing — always on" : cmd.needs.map((k) => `\`${k}\``).join(", ")}`,
       "",
       `| Variant | Input (as the CLI spells it) | ${SURFACE_METAS.map((s) => s.column).join(" | ")} |`,
       `|---|---|${SURFACE_METAS.map(() => ":-:").join("|")}|`,
