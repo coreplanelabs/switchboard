@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.0.0](https://github.com/coreplanelabs/switchboard/compare/v0.11.0...v1.0.0) (2026-09-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **authz:** grants + restrict are the whole authorization config; the permissions and token-scopes translation retires ([#637](https://github.com/coreplanelabs/switchboard/issues/637))
+
+### Features
+
+* **authz:** grants + restrict are the whole authorization config; the permissions and token-scopes translation retires ([#637](https://github.com/coreplanelabs/switchboard/issues/637)) ([81f5007](https://github.com/coreplanelabs/switchboard/commit/81f5007f9f9e4f17d05fe1db9bf423a27ee4666c))
+* **deploy:** the gate goes — runs in flight no longer refuse a rollout or a restart, and the release job stops waiting and re-dispatching ([#640](https://github.com/coreplanelabs/switchboard/issues/640)) ([d4a7bc7](https://github.com/coreplanelabs/switchboard/commit/d4a7bc7ecf031d471d631b9ac201b8d3e3a7ba65))
+* **registry:** a run ends in two steps — finish (the agent stopped, a finished frame) and seal (the stream closed, the end frame); finish seals at once for now ([#635](https://github.com/coreplanelabs/switchboard/issues/635)) ([bf183c6](https://github.com/coreplanelabs/switchboard/commit/bf183c672215fab388bc73aa40f89dd769c0f5d7))
+* **run-ledger:** the durable inbox — a steered follow-up survives the bot's death, and a boot-gap follow-up is steered into the resumed run ([#634](https://github.com/coreplanelabs/switchboard/issues/634)) ([4d1d9da](https://github.com/coreplanelabs/switchboard/commit/4d1d9daf62ce84cb5b05c25e3f98c3790c2b6cb8))
+* **runs:** one registry on every read surface — /runs, the run page, friction and stop see the runs the ledger holds live under other generations ([#639](https://github.com/coreplanelabs/switchboard/issues/639)) ([36196d0](https://github.com/coreplanelabs/switchboard/commit/36196d06ff08f3bf89ae721cd7c5ffa4867ac5b4))
+* **runs:** the seal moves to after the reply — records are written after the seal, and every surface says when the reply landed ([#638](https://github.com/coreplanelabs/switchboard/issues/638)) ([8c3e39a](https://github.com/coreplanelabs/switchboard/commit/8c3e39a30ee5dbf3d65d158b48088bfc09d8954c))
+* **stream:** span records join the run stream — readers, the one Adapter, the display table, and a protected head so spans displace no content ([#641](https://github.com/coreplanelabs/switchboard/issues/641)) ([16d67b4](https://github.com/coreplanelabs/switchboard/commit/16d67b47cea39524b9f9e4c2efbd990d3a8eb7c5))
+* **tracing:** every call the bot makes to one of its own Workers is an http.client span carrying the trace context — and to no one else ([#648](https://github.com/coreplanelabs/switchboard/issues/648)) ([a6ca033](https://github.com/coreplanelabs/switchboard/commit/a6ca033cd0a9e4c5e2c3f9c7890a3ab9ad9c1707))
+* **tracing:** every GitHub call a tool makes is a github.rest span under the call, and a token mint a github.token_mint span — routes from a closed table, never the path ([#653](https://github.com/coreplanelabs/switchboard/issues/653)) ([ba81057](https://github.com/coreplanelabs/switchboard/commit/ba8105736a8c29a749269fbd9da88af10da1702d))
+* **tracing:** one request, one root — the adapters start it at receipt, every awaited step of the dispatcher is a span, the card ticks from receipt with the setup step and the shape ([#643](https://github.com/coreplanelabs/switchboard/issues/643)) ([c5237ae](https://github.com/coreplanelabs/switchboard/commit/c5237ae514e03fcacd9ae8cb7f1f94fc959932d5))
+* **tracing:** the bot's own work gets roots — the catch-up pass, the drain, every deploy step with its live gate as a child — and 39 direct clock reads go through the injected clock ([#646](https://github.com/coreplanelabs/switchboard/issues/646)) ([5902745](https://github.com/coreplanelabs/switchboard/commit/590274565fd5440e9512663fb3d8fba0674de5b0))
+* **tracing:** the clock ratchet reaches zero — every production read of the wall clock goes through the one clock, the allowlist is empty, and the lint exemption is gone ([#650](https://github.com/coreplanelabs/switchboard/issues/650)) ([9dc922d](https://github.com/coreplanelabs/switchboard/commit/9dc922dd13501f7a4a1a830c309aa3777e9e114d))
+* **tracing:** the friction analyzer reads one span set — durations from the normalized spans, the window as run time, the shape on a finished diagnosis ([#644](https://github.com/coreplanelabs/switchboard/issues/644)) ([8d89b72](https://github.com/coreplanelabs/switchboard/commit/8d89b72f8ed411bd9be9685f48f2772ffc198636))
+* **tracing:** the resident's clone, install and mutex wait land on the run as spans under the attach, and an op's steps under run.command ([#645](https://github.com/coreplanelabs/switchboard/issues/645)) ([06bf117](https://github.com/coreplanelabs/switchboard/commit/06bf117567caba4a6580b621658596bd4c8ce8e4))
+* **tracing:** the runner, the MCP bridge, the executor, the review settle and the ship pipeline emit spans, and the dispatcher roots every run ([#642](https://github.com/coreplanelabs/switchboard/issues/642)) ([85dbea1](https://github.com/coreplanelabs/switchboard/commit/85dbea1415840468cbfcfb8b686d053583dd6d22))
+* **tracing:** the Workers join the bot's trace — the shim strips and mints, the state, resident and sandbox Workers root each authenticated request under the bot's trace id, and a fired schedule carries its own ([#649](https://github.com/coreplanelabs/switchboard/issues/649)) ([1887052](https://github.com/coreplanelabs/switchboard/commit/1887052ab772e7b4a4f4e4613f3ed86b4e54da07))
+* **web:** the run page gets a timeline — the run's shape from its spans and stamps, live and on a record, closing to the header's total ([#647](https://github.com/coreplanelabs/switchboard/issues/647)) ([b58a88c](https://github.com/coreplanelabs/switchboard/commit/b58a88ccffb2a167d4ad8f329ea2c204305267a6))
+
+
+### Documentation
+
+* **plans:** the run-tracing plan record is implemented — PRs 0–10 merged 2026-09-08 ([#651](https://github.com/coreplanelabs/switchboard/issues/651)) ([c6c59da](https://github.com/coreplanelabs/switchboard/commit/c6c59da085aac2da95b5fb3db06d1edbd050a311))
+* the milestone-1 comparison spec retires and the self-improvement tour joins the explanation tree ([#652](https://github.com/coreplanelabs/switchboard/issues/652)) ([7b81e49](https://github.com/coreplanelabs/switchboard/commit/7b81e49108ee42c985d87068856f6bba29572899))
+
 ## [0.11.0](https://github.com/coreplanelabs/switchboard/compare/v0.10.0...v0.11.0) (2026-09-08)
 
 
