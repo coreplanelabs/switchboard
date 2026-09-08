@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   isContainerStarting,
   isFleetBusyError,
+  legacyContainerError,
   thrownShape,
+  thrownText,
   FLEET_BUSY_BACKOFF_MS,
   FLEET_BUSY_REASON,
   FLEET_BUSY_WAIT_MAX_MS,
@@ -131,5 +133,78 @@ describe("isContainerStarting", () => {
     expect(isContainerStarting({ message: "Container is starting. Please retry in a moment" })).toBe(true);
     expect(isContainerStarting(new Error("Container is starting the wrong way"))).toBe(false);
     expect(isContainerStarting(new Error("no Container instance available"))).toBe(false);
+  });
+});
+
+// Feature: features/execution.md items 3 and 6 — a failure text is never
+// empty. 2026-09-07 (#569): during the 0.4.0 Worker+image rollout a new
+// thread's Durable Object was placed on a container still running the 0.3.7
+// image; the 0.12.9 client turned its `{error}` 400 body into a `SandboxError`
+// whose message was `""`, the Worker's `shape.message ?? String(err)` kept the
+// empty string, and seven commands rendered as silent `exit 127`s.
+describe("thrownText", () => {
+  it("returns the SDK's message verbatim (trimmed) when it has one", () => {
+    expect(thrownText({ name: "SandboxError", message: "Session 'x' not found" })).toBe("Session 'x' not found");
+    expect(thrownText({ message: "  fetch failed \n" })).toBe("fetch failed");
+  });
+
+  it("a message-less error names the error name and code and says a rollout may be in progress", () => {
+    const text = thrownText({ name: "SandboxError", code: "INTERNAL_ERROR", message: "" });
+    expect(text).toBe(
+      "sandbox exec failed with no message from the SDK (SandboxError, code INTERNAL_ERROR); the container may still be running a previous image while a Worker/image rollout is in progress — retry in a minute",
+    );
+    // the incident's exact shape: name, no code, empty message
+    expect(thrownText({ name: "SandboxError", code: undefined, message: "" })).toContain("(SandboxError);");
+  });
+
+  it("a whitespace-only message counts as empty", () => {
+    expect(thrownText({ name: "Error", message: "  \n\t" })).toMatch(
+      /^sandbox exec failed with no message from the SDK \(Error\)/,
+    );
+  });
+
+  it("no name at all still yields a non-empty text that says so", () => {
+    const text = thrownText({});
+    expect(text.length).toBeGreaterThan(0);
+    expect(text).toContain("(no error name)");
+    expect(thrownText({ message: undefined })).toContain("(no error name)");
+  });
+});
+
+// Feature: features/execution.md items 6 and 9 — the legacy-container shape a
+// 0.12.x client produces against a 0.3.x server: `SandboxError` (the base
+// class, not a typed subclass), an empty message, no code. Matched INSIDE the
+// Durable Object, where the prototype and the `code` getter are intact, so
+// `instanceof Error` plus the name is the whole test.
+describe("legacyContainerError", () => {
+  // Mirrors 0.12.9's `SandboxError`: `message` comes from the body's
+  // `message` (absent → ""), `code` from the body's `code`, and the raw body
+  // is kept as `errorResponse`.
+  const sandboxError = (body: Record<string, unknown>) => {
+    const err = new Error(typeof body.message === "string" ? body.message : "");
+    err.name = "SandboxError";
+    if (body.code !== undefined) Object.assign(err, { code: body.code });
+    Object.assign(err, { errorResponse: body });
+    return err;
+  };
+  const LEGACY_BODY = { error: "Session ID and command are required" };
+
+  it("matches a SandboxError built from a 0.3.7 {error} body — empty message, no code, the old server's text in errorResponse.error", () => {
+    expect(legacyContainerError(sandboxError(LEGACY_BODY))).toBe(true);
+    expect(legacyContainerError(sandboxError({ error: "Session 'x' not found" }))).toBe(true);
+  });
+
+  it("is NOT a SandboxError with a message or a code (every 0.12.x body has both), one whose body has no error text, a plain Error, or a non-Error", () => {
+    expect(legacyContainerError(sandboxError({ error: "x", message: "Session 'x' not found" }))).toBe(false);
+    expect(legacyContainerError(sandboxError({ error: "x", code: "INTERNAL_ERROR" }))).toBe(false);
+    expect(legacyContainerError(sandboxError({}))).toBe(false);
+    expect(legacyContainerError(sandboxError({ error: "" }))).toBe(false);
+    const noBody = new Error("");
+    noBody.name = "SandboxError";
+    expect(legacyContainerError(noBody)).toBe(false);
+    expect(legacyContainerError(new Error(""))).toBe(false);
+    expect(legacyContainerError({ name: "SandboxError", message: "" })).toBe(false);
+    expect(legacyContainerError(undefined)).toBe(false);
+    expect(legacyContainerError("")).toBe(false);
   });
 });
