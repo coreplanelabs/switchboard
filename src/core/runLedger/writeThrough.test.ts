@@ -245,6 +245,61 @@ describe("open — claim and seed", () => {
   });
 });
 
+describe("adopt — a reclaimed run continues under this generation (item 37)", () => {
+  it("no claim, no seed: the heartbeat starts at once, steps number on from the last record, events continue past the last seq, state merges into the row's", async () => {
+    const { ledger, wt, t, warnings } = harness();
+    // The previous generation's row, reclaimed by ours ("gen-A") at boot.
+    await ledger.claim({ ...openReq(), gen: "gen-OLD", leaseMs: 30_000 });
+    await ledger.setState("r1", "gen-OLD", { checklist: "○ a" });
+    await ledger.step(
+      "r1",
+      "gen-OLD",
+      {
+        step: 3,
+        seq: 12,
+        turnIndex: 3,
+        inFlight: [{ callId: "c9", tool: "bash" }],
+        inboxConsumedSeq: 0,
+        remainingMs: 1,
+        turn: 1,
+        iteration: 0,
+      },
+      [],
+    );
+    ledger.live.get("r1")!.leaseUntil = 0;
+    await ledger.reclaim("gen-A", 10_000, 30_000);
+    const run = wt.adopt({
+      runId: "r1",
+      threadKey: "slack:C1:1.0",
+      state: { checklist: "○ a" },
+      lastStep: 3,
+      lastSeq: 12,
+    });
+    expect(run.tracked()).toBe(true);
+    expect(t.heartbeats()).toBe(1);
+    expect((await ledger.readTranscript("r1")).turns).toBe(0); // nothing seeded
+    run.event({ type: "tool_result", tool: "bash", ok: false, summary: "restarted", at: 1, seq: 13 }, 13);
+    await t.flushTimers();
+    expect(ledger.events.get("r1")!.map((e) => e.seq)).toEqual([13]);
+    await run.step(
+      step({
+        turns: [{ role: "user", content: [{ type: "tool_result", toolUseId: "c9", content: "x" }] }, assistant("next")],
+        firstIdx: 3,
+        turn: 2,
+        iteration: 1,
+      }),
+    );
+    expect(ledger.steps.get("r1")!.map((s) => [s.step, s.seq])).toEqual([
+      [3, 12],
+      [4, 13],
+    ]);
+    run.setState({ verdict: "approve" });
+    await run.close();
+    expect(ledger.live.get("r1")!.state).toEqual({ checklist: "○ a", verdict: "approve" });
+    expect(warnings).toEqual([]);
+  });
+});
+
 describe("step — turns first, then the record", () => {
   it("writes the step's turns after the seed and a record numbered from 1 carrying the registry seq, the turn index after the write and the calls in flight", async () => {
     const { ledger, wt } = harness();

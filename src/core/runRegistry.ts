@@ -68,6 +68,15 @@ export class RunControl {
 }
 
 /** The identifiers a freshly created run is addressed by, plus its control. */
+/** `create()` for a run that already has an identity and a past (a resume,
+ *  features/run-history.md item 37): the ledger's run id, so the page URL and
+ *  the ledger row are the same run, and the events published before the
+ *  restart under their original seqs. */
+export interface CreateOptions {
+  id?: string;
+  replay?: RunEvent[];
+}
+
 export interface RunHandle {
   /** Random, unguessable run id — the `:id` in `/runs/:id`. */
   id: string;
@@ -335,9 +344,9 @@ export class RunRegistry {
    *  a `RunSummary`, the index, or the run record; the handle carries the
    *  redacted label so callers persist that one. `meta` (identity fields) is
    *  stored as given and projected onto every summary. */
-  create(label?: string, meta?: RunMeta): RunHandle {
+  create(label?: string, meta?: RunMeta, opts: CreateOptions = {}): RunHandle {
     this.sweep();
-    const id = this.genId();
+    const id = opts.id ?? this.genId();
     const token = this.genToken();
     const stored = label === undefined ? undefined : redactAndCap(label, RUN_LABEL_MAX);
     const run: RunState = {
@@ -357,8 +366,34 @@ export class RunRegistry {
       persisted: false,
     };
     this.runs.set(id, run);
+    // A resumed run (features/run-history.md item 37) brings the events it
+    // published before the restart, under their original `seq`: they are
+    // appended as if published (bounded like any backlog, no subscribers yet)
+    // and the counter continues past the highest, so the record assembled at
+    // finish and the seqs appended to the ledger stay one contiguous stream.
+    for (const event of [...(opts.replay ?? [])].sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0))) {
+      const seq = event.seq ?? run.eventCount + 1;
+      run.eventCount = Math.max(run.eventCount, seq);
+      this.appendToBacklog(run, { ...event, seq });
+    }
     this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
+  }
+
+  /** Append one stamped event to the run's bounded backlog and refresh its activity line. */
+  private appendToBacklog(run: RunState, stamped: RunEvent): void {
+    const bytes = utf8ByteLength(serializedOnce(stamped)); // memoized: the SSE frame reuses this string
+    run.backlog.push(stamped);
+    run.backlogSizes.push(bytes);
+    run.backlogBytes += bytes;
+    // The one-line "what is it doing" the index shows (item 20). Narration wins
+    // over the tool call it explains only until the next call arrives.
+    const activity = activityOf(stamped);
+    if (activity !== undefined) run.activity = activity;
+    while (run.backlog.length > 1 && (run.backlog.length > this.backlogLimit || run.backlogBytes > this.backlogBytes)) {
+      run.backlog.shift();
+      run.backlogBytes -= run.backlogSizes.shift() ?? 0;
+    }
   }
 
   /**
@@ -417,18 +452,7 @@ export class RunRegistry {
     // stamped on the event — the SSE `id:` a client resumes from.
     const seq = ++run.eventCount;
     const stamped: RunEvent = { ...event, seq };
-    const bytes = utf8ByteLength(serializedOnce(stamped)); // memoized: the SSE frame reuses this string
-    run.backlog.push(stamped);
-    run.backlogSizes.push(bytes);
-    run.backlogBytes += bytes;
-    // The one-line "what is it doing" the index shows (item 20). Narration wins
-    // over the tool call it explains only until the next call arrives.
-    const activity = activityOf(event);
-    if (activity !== undefined) run.activity = activity;
-    while (run.backlog.length > 1 && (run.backlog.length > this.backlogLimit || run.backlogBytes > this.backlogBytes)) {
-      run.backlog.shift();
-      run.backlogBytes -= run.backlogSizes.shift() ?? 0;
-    }
+    this.appendToBacklog(run, stamped);
     for (const sub of run.subscribers) {
       try {
         sub.onEvent(stamped, seq);

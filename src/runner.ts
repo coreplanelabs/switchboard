@@ -19,6 +19,7 @@ import {
 } from "./core/runEvents.js";
 import type { RunControl } from "./core/runRegistry.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
+import type { Settlement } from "./core/runLedger/resume.js";
 import { ExecCapacityError, ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
 
@@ -86,6 +87,20 @@ export interface RunOptions {
    *  fails the step before any tool runs: the hook decides whether a refused
    *  write may proceed, the runner never swallows it. Absent → no report. */
   onStep?: (step: StepReport) => Promise<void>;
+  /** Re-enter the loop from a reclaimed run (features/run-history.md item 37):
+   *  `messages` is then the transcript the ledger held, and this carries the
+   *  last step record's counters and budget plus how each call in flight at the
+   *  kill is settled (`planResume`). Absent → a fresh run. */
+  resume?: ResumeEntry;
+}
+
+/** What `planResume` decided, as the runner takes it. */
+export interface ResumeEntry {
+  settlements: Settlement[];
+  stepRecorded: boolean;
+  turn: number;
+  iteration: number;
+  remainingMs: number;
 }
 
 /** One step of the loop as reported to `onStep`, before its tools run. */
@@ -241,7 +256,7 @@ async function runLoop(
   // the loop ends and the agent is forced to write up findings so far. Tools
   // get the deadline too, so the bash tool can clip a command that would
   // otherwise outlive the run (features/execution.md item 12).
-  const deadline = now() + opts.agent.maxMinutes * 60_000;
+  const deadline = now() + (opts.resume ? opts.resume.remainingMs : opts.agent.maxMinutes * 60_000);
   const warnAt = deadline - Math.min(3 * 60_000, opts.agent.maxMinutes * 15_000);
   toolContext.remainingMs = () => deadline - now();
   let warned = false;
@@ -285,13 +300,194 @@ async function runLoop(
     }
     return parts;
   };
+  // One tool_use → its tool_result part (and the events it produces). Only a
+  // hard stop escapes as a rejection; every tool failure is a result.
+  const runOne = async (tu: ToolUsePart): Promise<ContentPart> => {
+    const tool = toolsByName.get(tu.name);
+    if (!tool) {
+      emit({
+        type: "tool_result",
+        tool: tu.name,
+        ok: false,
+        summary: redactAndCap(`Unknown tool: ${tu.name}`),
+        callId: tu.id,
+      });
+      return { type: "tool_result", toolUseId: tu.id, content: `Unknown tool: ${tu.name}`, isError: true };
+    }
+    try {
+      const output = await untilHardStop(tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext));
+      const text = toolResultText(output);
+      // A bash command that exited nonzero did not succeed, whatever the tool
+      // returned — the executors say so with an `exit N:` prefix (runEvents).
+      const exit = tu.name === "bash" ? parseExitPrefix(text) : undefined;
+      emit({
+        type: "tool_result",
+        tool: tu.name,
+        ok: !exit?.failed,
+        callId: tu.id,
+        ...(exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
+        ...prepareToolResult(text),
+      });
+      // The model never receives more than MAX_TOOL_RESULT_CHARS of text from
+      // one tool, whatever the tool returned (providers/types.ts, #615).
+      return { type: "tool_result", toolUseId: tu.id, content: capToolResultContent(output) };
+    } catch (err) {
+      // A hard stop is not a tool error to feed back to the model — unwind.
+      // A genuine tool error that merely coincides with the hard request is
+      // unwound too (the outcome is the abort either way), but logged first
+      // so it is not silently swallowed behind the abort message.
+      if (err instanceof HardStopError) throw err;
+      if (control?.requested === "hard") {
+        console.warn(
+          `[runner] tool ${tu.name} failed while hard-stopping: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        throw err;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      // A full sandbox fleet (features/execution.md item 14) is capacity, not
+      // a dead sandbox: the executor already waited its bounded time, nothing
+      // ran, and the tracker did not count it — so the run goes on. The model
+      // is told plainly what happened and its two ways forward; the stream
+      // carries a typed note so the friction analyzer sees the minutes lost.
+      if (err instanceof ExecCapacityError) {
+        const text = `⏳ Sandbox fleet busy — ${message}. Retry the command in a minute or finish with what you have.`;
+        emit({ type: "tool_result", tool: tu.name, ok: false, callId: tu.id, ...prepareToolResult(text) });
+        note("fleet_busy", text);
+        return { type: "tool_result", toolUseId: tu.id, content: text, isError: true };
+      }
+      // `infra` marks a sandbox/transport failure (not the command's own error)
+      // so downstream analysis never mistakes a dead sandbox for a failing command.
+      emit({
+        type: "tool_result",
+        tool: tu.name,
+        ok: false,
+        callId: tu.id,
+        ...prepareToolResult(message),
+        ...(err instanceof ExecInfraError ? { infra: true as const } : {}),
+      });
+      // The same ceiling on the error path: a tool that throws with a huge
+      // message (an executor echoing its output into the error) is still a
+      // tool result the model reads.
+      return {
+        type: "tool_result",
+        toolUseId: tu.id,
+        content: capToolResultContent(`Error: ${message}`),
+        isError: true,
+      };
+    }
+  };
+  // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
+  // token below its detector's length floor and leak a raw fragment.
+  // A bash call also carries its full command (redacted, capped far above the
+  // summary) so the pushed-branch tracker can see a `git push` that a chained
+  // command pushed past the 200-char summary (runEvents `tool_call.command`).
+  const announce = (tu: ToolUsePart) => {
+    const input = tu.input as Record<string, unknown> | undefined;
+    const command =
+      tu.name === "bash" && typeof input?.command === "string"
+        ? { command: redactAndCap(input.command, COMMAND_CAP) }
+        : {};
+    emit({
+      type: "tool_call",
+      tool: tu.name,
+      summary: redactAndCap(describeToolCall(tu)),
+      callId: tu.id,
+      ...command,
+    });
+  };
+  // Execution order: a mutating tool runs alone, in the model's order; a run
+  // of consecutive side-effect-free tools (several read_file/web_fetch in one
+  // turn — each a round trip to the resident or the web) runs concurrently.
+  // Results are appended in the model's order regardless of completion order,
+  // so `messages` is byte-identical to the serial loop. `allSettled` so a hard
+  // stop that rejects several in-flight tools rejects ONCE, never unhandled.
+  /** Run one assistant turn's tool calls in the model's order — a run of
+   *  consecutive side-effect-free calls concurrently, everything else alone —
+   *  and return their results in that order. Shared by the loop and the resume
+   *  settlement (item 37). */
+  const dispatchToolUses = async (
+    toolUses: ToolUsePart[],
+    opts: { announce?: boolean } = {},
+  ): Promise<ContentPart[]> => {
+    // A settlement re-run (item 37) has its `tool_call` on the stream already,
+    // replayed from the ledger under its original seq; announcing again would
+    // put two calls with one callId on the record.
+    const announceCall = opts.announce === false ? () => {} : announce;
+    const results: ContentPart[] = [];
+    const runBatch = async (batch: ToolUsePart[]) => {
+      batch.forEach(announceCall);
+      const settled = await Promise.allSettled(batch.map(runOne));
+      for (const s of settled) if (s.status === "rejected") throw s.reason;
+      for (const s of settled) if (s.status === "fulfilled") results.push(s.value);
+    };
+    let batch: ToolUsePart[] = [];
+    for (const tu of toolUses) {
+      if (toolsByName.get(tu.name)?.sideEffectFree) {
+        batch.push(tu);
+        continue;
+      }
+      if (batch.length > 0) await runBatch(batch);
+      batch = [];
+      announceCall(tu);
+      results.push(await runOne(tu));
+    }
+    if (batch.length > 0) await runBatch(batch);
+    return results;
+  };
   // How much of `messages` the last step report covered: the seed to begin with.
   let reportedUpTo = messages.length;
+  // Resume (features/run-history.md item 37): re-enter from a reclaimed run's
+  // transcript. The counters and the wall-clock budget come from its last step
+  // record; the calls that were in flight at the kill are settled by the plan
+  // (re-run, or answered with a synthetic result) and their results appended
+  // as the user turn the next model call needs. A step whose record never
+  // landed (`stepRecorded: false`) is reported first, with no new turns — its
+  // turns are already on the ledger.
+  const resume = opts.resume;
+  let iteration0 = 0;
+  if (resume) {
+    turn = resume.turn;
+    const rerun = resume.settlements.filter((x) => x.action === "rerun").length;
+    note(
+      "resumed",
+      `resumed after a restart: ${resume.settlements.length} call(s) were in flight — ${rerun} re-run, ${resume.settlements.length - rerun} answered with a restart note; ${Math.round(resume.remainingMs / 60_000)} min of budget left`,
+    );
+    iteration0 = resume.iteration;
+    if (resume.settlements.length > 0) {
+      if (!resume.stepRecorded && opts.onStep) {
+        await opts.onStep({
+          turns: [],
+          firstIdx: messages.length,
+          inFlight: resume.settlements.map((x) => ({ callId: x.toolUse.id, tool: x.toolUse.name })),
+          turn,
+          iteration: resume.iteration,
+          remainingMs: deadline - now(),
+        });
+      }
+      const settled: ContentPart[] = [];
+      for (const x of resume.settlements) {
+        if (x.action === "rerun") {
+          settled.push(...(await dispatchToolUses([x.toolUse], { announce: false })));
+        } else {
+          emit({
+            type: "tool_result",
+            tool: x.toolUse.name,
+            ok: false,
+            callId: x.toolUse.id,
+            summary: redactAndCap(x.text),
+          });
+          settled.push({ type: "tool_result", toolUseId: x.toolUse.id, content: x.text, isError: true });
+        }
+      }
+      messages.push({ role: "user", content: settled });
+      iteration0 = resume.iteration + 1;
+    }
+  }
   // A requested stop (soft or hard) ends the loop before the NEXT step — the
   // step already in flight completes (soft) or is abandoned (hard, via the race
   // above). Checked as a loop condition so a stop can never start a new step.
   for (
-    let iteration = 0;
+    let iteration = iteration0;
     turn < opts.agent.maxTurns && iteration < opts.agent.maxTurns * 2 && now() < deadline && !control?.requested;
     iteration++
   ) {
@@ -361,126 +557,7 @@ async function runLoop(
       });
       reportedUpTo = messages.length;
     }
-    // One tool_use → its tool_result part (and the events it produces). Only a
-    // hard stop escapes as a rejection; every tool failure is a result.
-    const runOne = async (tu: ToolUsePart): Promise<ContentPart> => {
-      const tool = toolsByName.get(tu.name);
-      if (!tool) {
-        emit({
-          type: "tool_result",
-          tool: tu.name,
-          ok: false,
-          summary: redactAndCap(`Unknown tool: ${tu.name}`),
-          callId: tu.id,
-        });
-        return { type: "tool_result", toolUseId: tu.id, content: `Unknown tool: ${tu.name}`, isError: true };
-      }
-      try {
-        const output = await untilHardStop(tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext));
-        const text = toolResultText(output);
-        // A bash command that exited nonzero did not succeed, whatever the tool
-        // returned — the executors say so with an `exit N:` prefix (runEvents).
-        const exit = tu.name === "bash" ? parseExitPrefix(text) : undefined;
-        emit({
-          type: "tool_result",
-          tool: tu.name,
-          ok: !exit?.failed,
-          callId: tu.id,
-          ...(exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
-          ...prepareToolResult(text),
-        });
-        // The model never receives more than MAX_TOOL_RESULT_CHARS of text from
-        // one tool, whatever the tool returned (providers/types.ts, #615).
-        return { type: "tool_result", toolUseId: tu.id, content: capToolResultContent(output) };
-      } catch (err) {
-        // A hard stop is not a tool error to feed back to the model — unwind.
-        // A genuine tool error that merely coincides with the hard request is
-        // unwound too (the outcome is the abort either way), but logged first
-        // so it is not silently swallowed behind the abort message.
-        if (err instanceof HardStopError) throw err;
-        if (control?.requested === "hard") {
-          console.warn(
-            `[runner] tool ${tu.name} failed while hard-stopping: ${err instanceof Error ? err.message : String(err)}`,
-          );
-          throw err;
-        }
-        const message = err instanceof Error ? err.message : String(err);
-        // A full sandbox fleet (features/execution.md item 14) is capacity, not
-        // a dead sandbox: the executor already waited its bounded time, nothing
-        // ran, and the tracker did not count it — so the run goes on. The model
-        // is told plainly what happened and its two ways forward; the stream
-        // carries a typed note so the friction analyzer sees the minutes lost.
-        if (err instanceof ExecCapacityError) {
-          const text = `⏳ Sandbox fleet busy — ${message}. Retry the command in a minute or finish with what you have.`;
-          emit({ type: "tool_result", tool: tu.name, ok: false, callId: tu.id, ...prepareToolResult(text) });
-          note("fleet_busy", text);
-          return { type: "tool_result", toolUseId: tu.id, content: text, isError: true };
-        }
-        // `infra` marks a sandbox/transport failure (not the command's own error)
-        // so downstream analysis never mistakes a dead sandbox for a failing command.
-        emit({
-          type: "tool_result",
-          tool: tu.name,
-          ok: false,
-          callId: tu.id,
-          ...prepareToolResult(message),
-          ...(err instanceof ExecInfraError ? { infra: true as const } : {}),
-        });
-        // The same ceiling on the error path: a tool that throws with a huge
-        // message (an executor echoing its output into the error) is still a
-        // tool result the model reads.
-        return {
-          type: "tool_result",
-          toolUseId: tu.id,
-          content: capToolResultContent(`Error: ${message}`),
-          isError: true,
-        };
-      }
-    };
-    // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
-    // token below its detector's length floor and leak a raw fragment.
-    // A bash call also carries its full command (redacted, capped far above the
-    // summary) so the pushed-branch tracker can see a `git push` that a chained
-    // command pushed past the 200-char summary (runEvents `tool_call.command`).
-    const announce = (tu: ToolUsePart) => {
-      const input = tu.input as Record<string, unknown> | undefined;
-      const command =
-        tu.name === "bash" && typeof input?.command === "string"
-          ? { command: redactAndCap(input.command, COMMAND_CAP) }
-          : {};
-      emit({
-        type: "tool_call",
-        tool: tu.name,
-        summary: redactAndCap(describeToolCall(tu)),
-        callId: tu.id,
-        ...command,
-      });
-    };
-    // Execution order: a mutating tool runs alone, in the model's order; a run
-    // of consecutive side-effect-free tools (several read_file/web_fetch in one
-    // turn — each a round trip to the resident or the web) runs concurrently.
-    // Results are appended in the model's order regardless of completion order,
-    // so `messages` is byte-identical to the serial loop. `allSettled` so a hard
-    // stop that rejects several in-flight tools rejects ONCE, never unhandled.
-    const results: ContentPart[] = [];
-    const runBatch = async (batch: ToolUsePart[]) => {
-      batch.forEach(announce);
-      const settled = await Promise.allSettled(batch.map(runOne));
-      for (const s of settled) if (s.status === "rejected") throw s.reason;
-      for (const s of settled) if (s.status === "fulfilled") results.push(s.value);
-    };
-    let batch: ToolUsePart[] = [];
-    for (const tu of toolUses) {
-      if (toolsByName.get(tu.name)?.sideEffectFree) {
-        batch.push(tu);
-        continue;
-      }
-      if (batch.length > 0) await runBatch(batch);
-      batch = [];
-      announce(tu);
-      results.push(await runOne(tu));
-    }
-    if (batch.length > 0) await runBatch(batch);
+    const results = await dispatchToolUses(toolUses);
     // One-time wrap-up warning as time runs low, attached to the tool results.
     if (!warned && now() >= warnAt) {
       warned = true;
