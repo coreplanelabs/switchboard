@@ -321,7 +321,7 @@ export function bindBotConfig(
 }
 
 /**
- * What the CLI's catalogue hides (features/command-registry.md item 27),
+ * What the CLI's catalogue hides (features/command-registry.md item 28),
  * resolved ONCE at startup from the config FILE — a synchronous read, so `help`
  * and the catalogue never wait on the state Worker (#409). A config that is not
  * a readable file — a `state://` location, a missing or unparsable file — is

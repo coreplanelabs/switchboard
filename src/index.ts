@@ -470,7 +470,11 @@ async function main() {
         active: () => devBypassActive,
         isLoopback: (req) => isLoopbackAddress(req.socket?.remoteAddress) && isLocalhostBase(publicBaseUrl),
       },
-      scheduled: { schedules: SCHEDULES, store: scheduleStore },
+      // The panel's own off-state wording (live-view item 14: "firing history
+      // unavailable", never "never fired") stands until the dashboard paints the
+      // off-state from the seed's capabilities; so the panel gets no store when
+      // schedules are off, not the null one.
+      scheduled: { schedules: SCHEDULES, store: capabilities.schedules ? scheduleStore : undefined },
     });
     // ── end U8 ───────────────────────────────────────────────────────────────
     const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => systemClock(), cache: new JwksCache() };
