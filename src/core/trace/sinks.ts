@@ -52,7 +52,11 @@ export function createLogSink(opts: LogSinkOptions): SpanSink {
   const slowMs = opts.slowMs ?? SLOW_SPAN_MS;
   return {
     onEnd(rec) {
-      const isRoot = rec.parentSpanId === undefined;
+      // A root is this process's own: one with no parent, or one that adopted a
+      // remote parent (a Worker continuing the bot's trace). Without the second
+      // clause every sub-second adopted request stayed unlogged at `slow` while
+      // the same request without context printed — the opposite of useful.
+      const isRoot = rec.parentSpanId === undefined || rec.adopted === true;
       if (!isRoot && (opts.level === "roots" || (rec.durationMs ?? 0) < slowMs)) return;
       opts.write(JSON.stringify(logLineOf(rec)));
     },

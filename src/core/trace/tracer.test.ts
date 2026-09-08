@@ -25,9 +25,11 @@ describe("createTracer", () => {
     });
     expect(adopted.traceId).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
     expect(adopted.record().parentSpanId).toBe("00f067aa0ba902b7");
+    expect(adopted.record().adopted).toBe(true);
     const child = adopted.start("state.put");
     expect(child.traceId).toBe("4bf92f3577b34da6a3ce929d0e0e4736");
     expect(child.record().parentSpanId).toBe(adopted.id);
+    expect(child.record().adopted).toBeUndefined();
     adopted.end("ok");
     expect(log.ends.at(-1)).toMatchObject({
       traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
@@ -36,6 +38,7 @@ describe("createTracer", () => {
     const own = tracer.start("request", { sinks: [log] });
     expect(own.traceId).not.toBe("4bf92f3577b34da6a3ce929d0e0e4736");
     expect(own.record().parentSpanId).toBeUndefined();
+    expect(own.record().adopted).toBeUndefined();
   });
 
   it("span(fn) invokes fn synchronously, ends ok on return with the measured duration, and nests under its parent", async () => {
