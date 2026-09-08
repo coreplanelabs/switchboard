@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.4.0](https://github.com/coreplanelabs/switchboard/compare/v1.3.0...v1.4.0) (2026-09-08)
+
+
+### Features
+
+* **tracing:** a model turn carries its thinking and writing time — block boundaries from the provider, summed by the runner, printed on the turn row ([#685](https://github.com/coreplanelabs/switchboard/issues/685)) ([838dac2](https://github.com/coreplanelabs/switchboard/commit/838dac2deddfa56d663e4fcf27c6441c5f15cb8c))
+* **web:** the run page's tail names the open span, and the setup spans fold under one Setup head ([#680](https://github.com/coreplanelabs/switchboard/issues/680)) ([928902f](https://github.com/coreplanelabs/switchboard/commit/928902f02373fa286623cadcfc8649a6c6c514fb))
+
+
+### Bug fixes
+
+* **resident:** a restore unmounts its squashfuse lower by backup id — fuse-overlayfs exposes no lowerdir=, so the lowers leaked ([#682](https://github.com/coreplanelabs/switchboard/issues/682)) ([28a03e6](https://github.com/coreplanelabs/switchboard/commit/28a03e6bf784c45075b588bc6dce6cba64192052))
+
+
+### Documentation
+
+* **decisions:** twenty-one architecture decision records, a records gate, and a generated index ([#679](https://github.com/coreplanelabs/switchboard/issues/679)) ([a25526b](https://github.com/coreplanelabs/switchboard/commit/a25526bf28c329f4e290db5e5f6828d791c339eb))
+* **specs:** features/capabilities.md names its receipts issue like every other spec ([#683](https://github.com/coreplanelabs/switchboard/issues/683)) ([8263bf5](https://github.com/coreplanelabs/switchboard/commit/8263bf5a48d333e583f2d3b4cb80649561627239))
+
 ## [1.3.0](https://github.com/coreplanelabs/switchboard/compare/v1.2.0...v1.3.0) (2026-09-08)
 
 
