@@ -277,8 +277,75 @@ export interface PullRequestFacts {
   htmlUrl?: string;
 }
 
+/**
+ * The tip of `refs/heads/<branch>` on `repo` — `GET /repos/{repo}/git/ref/heads/{branch}`
+ * — or undefined when the ref cannot be read (no such branch, a non-2xx, a
+ * network failure, a malformed sha) or does not point at a commit object.
+ * Never throws.
+ *
+ * Why the PR's head is read from the REF and not only from the PR object:
+ * after a force-push GitHub's pull-request object (`head.sha`, `commits`) can
+ * lag the branch ref by minutes (observed live: four minutes, while the new
+ * commit object was already fetchable by sha). The ref IS the PR's head by
+ * definition; the PR object follows it. A review attached at the lagging
+ * `head.sha` reviews a head nobody asked about and refuses with a mismatch —
+ * so every PR-head reader here prefers the ref's tip when the two disagree
+ * (`preferRefTip`), and says so in the log. Cross-fork heads have no ref on the
+ * base repo; those keep the PR object's sha.
+ */
+export async function headRefTipSha(
+  repo: string,
+  branch: string,
+  headers: Record<string, string>,
+): Promise<string | undefined> {
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${encodeGithubRef(branch)}`, {
+      headers,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as { object?: { sha?: unknown; type?: unknown } } | null;
+  // A branch ref points at a commit; anything else (an annotated tag object,
+  // a malformed answer) is not a head to pin a review to.
+  if (data?.object?.type !== "commit") return undefined;
+  const sha = data.object.sha;
+  return typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+}
+
+/** The head sha a PR-head reader should report: the ref's tip when it is known
+ *  and differs from what the PR object says (GitHub's PR object lags the ref
+ *  after a force-push — see `headRefTipSha`), else the PR object's own. The
+ *  disagreement is logged once per read with both shas, so a run's log says
+ *  which head it took and why. */
+export function preferRefTip(
+  where: string,
+  prSha: string | undefined,
+  refTip: string | undefined,
+  branch: string,
+): string | undefined {
+  if (refTip === undefined) return prSha;
+  if (prSha !== undefined && refTip !== prSha) {
+    console.log(
+      `[pr-head] ${where}: GitHub's PR object reports head ${prSha.slice(0, 7)} while refs/heads/${branch} is at ${refTip.slice(0, 7)} — using the ref (the PR object lags the ref after a force-push)`,
+    );
+  }
+  return refTip;
+}
+
+/** A branch name as a URL path for `/git/ref/heads/…`: each `/`-separated
+ *  segment percent-encoded, the slashes kept (GitHub matches the ref path). */
+function encodeGithubRef(branch: string): string {
+  return branch.split("/").map(encodeURIComponent).join("/");
+}
+
 /** GET /repos/{repo}/pulls/{n} → the entry-check facts, or undefined when the
- *  fetch fails or the state is unrecognizable. Never throws. */
+ *  fetch fails or the state is unrecognizable. The head sha is the head REF's
+ *  tip when that can be read and the head lives on the base repo (see
+ *  `headRefTipSha`), else the PR object's. Never throws. */
 export async function fetchPullRequestFacts(pr: {
   repo: string;
   number: number;
@@ -304,7 +371,16 @@ export async function fetchPullRequestFacts(pr: {
   } | null;
   if (!data || (data.state !== "open" && data.state !== "closed")) return undefined;
   const headRepo = typeof data.head?.repo?.full_name === "string" ? data.head.repo.full_name.toLowerCase() : undefined;
-  const sha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
+  const prSha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
+  const sameRepoHead = headRepo === pr.repo.toLowerCase();
+  const headRef = typeof data.head?.ref === "string" && data.head.ref ? data.head.ref : undefined;
+  // The ref's tip is the PR's head by definition; the PR object lags it after
+  // a force-push (`headRefTipSha`). Same-repo heads only — a fork's ref does
+  // not exist on the base repo.
+  const sha =
+    sameRepoHead && headRef !== undefined
+      ? preferRefTip(`${pr.repo}#${pr.number}`, prSha, await headRefTipSha(pr.repo, headRef, headers), headRef)
+      : prSha;
   return {
     state: data.state,
     ...(data.user && (typeof data.user.login === "string" || typeof data.user.id === "number")
@@ -315,9 +391,9 @@ export async function fetchPullRequestFacts(pr: {
           },
         }
       : {}),
-    ...(typeof data.head?.ref === "string" && data.head.ref ? { headRef: data.head.ref } : {}),
+    ...(headRef !== undefined ? { headRef } : {}),
     ...(sha ? { headSha: sha } : {}),
-    sameRepoHead: headRepo === pr.repo.toLowerCase(),
+    sameRepoHead,
     ...(typeof data.base?.ref === "string" && data.base.ref ? { baseRef: data.base.ref } : {}),
     ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
   };
