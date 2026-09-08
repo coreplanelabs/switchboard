@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
 import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
 import type { PageSeed, RunIndexRowSeed } from "../src/channels/webSeed.js";
-import { ALL_CAPABILITIES } from "../src/core/capabilities.js";
+import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
 import { normalizeSpans } from "../src/core/normalizeSpans.js";
@@ -18,13 +18,20 @@ import { systemClock } from "../src/core/trace/clock.js";
 //   /runs/live-1     a live run fed by a scripted SSE stream (loops forever)
 //   /runs/hist-1     a finished run in history mode        /runs/nope   the 404
 //   /runs/scheduled  the Scheduled tab                     /residents   /costs
+//
+// SWITCHBOARD_PREVIEW_CAPABILITIES=minimal serves the same fixtures with every
+// optional capability off (the nav shrinks to Runs, no Scheduled tab, no docs).
 
 const PORT = Number(process.env.PORT ?? 8788);
 const NOW = systemClock();
 
 const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"));
-// The preview paints every dashboard surface, so the shell stamps every capability on.
-const shell = makeShellRenderer(assets.entry, ALL_CAPABILITIES);
+// The shell stamps the capabilities the nav paints from: every one on by
+// default (every surface reachable); SWITCHBOARD_PREVIEW_CAPABILITIES=minimal
+// paints the smallest installation instead — Runs alone, no Scheduled tab, no
+// docs link — so both shapes of the header can be seen and screenshotted.
+const CAPABILITIES = process.env.SWITCHBOARD_PREVIEW_CAPABILITIES === "minimal" ? NO_CAPABILITIES : ALL_CAPABILITIES;
+const shell = makeShellRenderer(assets.entry, CAPABILITIES);
 
 const row = (over: Partial<RunIndexRowSeed>): RunIndexRowSeed => ({
   id: "run-x",

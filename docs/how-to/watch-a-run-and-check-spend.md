@@ -2,7 +2,7 @@
 
 Goal: use the dashboard to see what's running right now, look back at what already ran, stop something that's gone sideways, and check spend — all without touching Slack or the CLI.
 
-Everything below sits behind your org's Cloudflare Access — only signed-in teammates can load it.
+Everything below sits behind the dashboard's identity gate — with the default production setup that is your org's Cloudflare Access, so only signed-in teammates can load it (the other strategies, a bearer token or loopback-only local access, are in [reference: dashboard routes](../reference/dashboard-routes.md)). The header shows only the sections this installation has: Residents and Costs appear when those subsystems are configured, the Scheduled tab when firing history is.
 
 ## Watch something live
 
