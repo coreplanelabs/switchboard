@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createTracer } from "../core/trace/tracer.js";
+import { recordingSink } from "../core/testing/recordingSink.js";
+import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../core/trace/internalHosts.js";
+import { parseTraceparent } from "../core/trace/traceparent.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ExecCapacityError, ExecInfraError } from "./executor.js";
 import { FLEET_BUSY_WAIT_MAX_MS } from "./sandboxErrors.js";
@@ -30,6 +34,34 @@ const sentBody = (c: { init: RequestInit }) => JSON.parse(String(c.init.body)) a
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+// Feature: features/tracing.md item 21 — one `http.client` span per send under
+// the caller's span; the trace context rides to the sandbox Worker only because
+// it is one of our hosts.
+describe("CloudflareSandboxExecutor trace context", () => {
+  it("an exec with a span is an http.client child carrying host/route/method/status and traceparent for the configured host; without a span it is a plain fetch", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 5_000 }).start("request", { sinks: [log] });
+    const execSpan = root.start("exec.exec");
+    configureInternalHosts(internalHostsOf([OPTS.url]));
+    try {
+      const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+      await new CloudflareSandboxExecutor(OPTS).exec("echo hi", { span: execSpan });
+      const client = log.ended("http.client")!;
+      expect(client.parentSpanId).toBe(execSpan.id);
+      expect(client.attrs).toEqual({ host: "sandbox.example", route: "/exec", method: "POST", httpStatus: 200 });
+      const tp = parseTraceparent(new Headers(calls[0]!.init.headers).get("traceparent"));
+      expect(tp).toEqual({ traceId: root.traceId, parentId: client.spanId, sampled: true });
+      expect(new Headers(calls[0]!.init.headers).get("x-thread-key")).toBe(OPTS.threadKey); // the caller's headers survive
+      const plain = stubFetch({ content: "x" });
+      await new CloudflareSandboxExecutor(OPTS).readFile("a.ts");
+      expect(new Headers(plain.calls[0]!.init.headers).has("traceparent")).toBe(false);
+      expect(log.ends.filter((e) => e.name === "http.client")).toHaveLength(1);
+    } finally {
+      configureInternalHosts(NO_INTERNAL_HOSTS);
+    }
+  });
 });
 
 // Feature: features/execution.md item 5 — the sandbox credential is resolved

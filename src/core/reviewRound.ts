@@ -83,15 +83,22 @@ export async function attachRoundWorkspace(input: {
   factory: ExecutorFactoryOptions;
   round: { threadKey: string; agent: AgentDef; repo?: string; ref?: string; headSha?: string };
   logKey: string;
+  /** The caller's `dispatch.workspace.attach` span: the probe and the attach
+   *  become its `http.client` children (features/tracing.md item 21). */
+  span?: Span;
 }): Promise<RoundWorkspace> {
   const { agent } = input.round;
-  const selection = await makeExecutor(input.factory, {
-    threadKey: input.round.threadKey,
-    agent,
-    repo: input.round.repo,
-    ref: input.round.ref,
-    headSha: input.round.headSha,
-  });
+  const selection = await makeExecutor(
+    input.factory,
+    {
+      threadKey: input.round.threadKey,
+      agent,
+      repo: input.round.repo,
+      ref: input.round.ref,
+      headSha: input.round.headSha,
+    },
+    input.span,
+  );
   const release = async (opts: { hardStopped: boolean }): Promise<void> => {
     const { executor } = selection;
     if (!executor.release) return;

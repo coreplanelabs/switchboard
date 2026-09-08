@@ -1,4 +1,5 @@
 import type { ResidentStep } from "../execution/residentStepTrace.js";
+import type { Span } from "./trace/types.js";
 import { repoFromThread } from "./repoContext.js";
 import { parseSlug, validRef } from "./residentAdmin.js";
 
@@ -48,7 +49,9 @@ export type OperationResult =
   | { kind: "error"; message: string };
 
 export interface Operations {
-  run(op: OpName, req: { repo: string; ref?: string }): Promise<OperationResult>;
+  /** `trace.span`: the caller's span, when it has one — the backend's HTTP
+   *  call becomes its `http.client` child (features/tracing.md item 21). */
+  run(op: OpName, req: { repo: string; ref?: string }, trace?: { span?: Span }): Promise<OperationResult>;
 }
 
 /** A natural-language deterministic ask, recognized conservatively. */

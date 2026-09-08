@@ -17,17 +17,21 @@ function traced() {
 describe("TracingExecutor", () => {
   it("times exec / readFile / writeFile as exec.* spans under the tool's span, carrying the backend and the per-call budget, never the command, path or output", async () => {
     const seen: string[] = [];
+    const spansSeen: Array<string | undefined> = [];
     const inner: Executor = {
-      exec: async (command) => {
+      exec: async (command, opts) => {
         seen.push(`exec ${command}`);
+        spansSeen.push(opts?.span?.name);
         return "the output";
       },
-      readFile: async (path) => {
+      readFile: async (path, opts) => {
         seen.push(`read ${path}`);
+        spansSeen.push(opts?.span?.name);
         return "contents";
       },
-      writeFile: async (path, content) => {
+      writeFile: async (path, content, opts) => {
         seen.push(`write ${path} ${content}`);
+        spansSeen.push(opts?.span?.name);
         return "Wrote";
       },
     };
@@ -37,6 +41,9 @@ describe("TracingExecutor", () => {
     expect(await ex.readFile("src/a.ts")).toBe("contents");
     expect(await ex.writeFile("src/b.ts", "body")).toBe("Wrote");
     expect(seen).toEqual(["exec echo secret", "read src/a.ts", "write src/b.ts body"]);
+    // Each op's own exec.* span is handed down, so the inner executor's HTTP
+    // calls become its http.client children (features/tracing.md item 21).
+    expect(spansSeen).toEqual(["exec.exec", "exec.read_file", "exec.write_file"]);
     expect(log.ends.map((e) => e.name)).toEqual(["exec.exec", "exec.read_file", "exec.write_file"]);
     for (const e of log.ends) {
       expect(e.parentSpanId).toBe(call.id);

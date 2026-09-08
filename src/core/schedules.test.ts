@@ -397,6 +397,9 @@ describe("interpretIngressResponse (the firing record)", () => {
 describe("isScheduleFiring", () => {
   it("accepts the record shape and rejects anything else", () => {
     expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed" })).toBe(true);
+    // The shim's trace id (features/tracing.md item 21): optional, a string when present.
+    expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed", traceId: "a".repeat(32) })).toBe(true);
+    expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed", traceId: 7 })).toBe(false);
     expect(isScheduleFiring({ schedule: "s", firedAt: 1, outcome: "completed", runId: "r", detail: "d" })).toBe(true);
     for (const bad of [
       null,
