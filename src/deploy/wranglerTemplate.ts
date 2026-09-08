@@ -26,8 +26,8 @@ export const GENERATED_HEADER: readonly string[] = [
 ];
 
 /** What a template may name: `{{account}}`, `{{zone}}`, `{{script}}`, `{{hostname}}`,
- *  `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}`, `{{urls.docsBaseUrl}}` (inside an
- *  `{{#if urls.docsBaseUrl}}` block — the docs Worker is optional), and inside an
+ *  `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}` and `{{urls.docsBaseUrl}}` (each inside
+ *  an `{{#if urls.…}}` block — the state Worker and the docs Worker are optional), and inside an
  *  `{{#if access}}` block `{{access.teamDomain}}` / `{{access.aud}}`. */
 export interface TemplateView {
   account: string;
@@ -39,8 +39,9 @@ export interface TemplateView {
   urls: {
     /** The bot's public origin (live-view links, the dashboards). */
     publicBaseUrl: string;
-    /** The state Worker other Workers record firings on. */
-    stateWorkerUrl: string;
+    /** The state Worker other Workers record firings on, when the profile has one —
+     *  a template names it inside an `{{#if urls.stateWorkerUrl}}` block. */
+    stateWorkerUrl?: string;
     /** The installation's docs site (its `/docs` redirect target), when the profile has a docs Worker —
      *  a template names it inside an `{{#if urls.docsBaseUrl}}` block. */
     docsBaseUrl?: string;

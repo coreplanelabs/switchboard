@@ -398,6 +398,66 @@ describe("planDeploy", () => {
   });
 });
 
+// Feature: features/release-and-deploy.md item 14 — the plan iterates the
+// profile's Workers: an installation with only the bot is a one-step plan, the
+// bot plus the state Worker a two-step plan, and our production profile's plan
+// is byte-identical to before Workers became optional.
+describe("planDeploy over a partial profile", () => {
+  const botOnly: LoadedProfile = {
+    ...LOADED,
+    profile: { ...TEST_PROFILE, workers: { bot: TEST_PROFILE.workers.bot } },
+  };
+  const botAndState: LoadedProfile = {
+    ...LOADED,
+    profile: { ...TEST_PROFILE, workers: { memory: TEST_PROFILE.workers.memory, bot: TEST_PROFILE.workers.bot } },
+  };
+
+  it("a bot-only profile is a one-step plan: the bot with its preflight and live gate, no state Worker to push the config to (the plan says so), nothing else", () => {
+    const p = plan({}, installed, botOnly);
+    expect(p.steps.map((s) => s.name)).toEqual(["bot"]);
+    expect(p.steps[0]).toMatchObject({
+      script: "switchboard",
+      dir: "deploy/cloudflare",
+      liveGate: { kind: "health", healthUrl: BOT_HEALTH_URL },
+      retryOnPreflightRefusal: true,
+    });
+    expect(p.config).toEqual({ source: "config/config.production.yaml", document: CONFIG_DOCUMENT_KEY });
+    expect(p.warnings).toEqual([]);
+    const text = formatPlan(p);
+    expect(text).toContain(
+      "config: config/config.production.yaml (no state Worker in the profile — not pushed anywhere)",
+    );
+    expect(text).toContain("Steps:\n  1. bot (switchboard)");
+    expect(text).not.toContain("2. ");
+    expect(workersFor(botOnly.profile).map((w) => w.name)).toEqual(["bot"]);
+  });
+
+  it("the bot plus the state Worker is a two-step plan in canonical order, with the config pushed to that Worker", () => {
+    const p = plan({}, installed, botAndState);
+    expect(p.steps.map((s) => s.name)).toEqual(["memory", "bot"]);
+    expect(p.config.stateWorkerUrl).toBe("https://switchboard-memory.example.test");
+    expect(formatPlan(p)).toContain('→ document "base" on https://switchboard-memory.example.test');
+  });
+
+  it("`--only` naming a Worker the profile lacks deploys nothing for it and says so in a warning; `--skip` of an absent Worker is silent", () => {
+    const p = plan({ only: ["sandbox", "bot"] }, installed, botOnly);
+    expect(p.steps.map((s) => s.name)).toEqual(["bot"]);
+    expect(p.warnings).toEqual(["--only names sandbox: not among this profile's Workers — nothing to deploy for it"]);
+    expect(plan({ skip: ["resident"] }, installed, botOnly).warnings).toEqual([]);
+  });
+
+  it("the full production-shaped profile plans exactly as before: every Worker, in order, the config pushed to the state Worker", () => {
+    const p = plan();
+    expect(p.steps.map((s) => s.name)).toEqual(["memory", "bot", "resident", "sandbox"]);
+    expect(p.config).toEqual({
+      source: "config/config.production.yaml",
+      document: CONFIG_DOCUMENT_KEY,
+      stateWorkerUrl: "https://switchboard-memory.example.test",
+    });
+    expect(p.warnings).toEqual([]);
+  });
+});
+
 describe("capabilityProblem", () => {
   it("every Worker with an image needs the Containers scope (containers list) — bot, sandbox AND resident, which also needs R2 (r2 bucket list); the memory Worker nothing; the plan carries each step's checks", () => {
     const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));

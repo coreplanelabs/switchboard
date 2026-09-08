@@ -17,7 +17,10 @@
     // The state Worker (deploy/cloudflare-memory/): where scheduled() records
     // each resident-watchdog firing (#244/#307). Public URL — a var, not a
     // secret; the bearer is the MEMORY_TOKEN secret (deploy/secrets.manifest.json).
+    // A profile without a memory Worker renders no var: firings go unrecorded.
+    // {{#if urls.stateWorkerUrl}}
     "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}",
+    // {{/if}}
     // Presigned snapshot transfers (features/resident-repos.md item 61, #614):
     // with these two vars AND the R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
     // secrets (deploy/secrets.manifest.json) present, the container moves
