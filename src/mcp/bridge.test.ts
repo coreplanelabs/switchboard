@@ -12,7 +12,10 @@ import {
   newRunBudget,
 } from "./bridge.js";
 import { InMemoryMcpClient } from "./fake.js";
-import type { McpServerSpec } from "./types.js";
+import { McpError, type McpServerSpec } from "./types.js";
+import { createTracer } from "../core/trace/tracer.js";
+import { classificationOf } from "../core/trace/classify.js";
+import { recordingSink } from "../core/testing/recordingSink.js";
 
 const server: McpServerSpec = { name: "linear", url: "https://mcp.linear.app/mcp", agents: ["general"] };
 const executor: Executor = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
@@ -149,7 +152,42 @@ describe("bridgeMcpTools", () => {
     await expect(boom.run({}, ctx())).rejects.toThrow("MCP linear/boom failed: socket hang up");
   });
 
-  it("publishes an mcp_tool_use event per call with no arguments or body", async () => {
+  // Feature: features/tracing.md; features/mcp-tools.md item 10 — under a tool
+  // span the remote call is one `mcp.<server>.<tool>` span; the legacy event
+  // is published only when no span is given.
+  it("under a tool span, each call is an mcp.<server>.<tool> span with ok and bytes, error-status when the server errs or the call throws (classified), and no mcp_tool_use event", async () => {
+    const events: RunEvent[] = [];
+    const log = recordingSink();
+    let t = 1000;
+    const root = createTracer({ clock: () => (t += 5) }).start("request", { sinks: [log] });
+    const toolSpan = root.start("tool.mcp__linear__ok");
+    const client = new InMemoryMcpClient([
+      { name: "ok", inputSchema: {}, handler: () => ({ content: [{ type: "text", text: "hello" }] }) },
+      { name: "bad", inputSchema: {}, handler: () => ({ content: [{ type: "text", text: "x" }], isError: true }) },
+      { name: "boom", inputSchema: {}, handler: () => Promise.reject(new McpError("timeout", "took too long")) },
+    ]);
+    const tools = bridgeMcpTools(server, client, await client.listTools(), { budget: newRunBudget(), now: () => t });
+    const spanCtx: ToolContext = { ...ctx(events), span: toolSpan };
+    expect(await tools[0].run({ secret: "hunter2" }, spanCtx)).toContain("hello");
+    await expect(tools[1].run({}, spanCtx)).rejects.toThrow(/reported an error/);
+    const thrown = await tools[2].run({}, spanCtx).catch((e: unknown) => e);
+    expect(classificationOf(thrown)).toEqual({ kind: "timeout" });
+    expect(events).toEqual([]); // no legacy event on the span path
+    expect(log.ends.map((e) => [e.name, e.status, e.attrs, e.parentSpanId])).toEqual([
+      ["mcp.linear.ok", "ok", { ok: true, bytes: 5 }, toolSpan.id],
+      ["mcp.linear.bad", "error", { ok: false, bytes: 1 }, toolSpan.id],
+      ["mcp.linear.boom", "error", { ok: false, bytes: 0 }, toolSpan.id],
+    ]);
+    // The classification is on the span's own record — kind and code, never a message (mcp-tools item 10).
+    expect(log.ends.map((e) => [e.errorKind, e.errorCode, e.errorMessage])).toEqual([
+      [undefined, undefined, undefined],
+      ["refused", undefined, undefined],
+      ["timeout", undefined, undefined],
+    ]);
+    expect(JSON.stringify(log.ends)).not.toMatch(/hunter2|hello/);
+  });
+
+  it("publishes an mcp_tool_use event per call with no arguments or body (no span given)", async () => {
     const events: RunEvent[] = [];
     let t = 1000;
     const client = new InMemoryMcpClient([

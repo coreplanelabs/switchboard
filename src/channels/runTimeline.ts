@@ -339,33 +339,11 @@ export function createRunTimeline(): RunTimeline {
         ];
       case "assistant":
         return [{ kind: "step", step: openStep({ text: str(e.text), at: num(e.at) }) }];
-      case "turn": {
-        // A model call is a step boundary: whatever it produced starts a new
-        // step (an un-narrated one if it went straight to tools), so the row
-        // sits ABOVE its output in the log and never inside the previous step.
-        const durationMs = num(e.durationMs);
-        if (durationMs === undefined) return [];
-        current = null;
-        const facts: string[] = [];
-        const u = typeof e.usage === "object" && e.usage !== null ? (e.usage as Record<string, unknown>) : undefined;
-        const inTok = u ? num(u.inputTokens) : undefined;
-        const outTok = u ? num(u.outputTokens) : undefined;
-        const cached = u ? num(u.cacheReadTokens) : undefined;
-        if (inTok !== undefined) facts.push(fmtTokens(inTok) + " in");
-        if (outTok !== undefined) facts.push(fmtTokens(outTok) + " out");
-        if (cached !== undefined) facts.push(fmtTokens(cached) + " cached");
-        const model = str(e.model);
-        return [
-          {
-            kind: "turn",
-            label: "Thought for " + formatDuration(durationMs, "precise"),
-            facts,
-            durationMs,
-            ...(model ? { model } : {}),
-            at: num(e.at),
-          },
-        ];
-      }
+      case "turn":
+        // Legacy stored records only (features/tracing.md): the history seed is
+        // normalized before the fold, so a stored `turn` arrives as a
+        // `model.turn` span and this case never draws — a raw one is ignored.
+        return [];
       case "review_artifact":
         // The reading diff is the review panel's material (features/reading-diff.md
         // roadmap) — the timeline's step story does not change shape for it.
@@ -399,12 +377,14 @@ export function createRunTimeline(): RunTimeline {
           if (inTok !== undefined) facts.push(fmtTokens(inTok) + " in");
           if (outTok !== undefined) facts.push(fmtTokens(outTok) + " out");
           if (cached !== undefined) facts.push(fmtTokens(cached) + " cached");
+          const model = str(attrs.model);
           return [
             {
               kind: "turn",
               label: "Thought for " + formatDuration(durationMs, "precise"),
               facts,
               durationMs,
+              ...(model ? { model } : {}),
               at: num(e.at),
             },
           ];

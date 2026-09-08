@@ -21,6 +21,8 @@ import { runAgent } from "../runner.js";
 import { makeExecutor, type ExecutorFactoryOptions, type ExecutorSelection } from "../execution/factory.js";
 import type { Executor, ReleaseMode } from "../execution/executor.js";
 import type { RunnableTool, ToolContext } from "../tools/workspace.js";
+import type { Span } from "../core/trace/types.js";
+import type { Backend } from "../core/trace/attrs.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import {
   carriedFooter,
@@ -286,6 +288,8 @@ export function makeSystemComposer(input: {
  *  reuses `toolContext` for its re-review turn with its own verdict capture
  *  (the voided verdict must not leak back through the first turn's hook). */
 export interface ReviewTurnSpec {
+  /** Where the re-review's commands execute (features/tracing.md). */
+  backend?: Backend;
   provider: Provider;
   model: string;
   agent: AgentDef;
@@ -332,7 +336,18 @@ export interface SettledReviewHead {
  * The caller decides whether to invoke this at all (a hard-stopped round
  * observes nothing and posts nothing).
  */
-export async function settleReviewedHead(input: {
+export async function settleReviewedHead(input: SettleReviewedHeadInput): Promise<SettledReviewHead> {
+  // The whole settle is one uncounted `run.settle_reviewed_head` span
+  // (features/tracing.md): its git and GitHub awaits are overhead by design,
+  // and the re-review's `run.agent` is its child.
+  return input.span
+    ? input.span.span("run.settle_reviewed_head", (span) => settle(input, span))
+    : settle(input, undefined);
+}
+
+export interface SettleReviewedHeadInput {
+  /** The parent span, when the run is traced. */
+  span?: Span;
   pr: { repo: string; number: number };
   /** The PR's base ref — required to classify a head move; unknown → item 10. */
   baseRef: string | undefined;
@@ -355,7 +370,9 @@ export async function settleReviewedHead(input: {
     headMoved: (labelSuffix: string) => void;
   };
   logKey: string;
-}): Promise<SettledReviewHead> {
+}
+
+async function settle(input: SettleReviewedHeadInput, span: Span | undefined): Promise<SettledReviewHead> {
   const { pr, executor, turn, logKey } = input;
   const probeHead = async () => parseRevParseOutput(await executor.exec("git rev-parse HEAD").catch(() => ""));
   let answer = input.answer;
@@ -440,6 +457,8 @@ export async function settleReviewedHead(input: {
           messages: input.messages,
           system,
           effort: turn.effort,
+          ...(span ? { span } : {}),
+          ...(turn.backend ? { backend: turn.backend } : {}),
           toolContext: {
             ...turn.toolContext,
             onVerdict: (v) => {

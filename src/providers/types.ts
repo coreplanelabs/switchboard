@@ -97,6 +97,14 @@ export interface CompletionRequest {
   /** Prompt-cache TTL for this call's breakpoints; providers that cache apply
    *  it to every breakpoint. Absent → the provider default (`5m`). */
   cacheTtl?: CacheTtl;
+  /** Timing hooks for the call's span (features/tracing.md): a streaming
+   *  provider reports the first token; the span layer stamps the time. A
+   *  provider that cannot observe its stream simply never calls them. */
+  observer?: CompletionObserver;
+}
+
+export interface CompletionObserver {
+  onFirstToken?(): void;
 }
 
 /** Token accounting for ONE model call, normalized across providers. Cache

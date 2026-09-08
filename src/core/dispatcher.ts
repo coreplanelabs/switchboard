@@ -9,7 +9,10 @@ import { TOOLSETS } from "../tools/workspace.js";
 import type { LedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
 import type { AppendableEvent, LiveRunRow, StepRecord } from "./runLedger/types.js";
 import type { ResumePlan } from "./runLedger/resume.js";
-import { systemClock } from "./trace/index.js";
+import { createLogSink, createTracer, NULL_SINK, systemClock } from "./trace/index.js";
+import { createRunStreamSink } from "./trace/runStreamSink.js";
+import type { Span } from "./trace/types.js";
+import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { makeWebCapability } from "../tools/web.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
@@ -55,7 +58,6 @@ import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memo
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
 import { isSpanRecord, redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
-import { formatDuration } from "./time/formatDuration.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import {
   decideFollowUp,
@@ -1044,6 +1046,7 @@ export async function dispatch(
       },
       resume ? { id: resume.row.runId, replay: resume.events, startedAt: resume.row.startedAt } : {},
     );
+    const root = startRunRoot(deps, registry, run.id);
     if (resume) {
       console.log(
         `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger?.gen ?? "no ledger"}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
@@ -1253,9 +1256,14 @@ export async function dispatch(
     // honest partial state.
     const finalDetail = () => checklist;
     const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
+    // The runner's progress notes carry the 💭 thought line at each model turn
+    // (features/tracing.md): the card shows it as activity, as it showed the
+    // `turn` event before spans replaced it.
     const onProgress = (note: string) => {
       console.log(`[note] ${msg.threadKey} ${note}`);
       lastActivityAt = Date.now();
+      lastActivity = note;
+      card.update(currentFrame());
     };
     // Live run-visibility (Area 2): each tool call/result refreshes the card
     // immediately, so activity is visible without waiting for the heartbeat.
@@ -1437,6 +1445,8 @@ export async function dispatch(
         ...(mcpForRun && mcpForRun.tools.length > 0 ? { extraTools: mcpForRun.tools } : {}),
         onProgress,
         onEvent,
+        span: root, // the loop is `run.agent` under the run's root (features/tracing.md)
+        ...(round.selection.backend ? { backend: round.selection.backend } : {}),
         control: run.control, // operator stop from /runs (#101)
         inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
         // The step record before each step's tools (run-history item 35).
@@ -1465,6 +1475,7 @@ export async function dispatch(
       // settles nothing.
       if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && run.control.requested !== "hard") {
         const settled = await settleReviewedHead({
+          span: root,
           pr: { repo: repoCtx.repo, number: repoCtx.pr },
           baseRef: repoCtx.baseRef,
           reviewHead,
@@ -1483,6 +1494,7 @@ export async function dispatch(
             onProgress,
             onEvent,
             control: run.control,
+            ...(round.selection.backend ? { backend: round.selection.backend } : {}),
           },
           fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
           fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
@@ -1627,7 +1639,7 @@ export async function dispatch(
       // The run finished: it is sealed by the next drain (after the reply), and
       // its record — everything captured now, assembled after the seal — is
       // written by that drain. The card's total stops at the finish stamp.
-      ending.finished(run.id);
+      ending.finished(run.id, { afterSeal: () => root.end() }); // the root closes after the stream (features/tracing.md)
       shell.freeze(finishedAt);
       if (deps.runHistoryWriter) {
         const writer = deps.runHistoryWriter;
@@ -2068,7 +2080,12 @@ async function runShipBranch(
     console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
     card.update(currentFrame());
   };
-  const onProgress = (note: string) => console.log(`[note] ${msg.threadKey} ${note}`);
+  const onProgress = (note: string) => {
+    console.log(`[note] ${msg.threadKey} ${note}`);
+    lastActivity = note;
+    card.update(currentFrame());
+  };
+  const root = startRunRoot(deps, registry, run.id);
   const reportProgress = (list: string) => {
     const trimmed = list.trim();
     if (!trimmed) return; // never blank the durable progress record
@@ -2130,6 +2147,7 @@ async function runShipBranch(
   let outcome: ShipOutcome | undefined;
   try {
     outcome = await runShipPipeline({
+      span: root,
       entry,
       round0Messages: buildMessages(history, directives.text, msg.images, msg.documents),
       child,
@@ -2198,7 +2216,7 @@ async function runShipBranch(
     const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
     const finishedAt = snap?.finishedAt ?? Date.now();
     io.runFinished?.({ id: run.id, status });
-    ending.finished(run.id);
+    ending.finished(run.id, { afterSeal: () => root.end() }); // the root closes after the stream (features/tracing.md)
     shell.freeze(finishedAt);
     if (deps.runHistoryWriter) {
       const writer = deps.runHistoryWriter;
@@ -2657,6 +2675,7 @@ function assembleRunRecord(input: {
     eventCount: Math.max(snap?.eventCount ?? atFinish.length, seal?.eventCount ?? 0),
     storedEventCount: events.length,
     truncated: false,
+    schema: SPAN_SCHEMA, // the stream carries spans, never `turn` events (features/tracing.md)
     events,
     diagnosis: input.diagnosis,
     // What the run was last doing / how it ended, and where it came from — so the
@@ -2874,7 +2893,7 @@ function activityLine(e: RunEvent): string {
     case "answer":
       return "answer ready";
     case "turn":
-      return `💭 thought for ${formatDuration(e.durationMs, "precise")}`;
+      return ""; // legacy stored records only; a live run's thought line rides the runner's progress note
     case "run_meta":
       return "run context recorded"; // published straight to the registry too — never arrives here
     case "skill_use":
@@ -3086,4 +3105,19 @@ async function resolveRepoForCommand(
   } catch {
     return {};
   }
+}
+
+/** The run's root span (features/tracing.md): its streamed children (the
+ *  agent loop, model turns, tool calls) land on the run's own stream through
+ *  the run-stream sink, and its log line goes to stdout at the configured
+ *  verbosity — nothing when `tracing.log` is unset. Until the channel adapters
+ *  start the root at receipt (the dispatcher spans PR), the root begins here,
+ *  at the run's registration. */
+function startRunRoot(deps: CoreDeps, registry: RunRegistry, runId: string): Span {
+  const stream = createRunStreamSink({ clock: systemClock });
+  const level = deps.config.config.tracing?.log;
+  const log = level ? createLogSink({ level, write: (line) => console.log(line) }) : NULL_SINK;
+  const root = createTracer({ clock: systemClock }).start("request", { sinks: [log, stream], attrs: { runId } });
+  stream.bindRun(runId, (e) => registry.publish(runId, e as RunEvent));
+  return root;
 }

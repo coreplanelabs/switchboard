@@ -1,5 +1,6 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { runDurationMs } from "../core/runDuration.js";
+import { normalizeSpans } from "../core/normalizeSpans.js";
 import {
   authorize,
   matchesPredicate,
@@ -602,8 +603,10 @@ export function createLiveViewHandler(
             mode: "history",
             id: route.id,
             // The stored stream with the truncation made visible (AE11): the
-            // seed IS the stream on a history page.
-            events: withOmittedMarkers(view.events ?? [], view.eventCount),
+            // seed IS the stream on a history page — normalized first
+            // (features/tracing.md), so a legacy record's `turn` and
+            // `mcp_tool_use` reach the fold as the spans a live run emits.
+            events: withOmittedMarkers(normalizeSpans(view.events ?? [], { schema: view.schema }), view.eventCount),
             ...(view.status ? { status: view.status } : {}),
             eventCount: view.eventCount,
             startedAt: view.startedAt,

@@ -599,4 +599,35 @@ describe("analyzeRunFriction — span records are invisible to counts and to the
     expect(d.eventCount).toBe(2);
     expect(d.runMs).toBe(5_000);
   });
+
+  // Feature: features/tracing.md — a stream timed by `model.turn` spans takes
+  // model time from them, never from the result→call gap as well.
+  it("model.turn span ends are the model time on a span-timed stream: summed, flagged past the threshold at the span's index, and the gap rule is silent", () => {
+    const turn = (spanId: string, startedAt: number, durationMs: number, stopReason = "tool_use") =>
+      ({
+        type: "span_end",
+        spanId,
+        name: "model.turn",
+        startedAt,
+        durationMs,
+        status: "ok",
+        attrs: { stopReason },
+        at: startedAt + durationMs,
+      }) as unknown as RunEvent;
+    const events: RunEvent[] = [
+      { type: "input", text: "fix the thing", at: T0 },
+      turn("m1", T0, 4_000), // the runner measured 4 s; the gap to the call below is 5 s
+      ...bash("ls", T0 + 5_000, 1_000),
+      turn("m2", T0 + 6_000, 61_000), // flagged
+      ...bash("cat a.ts", T0 + 68_000, 1_000),
+      turn("m3", T0 + 69_000, 2_000, "end_turn"),
+      { type: "answer", text: "done", at: T0 + 71_000 },
+    ];
+    const d = analyzeRunFriction(events);
+    expect(d.modelTimeMs).toBe(4_000 + 61_000 + 2_000);
+    expect(categories(d)).toEqual(["slow_model_turn"]);
+    expect(d.findings[0]).toMatchObject({ durationMs: 61_000, eventIndex: 4, severity: "medium" });
+    expect(d.findings[0].summary).toContain("(tool_use)");
+    expect(d.eventCount).toBe(4); // the two tool pairs; spans and narrative are not steps
+  });
 });

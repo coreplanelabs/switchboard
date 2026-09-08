@@ -1,4 +1,5 @@
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
+import { classifyError } from "../core/trace/classify.js";
 import { redactAndCap } from "../core/redact.js";
 
 // The GitHub capability behind the `github_*` agent tools
@@ -349,7 +350,12 @@ export class RestGithubApi implements GithubApi {
       } catch {
         /* keep the raw slice */
       }
-      throw new GithubApiError(res.status, `GitHub ${method} ${path} failed: HTTP ${res.status} ${detail}`.trim());
+      // Classified for the spans above it (features/tracing.md item 2): the
+      // status is the peer's own discriminator, the body never an attr.
+      throw classifyError(
+        new GithubApiError(res.status, `GitHub ${method} ${path} failed: HTTP ${res.status} ${detail}`.trim()),
+        { kind: "http", code: String(res.status) },
+      );
     }
     return res;
   }

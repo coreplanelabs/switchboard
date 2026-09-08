@@ -32,6 +32,19 @@ export class AnthropicProvider implements Provider {
       // it run to completion in the background.
       req.signal ? { signal: req.signal } : undefined,
     );
+    // The first streamed content (a text delta or a block start) is the time
+    // to first token the model.turn span records; feature-detected, so a
+    // client double without `on` (tests) still completes.
+    if (req.observer?.onFirstToken && typeof (stream as { on?: unknown }).on === "function") {
+      let seen = false;
+      const first = () => {
+        if (seen) return;
+        seen = true;
+        req.observer?.onFirstToken?.();
+      };
+      (stream as unknown as { on(event: string, cb: () => void): unknown }).on("text", first);
+      (stream as unknown as { on(event: string, cb: () => void): unknown }).on("contentBlock", first);
+    }
     const msg = await stream.finalMessage();
 
     const content: ContentPart[] = [];

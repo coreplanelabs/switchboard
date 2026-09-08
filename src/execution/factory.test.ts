@@ -51,11 +51,12 @@ describe("makeExecutor per-agent provisioning", () => {
       throw new Error("unexpected network call");
     });
     vi.stubGlobal("fetch", fetchSpy);
-    const { executor: ex } = await makeExecutor(
+    const { executor: ex, backend } = await makeExecutor(
       { execution: { type: "cloudflare", url: "https://sandbox.example" }, ...dirs() },
       ctx("general"),
     );
     expect(fetchSpy).not.toHaveBeenCalled();
+    expect(backend).toBe("local"); // a null executor runs nothing anywhere: its spans say `local` (features/tracing.md)
     // Tools reaching a resource-less agent's executor is a config bug — it
     // must surface legibly, not crash or provision anything.
     await expect(ex.exec("echo hi")).rejects.toThrow(/no repo resource/);
@@ -75,19 +76,21 @@ describe("makeExecutor per-agent provisioning", () => {
 
   it("a repo-requiring agent gets a LocalExecutor with a per-thread workspace (local)", async () => {
     const d = dirs();
-    const { executor: ex } = await makeExecutor({ ...d }, ctx("coding"));
+    const { executor: ex, backend } = await makeExecutor({ ...d }, ctx("coding"));
     expect(ex).toBeInstanceOf(LocalExecutor);
+    expect(backend).toBe("local");
     expect(existsSync(join(d.workspaceDir, "slack_CX_1.0"))).toBe(true);
   });
 
   it("a repo-requiring agent gets the Cloudflare backend when configured", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", ""); // keep githubEnvs off the network
-    const { executor: ex } = await makeExecutor(
+    const { executor: ex, backend } = await makeExecutor(
       { execution: { type: "cloudflare", url: "https://sandbox.example" }, ...dirs() },
       ctx("review"),
     );
     expect(ex).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(backend).toBe("sandbox"); // the per-thread Cloudflare sandbox, on the run's `exec.*` spans
   });
 
   it("a repo-requiring agent with e2b configured but no API key still fails legibly", async () => {
@@ -238,8 +241,9 @@ describe("makeExecutor resident selection", () => {
         },
       },
     );
-    const { executor, note, resident, binding } = await makeExecutor(residentOpts(), repoCtx());
+    const { executor, note, resident, binding, backend } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(ResidentExecutor);
+    expect(backend).toBe("resident");
     // The warm path is POSITIVELY named (never inferable only from the absence
     // of a fallback note): ref@short-sha of the attached worktree.
     expect(note).toBe("resident · jshttp/vary · master@abc");

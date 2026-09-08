@@ -479,42 +479,49 @@ describe("createRunTimeline — span records", () => {
 });
 
 describe("createRunTimeline — model turns (item 15)", () => {
-  const turn = (over: Record<string, unknown> = {}) => ({
-    type: "turn",
+  // The runner's one timing record for a model call (features/tracing.md): a
+  // `model.turn` span whose end carries the stop reason, the usage and the
+  // model as attrs. A legacy record's `turn` reaches the fold as one of these
+  // through `normalizeSpans` on the history seed.
+  const turn = (over: Record<string, unknown> = {}, attrs: Record<string, unknown> = {}) => ({
+    type: "span_end",
+    spanId: "t1",
+    name: "model.turn",
     startedAt: 1_000,
     durationMs: 304_000,
-    stopReason: "tool_use",
+    status: "ok",
+    attrs: { stopReason: "tool_use", ...attrs },
     at: 305_000,
     ...over,
   });
 
-  it("a `turn` becomes its own change, labelled like the products people already know", () => {
+  it("a `model.turn` span end becomes its own change, labelled like the products people already know", () => {
     const t = createRunTimeline();
     const [c] = t.push(turn());
     expect(c).toEqual({ kind: "turn", label: "Thought for 5m 04s", facts: [], durationMs: 304_000, at: 305_000 });
   });
 
-  it("a turn carries the model that took it when the event names one; an unstamped turn has no model key", () => {
+  it("a turn carries the model that took it when the span names one; an unstamped turn has no model key", () => {
     const t = createRunTimeline();
-    const [c] = t.push(turn({ model: "anthropic/claude-fable-5" }));
+    const [c] = t.push(turn({}, { model: "anthropic/claude-fable-5" }));
     expect(c).toMatchObject({ kind: "turn", model: "anthropic/claude-fable-5" });
     const [d] = t.push(turn());
     expect(d).not.toHaveProperty("model");
-    const [e] = t.push(turn({ model: 42 }));
+    const [e] = t.push(turn({}, { model: 42 }));
     expect(e).not.toHaveProperty("model"); // a non-string model is not a model
   });
 
   it("token usage shows as compact facts: in, out, cached (cached only when present)", () => {
     const t = createRunTimeline();
     const [c] = t.push(
-      turn({ durationMs: 1_300, usage: { inputTokens: 12_345, outputTokens: 800, cacheReadTokens: 11_200 } }),
+      turn({ durationMs: 1_300 }, { inputTokens: 12_345, outputTokens: 800, cacheReadTokens: 11_200 }),
     );
     expect(c).toMatchObject({
       kind: "turn",
       label: "Thought for 1.3s",
       facts: ["12.3k in", "800 out", "11.2k cached"],
     });
-    const [d] = t.push(turn({ usage: { inputTokens: 1_250_000, outputTokens: 0 } }));
+    const [d] = t.push(turn({}, { inputTokens: 1_250_000, outputTokens: 0 }));
     expect(d).toMatchObject({ facts: ["1.3M in", "0 out"] });
   });
 
@@ -526,8 +533,16 @@ describe("createRunTimeline — model turns (item 15)", () => {
     expect(t.steps().map((s) => s.calls.map((c) => c.title))).toEqual([["ls"], ["pwd"]]);
   });
 
-  it("a malformed turn (no numeric duration) is ignored, never thrown on", () => {
+  it("a malformed span end (no numeric duration) is ignored, never thrown on; the span's start draws nothing", () => {
     const t = createRunTimeline();
-    expect(t.push({ type: "turn", startedAt: "x" })).toEqual([]);
+    expect(t.push(turn({ durationMs: "x" }))).toEqual([]);
+    expect(t.push({ type: "span_start", spanId: "t1", name: "model.turn", at: 1_000 })).toEqual([]);
+  });
+
+  it("a raw legacy `turn` event draws nothing here — the history seed normalizes it into a `model.turn` span first", () => {
+    const t = createRunTimeline();
+    expect(
+      t.push({ type: "turn", startedAt: 1_000, durationMs: 304_000, stopReason: "tool_use", at: 305_000 }),
+    ).toEqual([]);
   });
 });

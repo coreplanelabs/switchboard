@@ -16,6 +16,9 @@ import { runAgent, type StepReport } from "./runner.js";
 import type { RunnableTool } from "./tools/workspace.js";
 import { InMemorySkillStore } from "./skills/index.js";
 import { FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
+import { createTracer } from "./core/trace/tracer.js";
+import { createRunStreamSink } from "./core/trace/runStreamSink.js";
+import { recordingSink } from "./core/testing/recordingSink.js";
 
 // Feature: features/run-loop.md — turn/time budgets and forced write-up.
 
@@ -57,6 +60,24 @@ function scripted(results: CompletionResult[]): Provider & { requests: Completio
     },
   };
 }
+
+/** A traced run: one root whose streamed spans land in `all` beside the run's
+ *  own events (the same order a registry would see), and a recording sink for
+ *  the log-only ones. */
+function traced(now: () => number = Date.now) {
+  const all: RunEvent[] = [];
+  const log = recordingSink();
+  const stream = createRunStreamSink({ clock: now });
+  const root = createTracer({ clock: now }).start("request", { sinks: [log, stream] });
+  // The root's own records are the dispatcher's story, not the run's: dropped here so the run's sequence reads clean.
+  stream.bindRun("r", (e) => {
+    if ("name" in e && e.name === "request") return;
+    all.push(e as RunEvent);
+  });
+  return { root, all, log, onEvent: (e: RunEvent) => void all.push(e) };
+}
+const spanNames = (events: readonly RunEvent[]) =>
+  events.map((e) => (e.type === "span_start" ? `+${e.name}` : e.type === "span_end" ? `-${e.name}` : e.type));
 
 const bashUse = (id: string): CompletionResult => ({
   content: [{ type: "tool_use", id, name: "bash", input: { command: "echo hi" } }],
@@ -969,12 +990,10 @@ describe("run-friction signals in the event stream (#84)", () => {
       onEvent: (e) => events.push(e),
       now: () => t,
     });
-    // turn (model call, instant here) · tool_call · tool_result · final turn
+    // tool_call · tool_result — the model calls are spans, not events (features/tracing.md)
     expect(events.map((e) => [e.type, e.at])).toEqual([
-      ["turn", 1000],
       ["tool_call", 1000],
       ["tool_result", 1500],
-      ["turn", 1500],
     ]);
   });
 
@@ -1321,11 +1340,13 @@ describe("run control: soft / hard stop (#101)", () => {
   });
 });
 
-describe("model turn events (features/live-view.md item 15)", () => {
+// Feature: features/tracing.md; features/live-view.md item 15 — every model
+// call is one `model.turn` span, every tool call one `tool.<name>` span, the
+// whole loop one `run.agent`; the stream carries the spans, never a `turn`.
+describe("model turn and tool spans (features/tracing.md)", () => {
   const withUsage = (r: CompletionResult, usage: CompletionResult["usage"]): CompletionResult => ({ ...r, usage });
 
-  it("emits one `turn` per model call, BEFORE the events that turn produced, timed by the runner clock", async () => {
-    const events: RunEvent[] = [];
+  it("one run.agent span wraps the loop; each model call is a model.turn span ended BEFORE what it produced, timed by the runner clock; each tool call a tool.<name> span whose tool_call/tool_result carry its id", async () => {
     let t = 1_000;
     const provider = scripted([bashUse("t1"), text("done")]);
     const slow: Provider = {
@@ -1335,32 +1356,74 @@ describe("model turn events (features/live-view.md item 15)", () => {
         return provider.complete(req);
       },
     };
+    const { root, all, onEvent } = traced(() => t);
+    const notes: string[] = [];
     await runAgent({
       provider: slow,
       model: "m",
       agent: agent(),
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
       toolContext: { executor: fakeExecutor },
-      onEvent: (e) => events.push(e),
+      onEvent,
+      onProgress: (n) => void notes.push(n),
       now: () => t,
+      span: root,
     });
-    expect(events.map((e) => e.type)).toEqual(["turn", "tool_call", "tool_result", "turn"]);
-    // every turn names the model that took it as the SAME `<provider>/<model>` ref run_meta
-    // carries (the page badges a silent model and flags a switch by comparing the two)
-    expect(events[0]).toEqual({
-      type: "turn",
-      model: "slow/m",
+    expect(spanNames(all)).toEqual([
+      "+run.agent",
+      "+model.turn",
+      "-model.turn",
+      "+tool.bash",
+      "tool_call",
+      "tool_result",
+      "-tool.bash",
+      "+model.turn",
+      "-model.turn",
+      "-run.agent",
+    ]);
+    const turn = all[2];
+    expect(turn).toMatchObject({
+      type: "span_end",
+      name: "model.turn",
       startedAt: 1_000,
       durationMs: 5_000,
-      stopReason: "tool_use",
+      status: "ok",
+      attrs: { stopReason: "tool_use" },
       at: 6_000,
     });
+    const toolStart = all[3];
+    const call = all[4];
+    const result = all[5];
+    const toolEnd = all[6];
+    expect(toolStart.type === "span_start" && toolStart.spanId).toBeTruthy();
+    const spanId = (toolStart as { spanId: string }).spanId;
+    expect(call).toMatchObject({ type: "tool_call", callId: "t1", spanId });
+    expect(result).toMatchObject({ type: "tool_result", callId: "t1", spanId });
+    expect(toolEnd).toMatchObject({
+      type: "span_end",
+      spanId,
+      name: "tool.bash",
+      status: "ok",
+      attrs: { callId: "t1", ok: true, exitCode: 0 },
+    });
     // the final text-only completion is a turn too (its output is the `answer`, published by the dispatcher)
-    expect(events[3]).toMatchObject({ type: "turn", stopReason: "end_turn", durationMs: 5_000 });
+    expect(all[8]).toMatchObject({ type: "span_end", name: "model.turn", attrs: { stopReason: "end_turn" } });
+    // the parent chain: turns and tools under run.agent, run.agent under the root
+    const agentId = (all[0] as { spanId: string }).spanId;
+    expect((all[1] as { parentSpanId?: string }).parentSpanId).toBe(agentId);
+    expect((all[3] as { parentSpanId?: string }).parentSpanId).toBe(agentId);
+    expect((all[0] as { parentSpanId?: string }).parentSpanId).toBe(root.id);
+    // the card's thought line rides the progress notes, one per model call
+    expect(notes.filter((n) => n.startsWith("💭 thought for "))).toEqual([
+      "💭 thought for 5.0s",
+      "💭 thought for 5.0s",
+    ]);
+    // no `turn` event anywhere
+    expect(all.some((e) => e.type === "turn")).toBe(false);
   });
 
-  it("carries the provider's token usage when it reports one, and omits the field when it does not", async () => {
-    const events: RunEvent[] = [];
+  it("carries the provider's token usage as attrs when it reports one, and none when it does not", async () => {
+    const { root, all, onEvent } = traced();
     await runAgent({
       provider: scripted([
         withUsage(bashUse("t1"), { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 }),
@@ -1370,15 +1433,25 @@ describe("model turn events (features/live-view.md item 15)", () => {
       agent: agent(),
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
       toolContext: { executor: fakeExecutor },
-      onEvent: (e) => events.push(e),
+      onEvent,
+      span: root,
     });
-    const turns = events.filter((e) => e.type === "turn");
-    expect(turns[0]).toMatchObject({ usage: { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 } });
-    expect(turns[1]).not.toHaveProperty("usage");
+    const turns = all.filter((e) => e.type === "span_end" && e.name === "model.turn") as Array<{
+      attrs?: Record<string, unknown>;
+    }>;
+    // `model` is the same `<provider>/<model>` ref `run_meta` carries (live-view item 15)
+    expect(turns[0].attrs).toEqual({
+      model: "fake/m",
+      stopReason: "tool_use",
+      inputTokens: 1200,
+      outputTokens: 80,
+      cacheReadTokens: 1000,
+    });
+    expect(turns[1].attrs).toEqual({ model: "fake/m", stopReason: "end_turn" });
   });
 
-  it("a `turn` precedes the assistant narration it produced", async () => {
-    const events: RunEvent[] = [];
+  it("a model.turn ends before the assistant narration it produced", async () => {
+    const { root, all, onEvent } = traced();
     await runAgent({
       provider: scripted([
         {
@@ -1394,22 +1467,101 @@ describe("model turn events (features/live-view.md item 15)", () => {
       agent: agent(),
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
       toolContext: { executor: fakeExecutor },
-      onEvent: (e) => events.push(e),
+      onEvent,
+      span: root,
     });
-    expect(events.map((e) => e.type)).toEqual(["turn", "assistant", "tool_call", "tool_result", "turn"]);
+    expect(spanNames(all).slice(0, 5)).toEqual(["+run.agent", "+model.turn", "-model.turn", "assistant", "+tool.bash"]);
   });
 
-  it("a refusal is still a turn (stopReason refusal)", async () => {
-    const events: RunEvent[] = [];
+  it("a refusal is still a turn: stopReason folds to `other` on the span", async () => {
+    const { root, all, onEvent } = traced();
     await runAgent({
       provider: scripted([text("no", "refusal")]),
       model: "m",
       agent: agent(),
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
       toolContext: { executor: fakeExecutor },
+      onEvent,
+      span: root,
+    });
+    expect(spanNames(all)).toEqual(["+run.agent", "+model.turn", "-model.turn", "-run.agent"]);
+    expect(all[2]).toMatchObject({ type: "span_end", attrs: { stopReason: "other" } });
+  });
+
+  it("a tool that fails ends its span `error` with the outcome attrs; an unknown tool too; an infra failure is marked", async () => {
+    const flaky: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        throw new ExecInfraError("sandbox worker /exec: 502");
+      },
+    };
+    const unknown: CompletionResult = {
+      content: [{ type: "tool_use", id: "u1", name: "no_such_tool", input: {} }],
+      stopReason: "tool_use",
+    };
+    const { root, all, onEvent } = traced();
+    await runAgent({
+      provider: scripted([bashUse("t1"), unknown, text("done")]),
+      model: "m",
+      agent: agent({ maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: flaky },
+      onEvent,
+      span: root,
+    });
+    const ends = all.filter((e) => e.type === "span_end" && e.name.startsWith("tool.")) as Array<{
+      name: string;
+      status: string;
+      attrs?: Record<string, unknown>;
+    }>;
+    expect(ends.map((e) => [e.name, e.status, e.attrs])).toEqual([
+      ["tool.bash", "error", { callId: "t1", ok: false, infra: true }],
+      ["tool.no_such_tool", "error", { callId: "u1", ok: false }],
+    ]);
+  });
+
+  it("a tool's executor operations are log-only exec.* spans under the tool's span, carrying the backend; a tool's own publish is stamped with the span", async () => {
+    const skills = new InMemorySkillStore([
+      { name: "tdd", description: "test first", body: "BODY", agents: ["coding"], source: "https://example.com/tdd" },
+    ]);
+    const useSkill: CompletionResult = {
+      content: [{ type: "tool_use", id: "s1", name: "use_skill", input: { name: "tdd" } }],
+      stopReason: "tool_use",
+    };
+    const { root, all, log, onEvent } = traced();
+    await runAgent({
+      provider: scripted([bashUse("t1"), useSkill, text("done")]),
+      model: "m",
+      agent: agent({ toolset: "full", maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor, skills, agentName: "coding" },
+      onEvent,
+      span: root,
+      backend: "sandbox",
+    });
+    const exec = log.ended("exec.exec");
+    expect(exec).toBeDefined();
+    expect(exec!.attrs).toMatchObject({ backend: "sandbox" });
+    const toolBash = log.ended("tool.bash");
+    expect(exec!.parentSpanId).toBe(toolBash!.spanId);
+    expect(all.some((e) => e.type === "span_end" && e.name === "exec.exec")).toBe(false); // log-only: never on the stream
+    const skillUse = all.find((e) => e.type === "skill_use") as { spanId?: string } | undefined;
+    const skillSpan = log.ended("tool.use_skill");
+    expect(skillUse?.spanId).toBe(skillSpan!.spanId);
+  });
+
+  it("without a span the run emits no span records and its events are unchanged", async () => {
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider: scripted([bashUse("t1"), text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    expect(events).toEqual([expect.objectContaining({ type: "turn", stopReason: "refusal" })]);
+    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
+    expect(events[0]).not.toHaveProperty("spanId");
   });
 });
 

@@ -4,6 +4,7 @@ import {
   capToolResultContent,
   toolResultText,
   type ChatMessage,
+  type CompletionResult,
   type ContentPart,
   type Provider,
 } from "./providers/types.js";
@@ -21,7 +22,11 @@ import type { RunControl } from "./core/runRegistry.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 import type { Settlement } from "./core/runLedger/resume.js";
 import { ExecCapacityError, ExecHealthTracker, ExecInfraError } from "./execution/executor.js";
+import { TracingExecutor } from "./execution/tracingExecutor.js";
 import { TOOLSETS, type RunnableTool, type ToolContext } from "./tools/workspace.js";
+import type { Backend } from "./core/trace/attrs.js";
+import type { Span } from "./core/trace/types.js";
+import { formatDuration } from "./core/time/formatDuration.js";
 
 // The runner is the provider-neutral agent loop: send messages, execute any
 // requested tools, feed results back, repeat until the model stops or the
@@ -65,6 +70,14 @@ export interface RunOptions {
   onEvent?: (event: RunEvent) => void;
   /** injectable clock for tests; defaults to Date.now */
   now?: () => number;
+  /** The parent of this run's spans (features/tracing.md): `run.agent` is
+   *  opened under it, and every model turn (`model.turn`) and tool call
+   *  (`tool.<name>`, with its `exec.*` children) under that. Absent (CLI,
+   *  tests without a tracer) → the run emits no spans and is otherwise
+   *  byte-identical. */
+  span?: Span;
+  /** Where the run's commands execute, recorded on its `exec.*` spans. */
+  backend?: Backend;
   /** Operator stop control (#101), minted per run by the RunRegistry. Soft:
    *  the loop takes no new step and wraps up through the finale. Hard: the
    *  in-flight provider/tool call is abandoned (and cancelled where the
@@ -160,7 +173,10 @@ export async function runAgent(opts: RunOptions): Promise<string> {
   };
 
   try {
-    return await runLoop(opts, now, note, emit);
+    // The whole loop is one `run.agent` span (uncounted: its own time, minus
+    // its turns and tools, is Switchboard overhead by design).
+    const loop = (agentSpan: Span | undefined) => runLoop(opts, now, note, emit, agentSpan);
+    return opts.span ? await opts.span.span("run.agent", loop) : await loop(undefined);
   } catch (err) {
     // A hard stop is the ONLY expected way out here: whatever was awaited (a
     // provider stream, a tool, even the soft-stop finale) was abandoned. Any
@@ -178,6 +194,7 @@ async function runLoop(
   now: () => number,
   note: (kind: RunNoteKind, summary: string, mode?: StopMode) => void,
   emit: (event: RunEvent) => void,
+  agentSpan: Span | undefined,
 ): Promise<string> {
   const tools: RunnableTool[] = mergeTools(TOOLSETS[opts.agent.toolset] ?? [], opts.extraTools);
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
@@ -225,31 +242,44 @@ async function runLoop(
   // A provider call under the hard signal, optionally joined with a deadline
   // (the finale's timeout). A hard stop always unwinds as HardStopError; a
   // deadline that fires first is a FinaleTimeoutError the finale caller handles.
-  // Every provider call is one model `turn` on the stream (live-view item 15):
-  // timed here, emitted the moment the provider returns and before anything the
-  // completion produced is emitted. A call that throws (hard stop, finale
-  // deadline, provider error) is not a turn — nothing was produced.
+  // Every provider call is one `model.turn` span (features/tracing.md;
+  // live-view item 15): the span ends the moment the provider returns, before
+  // anything the completion produced is emitted, carrying the stop reason, the
+  // token counts and the time to first token. A call that throws (hard stop,
+  // finale deadline, provider error) is a turn that failed — the span says so
+  // and nothing was produced. The card's `💭 thought for …` line is a progress
+  // note from here; the stream carries the span, never a `turn` event.
   const complete: Complete = async (req, deadline) => {
     const signal = hardSignal && deadline ? AbortSignal.any([hardSignal, deadline]) : (hardSignal ?? deadline);
-    const startedAt = now();
-    const result = await raceSignal(opts.provider.complete(signal ? { ...req, signal } : req), signal, () =>
-      hardSignal?.aborted ? new HardStopError() : new FinaleTimeoutError(),
-    );
-    const at = now();
-    emit({
-      type: "turn",
-      // The same `<provider>/<model>` ref `run_meta` names — `opts.model` is
-      // the bare id the provider API takes, and the registry keys providers by
-      // the ref's prefix, so `provider.name` IS that prefix. (v0.4.0 stamped
-      // the bare id, which the page read as a model switch on every run.)
-      model: `${opts.provider.name}/${opts.model}`,
-      startedAt,
-      durationMs: at - startedAt,
-      stopReason: result.stopReason,
-      ...(result.usage ? { usage: result.usage } : {}),
-      at,
-    });
-    return result;
+    const call = async (turnSpan: Span | undefined) => {
+      const startedAt = now();
+      let firstTokenAt: number | undefined;
+      const observer = { onFirstToken: () => void (firstTokenAt ??= now()) };
+      const result = await raceSignal(
+        opts.provider.complete({ ...req, ...(signal ? { signal } : {}), observer }),
+        signal,
+        () => (hardSignal?.aborted ? new HardStopError() : new FinaleTimeoutError()),
+      );
+      const at = now();
+      turnSpan?.setAttrs({
+        model: `${opts.provider.name}/${opts.model}`, // the same ref `run_meta` carries (live-view item 15)
+        stopReason: turnStopReason(result.stopReason),
+        ...(result.usage
+          ? {
+              inputTokens: result.usage.inputTokens,
+              outputTokens: result.usage.outputTokens,
+              ...(result.usage.cacheReadTokens !== undefined ? { cacheReadTokens: result.usage.cacheReadTokens } : {}),
+              ...(result.usage.cacheWriteTokens !== undefined
+                ? { cacheWriteTokens: result.usage.cacheWriteTokens }
+                : {}),
+            }
+          : {}),
+        ...(firstTokenAt !== undefined ? { ttftMs: firstTokenAt - startedAt } : {}),
+      });
+      opts.onProgress?.(`💭 thought for ${formatDuration(at - startedAt, "precise")}`);
+      return result;
+    };
+    return agentSpan ? agentSpan.span("model.turn", call) : call(undefined);
   };
 
   // The wall clock is the real budget; turns are a backstop. At the deadline
@@ -300,88 +330,122 @@ async function runLoop(
     }
     return parts;
   };
-  // One tool_use → its tool_result part (and the events it produces). Only a
-  // hard stop escapes as a rejection; every tool failure is a result.
-  const runOne = async (tu: ToolUsePart): Promise<ContentPart> => {
-    const tool = toolsByName.get(tu.name);
-    if (!tool) {
-      emit({
-        type: "tool_result",
-        tool: tu.name,
-        ok: false,
-        summary: redactAndCap(`Unknown tool: ${tu.name}`),
-        callId: tu.id,
-      });
-      return { type: "tool_result", toolUseId: tu.id, content: `Unknown tool: ${tu.name}`, isError: true };
-    }
-    try {
-      const output = await untilHardStop(tool.run((tu.input ?? {}) as Record<string, unknown>, toolContext));
-      const text = toolResultText(output);
-      // A bash command that exited nonzero did not succeed, whatever the tool
-      // returned — the executors say so with an `exit N:` prefix (runEvents).
-      const exit = tu.name === "bash" ? parseExitPrefix(text) : undefined;
-      emit({
-        type: "tool_result",
-        tool: tu.name,
-        ok: !exit?.failed,
-        callId: tu.id,
-        ...(exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
-        ...prepareToolResult(text),
-      });
-      // The model never receives more than MAX_TOOL_RESULT_CHARS of text from
-      // one tool, whatever the tool returned (providers/types.ts, #615).
-      return { type: "tool_result", toolUseId: tu.id, content: capToolResultContent(output) };
-    } catch (err) {
-      // A hard stop is not a tool error to feed back to the model — unwind.
-      // A genuine tool error that merely coincides with the hard request is
-      // unwound too (the outcome is the abort either way), but logged first
-      // so it is not silently swallowed behind the abort message.
-      if (err instanceof HardStopError) throw err;
-      if (control?.requested === "hard") {
-        console.warn(
-          `[runner] tool ${tu.name} failed while hard-stopping: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        throw err;
+  // One tool_use → its tool_result part (and the events it produces), inside
+  // its own `tool.<name>` span (features/tracing.md): the `tool_call` is
+  // announced inside the span so it carries the span's id, the tool runs with
+  // a per-call context (the span, a tracing executor, a publisher that stamps
+  // the span on what the tool publishes), and the span ends with the call's
+  // outcome as attrs — `error` when the tool did not succeed. Only a hard stop
+  // escapes as a rejection; every tool failure is a result.
+  const runOne = async (tu: ToolUsePart, announceIt = true): Promise<ContentPart> => {
+    const body = async (callSpan: Span | undefined): Promise<ContentPart> => {
+      if (announceIt) announce(tu, callSpan?.id);
+      const spanId = callSpan ? { spanId: callSpan.id } : {};
+      const settle = (ok: boolean, extra: { exitCode?: number; infra?: true } = {}) =>
+        callSpan?.end(ok ? "ok" : "error", {
+          callId: tu.id,
+          ok,
+          ...(extra.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
+          ...(extra.infra ? { infra: true } : {}),
+        });
+      const tool = toolsByName.get(tu.name);
+      if (!tool) {
+        emit({
+          type: "tool_result",
+          tool: tu.name,
+          ok: false,
+          summary: redactAndCap(`Unknown tool: ${tu.name}`),
+          callId: tu.id,
+          ...spanId,
+        });
+        settle(false);
+        return { type: "tool_result", toolUseId: tu.id, content: `Unknown tool: ${tu.name}`, isError: true };
       }
-      const message = err instanceof Error ? err.message : String(err);
-      // A full sandbox fleet (features/execution.md item 14) is capacity, not
-      // a dead sandbox: the executor already waited its bounded time, nothing
-      // ran, and the tracker did not count it — so the run goes on. The model
-      // is told plainly what happened and its two ways forward; the stream
-      // carries a typed note so the friction analyzer sees the minutes lost.
-      if (err instanceof ExecCapacityError) {
-        const text = `⏳ Sandbox fleet busy — ${message}. Retry the command in a minute or finish with what you have.`;
-        emit({ type: "tool_result", tool: tu.name, ok: false, callId: tu.id, ...prepareToolResult(text) });
-        note("fleet_busy", text);
-        return { type: "tool_result", toolUseId: tu.id, content: text, isError: true };
+      const ctx: ToolContext = callSpan
+        ? {
+            ...toolContext,
+            span: callSpan,
+            executor: new TracingExecutor(execTracker, callSpan, opts.backend),
+            publish: (e) => emit(withSpanId(e, callSpan.id)),
+          }
+        : toolContext;
+      try {
+        const output = await untilHardStop(tool.run((tu.input ?? {}) as Record<string, unknown>, ctx));
+        const text = toolResultText(output);
+        // A bash command that exited nonzero did not succeed, whatever the tool
+        // returned — the executors say so with an `exit N:` prefix (runEvents).
+        const exit = tu.name === "bash" ? parseExitPrefix(text) : undefined;
+        emit({
+          type: "tool_result",
+          tool: tu.name,
+          ok: !exit?.failed,
+          callId: tu.id,
+          ...(exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
+          ...prepareToolResult(text),
+          ...spanId,
+        });
+        settle(!exit?.failed, exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {});
+        // The model never receives more than MAX_TOOL_RESULT_CHARS of text from
+        // one tool, whatever the tool returned (providers/types.ts, #615).
+        return { type: "tool_result", toolUseId: tu.id, content: capToolResultContent(output) };
+      } catch (err) {
+        // A hard stop is not a tool error to feed back to the model — unwind.
+        // A genuine tool error that merely coincides with the hard request is
+        // unwound too (the outcome is the abort either way), but logged first
+        // so it is not silently swallowed behind the abort message.
+        if (err instanceof HardStopError) throw err;
+        if (control?.requested === "hard") {
+          console.warn(
+            `[runner] tool ${tu.name} failed while hard-stopping: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          throw err;
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        // A full sandbox fleet (features/execution.md item 14) is capacity, not
+        // a dead sandbox: the executor already waited its bounded time, nothing
+        // ran, and the tracker did not count it — so the run goes on. The model
+        // is told plainly what happened and its two ways forward; the stream
+        // carries a typed note so the friction analyzer sees the minutes lost.
+        if (err instanceof ExecCapacityError) {
+          const text = `⏳ Sandbox fleet busy — ${message}. Retry the command in a minute or finish with what you have.`;
+          emit({ type: "tool_result", tool: tu.name, ok: false, callId: tu.id, ...prepareToolResult(text), ...spanId });
+          note("fleet_busy", text);
+          settle(false, { infra: true });
+          return { type: "tool_result", toolUseId: tu.id, content: text, isError: true };
+        }
+        // `infra` marks a sandbox/transport failure (not the command's own error)
+        // so downstream analysis never mistakes a dead sandbox for a failing command.
+        const infra = err instanceof ExecInfraError;
+        emit({
+          type: "tool_result",
+          tool: tu.name,
+          ok: false,
+          callId: tu.id,
+          ...prepareToolResult(message),
+          ...(infra ? { infra: true as const } : {}),
+          ...spanId,
+        });
+        callSpan?.fail(err);
+        settle(false, infra ? { infra: true } : {});
+        // The same ceiling on the error path: a tool that throws with a huge
+        // message (an executor echoing its output into the error) is still a
+        // tool result the model reads.
+        return {
+          type: "tool_result",
+          toolUseId: tu.id,
+          content: capToolResultContent(`Error: ${message}`),
+          isError: true,
+        };
       }
-      // `infra` marks a sandbox/transport failure (not the command's own error)
-      // so downstream analysis never mistakes a dead sandbox for a failing command.
-      emit({
-        type: "tool_result",
-        tool: tu.name,
-        ok: false,
-        callId: tu.id,
-        ...prepareToolResult(message),
-        ...(err instanceof ExecInfraError ? { infra: true as const } : {}),
-      });
-      // The same ceiling on the error path: a tool that throws with a huge
-      // message (an executor echoing its output into the error) is still a
-      // tool result the model reads.
-      return {
-        type: "tool_result",
-        toolUseId: tu.id,
-        content: capToolResultContent(`Error: ${message}`),
-        isError: true,
-      };
-    }
+    };
+    return agentSpan ? agentSpan.span(`tool.${tu.name}`, body) : body(undefined);
   };
   // Redact THEN cap (redactAndCap): a pre-truncated command could sever a
   // token below its detector's length floor and leak a raw fragment.
   // A bash call also carries its full command (redacted, capped far above the
   // summary) so the pushed-branch tracker can see a `git push` that a chained
   // command pushed past the 200-char summary (runEvents `tool_call.command`).
-  const announce = (tu: ToolUsePart) => {
+  const announce = (tu: ToolUsePart, spanId?: string) => {
     const input = tu.input as Record<string, unknown> | undefined;
     const command =
       tu.name === "bash" && typeof input?.command === "string"
@@ -393,6 +457,7 @@ async function runLoop(
       summary: redactAndCap(describeToolCall(tu)),
       callId: tu.id,
       ...command,
+      ...(spanId !== undefined ? { spanId } : {}),
     });
   };
   // Execution order: a mutating tool runs alone, in the model's order; a run
@@ -411,12 +476,13 @@ async function runLoop(
   ): Promise<ContentPart[]> => {
     // A settlement re-run (item 37) has its `tool_call` on the stream already,
     // replayed from the ledger under its original seq; announcing again would
-    // put two calls with one callId on the record.
-    const announceCall = opts.announce === false ? () => {} : announce;
+    // put two calls with one callId on the record. The announce happens inside
+    // each call's span (`runOne`), so a batch's calls are announced as they
+    // start — together, since they start together.
+    const announceIt = opts.announce !== false;
     const results: ContentPart[] = [];
     const runBatch = async (batch: ToolUsePart[]) => {
-      batch.forEach(announceCall);
-      const settled = await Promise.allSettled(batch.map(runOne));
+      const settled = await Promise.allSettled(batch.map((tu) => runOne(tu, announceIt)));
       for (const s of settled) if (s.status === "rejected") throw s.reason;
       for (const s of settled) if (s.status === "fulfilled") results.push(s.value);
     };
@@ -428,8 +494,7 @@ async function runLoop(
       }
       if (batch.length > 0) await runBatch(batch);
       batch = [];
-      announceCall(tu);
-      results.push(await runOne(tu));
+      results.push(await runOne(tu, announceIt));
     }
     if (batch.length > 0) await runBatch(batch);
     return results;
@@ -766,4 +831,25 @@ function describeToolCall(tu: ToolUsePart): string {
     if (typeof v === "string" && v.trim() && v.length <= 200) return `${tu.name} ${v.trim()}`;
   }
   return tu.name;
+}
+
+/** The `stopReason` attr domain (attrs.ts) folds the provider's `refusal` into `other`. */
+function turnStopReason(r: CompletionResult["stopReason"]): "end_turn" | "tool_use" | "max_tokens" | "other" {
+  return r === "end_turn" || r === "tool_use" || r === "max_tokens" ? r : "other";
+}
+
+/** Stamp the tool call's span on what the tool itself publishes (a skill load,
+ *  a legacy MCP fact); events with no `spanId` field pass through. */
+function withSpanId(e: RunEvent, spanId: string): RunEvent {
+  switch (e.type) {
+    case "tool_call":
+    case "tool_result":
+    case "run_note":
+    case "assistant":
+    case "skill_use":
+    case "mcp_tool_use":
+      return { ...e, spanId };
+    default:
+      return e;
+  }
 }

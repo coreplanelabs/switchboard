@@ -135,6 +135,25 @@ describe("createRunEnding — seal after the reply, records after the seal", () 
     expect(lines).toEqual(["[ending] record a: store exploded with token=SECRET", "[ending] record b: later"]);
   });
 
+  it("finished(id, { afterSeal }) runs the hook once, after that run's seal and before the writers; a hook that throws is logged and the drain goes on", () => {
+    const reg = fakeRegistry();
+    const lines: string[] = [];
+    const ending = createRunEnding({ registry: reg, log: (l) => void lines.push(l) });
+    const order: string[] = [];
+    ending.finished("r1", {
+      afterSeal: () => {
+        order.push(`after-seal r1 (sealed: ${reg.sealed.has("r1")})`);
+        throw new Error("root end blew up");
+      },
+    });
+    ending.finished("r2", { afterSeal: () => void order.push("after-seal r2") });
+    ending.register({ runId: "r1", flipOnPostFinishFailure: true, write: () => void order.push("write r1") });
+    ending.drain(true);
+    ending.drain(true);
+    expect(order).toEqual(["after-seal r1 (sealed: true)", "after-seal r2", "write r1"]);
+    expect(lines).toEqual(["[ending] after seal r1: root end blew up"]);
+  });
+
   it("a registry whose seal throws is logged and the drain goes on", () => {
     const lines: string[] = [];
     const ending = createRunEnding({

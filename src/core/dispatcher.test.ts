@@ -3195,6 +3195,10 @@ describe("coding PR post-step (features/pr-description.md)", () => {
 // RunRegistry, publishes each RunEvent to it (feeding the external /runs
 // stream), finishes it in the run-loop finally, and puts the per-run capability
 // link on the status card ONLY when PUBLIC_BASE_URL is set (graceful otherwise).
+/** A stream's shape with its span records named: `+name` opens, `-name` closes (features/tracing.md). */
+const shapeOf = (events: readonly RunEvent[]) =>
+  events.map((e) => (e.type === "span_start" ? `+${e.name}` : e.type === "span_end" ? `-${e.name}` : e.type));
+
 describe("live run-view wiring (Area 2)", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -3251,14 +3255,26 @@ describe("live run-view wiring (Area 2)", () => {
     // The record is bookended by the request (`input`, live-view item 12) and
     // the final answer (the run record is the source of truth; Slack is a
     // projection of it), the latter before the run finishes.
-    expect(events.map((e) => e.type)).toEqual([
+    // Spans, not `turn` events, carry the timing (features/tracing.md): the
+    // run's root opens the stream, the loop is `run.agent`, each model call a
+    // `model.turn`, the tool call a `tool.bash` around its pair. This spy never
+    // seals, so the root's close reaches it too; a real registry drops it.
+    expect(shapeOf(events)).toEqual([
+      "+request",
       "input",
       "run_meta",
-      "turn",
+      "+run.agent",
+      "+model.turn",
+      "-model.turn",
+      "+tool.bash",
       "tool_call",
       "tool_result",
-      "turn",
+      "-tool.bash",
+      "+model.turn",
+      "-model.turn",
+      "-run.agent",
       "answer",
+      "-request",
     ]);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
@@ -3350,16 +3366,28 @@ describe("live run-view wiring (Area 2)", () => {
       },
       fakeIO().io,
     );
-    expect(events.map((e) => e.type)).toEqual([
+    // Spans, not `turn` events, carry the timing (features/tracing.md): the
+    // run's root opens the stream, the loop is `run.agent`, each model call a
+    // `model.turn`, the tool call a `tool.bash` around its pair. This spy never
+    // seals, so the root's close reaches it too; a real registry drops it.
+    expect(shapeOf(events)).toEqual([
+      "+request",
       "input",
       "run_meta",
-      "turn",
+      "+run.agent",
+      "+model.turn",
+      "-model.turn",
+      "+tool.bash",
       "tool_call",
       "tool_result",
-      "turn",
+      "-tool.bash",
+      "+model.turn",
+      "-model.turn",
+      "-run.agent",
       "answer",
+      "-request",
     ]);
-    const input = events[0];
+    const input = events[1]; // after the root's `span_start`
     if (input.type !== "input") throw new Error("unreachable");
     expect(input.text).toBe("please rotate «redacted-github-token» now [+2 images, 1 document]"); // directives stripped, redacted
     expect(input.at).toEqual(expect.any(Number));
@@ -3371,7 +3399,7 @@ describe("live run-view wiring (Area 2)", () => {
     });
     // what the run is about, right after the request (live-view item 19): the
     // resolved agent + model; no repo context for a repo-less general run
-    const meta = events[1];
+    const meta = events[2];
     if (meta.type !== "run_meta") throw new Error("unreachable");
     expect(meta).toEqual({
       type: "run_meta",
@@ -3398,7 +3426,7 @@ describe("live run-view wiring (Area 2)", () => {
     const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
     deps.runRegistry = spy;
     await dispatch(deps, msg("agent:general hi"), fakeIO().io);
-    const input = events[0];
+    const input = events[1]; // after the root's `span_start`
     if (input.type !== "input") throw new Error("unreachable");
     expect("source" in input).toBe(false);
   });
@@ -5658,6 +5686,7 @@ describe("run history write path (#157 U4)", () => {
     expect(rec!.storedEventCount).toBe(rec!.events.length);
     expect(rec!.eventCount).toBe(rec!.events.length);
     expect(rec!.truncated).toBe(false);
+    expect(rec!.schema).toBe(2); // the stream carries spans, never `turn` events (features/tracing.md)
     expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input", "answer"]);
     expect(textEventsOf(rec!.events)[1].text).toBe("answer");
     expect(rec!.channelId).toBe("slack:CX");
@@ -5883,7 +5912,7 @@ describe("run history write path (#157 U4)", () => {
   });
 
   it("more published events than the backlog holds: eventCount is the published total, storedEventCount the backlog length, truncated true — and the protected head (input, context, run_meta) is what survives, with the newest events after it", async () => {
-    // 14 head events (the input, 12 context turns, the run meta) + room for two more: the trim drops from after the head.
+    // 15 head events (the root's span_start, the input, 12 context turns, the run meta) + room for one more: the trim drops from after the head.
     const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", backlogLimit: 16 });
     const { deps, store, writer } = wired(toolThenAnswer(), { registry });
     const history: HistoryItem[] = Array.from({ length: 12 }, (_, i) => ({
@@ -5898,10 +5927,10 @@ describe("run history write path (#157 U4)", () => {
     expect(rec!.storedEventCount).toBe(16);
     expect(rec!.events).toHaveLength(16);
     expect(rec!.truncated).toBe(true);
-    expect(rec!.events[0]!.type).toBe("input");
+    expect(shapeOf(rec!.events).slice(0, 2)).toEqual(["+request", "input"]);
     expect(rec!.events.filter((e) => e.type === "context")).toHaveLength(12);
     expect(
-      rec!.events.slice(0, 14).every((e) => e.type === "input" || e.type === "context" || e.type === "run_meta"),
+      rec!.events.slice(1, 15).every((e) => e.type === "input" || e.type === "context" || e.type === "run_meta"),
     ).toBe(true);
     expect(rec!.events.at(-1)!.type).toBe("answer"); // the newest survives; the middle went
   });
@@ -6043,7 +6072,7 @@ describe("run history write path (#157 U4)", () => {
       const tomb = puts[0];
       expect(tomb.id).toBe("run-h");
       expect(tomb.finishedAt).toBe(tomb.startedAt); // provisional: nobody knows a crash's real death time
-      expect(tomb.events.map((e) => e.type)).toEqual(["input", "run_meta", "context"]);
+      expect(shapeOf(tomb.events)).toEqual(["+request", "input", "run_meta", "context"]);
       expect(tomb).toMatchObject({
         agent: "general",
         model: "anthropic/general-model",
@@ -7423,17 +7452,17 @@ workspaceDir: __WORKDIR__
       expect(typeof r.at).toBe("number"); // stamped for the friction/cost timeline
       expect(typeof r.seq).toBe("number"); // ordered on the one stream
     }
-    // Per-round cost derivability (spec item 12): every model-turn receipt lies
-    // between a round's `started` boundary and its settle, so slicing `turn`
-    // events by ship_round boundaries attributes cost per round.
+    // Per-round cost derivability (spec item 12): every model turn's span lies
+    // between a round's `started` boundary and its settle, so slicing
+    // `model.turn` spans by ship_round boundaries attributes cost per round.
     let inRound = false;
     const turnsPerRound: number[] = [];
     for (const e of snap.events) {
       if (e.type === "ship_round") {
         inRound = e.outcome === "started";
         if (inRound) turnsPerRound.push(0);
-      } else if (e.type === "turn") {
-        expect(inRound, `turn event (seq ${e.seq}) outside any round window`).toBe(true);
+      } else if (e.type === "span_end" && e.name === "model.turn") {
+        expect(inRound, `model turn (seq ${e.seq}) outside any round window`).toBe(true);
         turnsPerRound[turnsPerRound.length - 1]++;
       }
     }
@@ -7993,16 +8022,24 @@ describe("MCP tools (#394, features/mcp-tools.md)", () => {
     expect(client.calls).toEqual([{ name: "search_issues", args: { q: "login bug" } }]);
     expect(JSON.stringify(provider.requests[1].messages)).toContain("LINEAR RESULT for login bug");
     expect(JSON.stringify(provider.requests[1].messages)).toContain("UNTRUSTED CONTENT");
-    // The run stream carries the mcp_tool_use fact between the generic pair.
+    // The run stream carries the remote call as an `mcp.<server>.<tool>` span
+    // under the tool call's own span, between the generic pair (features/tracing.md
+    // — the legacy `mcp_tool_use` event is reader-only).
     const events = [...runIds].flatMap((id) => registry.snapshotById(id)?.events ?? []);
-    const types = events.map((e) => e.type);
-    const call = types.indexOf("tool_call");
-    const use = types.indexOf("mcp_tool_use");
-    const result = types.indexOf("tool_result");
+    const call = events.findIndex((e) => e.type === "tool_call");
+    const use = events.findIndex((e) => e.type === "span_end" && e.name === "mcp.linear.search_issues");
+    const result = events.findIndex((e) => e.type === "tool_result");
     expect(call).toBeGreaterThanOrEqual(0);
     expect(use).toBeGreaterThan(call);
     expect(result).toBeGreaterThan(use);
-    expect(events[use]).toMatchObject({ type: "mcp_tool_use", server: "linear", tool: "search_issues", ok: true });
+    const toolCall = events[call] as { spanId?: string };
+    expect(events[use]).toMatchObject({
+      type: "span_end",
+      status: "ok",
+      parentSpanId: toolCall.spanId,
+      attrs: { ok: true, bytes: expect.any(Number) },
+    });
+    expect(events.some((e) => e.type === "mcp_tool_use")).toBe(false);
   });
 
   it("no source, or no server scoped to the agent → the request is byte-identical", async () => {

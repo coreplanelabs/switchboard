@@ -1,5 +1,5 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import { serializedOnce, type RunEvent } from "../../core/runEvents.js";
+import { isSpanRecord, serializedOnce, type RunEvent } from "../../core/runEvents.js";
 import type { FinishedFrame, IndexEvent, SealedFrame, Subscribed, Unsubscribe } from "../../core/runRegistry.js";
 
 // Server-Sent Events transport for the live view: the per-run stream (the
@@ -245,7 +245,11 @@ export function serveIndexEvents(
  * markers are transport notices, never run events (they enter no store).
  */
 export function withOmittedMarkers(events: readonly RunEvent[], eventCount: number): LiveFrame[] {
-  const omitted = eventCount - events.length;
+  // A span record without a `seq` was synthesized by `normalizeSpans` for the
+  // seed (features/tracing.md): it stands for nothing the registry counted, so
+  // it is neither part of the stored count nor a step of the cursor below.
+  const counted = events.filter((e) => !(isSpanRecord(e) && e.seq === undefined)).length;
+  const omitted = eventCount - counted;
   if (omitted <= 0) return [...events];
   const marker = (n: number): LiveFrame => ({
     type: "replay_note",
@@ -263,7 +267,10 @@ export function withOmittedMarkers(events: readonly RunEvent[], eventCount: numb
       }
     }
     out.push(e);
-    expected = typeof e.seq === "number" ? e.seq + 1 : expected + 1;
+    // Only a stamped event moves the cursor: a synthesized span (the seed is
+    // normalized before the markers) or another marker has no `seq` and
+    // stands for nothing the registry counted.
+    if (typeof e.seq === "number") expected = e.seq + 1;
   }
   if (accounted < omitted) out.push(marker(omitted - accounted));
   return out;
