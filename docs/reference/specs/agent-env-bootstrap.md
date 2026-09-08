@@ -1,8 +1,8 @@
 # Agent env bootstrap: downstream UAT creds into the agent's execution environment
 
-When the switchboard agent works on a **downstream service**, its execution environment — the shell where its `bash` tool runs (resident/sandbox/local-dev) — needs that service's environment variables so the real toolchain works: running the service's tests, generating code against it, deploying to that service's **UAT**. This tool materializes those env vars from 1Password via a **read-only service account scoped to a UAT vault**, so the agent can obtain a downstream service's **UAT** creds — never its prod (GitHub #72, Matanya requirements 2+3: local env setup so no agent tokens are wasted on env setup, and a 1Password service account that sets env vars from the vault).
+When the switchboard agent works on a **downstream service**, its execution environment — the shell where its `bash` tool runs (resident/sandbox/local-dev) — needs that service's environment variables so the real toolchain works: running the service's tests, generating code against it, deploying to that service's **UAT**. This tool materializes those env vars from 1Password via a **read-only service account scoped to a UAT vault**, so the agent can obtain a downstream service's **UAT** creds — never its prod — without spending agent turns on environment setup.
 
-**This is NOT** switchboard's own Cloudflare-Worker secret provisioning (that was the separate, closed PR #77, which wrote to switchboard's Workers via `wrangler secret put`). Here the write side **materializes env vars into the execution environment**: `--apply` writes a `chmod 600` dotenv file the toolchain sources, and the in-process integration hook returns the same `NAME→value` map for merging into a sandbox's env.
+**This is NOT** Switchboard's own Cloudflare-Worker secret provisioning ([release-and-deploy.md](release-and-deploy.md) item 18 — that path writes to Switchboard's Workers via `wrangler secret put`). Here the write side **materializes env vars into the execution environment**: `--apply` writes a `chmod 600` dotenv file the toolchain sources, and the in-process integration hook returns the same `NAME→value` map for merging into a sandbox's env.
 
 Switchboard itself runs in prod, which is fine — the safety is not where switchboard runs, it is that the service account is **read-only and UAT-vault-scoped**, so the only creds reachable are downstream **UAT** creds. The env-name allowlist (`["uat"]`) is defense-in-depth on top of that operational guard.
 
@@ -28,29 +28,29 @@ Keyed **env-first, then service-first**, so a section reads as "the UAT creds fo
 ## Safety posture
 
 - **UAT-only allowlist.** `assertAllowedEnv` refuses any env not in `ALLOWED_ENVS` (`["uat"]`) — prod, an alias, a typo — and it runs inside `buildPlan`, so it blocks even a *dry-run* of a non-uat env, before anything is read or written.
-- **The real guard is operational.** The `OP_SERVICE_ACCOUNT_TOKEN` the operator exports MUST belong to a 1Password service account that is **read-only** and **scoped to the UAT vault only**. Then the agent can only ever resolve UAT creds regardless of the manifest. The allowlist is defense-in-depth on top of this.
-- **Read-only tool.** The tool only ever READS from 1Password and WRITES the env file. It never writes to 1Password and never touches prod.
+- **The real guard is operational.** The `OP_SERVICE_ACCOUNT_TOKEN` the operator exports MUST belong to a vault service account that is **read-only** and **scoped to the UAT vault only**. Then the agent can only ever resolve UAT creds regardless of the manifest. The allowlist is defense-in-depth on top of this.
+- **Read-only tool.** The tool only ever READS from the vault and WRITES the env file. It never writes to the vault and never touches prod.
 - **Values never leak.** Resolved values travel `op read` → the chmod-600 file contents / the returned env map only. They are never logged and never placed in argv (the token is read by `op` from the environment; refs — not values — are the only args).
 
-## Setup: creating the 1Password service account (one-time, org-admin)
+## Setup: creating the vault service account (one-time, org-admin)
 
-> **Product gap — human-gated.** This tool cannot self-provision its own 1Password
-> credential. A 1Password **Business owner/admin** must create the service account
+> **Product gap — human-gated.** This tool cannot self-provision its own vault
+> credential. A secrets-manager **Business owner/admin** must create the service account
 > once; the agent can never do this itself. Until it exists, the tool runs dry-run
 > only (it fails closed on `--apply` when `OP_SERVICE_ACCOUNT_TOKEN` is unset).
 
 **Prerequisites**
-- Owner/admin on the 1Password **Business** account (service accounts are a Business feature).
-- The name of the single **UAT vault** that holds the downstream service's creds — the vault your `op://<vault>/…` refs point at. The service account is scoped to *only* that vault.
+- Owner/admin on the secrets manager's **Business** account (service accounts are a Business feature).
+- The name of the single **UAT vault** that holds the downstream service's creds — the vault the manifest's refs point at. The service account is scoped to *only* that vault.
 
 **Route A — Web console (recommended; unambiguous scoping)**
-1. Sign in to `https://<team>.1password.com` as owner/admin.
+1. Sign in to the secrets manager's web console as owner/admin.
 2. Sidebar → **Developer** (may sit under **Integrations** or **Settings → Developer**).
 3. **Service Accounts → Create Service Account**.
 4. Name it `switchboard-agent-uat-ro`.
 5. **Vault access (critical):** add **only the one UAT vault**, permission **Read / View items** only. Do **not** select "All vaults" and do **not** grant write/manage.
 6. Optional: set an expiration (e.g. 90 days).
-7. Create, then **copy the `ops_…` token** — it is shown **once**. Store it in 1Password.
+7. Create, then **copy the `ops_…` token** — it is shown **once**. Store it in the vault.
 
 **Route B — CLI (`op` v2+, signed in as owner/admin)**
 
@@ -75,13 +75,13 @@ The **read-only + single-UAT-vault scope is the real safety guard**; the `["uat"
 
 ## Dry-run and apply
 
-- **Dry-run is the default** (no `--apply`): prints the plan — env-var NAMES + their `op://vault/item/field` refs — resolving nothing, writing nothing, never a value.
+- **Dry-run is the default** (no `--apply`): prints the plan — env-var NAMES + their vault refs — resolving nothing, writing nothing, never a value.
 - **`--apply`** resolves each ref and writes ONE `chmod 600` env file (default `.agent-env/<service>.<env>.env`, gitignored). Fails closed if `OP_SERVICE_ACCOUNT_TOKEN` is unset or a ref won't resolve. The file is `export NAME='value'` lines (shell-quoted), sourced with `set -a; . <file>; set +a`.
 
 Operator flow:
 
 ```bash
-# 1) fill deploy/agent-env.jsonc with real op:// refs for the service
+# 1) fill deploy/agent-env.jsonc with the service's real vault refs
 # 2) export a READ-ONLY, UAT-vault-scoped service-account token
 export OP_SERVICE_ACCOUNT_TOKEN=ops_...
 # 3) see the plan (nothing read/written)
@@ -98,7 +98,7 @@ set -a; . .agent-env/<name>.uat.env; set +a
 
 **Open integration decision for the owner (deliberately NOT wired into the deployed executor in v1):** where downstream UAT env should enter a run. Two mechanisms, both supported by this tool:
 
-1. **Baked into the repo's toolchain-setup step** (requirement 2, "tune and bake into the repo"): run `--apply` once during the resident warm-up / a repo's setup, and have the toolchain source the chmod-600 file. Simple, no code change to the executor; the file lives on the execution host.
+1. **Baked into the repo's toolchain-setup step**: run `--apply` once during the resident warm-up / a repo's setup, and have the toolchain source the chmod-600 file. Simple, no code change to the executor; the file lives on the execution host.
 2. **In-process injection via `buildAgentEnv`**: call it from `factory.ts` alongside `githubEnvs()` and merge the result into the sandbox `envs`. Cleaner (no on-disk file), but adds an `op read` dependency and latency to executor provisioning, and needs a policy for *which service* a run targets (the dispatcher already resolves `ctx.repo`, which could map to a service).
 
 The decision (mechanism, where the service name comes from, whether the resident host has `op` + the token) is the owner's; v1 ships the standalone tool + the hook + this doc so either can be wired later behind a flag. Nothing here runs in the deployed bot/resident yet.
@@ -107,9 +107,9 @@ The decision (mechanism, where the service name comes from, whether the resident
 
 | Criterion | Evidence |
 |-----------|----------|
-| JSONC parse is string-aware: `op://` (with its `//`) survives line/block comments + trailing commas | `[unit]` `src/agentEnv/bootstrap.test.ts::stripJsonc::preserves op:// (with its //) inside string values`, `::strips line comments outside strings but not the op:// inside them`, `::strips block comments and trailing commas` |
+| JSONC parse is string-aware: a vault ref (with its `//`) survives line/block comments + trailing commas | `[unit]` `src/agentEnv/bootstrap.test.ts::stripJsonc::preserves … (with its //) inside string values`, `::strips line comments outside strings but not the … inside them`, `::strips block comments and trailing commas` |
 | Manifest parses to env→service→NAME→ref; malformed JSON / non-string ref / non-object service throw clearly | `[unit]` `::parseManifest::parses a JSONC manifest with comments into env -> service -> NAME -> ref`, `::throws on malformed JSON`, `::throws when a ref is not a string`, `::throws when a service is not an object` |
-| `op://` ref parses to vault/item/field (trailing path folded into field); malformed refs rejected | `[unit]` `::parseOpRef::splits vault/item/field`, `::folds a trailing section path into field`, `::rejects a non-op ref and a too-short ref` |
+| A vault ref parses to vault/item/field (trailing path folded into field); malformed refs rejected | `[unit]` `::parseOpRef::splits vault/item/field`, `::folds a trailing section path into field`, `::rejects a non-op ref and a too-short ref` |
 | Env-name allowlist: `uat` allowed; prod / aliases / typos refused | `[unit]` `::assertAllowedEnv — UAT-only allowlist::permits uat`, `::refuses prod`, `::refuses any non-allowlisted env or alias (staging, production, uat-alias)` (RED-verified: neutering the allowlist fails these) |
 | Plan reads only the selected env+service section; unknown service / missing env section throw | `[unit]` `::buildPlan::builds one entry per var for the selected env+service, only from that section`, `::refuses a non-uat env (allowlist enforced in the plan, before any resolve)`, `::throws on an unknown service`, `::throws when the env section is missing entirely` |
 | Env file is sourceable `export NAME='value'` (shell-quoted, single quotes survive) with a do-not-commit header | `[unit]` `::renderEnvFile::emits \`export NAME='value'\` lines that survive sourcing`, `::carries a do-not-commit header naming the env+service` |
@@ -120,5 +120,5 @@ The decision (mechanism, where the service name comes from, whether the resident
 | Apply refuses a non-uat env before resolving or writing | `[unit]` `::runBootstrap — apply::refuses apply for a non-uat env before resolving or writing` |
 | Integration hook returns the resolved UAT env map; enforces allowlist + fail-closed token | `[unit]` `::buildAgentEnv — integration hook::returns the resolved downstream UAT env map for injection into the sandbox env`, `::enforces the UAT-only allowlist`, `::fails closed with no service-account token` |
 | `env bootstrap`: `--env`/`--service` required, dry-run default, `--apply`/`--out`/`--manifest` reach the host half (manifest default), unknown options are usage errors; the output is plan lines + names/refs and never a value; anything the host half throws is `unavailable`; CLI-only | `[unit]` `src/core/commands/env.test.ts::*` |
-| CLI end-to-end (dry-run prints plan; prod refused; apply with a real read-only UAT token writes the 600 file the toolchain sources) | `[gap]` ([#47](https://github.com/coreplanelabs/switchboard/issues/47)) a full live apply needs the operator's read-only, UAT-vault-scoped service account + real refs (human-gated: an org-admin creates the account per *Setup* above; then one dry-run + apply round). |
-| Integration into the deployed resident/executor | `[gap]` ([#47](https://github.com/coreplanelabs/switchboard/issues/47)) intentionally not wired in v1; the owner's integration decision (see above). |
+| CLI end-to-end (dry-run prints plan; prod refused; apply with a real read-only UAT token writes the 600 file the toolchain sources) | `[gap]` a full live apply needs the operator's read-only, UAT-vault-scoped service account + real refs (human-gated: an org-admin creates the account per *Setup* above; then one dry-run + apply round). |
+| Integration into the deployed resident/executor | `[gap]` intentionally not wired in v1; the owner's integration decision (see above). |
