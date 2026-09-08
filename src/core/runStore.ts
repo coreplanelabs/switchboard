@@ -86,7 +86,7 @@ export interface RunStore {
 }
 
 /** The store of a process without run history (features/routing-and-config.md
- *  item 13 — a Null Object, so no caller branches on a missing store): every
+ *  item 16 — a Null Object, so no caller branches on a missing store): every
  *  read is the not-found shape, `list` is empty, `put` accepts and keeps
  *  nothing (`stored: false`, the same word a record outside retention gets). */
 export class NullRunStore implements RunStore {

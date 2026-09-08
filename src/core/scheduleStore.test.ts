@@ -144,7 +144,7 @@ describe("buildScheduleStore (startup selection)", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// Feature: features/routing-and-config.md item 16 — the Null Object a process
 // without a firing store is wired with.
 describe("NullScheduleStore — the store of a process without a firing store", () => {
   it("drops a firing and has never seen one", async () => {

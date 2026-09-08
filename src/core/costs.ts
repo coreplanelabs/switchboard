@@ -456,7 +456,7 @@ export const COSTS_OFF_MESSAGE =
   "Cost reporting isn't configured — set costs.cloudflareAccountId + costs.groups in config and the CF_ANALYTICS_TOKEN secret to enable this view.";
 
 /** The service of a process without cost reporting (a Null Object, routing-and-
- *  config item 13): no group exists, and a report of one is refused with the
+ *  config item 16): no group exists, and a report of one is refused with the
  *  reason — the view renders that instead of branching on a missing service. */
 export class NullCostsService implements CostsService {
   groups(): string[] {

@@ -654,7 +654,7 @@ describe("finishing and finish", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// Feature: features/routing-and-config.md item 16 — the Null Object a process
 // without a ledger is wired with: the dispatcher claims, steers and hands off
 // unconditionally and every answer is the one an untracked run gets.
 describe("NullLedgerWriteThrough — the write-through of a process without a ledger", () => {

@@ -271,7 +271,7 @@ describe("isFrictionRunRecord", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// Feature: features/routing-and-config.md item 16 — the Null Object a process
 // without run history is wired with; `selectFrictionLedger` hands it out for a
 // missing store instead of `undefined`.
 describe("NullFrictionLedger — the ledger of a process without run history", () => {

@@ -156,7 +156,7 @@ export class RunStoreFrictionLedger implements FrictionLedger {
 }
 
 /** The ledger of a process without run history (a Null Object, routing-and-
- *  config item 13): there are no recent runs anywhere, so nothing recurs. */
+ *  config item 16): there are no recent runs anywhere, so nothing recurs. */
 export class NullFrictionLedger implements FrictionLedger {
   async recent(_opts?: LedgerReadOptions): Promise<FrictionRunRecord[]> {
     return [];

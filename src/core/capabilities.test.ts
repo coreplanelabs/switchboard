@@ -10,7 +10,7 @@ import { buildRunLedger } from "./runLedgerWorker.js";
 import { buildRunStore } from "./runStore.js";
 import { buildScheduleStore } from "./scheduleStore.js";
 
-// Feature: features/routing-and-config.md item 13 — one Capabilities value,
+// Feature: features/routing-and-config.md item 16 — one Capabilities value,
 // computed once from the config and the environment. Every axis is exercised
 // with the config/env that turns it on and off, and each axis that mirrors a
 // builder's selection is pinned to that builder so the two rules cannot drift.

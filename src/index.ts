@@ -21,6 +21,7 @@ import {
   parseCostsConfig,
 } from "./core/costs.js";
 import { NullResidentAdminClient, residentAdminFromConfig } from "./core/residentAdmin.js";
+import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import {
   httpJwksFetcher,
   JwksCache,
@@ -156,7 +157,7 @@ async function main() {
     warn: (m) => console.warn(`[mcp] ${m}`),
   });
   // Every optional subsystem below is wired as a real implementation or its
-  // Null Object (features/routing-and-config.md item 13): the core never asks
+  // Null Object (features/routing-and-config.md item 16): the core never asks
   // whether a store, a ledger or a source exists — it calls it.
   const mcp = mcpWiring.source ?? new NullMcpToolSource();
   console.log(
@@ -263,10 +264,27 @@ async function main() {
   // The threads whose live run is on the ledger but not here (thread-admission
   // item 5): fed by every reclaim outcome below, read at admission.
   const threadsElsewhere = new ThreadsElsewhere();
+  // The resident admin plane: the client the config names, or — without
+  // residents, or without the admin bearer — the null client carrying the
+  // reason, which the residents dash and `repo list` render as their 503.
+  const residentAdmin = capabilities.residents
+    ? residentAdminFromConfig(config, process.env)
+    : new NullResidentAdminClient();
+  const residentAdminClient =
+    "unavailable" in residentAdmin ? new NullResidentAdminClient(residentAdmin.unavailable) : residentAdmin;
+  // The fleet facts the About block reads on every dispatch (routing-and-config
+  // item 11): the resident Worker's cap, refreshed in the background — never on
+  // the run path, never a constant. Only an admin plane that can answer is
+  // watched: none without residents, none when the admin bearer is unset (the
+  // null client would answer 503 forever and the cap could never be learned).
+  const fleetWatcher = residentFleetWatcherFor(residentAdminClient, { warn: (m) => console.warn(m) });
+  fleetWatcher?.start();
+  const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;
   const deps: CoreDeps = {
     config,
     providers,
     capabilities,
+    residentFleet,
     skills,
     mcp,
     memory,
@@ -368,11 +386,6 @@ async function main() {
     // client answers every route 503 with the reason, and so does the page.
     // Access-gated below alongside /runs — it lists every onboarded repo and
     // its build commands, so it must never be exposed without SSO.
-    const residentAdmin = capabilities.residents
-      ? residentAdminFromConfig(config, process.env)
-      : new NullResidentAdminClient();
-    const residentAdminClient =
-      "unavailable" in residentAdmin ? new NullResidentAdminClient(residentAdmin.unavailable) : residentAdmin;
     const residentsView = createResidentsViewHandler(residentAdminClient, shell);
     const residentsState =
       residentAdminClient instanceof NullResidentAdminClient

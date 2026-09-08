@@ -24,7 +24,7 @@ export interface ScheduleStore {
 }
 
 /** The store of a process without a firing store (a Null Object, routing-and-
- *  config item 13): a firing is dropped, and nothing has ever fired. */
+ *  config item 16): a firing is dropped, and nothing has ever fired. */
 export class NullScheduleStore implements ScheduleStore {
   async record(_firing: ScheduleFiring): Promise<void> {
     // no store to record on

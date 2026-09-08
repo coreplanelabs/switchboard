@@ -68,7 +68,7 @@ export interface RunHistoryWriter {
 }
 
 /** The writer of a process without run history (a Null Object, routing-and-
- *  config item 13): every record is dropped on the floor, nothing is ever
+ *  config item 16): every record is dropped on the floor, nothing is ever
  *  pending, failed or degraded, and `onPersisted` is never called — the
  *  index's persisted flag means "durably stored", which nothing here is. */
 export class NullRunHistoryWriter implements RunHistoryWriter {

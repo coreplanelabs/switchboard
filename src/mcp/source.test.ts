@@ -151,7 +151,7 @@ describe("CompositeMcpToolSource (config wins over registry, item 1)", () => {
   });
 });
 
-// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// Feature: features/routing-and-config.md item 16 — the Null Object a process
 // without MCP is wired with: a run gets no tools and no block.
 describe("NullMcpToolSource — the source of a process without MCP", () => {
   it("scopes no server to any agent or caller, so the guidance block is absent", async () => {
