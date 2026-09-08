@@ -7,7 +7,8 @@
 #
 # A busy bot never needs a person (features/release-and-deploy.md item 13).
 # The bot step refuses while runs are in flight and `deploy all` waits that out
-# for 45 min; if it is STILL refusing then, the CLI exits 75 (`busy` — nothing
+# for `wait_max` minutes (45 on a release; a dispatch may shorten it — how the
+# retry is rehearsed); if it is STILL refusing then, the CLI exits 75 (`busy` — nothing
 # is broken, nothing to change) and this job dispatches itself again at the
 # head of main with `attempt` + 1, up to MAX_ATTEMPTS. The retry is
 # `--affected` at that moment, so it deploys whatever is behind — including any
@@ -58,6 +59,10 @@ on:
         description: Which try this is (1 = the release or a person; a retry passes its own + 1)
         type: string
         default: "1"
+      wait_max:
+        description: Minutes to wait out a refusing preflight (runs in flight) before the deploy is `busy`
+        type: string
+        default: "45"
   workflow_dispatch:
     inputs:
       targets:
@@ -72,6 +77,10 @@ on:
         description: Leave at 1 — a retry the workflow dispatches for itself passes its own attempt + 1
         type: string
         default: "1"
+      wait_max:
+        description: Minutes to wait out a refusing preflight (runs in flight) before the deploy is `busy` and retries itself; 45 is the release's budget
+        type: string
+        default: "45"
 
 permissions:
   contents: read
@@ -181,14 +190,16 @@ jobs:
         id: deploy
         env:
           ARGS: ${{ steps.selection.outputs.args }}
+          WAIT_MAX: ${{ inputs.wait_max }}
         run: |
           # Exit 75 is `busy`: the bot preflight was still refusing (runs in
-          # flight) when the 45-min budget ran out. Nothing is broken, so this
-          # step does not fail on it — the next step dispatches the retry.
-          # Every other non-zero exit is a real failure and fails here.
+          # flight) when the wait budget (`wait_max`, 45 min on a release) ran
+          # out. Nothing is broken, so this step does not fail on it — the next
+          # step dispatches the retry. Every other non-zero exit is a real
+          # failure and fails here.
           set +e
           # shellcheck disable=SC2086
-          npm run --silent cli -- deploy all $ARGS --allow-branch --wait-max 45
+          npm run --silent cli -- deploy all $ARGS --allow-branch --wait-max "${WAIT_MAX:-45}"
           code=$?
           set -e
           case "$code" in
@@ -202,24 +213,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ATTEMPT: ${{ inputs.attempt }}
           TARGETS: ${{ inputs.targets }}
+          WAIT_MAX: ${{ inputs.wait_max }}
           # 8 × 45 min ≈ 6 h of waiting for a quiet bot before a person decides.
           MAX_ATTEMPTS: "8"
         run: |
           if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
-            echo "::error::production is NOT deployed — the bot preflight was still refusing after $ATTEMPT attempts of 45 min each (runs in flight every time). A person decides: wait and dispatch again, or dispatch with force=true (SIGTERM-drains in-flight runs and kills them at the drain deadline)."
+            echo "::error::production is NOT deployed — the bot preflight was still refusing after $ATTEMPT attempts of ${WAIT_MAX:-45} min each (runs in flight every time). A person decides: wait and dispatch again, or dispatch with force=true (SIGTERM-drains in-flight runs and kills them at the drain deadline)."
             exit 1
           fi
           next=$((ATTEMPT + 1))
-          # Always the head of main, always --affected: the retry deploys what is
-          # behind at that moment, so interim releases need no attention of their own.
-          gh workflow run deploy-production.yml --repo "$GITHUB_REPOSITORY" --ref main -f "targets=${TARGETS:-affected}" -f "attempt=$next"
+          # Always the head of main, the same targets and budget: the retry deploys
+          # what is behind at that moment, so interim releases need no attention of their own.
+          gh workflow run deploy-production.yml --repo "$GITHUB_REPOSITORY" --ref main -f "targets=${TARGETS:-affected}" -f "attempt=$next" -f "wait_max=${WAIT_MAX:-45}"
           runs_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/deploy-production.yml"
-          echo "::warning::production is not deployed yet — the bot preflight was still refusing after 45 min (runs in flight). Retry $next of $MAX_ATTEMPTS dispatched at the head of main: $runs_url"
+          echo "::warning::production is not deployed yet — the bot preflight was still refusing after ${WAIT_MAX:-45} min (runs in flight). Retry $next of $MAX_ATTEMPTS dispatched at the head of main: $runs_url"
           {
             echo
             echo "### Not deployed yet — retry $next of $MAX_ATTEMPTS dispatched"
             echo
-            echo "The bot preflight was still refusing when the 45-min budget ran out (runs in flight; nothing is broken). The retry runs \`deploy all --affected\` at the head of \`main\` — whatever is behind then, including any release since — so this run needs no attention of its own. A real failure never retries."
+            echo "The bot preflight was still refusing when the ${WAIT_MAX:-45}-min budget ran out (runs in flight; nothing is broken). The retry runs \`deploy all\` with the same targets at the head of \`main\` — whatever is behind then, including any release since — so this run needs no attention of its own. A real failure never retries."
             echo
             echo "[deploy-production runs]($runs_url)"
           } >> "$GITHUB_STEP_SUMMARY"
