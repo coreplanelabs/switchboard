@@ -4,7 +4,7 @@ import type { MemoryRecord } from "./types.js";
 // (the caller passes `now`) — so every branch is unit-testable in isolation.
 // MVP score = α·keywordMatch + β·recency (Generative-Agents-style, minus the
 // embedding-relevance term): keyword+recency is a legitimate MVP; vectors are an
-// upgrade behind the unchanged seam (#85, "do you even need vectors at MVP?").
+// upgrade behind the unchanged seam ("do you even need vectors at MVP?").
 
 /** Relative weights of the two scoring terms. */
 export interface ScoreWeights {
@@ -17,7 +17,7 @@ export const DEFAULT_WEIGHTS: ScoreWeights = { keyword: 0.7, recency: 0.3 };
 
 /** Exponential-decay time constant for the recency term (~1 week). A record
  *  one τ old scores 1/e on recency; the decay makes stale facts sink without a
- *  sweeper job (decay lives in the score, #85). */
+ *  sweeper job (decay lives in the score). */
 export const RECENCY_TAU_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Default read budget: at most 8 records / ~800 tokens injected, regardless of
@@ -140,7 +140,7 @@ function renderMemoryBullet(record: MemoryRecord): string {
  *  written here literally; the record-derived fields pass through
  *  `sanitizeMemoryField` (control/newline strip + `&`/`<`/`>` escape), so a
  *  record can neither inject extra lines / fake role turns nor forge the fence
- *  delimiter — or any tag — from within a bullet (anti-poisoning, #85). */
+ *  delimiter — or any tag — from within a bullet (anti-poisoning). */
 export function renderMemoryBlock(resource: string, records: MemoryRecord[]): string {
   const bullets = records.map(renderMemoryBullet);
   return [memoryBlockPrefix(resource), "<background_memory>", ...bullets, "</background_memory>"].join("\n");

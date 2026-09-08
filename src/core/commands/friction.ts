@@ -23,7 +23,7 @@ import {
   type SelfImprovementReport,
 } from "../selfImprovement.js";
 
-// The `friction.*` registrations (#157 R13 — Area 7b's on-demand trigger, re-homed
+// The `friction.*` registrations (the self-improvement on-demand trigger, re-homed
 // on the registry): `friction.report` clusters the ledger's recent runs into
 // ranked recurring patterns; `friction.propose` runs the whole self-improvement
 // step (cluster → propose → dedupe → file labeled issues). Both delegate to the
@@ -35,23 +35,23 @@ import {
 // Surface forms (derived from the options): `friction report [--since-ms n]
 // [--limit n] [--min-runs n]`, `friction propose [--dry-run] [--top n]
 // [--min-runs n] [--repo owner/name]` — the very flags the pre-registry chat
-// command took, now ONE grammar shared with the CLI (KTD21). `friction analyze
+// command took, now ONE grammar shared with the CLI. `friction analyze
 // [source] [--slow-ms n] [--in-progress]` (CLI only) is the read-only diagnosis
 // of a SAVED run stream — the former standalone frictionCli (phase 4b).
 //
-// Gates (R13, unchanged): `report` is open in chat and needs `friction:read`
+// Gates (unchanged by the migration): `report` is open in chat and needs `friction:read`
 // elsewhere; `propose` files to GitHub, so chat keeps the fail-closed
 // repo-management set (`repoManager` = holders of `repo:write`; admins through `all`)
 // and machine callers need `friction:write`. WHAT either analyzes is the
-// authorization policy (authorization.md item 6, OQ2): the runs the actor may
+// authorization policy (authorization.md item 6): the runs the actor may
 // read — `predicateFor(actor, "runs:read", "run")` handed to the ledger, which
 // pushes it into the run store; an `all-channels` holder (an admin, the
 // self-improvement schedule) analyzes the fleet, a token its granted channels,
 // and a ledger of bare records (no run store) contributes nothing under any
 // narrower predicate. No channel is compared here.
-// Neither command starts an agent run (KTD16): `propose` opens issues for a
+// Neither command starts an agent run: `propose` opens issues for a
 // human to triage; it never opens PRs or merges. In chat the dispatcher records
-// each invocation as an inline run (#244) so a scheduled firing leaves a trace.
+// each invocation as an inline run so a scheduled firing leaves a trace.
 
 export interface FrictionCommandDeps {
   friction: {

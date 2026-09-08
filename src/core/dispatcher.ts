@@ -156,7 +156,7 @@ export interface CoreDeps {
    */
   resolveRepoContext?: (msg: IncomingMessage, history: HistoryItem[]) => Promise<RepoContext> | RepoContext;
   /**
-   * Live run-view registry (Area 2 / #43): every run is registered here and its
+   * Live run-view registry: every run is registered here and its
    * events published so the external /runs page can stream them. Optional;
    * defaults to the process-wide singleton so the dispatcher and the served
    * /runs endpoints (src/index.ts) share one instance. Injectable for tests.
@@ -170,7 +170,7 @@ export interface CoreDeps {
    */
   admission?: ThreadAdmission<DispatchFollowUp>;
   /**
-   * Posts a review comment back to a PR (issue #69). Called after a `review`
+   * Posts a review comment back to a PR. Called after a `review`
    * run against a resolved PR, unless the request opted out. Default: the real
    * GitHub REST post with the App installation token (App `pull_requests:write`;
    * no `gh` shell-out — AGENTS.md invariant 5). Injectable so tests assert the
@@ -187,8 +187,8 @@ export interface CoreDeps {
    */
   openPullRequest?: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
   /**
-   * Ship round 0's pipeline-branch create (features/agent-ship.md item 3,
-   * KTD12): `refs/heads/<branch>` at the base ref's tip, so the ref exists on
+   * Ship round 0's pipeline-branch create (features/agent-ship.md item 3):
+   * `refs/heads/<branch>` at the base ref's tip, so the ref exists on
    * origin BEFORE the resident is asked to bind the thread to it. Default:
    * githubPulls' `createBranchRef` (App token REST, 422 already-exists is
    * success). Injectable so tests assert the call without a network call.
@@ -234,7 +234,7 @@ export interface CoreDeps {
    */
   fetchPrCommits?: (q: { repo: string; base: string; sha: string }) => Promise<PrCommitList | undefined>;
   /**
-   * Cross-session memory store (Area 7c, #85). When `config.memory.enabled`
+   * Cross-session memory store (docs/decisions/0017-memory-off-by-default.md). When `config.memory.enabled`
    * is true the dispatcher retrieves scope-relevant records from this store
    * and injects them as an advisory context block before the model turn, and
    * after the reply a background reflection pass writes distilled records back
@@ -245,7 +245,7 @@ export interface CoreDeps {
    */
   memory: MemoryStore;
   /**
-   * Skill store backing the load-a-skill capability (#100). When present, the
+   * Skill store backing the load-a-skill capability. When present, the
    * dispatcher appends the calling agent's scoped skill name+description list to
    * its system prompt (progressive disclosure) and passes the store to the tool
    * context so list_skills/use_skill work. Absent (as in most unit tests) →
@@ -255,7 +255,7 @@ export interface CoreDeps {
    */
   skills?: SkillStore;
   /**
-   * External MCP servers as tools (#394, features/mcp-tools.md). Asked once
+   * External MCP servers as tools (features/mcp-tools.md). Asked once
    * per run, before the first model turn, for the servers scoped to the
    * resolved agent; the bridged tools ride `RunOptions.extraTools` and the
    * outcome becomes the MCP prompt block + one `mcp_unavailable` note per
@@ -274,7 +274,7 @@ export interface CoreDeps {
    */
   githubApi?: GithubApi;
   /**
-   * The write path onto `runStore` (#157 KTD4): after every run the dispatcher
+   * The write path onto `runStore` (docs/decisions/0006-runs-have-two-lives.md): after every run the dispatcher
    * builds the `RunRecord` at finish and hands it here AFTER the reply is sent —
    * fire-and-forget with bounded retries, drain-counted via `pending()`. With
    * history off it is the `NullRunHistoryWriter` — every write dropped —
@@ -301,14 +301,14 @@ export interface CoreDeps {
    *  Empty in a process without a ledger. */
   threadsElsewhere: Pick<ThreadsElsewhere, "get" | "forget">;
   /**
-   * Channel facts for the run record (authorization KTD4/KTD7): every run is
+   * Channel facts for the run record (docs/decisions/0007-authorization-policy-table.md): every run is
    * stamped with its channel's visibility at create, asked of this directory
    * once per run. Default: the static id-based directory (`http:`/`mcp:` →
    * machine, `slack:D…` → dm, `slack:G…` → private, anything else → unknown);
    * the bot wires the Slack one (`SlackChannelDirectory`, `conversations.info`
    * cached per channel per TTL) when the Slack adapter is up. A directory
    * failure — or an answer slower than `channelDirectoryTimeoutMs` — stamps
-   * `unknown`, never a guess (R7), so a slow directory cannot delay a reply.
+   * `unknown`, never a guess, so a slow directory cannot delay a reply.
    */
   channelDirectory?: ChannelDirectory;
   /** Bound on one `channelDirectory.info` wait (default `CHANNEL_DIRECTORY_TIMEOUT_MS`).
@@ -325,7 +325,7 @@ export interface CoreDeps {
    *  Tests that assert on an individual intermediate frame set 0. */
   statusUpdateMinMs?: number;
   /**
-   * The command registry bound to its deps (#157 U13, `bindCommands`), for the
+   * The command registry bound to its deps (`bindCommands`; docs/decisions/0008-one-command-definition-every-surface.md), for the
    * chat fast path: `<group> <verb> [args…] [--option value…]` messages that
    * name a registered, chat-exposed command (and the bare word `help`) are
    * answered inline through `invoke`, never a model turn — since phase 4b this
@@ -339,7 +339,7 @@ export interface CoreDeps {
   commands?: ChatCommands;
 }
 
-/** Registry commands the dispatcher records as inline runs (#244): the ones
+/** Registry commands the dispatcher records as inline runs: the ones
  *  that DO work beyond answering from local state — ledger reads and GitHub
  *  writes (`friction.*`), a durable memory mutation (`memory.forget`), a repo
  *  provisioned/torn down/reprovisioned (`repo.onboard|offboard|rebuild|
@@ -359,7 +359,7 @@ export function isInlineRunCommand(id: string): boolean {
 const STATUS_UPDATE_MIN_MS = 3000;
 
 /** Bounds on the thread context recorded into a run's stream as `context`
- *  events (#157 KTD8): the newest turns win, at most this many, within this
+ *  events: the newest turns win, at most this many, within this
  *  many bytes of redacted text in total. */
 const CONTEXT_MAX_ITEMS = 20;
 const CONTEXT_MAX_BYTES = 256 * 1024;
@@ -375,7 +375,7 @@ const webCapability = () => (sharedWeb ??= makeWebCapability(process.env));
 /** The `github_*` tools' capability for one run (features/github-tools.md):
  *  the process-wide REST client on the App credential (or the injected test
  *  double) plus the REQUESTING USER's per-repo write gate — `canUseRepo`, the
- *  same allowlist that admits a user to a repo's resident (KD7) — so an issue
+ *  same allowlist that admits a user to a repo's resident — so an issue
  *  write from a plain mention is authorized like a coding run on that repo. */
 let sharedGithubApi: GithubApi | undefined;
 function githubCapabilityFor(deps: CoreDeps, userId: string): GithubCapability {
@@ -606,8 +606,8 @@ export async function dispatch(
   // review post, memory reflection scheduling) have run; decremented in the
   // outer finally. The shutdown drain (index.ts) polls this count: a SIGTERM
   // that lands between the channel's 👀 ack and the first status card used to
-  // see "0 run(s) in flight" and exit at once, abandoning an acked run
-  // (#317). Config commands and refusals hold the slot for their few hundred
+  // see "0 run(s) in flight" and exit at once, abandoning an acked run.
+  // Config commands and refusals hold the slot for their few hundred
   // milliseconds too — cheaper than a second gap.
   activeRuns++;
   // How this dispatch's runs end (runEnding.ts; features/tracing.md): a run is
@@ -648,18 +648,18 @@ export async function dispatch(
   // the outer finally (its heartbeat stops with the run).
   let ledgerRun: LedgerRun | undefined;
   try {
-    // Stage A — the ONE text-only fast path (#157 U13/KTD19, phase 4b): a
+    // Stage A — the ONE text-only fast path: a
     // message that names a registered, chat-exposed command (`<group> <verb>
     // [args…] [--kebab-flag value…]`, or the bare word `help`) is answered
     // inline through the registry — never a model turn — BEFORE `io.history()`,
     // so a recognized command costs no history fetch and the natural-language
     // recognizer below never sees it (the two can never both claim one
-    // message). ONE grammar (KTD21) for every command: config, memory, repo,
+    // message). ONE grammar for every command: config, memory, repo,
     // friction, runs, schedule, help. Prose falls through unchanged.
     //
     // Commands that DO real work — ledger reads and GitHub writes (`friction.*`),
     // a durable memory mutation, a repo provisioned or torn down, a
-    // deterministic op executed — are runs (#244): a registry record with the
+    // deterministic op executed — are runs: a registry record with the
     // request and the reply, on /runs like any other, and a receipt to the
     // channel. The weekly cron reaches this path through /ingress as
     // `http:cron`, so a scheduled firing is a run too. The outcome comes from
@@ -682,7 +682,7 @@ export async function dispatch(
     const directives = parseDirectives(msg.text);
     const history = await root.span("dispatch.history", () => io.history());
 
-    // Natural-language deterministic ops (U6, KTD8): the few conservative forms
+    // Natural-language deterministic ops: the few conservative forms
     // `recognizeOperation` admits ("run the tests on main in acme/api") are
     // TRANSLATED into the registry's `repo.test` / `repo.build` — the very
     // command `repo test acme/api main` is — so one handler executes, one gate
@@ -974,7 +974,7 @@ export async function dispatch(
     const provider = deps.providers.get(providerName);
 
     // Target repo/ref for resident environments, resolved BEFORE the model
-    // turn (U7): explicit signals in the message, else the repo this thread
+    // turn: explicit signals in the message, else the repo this thread
     // already established (from history — restart-safe, never stored). The
     // gate belongs with the resource declaration: an agent that declares no
     // repo (e.g. the toolless general default) never resolves or gates one, so
@@ -1004,11 +1004,11 @@ export async function dispatch(
     );
     repoCtxP.catch(() => {});
 
-    // Cross-session memory (Area 7c, #85) — READ path, STARTED here and awaited
+    // Cross-session memory — READ path, STARTED here and awaited
     // below, so the memory Worker round trip (up to 5 s) overlaps the repo/PR
     // resolution and the executor attach instead of adding to them. Its scopes
     // are the org, this channel, this user, and — once resolution settles —
-    // the bound repo (#253); the read never depends on the repo GATE, only on
+    // the bound repo; the read never depends on the repo GATE, only on
     // the repo NAME, and a failed resolution simply means no repo scope.
     // Started after the agent gate, never before: a refused request must not
     // touch memory (retrieval bumps usage counters). Flag-gated: with memory
@@ -1068,13 +1068,13 @@ export async function dispatch(
     // the branch moved between resolution and attach (item 12).
     let repoCtx: RepoContext = await repoCtxP;
 
-    // Not-onboarded gate (#316): the thread has no repo, and the only reason
+    // Not-onboarded gate: the thread has no repo, and the only reason
     // is that its bare `owner/name` slug was refused by the resident registry
     // (item 29's probe). A repo-needing agent would otherwise start with an
-    // EMPTY workspace and report `fatal: not a git repository` (live
-    // 2026-08-30, `coreplanelabs/try-catch`) — say why instead, before any
+    // EMPTY workspace and report `fatal: not a git repository` — say why
+    // instead, before any
     // attach or model turn. A thread that already has a repo never reaches
-    // here with `rejectedRepo` (prose slugs there are never probed — #289), so
+    // here with `rejectedRepo` (prose slugs there are never probed), so
     // the silence that fix bought is untouched. Only where residents exist
     // (`capabilities.residents`): without a fleet there is nothing to onboard,
     // and a note inviting `repo onboard` would point at a command this
@@ -1100,7 +1100,7 @@ export async function dispatch(
       return;
     }
 
-    // Unverified gate (item 29, the F2 of #445): the registry did not ANSWER
+    // Unverified gate (item 29): the registry did not ANSWER
     // for the repo this message addressed (or, in a fresh thread, for its only
     // candidate). Running anyway would mean guessing a repo — in a bound
     // thread, the thread's OLD one: exactly the wrong-repo run addressing
@@ -1128,7 +1128,7 @@ export async function dispatch(
       return;
     }
 
-    // Per-repo access gate (KD7): open unless `restrict.repos` names the repo;
+    // Per-repo access gate: open unless `restrict.repos` names the repo;
     // a restricted repo refuses a user without a `repos` grant BY NAME — a
     // refused user must see why, never get a silent per-thread fallback.
     if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(msg.userId, repoCtx.repo)) {
@@ -1182,12 +1182,12 @@ export async function dispatch(
     // Executor selection is context-aware: the agent's resource declarations
     // decide whether anything is provisioned at all (general gets nothing),
     // and repo/ref carry resident-repo inference. A resident fallback comes
-    // back with a named note (KTD10) that rides on every status frame below.
+    // back with a named note that rides on every status frame below.
     // Unknown-head check (features/agent-review.md item 11): a review whose PR
     // head could not be resolved is a guaranteed refusal downstream — not
     // started instead, before any attach, one named reply (the decision and
-    // the reply live in `checkPrHeadPreflight`; live incident 2026-08-30,
-    // PR #300: 75 s and a model turn spent on a Slack-only "cannot review").
+    // the reply live in `checkPrHeadPreflight`; otherwise a minute and a
+    // model turn are spent on a Slack-only "cannot review").
     const preflight = checkPrHeadPreflight({ agent, requestText: directives.text, repoCtx });
     if (!preflight.ok) {
       console.log(`[review] ${msg.threadKey} not started: PR head unknown (${preflight.where})`);
@@ -1201,7 +1201,7 @@ export async function dispatch(
     }
 
     // The workspace attach is paired with its release on the round's agent
-    // (reviewRound.ts, KTD4): readonly toolset → readonly worktree +
+    // (reviewRound.ts): readonly toolset → readonly worktree +
     // release("always"); writable → release("if-clean").
     let round: RoundWorkspace;
     try {
@@ -1241,7 +1241,7 @@ export async function dispatch(
         return attached;
       });
     } catch (err) {
-      // Ask-once (KTD6): the resident has no ref binding for this thread, the
+      // Ask-once: the resident has no ref binding for this thread, the
       // message named no branch, AND the resident did not name a default to
       // bind to (the factory binds to `defaultRef` itself when the 409 carries
       // one — only a Worker predating that field reaches here). Binding is
@@ -1266,7 +1266,7 @@ export async function dispatch(
     }
     const { executor, note, resident, binding } = round.selection;
 
-    // Attach-head check (features/agent-review.md item 10, #282): for a PR
+    // Attach-head check (features/agent-review.md item 10): for a PR
     // review on the resident path, the sha the resident ATTACHED the worktree
     // at is compared with the PR head resolved above — before any model turn
     // (the comparison, the current-head second lookup and the refusal reply
@@ -1319,14 +1319,14 @@ export async function dispatch(
     // the PR from the workspace's observed origin remote (an agent-discovered
     // repo; the App token bounds what is writable either way).
     const isCodingPrRun = agent.toolset === "full";
-    // Progressive disclosure (#100): the calling agent's scoped skill
+    // Progressive disclosure: the calling agent's scoped skill
     // name+description list trails the agent's own instructions (it is
     // guidance about the agent's tools, not advisory context like the memory
     // block). Bodies load on demand via use_skill — never dumped here. No
     // store, or an agent with no scoped skills (general/research) → undefined
     // and the prompt is untouched.
     const skillsBlock = deps.skills ? skillGuidanceBlock(deps.skills, agent.name) : undefined;
-    // External MCP tools (#394, features/mcp-tools.md item 8): discovery for
+    // External MCP tools (features/mcp-tools.md item 8): discovery for
     // the servers scoped to THIS agent, once, before the model turn. A server
     // that does not answer contributes no tools and is named in the MCP block
     // (and, once the run is registered, in an `mcp_unavailable` note). Nothing
@@ -1372,7 +1372,7 @@ export async function dispatch(
       deps.residentFleet.cap(),
     );
 
-    // Custom instructions (#107 phase 2): the requester's user text + this
+    // Custom instructions: the requester's user text + this
     // channel's text, as ONE advisory block. Read from the same resolved
     // scopes as the config block, AFTER resolution and every gate above — so
     // by construction they cannot influence agent, model, or permissions.
@@ -1380,10 +1380,10 @@ export async function dispatch(
     const instructionsBlock = customInstructionsBlock(scopes);
 
     // Effective system prompt, composed AFTER executor resolution (via
-    // RunOptions.system, U1) by the extracted composer (reviewRound.ts): a
+    // RunOptions.system) by the extracted composer (reviewRound.ts): a
     // resident-path run swaps in the agent's resident variant with the
-    // resolved repo named and the worktree path when the attach answered it
-    // (#282); a PR review gets the REVIEW TARGET block (item 9) recomposed
+    // resolved repo named and the worktree path when the attach answered it;
+    // a PR review gets the REVIEW TARGET block (item 9) recomposed
     // per pinned head. Order: memory (advisory context, leads when present) →
     // config block → custom instructions → the agent's effective instructions
     // (+ skills). The memory block is absent with memory off (default),
@@ -1429,7 +1429,7 @@ export async function dispatch(
     clearInterval(setupHeartbeat);
     card.update(shell.live()); // the ack card becomes the run card
     let lastActivityAt = clock();
-    // Live run view (Area 2 / #43): register the run and mint its capability
+    // Live run view: register the run and mint its capability
     // link AFTER the card exists (so nothing awaits between create() and the
     // run loop's finally that finish()es it). With no PUBLIC_BASE_URL the link
     // is simply omitted — the feature degrades gracefully, the run is otherwise
@@ -1437,7 +1437,7 @@ export async function dispatch(
     const registry = deps.runRegistry ?? defaultRunRegistry;
     // A human-first label for the Access-gated runs index (`GET /runs`): agent +
     // repo (repo runs) or channel/user (chat runs) + a snippet of the request,
-    // so a row reads like `review · #switchboard-prompting · justin · "…"` rather
+    // so a row reads like `review · #general · alice · "…"` rather
     // than raw ids. Built from the directive-stripped text so directives (agent:/
     // model:) never clutter the snippet.
     const runLabel = composeRunLabel({
@@ -1550,12 +1550,12 @@ export async function dispatch(
     if (liveUrl) admitted.runLink = liveUrl;
     liveControl = run.control;
     // The thread context fed to the model follows the request as `context`
-    // events (#157, KD1) — text only, attachments as metadata lines, bounded to
+    // events — text only, attachments as metadata lines, bounded to
     // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
     if (!resume && deps.config.config.runHistory?.includeContext !== false) {
       for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
     }
-    // Tombstone-first (#375): a provisional TERMINAL record — status
+    // Tombstone-first: a provisional TERMINAL record — status
     // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
     // from the events published so far (request, run_meta, context). Because it
     // is already terminal, a crash or a drain-abandonment needs NO store-side
@@ -1672,7 +1672,7 @@ export async function dispatch(
     let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
     let lastActivity: string | undefined;
     // The tool whose call has no result yet — the title says the wait is the
-    // tool's (`running bash (Ns)`), not the model's (`thinking …`), #531.
+    // tool's (`running bash (Ns)`), not the model's (`thinking …`).
     let inFlightTool: string | undefined;
     // The shutdown notice rides on the LIVE frame only: the closed card is
     // built from `shell.close` and never mentions the restart.
@@ -1703,12 +1703,12 @@ export async function dispatch(
     // immediately, so activity is visible without waiting for the heartbeat.
     let toolCalls = 0; // "did real work" signal for the memory reflection gate
     // The branch the run's own `git push` named, read off its bash calls and
-    // results as they stream by (features/pr-description.md item 5, #458):
+    // results as they stream by (features/pr-description.md item 5):
     // the PR post-step opens from THIS branch, and from the checkout only
     // when no push was observed — the checkout can move between the push and
     // the post. The latest push wins.
     const pushes = trackPushedBranch(typeof restored.pushedBranch === "string" ? restored.pushedBranch : undefined);
-    // The registry backlog is the run's ONE event store (#157 KTD9): the live
+    // The registry backlog is the run's ONE event store: the live
     // page, the post-run friction diagnosis and the run record all read it back
     // via `registry.snapshot` — there is no second copy to drift from it.
     let recordedPushedBranch: string | undefined;
@@ -1745,7 +1745,7 @@ export async function dispatch(
       const trimmed = list.trim();
       // An empty update never erases the checklist: the closed card is the
       // run's durable progress record, and an agent "clearing" its status as
-      // it wraps up would blank it (seen live 2026-08-30 on a review card).
+      // it wraps up would blank it (review agents do exactly that).
       if (!trimmed) return;
       checklist = trimmed;
       ledgerRun?.setState({ checklist: trimmed });
@@ -1825,7 +1825,7 @@ export async function dispatch(
     // a PR could be opened from) with no push observed.
     let observedBranch: string | undefined;
     // The branch checked out when the workspace was observed — the same as
-    // observedBranch unless HEAD moved after the push (#458), in which case
+    // observedBranch unless HEAD moved after the push, in which case
     // observedHead is the PUSHED branch's tip, not HEAD.
     let observedCheckedOut: string | undefined;
     // The commit the remote holds for that branch (`git ls-remote origin
@@ -1852,7 +1852,7 @@ export async function dispatch(
     // 16a). The release mode is paired to the round's agent by the attach
     // helper (reviewRound.ts): read-only agents hold nothing worth keeping; a
     // coding run keeps its worktree only while it has uncommitted/unpushed
-    // work — unless an operator HARD-stopped it (#101), which means "tear it
+    // work — unless an operator HARD-stopped it, which means "tear it
     // down now": the abandoned command may still be running in there, and the
     // whole point of a hard stop is to free the resources. Best-effort — a
     // failed release is a log line, never a failed run. Called AFTER the
@@ -1890,7 +1890,7 @@ export async function dispatch(
         onEvent,
         span: root, // the loop is `run.agent` under the run's root (features/tracing.md)
         ...(round.selection.backend ? { backend: round.selection.backend } : {}),
-        control: run.control, // operator stop from /runs (#101)
+        control: run.control, // operator stop from /runs
         inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
         // The step record before each step's tools (run-history item 35).
         ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
@@ -2079,7 +2079,7 @@ export async function dispatch(
       // says `failed`, the registry row keeps `completed` for its TTL.
       registry.finish(run.id, status);
       // The registry backlog is read back ONCE here, synchronously at finish
-      // (#157 KTD4/KTD9): it feeds both the friction diagnosis and the run
+      // (docs/decisions/0006-runs-have-two-lives.md): it feeds both the friction diagnosis and the run
       // record. Reading it now, not after the reply, is what makes a slow reply
       // safe — the registry evicts a finished run after its TTL, and the record
       // must not depend on winning that race. Skipped entirely when neither
@@ -2101,7 +2101,7 @@ export async function dispatch(
       runDiagnosis = diagnosis;
       // The channel's receipt (id + terminal status, never the token): a
       // single-shot channel hands it to its caller — the Worker shim records a
-      // scheduled firing's run from it (#244).
+      // scheduled firing's run from it.
       io.runFinished?.({ id: run.id, status });
       // The run finished: it is sealed by the next drain (after the reply), and
       // its record — everything captured now, assembled after the seal — is
@@ -2132,7 +2132,7 @@ export async function dispatch(
           ),
       });
       // The diagnosis rides the run record (above): the friction ledger the
-      // cross-run proposer reads (#84) is run history, so nothing is written twice.
+      // cross-run proposer reads is run history, so nothing is written twice.
       // A run whose loop threw closes its card here, after the finish, so the
       // card's total is the run's; the outer catch replies and drains.
       if (runFailed)
@@ -2183,7 +2183,7 @@ export async function dispatch(
       // stays the model's own words — the PR facts live in the pr_description
       // event and the [pr-post] log line.
       // The card close, the reply, then the drain: the run is sealed with how
-      // the reply went and its record (#157 KTD4) goes to the store — BEFORE the
+      // the reply went and its record goes to the store — BEFORE the
       // workspace release below: the record does not depend on it, and on the
       // ledger the finish is what frees the thread, which must not wait ~90 s on
       // a sandbox teardown (features/run-history.md item 36). Fire-and-forget;
@@ -2210,12 +2210,12 @@ export async function dispatch(
       await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     }
 
-    // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has
+    // Cross-session memory — WRITE path. AFTER the reply has
     // landed, distill this run into memory records: fire-and-forget (tracked
     // only for the shutdown drain), so its latency/failures never reach the
     // user; gated on memory.enabled (default off → nothing happens) and on the
     // run having done real work (tools used, or a long thread) and not being a
-    // `review` run (#292: findings live on the PR; distilling them floods org
+    // `review` run (findings live on the PR; distilling them floods org
     // memory with per-PR ephemera). Fast paths above returned before this
     // point and never reflect. A HARD-stopped run has no summary to distill
     // (its answer is the abort line), so it is skipped too; a soft stop wrote
@@ -2243,7 +2243,7 @@ export async function dispatch(
         answer,
       });
 
-    // Deterministic review post-step (issue #69, runReviewPostStep in
+    // Deterministic review post-step (runReviewPostStep in
     // reviewRound.ts): a `review` run against a resolved PR posts its findings
     // back to that PR by default — no need to ask — behind the reviewed-head
     // guard (item 8, fail-closed) and pinned to the verified head (or the
@@ -2462,8 +2462,8 @@ async function runShipBranch(
   }
   const entry = pre.entry;
 
-  // The one run record (KTD2): registered and stamped exactly like the main
-  // path — input, run_meta, bounded context, the #375 tombstone.
+  // The one run record: registered and stamped exactly like the main
+  // path — input, run_meta, bounded context, the tombstone.
   const registry = deps.runRegistry ?? defaultRunRegistry;
   const channelVisibility = await root.span("dispatch.channel_visibility", () =>
     channelVisibilityOf(deps, msg.channelId),
@@ -2526,7 +2526,7 @@ async function runShipBranch(
   if (deps.config.config.runHistory?.includeContext !== false) {
     for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
   }
-  // Tombstone-first (#375), like the main path — a pipeline can run for
+  // Tombstone-first, like the main path — a pipeline can run for
   // hours, so the provisional terminal record matters even more here.
   const startSnap = registry.snapshot(run.id, run.token);
   if (startSnap) {
@@ -2919,7 +2919,7 @@ function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined
 }
 
 /**
- * Run an inline (no-model) command AS a run (#244): register it in the run
+ * Run an inline (no-model) command AS a run: register it in the run
  * registry under a `<command> · #channel · user · "…"` label with the caller's
  * identity as its `RunMeta` (agent `command`), publish the request as the
  * `input` event and the reply as the `answer` event, finish it with its status,
@@ -2927,7 +2927,7 @@ function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined
  * `failed` when it was refused, misconfigured, or threw — and persist it through
  * the same `runHistoryWriter` path as an agent run, so a scheduled firing
  * outlives the registry TTL. The run record is the canonical trace
- * (command-registry principle, #157); the channel reply is a projection of it.
+ * (docs/decisions/0008-one-command-definition-every-surface.md); the channel reply is a projection of it.
  * A thrown command still finishes its run (as `failed`, with the `⚠️ <error>`
  * reply as its `answer`) and the error propagates to the dispatcher's outer
  * handler.
@@ -3050,10 +3050,10 @@ export const CHANNEL_DIRECTORY_TIMEOUT_MS = 1500;
 
 const DIRECTORY_TIMED_OUT = Symbol("channel directory timed out");
 
-/** The visibility stamp for a run in `channelId` (authorization KTD7): what the
+/** The visibility stamp for a run in `channelId` (docs/decisions/0007-authorization-policy-table.md): what the
  *  channel directory says, asked once per run and awaited for at most
  *  `channelDirectoryTimeoutMs`; a directory that throws, rejects, or is too slow
- *  yields `unknown` — never public, never a member (R7). */
+ *  yields `unknown` — never public, never a member. */
 async function channelVisibilityOf(deps: CoreDeps, channelId: string): Promise<ChannelVisibility> {
   const timeoutMs = deps.channelDirectoryTimeoutMs ?? CHANNEL_DIRECTORY_TIMEOUT_MS;
   const failed = (err: unknown): ChannelVisibility => {
@@ -3096,7 +3096,7 @@ function errorReply(err: unknown): string {
 }
 
 /**
- * The `interrupted` record for a run the drain deadline abandons (#375): the
+ * The `interrupted` record for a run the drain deadline abandons: the
  * run's full registry snapshot (every event published so far) with
  * `finishedAt` = the drain's clock — the tombstone upgrade `src/index.ts`
  * writes for each still-active run before `process.exit`. Identity comes from
@@ -3179,7 +3179,7 @@ export function reclaimedRunRecord(input: {
 }
 
 /**
- * The drain deadline's abandonment pass (#375), called by `src/index.ts` right
+ * The drain deadline's abandonment pass, called by `src/index.ts` right
  * before `process.exit`: every registry run still unfinished gets its tombstone
  * upgraded to a full-transcript `interrupted` record (`interruptedRunRecord`
  * over the run's whole snapshot, `finishedAt` = the drain's clock). The writes
@@ -3228,7 +3228,7 @@ function assembleRunRecord(input: {
   agent?: string;
   model?: string;
   msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName">;
-  /** The stamp taken at create (authorization KTD7) — the record carries what the run was stamped with. */
+  /** The stamp taken at create (`channelVisibilityOf`) — the record carries what the run was stamped with. */
   channelVisibility: ChannelVisibility;
   repo?: string;
   finishedAt: number;
@@ -3548,7 +3548,7 @@ export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
 
 /** The notice the drain (src/index.ts) sets on SIGTERM from a deploy rollout.
  *  Exported so the Slack adapter's orphan sweep can strip it from a frozen
- *  card's title (#357) — an interrupted card must not keep the stale
+ *  card's title — an interrupted card must not keep the stale
  *  "finishing this run" clause. Shared like LIVE_CARD_PREFIXES, so the text
  *  the drain appends and the text the sweep strips cannot drift apart. */
 export const DEPLOY_RESTART_NOTICE = "⏸ deploy in progress — this run continues through the bot restart";
@@ -3602,7 +3602,7 @@ export function turnContent(text: string, images?: ImageAttachment[], documents?
 }
 
 /**
- * The text recorded for one turn in the run stream (#157 R1): the turn's text
+ * The text recorded for one turn in the run stream: the turn's text
  * plus one metadata line per attachment — name, media type, decoded size — and
  * NEVER the attachment itself (no base64, no file body). Images and PDFs carry
  * base64 (size = decoded bytes); text/code documents carry their decoded text.
@@ -3631,7 +3631,7 @@ function attachmentLine(name: string | undefined, mime: string, bytes: number): 
 }
 
 /**
- * The thread-context turns to record as `context` events (#157 KTD8): the
+ * The thread-context turns to record as `context` events: the
  * NEWEST turns first, at most `CONTEXT_MAX_ITEMS`, until the redacted texts
  * together exceed `CONTEXT_MAX_BYTES` — then returned in thread order. Each turn is prefixed with its role so a context row reads as
  * the conversation did; attachments are metadata lines (see `messageText`).
@@ -3672,7 +3672,7 @@ function normalizeAlternation(messages: ChatMessage[]): ChatMessage[] {
 }
 
 /** Repo resolution for a chat command that asks for the thread's bound repo
- *  (`Caller.origin.repo`, e.g. `memory list` with the repo scope, #253): the
+ *  (`Caller.origin.repo`, e.g. `memory list` with the repo scope): the
  *  injected resolver in tests, the production resolver (registry-vetted slugs,
  *  PR → repo) otherwise; a failure means "no repo bound", never an error reply. */
 async function resolveRepoForCommand(

@@ -3,7 +3,7 @@ import type { MemoryScope } from "./types.js";
 // Scope derivation: pure functions from request identity → opaque scope keys,
 // namespaced exactly like switchboard's existing IDs (AGENTS.md invariant 4).
 // The store partitions rows by key and is otherwise scope-agnostic, so adding
-// the user scope (#107 PR B) and the repo/channel scopes (#253) were deriver
+// the user scope and the repo/channel scopes were deriver
 // changes, not schema changes — the Memory Worker's per-scope Durable Object
 // needed nothing new.
 //

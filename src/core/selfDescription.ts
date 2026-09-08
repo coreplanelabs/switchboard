@@ -6,10 +6,10 @@ import type { Capabilities } from "./capabilities.js";
 // agents, how it is addressed, what a resident repo is and how one is
 // onboarded, where its runs and memory live, and where its source and specs
 // live — so a question about Switchboard itself is answered from fact, not from
-// a public-web search that 404s on our private repo (2026-09-01: research
-// answered "repo is private, inaccessible" to "how does the resident system
-// work?"). The block is built from the live agent registry, so the agent list
-// can never drift from the code, and from the process's capabilities
+// a public-web search: the repository may be private, and a fetch that 404s
+// must never become the answer ("repo is private, inaccessible"). The block is
+// built from the live agent registry, so the agent list can never drift from
+// the code, and from the process's capabilities
 // (src/core/capabilities.ts), so it never describes a resident fleet, a run
 // history or a memory this installation does not have; the resident cap is the
 // resident Worker's own answer, never a constant here. The rest is prose about

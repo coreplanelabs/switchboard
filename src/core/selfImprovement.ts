@@ -12,7 +12,7 @@ import {
 } from "./frictionProposals.js";
 import { formatDuration } from "./time/formatDuration.js";
 
-// The self-improvement step (Area 7b / #84): ledger → cluster → propose →
+// The self-improvement step: ledger → cluster → propose →
 // dedupe against open proposals → file issues. This is the orchestration
 // around the pure proposer (frictionProposals.ts); its ONLY side effect is
 // `tracker.create`, and `dryRun` removes even that. Human-gated by

@@ -96,7 +96,10 @@ export function scopeFixture(): ScopeResource[] {
   return scopes;
 }
 
-const nonMember = actor("user", "slack:UCAROL", { actions: new Set(["runs:read"]), channels: new Set([CHANNELS.pub2.id]) });
+const nonMember = actor("user", "slack:UCAROL", {
+  actions: new Set(["runs:read"]),
+  channels: new Set([CHANNELS.pub2.id]),
+});
 
 export const ACTORS = {
   /** Fleet admin: every action, every channel, every repo. */
@@ -141,12 +144,12 @@ export const ACTORS = {
     actions: new Set(["runs:read", "runs:write"]),
     channels: new Set([CHANNELS.http.id]),
   }),
-  /** The self-improvement cron: fleet-wide reads (the #395 fix). */
+  /** The self-improvement cron: fleet-wide reads — it analyzes the fleet, not its own firings. */
   schedule: actor("schedule", "schedule:self-improvement", {
     actions: new Set(["runs:read", "friction:write"]),
     channels: "all",
   }),
-  /** An agent holding everything, acting for the non-member (R2: never exceeds the principal). */
+  /** An agent holding everything, acting for the non-member (never exceeds the principal). */
   agentForNonMember: actor(
     "agent",
     "agent:coding",

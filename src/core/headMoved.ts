@@ -5,10 +5,9 @@
 // commit and the org's auto-approve workflow will skip a review pinned to the
 // old one as stale (by design — never an approval of unreviewed code). Before
 // item 12 that was the whole story: post pinned to the old head, tell the
-// thread, ask for a re-request (`headMovedNote`). Live 2026-08-30 (PR #307,
-// switchboard-prompting thread p1788070753524099): the move was a rebase onto
-// main for a doc conflict — the same commits, the same review — and the
-// re-request cost a second full run to reach the same verdict.
+// thread, ask for a re-request (`headMovedNote`). When the move is a rebase
+// onto main for a doc conflict — the same commits, the same review — that
+// re-request costs a second full run to reach the same verdict.
 //
 // Item 12 classifies the move from the two `base...head` commit lists GitHub's
 // compare endpoint answers (`classifyHeadMove`), pure:

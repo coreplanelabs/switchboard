@@ -3,7 +3,7 @@ import { sanitizeResidentBody } from "../execution/residentText.js";
 import { tracedFetch } from "./trace/tracedFetch.js";
 import type { Span } from "./trace/types.js";
 
-// The resident Worker's admin plane, as the bot sees it (U8): the client for
+// The resident Worker's admin plane, as the bot sees it: the client for
 // the `/onboard`, `/offboard`, `/reconfigure`, `/rebuild`, `/residents` routes
 // (bearer = RESIDENT_ADMIN_TOKEN), its config-driven construction, and the two
 // validators every repo surface shares — `parseSlug` (owner/name → lowercase
@@ -151,7 +151,7 @@ export function residentAdminFromConfig(
 // Mirrors the resident's REPO_ID_RE (case-tolerant here; the slug is
 // lowercased before it becomes a resource id).
 const SLUG_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
-// Mirrors the resident's strict branch-ref pattern (U4).
+// Mirrors the resident's strict branch-ref pattern.
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
 /** "owner/name" (optionally ".git") → lowercase slug, or undefined. */
@@ -161,14 +161,14 @@ export function parseSlug(token: string): string | undefined {
 }
 
 /** Validated ref or undefined — the resident's strict pattern. A ref that
- *  fails this NEVER reaches any backend (KTD8). */
+ *  fails this NEVER reaches any backend. */
 export function validRef(candidate: string): string | undefined {
   if (!REF_RE.test(candidate)) return undefined;
   if (candidate.includes("..") || candidate.includes("@{") || candidate.endsWith(".lock")) return undefined;
   return candidate;
 }
 
-/** The resident service's resource id for a repo slug (KTD1: "<type>:<id>"). */
+/** The resident service's resource id for a repo slug ("<type>:<id>"). */
 export function repoResourceId(slug: string): string {
   return `repo:${slug}`;
 }

@@ -5,8 +5,8 @@ import { systemClock } from "./trace/clock.js";
 //
 // A thread reply that arrives while a run is already in flight in that thread
 // used to start a second, fully independent run — two agents editing the same
-// per-thread workspace at once (2026-09-04: two coding runs in one Slack
-// thread shared a checkout; the second's `git checkout -b` switched the
+// per-thread workspace at once (two coding runs in one Slack thread once
+// shared a checkout; the second's `git checkout -b` switched the
 // first's branch under it, and the first's PR post named a branch it never
 // pushed). Admission replaces that with two outcomes, decided per follow-up:
 //
@@ -150,7 +150,7 @@ export function decideFollowUp(live: LiveThread, requested: { agent?: string }):
 
 const elapsed = (live: LiveThread, now: number) => `${Math.max(0, Math.round((now - live.startedAt) / 1000))}s`;
 // A bare URL, never mrkdwn `<url|label>`: `ChannelIO.reply` escapes `<`/`>`
-// (live 2026-09-05 the label form arrived as literal `&lt;…|live run&gt;`),
+// (the label form arrives as literal `&lt;…|live run&gt;`),
 // and Slack auto-links a bare URL — the same convention as the review
 // verdict's run link.
 const linkSuffix = (live: LiveThread) => (live.runLink ? ` · ${live.runLink}` : "");
@@ -176,8 +176,8 @@ const followUpHeader = (n: number) =>
 
 /** The header when the follow-ups landed on a finished answer (item 3): that
  *  answer was never delivered — the thread has seen nothing yet — so the model
- *  must not write an increment on top of it (live 2026-09-05: "Perfect
- *  addition. Let me add that detail…" was the ONLY reply the thread got). */
+ *  must not write an increment on top of it (otherwise "Let me add that
+ *  detail…" is the ONLY reply the thread ever gets). */
 const supersededHeader = (n: number) =>
   `↪ ${n > 1 ? `${n} follow-ups` : "Follow-up"} from the thread, sent while you were writing your answer. That answer was NOT delivered — the thread has not seen it, and it will not be sent. Write ONE complete answer now that covers the original request AND ${n > 1 ? "all of these follow-ups" : "this follow-up"}:`;
 

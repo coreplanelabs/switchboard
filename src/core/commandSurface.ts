@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { acceptsUndefined, type CommandDef, type CommandInput, type InvokeErrorCode } from "./commandRegistry.js";
 
-// Everything a surface shows for a command, DERIVED from its definition (#157
-// KTD20/KTD21). This is the only place a surface name or a grammar exists:
+// Everything a surface shows for a command, DERIVED from its definition
+// (docs/decisions/0008-one-command-definition-every-surface.md). This is the only place a surface name or a grammar exists:
 //   naming   — camelCase in TypeScript (`sinceMs`), `--kebab-case` on the CLI and
 //              in chat, `group_verb` as the MCP tool name, `/api/group.verb` on
 //              HTTP; `toSurfaceNames(id)` is the one id → names mapping.
@@ -59,7 +59,7 @@ export function chatForm(id: string): string {
   return cliWords(id).join(" ");
 }
 
-/** KTD2: `runs.list` → `/api/runs.list`, `runs_list`, `["runs","list"]`, `"runs list"`. */
+/** `runs.list` → `/api/runs.list`, `runs_list`, `["runs","list"]`, `"runs list"`. */
 export function toSurfaceNames(id: string): { http: string; mcp: string; cli: [string, string]; chat: string } {
   return { http: httpPath(id), mcp: mcpToolName(id), cli: cliWords(id), chat: chatForm(id) };
 }
@@ -153,7 +153,7 @@ function jsonSchemaOf(schema: z.ZodType): Record<string, unknown> {
 }
 
 /**
- * KTD11: the MCP `inputSchema` (and any JSON-Schema consumer) — one object whose
+ * The MCP `inputSchema` (and any JSON-Schema consumer) — one object whose
  * properties are the arguments (by declared name, described) plus the options
  * (camelCase keys); `required` lists the non-optional arguments and options.
  * Unknown properties are refused, as the registry refuses unknown options.
@@ -390,8 +390,8 @@ export function catalogueText(cmds: readonly CommandShape[]): string {
 }
 
 // Chat (Slack) renders in a proportional font, where the padded columns of
-// `helpText`/`catalogueText` collapse into ragged runs of spaces (2026-08-30 for
-// the bare `help`, 2026-09-04 for `<group> help` and `--help`). The chat shapes
+// `helpText`/`catalogueText` collapse into ragged runs of spaces (seen live for
+// the bare `help`, then for `<group> help` and `--help`). The chat shapes
 // carry the same derived content as bullets with the form in a code span.
 
 /** One bullet per command: `• \`runs list\` — describe`. */

@@ -1,7 +1,7 @@
 import type { Actor, Grants } from "./authz/types.js";
 import { parseIngressTokenMap, tokenForSubject } from "./ingressTokens.js";
 
-// The schedule registry (#244): the ONE catalog of every cron any of our
+// The schedule registry: the ONE catalog of every cron any of our
 // Cloudflare Workers runs. Each Worker's `wrangler.jsonc` `triggers.crons` must
 // equal the registry's expressions for that worker (a unit test enforces it per
 // worker), and each Worker's `scheduled()` looks its firing up HERE — so a
@@ -40,7 +40,7 @@ export interface RunAction {
   command: string;
   /** The ingress identity (`subject`) whose token the shim presents. */
   identity: string;
-  /** Who the firing IS under the one authorization model (plan U2/U3, R9): the
+  /** Who the firing IS under the one authorization model (docs/decisions/0007-authorization-policy-table.md): the
    *  `schedule` actor `schedule:<name>` with the grants the registry declares
    *  for it — the floor `ConfigStore.grantsFor` serves for that id; a native
    *  `grants["schedule:<name>"]` entry in config.yaml replaces them. The shim
@@ -56,7 +56,7 @@ export function scheduleActor(name: string, grants: Grants): RunAction["actor"] 
 }
 
 /** What the weekly pass needs: read the fleet's runs (`friction report` is a
- *  run read across every channel — the #395 fix) and file proposals. No repos. */
+ *  run read across every channel) and file proposals. No repos. */
 const SELF_IMPROVEMENT_GRANTS: Grants = Object.freeze({
   actions: new Set(["friction:read", "friction:write"]),
   channels: "all",
@@ -102,7 +102,7 @@ export const SCHEDULES: readonly ScheduleDef[] = [
     cron: "0 14 * * 1",
     worker: "bot",
     description:
-      "Weekly self-improvement pass (#84): cluster the friction ledger and file deduped `self-improvement` issues. Proposals only.",
+      "Weekly self-improvement pass: cluster the friction ledger and file deduped `self-improvement` issues. Proposals only.",
     action: {
       type: "run",
       command: "friction propose",
@@ -115,7 +115,7 @@ export const SCHEDULES: readonly ScheduleDef[] = [
     cron: "*/10 * * * *",
     worker: "resident",
     description:
-      "Resident watchdog (KTD4): re-arm dead refresh alarm chains (marking degraded(alarm-missed)) and time out stuck onboarding. Cadence must stay shorter than the resident SLEEP_AFTER (20m). Not a run.",
+      "Resident watchdog: re-arm dead refresh alarm chains (marking degraded(alarm-missed)) and time out stuck onboarding. Cadence must stay shorter than the resident SLEEP_AFTER (20m). Not a run.",
     action: { type: "watchdog" },
   },
 ];

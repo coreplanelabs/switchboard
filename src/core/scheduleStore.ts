@@ -1,7 +1,7 @@
 import { isScheduleFiring, type ScheduleFiring } from "./schedules.js";
 import { errorSuffix } from "./workerError.js";
 
-// Where scheduled firings are recorded (#244). The Worker shim writes one
+// Where scheduled firings are recorded. The Worker shim writes one
 // `ScheduleFiring` per cron firing; the bot's /runs "Scheduled" panel reads the
 // newest per schedule. Two implementations of one seam (AGENTS.md invariant 2):
 //
@@ -60,7 +60,7 @@ export const SCHEDULE_WORKER_TIMEOUT_MS = 10_000;
 export const DEFAULT_SCHEDULE_TOKEN_ENV = "MEMORY_TOKEN";
 
 export interface WorkerScheduleStoreOptions {
-  /** Base URL of the state Worker (e.g. https://switchboard-memory.coreplanelabs.dev). */
+  /** Base URL of the state Worker (e.g. https://switchboard-memory.example.com). */
   baseUrl: string;
   /** Bearer secret (MEMORY_TOKEN on the Worker). */
   token: string;

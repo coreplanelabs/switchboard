@@ -1,15 +1,15 @@
 import type { ChannelDirectory, ChannelVisibility } from "./types.js";
 
-// The channel-facts seam (plan KTD4, U3): where dispatch learns a channel's
-// visibility before stamping it on the run (KTD7), and — later, U5 — where
-// membership facts come from. `authorize` never calls it: decisions read the
+// The channel-facts seam: where dispatch learns a channel's visibility before
+// stamping it on the run, and where membership facts will come from once an
+// adapter proves them. `authorize` never calls it: decisions read the
 // stamped resource and the actor's grants only, so a read costs no Slack call.
 //
 // This file holds the static mapping: what a platform-namespaced id says on
 // its own. Machine channels are `machine`; a Slack DM (`D…`) is `dm`, a Slack
 // private group (`G…`) is `private`; a Slack `C…` channel may be public or
 // private and only `conversations.info` can tell, so it is `unknown` here —
-// and `unknown` is never public (R7). It is the dispatcher's default (the CLI,
+// and `unknown` is never public (fail-closed). It is the dispatcher's default (the CLI,
 // the tests); the bot wires `SlackChannelDirectory`
 // (src/channels/slackChannelDirectory.ts), which asks Slack for `C…`/`G…` ids
 // and delegates everything else back here. Membership is `unknown` for

@@ -1,4 +1,4 @@
-// Deterministic "post the review back to the PR" decision (GitHub issue #69).
+// Deterministic "post the review back to the PR" decision.
 //
 // A review of a resolved PR posts its findings to that PR by default — the user
 // never has to add "and post to the PR". The decision is made by code here (not

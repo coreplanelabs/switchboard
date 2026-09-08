@@ -22,7 +22,7 @@ export function normalizeText(text: string): string {
 export function rankRecords(active: MemoryRecord[], query: string, now: number, limit: number): MemoryRecord[] {
   // The query (up to ~4k chars) is tokenized ONCE here, not once per record per
   // pass: the Memory Worker runs this over its FTS candidate pool (up to
-  // max(50, 5×limit) bm25-ordered rows, #356) on a single Durable Object
+  // max(50, 5×limit) bm25-ordered rows) on a single Durable Object
   // thread, and each record's match is computed exactly once — the relevance
   // gate and the score share it.
   const queryTokens = tokenize(query);
@@ -40,10 +40,10 @@ export function rankRecords(active: MemoryRecord[], query: string, now: number, 
     .map(({ r }) => r);
 }
 
-/** Default per-scope cap on ACTIVE records (#253) when config does not set one. */
+/** Default per-scope cap on ACTIVE records when config does not set one. */
 export const DEFAULT_SCOPE_CAP = 500;
 
-/** Per-scope cap (#253): which ACTIVE records a store must evict so that at
+/** Per-scope cap: which ACTIVE records a store must evict so that at
  *  most `cap` remain — the least recently USED first (`lastUsedAt ??
  *  createdAt` ascending; ties broken by lower `createdAt`, so the older record
  *  goes first), exactly `active.length - cap` of them, none at or under the

@@ -22,17 +22,17 @@ import { formatDiskGauge } from "../../execution/residentDiskBudget.js";
 import type { RepoInspector } from "../../execution/githubRepoInspect.js";
 import type { Span } from "../trace/types.js";
 
-// The `repo.*` registrations (#157 R13 + phase 4b): the whole repo surface on
+// The `repo.*` registrations: the whole repo surface on
 // ONE typed model.
 //   repo list                                  — the live resident registry (`repo:read`,
 //                                                what every Slack user holds)
 //   repo onboard <slug> [--ref] [--test] [--build] [--install] [--evict-coldest]
 //   repo offboard <slug> [--dry-run]           — `repo:write`: the repo-management right
-//   repo reconfigure <slug> [--ref] [--test…]    (KTD9 fail-closed: admins ∪
+//   repo reconfigure <slug> [--ref] [--test…]    (fail-closed: admins ∪
 //   repo rebuild <slug> [--dry-run]              holders of `repo:write` — admins, or
 //                                                anyone granted it)
 //   repo test <slug> [ref] / repo build <slug> [ref]
-//                                              — deterministic ops (U6/KTD8): `repo:exec`
+//                                              — deterministic ops: `repo:exec`
 //                                                decided on `agent { coding }` (the implicit
 //                                                target agent — the right to run it, or the
 //                                                exec grant) + the per-repo allowlist inside
@@ -40,7 +40,7 @@ import type { Span } from "../trace/types.js";
 // identity comparison of their own.
 // The handlers are thin: typed args/options → the resident Worker's admin
 // routes, or the `Operations` backend (resident `/op` or local). Nothing here
-// starts an agent run (KTD16): a deterministic op runs the repo's ONBOARDED
+// starts an agent run: a deterministic op runs the repo's ONBOARDED
 // command with zero model turns; the natural-language forms the dispatcher
 // recognizes are translated into these same two commands.
 //
@@ -57,7 +57,7 @@ export interface RepoCommandDeps {
      *  resident is configured, local for local execution), or null when none
      *  exists (a per-thread remote backend has no op surface). */
     operations(caller: Caller): Promise<Operations | null>;
-    /** Per-repo access for resident environments (KD7, open-when-absent). */
+    /** Per-repo access for resident environments (open-when-absent). */
     canUseRepo(callerId: string, slug: string): Promise<boolean>;
     /** Reads the repo root before `onboard` chooses a command table (item 52).
      *  Absent, or a named failure → the npm fallback table WITH a warning in
@@ -70,8 +70,8 @@ export interface RepoCommandDeps {
 
 const defineCommand = commandDefiner<RepoCommandDeps>();
 
-/** The table an uninspectable onboard falls back to (the shape U3 proved on
- *  jshttp/vary). An INSPECTED onboard derives its table from the repo root
+/** The table an uninspectable onboard falls back to (the npm shape first
+ *  proven on jshttp/vary). An INSPECTED onboard derives its table from the repo root
  *  instead (`detectCommands`, item 52). */
 export const DEFAULT_COMMANDS = NPM_FALLBACK_COMMANDS;
 export const DEFAULT_REF = "main";
@@ -87,7 +87,7 @@ export const repoSlug = z
   .string()
   .refine((s) => parseSlug(s) !== undefined, "expected a GitHub owner/name slug")
   .transform((s) => parseSlug(s) as string);
-/** The resident's strict branch-ref pattern — a hostile ref never reaches any backend (KTD8). */
+/** The resident's strict branch-ref pattern — a hostile ref never reaches any backend. */
 export const gitRef = z
   .string()
   .refine((s) => validRef(s) !== undefined, "expected a plausible git branch ref (e.g. main)");
@@ -213,7 +213,7 @@ export const repoOnboard = defineCommand({
       ),
     evictColdest: flag
       .optional()
-      .describe("over the resident cap, offboard the coldest eligible warm resident instead of failing (#50)"),
+      .describe("over the resident cap, offboard the coldest eligible warm resident instead of failing"),
   }),
   action: "repo:write",
   effect: "write",
@@ -279,7 +279,7 @@ export const repoOnboard = defineCommand({
     );
     if (r.status !== 202) {
       // Over the cap with --evict-coldest and nothing eligible: the resident
-      // itemizes why each one was kept (#50) — relay it so the admin can
+      // itemizes why each one was kept — relay it so the admin can
       // offboard by hand with the facts in front of them.
       const rejected =
         r.status === 429 && Array.isArray(r.data.rejected) ? (r.data.rejected as Array<Record<string, unknown>>) : [];
@@ -329,8 +329,8 @@ function listWords(words: readonly string[]): string {
  * own reason plus the hint that fits it: the two commands that fix a bad
  * table when the failure was at install/build/test (a step the table
  * controls), a plain retry otherwise (clone, snapshot, timeout — the
- * resident's or Cloudflare's side; live 2026-09-04 a snapshot `put` 10043
- * got the table hint and misled). Bounded by
+ * resident's or Cloudflare's side; a failed snapshot `put` once got the
+ * table hint and misled). Bounded by
  * `SETTLE_MAX_MS`; a resident still onboarding then is reported as such (not
  * silently dropped), and every transport/404 outcome is a sentence too.
  */
@@ -507,7 +507,7 @@ export const repoReconfigure = defineCommand({
     const api = await adminOf(deps, span);
     const body: Record<string, unknown> = { resource: repoResourceId(args.slug) };
     if (Object.keys(commands).length > 0) {
-      // The resident's /reconfigure REPLACES the whole command table (KTD9), so
+      // The resident's /reconfigure REPLACES the whole command table, so
       // a partial patch is merged onto the current table — fetched live.
       const list = await call(() => api.residents());
       if (list.status !== 200) throw residentFailure(list);
@@ -524,7 +524,7 @@ export const repoReconfigure = defineCommand({
   },
 });
 
-// ---- repo test / repo build (deterministic ops, U6/KTD8) -----------------------------------
+// ---- repo test / repo build (deterministic ops) -----------------------------------
 
 export const NO_OPS_BACKEND_MESSAGE =
   "Deterministic ops need a backend: configure `execution.resident` (with its operator token) or local execution.";
@@ -560,7 +560,7 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
     describe: `Run the repo's onboarded ${op} command with zero model turns (needs coding-agent access; the ref must be a plausible branch).`,
     render: renderOp,
     handler: async ({ args, caller, deps }) => {
-      // KD7: the same per-repo allowlist a coding run against this repo passes.
+      // The same per-repo allowlist a coding run against this repo passes.
       if (!(await deps.repo.canUseRepo(caller.id, args.slug)))
         throw new CommandError(
           "unauthorized",

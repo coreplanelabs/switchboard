@@ -1,6 +1,6 @@
 import { RUN_NOTE_KINDS, type RunEvent, type RunNoteKind } from "./runEvents.js";
 
-// Parsing a SAVED run-event stream (Area 7b / #84) — the input of
+// Parsing a SAVED run-event stream — the input of
 // `friction analyze`: one JSON object per line, OR a raw SSE capture of
 // `/runs/:id/events` (`data: {...}` frames). Analysis-only input handling;
 // nothing here touches a run, a sandbox, or GitHub.

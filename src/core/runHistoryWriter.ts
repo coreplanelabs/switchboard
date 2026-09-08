@@ -3,10 +3,10 @@ import type { RunStore } from "./runStore.js";
 import type { Span, TraceOptions } from "./trace/types.js";
 import { PermanentStoreError, RouteMissingError } from "./runStoreWorker.js";
 
-// Run history (#157, U4 / KTD4): the dispatcher's write path. A finished run's
+// Run history (docs/decisions/0006-runs-have-two-lives.md): the dispatcher's write path. A finished run's
 // record is built synchronously at finish and handed here AFTER the reply is
 // sent, so persistence never delays or fails the reply. The same path also
-// carries the tombstone-first writes (#375): a provisional `interrupted`
+// carries the tombstone-first writes: a provisional `interrupted`
 // record at run start (`provisional: true` — no `onPersisted`) and the drain
 // deadline's full-transcript upgrade, both upserts the finish write replaces
 // when the run ends normally. Writes are
@@ -15,7 +15,7 @@ import { PermanentStoreError, RouteMissingError } from "./runStoreWorker.js";
 // its whole life — retry backoff included — so SIGTERM during a backoff waits
 // for the retry rather than losing the run (AGENTS.md invariant 6).
 //
-// Retry policy: two retries with jittered backoff (nominal 1 s, then 4 s) on a
+// Retry policy: two retries with jittered backoff (base 1 s, then 4 s) on a
 // `TransientStoreError` (network, timeout, 408/429/5xx) or any unclassified
 // error (a file store's fs failure); never on a `PermanentStoreError` (a 4xx
 // such as 413, or a malformed response) — the same record would fail again; and
@@ -34,7 +34,7 @@ import { PermanentStoreError, RouteMissingError } from "./runStoreWorker.js";
 // provisional put already on the wire when the final write lands — arrival
 // order at the store is then the store's.
 
-/** Nominal backoff before retry 1 and retry 2; each is jittered ±50%. */
+/** Base backoff before retry 1 and retry 2; each is jittered ±50%. */
 export const RUN_HISTORY_RETRY_DELAYS_MS: readonly number[] = [1000, 4000];
 
 export const ROUTE_MISSING_MESSAGE =
@@ -43,7 +43,7 @@ export const ROUTE_MISSING_MESSAGE =
 export interface RunHistoryWriter {
   /** Persist a record in the background. Never throws; never blocks.
    *  `provisional: true` (the start-of-run `interrupted` tombstone and the
-   *  drain deadline's full-transcript upgrade, #375) skips the `onPersisted`
+   *  drain deadline's full-transcript upgrade) skips the `onPersisted`
    *  hook — the index's persisted flag means "finished and durably stored",
    *  which a provisional write must not claim — and yields to the run's final
    *  record: once a non-provisional write for the same id is enqueued, a
@@ -122,7 +122,7 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
   let degraded = false;
   let routeMissingLogged = false;
 
-  /** ±50% jitter around the nominal delay, so a burst of finishing runs does not retry in lockstep. */
+  /** ±50% jitter around the base delay, so a burst of finishing runs does not retry in lockstep. */
   const jittered = (ms: number): number => ms * (0.5 + random());
 
   const persisted = (id: string): void => {

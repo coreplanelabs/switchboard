@@ -15,20 +15,20 @@ import type { RunEvent } from "../runEvents.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../runRecord.js";
 import { MAX_EVENTS_PAGE, runResource, type Result, type RunRecordView, type RunsService } from "../runsService.js";
 
-// The `runs.*` registrations (#157 R8/R9): thin wrappers that translate typed
+// The `runs.*` registrations: thin wrappers that translate typed
 // arguments/options plus the resolved caller into `RunsService` calls.
 // Everything a surface can learn about a run comes through here. Two rules the
 // service does not enforce because they are about the CALLER, not the run:
 //   - what the caller may SEE is the authorization policy (authorization.md
-//     items 5–7, R1/R5/R6): a point read authorizes `runs:read` (or `runs:write`
+//     items 5–7): a point read authorizes `runs:read` (or `runs:write`
 //     for `stop`) against the run's own attributes — channel, user, stamped
 //     visibility — and a deny is `not_found`, byte-identical to a missing run
-//     (KTD8; the reason goes to the audit line only); a list hands the store
+//     (the reason goes to the audit line only); a list hands the store
 //     `predicateFor(actor, "runs:read", "run")` so nothing is loaded and
 //     filtered afterwards. No channel id is compared by hand here.
 //   - stored free text (message bodies, tool summaries) leaves wrapped as
-//     untrusted content (KTD17). `runs.list` carries none of it by construction.
-// None of these commands starts a run (KTD16); `runs.stop` only ends one.
+//     untrusted content. `runs.list` carries none of it by construction.
+// None of these commands starts a run; `runs.stop` only ends one.
 // Surface forms (derived): `runs get <id> [--include messages]`,
 // `runs events <id> [--after-seq n] [--limit n]`, `runs friction <id>`,
 // `runs stop <id> --mode soft|hard`, `runs list [--status …] [--agent …] …`.
@@ -45,7 +45,7 @@ export interface RunReadDenied {
 export interface RunsCommandDeps {
   /** Resolved on first use: the CLI opens the run store lazily behind an async config open. */
   runs(): Promise<RunsService>;
-  /** Where a denied point read is recorded (KTD8). Default: one JSON line on `console.log`. */
+  /** Where a denied point read is recorded. Default: one JSON line on `console.log`. */
   denied?: (entry: RunReadDenied) => void;
 }
 
@@ -64,8 +64,8 @@ const logDenied = (entry: RunReadDenied): void => console.log(JSON.stringify({ a
 
 /** The run as this caller may see it — ONE fetch serves both the authorization
  *  and the payload. `authorize(actor, action, run)` decides on the run's own
- *  attributes (R1); a deny is the same `not_found` an unknown id gives, so
- *  existence is never revealed (KTD8), and its reason reaches the audit line only. */
+ *  attributes; a deny is the same `not_found` an unknown id gives, so
+ *  existence is never revealed, and its reason reaches the audit line only. */
 async function getVisibleRun(
   runs: RunsService,
   id: string,
@@ -142,7 +142,7 @@ export const runsList = defineCommand({
   effect: "read",
   describe: "List runs (live and persisted, newest first) — metadata only, never message text.",
   handler: async ({ options, caller, deps }) => {
-    // The policy, compiled for this actor, is the store's filter (R6); the
+    // The policy, compiled for this actor, is the store's filter; the
     // `channel` option is a plain filter the caller asked for on top of it.
     const visibleTo = predicateFor(caller.actor, "runs:read", "run");
     return asJson(await (await deps.runs()).listRuns({ ...options, visibleTo }));

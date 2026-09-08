@@ -30,7 +30,7 @@ export interface ConfigAwarenessInput {
   threadDirective: DirectiveSet;
   /** Whether the invoking user may run `config set channel`. */
   canEditChannelConfig: boolean;
-  /** External MCP servers (#394, features/mcp-tools.md item 17): whether the
+  /** External MCP servers (features/mcp-tools.md item 17): whether the
    *  self-serve registry is on, and which servers answered / did not for THIS
    *  run — so an agent never says "I cannot load MCPs" when a user can add one.
    *  Absent → no line (byte-identical to before the feature). */
@@ -66,7 +66,7 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
     );
   }
 
-  // Custom instructions (#107 phase 2): name WHICH scopes carry them, never
+  // Custom instructions: name WHICH scopes carry them, never
   // the text — the instructions block itself carries that, right after this.
   const withInstructions = (["channel", "user"] as const).filter((k) => i[k].instructions?.trim());
   if (withInstructions.length > 0) {

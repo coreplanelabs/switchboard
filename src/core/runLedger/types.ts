@@ -1,4 +1,4 @@
-// The run ledger's contract (docs/plans/2026-09-08-001-feat-durable-runs-plan.md;
+// The run ledger's contract (docs/decisions/0019-durable-run-ledger-resume-after-kill.md;
 // features/run-history.md items 28–34): what a live run leaves on the state
 // Worker so the next bot generation can resume it. Node-free — imported by the
 // bot and by `deploy/cloudflare-memory/worker.ts` alike, the way runRecord.ts is.

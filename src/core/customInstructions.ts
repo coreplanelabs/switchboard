@@ -1,7 +1,7 @@
 import type { Scope } from "../config.js";
 
-// Per-scope custom instructions (features/routing-and-config.md behavior 9,
-// #107 phase 2). Channel and user scopes may carry free-text `instructions`
+// Per-scope custom instructions (features/routing-and-config.md behavior 9).
+// Channel and user scopes may carry free-text `instructions`
 // ("remember my rules/preferences"); this renders them as ONE clearly
 // delimited advisory block for the system prompt. Pure: the dispatcher hands
 // in the scopes it already resolved for this run, so the block can only ever

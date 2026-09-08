@@ -35,7 +35,7 @@ export class NullMemoryStore implements MemoryStore {
 export class InMemoryMemoryStore implements MemoryStore {
   private readonly byScope = new Map<string, MemoryRecord[]>();
   private readonly now: () => number;
-  /** Per-scope cap on active records (#253); undefined → uncapped (tests/dev). */
+  /** Per-scope cap on active records; undefined → uncapped (tests/dev). */
   private readonly cap: number | undefined;
   private seq = 0;
 
@@ -79,7 +79,7 @@ export class InMemoryMemoryStore implements MemoryStore {
       if (plan.supersede) plan.supersede.status = "superseded";
       list.push(plan.record);
     }
-    // Per-scope cap (#253): the batch never leaves the scope over the cap.
+    // Per-scope cap: the batch never leaves the scope over the cap.
     if (this.cap !== undefined) for (const r of planEviction(list, this.cap)) r.status = "evicted";
   }
 

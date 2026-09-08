@@ -4,9 +4,9 @@ import type { RunEvent } from "./runEvents.js";
 // item 2): what the run has been waiting on since its last event, once that
 // wait is long enough to be worth a word. Pure, so the two answers — the
 // model is thinking, or a tool is running — are asserted apart from the
-// dispatcher. 2026-09-07 (#531): a `pnpm typecheck` in flight for an hour was
-// rendered as `thinking (3601s since last tool)`; the last event WAS the tool
-// call, so the card blamed the model for a wait on the sandbox.
+// dispatcher. When the last event WAS a tool call, a long quiet stretch is a
+// wait on the sandbox, not on the model: an hour-long `pnpm typecheck` must
+// never render as `thinking (3601s since last tool)`.
 
 /** A quiet stretch shorter than this gets no suffix: the activity line
  *  already shows the current call, and a few seconds of either kind of wait

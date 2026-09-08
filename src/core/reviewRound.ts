@@ -1,12 +1,12 @@
 // Per-round review + workspace machinery, extracted from dispatch() as
-// callable units (agent:ship plan U4, zero behavior change): everything a
+// callable units (zero behavior change): everything a
 // review or coding round must invoke — workspace attach/release paired on the
 // round's agent, the PR-head pre-flight, the attach-head guard, head-pinned
 // system composition, the head-move settle + single re-review, and the
 // reviewed-head post gate — parameterized on an explicit `AgentDef` instead of
 // branches keyed on the dispatch's top-level resolved agent. `dispatch()`'s
 // plain agent:review / agent:coding paths call these units at their existing
-// lifecycle positions; a ship round (plan U7) invokes the same units per
+// lifecycle positions; a ship round invokes the same units per
 // child round.
 //
 // Every unit takes a `logKey` for its console lines (the dispatcher passes
@@ -50,7 +50,7 @@ export type FetchPrHead = (pr: { repo: string; number: number }) => Promise<stri
  *  the move is unclassifiable. `deps.fetchPrCommits ?? prCommitsSince`. */
 export type FetchPrCommits = (q: { repo: string; base: string; sha: string }) => Promise<PrCommitList | undefined>;
 
-// ---- per-agent attach/release pairing (KTD4) --------------------------------
+// ---- per-agent attach/release pairing ---------------------------------------
 
 /** Release mode paired to a round's agent: a readonly toolset holds nothing
  *  worth keeping → "always"; a writable one keeps a worktree with
@@ -158,7 +158,7 @@ export function checkPrHeadPreflight(input: {
   };
 }
 
-// ---- attach-head guard (agent-review.md items 10 + 12, #282) ----------------
+// ---- attach-head guard (agent-review.md items 10 + 12) ----------------------
 
 export type AttachHeadGuard =
   | { outcome: "verified" }
@@ -510,7 +510,7 @@ async function classifyMove(
   return { move: classifyHeadMove(before, after), before, after };
 }
 
-// ---- reviewed-head post gate + review post (issue #69, item 8) --------------
+// ---- reviewed-head post gate + review post (agent-review.md item 8) ---------
 
 /** How the post step ended: `posted: true` only when the GitHub post call
  *  succeeded; every skip, guard refusal, and failure is `posted: false` with
@@ -525,7 +525,7 @@ export type ReviewPostOutcome = { posted: true } | { posted: false; reason: stri
  * resolved PR posts its verdict back to that PR by default — unless the
  * request opted out, the round was hard-stopped (no findings, only the abort
  * line), or the reviewed-head guard refuses (fail-closed: the commit the
- * round actually reviewed must BE the pinned head — the #182 shape). Every
+ * round actually reviewed must BE the pinned head). Every
  * skip and failure is said out loud through `reply` (best-effort, never a
  * failed run): the Slack-only notes, the carried-forward note, and the
  * head-moved-after-post note (one best-effort GET; unknown → no note, never a
@@ -595,9 +595,9 @@ export async function runReviewPostStep(input: {
     // Reviewed-head guard (item 8): the review is posted to this PR only if
     // the commit the agent reviewed IS the PR head resolved for this run.
     // Observed HEAD is authoritative; the verdict's reported head is the
-    // fallback; unknown either way → no post (fail-closed). Found live on
-    // PR #182 (2026-08-29): the agent reviewed another PR's branch and its
-    // LGTM was posted — and auto-approved — on the wrong PR.
+    // fallback; unknown either way → no post (fail-closed). Otherwise an agent
+    // that reviewed another PR's branch gets its LGTM posted — and
+    // auto-approved — on the wrong PR.
     const head = checkReviewedHead({ expected: reviewHead, observed: observedHead, reported: verdict?.head });
     if (!head.ok) {
       console.log(`[review-post] ${logKey} skipped: ${head.reason} (${where})`);

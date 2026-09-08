@@ -2,19 +2,19 @@ import { z } from "zod";
 import { hasAction } from "./authorize.js";
 import { NO_GRANTS, type Grants, type GrantSet } from "./types.js";
 
-// Grants (plan U2 — R7, R8): WHAT an actor may do, from config's one shape —
+// Grants: WHAT an actor may do, from config's one shape —
 // the native `grants` block (one entry per platform-namespaced actor id) — plus
 // `restrict`, which names the agents and repos that are CLOSED unless a grant
 // covers them. Everything not restricted is open to everyone who can reach the
 // bot; a grant only ever adds. Pure: no I/O, no decisions — nothing here says
-// whether an action is allowed; that is `authorize` (U1).
+// whether an action is allowed; that is `authorize`.
 
 /** Every grant, on every axis. What admins and the local CLI hold. */
 export const ALL_GRANTS: Grants = Object.freeze({ actions: "all", channels: "all", repos: "all" });
 
 /** The namespaces a native `grants` key may use (invariant 4). `cli:` is not
  *  configurable (the local CLI always holds everything) and `agent:` actors
- *  derive their grants from their principal (R2), so neither is listed. */
+ *  derive their grants from their principal, so neither is listed. */
 export const GRANT_ACTOR_PREFIXES = ["slack", "http", "mcp", "access", "schedule"] as const;
 
 /** The action that lets an actor run agent `<name>` — checked only for a
@@ -24,8 +24,8 @@ export function agentRunAction(agent: string): string {
 }
 
 /** The actions of the commands the `open` chat gate admitted before they became
- *  policy rows (plan U4, KTD5): what EVERY Slack user holds. A command group not
- *  listed here is closed to chat users until config grants it (fail-closed, R7).
+ *  policy rows: what EVERY Slack user holds. A command group not listed here
+ *  is closed to chat users until config grants it (fail-closed).
  *  `config:write` is not here: `config set channel` is held where `grants` say
  *  so (admins through `actions: all`) and nowhere else. */
 export const CHAT_OPEN_ACTIONS: readonly string[] = [
@@ -40,7 +40,7 @@ export const CHAT_OPEN_ACTIONS: readonly string[] = [
   "mcp:write",
 ];
 
-/** What an Access browser session holds implicitly (KTD10): every registered
+/** What an Access browser session holds implicitly: every registered
  *  group's read — never a write, never an exec. */
 export function browserReadActions(commandGroups: readonly string[]): Set<string> {
   return new Set(commandGroups.map((g) => `${g}:read`));
@@ -51,7 +51,7 @@ export function browserReadActions(commandGroups: readonly string[]): Set<string
 /** One axis as config spells it: a list of names, or the explicit word "all". */
 export type GrantListConfig = readonly string[] | "all";
 
-/** One actor's entry. An ABSENT axis is the empty set (fail-closed, R7). */
+/** One actor's entry. An ABSENT axis is the empty set (fail-closed). */
 export interface GrantsEntryConfig {
   actions?: GrantListConfig;
   channels?: GrantListConfig;
@@ -196,7 +196,7 @@ export interface GrantsSource {
   agentNames?: readonly string[];
   /** The registered command groups; absent = none (a browser session holds nothing). */
   commandGroups?: readonly string[];
-  /** The schedule registry's declared actors (`RunAction.actor`, R9): each
+  /** The schedule registry's declared actors (`RunAction.actor`): each
    *  schedule's grants as the registry states them. The floor for a
    *  `schedule:<name>` id — a native `grants` entry for the same id replaces
    *  them (config decides). */
@@ -217,7 +217,7 @@ export interface GrantsTable {
  *  user holds what `everyone` does; an Access browser session holds every
  *  `<group>:read`. Every other namespace (`schedule:`, `access:svc:`, `http:`,
  *  `mcp:`) is a credential or a job that holds exactly what names it — an
- *  unlisted one is `NO_GRANTS` (R7). */
+ *  unlisted one is `NO_GRANTS` (fail-closed). */
 export function namespaceBaseline(actorId: string, table: Pick<GrantsTable, "everyone" | "browserReads">): Grants {
   if (actorId.startsWith("slack:")) return table.everyone;
   if (actorId.startsWith("access:") && !actorId.startsWith("access:svc:")) return table.browserReads;
@@ -247,7 +247,7 @@ export function grantsTable(source: GrantsSource): GrantsTable {
 }
 
 /** One actor's grants from a built table: its entry (baseline included); else
- *  the baseline its namespace inherits; else `NO_GRANTS` (R7). */
+ *  the baseline its namespace inherits; else `NO_GRANTS` (fail-closed). */
 export function grantsIn(table: GrantsTable, actorId: string): Grants {
   const listed = table.grants.get(actorId);
   if (listed) return listed;

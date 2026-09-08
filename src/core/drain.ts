@@ -3,11 +3,11 @@
 // catch-up (`src/channels/slackCatchUp.ts`). Node-free and Bolt-free on purpose
 // so tests can pin the relationship between them without loading the adapter.
 //
-// Why they are one module (#272): on SIGTERM the drain closes the Slack socket
+// Why they are one module: on SIGTERM the drain closes the Slack socket
 // at once and holds the container until in-flight runs finish, up to
 // DRAIN_DEADLINE_MS. Cloudflare starts the replacement container only after
 // this one exits, so a deploy that lands on a run in flight blacks Slack out
-// for the run's remaining duration (7.5 min observed 2026-08-30). Mentions in
+// for the run's remaining duration (minutes, in practice). Mentions in
 // that gap are recovered ONLY by the catch-up scan on the next connect, whose
 // window must therefore cover the worst blackout: the full drain deadline plus
 // the new container's cold start. Keeping the socket open during the drain was

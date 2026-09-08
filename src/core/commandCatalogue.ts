@@ -73,7 +73,7 @@ export interface CoreCommandWiring {
   profile?: () => Promise<LoadedProfile>;
   /** Where scheduled firings are recorded; absent → `schedule list` shows no history. */
   scheduleStore?: ScheduleStore;
-  /** The MCP service (#394) behind `mcp.*`, or why MCP is off; absent → the
+  /** The MCP service behind `mcp.*`, or why MCP is off; absent → the
    *  commands answer `unavailable` with the standard sentence. */
   mcp?: () => Promise<McpService | { unavailable: string }> | McpService | { unavailable: string };
   /** The resident admin client; default: from `execution.resident` + its bearer (per call). */
@@ -132,7 +132,7 @@ export type Provided<T> = T | (() => T | Promise<T>);
 /** Resolve once, on first use, asynchronously: the config's overrides backing
  *  may be the state Worker, so opening it is an await — and because every
  *  config-backed dep below reaches for it through this accessor, a command that
- *  never touches the config never waits for the open (#409), with nothing to
+ *  never touches the config never waits for the open, with nothing to
  *  classify. A rejected open is NOT cached: the next command retries. */
 function once<T>(provided: Provided<T>): () => Promise<T> {
   if (typeof provided !== "function") {

@@ -28,7 +28,7 @@ import {
 } from "./runRecord.js";
 import { DEFAULT_RUN_STORE_TOKEN_ENV, RUN_STORE_KEY, WorkerRunStore } from "./runStoreWorker.js";
 
-// Run history (#157, U2): the store seam behind every `runs.*` read and the
+// Run history (docs/decisions/0006-runs-have-two-lives.md): the store seam behind every `runs.*` read and the
 // dispatcher's write at run finish. Three implementations (AGENTS.md invariant
 // 2): `InMemoryRunStore` (tests/dev), `FileRunStore` (an explicit opt-in that
 // keeps `data/runs/<id>.json` files on the host disk — ephemeral on Cloudflare
@@ -36,7 +36,7 @@ import { DEFAULT_RUN_STORE_TOKEN_ENV, RUN_STORE_KEY, WorkerRunStore } from "./ru
 // the state Worker; the production choice, AGENTS.md invariant 6). Every
 // implementation runs the ONE retention function from runRecord.ts, so a read
 // on any side hides the same rows, and rejects an id failing `RUN_ID_PATTERN`
-// before touching storage (R4): a bad id is not-found, never a path.
+// before touching storage: a bad id is not-found, never a path.
 
 export interface PutResult {
   ok: true;
@@ -67,7 +67,7 @@ export interface RunStore {
   /** `trace.span`: the caller's span, under which a Worker store's request is an
    *  `http.client` span (features/tracing.md item 24); the local stores ignore it. */
   put(record: RunRecord, trace?: TraceOptions): Promise<PutResult>;
-  /** The record, or null when unknown, expired, or the id is malformed — one not-found shape (R4). */
+  /** The record, or null when unknown, expired, or the id is malformed — one not-found shape. */
   get(id: string): Promise<RunRecord | null>;
   /** The record WITHOUT its events (the listing row, `bytes` included) — the
    *  same not-found shape as `get`. The read for a caller that needs identity,
@@ -110,7 +110,7 @@ export class NullRunStore implements RunStore {
   }
 }
 
-/** How often every store implementation sweeps expired rows (KTD5). */
+/** How often every store implementation sweeps expired rows. */
 export const SWEEP_INTERVAL_MS = 6 * 3600_000;
 /** Directory under the data dir holding `<id>.json` files and `index.jsonl`. */
 export const RUNS_DIR = "runs";
@@ -244,7 +244,7 @@ const DIR_MODE = 0o700;
  * `bytes`), so `list` never opens a record file and `get` opens exactly one.
  * Retention runs on every read (hidden) and on every write (files unlinked, the
  * index compacted); `sweep()` does the write-side work with no new record, and
- * `buildRunStore` runs it on start and every 6 h (KTD5). A torn record file is
+ * `buildRunStore` runs it on start and every 6 h. A torn record file is
  * absent from `list` (size ≠ the indexed `bytes`) and not-found from `get`
  * (unparsable or missing — `get` opens the one file instead of stat'ing them
  * all); an index line whose file is gone is hidden and dropped at the next
@@ -398,7 +398,7 @@ export class FileRunStore implements RunStore {
 // Config + startup selection
 // ---------------------------------------------------------------------------
 
-/** The `runHistory` config section (KTD14). Absent → history is OFF (live-only). */
+/** The `runHistory` config section. Absent → history is OFF (live-only). */
 export interface RunHistoryConfig {
   /** Days a finished run stays readable. Default 30, clamped to [1, 365]. */
   retentionDays?: number;
@@ -414,7 +414,7 @@ export interface RunHistoryConfig {
   store?: "worker" | "file";
   /** The `RunHistoryDO` on the state Worker (deploy/cloudflare-memory/). */
   worker?: {
-    /** Base URL, must be https:, e.g. https://switchboard-memory.coreplanelabs.dev */
+    /** Base URL, must be https:, e.g. https://switchboard-memory.example.com */
     baseUrl: string;
     /** Env var holding the bearer secret. Default MEMORY_TOKEN. */
     tokenEnv?: string;

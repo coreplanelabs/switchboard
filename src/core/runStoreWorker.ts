@@ -14,7 +14,7 @@ import {
 } from "./runRecord.js";
 import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./runStore.js";
 
-// The DURABLE RunStore (#157, U2): an HTTPS client to the RunHistoryDO on the
+// The DURABLE RunStore (docs/decisions/0006-runs-have-two-lives.md): an HTTPS client to the RunHistoryDO on the
 // state Worker (deploy/cloudflare-memory/ — one SQLite Durable Object per store
 // key), so run history survives bot restarts and redeploys (AGENTS.md
 // invariant 6). Mirrors WorkerMemoryStore: the core sees the RunStore
@@ -23,7 +23,7 @@ import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./run
 // derives the numeric Content-Length the Worker's size fence needs from it,
 // exactly as the memory/friction/schedule clients do; a hand-set header was
 // the one difference between this client and those three, and the only one
-// whose fetches failed from the production container, #313):
+// whose fetches failed from the production container):
 //   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?} → {ok, retained, stored, rewritten}
 //   POST /runs/get    {storeKey, id}                                → {record: RunRecord | null}
 //   POST /runs/summary {storeKey, id}                               → {summary: RunListItem | null}
@@ -32,7 +32,7 @@ import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./run
 //   POST /runs/events {storeKey, id, afterSeq?, limit?}             → {events: StoredRunEvent[] | null, nextAfterSeq?}
 //                                                                     (`events: null` = unknown or hidden run)
 //   POST /runs/delete {storeKey, id}                                → {ok: true, deleted: boolean}
-// Only `put` carries a policy (KTD5): the DO owns the effective policy and a
+// Only `put` carries a policy: the DO owns the effective policy and a
 // read can never widen it. Failure classes tell the caller what to do: a 404
 // means the ROUTE is missing (Worker not yet deployed with v3 — do not retry),
 // 5xx/408/429/network are transient (bounded retries), any other 4xx is
@@ -43,7 +43,7 @@ import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./run
 export const RUN_STORE_TIMEOUT_MS = 10_000;
 /** Env var holding the state Worker bearer when `runHistory.worker.tokenEnv` is unset. */
 export const DEFAULT_RUN_STORE_TOKEN_ENV = "MEMORY_TOKEN";
-/** The one store key (Durable Object name) the bot uses (KTD3). */
+/** The one store key (Durable Object name) the bot uses. */
 export const RUN_STORE_KEY = "runs:default";
 
 /** The `/runs/*` route answered 404: the Worker does not have this route yet. Never retried. */
@@ -71,7 +71,7 @@ export function describeError(err: unknown, depth = 0): string {
 }
 
 export interface WorkerRunStoreOptions {
-  /** Base URL of the state Worker (e.g. https://switchboard-memory.coreplanelabs.dev). */
+  /** Base URL of the state Worker (e.g. https://switchboard-memory.example.com). */
   baseUrl: string;
   /** Bearer secret (MEMORY_TOKEN on the Worker). */
   token: string;

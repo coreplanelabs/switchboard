@@ -2,11 +2,11 @@
 //
 // A review may only be posted to a PR when the commit the agent ACTUALLY
 // reviewed is the PR head resolved for the run (`RepoContext.headSha`). The
-// incident behind this (2026-08-29, PR #182): the agent's own worktree was on
-// the right branch, but it fetched and checked out another PR's branch because
-// the PR body referenced it, reviewed that, called `submit_verdict approve`,
-// and the deterministic post-step put `LGTM:` on #182 — which the org's
-// auto-approve workflow then approved. Every layer had done its job except the
+// failure this guards against: the agent's own worktree is on the right
+// branch, but it fetches and checks out another PR's branch because the PR
+// body references it, reviews that, calls `submit_verdict approve`, and the
+// deterministic post-step puts `LGTM:` on the PR under review — which an
+// auto-approve workflow then approves. Every layer has done its job except the
 // one that asks "is this review OF this PR?".
 //
 // Two sources for the reviewed head, in authority order:
@@ -45,7 +45,7 @@ export function parseRevParseOutput(output: string): string | undefined {
 }
 
 /** Two normalized heads name the same commit when one is a ≥7-hex prefix of
- *  the other (the dispatcher's pre-run attach check reuses this, #282). */
+ *  the other (the dispatcher's pre-run attach check reuses this). */
 export function sameCommit(a: string, b: string): boolean {
   const n = Math.min(a.length, b.length);
   return n >= 7 && a.slice(0, n) === b.slice(0, n);

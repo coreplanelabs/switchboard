@@ -13,7 +13,7 @@ import {
 import { deriveScopeKey, requestScopeKeys, selectMemoryStore } from "../memory/index.js";
 import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js";
 
-// The `memory.*` registrations (#278, #293, #253, phase 4b): the human controls
+// The `memory.*` registrations: the human controls
 // over cross-session memory, on the typed model.
 //   memory list [query…] [--scope <me|org|repo|channel|all>] [--limit <n>] [--repo owner/name]
 //   memory forget <id>
@@ -27,7 +27,8 @@ import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js
 // org admin (chat: the fail-closed repo-management set; `cli:local` holds every
 // scope); another user's scope is unreachable for anyone (isolation by
 // construction, invariant 4). Never a model turn, never a run started here
-// (KTD16); the dispatcher records `memory forget` as an inline run.
+// (only the dispatcher starts agent runs, docs/decisions/0002-dispatcher-is-the-only-orchestrator.md);
+// the dispatcher records `memory forget` as an inline run.
 
 export interface MemoryCommandDeps {
   memory: {
@@ -87,7 +88,7 @@ function isOrgAdmin(caller: Caller): boolean {
   return authorize(caller.actor, "repo:write", { type: "command", id: "memory.forget" }).allow;
 }
 
-/** The shared scope keys (#253) — the same derivers the read/write paths use. */
+/** The shared scope keys — the same derivers the read/write paths use. */
 const repoScopeKey = (repo: string) => deriveScopeKey("repo", { repo });
 const channelScopeKey = (channelId: string) => deriveScopeKey("channel", { channelId });
 const isSharedScope = (key: string, keys: { org: string }) =>
@@ -104,7 +105,7 @@ interface ListedScope {
 }
 
 /** One record per line. The source thread key goes in a code span: as italics
- *  it collided with mrkdwn's `_` handling and rendered mangled (#293). */
+ *  it collided with mrkdwn's `_` handling and rendered mangled. */
 function renderRecord(r: JsonObject): string {
   const when = typeof r.createdAt === "number" ? new Date(r.createdAt).toISOString().slice(0, 10) : "?";
   return `• \`${String(r.id)}\` [${String(r.kind)}, ${when}] ${String(r.text)} (source: \`${String(r.sourceThreadKey)}\`)`;
@@ -177,7 +178,7 @@ export const memoryList = defineCommand({
   handler: async ({ args, options, caller, deps }) => {
     const store = await storeOf(deps);
     const keys = requestScopeKeys(await deps.memory.organization(), caller.id);
-    // #344: the chat-documented "scope word first" form (`memory list org
+    // The chat-documented "scope word first" form (`memory list org
     // deploy`). A leading bare scope word is the scope when --scope is absent;
     // an explicit --scope keeps every query word as filter text. A first word
     // that is not a scope name is never consumed.
@@ -215,7 +216,7 @@ export const memoryList = defineCommand({
       const records = await viaStore(() => store.list(w.key, limit, query));
       scopes.push({ ...w, records, limitReached: records.length === limit });
     }
-    // Stored free text leaves machine surfaces wrapped (KTD17); chat renders it as the person's own records.
+    // Stored free text leaves machine surfaces wrapped; chat renders it as the person's own records.
     const wrap = caller.kind === "chat" ? (t: string) => t : wrapUntrusted;
     return {
       ...(query !== undefined ? { query } : {}),

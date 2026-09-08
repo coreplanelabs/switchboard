@@ -9,11 +9,11 @@ import { systemClock } from "./trace/clock.js";
 //     billable DO GB-s (per namespace), `durableObjectsInvocationsAdaptiveGroups`
 //     for DO request counts — the datasets Cloudflare bills from. NOT summed
 //     request wall time: concurrent long requests (SSE streams, exec) overlap,
-//     so that sum runs ~2× above what is billed (audit 2026-08-29).
+//     so that sum runs ~2× above what is billed.
 //   - Anthropic Admin API `GET /v1/organizations/cost_report` grouped by
 //     workspace — LLM spend, attributed to a group by its Anthropic workspace.
 // `buildCostReport` is pure and does every dollar of arithmetic, so the math is
-// unit-tested against real rows and the sources only fetch + map.
+// unit-tested against dataset-shaped rows and the sources only fetch + map.
 //
 // Pricing model (Cloudflare Containers): vCPU bills on ACTIVE seconds only;
 // memory and disk bill on the PROVISIONED size for every awake second. That is
@@ -88,7 +88,7 @@ export function parseCostsConfig(raw: unknown): CostsConfig | undefined {
 // ---- prices -------------------------------------------------------------------
 
 /** Cloudflare list prices (USD), developers.cloudflare.com/containers/pricing and
- *  /durable-objects/platform/pricing, as of 2026-08-29. Gross: the Workers Paid
+ *  /durable-objects/platform/pricing. Gross: the Workers Paid
  *  plan's included allowance is not subtracted. */
 export const CLOUDFLARE_PRICES = {
   vcpuSecond: 0.00002,
