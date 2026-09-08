@@ -429,7 +429,12 @@ export async function runCodingPrPostStep(input: {
     // the reader to duplicate it. The lookup is the same one open-or-edit
     // uses (githubPulls.findOpenPrByHead); the PR body is NOT touched — there
     // is no description to render — so the note says the push updated it and
-    // the record carries the fact as `pr_opened` with `created: false`.
+    // the record carries the fact as `pr_opened` with `created: false`. The
+    // note is a warning, not an info line: the coding prompt requires a
+    // resubmitted description after EVERY push to an existing PR
+    // (docs/reference/specs/agent-coding.md item 3), so a push without one left the PR
+    // possibly describing an earlier state of its branch — a defect of the
+    // run the reader should know about, never an accepted outcome.
     const existing = await input.findOpenPr(repo, branch).catch((err: unknown) => {
       console.error(
         `[pr-post] ${logKey} open-PR lookup failed for ${repo} ${branch}: ${err instanceof Error ? err.message : String(err)}`,
@@ -447,7 +452,7 @@ export async function runCodingPrPostStep(input: {
         created: false,
         at: systemClock(),
       });
-      return `🔀 PR updated by the push: ${existing.htmlUrl} — \`${branch}\`${branchNote} is at \`${headSha.slice(0, 7)}\`; no PR description was submitted, so the PR's title and body were left as they were`;
+      return `⚠️ PR updated by the push: ${existing.htmlUrl} — \`${branch}\`${branchNote} is at \`${headSha.slice(0, 7)}\`, but its description was not resubmitted (submit_pr_description was never called): the PR may now describe an earlier state of its branch — the coding agent must re-evaluate and resubmit the description after every push`;
     }
     console.log(`[pr-post] ${logKey} skipped: no description submitted (repo ${repo}, branch ${branch})`);
     return `ℹ️ No PR was opened: the run pushed \`${branch}\` but submitted no PR description (submit_pr_description was never called) — compare & open manually: ${compareUrl}`;
