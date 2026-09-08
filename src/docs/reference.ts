@@ -14,7 +14,7 @@ import type { z } from "zod";
 import { authorize } from "../core/authz/authorize.js";
 import { CHAT_OPEN_ACTIONS } from "../core/authz/grants.js";
 import type { Actor } from "../core/authz/types.js";
-import { CAPABILITY_KEYS, gatedBy, type CapabilityKey } from "../core/capabilityGating.js";
+import { CAPABILITY_KEYS, dependsOn, type CapabilityKey } from "../core/capabilityGating.js";
 import type { CommandAction, CommandDef, SurfaceName } from "../core/commandRegistry.js";
 import { acceptsUndefined, resourceOf } from "../core/commandRegistry.js";
 import { chatForm, cliFlag, httpPath, isBooleanSchema, mcpToolName, typeHint } from "../core/commandSurface.js";
@@ -34,7 +34,7 @@ export interface DocCommand {
   surfaces: readonly SurfaceName[];
   httpPath: string;
   mcpTool: string;
-  /** The capabilities that turn it on (`gatedBy`, src/core/capabilityGating.ts); empty = on in every installation. */
+  /** The capabilities that turn it on (`dependsOn`, src/core/capabilityGating.ts); empty = on in every installation. */
   needs: readonly CapabilityKey[];
 }
 
@@ -123,7 +123,7 @@ export function docCommands(cmds: readonly CommandDef<unknown>[]): DocCommand[] 
       surfaces: ALL_SURFACES.filter((s) => cmd.surfaces?.[s] !== false),
       httpPath: httpPath(cmd.id),
       mcpTool: mcpToolName(cmd.id),
-      needs: gatedBy(cmd),
+      needs: dependsOn(cmd),
     };
   });
 }
@@ -212,10 +212,11 @@ export function renderApiRoutes(cmds: readonly DocCommand[]): string {
 
 /** docs/how-to/turn-features-on-and-off.md — the command column of the matrix:
  *  one row per capability axis (the contract's order) and the commands whose
- *  `enabledWhen` needs it, in chat form; an axis that turns on no command reads
- *  "—". Read off the registry through `gatedBy`, so the page cannot claim a
- *  command is behind a capability the code does not gate it on. The closing
- *  line counts the commands on in every installation. */
+ *  `enabledWhen` depends on it, in chat form; an axis no command depends on
+ *  reads "—". Read off the registry through `dependsOn`, so the page cannot
+ *  claim a command is behind a capability the code does not gate it on. A
+ *  command under two rows depends on both (`repo test`: residents or local
+ *  execution). The closing line counts the commands on in every installation. */
 export function renderCapabilityCommands(cmds: readonly DocCommand[]): string {
   const rows = CAPABILITY_KEYS.map((key) => {
     const on = cmds.filter((c) => c.needs.includes(key)).map((c) => code(chatForm(c.id)));
@@ -223,7 +224,7 @@ export function renderCapabilityCommands(cmds: readonly DocCommand[]): string {
   });
   const alwaysOn = cmds.filter((c) => c.needs.length === 0).length;
   const noun = alwaysOn === 1 ? "command is" : "commands are";
-  return `${table(["Capability", "Commands it turns on"], rows)}\n\nThe other ${alwaysOn} ${noun} on in every installation.`;
+  return `${table(["Capability", "Commands that depend on it"], rows)}\n\nThe other ${alwaysOn} ${noun} on in every installation.`;
 }
 
 /** Every generated region in docs/, keyed by the file that carries it. The

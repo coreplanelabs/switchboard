@@ -16,7 +16,7 @@ import {
 } from "./reference.js";
 import { declaredRegions } from "./regions.js";
 import type { Capabilities } from "../core/capabilities.js";
-import { CAPABILITY_KEYS, gatedBy } from "../core/capabilityGating.js";
+import { CAPABILITY_KEYS, dependsOn } from "../core/capabilityGating.js";
 import { chatForm } from "../core/commandSurface.js";
 
 /** A hand-built catalogue: one command per shape the renderers must handle. */
@@ -189,14 +189,14 @@ describe("the real catalogue", () => {
     expect(out).toContain("deploy restart");
   });
 
-  it("the capability column lists, per axis, exactly the commands gatedBy derives from the registry — a list nobody typed", () => {
+  it("the capability column lists, per axis, exactly the commands dependsOn derives from the registry — a list nobody typed", () => {
     const out = renderCapabilityCommands(real);
     const defs = registry.list() as CommandDef<unknown>[];
     for (const key of CAPABILITY_KEYS) {
-      const expected = defs.filter((cmd) => gatedBy(cmd).includes(key)).map((cmd) => `\`${chatForm(cmd.id)}\``);
+      const expected = defs.filter((cmd) => dependsOn(cmd).includes(key)).map((cmd) => `\`${chatForm(cmd.id)}\``);
       expect(out).toContain(`| \`${key}\` | ${expected.length === 0 ? "—" : expected.join(", ")} |`);
     }
-    const alwaysOn = defs.filter((cmd) => gatedBy(cmd).length === 0).length;
+    const alwaysOn = defs.filter((cmd) => dependsOn(cmd).length === 0).length;
     expect(out).toContain(`The other ${alwaysOn} commands are on in every installation.`);
   });
 

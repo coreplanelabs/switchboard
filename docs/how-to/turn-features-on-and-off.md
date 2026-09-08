@@ -23,28 +23,28 @@ Everything optional is a **capability**: computed once when the process starts, 
 
 The `MEMORY_TOKEN` rows share one Worker: `memory.worker`, `runHistory.worker`, `schedules.worker` and `runtimeOverrides.worker` all name the state Worker (`deploy/cloudflare-memory/`) with the same bearer. Deploy it once and four capabilities are a config block away ([Worker topology](../explanation/worker-topology.md)).
 
-## Which commands each capability turns on
+## Which commands depend on each capability
 
-This table is generated from the command registry — every command declares the capability it needs on its own definition, and `npm run docs:check` fails when this table and the code disagree.
+This table is generated from the command registry — every command declares the capability it needs on its own definition, and `npm run docs:check` fails when this table and the code disagree. A command listed under two capabilities is on when either gives it a backend (`repo test` runs against a resident or on the local host), so the row says what a command depends on, not everything it requires.
 
 <!-- generated:capability-commands · npm run docs:gen — generated from the code, do not edit by hand -->
 
-| Capability | Commands it turns on |
+| Capability | Commands that depend on it |
 |---|---|
-| `execution` | — |
-| `residents` | — |
-| `memory` | — |
-| `runHistory` | — |
+| `execution` | `repo test`, `repo build` |
+| `residents` | `repo list`, `repo onboard`, `repo offboard`, `repo reconfigure`, `repo rebuild`, `repo test`, `repo build` |
+| `memory` | `memory list`, `memory forget` |
+| `runHistory` | `friction report`, `friction propose` |
 | `runLedger` | — |
-| `mcp` | — |
+| `mcp` | `mcp list`, `mcp add`, `mcp connect`, `mcp show`, `mcp remove` |
 | `costs` | — |
-| `schedules` | — |
+| `schedules` | `schedule list` |
 | `github` | — |
 | `ingress` | — |
 | `dashboardAuth` | — |
 | `docs` | — |
 
-The other 35 commands are on in every installation.
+The other 18 commands are on in every installation.
 
 <!-- /generated:capability-commands -->
 
