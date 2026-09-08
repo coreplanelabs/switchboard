@@ -12,6 +12,17 @@ import {
 } from "./residentRestoreExtract.js";
 
 describe("residentRestoreExtract (item 61: the SDK's presigned restore MOUNTS the archive; the resident extracts it onto ext4)", () => {
+  it("the resident image proves unsquashfs is installed with the probe the extract script uses (`command -v`), never `unsquashfs -version` — which exits 1 on squashfs-tools 4.5 (the Ubuntu 22.04 base) when no filesystem is named, and failed the 1.2.0 resident image build", () => {
+    const dockerfile = readFileSync(join(import.meta.dirname, "../../deploy/cloudflare-resident/Dockerfile"), "utf8");
+    const run = dockerfile
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+    expect(run).toContain("squashfs-tools");
+    expect(run).toContain("command -v unsquashfs");
+    expect(run).not.toMatch(/unsquashfs\s+-v(ersion)?\b/);
+  });
+
   it("the staging mount is a sibling of the target, under /workspace (the SDK validates the dir), unique per attempt", () => {
     expect(restoreMountDir("/workspace/checkout", "ab12cd34")).toBe("/workspace/checkout.restore-ab12cd34");
     expect(restoreMountDir("/workspace/deps/.scratch-1/node_modules", "x")).toBe(
