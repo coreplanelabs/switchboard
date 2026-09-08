@@ -25,8 +25,9 @@ import { MAX_BODY_BYTES, readBody } from "./http.js";
 //
 // KTD13 — ONE route predicate. `isCommandPath` is what index.ts gates on, and
 // the handler claims ALL of `/api/*`, answering its own 404 so no `/api` spelling
-// ever falls through to the `200 ok` health probe. Under the local-dev Access
-// bypass, `/api/*` is served only to a loopback caller on a localhost deployment.
+// ever falls through to the `200 ok` health probe. Who may reach it at all is
+// the dashboard auth strategy's decision (dashboardAuth.ts), made before this
+// handler runs — the `none` strategy's loopback rule included.
 //
 // KTD15 — write safety. `effect: "write"` commands are POST-only (405), require
 // `content-type: application/json`, and refuse a foreign `Origin` /
@@ -42,11 +43,7 @@ export interface CommandHttpOptions {
    *  `access:svc:<common_name>` (exactly its `grants` entry, nothing implicit).
    *  The table is config's; the adapter only names the id. */
   grantsFor: GrantsLookup;
-  /** True when the Access gate is admitting requests WITHOUT a JWT
-   *  (`ACCESS_DEV_BYPASS` with no Access config). Enables the loopback rule. */
-  devBypassActive: boolean;
-  /** `PUBLIC_BASE_URL`, when set: the origin writes must come from, and the
-   *  host that decides whether the deployment counts as localhost. */
+  /** `PUBLIC_BASE_URL`, when set: the origin writes must come from. */
   publicBaseUrl?: string;
   maxBodyBytes?: number;
 }
@@ -55,15 +52,6 @@ export interface CommandHttpOptions {
 export type CommandHttpHandler = (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity) => Promise<void>;
 
 const API_ROOT = "/api";
-const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
-const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
-
-/** The ONE loopback rule for the dev bypass: true for the v4/v6/mapped loopback
- *  addresses node reports on `socket.remoteAddress` (`/api/*` here, the `/runs`
- *  history reads in index.ts). */
-export function isLoopbackAddress(addr: string | undefined): boolean {
-  return addr !== undefined && LOOPBACK.has(addr);
-}
 
 /**
  * Normalize a raw request path the way an attacker might spell it: percent-
@@ -127,8 +115,9 @@ export function accessActor(identity: AccessIdentity, grantsFor: GrantsLookup): 
  * A service token is a command-surface credential ONLY: it may reach `/api/*`
  * (where `callerFor` gives it exactly its configured scopes, or none) and
  * nothing else the Access gate fronts — `/runs*` renders live capability tokens
- * and `/residents*` / `/costs*` are people's dashboards. A browser session (and
- * the dev-bypass identity) is allowed everywhere the gate admits it. index.ts
+ * and `/residents*` / `/costs*` are people's dashboards. A browser-shaped
+ * identity (an Access session, the `token` strategy's actor, the `none`
+ * strategy's local operator) is allowed everywhere the gate admits it. index.ts
  * applies this right after the gate; a refusal is a 403.
  */
 export function serviceTokenAllowed(pathname: string, identity: AccessIdentity): boolean {
@@ -148,25 +137,6 @@ function hostOf(url: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-/**
- * The ONE localhost rule for the dev bypass (`/api/*` here, the `/runs` history
- * reads in index.ts): unset `PUBLIC_BASE_URL` → a localhost deployment;
- * otherwise its host must be `localhost`, `127.0.0.1` or `[::1]` (any port). A
- * malformed value (no scheme, not a URL) is NOT localhost and never throws —
- * boot must not crash on a typo, it must fail closed.
- */
-export function isLocalhostBase(publicBaseUrl: string | undefined): boolean {
-  if (!publicBaseUrl) return true;
-  const hostname = (() => {
-    try {
-      return new URL(publicBaseUrl).hostname.toLowerCase();
-    } catch {
-      return undefined;
-    }
-  })();
-  return hostname !== undefined && LOCALHOST_HOSTS.has(hostname);
 }
 
 function header(req: IncomingMessage, name: string): string | undefined {
@@ -234,16 +204,6 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
   ) => send(res, status, { error, code }, extra);
 
   return async (req, res, identity) => {
-    // KTD13 dev-bypass rule: a bypassed gate serves /api/* only on loopback, on a
-    // localhost deployment. Checked before anything else so nothing about the
-    // catalogue leaks to a remote caller of a misconfigured dev box.
-    if (opts.devBypassActive) {
-      if (!isLoopbackAddress(req.socket?.remoteAddress) || !isLocalhostBase(opts.publicBaseUrl)) {
-        refuse(res, 403, "forbidden", "dev bypass serves /api only to loopback on a localhost deployment");
-        return;
-      }
-    }
-
     const url = new URL(req.url ?? "/", "http://placeholder.invalid");
     const id = commandIdFromPath(url.pathname);
     const cmd: CommandDef<unknown> | undefined = id === undefined ? undefined : commands.get(id);

@@ -24,7 +24,7 @@ import {
   type ScheduledSeed,
   type WebSeed,
 } from "./webSeed.js";
-import { accessActor, isLoopbackAddress } from "./commandHttp.js";
+import { accessActor } from "./commandHttp.js";
 import { ALL_GRANTS, grantsFor, type GrantsSource } from "../core/authz/grants.js";
 import { NO_GRANTS, predicateFor } from "../core/authz/index.js";
 import { RunRegistry, type RunRegistryOptions } from "../core/runRegistry.js";
@@ -1128,7 +1128,6 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     opts: {
       store?: InMemoryRunStore | null;
       retention?: { retentionDays: number } | null;
-      devBypass?: LiveViewDeps["devBypass"];
       audit?: LiveViewDeps["audit"];
       indexPageSize?: number;
       ledger?: InMemoryRunLedger;
@@ -1147,7 +1146,6 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         index: registry,
         now, // the seeds carry `serverNow`: two renders compared byte-for-byte need one clock
         retention: opts.retention === undefined ? { retentionDays: 30 } : opts.retention,
-        ...(opts.devBypass ? { devBypass: opts.devBypass } : {}),
         ...(opts.audit ? { audit: opts.audit } : {}),
         ...(opts.indexPageSize !== undefined ? { indexPageSize: opts.indexPageSize } : {}),
       }),
@@ -1708,49 +1706,6 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       await done(bad);
       expect(bad.status).toBe(200);
       expect(indexSeedOf(bad.body()).rows.map((r) => r.id)).toEqual(["p1"]);
-    });
-  });
-
-  describe("KTD13: dev bypass off-loopback", () => {
-    const bypass = (isLoopback: boolean) => ({ active: () => true, isLoopback: () => isLoopback });
-
-    it("403s history reads (persisted page/events/friction, ?all=1) while a live token page still works", async () => {
-      const h = harness({ devBypass: bypass(false) });
-      await h.store!.put(record("r1"));
-      for (const url of ["/runs/r1", "/runs/r1/events", "/runs/r1/friction", "/runs?all=1", "/runs?stream=1&all=1"]) {
-        const t = fakeReqRes("GET", url);
-        h.handler(t.req, t.res);
-        await done(t);
-        expect([url, t.status]).toEqual([url, 403]);
-      }
-      const live = h.registry.create();
-      const ok = fakeReqRes("GET", `/runs/${live.id}?t=${live.token}`);
-      h.handler(ok.req, ok.res);
-      expect(ok.status).toBe(200);
-      const idx = fakeReqRes("GET", "/runs");
-      h.handler(idx.req, idx.res);
-      await done(idx);
-      expect(idx.status).toBe(200);
-    });
-
-    it("serves them on loopback, and always when the bypass is off", async () => {
-      const on = harness({ devBypass: bypass(true) });
-      await on.store!.put(record("r1"));
-      const a = fakeReqRes("GET", "/runs/r1");
-      on.handler(a.req, a.res);
-      await done(a);
-      expect(a.status).toBe(200);
-      const off = harness({ devBypass: { active: () => false, isLoopback: () => false } });
-      await off.store!.put(record("r1"));
-      const b = fakeReqRes("GET", "/runs?all=1");
-      off.handler(b.req, b.res);
-      await done(b);
-      expect(b.status).toBe(200);
-    });
-
-    it("isLoopbackAddress recognizes v4, v6 and mapped loopback only", () => {
-      expect(["127.0.0.1", "::1", "::ffff:127.0.0.1"].map(isLoopbackAddress)).toEqual([true, true, true]);
-      expect(["10.0.0.1", "203.0.113.9", undefined, ""].map(isLoopbackAddress)).toEqual([false, false, false, false]);
     });
   });
 

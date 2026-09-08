@@ -1,16 +1,15 @@
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
-import type { IncomingHttpHeaders } from "node:http";
 
-// App-layer Cloudflare Access (SSO) enforcement for the /runs* surface. The bot
-// sits on a custom domain behind a Cloudflare Access edge rule on `/runs*`; that
-// rule injects a signed RS256 JWT in the `Cf-Access-Jwt-Assertion` request
-// header. This module re-verifies that identity in OUR OWN code and FAILS
-// CLOSED, so `/runs*` refuses to serve without a valid Access JWT — even if the
-// edge rule is ever misconfigured, removed, or a client spoofs the header.
+// App-layer Cloudflare Access (SSO) verification for the dashboard. Under the
+// `access` strategy (dashboardAuth.ts) the bot sits on a custom domain behind a
+// Cloudflare Access edge rule on the dashboard paths; that rule injects a signed
+// RS256 JWT in the `Cf-Access-Jwt-Assertion` request header. This module
+// re-verifies that identity in OUR OWN code and FAILS CLOSED, so the dashboard
+// refuses to serve without a valid Access JWT — even if the edge rule is ever
+// misconfigured, removed, or a client spoofs the header.
 //
 // Security posture (mirrors channels/http.ts):
-//   - Fail-closed: no Access config → /runs is denied (403), never open. The
-//     only escape hatch is an explicit, loudly-documented local-dev bypass.
+//   - Fail-closed: a token that does not verify is `null`, never an identity.
 //   - Algorithm confusion is the critical defense: the header `alg` MUST be
 //     RS256; `none`/`HS256`/anything else is rejected before any signature work,
 //     and verification always uses RSA-SHA256 (never an attacker-named alg).
@@ -22,8 +21,9 @@ import type { IncomingHttpHeaders } from "node:http";
 //     one origin certs fetch per request.
 //   - Bad input never throws: every malformed token / claim yields `null`.
 //
-// Pure logic (verify + claim checks) is split from transport (the gate reads a
-// header; index.ts writes the 403), so it is unit-testable without a socket.
+// Pure logic (verify + claim checks) is split from transport (the `access`
+// verifier reads the header; index.ts writes the 403), so it is unit-testable
+// without a socket.
 
 const CERTS_PATH = "/cdn-cgi/access/certs";
 const DEFAULT_JWKS_TTL_SECONDS = 3600;
@@ -317,63 +317,14 @@ function normalizeTeamDomain(raw: string): string {
 /**
  * Read Access config from the environment. Returns the config only if BOTH
  * `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are set and non-blank (trimmed); else
- * `null` — which the gate treats as "Access not configured" (fail-closed).
- * `teamDomain` is defensively normalized to a bare host.
+ * `null` — "Access not configured", which selects the `none` strategy when
+ * `dashboard.auth` is not set (src/core/dashboardAuthConfig.ts) and is a
+ * startup error when it is `access`. `teamDomain` is defensively normalized to
+ * a bare host.
  */
 export function parseAccessConfig(env: NodeJS.ProcessEnv): AccessConfig | null {
   const teamDomain = normalizeTeamDomain(env.ACCESS_TEAM_DOMAIN ?? "");
   const aud = (env.ACCESS_AUD ?? "").trim();
   if (teamDomain === "" || aud === "") return null;
   return { teamDomain, aud };
-}
-
-/**
- * Parse the local-dev bypass flag. **LOCAL DEV ONLY** — when true AND no Access
- * config is present, `/runs*` is served WITHOUT any SSO check. Never set this in
- * a deployed environment; it exists so a developer running the bot locally
- * (without a Cloudflare Access app) can open the live-view page. Truthy values
- * are `"1"` and `"true"` (case-insensitive); everything else is false.
- */
-export function parseAccessDevBypass(env: NodeJS.ProcessEnv): boolean {
-  const v = (env.ACCESS_DEV_BYPASS ?? "").trim().toLowerCase();
-  return v === "1" || v === "true";
-}
-
-/** Options for the /runs gate: the (possibly null) Access config, the verifier
- *  deps, and the local-dev bypass flag. */
-export interface RunsGateOptions {
-  config: AccessConfig | null;
-  verify: VerifyDeps;
-  devBypass: boolean;
-}
-
-/** The gate result: allow (with identity) or deny (with a status + body). */
-export type RunsGateResult = { ok: true; identity: AccessIdentity } | { ok: false; status: number; body: string };
-
-/**
- * The /runs* SSO gate, fail-closed:
- *   - No Access config: dev bypass → allow (dev-bypass identity); else → 403.
- *     `/runs` is NEVER exposed without SSO configured.
- *   - Access config present: a missing header or a token that fails
- *     verifyAccessJwt → 403; a valid token → allow with its identity.
- * This is the identity gate only; the live-view handler still applies its own
- * per-run capability-token check afterward (defense in depth).
- */
-export async function requireAccessForRuns(
-  headers: IncomingHttpHeaders,
-  opts: RunsGateOptions,
-): Promise<RunsGateResult> {
-  if (opts.config === null) {
-    if (opts.devBypass) return { ok: true, identity: { sub: "dev-bypass" } };
-    return { ok: false, status: 403, body: "forbidden" };
-  }
-
-  // Node lowercases header keys; Cloudflare injects `Cf-Access-Jwt-Assertion`.
-  const raw = headers["cf-access-jwt-assertion"];
-  const token = Array.isArray(raw) ? raw[0] : raw;
-  if (!token) return { ok: false, status: 403, body: "forbidden" };
-
-  const identity = await verifyAccessJwt(token, opts.config, opts.verify);
-  if (!identity) return { ok: false, status: 403, body: "forbidden" };
-  return { ok: true, identity };
 }

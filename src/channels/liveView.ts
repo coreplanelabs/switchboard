@@ -137,13 +137,6 @@ export interface LiveViewDeps {
   /** The configured run-history retention, for the index toggle's tooltip; null
    *  when history is off (store: null). */
   retention: { retentionDays: number } | null;
-  /** KTD13: under `ACCESS_DEV_BYPASS`, history reads (`?all=1`, tokenless page /
-   *  events / friction of a finished run) are served only to a loopback client;
-   *  otherwise 403. `active` is true only while the bypass is in effect — i.e.
-   *  Access is NOT configured (index.ts applies the same rule as `commandHttp`
-   *  and `requireAccessForRuns`). The token-gated live path is unaffected.
-   *  Absent → no gate. */
-  devBypass?: { active: () => boolean; isLoopback: (req: HttpRequest) => boolean };
   /** Receives one entry per allowed page/events history read and per refused
    *  tokenless read. Default: console.log. */
   audit?: (entry: HistoryReadAudit) => void;
@@ -305,8 +298,6 @@ export function createLiveViewHandler(
     res.writeHead(status, TEXT);
     res.end(body);
   };
-  const historyReadForbidden = (req: HttpRequest): boolean =>
-    !!deps.devBypass && deps.devBypass.active() && !deps.devBypass.isLoopback(req);
   /** Runs the async history path; a throw is a 500, never an unhandled rejection. */
   const run = (res: ServerResponse, work: () => Promise<void>) => {
     work().catch((err: unknown) => {
@@ -385,10 +376,6 @@ export function createLiveViewHandler(
     // live rows' token hrefs.
     if (route.kind === "index") {
       const all = url.searchParams.get("all") === "1";
-      if (all && historyReadForbidden(req)) {
-        text(res, 403, "forbidden");
-        return true;
-      }
       const visibleTo = readableRuns(ctx.actor);
       if (url.searchParams.get("stream") === "1") {
         serveIndexEvents(
@@ -585,11 +572,6 @@ export function createLiveViewHandler(
         res.writeHead(200, JSON_NO_STORE);
         res.end(JSON.stringify(stopped.value));
       });
-      return true;
-    }
-
-    if (historyReadForbidden(req)) {
-      text(res, 403, "forbidden");
       return true;
     }
 

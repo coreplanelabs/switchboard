@@ -204,7 +204,7 @@ describe("capability fixtures — real configurations", () => {
 
   it("minimal is the contract's all-off value with the local-dev dashboard; cloud-full is its all-on value", () => {
     const [minimal, , cloudFull] = CAPABILITY_FIXTURES;
-    expect(minimal.capabilities).toEqual({ ...NO_CAPABILITIES, dashboardAuth: "none" });
+    expect(minimal.capabilities).toEqual(NO_CAPABILITIES);
     expect(cloudFull.capabilities).toEqual(ALL_CAPABILITIES);
   });
 

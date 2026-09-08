@@ -210,14 +210,14 @@ describe("hiding per surface — the catalogue bound with everything on vs nothi
 
   it("HTTP: /api/<id> of a hidden command is the adapter's 404, byte-identical to an unknown id", async () => {
     const grants = (id: string) => grantsFor(id, { commandGroups: coreCommandGroups() });
-    const handler = createCommandHttpHandler(off, { grantsFor: grants, devBypassActive: false });
+    const handler = createCommandHttpHandler(off, { grantsFor: grants });
     const hiddenReq = fakeReqRes("GET", httpPath("memory.list"));
     await handler(hiddenReq.req, hiddenReq.res, { sub: "user-1" });
     const unknownReq = fakeReqRes("GET", "/api/nosuch.thing");
     await handler(unknownReq.req, unknownReq.res, { sub: "user-1" });
     expect(hiddenReq.status()).toBe(404);
     expect(hiddenReq.text()).toBe(unknownReq.text());
-    const onHandler = createCommandHttpHandler(on, { grantsFor: grants, devBypassActive: false });
+    const onHandler = createCommandHttpHandler(on, { grantsFor: grants });
     const shown = fakeReqRes("GET", httpPath("memory.list"));
     await onHandler(shown.req, shown.res, { sub: "user-1" });
     expect(shown.status()).not.toBe(404);

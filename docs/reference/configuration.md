@@ -17,6 +17,7 @@ Every top-level block, what it's for, and what happens when it's absent. Copy `c
 | `schedules` | Where the `/runs` Scheduled panel reads cron firing history from | the panel lists schedules with no firing history |
 | `ship` | `agent:ship` pipeline caps: `maxRounds`, `maxMinutes` | sane built-in defaults (3 rounds, 120 min) |
 | `costs` | `/costs` dashboard: Cloudflare account + token, optional Anthropic admin key, named groups of Workers/containers/DOs to price | `/costs` refuses to start — nothing to report on |
+| `dashboard` | Dashboard authentication: `auth: access` (the Cloudflare Access JWT, `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD`), `token` (`Authorization: Bearer` from the env var `token.env` names, default `DASHBOARD_TOKEN`, resolving to the one actor `token.actor` — `access:<name>`) or `none` (loopback callers on a localhost deployment only; a public `PUBLIC_BASE_URL` refuses to start) — see [dashboard routes](dashboard-routes.md) | `access` when both `ACCESS_*` are set, else `none` — a deployed installation is unchanged; a localhost one without Access now admits its loopback callers |
 | `slack.catchUp` | Reconnect catch-up window after a deploy/drain | on, 30-minute window |
 | `runtimeOverrides` | Where chat-set overrides (`config set`, `config instructions`) persist | `data/overrides.json` on host disk — **ephemeral on Cloudflare Containers** |
 | `runHistory` | Durable run records: retention window, byte/count caps, which store backs it | **off** — runs are live-only, evicted ~60s after finish |

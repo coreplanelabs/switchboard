@@ -1,6 +1,7 @@
 import type { AppConfig } from "../config.js";
 import { parseMcpSettings } from "../mcp/config.js";
 import { parseCostsConfig } from "./costs.js";
+import { resolveDashboardAuthMode, type DashboardAuthMode } from "./dashboardAuthConfig.js";
 import { parseIngressTokenMap } from "./ingressTokens.js";
 
 // What is ON in this process — Fowler's feature toggles, resolved ONCE at
@@ -41,14 +42,15 @@ export interface Capabilities {
   /** The HTTP and MCP ingress surfaces: `SWITCHBOARD_INGRESS_TOKENS` names at least one bearer. */
   ingress: boolean;
   /**
-   * What stands in front of the dashboards. `access`: a Cloudflare Access app
-   * (`ACCESS_TEAM_DOMAIN` + `ACCESS_AUD`), the JWT re-verified in-process.
-   * `none`: the local-dev bypass (`ACCESS_DEV_BYPASS`) — no SSO, loopback
-   * callers only. `token`: neither is configured — no browser session can be
-   * proven, so the page routes refuse (fail-closed) and the process answers
-   * bearer tokens only (`/ingress`, `/mcp`).
+   * The dashboard auth strategy that gates the dashboards (features/access-gate.md):
+   * `config.dashboard.auth` when set; else `access` when a Cloudflare Access app
+   * is configured (`ACCESS_TEAM_DOMAIN` + `ACCESS_AUD`, the JWT re-verified
+   * in-process), else `none` (no credential — loopback callers on a localhost
+   * deployment only). `token` is a bearer from a named env var resolving to one
+   * configured actor. The same rule (`resolveDashboardAuthMode`) composes the
+   * verifier in src/index.ts, so this value names the strategy that actually runs.
    */
-  dashboardAuth: "access" | "token" | "none";
+  dashboardAuth: DashboardAuthMode;
   /** This installation publishes its own docs site: `DOCS_BASE_URL` is set (the bot Worker renders it from the profile). */
   docs: boolean;
 }
@@ -81,7 +83,7 @@ export const NO_CAPABILITIES: Readonly<Capabilities> = Object.freeze({
   schedules: false,
   github: false,
   ingress: false,
-  dashboardAuth: "token",
+  dashboardAuth: "none",
   docs: false,
 });
 
@@ -107,7 +109,6 @@ export function capabilitiesFrom(config: AppConfig, env: NodeJS.ProcessEnv): Cap
   const costs = parseCostsConfig(config.costs);
   const ingress = parseIngressTokenMap(env.SWITCHBOARD_INGRESS_TOKENS);
   const accessConfigured = present(env.ACCESS_TEAM_DOMAIN) && present(env.ACCESS_AUD);
-  const devBypass = ["1", "true"].includes((env.ACCESS_DEV_BYPASS ?? "").trim().toLowerCase());
   return {
     execution: config.execution?.type ?? "local",
     residents: present(config.execution?.resident?.baseUrl),
@@ -121,7 +122,7 @@ export function capabilitiesFrom(config: AppConfig, env: NodeJS.ProcessEnv): Cap
       (present(env.GITHUB_APP_ID) && present(env.GITHUB_APP_PRIVATE_KEY) && present(env.GITHUB_APP_INSTALLATION_ID)) ||
       present(env.GH_TOKEN),
     ingress: ingress.ok && Object.keys(ingress.tokens).length > 0,
-    dashboardAuth: accessConfigured ? "access" : devBypass ? "none" : "token",
+    dashboardAuth: resolveDashboardAuthMode(config.dashboard?.auth, accessConfigured),
     docs: present(env.DOCS_BASE_URL),
   };
 }
