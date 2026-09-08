@@ -1,6 +1,8 @@
 # Worker topology: one bot, three Workers, and why they're separate
 
-Switchboard isn't one service. It's one long-lived process (the bot, wherever you host it) plus three Cloudflare Workers, each earning its place by solving a problem the bot itself structurally can't:
+Switchboard isn't one service. It's one long-lived process (the bot, wherever you host it) plus three Cloudflare Workers, each earning its place by solving a problem the bot itself structurally can't.
+
+The bot is one Node process with no inbound server to speak of. The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint or signature verification to host; the one port it listens on serves the health probe, the dashboard and the ingress routes, and a deployment that wants none of those exposed exposes nothing. Every awaited step the process takes runs inside a span, so a run's timeline is a side effect of the code's shape, and every call to one of its own Workers carries the trace id along so their logs join up ([tracing](../reference/specs/tracing.md)). State lives in three places: the channel's own thread history, the state Worker's Durable Objects, and disk — and only the first two are meant to survive a restart.
 
 | Piece | What it is | Why it exists |
 |---|---|---|
@@ -8,6 +10,48 @@ Switchboard isn't one service. It's one long-lived process (the bot, wherever yo
 | **State Worker** (`switchboard-memory`) | Durable Objects: config overrides, cross-session memory, run history (the friction ledger reads it), schedule firings | Outlives the bot's own process. If the bot's disk is ephemeral (it is, on Cloudflare Containers), anything that must survive a restart has to live somewhere else |
 | **Resident Worker** (`switchboard-resident`) | Per-repo Durable Objects running Cloudflare Sandbox containers: a bare mirror, a warm checkout, per-thread worktrees | Keeps *specific, chosen* repos always-warm so a coding request doesn't pay clone-and-install every time — and holds its own GitHub credential, isolated from the bot |
 | **Sandbox Worker** (`switchboard-sandbox`) | A thin proxy in front of per-thread Cloudflare Sandbox containers | Where a tool call actually executes when you want it off the bot host entirely — no persistent identity, just exec-per-thread |
+
+A fifth Worker, the assets-only docs site, is deliberately not in this list: it has no runtime role, cannot disturb a run, and deploys in seconds on every docs change ([docs site](../reference/specs/docs-site.md)).
+
+## The whole picture
+
+```mermaid
+flowchart TD
+    subgraph channels ["Channel adapters — pure transport"]
+        SL["Slack<br/>Socket Mode websocket"]
+        CLI["CLI ask"]
+        ING["HTTP ingress · MCP"]
+    end
+
+    D{"Dispatcher"}
+    CR["Command registry<br/>one definition → chat · CLI · HTTP · MCP"]
+    RUN["Agent loop"]
+
+    subgraph providers ["Providers"]
+        A["anthropic"]
+        O["openai-compatible"]
+    end
+
+    subgraph exec ["Executors"]
+        LX["local"]
+        EX["e2b · cloudflare sandbox"]
+        RX["resident"]
+    end
+
+    SW[("State Worker<br/>memory · run history · schedule firings · config documents")]
+    RW["Resident Worker<br/>mirror · warm checkout · thread worktrees · snapshots"]
+
+    SL & CLI & ING --> D
+    CR --> D
+    D --> RUN
+    RUN --> A & O
+    RUN --> LX & EX & RX
+    RX --> RW
+    D -->|"memory · run record after the reply · overrides"| SW
+    CR -.->|reads| SW
+```
+
+Three more facts about the state Worker's side of that picture. Every finished run is built into a record at finish and written *after* the reply, retried and drain-tracked, so a slow history write never delays an answer ([Runs: live, then remembered](runs-live-and-history.md)). The run history's Durable Object owns the retention policy — `retentionDays`, `maxRuns`, `maxBytes`, applied identically by the bot and the Worker through one shared module — and sweeps on an alarm. And the chat-set config overrides (`config set`, `config instructions`) persist there too when `runtimeOverrides.worker` names it; without a Worker they go to a file under `data/`, which an ephemeral-disk host loses on restart.
 
 ## How they actually talk to each other
 
@@ -59,8 +103,12 @@ The order is also why a release does not redeploy everything. Each Worker is a s
 ## What this buys you operationally
 
 - **The bot can be redeployed at will** without losing config, memory, or history — only in-flight runs are at risk, and even those get a reconnect catch-up window.
-- **A resident repo survives a resident Worker redeploy differently than a bot redeploy** — a resident deploy swaps the DO isolate under active threads, which is why resident deploys are preflighted separately and refuse while work is in flight (see the resident deploy guard in the root README).
+- **A resident repo survives a resident Worker redeploy differently than a bot redeploy** — a resident deploy swaps the DO isolate under active threads, which is why resident deploys are preflighted separately and refuse while work is in flight (the resident preflight in [Operate production](../how-to/operate-production.md)).
 - **No single host, if compromised, can do everything.** The bot can talk to Slack and the model, but not push code. The resident Worker can push code to the one repo it's attached to, but has no Slack or model access. Compromising one doesn't hand you the others.
+
+## Why not serverless, and why not host the bot in a sandbox
+
+Two questions come up often enough to answer here. *Could the bot run on the Workers runtime itself?* Not as it stands: the Slack adapter is a Socket Mode daemon and a run holds a model conversation, a sandbox attach and a Slack card open for minutes. The seams map one-to-one onto the durable-agent frameworks that productize the serverless shape, so the door stays open; the full argument, including the strongest form of the alternative and why it was deferred, is decision record [0016](../decisions/0016-long-lived-process-not-serverless.md). *Could the bot itself run inside a Cloudflare Sandbox?* Technically yes — a Sandbox is a container underneath — but that only re-implements the container deployment with an extra orchestration layer. Sandboxes earn their keep as the execution plane, where the agents' tools run; the bot process still needs a long-lived home.
 
 ## See also
 

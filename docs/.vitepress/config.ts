@@ -122,6 +122,7 @@ export default withMermaid(
             { text: "Watch a run and check spend", link: "/how-to/watch-a-run-and-check-spend" },
             { text: "Restrict who can do what", link: "/how-to/restrict-who-can-do-what" },
             { text: "Add a provider or an agent", link: "/how-to/add-a-provider-or-agent" },
+            { text: "Deploy for the first time", link: "/how-to/deploy-for-the-first-time" },
             { text: "Deploy and rotate a secret", link: "/how-to/deploy-and-rotate-a-secret" },
             { text: "Operate production", link: "/how-to/operate-production" },
             { text: "Configure the repository", link: "/how-to/configure-the-repository" },
@@ -147,6 +148,7 @@ export default withMermaid(
           collapsed: false,
           items: [
             { text: "How a request flows", link: "/explanation/how-a-request-flows" },
+            { text: "The agents and their toolsets", link: "/explanation/agents-and-toolsets" },
             { text: "Why config is layered", link: "/explanation/config-layers" },
             { text: "Execution and trust", link: "/explanation/execution-and-trust" },
             { text: "Worker topology", link: "/explanation/worker-topology" },

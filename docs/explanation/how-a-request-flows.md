@@ -33,6 +33,17 @@ flowchart LR
 - **A provider adapter** turns "call this model with these messages and tools" into one vendor's HTTP shape and back. It knows nothing about Slack, permissions, or where the tools it's being asked to call will actually run.
 - **An executor** runs a tool call somewhere — the bot host, a per-thread sandbox, an always-warm resident — and returns a result. It has no idea which agent asked, what model is driving the loop, or which channel started it.
 
+The same pattern at every seam — one interface, more than one implementation, and a fixed way to add one:
+
+| Seam | Interface | Implementations today | Adding one |
+|---|---|---|---|
+| Channel | `ChannelIO` + `IncomingMessage` (`src/core/types.ts`) | Slack (Socket Mode), the CLI's `ask`, HTTP ingress, MCP | one adapter file in `src/channels/` |
+| Provider | `Provider` (`src/providers/types.ts`) | Anthropic; OpenAI-compatible, which covers OpenAI, Groq, Ollama and vLLM with config alone | one adapter file, or just a config block |
+| Executor | `Executor` (`src/execution/executor.ts`) | the bot host; an E2B micro-VM per thread; a Cloudflare Sandbox per thread through the sandbox Worker; a resident repo environment through the resident Worker | one backend file plus config |
+| Agent | `AgentDef` data (`src/agents/registry.ts`) | `general`, `coding`, `review`, `ship`, `research` | one registry entry |
+
+A channel adapter translates exactly three things: an incoming platform event into an `IncomingMessage`, a history fetch into `HistoryItem[]`, and replies and status back into platform calls (chunking, formatting and message editing are the adapter's concern). Identifiers are namespaced by platform — `slack:C…` for a channel, `slack:U…` for a user, `slack:C…:<ts>` for a thread — so config scopes, grants and memory can key on them and a new adapter brings its own prefix. Everything else is the dispatcher's: directives, the six config layers, authorization against the resolved agent, one live run per thread, history assembly, and the agent loop itself.
+
 ## One real request, end to end
 
 ```mermaid

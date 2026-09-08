@@ -3,7 +3,7 @@
 One measurement primitive, a span, records every unit of work Switchboard does — from the moment a message reaches the process to the moment its first reply lands, every named background step, and every step on the Workers — and the per-run timeline falls out of it. Every instant of a run's window belongs to exactly one of seven terms, so a user can explain every number they see and no gap can hide. Decision record: [spans are the one measurement primitive](../../decisions/0020-spans-one-measurement-primitive.md).
 
 - **Code**: `src/core/trace/` (types, tracer, context, sinks, runStreamSink, cardSink, streamSpans, attrs, partition, classify, spanLog, traceparent, displayNames, clockReads, clockScan, clockAllowlist.json), `src/core/normalizeSpans.ts` (the stream Adapter: `normalizeSpans`, `spansFromEvents`, `lossesFromStream`), `src/core/time/formatDuration.ts`, `src/core/testing/` (recordingSink, tickingClock), `scripts/clock-allowlist.mts`, the `clock-ban` rule in `eslint.config.mjs`, `tracing` in `src/config.ts`
-- **Docs**: [reference: configuration](../../reference/configuration.md) (`tracing.log`); [README — Architecture](../../../README.md#architecture)
+- **Docs**: [reference: configuration](../../reference/configuration.md) (`tracing.log`); [How a request flows](../../explanation/how-a-request-flows.md), [Worker topology](../../explanation/worker-topology.md)
 - **Tests**: `src/core/trace/*.test.ts`, `src/core/normalizeSpans.test.ts`, `src/core/time/formatDuration.test.ts`
 
 ## Behavior

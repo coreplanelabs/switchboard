@@ -147,7 +147,7 @@ command syntax; the changelog calls out every such change with a migration note.
 
 | You want to… | Look at |
 |---|---|
-| understand the architecture | [README.md](README.md), then [docs/explanation/](docs/explanation/) |
+| understand the architecture | [How a request flows](docs/explanation/how-a-request-flows.md), then the rest of [docs/explanation/](docs/explanation/) |
 | know the rules a change must keep | [AGENTS.md](AGENTS.md) |
 | find what a feature is supposed to do | the feature's spec, linked from its docs page |
 | add a channel, provider, executor, or agent | [Add a provider or an agent](docs/how-to/add-a-provider-or-agent.md) |

@@ -4,6 +4,18 @@ Goal: a coding or review request against `acme/api` should start instantly — c
 
 By default, every repo runs cold: a fresh workspace directory per thread, cloned on first use. **Onboarding** a repo gives it its own always-warm environment (a "resident") so requests skip that setup entirely.
 
+## Before you start
+
+Residents live on the resident Worker, so the installation needs one deployed ([Deploy for the first time](deploy-for-the-first-time.md)) and the bot's config pointed at it:
+
+```yaml
+execution:
+  resident:
+    baseUrl: https://switchboard-resident.example.com
+```
+
+with `RESIDENT_OPERATOR_TOKEN` (runtime tool calls) and `RESIDENT_ADMIN_TOKEN` (the `repo …` commands) in the bot's environment. The resident Worker holds its own copy of the GitHub App credential, so private repositories can be cloned and resident threads can push; when the App is configured, a repository must already be in the App's installation to be onboarded, and the reply says so when it is not.
+
 ## Onboard one
 
 Onboarding provisions billable, always-on compute and binds GitHub credentials, so it needs the `repo:write` grant — **never a baseline**: unless an admin has granted it to someone, only admins can run these commands.

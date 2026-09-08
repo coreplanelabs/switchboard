@@ -50,6 +50,19 @@ The default agent just answers. Point it at a real task and it hands off to a sp
 
 This one opens a pull request. While it works, the status card links to a **live run page** — click it to watch the agent's steps (files read, commands run, tests) as they happen, not just the final answer. See [watch a run and check spend](../how-to/watch-a-run-and-check-spend.md).
 
+## Try a few more
+
+Directives combine, and the operator commands use the same grammar as a message:
+
+```
+@switchboard agent:review model:anthropic/claude-opus-5 review https://github.com/acme/api/pull/123
+@switchboard config show
+@switchboard config set me --models.coding openai/gpt-5
+@switchboard config instructions me "Always reply in bullet points"
+```
+
+DMs to the bot work the same way, with no mention needed.
+
 ## When you're stuck
 
 ```

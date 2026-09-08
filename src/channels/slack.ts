@@ -382,7 +382,7 @@ export function createSlackApp(deps: CoreDeps) {
             recordMissingScopes(missing);
             if (missing.length > 0) {
               console.error(
-                `[slack] bot token is MISSING required scopes: ${missing.join(", ")} — reinstall the app with them (README → Slack app setup); until then the features needing them silently do nothing`,
+                `[slack] bot token is MISSING required scopes: ${missing.join(", ")} — reinstall the app with them (docs/tutorials/run-it-locally.md → Connect it to Slack); until then the features needing them silently do nothing`,
               );
             }
           }
