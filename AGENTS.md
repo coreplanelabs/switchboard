@@ -9,7 +9,7 @@ This file is read by every agent that works on this repository — Claude Code, 
 1. **The spec says what should be true.** Every behavior has a row in a spec under `features/`: the criterion, and its proof — a test named `file::describe::it`, a written procedure an agent runs live, or a `[gap]` linked to the issue that closes it. A change starts by writing or editing that row, in the same PR as the code. A spec describing code that no longer exists is a bug.
 2. **A failing test, then the code.** Unit tests are the default proof. `npx vitest run --changed origin/main` is the working loop; `npm test` before pushing.
 3. **`npm run fix`, then `npm run verify`.** `fix` regenerates every generated artifact and repairs lint and formatting. `verify` is the whole gate and exactly what CI runs — nothing lives only in CI, and a unit test over the workflow files keeps it that way.
-4. **A PR written for the reader.** Conventional title (`feat(scope): …` — it becomes the squash commit and a changelog line; a required check refuses anything else). Body: two sentences a stranger can act on, then a Tour of the change in reading order with permalinks at the pushed head, the non-obvious decisions, and the validation with receipts. Docs under `docs/` that describe changed behavior change in the same PR.
+4. **A PR written for the reader.** Conventional title (`feat(scope): …` — it becomes the squash commit and a changelog line; a required check refuses anything else). Body: two sentences a stranger can act on, then a Tour of the change in reading order with permalinks at the pushed head, the non-obvious decisions, and the validation with receipts. Docs describing changed behavior change in the same PR.
 5. **Switchboard reviews it, in the open.** The PR is posted to `agent:review`; the verdict's findings are addressed or declined with a reason on the thread, the branch is rewritten so every commit is a reviewable unit, and review is re-requested at the new head. `LGTM` auto-approves; a person merges.
 6. **Squash-merge, release, deploy.** The title is the commit. release-please accumulates a release PR; merging it tags the version and CI deploys only the Workers whose inputs changed. Why the loop has this shape: [How we work](docs/explanation/how-we-work.md).
 
@@ -39,11 +39,11 @@ This file is read by every agent that works on this repository — Claude Code, 
 | Deploy selection, order, and live gate | `src/deploy/` | `features/release-and-deploy.md` |
 | Human docs (Diataxis) and their generated tables | `docs/`, `src/docs/` | `features/docs-site.md` |
 
-The module-by-module map with each area's gotchas: [Code map](docs/reference/code-map.md).
+Module by module, with each area's gotchas: [Code map](docs/reference/code-map.md).
 
 ## Commands
 
-The whole interface to this repository. Each script is deterministic and non-interactive, needs no credential unless it says so, and fails fast naming the variable when one is missing. CI calls nothing else.
+The whole interface to this repository. Each script is deterministic and non-interactive, needs no credential unless it says so, and fails fast naming a missing one. CI calls nothing else.
 
 <!-- generated:commands · npm run agents:gen — generated from package.json + project.json, do not edit by hand -->
 
@@ -53,13 +53,15 @@ The whole interface to this repository. Each script is deterministic and non-int
 | `npm run start` | Runs the compiled bot from `dist/`. | Production entry (the container's CMD). |
 | `npm run dev` | Runs the bot from source with tsx. | Local development against a real Slack app. |
 | `npm run typecheck` | TypeScript over the bot and its scripts, no emit. | After type-level changes; `verify:root` runs it. |
-| `npm run test` | The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry. | Before pushing. Use `npx vitest run --changed origin/main` while working. |
+| `npm run test` | The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry. | Before pushing. |
 | `npm run cli` | The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack. | Smoke tests, deploys, config, run history. |
 | `npm run verify` | The whole gate: every root check, every workspace's verify, the site check — exactly what CI runs. | Before requesting review. ~4 min. |
 | `npm run verify:root` | The bot package's gate: consistency checks, typecheck, lint, format, tests, dist. | When only the bot changed. |
-| `npm run check:consistency` | The sub-second checks that keep generated and declared things equal to the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table). | After touching a generated or declared artifact; one CI leg. |
+| `npm run check:consistency` | The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table, Worker configs). | After touching a generated or declared artifact; one CI leg. |
 | `npm run ci:gate` | Reads the `needs` context of a CI fan-out and passes only when every leg succeeded. | CI only — the `bot` and `workers` gate jobs. |
-| `npm run fix` | Regenerates every generated artifact (docs tables, this table, vendored skills) and repairs lint and formatting. | Before committing; whenever `check:consistency` reports drift. |
+| `npm run fix` | Regenerates every generated artifact and repairs lint and formatting. | Before committing; whenever `check:consistency` reports drift. |
+| `npm run deploy:gen` | Renders each Worker's `wrangler.jsonc` from its template and the deployment profile. | After editing a template or `deploy/profile.json`. |
+| `npm run deploy:check` | The rendered `wrangler.jsonc` files match `deploy:gen`. | Part of `check:consistency`. |
 | `npm run check:lockfile` | Every native package in the lockfile carries its Linux x64 and macOS arm64 variants. | After any `npm install`; the fix is `rm -rf node_modules && npm install`. |
 | `npm run check:sandbox-pair` | Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag. | After bumping either half of a pair. |
 | `npm run check:pr-title` | Judges one PR title against Conventional Commits with the types release-please knows. | `-- "feat(scope): …"` before opening a PR; CI's `title` check runs it. |
@@ -88,23 +90,23 @@ The whole interface to this repository. Each script is deterministic and non-int
 
 <!-- /generated:commands -->
 
-Workspaces have their own `verify` (`npm run verify -w web`, `-w docs`, `-w deploy/<worker>`); the root `verify` runs them all. Node comes from `.nvmrc` (24, Active LTS — the image, CI, the production deploy and `@types/node` move together, on purpose); `npm ci` at the root installs every workspace.
+Workspaces have their own `verify` (`-w web`, `-w docs`, `-w deploy/<worker>`); the root `verify` runs them all. Node is `.nvmrc`'s (24, Active LTS); `npm ci` at the root installs every workspace.
 
 ## Rules for agents
 
 - **Comments are for the stranger.** A comment explains why the code is the way it is, checkable against the code. No links to private trackers, no people, no incident retellings — provenance belongs in the changelog and the decision records.
-- **Never hand-edit a generated region.** Anything between `<!-- generated:… -->` markers, the vendored skills, and the reference tables come from `npm run fix`; change the source and regenerate.
+- **Never hand-edit a generated file or region.** Anything between `<!-- generated:… -->` markers, the vendored skills, the reference tables, and each Worker's `wrangler.jsonc` come from `npm run fix`; change the source and regenerate.
 - **The spec follows the code, never the reverse.** Do not rename a test to satisfy a spec row; fix the row. A proof reference is exact or wildcarded (`title…`), never a truncation.
 - **Tidy first.** Structural change (rename, move, extract) and behavioral change are separate commits, so each can be read on its own terms.
 - **One coherent change per PR, rewritten before review.** No trails of fix-up commits; names and types tell the truth; a comment that was true earlier in the review cycle and is not now is removed.
 - **Decisions are written down.** Non-obvious choices go in the PR's Decisions section; a choice that shapes the architecture becomes a dated record under `docs/plans/` with a status line, superseded rather than edited.
 - **Tests move with code.** A moved module takes its tests and its spec rows with it in the same commit.
 - **Credentials are never in the tree** and never on the bot host when a sandbox executes tools; a missing one fails fast by name. Config is `config/config.yaml` (gitignored); `config/config.example.yaml` documents every knob.
-- **Run only what the Commands table names.** If the repo needs something else done, add a script and describe it — `agents:check` refuses an undescribed one.
+- **Run only what the Commands table names.** Need something else done? Add a script and describe it; `agents:check` refuses an undescribed one.
 
 ## Switchboard develops Switchboard
 
-The development rules above are written in terms of the product's own agents, because they are who follows them:
+The rules above are written in terms of the product's own agents, because they are who follows them:
 
 - **`agent:review` reviews every PR.** Read-only, in a warm checkout, one verdict with labeled findings posted at the head it read; it never approves or merges. The auto-approve workflow trusts its `LGTM`; the reviewed-head guard refuses a verdict for a head it did not read.
 - **`agent:coding` implements issues**, with the vendored skills under `skills/` as its house style (the PR-Tour skill shapes PR bodies), pushing a branch and submitting a typed description that Switchboard renders and opens as the PR.
@@ -114,4 +116,4 @@ The development rules above are written in terms of the product's own agents, be
 
 ## Working locally
 
-Node from `.nvmrc`, `npm ci`, `npm run verify`. `npm run cli -- ask "agent:review <PR url>"` drives the full pipeline without Slack; `npm run cli -- <group> <verb> --help` for any command. The `bash` tool runs model-generated commands inside the executor's boundary (the bot's container, or the per-thread sandbox) — never put write-capable credentials where the model can reach them. Production, sizing, and what is deliberately off: [Operate production](docs/how-to/operate-production.md), [Capacity and sizing](docs/explanation/capacity-and-sizing.md), [Known limits](docs/explanation/known-limits.md).
+Node from `.nvmrc`, `npm ci`, `npm run verify`. `npm run cli -- ask "agent:review <PR url>"` drives the full pipeline without Slack; `npm run cli -- <group> <verb> --help` for any command. The `bash` tool runs model-generated commands inside the executor's boundary — never put write-capable credentials where the model can reach them. Production, sizing, and what is deliberately off: [Operate production](docs/how-to/operate-production.md), [Capacity and sizing](docs/explanation/capacity-and-sizing.md), [Known limits](docs/explanation/known-limits.md).

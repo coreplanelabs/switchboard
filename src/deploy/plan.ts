@@ -25,7 +25,7 @@
 // functions.
 
 import { formatAffectedText, type AffectedReport } from "./affected.js";
-import { profileUrls, type DeploymentProfile, type LoadedProfile } from "./profile.js";
+import { profileUrls, type DeploymentProfile, type LoadedProfile, type WorkerKind } from "./profile.js";
 
 /** Env vars removed from every deploy step's environment. */
 export const UNSET_ENV = ["CLOUDFLARE_ACCOUNT_ID"] as const;
@@ -109,8 +109,10 @@ export interface WorkerSpec {
   /** Set when `/healthz` sits behind a bearer: the env var holding it. */
   healthBearerEnv?: string;
   inputs: WorkerInputs;
-  /** Present when the dir's `npm run deploy` runs a preflight that can refuse. */
-  preflight?: { forceEnv: string };
+  /** Present when the dir's `npm run deploy` runs a preflight that can refuse: the env var that
+   *  bypasses it (`--force`) and the env var it reads the Worker's origin from (set by the runner
+   *  from the profile — the preflight has no address of its own). */
+  preflight?: { forceEnv: string; baseUrlEnv: string };
   /** Present when "deployed" is not "live": which proof the step waits for (`LiveGateSpec`). */
   liveGate?: LiveGateSpec;
   /** Env the step needs present (the runner fails fast when a requirement has none of its alternatives). */
@@ -124,12 +126,14 @@ export interface WorkerSpec {
 export interface WorkerDef extends Omit<WorkerSpec, "preflight" | "liveGate"> {
   /** The Cloudflare Worker script name (what `wrangler deployments list` shows). */
   script: string;
+  /** The Worker's origin (`https://<hostname>`), from the profile. */
+  baseUrl: string;
   /** `GET /healthz` — answers `build.commit`, the commit this Worker serves (execution.md item 13). */
   healthUrl: string;
   /** Present when the dir's `npm run deploy` runs a preflight that can refuse.
    *  `healthUrl` is the bot's public `/healthz`: the heartbeat reads it while
    *  waiting, and the live gate polls it after the deploy. */
-  preflight?: { forceEnv: string; healthUrl?: string };
+  preflight?: { forceEnv: string; baseUrlEnv: string; healthUrl?: string };
   /** Present when "deployed" is not "live": the spec's gate bound to this installation's URLs. */
   liveGate?: LiveGate;
 }
@@ -144,11 +148,22 @@ export const CONTAINERS_CAPABILITY: CapabilityCheck = {
   needs: "Containers: Edit",
 };
 
+/** Each Worker's directory: package.json, wrangler.template.jsonc and the wrangler.jsonc rendered from
+ *  it (src/deploy/wranglerTemplate.ts). The docs Worker is here too — it has a config to render even
+ *  though it deploys on its own (features/docs-site.md), never as a `deploy all` step. */
+export const WORKER_DIRS: Readonly<Record<WorkerKind, string>> = {
+  memory: "deploy/cloudflare-memory",
+  bot: "deploy/cloudflare",
+  resident: "deploy/cloudflare-resident",
+  sandbox: "deploy/cloudflare-sandbox",
+  docs: "deploy/cloudflare-docs",
+};
+
 /** Canonical order. Never reorder without updating README + AGENTS.md. */
 export const WORKER_SPECS: readonly WorkerSpec[] = [
   {
     name: "memory",
-    dir: "deploy/cloudflare-memory",
+    dir: WORKER_DIRS.memory,
     entry: "deploy/cloudflare-memory/worker.ts",
     inputs: {
       paths: ["deploy/cloudflare-memory/"],
@@ -158,7 +173,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
   },
   {
     name: "bot",
-    dir: "deploy/cloudflare",
+    dir: WORKER_DIRS.bot,
     entry: "deploy/cloudflare/worker.ts",
     // The Worker shim's dir, plus everything the root Dockerfile COPYs into the
     // image (src/, web/, config/, skills/, the package files, the tsconfigs)
@@ -186,7 +201,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
         { workspace: "deploy/cloudflare", includeDev: false },
       ],
     },
-    preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE" },
+    preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", baseUrlEnv: "SWITCHBOARD_BASE_URL" },
     liveGate: { kind: "health" },
     // The preflight reads the container application and the deploy pushes the image: both need Containers.
     capabilities: [CONTAINERS_CAPABILITY],
@@ -194,13 +209,13 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
   },
   {
     name: "resident",
-    dir: "deploy/cloudflare-resident",
+    dir: WORKER_DIRS.resident,
     entry: "deploy/cloudflare-resident/worker.ts",
     inputs: {
       paths: ["deploy/cloudflare-resident/"],
       lockfile: [{ workspace: "deploy/cloudflare-resident", includeDev: false }],
     },
-    preflight: { forceEnv: "RESIDENT_DEPLOY_FORCE" },
+    preflight: { forceEnv: "RESIDENT_DEPLOY_FORCE", baseUrlEnv: "RESIDENT_BASE_URL" },
     requiredEnv: [{ anyOf: RESIDENT_BEARER_ENVS }],
     // A container image like the bot's — checked here too, since an --affected
     // release can select the resident without the bot — plus the BACKUP_BUCKET
@@ -213,7 +228,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
   },
   {
     name: "sandbox",
-    dir: "deploy/cloudflare-sandbox",
+    dir: WORKER_DIRS.sandbox,
     entry: "deploy/cloudflare-sandbox/worker.ts",
     healthBearerEnv: SANDBOX_BEARER_ENV,
     inputs: {
@@ -257,11 +272,10 @@ export function workersFor(profile: DeploymentProfile): WorkerDef[] {
     return {
       ...spec,
       script,
+      baseUrl: urls.baseUrl(spec.name),
       healthUrl,
       // A preflighted step with a health gate reads the same URL for its wait heartbeat.
-      ...(preflight
-        ? { preflight: liveGate?.kind === "health" ? { forceEnv: preflight.forceEnv, healthUrl } : preflight }
-        : {}),
+      ...(preflight ? { preflight: liveGate?.kind === "health" ? { ...preflight, healthUrl } : preflight } : {}),
       ...(liveGate ? { liveGate: bindLiveGate(liveGate, script, healthUrl) } : {}),
     };
   });
@@ -289,8 +303,15 @@ export interface DeployStep {
   dir: string;
   command: string[];
   unsetEnv: readonly string[];
-  /** Force env for a preflighted step when --force; empty otherwise. */
+  /** What the runner sets for the step's `npm run deploy`: a preflighted step's origin (the
+   *  preflight reads it — `SWITCHBOARD_BASE_URL` / `RESIDENT_BASE_URL`), plus its force env under
+   *  --force. Empty for a step without a preflight. */
   setEnv: Record<string, string>;
+  /** The env var set to `1` in `setEnv` to bypass this step's preflight — present only under --force. */
+  forcedBy?: string;
+  /** `/healthz` to GET once after an unguarded deploy so the Worker (and its Durable Objects) wake
+   *  — steps without a live gate whose health route is public. */
+  wakeUrl?: string;
   requiredEnv: readonly EnvRequirement[];
   /** The read-only wrangler commands the pre-checks run to prove the credential can deploy this step. */
   capabilities: readonly CapabilityCheck[];
@@ -339,23 +360,28 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe, loaded:
   const selected = opts.affected
     ? opts.affected.selected.filter((n) => !opts.only || opts.only.includes(n))
     : opts.only;
-  const steps = workersFor(profile)
-    .filter((w) => (selected ? selected.includes(w.name) : true) && !(opts.skip ?? []).includes(w.name))
-    .map<DeployStep>((w) => ({
-      name: w.name,
-      script: w.script,
-      dir: w.dir,
-      command: ["npm", "run", "deploy"],
-      unsetEnv: UNSET_ENV,
-      setEnv: opts.force && w.preflight ? { [w.preflight.forceEnv]: "1" } : {},
-      requiredEnv: w.requiredEnv ?? [],
-      capabilities: w.capabilities ?? [],
-      retryOnPreflightRefusal: !!w.preflight && !opts.force,
-      ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
-      ...(w.liveGate ? { liveGate: w.liveGate } : {}),
-      why: w.why,
-    }));
-  const forcedNames = steps.filter((s) => Object.keys(s.setEnv).length > 0).map((s) => s.name);
+  const chosen = workersFor(profile).filter(
+    (w) => (selected ? selected.includes(w.name) : true) && !(opts.skip ?? []).includes(w.name),
+  );
+  const steps = chosen.map<DeployStep>((w) => ({
+    name: w.name,
+    script: w.script,
+    dir: w.dir,
+    command: ["npm", "run", "deploy"],
+    unsetEnv: UNSET_ENV,
+    setEnv: w.preflight
+      ? { [w.preflight.baseUrlEnv]: w.baseUrl, ...(opts.force ? { [w.preflight.forceEnv]: "1" } : {}) }
+      : {},
+    ...(opts.force && w.preflight ? { forcedBy: w.preflight.forceEnv } : {}),
+    requiredEnv: w.requiredEnv ?? [],
+    capabilities: w.capabilities ?? [],
+    retryOnPreflightRefusal: !!w.preflight && !opts.force,
+    ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
+    ...(w.liveGate ? { liveGate: w.liveGate } : {}),
+    ...(!w.liveGate && !w.healthBearerEnv ? { wakeUrl: w.healthUrl } : {}),
+    why: w.why,
+  }));
+  const forcedNames = opts.force ? chosen.filter((w) => w.preflight).map((w) => w.name) : [];
   return {
     steps,
     ...(opts.affected ? { affected: opts.affected } : {}),
@@ -403,8 +429,8 @@ export function formatPlan(plan: DeployPlan): string {
   plan.steps.forEach((s, i) => {
     const pf = s.retryOnPreflightRefusal
       ? ` — preflight (retry every ${plan.pollMs / 1000}s up to ${plan.waitMaxMs / 60_000} min)`
-      : Object.keys(s.setEnv).length > 0
-        ? ` — preflight FORCED (${Object.keys(s.setEnv).join(",")}=1)`
+      : s.forcedBy
+        ? ` — preflight FORCED (${s.forcedBy}=1)`
         : "";
     const env =
       s.requiredEnv.length > 0

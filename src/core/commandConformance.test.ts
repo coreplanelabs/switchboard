@@ -18,6 +18,7 @@ import { callerWith } from "./testing/callers.js";
 import type { DeployPlan } from "../deploy/plan.js";
 import type { RestartPlan } from "../deploy/restart.js";
 import { TEST_PROFILE } from "../deploy/testing/profile.js";
+import { renderWorkerConfigs, TEMPLATE_FILE } from "../deploy/wranglerTemplate.js";
 import type { DeployRunResult, RestartRunResult } from "../deploy/run.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { buildCoreCommands } from "./commandCatalogue.js";
@@ -166,6 +167,14 @@ afterAll(() => {
 });
 
 const NOW = 1_700_000_000_000;
+
+/** `deploy init`'s world: one template for every Worker dir, and each rendered file already equal to its render. */
+const FIXTURE_TEMPLATE = '{ "name": "{{script}}", "account_id": "{{account}}" }\n';
+const FIXTURE_RENDERED: ReadonlyMap<string, string> = (() => {
+  const r = renderWorkerConfigs(TEST_PROFILE, () => FIXTURE_TEMPLATE);
+  if (!r.ok) throw new Error(r.problems.join("; "));
+  return new Map(r.files.map((f) => [f.path, f.text]));
+})();
 /** Stored free text: must leave a machine surface wrapped as untrusted, or not at all. */
 const PLANTED_TEXT = "PLANTED-FREE-TEXT-5b7e";
 /** A secret that lives in the process (env) — must never reach any output. */
@@ -514,6 +523,14 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
       // Probes of the checkout and the fleet, not executors: not recorded in `executed`.
       checkout: { hasNodeModules: () => true },
       profile: async () => ({ profile: TEST_PROFILE, origin: "profile", path: "deploy/profile.json" }),
+      // `deploy init`: every template is the fixture template and every rendered file is already its
+      // render (so `--check` passes); a write is the command's effect and is recorded.
+      files: {
+        read: async (path) => (path.endsWith(TEMPLATE_FILE) ? FIXTURE_TEMPLATE : FIXTURE_RENDERED.get(path)),
+        write: async (path) => {
+          exec(`deploy.init write ${path}`, undefined);
+        },
+      },
       affected: async (opts) => ({
         head: "f".repeat(40),
         workers: [

@@ -17,7 +17,9 @@
 
 import { pathToFileURL } from "node:url";
 
-export const DEFAULT_BASE_URL = "https://switchboard-resident.coreplanelabs.dev";
+/** The env var naming this Worker's origin. `deploy all` sets it from the deployment profile; the
+ *  preflight has no address of its own (deploy/profile.json is the only place the fleet's hostnames live). */
+export const BASE_URL_ENV = "RESIDENT_BASE_URL";
 export const TOKEN_ENV_VARS = ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"];
 
 const HOW_TO_SET_TOKEN =
@@ -165,7 +167,13 @@ export function decide(fetched, { force = false } = {}) {
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const force = argv.includes("--force") || env.RESIDENT_DEPLOY_FORCE === "1";
-  const baseUrl = env.RESIDENT_BASE_URL || DEFAULT_BASE_URL;
+  const baseUrl = env[BASE_URL_ENV];
+  if (!baseUrl) {
+    console.error(
+      `[resident-preflight] ${BASE_URL_ENV} is not set — the resident Worker's origin comes from the deployment profile; deploy through \`npm run cli -- deploy all\` (it sets it), or set it to https://<resident hostname> to run this alone`,
+    );
+    return 2;
+  }
   const fetched = await fetchResidents(baseUrl, readToken(env));
   const d = decide(fetched, { force });
   (d.allow && !d.forced ? console.log : console.error)(`[resident-preflight] ${d.message}`);

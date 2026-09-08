@@ -248,6 +248,17 @@ export async function loadProfileOnHost(env: Record<string, string | undefined> 
   throw new Error(`no deployment profile: write ${PROFILE_PATH} (see ${PROFILE_EXAMPLE_PATH}) or set ${PROFILE_ENV}`);
 }
 
+/** `deploy init`'s file access on this host: repo-relative paths under the checkout. */
+export const hostDeployFiles = {
+  read: async (path: string): Promise<string | undefined> => {
+    const abs = join(REPO_ROOT, path);
+    return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
+  },
+  write: async (path: string, text: string): Promise<void> => {
+    writeFileSync(join(REPO_ROOT, path), text);
+  },
+};
+
 /** The config-source loaders' I/O on this host: files under the repo root, real fetch, the `op` CLI. */
 function hostConfigSourceIO(): ConfigSourceIO {
   return {
@@ -298,6 +309,17 @@ async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<
   const r = await run("npm", ["ci", "--silent"], { cwd: dir });
   if (r.code !== 0) io.warn(r.output);
   return r.code === 0;
+}
+
+/** One GET of the Worker's `/healthz` after its deploy, so it (and its Durable Objects) are awake
+ *  before the next step needs them. Informational: the deploy is done either way. */
+async function wake(name: string, url: string, io: DeployRunnerIO): Promise<void> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(180_000) });
+    io.log(`[deploy:all] ${name}: awake — GET ${url} → HTTP ${res.status}`);
+  } catch (err) {
+    io.warn(`[deploy:all] ${name}: wake GET ${url} failed (${err instanceof Error ? err.message : String(err)})`);
+  }
 }
 
 /** GET a `/healthz`, with a bearer when the Worker sits behind one (the sandbox):
@@ -528,7 +550,10 @@ async function deployStep(
     });
     const outcome = classifyDeployOutput(r.code, r.output);
     if (outcome.kind === "deployed") {
-      if (!step.liveGate) return { ok: true, versionId: outcome.versionId, live: "n/a" };
+      if (!step.liveGate) {
+        if (step.wakeUrl) await wake(step.name, step.wakeUrl, io);
+        return { ok: true, versionId: outcome.versionId, live: "n/a" };
+      }
       io.log(
         `[deploy:all] ${step.name}: version ${outcome.versionId ?? "?"} uploaded — waiting until live (commit ${expectedCommit.slice(0, 7)})`,
       );

@@ -108,6 +108,8 @@ export interface LoadedProfile {
 export function profileUrls(p: DeploymentProfile) {
   const origin = (kind: Exclude<WorkerKind, "docs">) => `https://${p.workers[kind].hostname}`;
   return {
+    /** A runtime Worker's origin — what its deploy preflight is pointed at. */
+    baseUrl: origin,
     /** `GET /healthz` of a runtime Worker. */
     healthUrl: (kind: Exclude<WorkerKind, "docs">) => `${origin(kind)}/healthz`,
     /** The bot's public origin — live-view links, the dashboards. */

@@ -6,16 +6,15 @@
     "node": ">=22"
   },
   "scripts": {
-    "deploy": "node preflight.mjs && node write-build.mjs && wrangler deploy && npm run wake",
+    "deploy": "node preflight.mjs && node write-build.mjs && wrangler deploy",
     "preflight": "node preflight.mjs",
     "test": "vitest run",
     "verify": "npm run typecheck && npm test",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typegen": "wrangler types",
-    "tail": "wrangler tail switchboard",
-    "secrets": "node ../bin/put-secrets.mjs bot",
-    "wake": "curl -s -o /dev/null -w 'container awake: HTTP %{http_code}\\n' --max-time 180 https://switchboard.coreplanelabs.dev/healthz"
+    "tail": "wrangler tail",
+    "secrets": "node ../bin/put-secrets.mjs bot"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.3.7"

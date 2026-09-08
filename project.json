@@ -18,12 +18,12 @@
       "when": "When only the bot changed."
     },
     "check:consistency": {
-      "does": "The sub-second checks that keep generated and declared things equal to the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table).",
+      "does": "The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table, Worker configs).",
       "when": "After touching a generated or declared artifact; one CI leg."
     },
     "test": {
       "does": "The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry.",
-      "when": "Before pushing. Use `npx vitest run --changed origin/main` while working."
+      "when": "Before pushing."
     },
     "typecheck": {
       "does": "TypeScript over the bot and its scripts, no emit.",
@@ -34,7 +34,7 @@
     "format": { "does": "Prettier over the whole tree (not Markdown).", "when": "Part of `fix`." },
     "format:check": { "does": "Prettier in check mode.", "when": "Part of `verify:root`." },
     "fix": {
-      "does": "Regenerates every generated artifact (docs tables, this table, vendored skills) and repairs lint and formatting.",
+      "does": "Regenerates every generated artifact and repairs lint and formatting.",
       "when": "Before committing; whenever `check:consistency` reports drift."
     },
     "build": {
@@ -114,6 +114,14 @@
     "docs:changed": {
       "does": "Says whether the last push touched the docs or their build (a CI job output).",
       "when": "CI only — gates the docs deploy."
+    },
+    "deploy:gen": {
+      "does": "Renders each Worker's `wrangler.jsonc` from its template and the deployment profile.",
+      "when": "After editing a template or `deploy/profile.json`."
+    },
+    "deploy:check": {
+      "does": "The rendered `wrangler.jsonc` files match `deploy:gen`.",
+      "when": "Part of `check:consistency`."
     },
     "deploy:targets": {
       "does": "Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment.",
