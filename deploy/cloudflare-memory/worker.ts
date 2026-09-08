@@ -1479,17 +1479,27 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** Every 6 h: delete everything outside policy (no fence — this is where a
    *  large shrink finishes), sweep orphaned events, then re-arm. */
   async alarm(): Promise<void> {
-    const now = systemClock();
-    const { policy } = this.policyState();
-    let deleted = 0;
-    this.ctx.storage.transactionSync(() => {
-      deleted = this.trim(policy, now, undefined).deleted;
-      // Orphan sweep: events whose run is gone (defensive — `deleteRuns` pairs
-      // the two deletes, so this is a periodic check, not a per-put cost).
-      this.sql.exec(`DELETE FROM run_events WHERE run_id NOT IN (SELECT run_id FROM runs)`);
-    });
-    console.log(`[runs/alarm] swept ${deleted} rows outside policy`);
-    await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
+    // The sweep nobody asked for is a root of its own (features/tracing.md
+    // item 25): `state.alarm`, ending with how many rows it swept.
+    const root = startAdoptedRoot(tracer, "state.alarm", { sinks: traceSinks });
+    try {
+      const now = systemClock();
+      const { policy } = this.policyState();
+      let deleted = 0;
+      this.ctx.storage.transactionSync(() => {
+        deleted = this.trim(policy, now, undefined).deleted;
+        // Orphan sweep: events whose run is gone (defensive — `deleteRuns` pairs
+        // the two deletes, so this is a periodic check, not a per-put cost).
+        this.sql.exec(`DELETE FROM run_events WHERE run_id NOT IN (SELECT run_id FROM runs)`);
+      });
+      console.log(`[runs/alarm] swept ${deleted} rows outside policy`);
+      await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
+      root.end("ok", { swept: deleted });
+    } catch (err) {
+      root.fail(err);
+      root.end("error");
+      throw err;
+    }
   }
 
   // ---- reads ----------------------------------------------------------------
