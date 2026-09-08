@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.5.0](https://github.com/coreplanelabs/switchboard/compare/v0.4.0...v0.5.0) (2026-09-08)
+
+
+### Features
+
+* **deploy:** a busy bot never needs a person — deploy all exits 75 (busy) when the preflight never clears, and the release workflow re-dispatches itself at the head of main ([#577](https://github.com/coreplanelabs/switchboard/issues/577)) ([a48cb84](https://github.com/coreplanelabs/switchboard/commit/a48cb84dd01931eec307a6d4d77e602fd30c70c5))
+* **deploy:** a deployment profile names the installation, and deploy all places the config from it ([#579](https://github.com/coreplanelabs/switchboard/issues/579)) ([143e041](https://github.com/coreplanelabs/switchboard/commit/143e041a2c1883205133c2dce9d46161e11e1fc8))
+* **deploy:** the sandbox step is live only when the Worker, the container rollout and an echo-ok probe agree ([#569](https://github.com/coreplanelabs/switchboard/issues/569)) ([#583](https://github.com/coreplanelabs/switchboard/issues/583)) ([f8f0128](https://github.com/coreplanelabs/switchboard/commit/f8f01282516c54733506a22775c8a40d269c0b4f))
+* **load:** the load harness — concurrency baseline, resident/sandbox/e2e drivers, the Slack card path simulated at N, /healthz process metrics, purge-bindings ([#565](https://github.com/coreplanelabs/switchboard/issues/565)) ([af6da77](https://github.com/coreplanelabs/switchboard/commit/af6da779c277dd72bd57663a1c07b1f0f6220870))
+
+
+### Bug fixes
+
+* **release:** release-please acts as the coreplane-infra App, so the release PR's own CI runs without an 'Approve and run' click ([#584](https://github.com/coreplanelabs/switchboard/issues/584)) ([b430874](https://github.com/coreplanelabs/switchboard/commit/b430874a6831457e742b7d746c14acf8f2ae0598))
+* **resident:** a restore is judged by the bytes still arriving, never abandoned to a clock — and a clean never races the last attempt's restore ([#576](https://github.com/coreplanelabs/switchboard/issues/576)) ([676b682](https://github.com/coreplanelabs/switchboard/commit/676b682924149db2d9ff381dfc886a4f8f33edc8))
+* **resident:** a restore that goes down takes the container with it, and a rebuild never cleans over an earlier attempt's stream ([#581](https://github.com/coreplanelabs/switchboard/issues/581)) ([2570487](https://github.com/coreplanelabs/switchboard/commit/2570487fe6f2ed2ea1bc978c601542d5ceb33022))
+* **resident:** classify a stopped-container spawn refusal as runtime-replaced ([#566](https://github.com/coreplanelabs/switchboard/issues/566)) ([#582](https://github.com/coreplanelabs/switchboard/issues/582)) ([47041cf](https://github.com/coreplanelabs/switchboard/commit/47041cf8e166ef4dbd6e38cc9fff66001a78ec75))
+* **runner:** a turn's model stamp is the same provider/model ref run_meta carries — v0.4.0's bare id read as a model switch on every run ([#574](https://github.com/coreplanelabs/switchboard/issues/574)) ([ba1f97b](https://github.com/coreplanelabs/switchboard/commit/ba1f97b4a6ba15c6165d5fb3b98da8c1cfeba997))
+* **sandbox:** a Worker/image rollout never reads as a dead or silent sandbox — never-empty error text, one-wave rollout ([#580](https://github.com/coreplanelabs/switchboard/issues/580)) ([8f58158](https://github.com/coreplanelabs/switchboard/commit/8f58158a086124fd9cd9b750690c5f275bc07471))
+* **ship:** a foreign PR cited in new task text falls through even when its facts fetch fails ([#578](https://github.com/coreplanelabs/switchboard/issues/578)) ([6f6853f](https://github.com/coreplanelabs/switchboard/commit/6f6853fe55922a6b84b9505a8e1018db58e5d546))
+* **ship:** a PR quoted as evidence in new task text no longer binds the entry checks ([#520](https://github.com/coreplanelabs/switchboard/issues/520)) ([44abddf](https://github.com/coreplanelabs/switchboard/commit/44abddff14b2d8e92ff2c6466200dc580cf9aa29))
+* **web:** every thought head wears the model badge — the turn's stamp, else the model the run was on; a switched turn wears the ⇄ chip in its place ([#568](https://github.com/coreplanelabs/switchboard/issues/568)) ([ce7add6](https://github.com/coreplanelabs/switchboard/commit/ce7add6868927ec11db65af1395087b22f45fd21))
+
+
+### Documentation
+
+* **plans:** D13 — Switchboard is installed, not forked; Phase 3 rewritten around time-to-value ([#571](https://github.com/coreplanelabs/switchboard/issues/571)) ([44c261c](https://github.com/coreplanelabs/switchboard/commit/44c261c8b4304a1c631c74d22211913d7452121c))
+
 ## [0.4.0](https://github.com/coreplanelabs/switchboard/compare/v0.3.0...v0.4.0) (2026-09-07)
 
 
