@@ -100,7 +100,7 @@ describe("RunStoreFrictionLedger", () => {
       agent: "coding",
       model: "anthropic/m",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
       channelVisibility: "unknown",
       startedAt: finishedAt - 1000,

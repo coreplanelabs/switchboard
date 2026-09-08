@@ -18,7 +18,7 @@ const claimReq = (runId: string, threadKey: string, gen = "g1"): ClaimRequest =>
   gen,
   leaseMs: LEASE_MS,
   startedAt: 1_000,
-  meta: { agent: "review", channelId: "slack:C1", userId: "slack:U1", threadKey },
+  meta: { agent: "review", channelId: "slack:C1", userId: "slack:UALICE", threadKey },
   card: { channel: "C1", ts: "1.0" },
   system: "you are a reviewer",
   tools: [{ name: "bash", description: "run", inputSchema: {} }],
@@ -39,7 +39,7 @@ const record = (id: string): RunRecord =>
   ({
     id,
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1.0",
     startedAt: 1_000,
     finishedAt: 5_000,

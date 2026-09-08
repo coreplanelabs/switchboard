@@ -235,7 +235,7 @@ describe("predicateFor: derivation", () => {
 });
 
 describe("matchesPredicate", () => {
-  const rec = { channelId: CHANNELS.pub1.id, userId: "slack:U2", repo: REPOS[0] };
+  const rec = { channelId: CHANNELS.pub1.id, userId: "slack:UBOB", repo: REPOS[0] };
   it("visibility-in reads the record's stamp; a missing stamp is `unknown` and never public", () => {
     expect(matchesPredicate(PUBLIC, { ...rec, channelVisibility: "public" })).toBe(true);
     expect(matchesPredicate(PUBLIC, { ...rec, channelVisibility: "private" })).toBe(false);
@@ -248,25 +248,25 @@ describe("matchesPredicate", () => {
     expect(matchesPredicate({ kind: "all" }, rec)).toBe(true);
     expect(matchesPredicate({ kind: "channels-in", channelIds: new Set([CHANNELS.pub1.id]) }, rec)).toBe(true);
     expect(matchesPredicate({ kind: "channels-in", channelIds: new Set([CHANNELS.pub2.id]) }, rec)).toBe(false);
-    expect(matchesPredicate({ kind: "user-is", userId: "slack:U2" }, rec)).toBe(true);
-    expect(matchesPredicate({ kind: "user-is", userId: "slack:U3" }, rec)).toBe(false);
+    expect(matchesPredicate({ kind: "user-is", userId: "slack:UBOB" }, rec)).toBe(true);
+    expect(matchesPredicate({ kind: "user-is", userId: "slack:UCAROL" }, rec)).toBe(false);
     expect(matchesPredicate({ kind: "repos-in", repos: new Set([REPOS[0]]) }, rec)).toBe(true);
     expect(matchesPredicate({ kind: "repos-in", repos: new Set([REPOS[1]]) }, rec)).toBe(false);
-    expect(matchesPredicate({ kind: "or", of: [{ kind: "none" }, { kind: "user-is", userId: "slack:U2" }] }, rec)).toBe(
+    expect(matchesPredicate({ kind: "or", of: [{ kind: "none" }, { kind: "user-is", userId: "slack:UBOB" }] }, rec)).toBe(
       true,
     );
     expect(matchesPredicate({ kind: "or", of: [] }, rec)).toBe(false);
-    expect(matchesPredicate({ kind: "and", of: [{ kind: "all" }, { kind: "user-is", userId: "slack:U2" }] }, rec)).toBe(
+    expect(matchesPredicate({ kind: "and", of: [{ kind: "all" }, { kind: "user-is", userId: "slack:UBOB" }] }, rec)).toBe(
       true,
     );
     expect(
-      matchesPredicate({ kind: "and", of: [{ kind: "none" }, { kind: "user-is", userId: "slack:U2" }] }, rec),
+      matchesPredicate({ kind: "and", of: [{ kind: "none" }, { kind: "user-is", userId: "slack:UBOB" }] }, rec),
     ).toBe(false);
     expect(matchesPredicate({ kind: "and", of: [] }, rec)).toBe(false);
   });
   it("a record missing the attribute never matches a relation", () => {
     expect(matchesPredicate({ kind: "channels-in", channelIds: new Set([CHANNELS.pub1.id]) }, {})).toBe(false);
-    expect(matchesPredicate({ kind: "user-is", userId: "slack:U2" }, {})).toBe(false);
+    expect(matchesPredicate({ kind: "user-is", userId: "slack:UBOB" }, {})).toBe(false);
     expect(matchesPredicate({ kind: "repos-in", repos: new Set([REPOS[0]]) }, {})).toBe(false);
   });
 });

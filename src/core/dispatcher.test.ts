@@ -314,10 +314,10 @@ describe("composeRunLabel", () => {
     expect(
       composeRunLabel({
         ...base,
-        repo: "coreplanelabs/switchboard",
-        text: "<https://github.com/coreplanelabs/switchboard/pull/41|https://github.com/coreplanelabs/switchboard/pull/41> — lead with a verdict",
+        repo: "acme/api",
+        text: "<https://github.com/acme/api/pull/41|https://github.com/acme/api/pull/41> — lead with a verdict",
       }),
-    ).toBe('review · coreplanelabs/switchboard · "coreplanelabs/switchboard#41 — lead with a verdict"');
+    ).toBe('review · acme/api · "acme/api#41 — lead with a verdict"');
     expect(composeRunLabel({ ...base, repo: "o/r", text: "<https://github.com/o/r/issues/7>" })).toBe(
       'review · o/r · "o/r#7"',
     );
@@ -996,13 +996,13 @@ describe("resident repo dispatch", () => {
     const deps = makeDeps(REPO_PERMS_YAML, provider);
     // The note is a resident installation's (item 16); the fixture names no resident Worker, so say there is one.
     deps.capabilities = { ...deps.capabilities, residents: true };
-    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/try-catch" });
     const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UADMIN"), io);
+    await dispatch(deps, msg("agent:coding in acme/try-catch: say hi", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("coreplanelabs/try-catch");
+    expect(replies[0]).toContain("acme/try-catch");
     expect(replies[0]).toContain("not onboarded");
-    expect(replies[0]).toContain("repo onboard coreplanelabs/try-catch");
+    expect(replies[0]).toContain("repo onboard acme/try-catch");
     expect(replies[0]).not.toContain("Ask "); // an admin can run `repo onboard` themselves
     expect(replies[0]).toMatch(/github\.com/); // the URL form still binds a real repo
     expect(provider.requests).toHaveLength(0); // no model turn
@@ -1017,9 +1017,9 @@ describe("resident repo dispatch", () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
     deps.capabilities = { ...deps.capabilities, residents: false };
-    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/try-catch" });
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UADMIN"), io);
+    await dispatch(deps, msg("agent:coding in acme/try-catch: say hi", "slack:UADMIN"), io);
     expect(replies.some((r) => r.includes("not onboarded"))).toBe(false);
     expect(replies.some((r) => r.includes("repo onboard"))).toBe(false);
     expect(provider.requests.length).toBeGreaterThan(0); // the run went ahead in a per-thread workspace
@@ -1031,12 +1031,12 @@ describe("resident repo dispatch", () => {
   it("unverified repo (registry unreachable) + a repo-needing agent → one could-not-verify reply, no run", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
-    deps.resolveRepoContext = () => ({ unverifiedRepo: "coreplanelabs/nominal" });
+    deps.resolveRepoContext = () => ({ unverifiedRepo: "acme/web" });
     const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("agent:coding in coreplanelabs/nominal: fix the consent page", "slack:UADMIN"), io);
+    await dispatch(deps, msg("agent:coding in acme/web: fix the consent page", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("couldn't verify");
-    expect(replies[0]).toContain("coreplanelabs/nominal");
+    expect(replies[0]).toContain("acme/web");
     expect(replies[0]).not.toContain("not onboarded"); // silence is not a refusal
     expect(replies[0]).toMatch(/github\.com/); // the URL form still binds a real repo
     expect(provider.requests).toHaveLength(0);
@@ -1050,12 +1050,12 @@ describe("resident repo dispatch", () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
     deps.capabilities = { ...deps.capabilities, residents: true };
-    deps.resolveRepoContext = () => ({ rejectedRepo: "coreplanelabs/try-catch" });
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/try-catch" });
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("agent:coding in coreplanelabs/try-catch: say hi", "slack:UDEV"), io);
+    await dispatch(deps, msg("agent:coding in acme/try-catch: say hi", "slack:UDEV"), io);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("not onboarded");
-    expect(replies[0]).toContain("Ask <@slack:UADMIN> to onboard it (`repo onboard coreplanelabs/try-catch`)");
+    expect(replies[0]).toContain("Ask <@slack:UADMIN> to onboard it (`repo onboard acme/try-catch`)");
     expect(replies[0]).toMatch(/github\.com/); // the self-serve path stays
     expect(provider.requests).toHaveLength(0);
   });
@@ -1063,10 +1063,10 @@ describe("resident repo dispatch", () => {
   it("the same rejected slug with a no-repo agent (general) runs unchanged (#316)", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider);
-    const resolveSpy = vi.fn(() => ({ rejectedRepo: "coreplanelabs/try-catch" }));
+    const resolveSpy = vi.fn(() => ({ rejectedRepo: "acme/try-catch" }));
     deps.resolveRepoContext = resolveSpy;
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("say hi about coreplanelabs/try-catch", "slack:UADMIN"), io);
+    await dispatch(deps, msg("say hi about acme/try-catch", "slack:UADMIN"), io);
     expect(replies).toContain("answer");
     expect(replies.some((r) => r.includes("not onboarded"))).toBe(false);
     expect(resolveSpy).not.toHaveBeenCalled();
@@ -4406,25 +4406,25 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
       channelDirectory: PUBLIC_CHANNEL,
     };
 
-    await dispatch(deps, msg("how do we deploy?", "slack:U1"), fakeIO(longHistory).io);
+    await dispatch(deps, msg("how do we deploy?", "slack:UALICE"), fakeIO(longHistory).io);
     await drainReflections();
     expect(
-      (await store.retrieve({ scopeKey: "user:slack:U1", query: "preview link deploy", limit: 10 })).map((r) => r.text),
+      (await store.retrieve({ scopeKey: "user:slack:UALICE", query: "preview link deploy", limit: 10 })).map((r) => r.text),
     ).toEqual(["this user wants a preview link before every deploy"]);
     expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
-    expect(await store.retrieve({ scopeKey: "user:slack:U2", query: "preview link deploy", limit: 10 })).toEqual([]);
+    expect(await store.retrieve({ scopeKey: "user:slack:UBOB", query: "preview link deploy", limit: 10 })).toEqual([]);
 
     requests.length = 0;
-    await dispatch(deps, msg("deploy preview link?", "slack:U1"), fakeIO().io);
+    await dispatch(deps, msg("deploy preview link?", "slack:UALICE"), fakeIO().io);
     const u1System = requests[0].system!;
-    expect(u1System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:U1");
+    expect(u1System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:UALICE");
     expect(u1System).toContain("this user wants a preview link before every deploy");
     expect(u1System).toContain("the deploy command is npm run deploy");
 
     requests.length = 0;
-    await dispatch(deps, msg("deploy preview link?", "slack:U2"), fakeIO().io);
+    await dispatch(deps, msg("deploy preview link?", "slack:UBOB"), fakeIO().io);
     const u2System = requests[0].system!;
-    expect(u2System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:U2");
+    expect(u2System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:UBOB");
     expect(u2System).not.toContain("preview link before every deploy");
     expect(u2System).toContain("the deploy command is npm run deploy");
   });
@@ -4457,12 +4457,12 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await dispatch(
       deps,
-      { ...msg("how do we deploy?", "slack:U1"), channelId: "slack:D0AB", threadKey: "slack:D0AB:1.0" },
+      { ...msg("how do we deploy?", "slack:UALICE"), channelId: "slack:D0AB", threadKey: "slack:D0AB:1.0" },
       fakeIO(longHistory).io,
     );
     await drainReflections();
     expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual([]);
-    expect((await store.list("user:slack:U1", 10)).map((r) => r.text)).toEqual([
+    expect((await store.list("user:slack:UALICE", 10)).map((r) => r.text)).toEqual([
       "the deploy command is npm run deploy",
     ]);
     expect((await store.list("channel:slack:D0AB", 10)).map((r) => r.text)).toEqual([
@@ -4479,10 +4479,10 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
       memory: pub,
       channelDirectory: PUBLIC_CHANNEL,
     };
-    await dispatch(publicDeps, msg("how do we deploy?", "slack:U1"), fakeIO(longHistory).io);
+    await dispatch(publicDeps, msg("how do we deploy?", "slack:UALICE"), fakeIO(longHistory).io);
     await drainReflections();
     expect((await pub.list("org:acme", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
-    expect(await pub.list("user:slack:U1", 10)).toEqual([]);
+    expect(await pub.list("user:slack:UALICE", 10)).toEqual([]);
   });
 
   // Feature: features/memory.md §21–23 (#253) — repo + channel scopes end to end:
@@ -4525,20 +4525,20 @@ describe("cross-session memory WRITE path (PR2, #85)", () => {
     expect((await store.list("org:acme", 10)).map((r) => r.text)).toEqual(["the deploy command is npm run deploy"]);
 
     requests.length = 0;
-    await dispatch(deps, msg("acme deploy release?", "slack:U2"), fakeIO().io); // same channel (slack:CX), toolless general
+    await dispatch(deps, msg("acme deploy release?", "slack:UBOB"), fakeIO().io); // same channel (slack:CX), toolless general
     const sameChannel = requests[0].system!;
-    expect(sameChannel).toContain("Background memory for org:acme + channel:slack:CX + user:slack:U2");
+    expect(sameChannel).toContain("Background memory for org:acme + channel:slack:CX + user:slack:UBOB");
     expect(sameChannel).toContain("this channel coordinates acme deploys");
     expect(sameChannel).not.toContain("make release"); // no repo bound on a toolless general run
 
     requests.length = 0;
     await dispatch(
       deps,
-      { ...msg("acme deploy release?", "slack:U2"), channelId: "slack:CY", threadKey: "slack:CY:1.0" },
+      { ...msg("acme deploy release?", "slack:UBOB"), channelId: "slack:CY", threadKey: "slack:CY:1.0" },
       fakeIO().io,
     );
     const otherChannel = requests[0].system!;
-    expect(otherChannel).toContain("Background memory for org:acme + channel:slack:CY + user:slack:U2");
+    expect(otherChannel).toContain("Background memory for org:acme + channel:slack:CY + user:slack:UBOB");
     expect(otherChannel).not.toContain("coordinates acme deploys");
     expect(otherChannel).toContain("the deploy command is npm run deploy");
   });
@@ -4704,7 +4704,7 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
                 type: "tool_use",
                 id: "t1",
                 name: "github_issue_create",
-                input: { repo: "coreplanelabs/switchboard", title: "foo", body: "bar" },
+                input: { repo: "acme/api", title: "foo", body: "bar" },
               },
             ],
             stopReason: "tool_use",
@@ -4717,7 +4717,7 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
       },
     };
     const deps = makeDeps(YAML_FIXTURE, provider);
-    const api = new InMemoryGithubApi({ "coreplanelabs/switchboard": {} });
+    const api = new InMemoryGithubApi({ "acme/api": {} });
     deps.githubApi = api;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg('open an issue on the switchboard app with the title "foo" and the body "bar"'), io);
@@ -4725,16 +4725,16 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
       expect.arrayContaining(["github_issue_create", "github_file", "github_repos", "web_fetch"]),
     );
     expect(provider.requests[0].tools?.map((t) => t.name)).not.toContain("bash");
-    expect((await api.listIssues("coreplanelabs/switchboard")).map((i) => ({ title: i.title, body: i.body }))).toEqual([
+    expect((await api.listIssues("acme/api")).map((i) => ({ title: i.title, body: i.body }))).toEqual([
       { title: "foo", body: "bar" },
     ]);
     expect(replies.at(-1)).toContain(
-      "Opened coreplanelabs/switchboard#1: foo\nhttps://github.com/coreplanelabs/switchboard/issues/1",
+      "Opened acme/api#1: foo\nhttps://github.com/acme/api/issues/1",
     );
   });
 
   it("the issue write is gated by restrict.repos for the requesting user — refused before the API, allowed for a granted user", async () => {
-    const gated = YAML_FIXTURE.replace("restrict:\n", 'restrict:\n  repos: ["coreplanelabs/switchboard"]\n');
+    const gated = YAML_FIXTURE.replace("restrict:\n", 'restrict:\n  repos: ["acme/api"]\n');
     const call = (): Provider => {
       let n = 0;
       return {
@@ -4747,7 +4747,7 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
                   type: "tool_use",
                   id: "t1",
                   name: "github_issue_create",
-                  input: { repo: "coreplanelabs/switchboard", title: "foo" },
+                  input: { repo: "acme/api", title: "foo" },
                 },
               ],
               stopReason: "tool_use",
@@ -4760,20 +4760,20 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
         },
       };
     };
-    const api = new InMemoryGithubApi({ "coreplanelabs/switchboard": {} });
+    const api = new InMemoryGithubApi({ "acme/api": {} });
     const denied = makeDeps(gated, call());
     denied.githubApi = api;
     const d = fakeIO();
     await dispatch(denied, msg("open an issue", "slack:UX"), d.io);
     expect(d.replies.at(-1)).toContain(
-      "github_issue_create: you are not allowed to write to coreplanelabs/switchboard (it is restricted and you hold no grant for it)",
+      "github_issue_create: you are not allowed to write to acme/api (it is restricted and you hold no grant for it)",
     );
-    expect(await api.listIssues("coreplanelabs/switchboard")).toEqual([]);
+    expect(await api.listIssues("acme/api")).toEqual([]);
     const allowed = makeDeps(gated, call());
     allowed.githubApi = api;
     const a = fakeIO();
     await dispatch(allowed, msg("open an issue", "slack:UADMIN"), a.io);
-    expect(a.replies.at(-1)).toContain("Opened coreplanelabs/switchboard#1: foo");
+    expect(a.replies.at(-1)).toContain("Opened acme/api#1: foo");
   });
 });
 
@@ -5896,7 +5896,7 @@ describe("run history write path (#157 U4)", () => {
   it("Slack directory stamp: a public-channel run is visible to a plain Slack user's run reads, a private-channel or DM run is not; conversations.info is asked once per channel across runs", async () => {
     const info = vi.fn(async ({ channel }: { channel: string }) => ({ channel: { is_private: channel === "CPRIV" } }));
     const directory = new SlackChannelDirectory({ conversations: { info } }, { now: () => 0 });
-    const plainUser: Actor = { kind: "user", id: "slack:U9", grants: NO_GRANTS };
+    const plainUser: Actor = { kind: "user", id: "slack:UIVY", grants: NO_GRANTS };
     const readable = predicateFor(plainUser, "runs:read", "run");
     const records: RunRecord[] = [];
     for (const [id, channel] of [
@@ -5909,7 +5909,7 @@ describe("run history write path (#157 U4)", () => {
       w.deps.channelDirectory = directory;
       await dispatch(
         w.deps,
-        { ...msg("hello there", "slack:U1"), channelId: channel, threadKey: `${channel}:1` },
+        { ...msg("hello there", "slack:UALICE"), channelId: channel, threadKey: `${channel}:1` },
         fakeIO().io,
       );
       await w.writer.settled();
@@ -6462,7 +6462,7 @@ describe("run history write path (#157 U4)", () => {
         agent: "coding",
         model: "anthropic/claude",
         channelId: "slack:C1",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: "slack:C1:t",
         repo: "acme/x",
         sourceUrl: "https://acme.slack.com/archives/C1/p1",
@@ -6482,7 +6482,7 @@ describe("run history write path (#157 U4)", () => {
         agent: "coding",
         model: "anthropic/claude",
         channelId: "slack:C1",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: "slack:C1:t",
         repo: "acme/x",
         sourceUrl: "https://acme.slack.com/archives/C1/p1",
@@ -6502,7 +6502,7 @@ describe("run history write path (#157 U4)", () => {
       const live = registry.create("coding · acme/x", {
         agent: "coding",
         channelId: "slack:C1",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: "slack:C1:t",
       });
       registry.publish(live.id, { type: "input", text: "go", at: 1 });
@@ -6510,7 +6510,7 @@ describe("run history write path (#157 U4)", () => {
       const done = registry.create("review · acme/y", {
         agent: "review",
         channelId: "slack:C1",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: "slack:C1:u",
       });
       registry.finish(done.id, "completed");
@@ -6663,15 +6663,15 @@ describe("registry chat commands in the fast-path chain (U13, KTD19)", () => {
     deps.residentAdmin = admin;
     withCommands(deps);
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("repo onboard coreplanelabs/infrastructure", "slack:UADMIN"), io);
+    await dispatch(deps, msg("repo onboard acme/infra", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
     await vi.waitFor(() =>
       expect(replies[1]).toBe(
-        "❌ `coreplanelabs/infrastructure` failed to provision: provision-failed at install: exit 254: npm error enoent Could not read package.json\n" +
-          'Fix the command table with `repo reconfigure coreplanelabs/infrastructure --install "…" --build "…" --test "…"`, then `repo rebuild coreplanelabs/infrastructure`.',
+        "❌ `acme/infra` failed to provision: provision-failed at install: exit 254: npm error enoent Could not read package.json\n" +
+          'Fix the command table with `repo reconfigure acme/infra --install "…" --build "…" --test "…"`, then `repo rebuild acme/infra`.',
       ),
     );
-    await dispatch(deps, msg("repo rebuild coreplanelabs/infrastructure --dry-run", "slack:UADMIN"), io);
+    await dispatch(deps, msg("repo rebuild acme/infra --dry-run", "slack:UADMIN"), io);
     expect(replies[2]).toMatch(/^🧪 \*Dry run\*/);
     await new Promise((r) => setTimeout(r, 20));
     expect(replies).toHaveLength(3);

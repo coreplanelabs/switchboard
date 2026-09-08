@@ -290,7 +290,7 @@ export const ERROR_STATUS: Readonly<Record<InvokeErrorCode, number>> = {
 
 /** A failure says WHO decided it: `registry` — the id was unknown, the policy
  *  table denied the caller the command's action, or the input failed its schema (the message
- *  is the registry's, e.g. `slack:U1 is not allowed to run runs.list`); `handler`
+ *  is the registry's, e.g. `slack:UALICE is not allowed to run runs.list`); `handler`
  *  — the command itself threw a `CommandError` about the request (the message
  *  is the command's own, meant for the caller: `You're not on the allowlist for
  *  the \`acme/api\` repo environment.`). Chat renders a registry refusal with

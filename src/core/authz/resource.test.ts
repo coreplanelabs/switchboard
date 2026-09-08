@@ -12,20 +12,20 @@ describe("attributesOf", () => {
         type: "run",
         id: "r",
         channelId: "slack:C1",
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         repo: "o/r",
         channelVisibility: "private",
       }),
     ).toEqual({
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       repo: "o/r",
       visibility: "private",
       channelVisibility: "private",
     });
-    expect(attributesOf({ type: "run", id: "r", channelId: "slack:C1", userId: "slack:U1" })).toEqual({
+    expect(attributesOf({ type: "run", id: "r", channelId: "slack:C1", userId: "slack:UALICE" })).toEqual({
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       visibility: "unknown",
       channelVisibility: "unknown",
     });
@@ -38,9 +38,9 @@ describe("attributesOf", () => {
     });
   });
   it("memory-scope: the id behind the kind's key prefix; org carries nothing but its origin visibility", () => {
-    expect(attributesOf(scope("org", "org:coreplanelabs", "public"))).toEqual({ visibility: "public" });
-    expect(attributesOf(scope("org", "org:coreplanelabs"))).toEqual({ visibility: "unknown" });
-    expect(attributesOf(scope("user", "user:slack:U1"))).toEqual({ userId: "slack:U1", visibility: "unknown" });
+    expect(attributesOf(scope("org", "org:acme", "public"))).toEqual({ visibility: "public" });
+    expect(attributesOf(scope("org", "org:acme"))).toEqual({ visibility: "unknown" });
+    expect(attributesOf(scope("user", "user:slack:UALICE"))).toEqual({ userId: "slack:UALICE", visibility: "unknown" });
     expect(attributesOf(scope("channel", "channel:slack:C1"))).toEqual({
       channelId: "slack:C1",
       visibility: "unknown",
@@ -48,8 +48,8 @@ describe("attributesOf", () => {
     expect(attributesOf(scope("repo", "repo:o/r"))).toEqual({ repo: "o/r", visibility: "unknown" });
   });
   it("memory-scope: a key without the kind's prefix yields no relation attribute (fail-closed)", () => {
-    expect(attributesOf(scope("user", "slack:U1"))).toEqual({ visibility: "unknown" });
-    expect(attributesOf(scope("channel", "user:slack:U1"))).toEqual({ visibility: "unknown" });
+    expect(attributesOf(scope("user", "slack:UALICE"))).toEqual({ visibility: "unknown" });
+    expect(attributesOf(scope("channel", "user:slack:UALICE"))).toEqual({ visibility: "unknown" });
     expect(attributesOf(scope("repo", "repo:"))).toEqual({ visibility: "unknown" });
   });
   it("repo, config-scope, agent, command", () => {
@@ -58,8 +58,8 @@ describe("attributesOf", () => {
       channelId: "slack:C1",
       visibility: "unknown",
     });
-    expect(attributesOf({ type: "config-scope", kind: "user", id: "slack:U1" })).toEqual({
-      userId: "slack:U1",
+    expect(attributesOf({ type: "config-scope", kind: "user", id: "slack:UALICE" })).toEqual({
+      userId: "slack:UALICE",
       visibility: "unknown",
     });
     expect(attributesOf({ type: "config-scope", kind: "org" })).toEqual({ visibility: "unknown" });

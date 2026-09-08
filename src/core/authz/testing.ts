@@ -40,9 +40,9 @@ export const CHANNELS = {
   mcp: { id: "mcp:ops", visibility: "machine" as ChannelVisibility },
 } as const;
 
-export const USERS = ["slack:U1", "slack:U2", "slack:U3", "slack:U4", "slack:U5"] as const;
+export const USERS = ["slack:UALICE", "slack:UBOB", "slack:UCAROL", "slack:UDAVE", "slack:UERIN"] as const;
 
-export const REPOS = ["coreplanelabs/switchboard", "coreplanelabs/nominal"] as const;
+export const REPOS = ["acme/api", "acme/web"] as const;
 
 export type RunResource = Extract<Resource, { type: "run" }>;
 export type ScopeResource = Extract<Resource, { type: "memory-scope" }>;
@@ -87,8 +87,8 @@ export function runFixture(): RunResource[] {
 export function scopeFixture(): ScopeResource[] {
   const scopes: ScopeResource[] = [];
   for (const visibility of ["public", "private", "dm", "machine", "unknown"] as const)
-    scopes.push(scope("org", "org:coreplanelabs", visibility));
-  scopes.push(scope("org", "org:coreplanelabs"));
+    scopes.push(scope("org", "org:acme", visibility));
+  scopes.push(scope("org", "org:acme"));
   for (const userId of USERS) scopes.push(scope("user", `user:${userId}`));
   for (const channel of Object.values(CHANNELS)) scopes.push(scope("channel", `channel:${channel.id}`));
   for (const repo of REPOS) scopes.push(scope("repo", `repo:${repo}`));
@@ -96,35 +96,35 @@ export function scopeFixture(): ScopeResource[] {
   return scopes;
 }
 
-const nonMember = actor("user", "slack:U3", { actions: new Set(["runs:read"]), channels: new Set([CHANNELS.pub2.id]) });
+const nonMember = actor("user", "slack:UCAROL", { actions: new Set(["runs:read"]), channels: new Set([CHANNELS.pub2.id]) });
 
 export const ACTORS = {
   /** Fleet admin: every action, every channel, every repo. */
-  admin: actor("user", "slack:U1", { actions: "all", channels: "all", repos: "all" }),
+  admin: actor("user", "slack:UALICE", { actions: "all", channels: "all", repos: "all" }),
   /** A channel member with run + config grants in pub1 and the private channel. */
-  member: actor("user", "slack:U2", {
+  member: actor("user", "slack:UBOB", {
     actions: new Set(["runs:read", "runs:write", "config:write"]),
     channels: new Set([CHANNELS.pub1.id, CHANNELS.priv.id]),
   }),
   /** A user who is a member of pub2 only. */
   nonMember,
   /** A user with the read grant only, in pub1 only. */
-  reader: actor("user", "slack:U4", { actions: new Set(["runs:read"]), channels: new Set([CHANNELS.pub1.id]) }),
+  reader: actor("user", "slack:UDAVE", { actions: new Set(["runs:read"]), channels: new Set([CHANNELS.pub1.id]) }),
   /** A user with no grants at all. */
-  noGrants: actor("user", "slack:U5"),
+  noGrants: actor("user", "slack:UERIN"),
   /** Repo manager: repo grants over one repo. */
-  manager: actor("user", "slack:U1", {
+  manager: actor("user", "slack:UALICE", {
     actions: new Set(["repo:write", "repo:exec", "friction:write"]),
     repos: new Set([REPOS[0]]),
   }),
   /** A user allowed to run one agent by name. */
-  agentUser: actor("user", "slack:U4", { actions: new Set(["agent:run:coding"]) }),
+  agentUser: actor("user", "slack:UDAVE", { actions: new Set(["agent:run:coding"]) }),
   /** A user allowed to run every agent through the wildcard. */
-  allAgents: actor("user", "slack:U4", { actions: new Set(["agent:run:*"]) }),
+  allAgents: actor("user", "slack:UDAVE", { actions: new Set(["agent:run:*"]) }),
   /** A Slack user granted `config:write` on top of the `open` chat commands. */
-  chatUser: actor("user", "slack:U6", { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write"]) }),
+  chatUser: actor("user", "slack:UFAY", { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write"]) }),
   /** A plain Slack user: the `open` chat commands alone (`config:write` is never a baseline). */
-  chatUserGated: actor("user", "slack:U7", { actions: new Set(CHAT_OPEN_ACTIONS) }),
+  chatUserGated: actor("user", "slack:UGUS", { actions: new Set(CHAT_OPEN_ACTIONS) }),
   /** An unlisted Access browser session: every group's read, nothing else. */
   browser: actor("user", "access:viewer", { actions: browserReadActions(COMMAND_GROUPS) }),
   /** An Access operator (granted every read + write with `channels: all`): fleet-wide, never exec. */

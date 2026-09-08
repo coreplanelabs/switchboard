@@ -49,7 +49,7 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
         rec({ id: "b", createdAt: NOW - 2000, text: "middle deploy note" }),
         rec({ id: "c", createdAt: NOW - 1000, text: "newest deploy note" }),
         rec({ id: "s", createdAt: NOW, text: "superseded deploy note", status: "superseded" }),
-        rec({ id: "u", scopeKey: "user:slack:U1", text: "user deploy note" }),
+        rec({ id: "u", scopeKey: "user:slack:UALICE", text: "user deploy note" }),
       ],
       { now: () => NOW },
     );
@@ -58,8 +58,8 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
     const store = seed();
     expect((await store.list("org:acme", 10)).map((r) => r.id)).toEqual(["c", "b", "a"]);
     expect((await store.list("org:acme", 2)).map((r) => r.id)).toEqual(["c", "b"]);
-    expect((await store.list("user:slack:U1", 10)).map((r) => r.id)).toEqual(["u"]);
-    expect(await store.list("user:slack:U2", 10)).toEqual([]);
+    expect((await store.list("user:slack:UALICE", 10)).map((r) => r.id)).toEqual(["u"]);
+    expect(await store.list("user:slack:UBOB", 10)).toEqual([]);
   });
 
   it("list with a query keeps only records a query token hits (whole-token, text or keywords), newest first, no usage bump (#293)", async () => {
@@ -93,9 +93,9 @@ describe("InMemoryMemoryStore.list / forget (#278)", () => {
   it("forget: unknown id, foreign-scope id, or an already non-active record → false, nothing changes", async () => {
     const store = seed();
     expect(await store.forget("org:acme", "nope")).toBe(false);
-    expect(await store.forget("org:acme", "u")).toBe(false); // lives in user:slack:U1
+    expect(await store.forget("org:acme", "u")).toBe(false); // lives in user:slack:UALICE
     expect(await store.forget("org:acme", "s")).toBe(false); // superseded
-    expect((await store.list("user:slack:U1", 10)).map((r) => r.id)).toEqual(["u"]);
+    expect((await store.list("user:slack:UALICE", 10)).map((r) => r.id)).toEqual(["u"]);
     expect(await store.forget("org:acme", "b")).toBe(true);
     expect(await store.forget("org:acme", "b")).toBe(false); // second time: no longer active
   });

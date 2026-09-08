@@ -41,7 +41,7 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
     label: "review · #ch · u",
     agent: "review",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1.0",
     channelVisibility: "unknown",
     startedAt: 1_000,
@@ -450,8 +450,8 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
     channelVisibility: RunRecord["channelVisibility"],
     repo?: string,
   ) => ({ channelId, userId, channelVisibility, ...(repo ? { repo } : {}) });
-  const pubRow = row("slack:C1", "slack:U1", "public");
-  const privRow = row("slack:G1", "slack:U2", "private", "acme/api");
+  const pubRow = row("slack:C1", "slack:UALICE", "public");
+  const privRow = row("slack:G1", "slack:UBOB", "private", "acme/api");
   const machineRow = row("http:ops", "http:ci", "machine");
 
   it("toVisibilityFilter turns sets into sorted arrays and keeps the tree shape", () => {
@@ -463,7 +463,7 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
         {
           kind: "and",
           of: [
-            { kind: "user-is", userId: "slack:U2" },
+            { kind: "user-is", userId: "slack:UBOB" },
             { kind: "repos-in", repos: new Set(["z/z", "acme/api"]) },
           ],
         },
@@ -477,7 +477,7 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
         {
           kind: "and",
           of: [
-            { kind: "user-is", userId: "slack:U2" },
+            { kind: "user-is", userId: "slack:UBOB" },
             { kind: "repos-in", repos: ["acme/api", "z/z"] },
           ],
         },
@@ -493,8 +493,8 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
     expect(matchesVisibility({ kind: "channels-in", channelIds: ["slack:G1"] }, privRow)).toBe(true);
     expect(matchesVisibility({ kind: "channels-in", channelIds: ["slack:G1"] }, pubRow)).toBe(false);
     expect(matchesVisibility({ kind: "channels-in", channelIds: [] }, pubRow)).toBe(false);
-    expect(matchesVisibility({ kind: "user-is", userId: "slack:U2" }, privRow)).toBe(true);
-    expect(matchesVisibility({ kind: "user-is", userId: "slack:U2" }, pubRow)).toBe(false);
+    expect(matchesVisibility({ kind: "user-is", userId: "slack:UBOB" }, privRow)).toBe(true);
+    expect(matchesVisibility({ kind: "user-is", userId: "slack:UBOB" }, pubRow)).toBe(false);
     expect(matchesVisibility({ kind: "repos-in", repos: ["acme/api"] }, privRow)).toBe(true);
     expect(matchesVisibility({ kind: "repos-in", repos: ["acme/api"] }, pubRow)).toBe(false);
     expect(matchesVisibility({ kind: "visibility-in", visibilities: ["public"] }, pubRow)).toBe(true);
@@ -503,13 +503,13 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
     expect(
       matchesVisibility(
         { kind: "visibility-in", visibilities: ["public"] },
-        { channelId: "slack:C1", userId: "slack:U1" },
+        { channelId: "slack:C1", userId: "slack:UALICE" },
       ),
     ).toBe(false);
     expect(
       matchesVisibility(
         { kind: "visibility-in", visibilities: ["unknown"] },
-        { channelId: "slack:C1", userId: "slack:U1" },
+        { channelId: "slack:C1", userId: "slack:UALICE" },
       ),
     ).toBe(true);
     const memberOfOps = {
@@ -525,7 +525,7 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
         {
           kind: "and",
           of: [
-            { kind: "user-is", userId: "slack:U2" },
+            { kind: "user-is", userId: "slack:UBOB" },
             { kind: "repos-in", repos: ["acme/api"] },
           ],
         },
@@ -537,7 +537,7 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
         {
           kind: "and",
           of: [
-            { kind: "user-is", userId: "slack:U1" },
+            { kind: "user-is", userId: "slack:UALICE" },
             { kind: "repos-in", repos: ["acme/api"] },
           ],
         },
@@ -553,7 +553,7 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
     expect(isRunVisibilityFilter({ kind: "none" })).toBe(true);
     expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: ["slack:C1"] })).toBe(true);
     expect(isRunVisibilityFilter({ kind: "channels-in", channelIds: [] })).toBe(true);
-    expect(isRunVisibilityFilter({ kind: "user-is", userId: "slack:U1" })).toBe(true);
+    expect(isRunVisibilityFilter({ kind: "user-is", userId: "slack:UALICE" })).toBe(true);
     expect(isRunVisibilityFilter({ kind: "repos-in", repos: ["a/b"] })).toBe(true);
     expect(isRunVisibilityFilter({ kind: "visibility-in", visibilities: ["public", "dm"] })).toBe(true);
     expect(isRunVisibilityFilter({ kind: "or", of: [{ kind: "all" }, { kind: "and", of: [{ kind: "none" }] }] })).toBe(

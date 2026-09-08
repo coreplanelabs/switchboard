@@ -16,7 +16,7 @@ function record(id = "run-1"): RunRecord {
   return {
     id,
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1.0",
     channelVisibility: "unknown",
     startedAt: 1000,

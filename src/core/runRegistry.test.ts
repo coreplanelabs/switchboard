@@ -505,7 +505,7 @@ describe("RunRegistry.listActive", () => {
       agent: "coding",
       model: "anthropic/claude",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
       repo: "acme/x",
       sourceUrl: "https://acme.slack.com/archives/C1/p1",
@@ -519,7 +519,7 @@ describe("RunRegistry.listActive", () => {
       agent: "coding",
       model: "anthropic/claude",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
       repo: "acme/x",
       receivedAt: 900,
@@ -531,7 +531,7 @@ describe("RunRegistry.listActive", () => {
     const bareRow = reg.listActive().find((r) => r.id === bare.id)!;
     expect(bare.label).toBeUndefined();
     expect(Object.keys(bareRow).sort()).toEqual(["eventCount", "finished", "id", "startedAt", "stepCount", "token"]);
-    const chat = reg.create("general · #ch", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:2" });
+    const chat = reg.create("general · #ch", { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:2" });
     expect(reg.getById(chat.id)).not.toHaveProperty("repo");
     expect(reg.getById(chat.id)).not.toHaveProperty("sourceUrl");
     expect(reg.getById(chat.id)).not.toHaveProperty("agent");
@@ -842,11 +842,11 @@ describe("RunRegistry.snapshot — record inputs (#157 U4)", () => {
     const { reg } = testRegistry();
     const stamped = reg.create("x", {
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:1",
       receivedAt: 900,
     });
-    const plain = reg.create("y", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:2" });
+    const plain = reg.create("y", { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:2" });
     expect(reg.snapshot(stamped.id, stamped.token)?.receivedAt).toBe(900);
     expect(reg.listActive().find((r) => r.id === stamped.id)?.receivedAt).toBe(900);
     expect("receivedAt" in (reg.snapshot(plain.id, plain.token) ?? {})).toBe(false);
@@ -1212,7 +1212,7 @@ describe("RunRegistry — `activity` on the summary (live-view item 20)", () => 
 describe("RunRegistry — terminal status + finishedAt on the summary; truncated on the snapshot (review)", () => {
   it("finish(id, status) stores the status: the summary and the index upsert carry `status` and `finishedAt`; a live run has neither", () => {
     const { reg, tick } = testRegistry();
-    const run = reg.create("l", { channelId: "slack:C1", userId: "slack:U1", threadKey: "slack:C1:1" });
+    const run = reg.create("l", { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1" });
     const live = reg.getById(run.id)!;
     expect("status" in live).toBe(false);
     expect("finishedAt" in live).toBe(false);

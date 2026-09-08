@@ -47,7 +47,7 @@ function cleanRun(runId: string, finishedAt: number): FrictionRunRecord {
   };
 }
 
-const REPO = "coreplanelabs/switchboard";
+const REPO = "acme/api";
 
 async function seeded() {
   const ledger = new InMemoryFrictionLedger();

@@ -41,12 +41,12 @@ const restriction = (r: { agents?: string[]; repos?: string[] }): Restriction =>
 describe("parseGrantsConfig — the native `grants` block", () => {
   it('absent field = empty set (fail-closed, R7); "all" is explicit', () => {
     const parsed = parseGrantsConfig({
-      "slack:U1": { actions: ["runs:read"] },
+      "slack:UALICE": { actions: ["runs:read"] },
       "http:ci": { actions: "all", channels: ["http:ops"] },
     });
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.grants.get("slack:U1")).toEqual(grants({ actions: set("runs:read") }));
+    expect(parsed.grants.get("slack:UALICE")).toEqual(grants({ actions: set("runs:read") }));
     expect(parsed.grants.get("http:ci")).toEqual(grants({ actions: "all", channels: set("http:ops") }));
   });
 
@@ -62,22 +62,22 @@ describe("parseGrantsConfig — the native `grants` block", () => {
   });
 
   it('a misspelled "all" (or any bare string) is an error naming the id and the field', () => {
-    const parsed = parseGrantsConfig({ "slack:U1": { actions: "ALL" }, "slack:U2": { channels: "*" } });
+    const parsed = parseGrantsConfig({ "slack:UALICE": { actions: "ALL" }, "slack:UBOB": { channels: "*" } });
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
     expect(parsed.errors).toEqual([
-      expect.stringMatching(/grants\["slack:U1"\]\.actions.*"all"/),
-      expect.stringMatching(/grants\["slack:U2"\]\.channels.*"all"/),
+      expect.stringMatching(/grants\["slack:UALICE"\]\.actions.*"all"/),
+      expect.stringMatching(/grants\["slack:UBOB"\]\.channels.*"all"/),
     ]);
   });
 
   it("an unknown field (the removed `agents` axis included), a non-mapping block, and an empty name are errors", () => {
-    expect(parseGrantsConfig({ "slack:U1": { agents: ["coding"] } })).toMatchObject({
+    expect(parseGrantsConfig({ "slack:UALICE": { agents: ["coding"] } })).toMatchObject({
       ok: false,
-      errors: [expect.stringContaining('grants["slack:U1"]: unknown field agents')],
+      errors: [expect.stringContaining('grants["slack:UALICE"]: unknown field agents')],
     });
     expect(parseGrantsConfig([])).toMatchObject({ ok: false, errors: [expect.stringContaining("mapping")] });
-    expect(parseGrantsConfig({ "slack:U1": { actions: [""] } })).toMatchObject({ ok: false });
+    expect(parseGrantsConfig({ "slack:UALICE": { actions: [""] } })).toMatchObject({ ok: false });
   });
 });
 
@@ -119,7 +119,7 @@ describe("the baselines — what an id holds by its namespace, listed or not (KT
   };
 
   it("slack: → everyone; access:<sub> → every group's read; access:svc:, http:, mcp:, schedule:, cli: → nothing", () => {
-    expect(namespaceBaseline("slack:U1", table)).toBe(table.everyone);
+    expect(namespaceBaseline("slack:UALICE", table)).toBe(table.everyone);
     expect(namespaceBaseline("access:alice", table)).toBe(table.browserReads);
     for (const id of ["access:svc:ci", "http:ci", "mcp:ci", "schedule:x", "cli:local"])
       expect(namespaceBaseline(id, table), id).toBe(NO_GRANTS);

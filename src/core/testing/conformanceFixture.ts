@@ -206,7 +206,7 @@ export function record(id: string, finishedAt: number): RunRecord {
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: `slack:C1:${id}`,
     channelVisibility: "public", // public: every fixture caller may read it — conformance is about surfaces, not visibility
     startedAt: finishedAt - 10_000,
@@ -529,7 +529,7 @@ export async function fixture(
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:t",
     channelVisibility: "public",
   });

@@ -39,8 +39,8 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
   it("owner/name slug + 'on branch X' phrasing", async () => {
     const { fn } = stubFetch();
     await expect(
-      resolveRepoContext(msg("fix the bug in coreplanelabs/switchboard on branch fix/x"), []),
-    ).resolves.toEqual({ repo: "coreplanelabs/switchboard", ref: "fix/x" });
+      resolveRepoContext(msg("fix the bug in acme/api on branch fix/x"), []),
+    ).resolves.toEqual({ repo: "acme/api", ref: "fix/x" });
     expect(fn).not.toHaveBeenCalled();
   });
 
@@ -70,8 +70,8 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
   });
 
   it("uppercase slugs are lowercased (resident resource ids are lowercase)", async () => {
-    await expect(resolveRepoContext(msg("fix it in CorePlaneLabs/Switchboard"), [])).resolves.toEqual({
-      repo: "coreplanelabs/switchboard",
+    await expect(resolveRepoContext(msg("fix it in Acme/Api"), [])).resolves.toEqual({
+      repo: "acme/api",
     });
   });
 
@@ -82,8 +82,8 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
   });
 
   it("'on <slug-shaped>' WITH a repo signal present is a ref", async () => {
-    await expect(resolveRepoContext(msg("on fix/x in coreplanelabs/switchboard please"), [])).resolves.toEqual({
-      repo: "coreplanelabs/switchboard",
+    await expect(resolveRepoContext(msg("on fix/x in acme/api please"), [])).resolves.toEqual({
+      repo: "acme/api",
       ref: "fix/x",
     });
   });
@@ -226,8 +226,8 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
   // only when the CURRENT message names a PR of the resolved repo.
   it("a bare repo mention (no PR reference) carries no pr — nowhere to post", async () => {
     const { fn } = stubFetch();
-    await expect(resolveRepoContext(msg("review coreplanelabs/switchboard"), [])).resolves.toEqual({
-      repo: "coreplanelabs/switchboard",
+    await expect(resolveRepoContext(msg("review acme/api"), [])).resolves.toEqual({
+      repo: "acme/api",
     });
     expect(fn).not.toHaveBeenCalled();
   });
@@ -445,7 +445,7 @@ describe("resolveRepoContext: thread history inheritance", () => {
     await expect(resolveRepoContext(msg("on fix/x"), history)).resolves.toEqual({ repo: "acme/api", ref: "fix/x" });
   });
 
-  it("`on <the established repo's own slug>` restates the repo — it never becomes the ref (live incident 2026-09-03: ship's base became 'coreplanelabs/switchboard')", async () => {
+  it("`on <the established repo's own slug>` restates the repo — it never becomes the ref (live incident 2026-09-03: ship's base became 'acme/api')", async () => {
     await expect(
       resolveRepoContext(msg("auto-merge is now disabled on acme/api — retry the task"), history),
     ).resolves.toEqual({ repo: "acme/api" });
@@ -636,12 +636,12 @@ describe("PR head SHA for review pinning", () => {
 });
 
 // Regression (2026-08-29): three Slack replies in a thread whose real repo was
-// coreplanelabs/switchboard each contained an un-backticked prose token shaped
+// acme/api each contained an un-backticked prose token shaped
 // like an owner/name slug — `reflection/review-post`, `try/catch`,
 // `comment/spec` — and each rebound the thread's repo, sending a review into a
 // cold sandbox for a repo that does not exist. #142 excluded code-spanned
 // tokens and #167 made STRONG bindings sticky, but a weakly-bound thread (a
-// bare `in coreplanelabs/switchboard` opener) was still hijacked by the next
+// bare `in acme/api` opener) was still hijacked by the next
 // prose slug. The guard: a bare token NEVER overrides a repo the thread
 // already established (any strength), and in an unbound thread it binds only
 // when the injectable resident probe confirms an onboarded resource (no probe
@@ -655,7 +655,7 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
   const boundHistory = [
     {
       role: "user" as const,
-      text: "agent:coding in coreplanelabs/switchboard: the resolver reads prose as a repo slug — fix it",
+      text: "agent:coding in acme/api: the resolver reads prose as a repo slug — fix it",
     },
     { role: "assistant" as const, text: "on it — branch pushed" },
   ];
@@ -663,14 +663,14 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
   for (const payload of PAYLOADS) {
     it(`resolveRepoContext keeps the weakly-bound thread repo: ${JSON.stringify(payload.slice(0, 40))}…`, async () => {
       const { fn } = stubFetch();
-      const probe = vi.fn(async (slug: string) => slug === "coreplanelabs/switchboard");
+      const probe = vi.fn(async (slug: string) => slug === "acme/api");
       await expect(resolveRepoContext(msg(payload), boundHistory, probe)).resolves.toEqual({
-        repo: "coreplanelabs/switchboard",
+        repo: "acme/api",
       });
       // A prose slug is never even a candidate — only the thread's repo is
       // vetted. The one exception is an ADDRESS: `in try/catch` is probed once
       // (item 29), refused, and changes nothing; never more than that.
-      expect(probe).toHaveBeenCalledWith("coreplanelabs/switchboard");
+      expect(probe).toHaveBeenCalledWith("acme/api");
       expect(probe).not.toHaveBeenCalledWith(expect.stringMatching(/review-post|spec/));
       expect(probe.mock.calls.length).toBeLessThanOrEqual(2);
       expect(fn).not.toHaveBeenCalled();
@@ -688,9 +688,9 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
 
     it(`repoFromThread keeps the weakly-bound thread repo: ${JSON.stringify(payload.slice(0, 40))}…`, () => {
       const h = [...boundHistory, { role: "user" as const, text: payload }];
-      expect(repoFromThread(h, (slug) => slug === "coreplanelabs/switchboard")).toBe("coreplanelabs/switchboard");
+      expect(repoFromThread(h, (slug) => slug === "acme/api")).toBe("acme/api");
       // The no-override rule holds even without a probe (sync callers may have none).
-      expect(repoFromThread(h)).toBe("coreplanelabs/switchboard");
+      expect(repoFromThread(h)).toBe("acme/api");
     });
 
     it(`repoFromThread in a FRESH thread refuses the not-onboarded slug: ${JSON.stringify(payload.slice(0, 40))}…`, () => {
@@ -708,17 +708,17 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
   it("a fresh thread whose only signal is a rejected bare slug reports it as rejectedRepo, no repo (#316)", async () => {
     const probe = vi.fn(async () => false);
     await expect(
-      resolveRepoContext(msg("agent:coding in coreplanelabs/try-catch: say hi"), [], probe),
+      resolveRepoContext(msg("agent:coding in acme/try-catch: say hi"), [], probe),
     ).resolves.toEqual({
-      rejectedRepo: "coreplanelabs/try-catch",
+      rejectedRepo: "acme/try-catch",
     });
   });
 
   it("a thread weakly bound to a repo the probe rejects reports THAT repo as rejected on a signal-less follow-up (#316)", async () => {
     const probe = vi.fn(async () => false);
-    const h = [{ role: "user" as const, text: "agent:coding in coreplanelabs/try-catch: say hi" }];
+    const h = [{ role: "user" as const, text: "agent:coding in acme/try-catch: say hi" }];
     await expect(resolveRepoContext(msg("now run git status"), h, probe)).resolves.toEqual({
-      rejectedRepo: "coreplanelabs/try-catch",
+      rejectedRepo: "acme/try-catch",
     });
   });
 
@@ -753,7 +753,7 @@ describe("bare prose slugs never hijack a thread (2026-08-29 regressions)", () =
 // binds a fresh thread and rebinds a bound one — because a registry-confirmed
 // repo is unambiguous in a way a prose slug (`features/memory.md`) never is.
 // A bare NAME resolves only through the registry listing and only when exactly
-// one onboarded repo carries it ("in nominal" → coreplanelabs/nominal); an
+// one onboarded repo carries it ("in nominal" → acme/web); an
 // unknown or ambiguous name is prose and binds nothing.
 describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind once the registry vets them", () => {
   const onboarded = ["acme/api", "acme/web", "acme/nominal"];

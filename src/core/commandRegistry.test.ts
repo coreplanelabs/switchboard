@@ -314,7 +314,7 @@ describe("CommandRegistry.invoke — auth before parse", () => {
 
   it("a chat caller holding no grant for the action is refused (fail-closed); the same decision for the same actor on any surface", async () => {
     const { registry, deps } = setup();
-    const nobody = callerWith("chat", "slack:U1", []);
+    const nobody = callerWith("chat", "slack:UALICE", []);
     expect(await registry.invoke("demo.echo", opts({ status: "all" }), nobody, deps)).toMatchObject({
       ok: false,
       error: "unauthorized",
@@ -566,7 +566,7 @@ describe("untrusted wrapping and rendering", () => {
             finishedAt: now - 5_000,
             finished: true,
             channelId: "slack:C1",
-            userId: "slack:U1",
+            userId: "slack:UALICE",
             threadKey: "slack:C1:1",
             label: "coding · acme/x",
             eventCount: 3,
@@ -599,7 +599,7 @@ describe("untrusted wrapping and rendering", () => {
     expect(lines[0]).toMatch(/^abcdefgh\s+coding\s+completed\s+1m 30s$/);
     expect(lines[1]).toMatch(/^zyxwvuts\s+review\s+stopping\s+30s$/);
     expect(lines[2]).toMatch(/^received\s+general\s+completed\s+1m 45s$/);
-    expect(text).not.toMatch(/slack:|acme|threadKey|U1/);
+    expect(text).not.toMatch(/slack:|acme|threadKey|UALICE/);
   });
 
   it("renderCompact appends the store-unavailable banner to runs.list when the service degraded to live rows", () => {
@@ -691,7 +691,7 @@ describe("who decided a failure (phase 4b): registry vs handler; the wider Comma
   registry.register(dataGated);
   registry.register(op);
   /** A plain Slack user: the config write commands admit any person (their own scope is theirs). */
-  const chatOpen: Caller = callerWith("chat", "slack:U1", ["config:read"]);
+  const chatOpen: Caller = callerWith("chat", "slack:UALICE", ["config:read"]);
 
   it("a table refusal or a schema failure is `decidedBy: registry`; a CommandError the handler threw is `decidedBy: handler` with its own message", async () => {
     expect(await registry.invoke("demo.exec", {}, chatOpen, {})).toMatchObject({
@@ -736,7 +736,7 @@ describe("who decided a failure (phase 4b): registry vs handler; the wider Comma
       error: "unauthorized",
     });
     expect((await registry.invoke("demo.exec", {}, mcp("repo:exec"), {})).ok).toBe(true);
-    expect((await registry.invoke("demo.exec", {}, callerWith("chat", "slack:U1", ["agent:run:coding"]), {})).ok).toBe(
+    expect((await registry.invoke("demo.exec", {}, callerWith("chat", "slack:UALICE", ["agent:run:coding"]), {})).ok).toBe(
       true,
     );
     // A browser Access session holds reads, never exec.

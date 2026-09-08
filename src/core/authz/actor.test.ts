@@ -44,7 +44,7 @@ const lookup = (id: string) => grantsFor(id, source);
 
 describe("actorIdFor — platform-namespaced ids (invariant 4)", () => {
   it("one prefix per surface; Access service tokens under access:svc:", () => {
-    expect(actorIdFor("slack", "U1")).toBe("slack:U1");
+    expect(actorIdFor("slack", "UALICE")).toBe("slack:UALICE");
     expect(actorIdFor("http", "alice")).toBe("http:alice");
     expect(actorIdFor("mcp", "alice")).toBe("mcp:alice");
     expect(actorIdFor("access-browser", "sub-1")).toBe("access:sub-1");
@@ -159,7 +159,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
   });
 
   it("origin needs both channel and thread; it is context, never authority", () => {
-    expect(resolveActor({ surface: "slack", subjectId: "U1", channelId: "slack:C1" }, lookup).origin).toBeUndefined();
+    expect(resolveActor({ surface: "slack", subjectId: "UALICE", channelId: "slack:C1" }, lookup).origin).toBeUndefined();
     const a = resolveActor(
       { surface: "slack", subjectId: "UNOBODY", channelId: "slack:CADMIN", threadKey: "slack:CADMIN:1" },
       lookup,

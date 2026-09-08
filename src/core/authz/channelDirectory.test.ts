@@ -35,7 +35,7 @@ describe("StaticChannelDirectory", () => {
   });
 
   it("knows no members: isMember is `unknown` for every actor and channel (not a member, R7)", async () => {
-    expect(await directory.isMember("slack:U1", "slack:C1")).toBe("unknown");
+    expect(await directory.isMember("slack:UALICE", "slack:C1")).toBe("unknown");
     expect(await directory.isMember("http:ops", "http:ops")).toBe("unknown");
   });
 

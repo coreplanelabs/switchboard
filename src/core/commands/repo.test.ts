@@ -191,7 +191,7 @@ describe("repo.list", () => {
           count: 2,
           residents: [
             {
-              resource: "repo:coreplanelabs/nominal",
+              resource: "repo:acme/web",
               defaultRef: "main",
               live: {
                 state: "warm",
@@ -203,14 +203,14 @@ describe("repo.list", () => {
         }),
       }),
     });
-    const reply = (await say(withDisk, "repo list", chat("slack:U1"))).text;
-    expect(reply).toContain("• `coreplanelabs/nominal` — *warm* · ref `main` · disk 4.06 GiB/14.4 GiB (28%)");
+    const reply = (await say(withDisk, "repo list", chat("slack:UALICE"))).text;
+    expect(reply).toContain("• `acme/web` — *warm* · ref `main` · disk 4.06 GiB/14.4 GiB (28%)");
     expect(reply.split("\n")[2]).toBe("• `acme/api` — *warm* · ref `main`"); // a malformed sample adds nothing
   });
 
   it("an empty registry and an active test override keep their wording", async () => {
     const empty = bind({ admin: mockClient({ residents: ok({ cap: 6, count: 0, residents: [] }) }) });
-    expect((await say(empty, "repo list", chat("slack:U1"))).text).toBe(
+    expect((await say(empty, "repo list", chat("slack:UALICE"))).text).toBe(
       "No repos onboarded (0/6). Onboard one with `repo onboard <owner/name>`.",
     );
     const overridden = bind({
@@ -224,7 +224,7 @@ describe("repo.list", () => {
         }),
       }),
     });
-    const reply = (await say(overridden, "repo list", chat("slack:U1"))).text;
+    const reply = (await say(overridden, "repo list", chat("slack:UALICE"))).text;
     expect(reply).toContain("(1/2)");
     expect(reply).toContain(
       "⚠️ test overrides active (set 2026-08-29T23:00:00.000Z): cap 2 (default 6), LRU floor 600s (default 3600s)",
@@ -237,14 +237,14 @@ describe("repo.list", () => {
         unavailable: "Resident repo environments aren't configured — set `execution.resident.baseUrl` in config.yaml.",
       },
     });
-    expect(await unconfigured.invoke("repo.list", {}, chat("slack:U1"))).toMatchObject({
+    expect(await unconfigured.invoke("repo.list", {}, chat("slack:UALICE"))).toMatchObject({
       ok: false,
       error: "unavailable",
       status: 503,
       message: expect.stringContaining("execution.resident"),
     });
     const failing = bind({ admin: mockClient({ residents: ok({ error: "registry unavailable" }, 503) }) });
-    expect(await failing.invoke("repo.list", {}, chat("slack:U1"))).toMatchObject({
+    expect(await failing.invoke("repo.list", {}, chat("slack:UALICE"))).toMatchObject({
       ok: false,
       error: "unavailable",
       message: "repo list failed (HTTP 503): registry unavailable",
@@ -258,7 +258,7 @@ describe("repo.list", () => {
         },
       }),
     });
-    expect(await down.invoke("repo.list", {}, chat("slack:U1"))).toMatchObject({
+    expect(await down.invoke("repo.list", {}, chat("slack:UALICE"))).toMatchObject({
       ok: false,
       error: "unavailable",
       message: expect.stringContaining("/residents request failed"),
@@ -349,11 +349,11 @@ describe("repo onboard", () => {
     const c = mockClient();
     const { text } = await say(
       bind({ admin: c, inspect: inspecting({ entries: ["Taskfile.yaml", "terrateam"] }) }),
-      "repo onboard coreplanelabs/infrastructure",
+      "repo onboard acme/infra",
       admin,
     );
     expect(c.onboard).toHaveBeenCalledWith({
-      resource: "repo:coreplanelabs/infrastructure",
+      resource: "repo:acme/infra",
       commands: { build: "true", test: "true" },
       defaultRef: "main",
     });
@@ -685,10 +685,10 @@ describe("provisioning follow-up (item 52): repo onboard / repo rebuild settle",
     for (const step of ["install", "build", "test"]) {
       const reason = `provision-failed at ${step}: exit 1: npm error code EOVERRIDE`;
       const c = { ...mockClient(), status: statusSequence({ state: "down", reason, inFlight: 0 }) };
-      const out = await settleProvisioning(depsOf({ admin: c, sleep }), "coreplanelabs/nominal");
+      const out = await settleProvisioning(depsOf({ admin: c, sleep }), "acme/web");
       expect(out).toEqual({
         ok: false,
-        text: `❌ \`coreplanelabs/nominal\` failed to provision: ${reason}\nFix the command table with \`repo reconfigure coreplanelabs/nominal --install "…" --build "…" --test "…"\`, then \`repo rebuild coreplanelabs/nominal\`.`,
+        text: `❌ \`acme/web\` failed to provision: ${reason}\nFix the command table with \`repo reconfigure acme/web --install "…" --build "…" --test "…"\`, then \`repo rebuild acme/web\`.`,
       });
     }
   });
@@ -704,10 +704,10 @@ describe("provisioning follow-up (item 52): repo onboard / repo rebuild settle",
         ...mockClient(),
         status: statusSequence({ state: "down", ...(reason ? { reason } : {}), inFlight: 0 }),
       };
-      const out = await settleProvisioning(depsOf({ admin: c, sleep }), "coreplanelabs/infrastructure");
+      const out = await settleProvisioning(depsOf({ admin: c, sleep }), "acme/infra");
       expect(out.ok).toBe(false);
       expect(out.text).toBe(
-        `❌ \`coreplanelabs/infrastructure\` failed to provision: ${reason ?? "no reason recorded"}\nNot a command-table failure — retry with \`repo rebuild coreplanelabs/infrastructure\`; if it recurs, the resident or Cloudflare side is at fault (\`repo list\` shows the live state).`,
+        `❌ \`acme/infra\` failed to provision: ${reason ?? "no reason recorded"}\nNot a command-table failure — retry with \`repo rebuild acme/infra\`; if it recurs, the resident or Cloudflare side is at fault (\`repo list\` shows the live state).`,
       );
       expect(out.text).not.toContain("repo reconfigure");
     }

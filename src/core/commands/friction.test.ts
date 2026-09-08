@@ -67,7 +67,7 @@ async function seededLedger() {
   return ledger;
 }
 
-const CONFIG: SelfImprovementConfig = { repo: "coreplanelabs/switchboard" };
+const CONFIG: SelfImprovementConfig = { repo: "acme/api" };
 
 /** A ready ledger as the async accessor the deps now carry. */
 const ledgerDep = (ledger: FrictionLedger) => async () => ledger;
@@ -189,7 +189,7 @@ describe("friction.report", () => {
         agent: "coding",
         model: "m",
         channelId,
-        userId: "slack:U1",
+        userId: "slack:UALICE",
         threadKey: `${channelId}:${id}`,
         channelVisibility,
         startedAt: NOW - 60_000,
@@ -286,7 +286,7 @@ describe("friction.report", () => {
     );
     expect(proposed.runsAnalyzed).toBe(7);
     expect(proposed.filed).toHaveLength(1);
-    expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
+    expect(tracker.issues("acme/api")).toHaveLength(1);
   });
 });
 
@@ -307,9 +307,9 @@ describe("friction.propose", () => {
       chat("slack:UDEV", { repoManager: true }),
     );
     expect(text(commands, "friction.propose", filed)).toBe(
-      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 filed\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Filed:*\n• https://github.com/coreplanelabs/switchboard/issues/1 — [friction] the repo's setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
+      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 filed\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Filed:*\n• https://github.com/acme/api/issues/1 — [friction] the repo's setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
     );
-    expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
+    expect(tracker.issues("acme/api")).toHaveLength(1);
 
     const again = await commands.invoke(
       "friction.propose",
@@ -317,9 +317,9 @@ describe("friction.propose", () => {
       chat("slack:UADMIN", { repoManager: true }),
     );
     expect(text(commands, "friction.propose", again)).toBe(
-      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 already open\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Already open (not refiled):*\n• https://github.com/coreplanelabs/switchboard/issues/1 — `setup_install:pnpm install --frozen-lockfile`",
+      "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · 1 already open\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Already open (not refiled):*\n• https://github.com/acme/api/issues/1 — `setup_install:pnpm install --frozen-lockfile`",
     );
-    expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
+    expect(tracker.issues("acme/api")).toHaveLength(1);
   });
 
   it('`dryRun` is a real boolean on text surfaces: "false" files, "true" files nothing', async () => {
@@ -332,10 +332,10 @@ describe("friction.propose", () => {
     expect(text(commands, "friction.propose", dry)).toBe(
       "🔍 *Friction proposals* — 2 runs analyzed · 1 recurring pattern · dry run (nothing filed)\n\n1. `setup_install:pnpm install --frozen-lockfile` — 2 runs · 2× · 1m 30s · high\n\n*Would file (dry run):*\n• [friction] the repo's setup/install recurs in 2 of 2 runs: pnpm install --frozen-lockfile",
     );
-    expect(tracker.issues("coreplanelabs/switchboard")).toEqual([]);
+    expect(tracker.issues("acme/api")).toEqual([]);
     const wet = await commands.invoke("friction.propose", { options: { dryRun: "false" } }, mcp("friction:write"));
     expect(wet.ok).toBe(true);
-    expect(tracker.issues("coreplanelabs/switchboard")).toHaveLength(1);
+    expect(tracker.issues("acme/api")).toHaveLength(1);
     expect(
       await commands.invoke("friction.propose", { options: { dryRun: "yes" } }, mcp("friction:write")),
     ).toMatchObject({ ok: false, error: "invalid_input" });
@@ -418,7 +418,7 @@ describe("scopes on machine surfaces (AE12)", () => {
     expect((await commands.invoke("friction.propose", { options: { dryRun: "true" } }, mcp("friction:write"))).ok).toBe(
       true,
     );
-    expect(tracker.issues("coreplanelabs/switchboard")).toEqual([]);
+    expect(tracker.issues("acme/api")).toEqual([]);
   });
 
   it("declares the R13 actions and derives a JSON schema (dryRun accepts a boolean or its string form)", () => {

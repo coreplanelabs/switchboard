@@ -31,7 +31,7 @@ describe("tokenSubjectOf — the actor id a bearer resolves to", () => {
     expect(tokenSubjectOf("access:ops-bot.1")).toBe("ops-bot.1");
     expect(tokenSubjectOf("access:svc:ops")).toBeUndefined();
     expect(tokenSubjectOf("http:ops")).toBeUndefined();
-    expect(tokenSubjectOf("slack:U1")).toBeUndefined();
+    expect(tokenSubjectOf("slack:UALICE")).toBeUndefined();
     expect(tokenSubjectOf("access:")).toBeUndefined();
     expect(tokenSubjectOf("access: ops")).toBeUndefined();
     expect(tokenSubjectOf("ops")).toBeUndefined();

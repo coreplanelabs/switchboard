@@ -18,7 +18,7 @@ import {
 
 const input = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput => ({
   text,
-  userId: "slack:U1",
+  userId: "slack:UALICE",
   at: 1_000,
   ...over,
 });
@@ -207,12 +207,12 @@ describe("mergeFollowUps — unconsumed inputs become ONE fresh request", () => 
     const img = { mediaType: "image/png", data: "AAA" };
     const doc = { mediaType: "application/pdf", data: "BBB", name: "spec.pdf" };
     const merged = mergeFollowUps([
-      input("first", { userId: "slack:U1", userName: "ann", sourceUrl: "https://s/1", images: [img] }),
-      input("second", { userId: "slack:U2", userName: "bob", sourceUrl: "https://s/2", documents: [doc] }),
+      input("first", { userId: "slack:UALICE", userName: "ann", sourceUrl: "https://s/1", images: [img] }),
+      input("second", { userId: "slack:UBOB", userName: "bob", sourceUrl: "https://s/2", documents: [doc] }),
     ]);
     expect(merged).toEqual({
       text: "first\n\nsecond",
-      userId: "slack:U2",
+      userId: "slack:UBOB",
       userName: "bob",
       sourceUrl: "https://s/2",
       images: [img],
@@ -222,6 +222,6 @@ describe("mergeFollowUps — unconsumed inputs become ONE fresh request", () => 
 
   it("no attachments and no names → those keys are absent, not undefined", () => {
     const merged = mergeFollowUps([input("only")]);
-    expect(merged).toEqual({ text: "only", userId: "slack:U1" });
+    expect(merged).toEqual({ text: "only", userId: "slack:UALICE" });
   });
 });

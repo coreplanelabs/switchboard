@@ -31,7 +31,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     agent: "review",
     model: "anthropic/m",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1",
     channelVisibility: "unknown",
     startedAt: finishedAt - 5000,
@@ -149,16 +149,16 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
     it("list applies `visibleTo` — the actor's predicate — as its own filter, ANDed with the others; a row without the stamp is `unknown` and never public", async () => {
       const { store } = make();
       await store.put(
-        record("pub", NOW - 1000, { channelId: "slack:C_PUB", userId: "slack:U1", channelVisibility: "public" }),
+        record("pub", NOW - 1000, { channelId: "slack:C_PUB", userId: "slack:UALICE", channelVisibility: "public" }),
       );
       await store.put(
-        record("priv", NOW - 2000, { channelId: "slack:G1", userId: "slack:U2", channelVisibility: "private" }),
+        record("priv", NOW - 2000, { channelId: "slack:G1", userId: "slack:UBOB", channelVisibility: "private" }),
       );
       await store.put(
         record("ops", NOW - 3000, { channelId: "http:ops", userId: "http:ci", channelVisibility: "machine" }),
       );
       await store.put(
-        record("old-style", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:U3", channelVisibility: "unknown" }),
+        record("old-style", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:UCAROL", channelVisibility: "unknown" }),
       );
       const ids = async (visibleTo: RunListOptions["visibleTo"], more: Partial<RunListOptions> = {}) =>
         (await store.list({ visibleTo, ...more })).map((r) => r.id);
@@ -179,7 +179,7 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
           kind: "or",
           of: [
             { kind: "visibility-in", visibilities: ["public"] },
-            { kind: "user-is", userId: "slack:U2" },
+            { kind: "user-is", userId: "slack:UBOB" },
           ],
         }),
       ).toEqual(["pub", "priv"]);

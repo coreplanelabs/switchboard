@@ -42,7 +42,7 @@ const PROVENANCE = { sourceThreadKey: "slack:CX:1.0", sourceRunId: "run-1" };
  *  user speaking from a PUBLIC channel — the origin under which org writes are
  *  allowed (authorization.md item 8, R11), so the routing tests keep today's
  *  expectations. The write-gate suite varies the origin. */
-const PRINCIPAL = actor("user", "slack:U1");
+const PRINCIPAL = actor("user", "slack:UALICE");
 const PUBLIC_ORIGIN = { actor: PRINCIPAL, originChannelVisibility: "public" as ChannelVisibility };
 
 function existing(over: Partial<MemoryRecord> = {}): MemoryRecord {
@@ -403,7 +403,7 @@ describe("reflect (one extractor call → store.write)", () => {
 // run's repo/channel scope when present, else fall back to org; the summary
 // follows user > repo > channel > org.
 describe("reflect — repo / channel routing (#253)", () => {
-  const USER = "user:slack:U1";
+  const USER = "user:slack:UALICE";
   const REPO = "repo:acme/api";
   const CHAN = "channel:slack:C1";
   const base = {
@@ -519,7 +519,7 @@ describe("parseReflection — repo / channel audiences (#253)", () => {
 });
 
 describe("reflect — user scope routing (#107 PR B)", () => {
-  const USER = "user:slack:U1";
+  const USER = "user:slack:UALICE";
   const base = {
     scopeKeys: { org: SCOPE, user: USER },
     model: "cheap-model",
@@ -554,7 +554,7 @@ describe("reflect — user scope routing (#107 PR B)", () => {
         "this user wants a deploy preview link before prod",
       ].sort(),
     );
-    expect(user.every((r) => r.id.startsWith("mem:user:slack:U1:"))).toBe(true);
+    expect(user.every((r) => r.id.startsWith("mem:user:slack:UALICE:"))).toBe(true);
     expect(user.every((r) => r.sourceThreadKey === PROVENANCE.sourceThreadKey)).toBe(true);
   });
 
@@ -587,7 +587,7 @@ describe("reflect — user scope routing (#107 PR B)", () => {
 
   it("shows the extractor the user's existing records too, and a supersede lands in the superseded record's scope", async () => {
     const stale = existing({
-      id: "mem:user:slack:U1:0",
+      id: "mem:user:slack:UALICE:0",
       scopeKey: USER,
       text: "this user wants deploys announced in #ops",
     });
@@ -598,7 +598,7 @@ describe("reflect — user scope routing (#107 PR B)", () => {
             text: "this user wants deploys announced in #releases",
             confidence: 0.9,
             audience: "org", // mislabeled on purpose — the supersede target decides the scope
-            supersedes: "mem:user:slack:U1:0",
+            supersedes: "mem:user:slack:UALICE:0",
           },
         ],
         summary: "",
@@ -607,10 +607,10 @@ describe("reflect — user scope routing (#107 PR B)", () => {
     const store = new InMemoryMemoryStore([stale]);
     await reflect({ ...base, request: "announce deploys in #releases from now on", provider, store });
     const shown = (provider.requests[0].messages[0].content[0] as { text: string }).text;
-    expect(shown).toContain("mem:user:slack:U1:0");
+    expect(shown).toContain("mem:user:slack:UALICE:0");
     const user = await store.retrieve({ scopeKey: USER, query: "user deploys announced", limit: 10 });
     expect(user.map((r) => r.text)).toEqual(["this user wants deploys announced in #releases"]);
-    expect(user[0].supersedes).toBe("mem:user:slack:U1:0");
+    expect(user[0].supersedes).toBe("mem:user:slack:UALICE:0");
     expect(await store.retrieve({ scopeKey: SCOPE, query: "user deploys announced", limit: 10 })).toEqual([]);
   });
 
@@ -618,7 +618,7 @@ describe("reflect — user scope routing (#107 PR B)", () => {
     const provider = fakeProvider(reply);
     const store = new InMemoryMemoryStore();
     await reflect({ ...base, provider, store });
-    expect(await store.retrieve({ scopeKey: "user:slack:U2", query: "deploy preview", limit: 10 })).toEqual([]);
+    expect(await store.retrieve({ scopeKey: "user:slack:UBOB", query: "deploy preview", limit: 10 })).toEqual([]);
   });
 });
 
@@ -629,7 +629,7 @@ describe("reflect — user scope routing (#107 PR B)", () => {
 // never reaches `org`: it is NARROWED (dm → the user's own scope, else the
 // channel's, then the user's), never widened, never silently dropped.
 describe("reflect — write gate (authorization R11, deliberate change c)", () => {
-  const USER = "user:slack:U1";
+  const USER = "user:slack:UALICE";
   const CHAN = "channel:slack:C1";
   const REPO = "repo:acme/api";
   const orgFact = { text: "the org standup is at 10am", confidence: 0.9, audience: "org" };
@@ -781,7 +781,7 @@ describe("reflect — write gate (authorization R11, deliberate change c)", () =
   it("reflectionActor: the run's principal holding the run's own channel and repo as memberships — no action added, `all` left alone, nothing else changed", () => {
     const plain = actor(
       "user",
-      "slack:U1",
+      "slack:UALICE",
       { actions: new Set(["memory:write"]), channels: new Set(["slack:C9"]) },
       { origin: { channelId: "slack:C1", threadKey: "slack:C1:1" } },
     );
@@ -789,7 +789,7 @@ describe("reflect — write gate (authorization R11, deliberate change c)", () =
     expect(scoped.grants.actions).toEqual(new Set(["memory:write"]));
     expect(scoped.grants.channels).toEqual(new Set(["slack:C9", "slack:C1"]));
     expect(scoped.grants.repos).toEqual(new Set(["acme/api"]));
-    expect(scoped.id).toBe("slack:U1");
+    expect(scoped.id).toBe("slack:UALICE");
     expect(scoped.kind).toBe("user");
     expect(scoped.origin).toEqual(plain.origin);
     expect(plain.grants.channels).toEqual(new Set(["slack:C9"])); // the principal is not mutated

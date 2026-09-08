@@ -38,7 +38,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UALICE",
     threadKey: `slack:C1:${id}`,
     channelVisibility: "unknown",
     startedAt: finishedAt - 10_000,
@@ -62,10 +62,10 @@ async function setup() {
   await store.put(record("fin-x", NOW - 1000, { channelId: "mcp:X", channelVisibility: "machine" }));
   await store.put(record("fin-y", NOW - 2000, { channelId: "mcp:Y", channelVisibility: "machine" }));
   await store.put(
-    record("fin-priv", NOW - 3000, { channelId: "slack:G_PRIV", userId: "slack:U9", channelVisibility: "private" }),
+    record("fin-priv", NOW - 3000, { channelId: "slack:G_PRIV", userId: "slack:UIVY", channelVisibility: "private" }),
   );
   await store.put(
-    record("fin-pub", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:U9", channelVisibility: "public" }),
+    record("fin-pub", NOW - 4000, { channelId: "slack:C_PUB", userId: "slack:UIVY", channelVisibility: "public" }),
   );
   const runs = createRunsService({ registry: reg, store });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
@@ -193,7 +193,7 @@ describe("runs.list", () => {
     const { id } = reg.create("coding · acme/live", {
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:t",
     });
     reg.publish(id, { type: "input", text: "live secret request" });
@@ -212,7 +212,7 @@ describe("runs.list", () => {
     const { id } = reg.create("coding · acme/live", {
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:t",
     });
     const bare = await registry.invoke("runs.list", {}, reader, deps);
@@ -407,7 +407,7 @@ describe("channel visibility (authorization.md items 5–7)", () => {
     const owner: Caller = {
       kind: "access",
       id: "access:u9",
-      actor: actor("user", "slack:U9", set("runs:read"), set()),
+      actor: actor("user", "slack:UIVY", set("runs:read"), set()),
     };
     expect(await registry.invoke("runs.get", { args: ["fin-priv"], options: {} }, owner, deps)).toMatchObject({
       ok: true,
@@ -428,7 +428,7 @@ describe("channel visibility (authorization.md items 5–7)", () => {
 
   it("a live run without a stamp is `unknown` — never public: only a channel grant, all-channels, or its own user reads it", async () => {
     const { reg, registry, deps } = await setup();
-    const { id } = reg.create("x", { channelId: "slack:C_PUB", userId: "slack:U1", threadKey: "slack:C_PUB:t" });
+    const { id } = reg.create("x", { channelId: "slack:C_PUB", userId: "slack:UALICE", threadKey: "slack:C_PUB:t" });
     expect(await registry.invoke("runs.get", { args: [id], options: {} }, accessOperator, deps)).toMatchObject({
       ok: false,
       error: "not_found",
@@ -579,7 +579,7 @@ describe("runs.stop", () => {
     const { id, token } = reg.create("coding · acme/live", {
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UALICE",
       threadKey: "slack:C1:t",
     });
     const res = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);
