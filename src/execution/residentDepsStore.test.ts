@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  CHECKOUT_SNAPSHOT_EXCLUDES,
+  DEPS_BACKUP_KEY_PREFIX,
+  DEPS_BACKUP_TTL_S,
   DEPS_STORE_DIR,
+  depsBackupStorageKey,
+  depsBackupsToDrop,
   depsEntryPath,
   depsCompletePath,
   depsInstallSemaphoreSize,
@@ -53,6 +58,13 @@ describe("planDepsMaterialization (hit / join / install)", () => {
 
   it("a complete entry wins over a stale in-flight memo (a DO reset can leave one)", () => {
     expect(planDepsMaterialization({ complete: true, inFlight: true })).toEqual({ action: "hit" });
+  });
+
+  it("a recorded entry backup is restored before anything is installed; a hit or a running install still wins", () => {
+    expect(planDepsMaterialization({ complete: false, inFlight: false, backup: true })).toEqual({ action: "restore" });
+    expect(planDepsMaterialization({ complete: true, inFlight: false, backup: true })).toEqual({ action: "hit" });
+    expect(planDepsMaterialization({ complete: false, inFlight: true, backup: true })).toEqual({ action: "join" });
+    expect(planDepsMaterialization({ complete: false, inFlight: false, backup: false })).toEqual({ action: "install" });
   });
 });
 
@@ -324,5 +336,27 @@ describe("deps-harden: the install's node_modules is made owner-read-only, and a
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("entry backups: content-addressed snapshots of the store (item 61, #614 PR B)", () => {
+  it("the checkout snapshot excludes the top-level node_modules — the store entry carries it", () => {
+    expect(CHECKOUT_SNAPSHOT_EXCLUDES).toEqual(["node_modules"]);
+  });
+
+  it("a backup record is keyed under its own storage prefix by lockfile key; a non-key is refused", () => {
+    expect(DEPS_BACKUP_KEY_PREFIX).toBe("resident:depsBackup:");
+    expect(depsBackupStorageKey(KEY_A)).toBe(`resident:depsBackup:${KEY_A}`);
+    expect(() => depsBackupStorageKey("../snapshot")).toThrow(/not a lockfile key/);
+  });
+
+  it("entry backups outlive snapshots by design: at least 180 days, so a warm key's backup is there for the wake", () => {
+    expect(DEPS_BACKUP_TTL_S).toBeGreaterThanOrEqual(180 * 24 * 60 * 60);
+  });
+
+  it("the backups to drop after a sweep are exactly the evicted keys that have one — never a key still in the store", () => {
+    expect(depsBackupsToDrop({ evictedKeys: [KEY_A, KEY_B], backedUpKeys: [KEY_B, KEY_C] })).toEqual([KEY_B]);
+    expect(depsBackupsToDrop({ evictedKeys: [], backedUpKeys: [KEY_A] })).toEqual([]);
+    expect(depsBackupsToDrop({ evictedKeys: [KEY_A], backedUpKeys: [] })).toEqual([]);
   });
 });

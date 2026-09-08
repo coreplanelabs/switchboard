@@ -9,6 +9,8 @@ import {
   RESTORE_MAX_MS,
   RESTORE_POLL_MS,
   RESTORE_STALL_MS,
+  planWakeDepsBudget,
+  WAKE_DEPS_MIN_MS,
   SDK_BACKUP_ARCHIVE_DIR,
   RUNTIME_REPLACEMENT_WORDING,
   checkoutUpdateCommand,
@@ -565,5 +567,43 @@ describe("restoreArchivePath (#572 follow-up: a restore's bytes land in the SDK'
     expect(m?.[1]).toBe(SDK_BACKUP_ARCHIVE_DIR);
     expect(source).toContain('const BACKUP_ARCHIVE_OBJECT_NAME = "data.sqsh"');
     expect(source).toMatch(/const archivePath = `\$\{BACKUP_CONTAINER_DIR\}\/\$\{id\}\.sqsh`/);
+  });
+});
+
+describe("planWakeDepsBudget (item 61 PR B: the wake's deps materialization lives inside the ONE hydrate deadline)", () => {
+  const t0 = 1_000_000;
+  const install = 10 * 60_000;
+
+  it("plenty of deadline left → the install keeps its own budget and the restore is judged against the hydrate deadline", () => {
+    const deadline = t0 + RESTORE_MAX_MS;
+    expect(planWakeDepsBudget({ nowMs: t0, deadlineMs: deadline, installBudgetMs: install })).toEqual({
+      action: "materialize",
+      installBudgetMs: install,
+      restoreDeadlineMs: deadline,
+      remainingMs: RESTORE_MAX_MS,
+    });
+  });
+
+  it("less deadline left than the install budget → the install is bounded by what remains, never past the deadline", () => {
+    const deadline = t0 + 3 * 60_000;
+    const b = planWakeDepsBudget({ nowMs: t0, deadlineMs: deadline, installBudgetMs: install });
+    expect(b).toEqual({
+      action: "materialize",
+      installBudgetMs: 3 * 60_000,
+      restoreDeadlineMs: deadline,
+      remainingMs: 3 * 60_000,
+    });
+  });
+
+  it("under WAKE_DEPS_MIN_MS left → skip (the deps checkpoint stays unwritten; the next refresh installs) — also when the deadline has passed", () => {
+    expect(planWakeDepsBudget({ nowMs: t0, deadlineMs: t0 + WAKE_DEPS_MIN_MS - 1, installBudgetMs: install })).toEqual({
+      action: "skip",
+      remainingMs: WAKE_DEPS_MIN_MS - 1,
+    });
+    expect(planWakeDepsBudget({ nowMs: t0, deadlineMs: t0 - 5_000, installBudgetMs: install })).toEqual({
+      action: "skip",
+      remainingMs: 0,
+    });
+    expect(WAKE_DEPS_MIN_MS).toBeGreaterThanOrEqual(60_000);
   });
 });
