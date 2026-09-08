@@ -30,6 +30,7 @@ export const DISPLAY_NAMES = {
   "run.reading_diff": "reading the diff (in parallel)",
   "run.reading_diff.upgrade": "upgrading the diff (in parallel)",
   "run.settle_reviewed_head": "re-checking the moved branch",
+  "run.description_turn": "asking for the PR description",
   "run.observe_workspace": "checking the workspace",
   "run.pr_post_step": "posting the PR",
   "run.reading_diff_join": "waiting for the diff",

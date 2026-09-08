@@ -65,6 +65,7 @@ import {
   type RoundWorkspace,
 } from "./reviewRound.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "./codingPrPostStep.js";
+import { descriptionTurnTarget, runDescriptionTurn } from "./descriptionTurn.js";
 import { recognizeOperation } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
@@ -2069,7 +2070,7 @@ export async function dispatch(
       // undefined and the post-step reports honestly instead of guessing. A
       // hard stop tore the work down mid-flight — nothing observed, nothing
       // posted.
-      if (isCodingPrRun && run.control.requested !== "hard") {
+      const observeWorkspaceNow = async () => {
         const pushedBranch = pushes.branch();
         const observed = await root.span("run.observe_workspace", (span) =>
           observeCodingWorkspace(
@@ -2086,6 +2087,71 @@ export async function dispatch(
         observedCheckedOut = observed.checkedOut;
         observedRemoteHead = observed.remoteHead;
         observedRemoteRepo = observed.remoteRepo;
+      };
+      // Where the post-step's PR would open (CodingPrTarget): the PR's true
+      // base ref when the thread's context came from a PR, else the resident
+      // binding ref, else the dispatch's resolved ref. Shared by the
+      // description turn's decision and the post-step below.
+      const prTarget = {
+        repo: repoCtx.repo,
+        baseRef: repoCtx.baseRef,
+        bindingRef: binding?.ref,
+        resolvedRef: repoCtx.ref,
+      };
+      if (isCodingPrRun && run.control.requested !== "hard") await observeWorkspaceNow();
+      // The description turn (docs/reference/specs/pr-description.md item 5,
+      // descriptionTurn.ts): the coding prompt requires a resubmitted
+      // description after EVERY push to a PR that already exists (agent-coding.md
+      // item 3), and a prompt rule alone can be rationalized away. So a run
+      // whose loop ended with a proven push onto a branch that already heads
+      // an open PR and NO submit_pr_description call gets ONE bounded extra
+      // model turn asking for it — here, after the model is done and BEFORE
+      // the answer lands or the workspace is released. The description arrives
+      // through the same onPrDescription hook the first turn fed (so
+      // `prDescription` and the ledger row see it); the workspace is observed
+      // again afterwards in case the turn pushed. A hard stop asks nothing.
+      let descriptionTurnRan = false;
+      if (isCodingPrRun && run.control.requested !== "hard" && prDescription === undefined) {
+        const turnTarget = await descriptionTurnTarget({
+          observed: {
+            head: observedHead,
+            branch: observedBranch,
+            checkedOut: observedCheckedOut,
+            remoteHead: observedRemoteHead,
+            remoteRepo: observedRemoteRepo,
+          },
+          description: prDescription,
+          target: prTarget,
+          findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
+          logKey: msg.threadKey,
+        });
+        if (turnTarget) {
+          descriptionTurnRan = true;
+          await root.span("run.description_turn", (span) =>
+            runDescriptionTurn({
+              span,
+              target: turnTarget,
+              answer,
+              messages,
+              system,
+              turn: {
+                provider,
+                model,
+                agent,
+                effort: resolved.effort,
+                toolContext,
+                extraTools: mcpForRun?.tools,
+                onProgress,
+                onEvent,
+                control: run.control,
+                ...(round.selection.backend ? { backend: round.selection.backend } : {}),
+              },
+              logKey: msg.threadKey,
+            }),
+          );
+          // Re-read, not narrowed: a hard stop may have landed during the turn.
+          if (!run.control.hardSignal.aborted) await observeWorkspaceNow();
+        }
       }
       // The accepted PrDescription is a fact of the run: publish it as a typed
       // event BEFORE the finally below finish()es the stream, string fields
@@ -2123,15 +2189,11 @@ export async function dispatch(
               remoteRepo: observedRemoteRepo,
             },
             description: prDescription,
-            target: {
-              repo: repoCtx.repo,
-              baseRef: repoCtx.baseRef,
-              bindingRef: binding?.ref,
-              resolvedRef: repoCtx.ref,
-            },
+            target: prTarget,
             openPullRequest: deps.openPullRequest ?? openPullRequest,
             findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
             fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
+            descriptionTurnRan,
             publish: (e) => registry.publish(run.id, e),
             logKey: msg.threadKey,
           }),
