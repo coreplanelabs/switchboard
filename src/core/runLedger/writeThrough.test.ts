@@ -6,7 +6,12 @@ import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../
 import { InMemoryRunLedger } from "./inMemory.js";
 import type { RunLedger } from "./ledger.js";
 import { GEN_PATTERN, TRANSCRIPT_PART_BYTES } from "./types.js";
-import { createLedgerWriteThrough, mintGeneration, type OpenRunRequest } from "./writeThrough.js";
+import {
+  createLedgerWriteThrough,
+  mintGeneration,
+  NullLedgerWriteThrough,
+  type OpenRunRequest,
+} from "./writeThrough.js";
 
 // The write-through (features/run-history.md item 35): what a dispatched run
 // leaves in the ledger while it runs, and the Phase 2 rule that a refused or
@@ -646,5 +651,41 @@ describe("finishing and finish", () => {
     await b.sink.put(record("r2")); // the writer's retry: idempotent
     expect(inner.finished.has("r2")).toBe(true);
     expect(fallbackPuts.map((r) => r.id)).toEqual(["r1"]);
+  });
+});
+
+// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// without a ledger is wired with: the dispatcher claims, steers and hands off
+// unconditionally and every answer is the one an untracked run gets.
+describe("NullLedgerWriteThrough — the write-through of a process without a ledger", () => {
+  it("open claims nothing (undefined — the untracked answer), nothing is live, the inbox holds nothing, the handoff marks nothing, and the generation is the process's", async () => {
+    const puts: RunRecord[] = [];
+    const ledger = new NullLedgerWriteThrough("20260101T000000Z-abcd", {
+      put: async (r: RunRecord) => void puts.push(r),
+    });
+    expect(ledger.gen).toBe("20260101T000000Z-abcd");
+    expect(await ledger.open({} as OpenRunRequest)).toBeUndefined();
+    expect(ledger.liveRuns()).toEqual([]);
+    expect(await ledger.pushInbox("r1", { text: "hi" })).toBeUndefined();
+    expect(await ledger.readInbox("r1", 0)).toEqual([]);
+    expect(await ledger.handoff()).toEqual({ marked: [] });
+    expect(puts).toEqual([]);
+  });
+
+  it("adopt answers a detached run: untracked, not resumable, every mirror a no-op, finishing `unavailable`, its finish sink the plain store so a record cannot vanish", async () => {
+    const puts: RunRecord[] = [];
+    const ledger = new NullLedgerWriteThrough("gen", { put: async (r: RunRecord) => void puts.push(r) });
+    const run = ledger.adopt({ runId: "r9", threadKey: "slack:C1:1", state: {}, lastStep: 3, lastSeq: 7 });
+    expect(run.runId).toBe("r9");
+    expect(run.tracked()).toBe(false);
+    expect(run.resumable).toBe(false);
+    expect(run.handedOff).toBe(false);
+    await run.step({} as StepReport);
+    run.event({ type: "answer", text: "x" }, 8);
+    run.setState({ phase: "x" } as never);
+    expect(await run.finishing()).toBe("unavailable");
+    await run.sink.put(record("r9"));
+    expect(puts.map((r) => r.id)).toEqual(["r9"]);
+    await expect(run.close()).resolves.toBeUndefined();
   });
 });

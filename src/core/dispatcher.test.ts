@@ -50,14 +50,15 @@ import { matchesPredicate, NO_GRANTS, predicateFor, type Actor, type ChannelDire
 import { SlackChannelDirectory } from "../channels/slackChannelDirectory.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
 import { StaticMcpToolSource, InMemoryMcpClient } from "../mcp/index.js";
+import { NullMcpToolSource } from "../mcp/source.js";
 import { InMemoryFrictionLedger, RunStoreFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
-import { InMemoryRunStore, type RunStore } from "./runStore.js";
+import { InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
 import { isRunRecord, type RunRecord } from "./runRecord.js";
-import { createRunHistoryWriter } from "./runHistoryWriter.js";
+import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
-import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
+import { createLedgerWriteThrough, NullLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import type { StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
@@ -137,10 +138,17 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   writeFileSync(cfgPath, fixtureYaml.replaceAll("__WORKDIR__", join(dir, "workspaces")));
   const config = new ConfigStore(cfgPath, join(dir, "overrides.json"));
   const providers = { get: () => provider } as unknown as ProviderRegistry;
+  // The Null Objects a process without the subsystem is wired with (routing-and-
+  // config item 13): a test that needs the real thing sets it after `makeDeps`.
   const deps: TestDeps = {
     config,
     providers,
     capabilities: capabilitiesFrom(config.config, process.env),
+    memory: new NullMemoryStore(),
+    mcp: new NullMcpToolSource(),
+    runHistoryWriter: new NullRunHistoryWriter(),
+    runLedger: new NullLedgerWriteThrough("test-gen", new NullRunStore()),
+    threadsElsewhere: new ThreadsElsewhere(),
     dataDir: dir,
     invoked: [],
   };
@@ -3478,6 +3486,7 @@ describe("live run-view wiring (Area 2)", () => {
         "dispatch.memory_read",
         "dispatch.ack_card",
         "dispatch.workspace.attach",
+        "dispatch.mcp_discovery",
         "dispatch.compose",
         "dispatch.channel_visibility",
       ]),
@@ -3614,6 +3623,7 @@ describe("live run-view wiring (Area 2)", () => {
         "dispatch.memory_read",
         "dispatch.ack_card",
         "dispatch.workspace.attach",
+        "dispatch.mcp_discovery",
         "dispatch.compose",
         "dispatch.channel_visibility",
       ]),
@@ -7358,7 +7368,7 @@ workspaceDir: __WORKDIR__
     });
     const { deps } = shipDeps(provider);
     deps.mcp = new StaticMcpToolSource([], { factory: () => new InMemoryMcpClient([]) });
-    deps.mcpRegistryOn = true;
+    deps.capabilities = { ...deps.capabilities, mcp: true };
     queueWorkspaces(
       shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
       shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),

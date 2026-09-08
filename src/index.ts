@@ -15,11 +15,12 @@ import { createCostsViewHandler } from "./channels/costsView.js";
 import {
   AnthropicCostReportSource,
   CloudflareGraphqlUsageSource,
+  NullCostsService,
   NullLlmCostSource,
   createCostsService,
   parseCostsConfig,
 } from "./core/costs.js";
-import { makeResidentAdminClient } from "./core/residentAdmin.js";
+import { NullResidentAdminClient, residentAdminFromConfig } from "./core/residentAdmin.js";
 import {
   httpJwksFetcher,
   JwksCache,
@@ -31,17 +32,18 @@ import {
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
+import { NullMcpToolSource } from "./mcp/source.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
 import { resolveUserEmail } from "./channels/slack.js";
-import { buildMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
+import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
 import { startProcessMetrics } from "./channels/processMetrics.js";
 import { selectFrictionLedger } from "./core/frictionLedger.js";
-import { buildRunStore, FileRunStore, retentionPolicyOf } from "./core/runStore.js";
+import { buildRunStore, FileRunStore, NullRunStore, retentionPolicyOf } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
-import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
+import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
-import { createLedgerWriteThrough, mintGeneration } from "./core/runLedger/writeThrough.js";
+import { createLedgerWriteThrough, mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
 import { reclaimRuns, startReclaimSweep, closeReclaimed, type ReclaimOutcome } from "./core/boot.js";
 import { launchResumes } from "./core/resumeLaunch.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
@@ -70,7 +72,7 @@ import {
   writeAbandonedRunRecords,
   type CoreDeps,
 } from "./core/dispatcher.js";
-import { buildScheduleStore } from "./core/scheduleStore.js";
+import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters (#157 U7) ---
 import { buildCoreCommands } from "./core/commandCatalogue.js";
@@ -153,21 +155,25 @@ async function main() {
     resolveEmail: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
     warn: (m) => console.warn(`[mcp] ${m}`),
   });
-  const mcp = mcpWiring.source;
+  // Every optional subsystem below is wired as a real implementation or its
+  // Null Object (features/routing-and-config.md item 13): the core never asks
+  // whether a store, a ledger or a source exists — it calls it.
+  const mcp = mcpWiring.source ?? new NullMcpToolSource();
   console.log(
-    `[mcp] ${mcpWiring.service ? `on (secrets: ${mcpWiring.service.secrets.describe()})` : `off — ${mcpWiring.unavailable}`}`,
+    `[mcp] ${capabilities.mcp ? `on (secrets: ${mcpWiring.service!.secrets.describe()})` : `off — ${mcpWiring.unavailable}`}`,
   );
   // Cross-session memory (#85): ONE store instance shared by every channel so
   // what the reflection pass writes after a run is what the next run reads.
   // Durable WorkerMemoryStore when memory.worker (+ its bearer) is configured;
   // otherwise an in-process store with a loud warning (a restart loses it).
-  // Disabled (default) → undefined → the dispatcher uses a NullMemoryStore.
-  const memory = buildMemoryStore(config.config.memory, process.env, (m) => console.warn(`[memory] ${m}`));
+  // Disabled (default) → the NullMemoryStore: nothing read, nothing written.
+  const memory =
+    buildMemoryStore(config.config.memory, process.env, (m) => console.warn(`[memory] ${m}`)) ?? new NullMemoryStore();
   // Run history (#157): the durable store every finished run's record lands in.
-  // `null` when `runHistory` is unconfigured (or misconfigured — buildRunStore
-  // warned) → history off, live-only as before. The friction ledger (Area 7b,
-  // #84 — what `friction propose` clusters across) is READ from it: the record
-  // carries the diagnosis, so nothing is written twice.
+  // With `runHistory` unconfigured (or misconfigured — buildRunStore warned) it
+  // is the NullRunStore → history off, live-only as before. The friction ledger
+  // (Area 7b, #84 — what `friction propose` clusters across) is READ from it:
+  // the record carries the diagnosis, so nothing is written twice.
   const runHistoryCfg = config.config.runHistory;
   // The hosts our own Workers answer on (features/tracing.md item 21): the one
   // set a `traceparent` may leave for. Computed once from the configured URLs,
@@ -184,19 +190,20 @@ async function main() {
   console.log(
     `[trace] internal hosts (trace context travels to these only): ${hosts.hosts.length > 0 ? hosts.hosts.join(", ") : "none"}`,
   );
-  const runStore = buildRunStore(runHistoryCfg, process.env, {
-    dataDir: "./data",
-    warn: (m) => console.warn(`[run-history] ${m}`),
-  });
-  const runHistoryWriter = runStore
+  const runStore =
+    buildRunStore(runHistoryCfg, process.env, {
+      dataDir: "./data",
+      warn: (m) => console.warn(`[run-history] ${m}`),
+    }) ?? new NullRunStore();
+  const runHistoryWriter = capabilities.runHistory
     ? createRunHistoryWriter({
         store: runStore,
         warn: (m) => console.warn(m),
         onPersisted: (id) => defaultRunRegistry.markPersisted(id),
       })
-    : undefined;
+    : new NullRunHistoryWriter();
   console.log(
-    runStore
+    capabilities.runHistory
       ? `[run-history] store: ${runStore instanceof FileRunStore ? "host-disk file (data/runs)" : `durable Worker (${runHistoryCfg?.worker?.baseUrl})`}`
       : "[run-history] off (no runHistory config) — runs are live-only",
   );
@@ -204,27 +211,27 @@ async function main() {
   // process's generation — its fencing token on every ledger write — is minted
   // once here, and every run is mirrored onto the state Worker's ledger (claim,
   // seed, steps, events, state, finishing, finish) so the next generation can
-  // pick it up. Worker-backed history only: a file store has no ledger.
+  // pick it up. Worker-backed history only: a file store has no ledger, and a
+  // process without one carries the null write-through (nothing claimed).
   const generation = mintGeneration();
-  const ledgerClient = buildRunLedger(runHistoryCfg, process.env);
-  const runLedger =
-    ledgerClient && runStore
-      ? createLedgerWriteThrough({
-          ledger: ledgerClient,
-          gen: generation,
-          fallback: runStore,
-          warn: (m) => console.warn(m),
-        })
-      : undefined;
+  const ledgerClient = capabilities.runLedger ? buildRunLedger(runHistoryCfg, process.env) : null;
+  const runLedger = ledgerClient
+    ? createLedgerWriteThrough({
+        ledger: ledgerClient,
+        gen: generation,
+        fallback: runStore,
+        warn: (m) => console.warn(m),
+      })
+    : new NullLedgerWriteThrough(generation, runStore);
   console.log(
-    runLedger
+    capabilities.runLedger
       ? `[ledger] generation ${generation}: runs are mirrored onto the ledger (${runHistoryCfg?.worker?.baseUrl})`
-      : `[ledger] generation ${generation}: write-through off (${runStore ? "host-disk history has no ledger" : "history off"})`,
+      : `[ledger] generation ${generation}: write-through off (${capabilities.runHistory ? "host-disk history has no ledger" : "history off"})`,
   );
   const selfImprovement = config.config.selfImprovement;
   const frictionLedger = selectFrictionLedger(runStore);
   console.log(
-    `[friction] ledger: ${frictionLedger ? "run history" : "none (no runHistory config — `friction report` has no runs to analyze)"}; ` +
+    `[friction] ledger: ${capabilities.runHistory ? "run history" : "none (no runHistory config — `friction report` has no runs to analyze)"}; ` +
       (selfImprovement?.repo
         ? `\`friction propose\` files to ${selfImprovement.repo}`
         : "`friction propose` disabled until selfImprovement.repo is set"),
@@ -233,7 +240,7 @@ async function main() {
   // must carry the `v3` run-history routes before this bot version writes to
   // them. A Worker whose /healthz lacks `runs` would 404 every put (the writer
   // then logs once and degrades) — say so at boot instead of at the first run.
-  if (runStore && !(runStore instanceof FileRunStore) && runHistoryCfg?.worker?.baseUrl) {
+  if (capabilities.runLedger && runHistoryCfg?.worker?.baseUrl) {
     const base = runHistoryCfg.worker.baseUrl.replace(/\/+$/, "");
     fetch(`${base}/healthz`, { signal: AbortSignal.timeout(5000) })
       .then(async (res) => {
@@ -262,11 +269,10 @@ async function main() {
     capabilities,
     skills,
     mcp,
-    mcpRegistryOn: mcpWiring.service !== undefined,
     memory,
     runHistoryWriter,
     threadsElsewhere,
-    ...(runLedger ? { runLedger } : {}),
+    runLedger,
   };
   // --- command registry (#157 U6/U7/U9): the ONE core catalogue (`buildCoreCommands`,
   // shared with src/cli.ts), bound ONCE; every adapter
@@ -278,9 +284,9 @@ async function main() {
   const runsService = createRunsService({ registry: defaultRunRegistry, store: runStore, ledger: ledgerClient });
   // Scheduled firings (#244) are recorded on the state Worker's ScheduleDO;
   // `schedule list` and the /runs "Scheduled" panel read the same store.
-  const scheduleStore = buildScheduleStore(config.config.schedules, process.env, (m) =>
-    console.warn(`[schedules] ${m}`),
-  );
+  const scheduleStore =
+    buildScheduleStore(config.config.schedules, process.env, (m) => console.warn(`[schedules] ${m}`)) ??
+    new NullScheduleStore();
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
     env: process.env,
@@ -317,7 +323,7 @@ async function main() {
   // + run-history writes still retrying (#157 KTD4: a record lost at SIGTERM is
   // a run that vanishes at eviction). Read by the graceful drain below and
   // reported on /healthz for the deploy preflight (deploy/cloudflare/preflight.mjs).
-  const pendingHistoryWrites = () => runHistoryWriter?.pending() ?? 0;
+  const pendingHistoryWrites = () => runHistoryWriter.pending();
   const inFlight = () => activeRunCount() + pendingReflectionCount() + pendingHistoryWrites();
   let draining = false;
   // Epoch ms when the HTTP server's listen() callback fired; undefined until
@@ -347,7 +353,7 @@ async function main() {
     // unavailable when that is not configured. Without a `cron` entry the shim
     // fails closed.
     const cronArmed = Object.values(auth.tokens).some((id) => id.subject === "cron");
-    const schedulesState = `${SCHEDULES.length} schedule(s) on /runs (${scheduleStore ? `firings from ${config.config.schedules?.worker?.baseUrl}` : "no firing store"}; cron identity ${cronArmed ? "armed" : "NOT in SWITCHBOARD_INGRESS_TOKENS — scheduled runs fail closed"})`;
+    const schedulesState = `${SCHEDULES.length} schedule(s) on /runs (${capabilities.schedules ? `firings from ${config.config.schedules?.worker?.baseUrl}` : "no firing store"}; cron identity ${cronArmed ? "armed" : "NOT in SWITCHBOARD_INGRESS_TOKENS — scheduled runs fail closed"})`;
     // The web app (web/): every HTML page is the shared shell + a JSON seed,
     // painted client-side by the Vue bundle served as hashed assets under
     // /assets/*. The build is loaded once at startup — a missing build is a
@@ -358,44 +364,43 @@ async function main() {
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
     // /residents route live on every request with the same bearer the chat
-    // commands use; undefined (not configured) → the handler answers 503.
+    // commands use; without residents (or without the admin bearer) the null
+    // client answers every route 503 with the reason, and so does the page.
     // Access-gated below alongside /runs — it lists every onboarded repo and
     // its build commands, so it must never be exposed without SSO.
-    const residentCfg = config.config.execution?.resident;
-    const residentAdminToken = residentCfg?.baseUrl
-      ? process.env[residentCfg.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN"]
-      : undefined;
-    const residentsView = createResidentsViewHandler(
-      residentCfg?.baseUrl && residentAdminToken
-        ? makeResidentAdminClient(residentCfg.baseUrl, residentAdminToken)
-        : undefined,
-      shell,
-    );
+    const residentAdmin = capabilities.residents
+      ? residentAdminFromConfig(config, process.env)
+      : new NullResidentAdminClient();
+    const residentAdminClient =
+      "unavailable" in residentAdmin ? new NullResidentAdminClient(residentAdmin.unavailable) : residentAdmin;
+    const residentsView = createResidentsViewHandler(residentAdminClient, shell);
     const residentsState =
-      residentCfg?.baseUrl && residentAdminToken
-        ? `GET /residents (dash → ${residentCfg.baseUrl})`
-        : "GET /residents (503 — resident admin not configured)";
+      residentAdminClient instanceof NullResidentAdminClient
+        ? `GET /residents (503 — ${residentAdminClient.reason})`
+        : `GET /residents (dash → ${config.config.execution?.resident?.baseUrl})`;
     // Costs dash: GET /costs (first group) + /costs/<group> (+ .json twin).
     // Reads Cloudflare's billing datasets (and, when an Admin key is present,
-    // Anthropic's cost report) live per request. Fully off without the
-    // `costs:` config block or the Cloudflare token → 503. Access-gated below
-    // alongside /runs and /residents.
+    // Anthropic's cost report) live per request. Without the `costs:` block or
+    // the Cloudflare token the null service has no group and the page says so
+    // (503). Access-gated below alongside /runs and /residents.
     const costsCfg = parseCostsConfig(config.config.costs);
-    const cfAnalyticsToken = costsCfg ? process.env[costsCfg.cloudflareTokenEnv] : undefined;
     const anthropicAdminKey = costsCfg ? process.env[costsCfg.anthropicAdminKeyEnv] : undefined;
     const costsService =
-      costsCfg && cfAnalyticsToken
+      capabilities.costs && costsCfg
         ? createCostsService(
             costsCfg,
-            new CloudflareGraphqlUsageSource({ accountId: costsCfg.cloudflareAccountId, token: cfAnalyticsToken }),
+            new CloudflareGraphqlUsageSource({
+              accountId: costsCfg.cloudflareAccountId,
+              token: process.env[costsCfg.cloudflareTokenEnv]!,
+            }),
             anthropicAdminKey
               ? new AnthropicCostReportSource({ adminKey: anthropicAdminKey })
               : new NullLlmCostSource(),
           )
-        : undefined;
+        : new NullCostsService();
     const costsView = createCostsViewHandler(costsService, shell);
-    const costsState = costsService
-      ? `GET /costs (${Object.keys(costsCfg!.groups).join(",")}; LLM ${anthropicAdminKey ? "on" : "off"})`
+    const costsState = capabilities.costs
+      ? `GET /costs (${costsService.groups().join(",")}; LLM ${anthropicAdminKey ? "on" : "off"})`
       : costsCfg
         ? `GET /costs (503 — ${costsCfg.cloudflareTokenEnv} not set)`
         : "GET /costs (503 — no costs config)";
@@ -444,7 +449,10 @@ async function main() {
       shell,
       service: runsService,
       index: defaultRunRegistry,
-      retention: runStore && runHistoryCfg ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays } : null,
+      retention:
+        capabilities.runHistory && runHistoryCfg
+          ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays }
+          : null,
       devBypass: {
         active: () => devBypassActive,
         isLoopback: (req) => isLoopbackAddress(req.socket?.remoteAddress) && isLocalhostBase(publicBaseUrl),
@@ -504,7 +512,7 @@ async function main() {
         handleAdminCrash(req, res, {
           tokens: process.env.SWITCHBOARD_INGRESS_TOKENS,
           grantsFor: (id) => config.grantsFor(id),
-          generation: runLedger ? generation : undefined,
+          generation: capabilities.runLedger ? generation : undefined,
         });
         return;
       }
@@ -612,7 +620,7 @@ async function main() {
               catchUp: getCatchUpStatus(),
               slack: getSocketStatus(),
               build,
-              ...(runLedger ? { generation } : {}),
+              ...(capabilities.runLedger ? { generation } : {}),
               startedAt: PROCESS_STARTED_AT,
               httpListeningAt,
               process: sampleProcessMetrics(),
@@ -655,7 +663,7 @@ async function main() {
   // What one reclaim outcome asks of this process (run-history items 36 and
   // 38): mark the cards other generations hold, close the cards of runs that had
   // replied, and launch the resumes. Used at boot and by the periodic sweep.
-  const ledgerReclaim = ledgerClient && runLedger ? { client: ledgerClient } : undefined;
+  const ledgerReclaim = capabilities.runLedger && ledgerClient ? { client: ledgerClient } : undefined;
   // Two acts, because the boot performs them at different times: the cards
   // before the socket opens (the sweep must see them), the resumes after it.
   const guardCards = async (outcome: ReclaimOutcome): Promise<void> => {
@@ -796,7 +804,7 @@ async function main() {
     // writes are fenced the moment the next generation reclaims them. Only the
     // runs a resume cannot continue (a ship pipeline, an untracked run) hold the
     // drain, up to the old deadline.
-    const handoff = runLedger ? await runLedger.handoff() : { marked: [] as string[] };
+    const handoff = await runLedger.handoff();
     const handed = new Set(handoff.marked);
     if (handoff.failed) console.warn(`[drain] handoff failed (${handoff.failed}) — waiting for the runs instead`);
     if (handed.size > 0)
@@ -828,7 +836,7 @@ async function main() {
     // Bounded: one write per run through the normal writer (its own retries run
     // inside the budget), at most INTERRUPTED_WRITE_BUDGET_MS total — never a
     // second drain.
-    if (runHistoryWriter && inFlight() > 0) {
+    if (inFlight() > 0) {
       const written = writeAbandonedRunRecords(
         defaultRunRegistry,
         runHistoryWriter,
@@ -844,8 +852,7 @@ async function main() {
       }
     }
     console.log(
-      `[drain] exiting (${activeRunCount()} run(s) of which ${handed.size} handed off, ${pendingReflectionCount()} reflection(s), ${pendingHistoryWrites()} history write(s) abandoned` +
-        (runHistoryWriter ? `; ${runHistoryWriter.failures()} history write(s) lost this process)` : ")"),
+      `[drain] exiting (${activeRunCount()} run(s) of which ${handed.size} handed off, ${pendingReflectionCount()} reflection(s), ${pendingHistoryWrites()} history write(s) abandoned; ${runHistoryWriter.failures()} history write(s) lost this process)`,
     );
     root.end("ok", { handed: handed.size, sealed, abandonedRuns: activeRunCount() });
     process.exit(0);

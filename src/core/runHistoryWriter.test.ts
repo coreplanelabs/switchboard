@@ -4,7 +4,7 @@
 // never on a 4xx, never on a missing route; every permanent loss is counted and
 // every in-flight write (backoff included) is visible to the shutdown drain.
 import { describe, expect, it } from "vitest";
-import { createRunHistoryWriter, RUN_HISTORY_RETRY_DELAYS_MS } from "./runHistoryWriter.js";
+import { createRunHistoryWriter, NullRunHistoryWriter, RUN_HISTORY_RETRY_DELAYS_MS } from "./runHistoryWriter.js";
 import type { RunRecord } from "./runRecord.js";
 import type { PutResult, RunStore } from "./runStore.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
@@ -296,5 +296,21 @@ describe("createRunHistoryWriter", () => {
     await h.writer.settled();
     expect(h.writer.pending()).toBe(0);
     expect(h.persisted.sort()).toEqual(["run-1", "run-2"]);
+  });
+});
+
+// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// without run history is wired with: the dispatcher writes unconditionally.
+describe("NullRunHistoryWriter — the writer of a process without run history", () => {
+  it("drops every write (final, provisional, via a sink), never counts pending or failures, is never degraded, and settles at once", async () => {
+    const writer = new NullRunHistoryWriter();
+    const sink = { put: async () => ({}) };
+    writer.write(record("a"));
+    writer.write(record("b"), { provisional: true });
+    writer.write(record("c"), { via: sink });
+    expect(writer.pending()).toBe(0);
+    expect(writer.failures()).toBe(0);
+    expect(writer.degraded()).toBe(false);
+    await expect(writer.settled()).resolves.toBeUndefined();
   });
 });

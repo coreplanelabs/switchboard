@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CostReport, CostsService } from "../core/costs.js";
+import { NullCostsService, type CostReport, type CostsService } from "../core/costs.js";
 import { createCostsViewHandler, parseCostsRoute } from "./costsView.js";
 import { makeShellRenderer } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
@@ -114,8 +114,8 @@ describe("createCostsViewHandler", () => {
     expect(io.status).toBe(0);
   });
 
-  it("503s with a pointer to the config when no service is wired", () => {
-    const h = createCostsViewHandler(undefined, shell);
+  it("503s with a pointer to the config when the process has no cost reporting (the null service has no groups)", () => {
+    const h = createCostsViewHandler(new NullCostsService(), shell);
     const io = fakeReqRes("GET", "/costs");
     expect(h(io.req, io.res)).toBe(true);
     expect(io.status).toBe(503);

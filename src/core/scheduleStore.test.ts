@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildScheduleStore,
   InMemoryScheduleStore,
+  NullScheduleStore,
   SCHEDULE_WORKER_TIMEOUT_MS,
   WorkerScheduleStore,
 } from "./scheduleStore.js";
@@ -140,5 +141,15 @@ describe("buildScheduleStore (startup selection)", () => {
       buildScheduleStore({ worker: { baseUrl: "https://m.test", tokenEnv: "STATE_BEARER" } }, {}, warn),
     ).toBeUndefined();
     expect(warn.mock.calls[0][0]).toContain("STATE_BEARER");
+  });
+});
+
+// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// without a firing store is wired with.
+describe("NullScheduleStore — the store of a process without a firing store", () => {
+  it("drops a firing and has never seen one", async () => {
+    const store = new NullScheduleStore();
+    await store.record(firing("x", 1));
+    expect(await store.latest()).toEqual([]);
   });
 });

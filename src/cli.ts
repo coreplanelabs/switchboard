@@ -47,13 +47,17 @@ import { catalogueText, chatForm, helpText, parseInvocation, type GrammarRejecti
 import { dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { startRequestRoot } from "./core/requestTrace.js";
 import { systemClock } from "./core/trace/clock.js";
-import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
+import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
-import { buildRunStore, type RunStore } from "./core/runStore.js";
+import { buildRunStore, NullRunStore, type RunStore } from "./core/runStore.js";
+import { mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
+import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
+import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
+import { NullMcpToolSource } from "./mcp/source.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -348,14 +352,15 @@ async function main(): Promise<void> {
   // state Worker is doing; a command that needs the config and cannot have it
   // gets the `unavailable` error naming the cause.
   const botConfig = bindBotConfig(CONFIG_PATH, "./data/cli-overrides.json");
-  let loaded: Promise<{ config: ConfigStore; runStore: RunStore | null }> | undefined;
+  let loaded: Promise<{ config: ConfigStore; runStore: RunStore }> | undefined;
   const bot = () =>
     (loaded ??= botConfig().then((config) => ({
       config,
-      runStore: buildRunStore(config.config.runHistory, process.env, {
-        dataDir: "./data",
-        warn: (m) => warn(`[run-history] ${m}`),
-      }),
+      runStore:
+        buildRunStore(config.config.runHistory, process.env, {
+          dataDir: "./data",
+          warn: (m) => warn(`[run-history] ${m}`),
+        }) ?? new NullRunStore(),
     })));
   // MCP (#394) rides the same config: entries are config scopes, secrets follow
   // the overrides backing; connect links point at the bot's PUBLIC_BASE_URL.
@@ -404,25 +409,31 @@ async function main(): Promise<void> {
   const { config, runStore } = await bot();
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
-  const mcpLoadedWiring = await mcpWiring();
-  const mcp = mcpLoadedWiring.source;
-  const runHistoryWriter = runStore
-    ? createRunHistoryWriter({ store: runStore, warn, onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
-    : undefined;
-  // The chat fast path (`runs list`, `friction report`, …) answers from the same
-  // catalogue the bot binds — without it those messages would go to the model.
   // What is on in this process (src/core/capabilities.ts): the CLI's `ask`
   // resolves it once from the same config the bot would, so a run started here
   // carries the same prompt blocks and card notes as one started in Slack.
   const capabilities = capabilitiesFrom(config.config, process.env);
+  // Every optional subsystem is a real implementation or its Null Object
+  // (features/routing-and-config.md item 13), as in the bot. The CLI has no
+  // run ledger: a one-shot process reclaims and resumes nothing.
+  const mcp = (await mcpWiring()).source ?? new NullMcpToolSource();
+  const memory =
+    buildMemoryStore(config.config.memory, process.env, (m) => warn(`[memory] ${m}`)) ?? new NullMemoryStore();
+  const runHistoryWriter = capabilities.runHistory
+    ? createRunHistoryWriter({ store: runStore, warn, onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
+    : new NullRunHistoryWriter();
+  // The chat fast path (`runs list`, `friction report`, …) answers from the same
+  // catalogue the bot binds — without it those messages would go to the model.
   const deps: CoreDeps = {
     config,
     providers,
     capabilities,
     skills,
     mcp,
-    mcpRegistryOn: mcpLoadedWiring.service !== undefined,
+    memory,
     runHistoryWriter,
+    runLedger: new NullLedgerWriteThrough(mintGeneration(), runStore),
+    threadsElsewhere: new ThreadsElsewhere(),
     commands,
   };
   // The request's root (features/tracing.md): the CLI's receipt is now.
@@ -435,7 +446,7 @@ async function main(): Promise<void> {
     { trace },
   );
   // Wait for the record write to settle before exiting rather than dropping it.
-  await runHistoryWriter?.settled();
+  await runHistoryWriter.settled();
 }
 
 // Run only when invoked as a script (tsx/node src/cli.ts), never on import

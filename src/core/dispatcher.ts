@@ -230,11 +230,12 @@ export interface CoreDeps {
    * is true the dispatcher retrieves scope-relevant records from this store
    * and injects them as an advisory context block before the model turn, and
    * after the reply a background reflection pass writes distilled records back
-   * to it. When memory is disabled (the default) a NullMemoryStore is used
-   * regardless, so model input is byte-identical to memory-off and nothing is
-   * written. Injectable for tests; the durable WorkerMemoryStore is PR3.
+   * to it. With memory off (the default) production wires a `NullMemoryStore`
+   * (src/index.ts, src/cli.ts) — and the memory module selects one whatever
+   * is wired — so model input is byte-identical to memory-off and nothing is
+   * written. Injectable for tests.
    */
-  memory?: MemoryStore;
+  memory: MemoryStore;
   /**
    * Skill store backing the load-a-skill capability (#100). When present, the
    * dispatcher appends the calling agent's scoped skill name+description list to
@@ -250,15 +251,13 @@ export interface CoreDeps {
    * per run, before the first model turn, for the servers scoped to the
    * resolved agent; the bridged tools ride `RunOptions.extraTools` and the
    * outcome becomes the MCP prompt block + one `mcp_unavailable` note per
-   * server that did not answer. Absent, or no server scoped to the agent →
-   * the request is byte-identical to before the feature. Production wires a
-   * `ConfigMcpToolSource` over `mcp.servers` (src/index.ts, src/cli.ts).
+   * server that did not answer. No server scoped to the agent — the
+   * `NullMcpToolSource` of a process without MCP included — → the request is
+   * byte-identical to before the feature. Whether the self-serve surface
+   * (`mcp add …`) exists is `capabilities.mcp`, which the config awareness
+   * block tells the model (features/mcp-tools.md item 17).
    */
-  mcp?: McpToolSource;
-  /** Whether the self-serve surface (`mcp add …`) is on — the config awareness
-   *  block tells the model so it points users at it instead of answering "I
-   *  cannot load MCPs" (features/mcp-tools.md item 17). */
-  mcpRegistryOn?: boolean;
+  mcp: McpToolSource;
   /**
    * The GitHub API behind the `github_*` tools (features/github-tools.md).
    * Absent → the production REST client on the App credential; tests inject an
@@ -269,27 +268,30 @@ export interface CoreDeps {
   /**
    * The write path onto `runStore` (#157 KTD4): after every run the dispatcher
    * builds the `RunRecord` at finish and hands it here AFTER the reply is sent —
-   * fire-and-forget with bounded retries, drain-counted via `pending()`. Absent
-   * (most unit tests, or history off) → nothing is written. Production wires
+   * fire-and-forget with bounded retries, drain-counted via `pending()`. With
+   * history off it is the `NullRunHistoryWriter` — every write dropped —
+   * so the dispatcher never asks whether there is one. Production wires
    * `createRunHistoryWriter` over the selected store (src/index.ts, src/cli.ts).
    */
-  runHistoryWriter?: RunHistoryWriter;
+  runHistoryWriter: RunHistoryWriter;
   /**
    * The run ledger's write-through (features/run-history.md item 35): every
    * agent run and ship pipeline is claimed on the state Worker's ledger when
    * its run is created, mirrors its steps/events/state while it runs, takes
    * `finishing` before the reply and finishes through the ledger's one
-   * transaction (`runHistoryWriter.write(record, { via })`). Absent (tests, or
-   * history off) → the in-process registry alone, exactly as before. Production
-   * wires `createLedgerWriteThrough` beside the run store (src/index.ts), so a
+   * transaction (`runHistoryWriter.write(record, { via })`). Without a ledger
+   * it is the `NullLedgerWriteThrough`: nothing is claimed and the run goes on
+   * exactly as before the ledger existed. Production wires
+   * `createLedgerWriteThrough` beside the run store (src/index.ts), so a
    * ledger always comes with a writer: without one the finish never reaches the
    * ledger and a claimed row closes only by lease expiry (a test-only pairing).
    */
-  runLedger?: LedgerWriteThrough;
+  runLedger: LedgerWriteThrough;
   /** The threads whose live run is on the ledger but not in this process
    *  (thread-admission item 5), fed by the reclaim sweep: a follow-up on one
-   *  is steered into that run's durable inbox instead of starting a rival. */
-  threadsElsewhere?: Pick<ThreadsElsewhere, "get" | "forget">;
+   *  is steered into that run's durable inbox instead of starting a rival.
+   *  Empty in a process without a ledger. */
+  threadsElsewhere: Pick<ThreadsElsewhere, "get" | "forget">;
   /**
    * Channel facts for the run record (authorization KTD4/KTD7): every run is
    * stamped with its channel's visibility at create, asked of this directory
@@ -702,20 +704,18 @@ export async function dispatch(
       // run that now holds the thread. A live run here means the user moved on
       // after the kill (a re-mention started a fresh run); the reclaimed run
       // is closed `interrupted` on the ledger, with no reply to the thread.
-      if (deps.runLedger) {
-        const adopted = deps.runLedger.adopt({
-          runId: resume.row.runId,
-          threadKey: msg.threadKey,
-          state: resume.row.state,
-          lastStep: resume.lastStep.step,
-          lastSeq: resume.lastSeq,
-        });
-        await root.span(
-          "dispatch.admission",
-          () => closeResumedRow(adopted, resume, "the thread has a newer run in flight"),
-          { attrs: { outcome: "resume_superseded" } },
-        );
-      }
+      const adopted = deps.runLedger.adopt({
+        runId: resume.row.runId,
+        threadKey: msg.threadKey,
+        state: resume.row.state,
+        lastStep: resume.lastStep.step,
+        lastSeq: resume.lastSeq,
+      });
+      await root.span(
+        "dispatch.admission",
+        () => closeResumedRow(adopted, resume, "the thread has a newer run in flight"),
+        { attrs: { outcome: "resume_superseded" } },
+      );
       console.log(
         `[resume] ${msg.threadKey} run ${resume.row.runId} not resumed: the thread has a newer run in flight — closed interrupted`,
       );
@@ -747,10 +747,9 @@ export async function dispatch(
       // run with no row yet (still in setup) has no durable copy: it is not
       // resumable until its seed lands anyway.
       const at = clock();
-      const ledgerSeq =
-        deps.runLedger && claim.live.runId
-          ? await deps.runLedger.pushInbox(claim.live.runId, durableInboxMessage(msg, directives.text, at))
-          : undefined;
+      const ledgerSeq = claim.live.runId
+        ? await deps.runLedger.pushInbox(claim.live.runId, durableInboxMessage(msg, directives.text, at))
+        : undefined;
       if (admission.get(msg.threadKey) !== claim.live) {
         // The run finished and released the thread during the round trip: an
         // item pushed now would sit on a dead slot (and its durable copy went
@@ -786,14 +785,14 @@ export async function dispatch(
     // steer apply (the live agent's allowlist, no agent switch). A push the
     // ledger refuses means the row is gone — the map is stale — so the message
     // runs fresh and the thread is forgotten until the next sweep.
-    const elsewhere = resume ? undefined : deps.threadsElsewhere?.get(msg.threadKey);
+    const elsewhere = resume ? undefined : deps.threadsElsewhere.get(msg.threadKey);
     const farAgent = elsewhere?.agent;
-    if (elsewhere && deps.runLedger && farAgent === undefined) {
+    if (elsewhere && farAgent === undefined) {
       // No agent on the row: the no-agent-switch gate cannot be judged, so the
       // message is not steered into it (a claim always records the agent; this
       // is a guard, not a path).
       console.log(`[dispatch] ${msg.threadKey} run ${elsewhere.runId} on the ledger names no agent — running fresh`);
-    } else if (elsewhere && deps.runLedger && farAgent !== undefined) {
+    } else if (elsewhere && farAgent !== undefined) {
       // This dispatch holds the slot for nothing but a steer: release it NOW,
       // before any round trip, so the resume's own dispatch (which may launch
       // this instant) finds the thread free instead of a rival that closes its
@@ -846,7 +845,7 @@ export async function dispatch(
         await io.reply(steerAck(far, now));
         return;
       }
-      deps.threadsElsewhere?.forget(msg.threadKey);
+      deps.threadsElsewhere.forget(msg.threadKey);
       console.log(`[dispatch] ${msg.threadKey} run ${elsewhere.runId} is no longer on the ledger — running fresh`);
       // Take the slot back for the fresh run below.
       const again = admission.claim(msg.threadKey, { agent: agent.name });
@@ -861,7 +860,7 @@ export async function dispatch(
     // generation's since the boot reclaim — take it up NOW, before the card,
     // the repo resolution and the workspace attach, so the heartbeat keeps
     // the lease through a slow resident attach. No claim, no seed.
-    if (resume && deps.runLedger) {
+    if (resume) {
       ledgerRun = deps.runLedger.adopt({
         runId: resume.row.runId,
         threadKey: msg.threadKey,
@@ -886,7 +885,7 @@ export async function dispatch(
       // after the workspace attach, which is too late for that check).
       admitted.runId = resume.row.runId;
       const known = Math.max(resume.lastStep.inboxConsumedSeq, ...resume.inbox.map((i) => i.seq));
-      const late = deps.runLedger ? await deps.runLedger.readInbox(resume.row.runId, known) : [];
+      const late = await deps.runLedger.readInbox(resume.row.runId, known);
       const items = [...resume.inbox, ...late.filter((i) => i.seq > known)];
       const fallbackAt = clock();
       let folded = 0;
@@ -1263,15 +1262,13 @@ export async function dispatch(
     // External MCP tools (#394, features/mcp-tools.md item 8): discovery for
     // the servers scoped to THIS agent, once, before the model turn. A server
     // that does not answer contributes no tools and is named in the MCP block
-    // (and, once the run is registered, in an `mcp_unavailable` note). No
-    // source, or nothing scoped → no tools, no block, request unchanged.
-    const mcp = deps.mcp;
-    const mcpForRun = mcp
-      ? await root.span("dispatch.mcp_discovery", () =>
-          mcp.toolsFor(agent.name, { userId: msg.userId, channelId: msg.channelId }),
-        )
-      : undefined;
-    const mcpBlock = mcpForRun ? mcpGuidanceBlock(mcpForRun.servers) : undefined;
+    // (and, once the run is registered, in an `mcp_unavailable` note). Nothing
+    // scoped — a process without MCP has the null source — → no tools, no
+    // block, request unchanged.
+    const mcpForRun = await root.span("dispatch.mcp_discovery", () =>
+      deps.mcp.toolsFor(agent.name, { userId: msg.userId, channelId: msg.channelId }),
+    );
+    const mcpBlock = mcpGuidanceBlock(mcpForRun.servers);
 
     // Config awareness (routing-and-config behavior 8): tell the model the
     // RESOLVED agent/model/scope of this very run and how users tune it, so no
@@ -1289,15 +1286,11 @@ export async function dispatch(
       messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
       threadDirective: { agent: sticky.agent, model: sticky.model, effort: sticky.effort },
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
-      ...(deps.mcp
-        ? {
-            mcp: {
-              registryOn: deps.mcpRegistryOn === true,
-              served: (mcpForRun?.servers ?? []).filter((s) => s.toolCount !== undefined).map((s) => s.server),
-              unavailable: (mcpForRun?.servers ?? []).filter((s) => s.unavailable !== undefined).map((s) => s.server),
-            },
-          }
-        : {}),
+      mcp: {
+        registryOn: deps.capabilities.mcp,
+        served: mcpForRun.servers.filter((s) => s.toolCount !== undefined).map((s) => s.server),
+        unavailable: mcpForRun.servers.filter((s) => s.unavailable !== undefined).map((s) => s.server),
+      },
     });
 
     // Self-description (routing-and-config behavior 11): what Switchboard is —
@@ -1410,7 +1403,7 @@ export async function dispatch(
     trace.bindRun(run.id, (e) => registry.publish(run.id, e));
     if (resume) {
       console.log(
-        `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger?.gen ?? "no ledger"}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
+        `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger.gen}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
       );
     }
     io.runStarted?.({ id: run.id });
@@ -1503,7 +1496,7 @@ export async function dispatch(
     // `markPersisted` must NOT run — the index's persisted flag means "finished
     // and durably stored". Synchronous assembly over a handful of bounded
     // events; the first model call is not delayed.
-    if (!resume && deps.runHistoryWriter) {
+    if (!resume) {
       const startSnap = registry.snapshot(run.id, run.token);
       if (startSnap) {
         deps.runHistoryWriter.write(
@@ -1536,7 +1529,7 @@ export async function dispatch(
     // first step's record never precedes its claim. An untracked run (a stale
     // row on the thread, no routes, a claim that kept failing) runs exactly as
     // before — the write-through warned once.
-    if (deps.runLedger && !resume) {
+    if (!resume) {
       const ledger = deps.runLedger;
       const opened = await root.span("dispatch.ledger_claim", () =>
         ledger.open({
@@ -2039,32 +2032,29 @@ export async function dispatch(
       // written by that drain. The card's total stops at the finish stamp.
       ending.finished(run.id);
       shell.freeze(finishedAt);
-      if (deps.runHistoryWriter) {
-        const writer = deps.runHistoryWriter;
-        // A tracked run finishes through the ledger: the record replaces its
-        // live rows in one transaction (a refused finish falls back to the store).
-        ending.register({
-          runId: run.id,
-          flipOnPostFinishFailure: true,
-          write: (seal, failedAfterFinish) =>
-            writer.write(
-              assembleRunRecord({
-                run,
-                snap,
-                agent: agent.name,
-                model: resolved.modelRef,
-                msg,
-                channelVisibility,
-                repo: repoCtx.repo,
-                finishedAt,
-                status: failedAfterFinish && status === "completed" ? "failed" : status,
-                diagnosis,
-                seal,
-              }),
-              { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
-            ),
-        });
-      }
+      // A tracked run finishes through the ledger: the record replaces its
+      // live rows in one transaction (a refused finish falls back to the store).
+      ending.register({
+        runId: run.id,
+        flipOnPostFinishFailure: true,
+        write: (seal, failedAfterFinish) =>
+          deps.runHistoryWriter.write(
+            assembleRunRecord({
+              run,
+              snap,
+              agent: agent.name,
+              model: resolved.modelRef,
+              msg,
+              channelVisibility,
+              repo: repoCtx.repo,
+              finishedAt,
+              status: failedAfterFinish && status === "completed" ? "failed" : status,
+              diagnosis,
+              seal,
+            }),
+            { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
+          ),
+      });
       // The diagnosis rides the run record (above): the friction ledger the
       // cross-run proposer reads (#84) is run history, so nothing is written twice.
       // A run whose loop threw closes its card here, after the finish, so the
@@ -2462,69 +2452,64 @@ async function runShipBranch(
   }
   // Tombstone-first (#375), like the main path — a pipeline can run for
   // hours, so the provisional terminal record matters even more here.
-  if (deps.runHistoryWriter) {
-    const startSnap = registry.snapshot(run.id, run.token);
-    if (startSnap) {
-      deps.runHistoryWriter.write(
-        assembleRunRecord({
-          run,
-          snap: startSnap,
-          agent: agent.name,
-          model: ctx.modelRef,
-          msg,
-          channelVisibility,
-          repo: repoCtx.repo,
-          finishedAt: startSnap.startedAt,
-          status: "interrupted",
-          diagnosis: analyzeRunFriction(startSnap.events, {
-            finished: false,
-            truncated: startSnap.truncated,
-            schema: SPAN_SCHEMA,
-          }),
+  const startSnap = registry.snapshot(run.id, run.token);
+  if (startSnap) {
+    deps.runHistoryWriter.write(
+      assembleRunRecord({
+        run,
+        snap: startSnap,
+        agent: agent.name,
+        model: ctx.modelRef,
+        msg,
+        channelVisibility,
+        repo: repoCtx.repo,
+        finishedAt: startSnap.startedAt,
+        status: "interrupted",
+        diagnosis: analyzeRunFriction(startSnap.events, {
+          finished: false,
+          truncated: startSnap.truncated,
+          schema: SPAN_SCHEMA,
         }),
-        { provisional: true },
-      );
-    }
+      }),
+      { provisional: true },
+    );
   }
   // The ledger claim (run-history item 35) for the live index and the finish.
   // A pipeline has no single model loop of its own — each child round runs
   // `runAgent` with its own prompt and conversation — so it is claimed without
   // a seed or step records and closes `interrupted` at a reclaim; resuming a
-  // pipeline mid-round is not built.
-  let ledgerRun: LedgerRun | undefined;
-  if (deps.runLedger) {
-    const ledger = deps.runLedger;
-    ledgerRun = await root.span("dispatch.ledger_claim", () =>
-      ledger.open({
-        runId: run.id,
+  // pipeline mid-round is not built. Untracked (a process without a ledger
+  // included) → undefined, and the pipeline runs as before.
+  const ledgerRun: LedgerRun | undefined = await root.span("dispatch.ledger_claim", () =>
+    deps.runLedger.open({
+      runId: run.id,
+      threadKey: msg.threadKey,
+      startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
+      meta: {
+        agent: agent.name,
+        model: ctx.modelRef,
+        channelId: msg.channelId,
+        userId: msg.userId,
         threadKey: msg.threadKey,
-        startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
-        meta: {
-          agent: agent.name,
-          model: ctx.modelRef,
-          channelId: msg.channelId,
-          userId: msg.userId,
-          threadKey: msg.threadKey,
-          channelVisibility,
-          ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-          ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-          ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-          ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
-        },
-        card: card.handle ?? null,
-        system: "",
-        tools: [],
-        onStop: (mode) => void run.control.requestStop(mode),
-        onFenced: () => void run.control.requestStop("hard"),
-      }),
-    );
-    if (ledgerRun) {
-      const opened = ledgerRun;
-      registry.subscribe(run.id, run.token, {
-        onEvent: (event, seq) => opened.event(event, seq),
-        ...REPLAY_EVERYTHING,
-      });
-    }
+        channelVisibility,
+        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+        ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
+      },
+      card: card.handle ?? null,
+      system: "",
+      tools: [],
+      onStop: (mode) => void run.control.requestStop(mode),
+      onFenced: () => void run.control.requestStop("hard"),
+    }),
+  );
+  if (ledgerRun) {
+    const opened = ledgerRun;
+    registry.subscribe(run.id, run.token, {
+      onEvent: (event, seq) => opened.event(event, seq),
+      ...REPLAY_EVERYTHING,
+    });
   }
 
   // The card's frames — the main path's vocabulary (spinner title, checklist +
@@ -2680,10 +2665,7 @@ async function runShipBranch(
           ? outcome.status
           : "completed";
     registry.finish(run.id, status);
-    // With a writer the finish write (below, through the ledger sink) closes
-    // the ledger row; without one the heartbeat must stop here.
-    if (!deps.runHistoryWriter) void ledgerRun?.close();
-    const snap = registry.snapshot(run.id, run.token); // the card's shape needs it, writer or not
+    const snap = registry.snapshot(run.id, run.token);
     const finishedAt = snap?.finishedAt ?? clock();
     const diagnosis = analyzeRunFriction(snap?.events ?? [], {
       finished: true,
@@ -2695,34 +2677,32 @@ async function runShipBranch(
     io.runFinished?.({ id: run.id, status });
     ending.finished(run.id);
     shell.freeze(finishedAt);
-    if (deps.runHistoryWriter) {
-      const writer = deps.runHistoryWriter;
-      // Mirrors the main path: a completed pipeline whose final reply throws is
-      // recorded `failed` — the thread never saw the report — while a stopped
-      // status stays what it was. Written by the drain after the seal; a throw
-      // reaches dispatch()'s outer catch, which drains.
-      ending.register({
-        runId: run.id,
-        flipOnPostFinishFailure: true,
-        write: (seal, failedAfterFinish) =>
-          writer.write(
-            assembleRunRecord({
-              run,
-              snap,
-              agent: agent.name,
-              model: ctx.modelRef,
-              msg,
-              channelVisibility,
-              repo: repoCtx.repo,
-              finishedAt,
-              status: failedAfterFinish && status === "completed" ? "failed" : status,
-              diagnosis,
-              seal,
-            }),
-            { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
-          ),
-      });
-    }
+    // Mirrors the main path: a completed pipeline whose final reply throws is
+    // recorded `failed` — the thread never saw the report — while a stopped
+    // status stays what it was. Written by the drain after the seal; a throw
+    // reaches dispatch()'s outer catch, which drains. A tracked run finishes
+    // through the ledger sink, which also closes its row.
+    ending.register({
+      runId: run.id,
+      flipOnPostFinishFailure: true,
+      write: (seal, failedAfterFinish) =>
+        deps.runHistoryWriter.write(
+          assembleRunRecord({
+            run,
+            snap,
+            agent: agent.name,
+            model: ctx.modelRef,
+            msg,
+            channelVisibility,
+            repo: repoCtx.repo,
+            finishedAt,
+            status: failedAfterFinish && status === "completed" ? "failed" : status,
+            diagnosis,
+            seal,
+          }),
+          { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
+        ),
+    });
     // A pipeline that threw closes its card here, after the finish, so the
     // card's total is the run's.
     if (outcome === undefined)
@@ -2954,38 +2934,35 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
     // when the command fell through to the agent); the record is written then.
     // A command's status is its own `ok` — a reply that throws never flips it.
     ending.finished(run.id);
-    if (deps.runHistoryWriter) {
-      const writer = deps.runHistoryWriter;
-      const snap = registry.snapshot(run.id, run.token);
-      const finishedAt = snap?.finishedAt ?? clock();
-      // A command run owns its window's tools: `run.command` is the work.
-      const diagnosis = analyzeRunFriction(snap?.events ?? [], {
-        finished: true,
-        truncated: snap?.truncated ?? false,
-        schema: SPAN_SCHEMA,
-        owner: "command",
-        window: { start: trace.receivedAt, end: finishedAt },
-      });
-      ending.register({
-        runId: run.id,
-        flipOnPostFinishFailure: false,
-        write: (seal) =>
-          writer.write(
-            assembleRunRecord({
-              run,
-              snap,
-              agent: COMMAND_RUN_AGENT,
-              msg,
-              channelVisibility,
-              finishedAt,
-              status,
-              diagnosis,
-              seal,
-            }),
-            { span: root },
-          ),
-      });
-    }
+    const snap = registry.snapshot(run.id, run.token);
+    const finishedAt = snap?.finishedAt ?? clock();
+    // A command run owns its window's tools: `run.command` is the work.
+    const diagnosis = analyzeRunFriction(snap?.events ?? [], {
+      finished: true,
+      truncated: snap?.truncated ?? false,
+      schema: SPAN_SCHEMA,
+      owner: "command",
+      window: { start: trace.receivedAt, end: finishedAt },
+    });
+    ending.register({
+      runId: run.id,
+      flipOnPostFinishFailure: false,
+      write: (seal) =>
+        deps.runHistoryWriter.write(
+          assembleRunRecord({
+            run,
+            snap,
+            agent: COMMAND_RUN_AGENT,
+            msg,
+            channelVisibility,
+            finishedAt,
+            status,
+            diagnosis,
+            seal,
+          }),
+          { span: root },
+        ),
+    });
   }
 }
 

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { analyzeRunFriction } from "./runFriction.js";
 import { DEFAULT_RETENTION_POLICY, type RunListOptions, type RunRecord } from "./runRecord.js";
 import type { RunEvent } from "./runEvents.js";
-import { buildRunStore, FileRunStore, InMemoryRunStore, type RunStore } from "./runStore.js";
+import { buildRunStore, FileRunStore, InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
 import { WorkerRunStore } from "./runStoreWorker.js";
 
 // Feature: features/run-history.md — the RunStore seam (U2): in-memory and
@@ -446,5 +446,19 @@ describe("buildRunStore", () => {
     );
     expect(warnings).toEqual([]);
     expect(timers).toEqual([]);
+  });
+});
+
+// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// without run history is wired with, so no caller branches on a missing store.
+describe("NullRunStore — the store of a process without run history", () => {
+  it("accepts a put and keeps nothing (stored: false, like a record outside retention); every read is the not-found shape; list is empty; delete is a no-op", async () => {
+    const store = new NullRunStore();
+    expect(await store.put(record("r1", NOW))).toEqual({ ok: true, retained: 0, stored: false, rewritten: false });
+    expect(await store.get("r1")).toBeNull();
+    expect(await store.getSummary("r1")).toBeNull();
+    expect(await store.list({ limit: 10 })).toEqual([]);
+    expect(await store.events("r1", { limit: 10 })).toBeNull();
+    await expect(store.delete("r1")).resolves.toBeUndefined();
   });
 });

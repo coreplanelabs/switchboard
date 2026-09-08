@@ -4,6 +4,7 @@ import { analyzeRunFriction } from "./runFriction.js";
 import {
   DEFAULT_LEDGER_MAX,
   InMemoryFrictionLedger,
+  NullFrictionLedger,
   isFrictionRunRecord,
   RunStoreFrictionLedger,
   selectFrictionLedger,
@@ -237,9 +238,9 @@ describe("RunStoreFrictionLedger", () => {
     expect(calls).toEqual([`list ${DEFAULT_LEDGER_MAX}`, "list 2"]);
   });
 
-  it("selectFrictionLedger: a run store → the store-served ledger; no run store → no ledger (the commands say so)", () => {
+  it("selectFrictionLedger: a run store → the store-served ledger; no run store → the null ledger (no recent runs anywhere)", () => {
     expect(selectFrictionLedger(new InMemoryRunStore())).toBeInstanceOf(RunStoreFrictionLedger);
-    expect(selectFrictionLedger(null)).toBeUndefined();
+    expect(selectFrictionLedger(null)).toBeInstanceOf(NullFrictionLedger);
   });
 });
 
@@ -267,5 +268,18 @@ describe("isFrictionRunRecord", () => {
     const bad = rec("a", 1);
     expect(isFrictionRunRecord({ ...bad, diagnosis: { ...bad.diagnosis, byCategory: { slow_tool: 3 } } })).toBe(false);
     expect(isFrictionRunRecord({ ...bad, diagnosis: { ...bad.diagnosis, byCategory: null } })).toBe(false);
+  });
+});
+
+// Feature: features/routing-and-config.md item 13 — the Null Object a process
+// without run history is wired with; `selectFrictionLedger` hands it out for a
+// missing store instead of `undefined`.
+describe("NullFrictionLedger — the ledger of a process without run history", () => {
+  it("has no recent runs whatever is asked; selectFrictionLedger(null) is it, and a store gives the run-store ledger", async () => {
+    const ledger = new NullFrictionLedger();
+    expect(await ledger.recent()).toEqual([]);
+    expect(await ledger.recent({ limit: 5, sinceMs: 0, visibleTo: { kind: "all" } })).toEqual([]);
+    expect(selectFrictionLedger(null)).toBeInstanceOf(NullFrictionLedger);
+    expect(selectFrictionLedger(new InMemoryRunStore())).toBeInstanceOf(RunStoreFrictionLedger);
   });
 });

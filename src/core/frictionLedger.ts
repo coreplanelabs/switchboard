@@ -155,8 +155,16 @@ export class RunStoreFrictionLedger implements FrictionLedger {
   }
 }
 
-/** Startup wiring: the ledger is the run store, or nothing — without run
- *  history there are no recent runs anywhere, and the friction commands say so. */
-export function selectFrictionLedger(store: RunStore | null): FrictionLedger | undefined {
-  return store ? new RunStoreFrictionLedger(store) : undefined;
+/** The ledger of a process without run history (a Null Object, routing-and-
+ *  config item 13): there are no recent runs anywhere, so nothing recurs. */
+export class NullFrictionLedger implements FrictionLedger {
+  async recent(_opts?: LedgerReadOptions): Promise<FrictionRunRecord[]> {
+    return [];
+  }
+}
+
+/** Startup wiring: the ledger is the run store; without one there are no
+ *  recent runs anywhere and the null ledger says so with an empty answer. */
+export function selectFrictionLedger(store: RunStore | null): FrictionLedger {
+  return store ? new RunStoreFrictionLedger(store) : new NullFrictionLedger();
 }

@@ -184,6 +184,66 @@ export interface LedgerWriteThrough {
   handoff(): Promise<{ marked: string[]; failed?: string }>;
 }
 
+/** The write-through of a process without a run ledger (a Null Object,
+ *  routing-and-config item 13): nothing is claimed, so `open` answers as the
+ *  real one does for an untracked run and every run goes on exactly as it did
+ *  before the ledger existed; the inbox and the handoff hold nothing. `adopt`
+ *  has nothing to adopt — a reclaim needs a ledger — and answers a detached run
+ *  whose finish sink is the plain store, so a record can never vanish. */
+export class NullLedgerWriteThrough implements LedgerWriteThrough {
+  constructor(
+    readonly gen: string,
+    private readonly fallback: RecordSink,
+  ) {}
+  async open(_req: OpenRunRequest): Promise<LedgerRun | undefined> {
+    return undefined;
+  }
+  adopt(req: AdoptRunRequest): LedgerRun {
+    return new NullLedgerRun(req.runId, this.fallback);
+  }
+  liveRuns(): LedgerRun[] {
+    return [];
+  }
+  async pushInbox(_runId: string, _message: Record<string, unknown>): Promise<number | undefined> {
+    return undefined;
+  }
+  async readInbox(_runId: string, _afterSeq: number): Promise<InboxItem[]> {
+    return [];
+  }
+  async handoff(): Promise<{ marked: string[]; failed?: string }> {
+    return { marked: [] };
+  }
+}
+
+/** A run the null write-through was asked to adopt: untracked, not resumable,
+ *  every mirror a no-op, its finish landing on the plain store. */
+export class NullLedgerRun implements LedgerRun {
+  readonly resumable = false;
+  readonly handedOff = false;
+  constructor(
+    readonly runId: string,
+    readonly sink: RecordSink,
+  ) {}
+  tracked(): boolean {
+    return false;
+  }
+  async step(_report: StepReport): Promise<void> {
+    // no ledger to mirror onto
+  }
+  event(_event: RunEvent, _seq: number): void {
+    // no ledger to mirror onto
+  }
+  setState(_patch: RunState): void {
+    // no ledger to mirror onto
+  }
+  async finishing(): Promise<FinishingGate> {
+    return "unavailable";
+  }
+  async close(): Promise<void> {
+    // nothing was open
+  }
+}
+
 /** Backoff before a retry: the claim gets both, a step or state write the first. */
 const RETRY_MS: readonly number[] = [200, 800];
 

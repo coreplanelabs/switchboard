@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { ResidentAdminClient, ResidentAdminResponse } from "../core/residentAdmin.js";
+import {
+  NullResidentAdminClient,
+  type ResidentAdminClient,
+  type ResidentAdminResponse,
+} from "../core/residentAdmin.js";
 import {
   createResidentsViewHandler,
   parseResidentsRoute,
@@ -237,12 +241,14 @@ describe("createResidentsViewHandler", () => {
     expect(io.headers.allow).toBe("GET");
   });
 
-  it("503s with a plain explanation when no resident admin client is configured", () => {
-    const h = createResidentsViewHandler(undefined, shell);
+  it("503s with a plain explanation when the process has no residents (the null admin client carries the reason)", async () => {
+    const h = createResidentsViewHandler(new NullResidentAdminClient(), shell);
     const io = fakeReqRes("GET", "/residents");
     expect(h(io.req, io.res)).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
     expect(io.status).toBe(503);
     expect(io.body()).toContain("execution.resident");
+    expect(io.body()).not.toContain("resident Worker answered");
   });
 
   it("502s (never a 500 with a stack) when the resident Worker answers non-200 or the request throws", async () => {

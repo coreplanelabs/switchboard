@@ -1,5 +1,5 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import type { CostsService } from "../core/costs.js";
+import { COSTS_OFF_MESSAGE, type CostsService } from "../core/costs.js";
 import type { ShellRenderer } from "./webShell.js";
 import { WEB_HTML_HEADERS } from "./webShell.js";
 
@@ -44,7 +44,7 @@ function plain(res: ServerResponse, status: number, body: string, extra: Record<
  * carrying a capped reason, never a 500.
  */
 export function createCostsViewHandler(
-  service: CostsService | undefined,
+  service: CostsService,
   shell: ShellRenderer,
 ): (req: HttpRequest, res: ServerResponse) => boolean {
   return (req, res) => {
@@ -56,15 +56,13 @@ export function createCostsViewHandler(
       plain(res, 405, "method not allowed", { allow: "GET" });
       return true;
     }
-    if (!service) {
-      plain(
-        res,
-        503,
-        "Cost reporting isn't configured — set costs.cloudflareAccountId + costs.groups in config and the CF_ANALYTICS_TOKEN secret to enable this view.",
-      );
+    const groups = service.groups();
+    // A service with no group to report is cost reporting that is off (the
+    // `NullCostsService` of a process without it): say so, never "no group named".
+    if (groups.length === 0) {
+      plain(res, 503, COSTS_OFF_MESSAGE);
       return true;
     }
-    const groups = service.groups();
     const group = route.group ?? groups[0];
     if (!group || !groups.includes(group)) {
       plain(res, 404, `no cost group named ${route.group ?? "(none)"}`);
