@@ -44,7 +44,11 @@ export type RunNoteKind =
   /** A thread follow-up steered into this run was folded into its next step
    *  (features/thread-admission.md item 2). Published by the runner as it
    *  drains the inbox, beside an `input` event carrying the follow-up itself. */
-  | "follow_up";
+  | "follow_up"
+  /** The run was resumed by a new bot generation from its ledger transcript
+   *  (features/run-history.md item 37); the summary says how many calls were
+   *  in flight at the kill and how each was settled. Published by the runner. */
+  | "resumed";
 
 /** How an operator asked a run to stop (#101): `soft` — take no new steps and
  *  wrap up through the normal finale; `hard` — abort the in-flight call now, no

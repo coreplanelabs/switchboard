@@ -1987,3 +1987,166 @@ describe("step reports (features/run-history.md item 35)", () => {
     expect(ran).toBe(false);
   });
 });
+
+describe("resume (features/run-history.md item 37)", () => {
+  const probe = (log: string[]): RunnableTool => ({
+    name: "probe",
+    description: "a side-effect-free read",
+    inputSchema: { type: "object", properties: {} },
+    sideEffectFree: true,
+    run: async () => {
+      log.push("probe");
+      return "probe-ok";
+    },
+  });
+  const transcript = (): ChatMessage[] => [
+    { role: "user", content: [{ type: "text", text: "go" }] },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "looking" },
+        { type: "tool_use", id: "p1", name: "probe", input: {} },
+        { type: "tool_use", id: "b1", name: "bash", input: { command: "make deploy" } },
+      ],
+    },
+  ];
+  const RESTART =
+    "The bot restarted while this bash call was in flight; its effects are unknown — re-check them before re-running it.";
+
+  it("settles the calls in flight before the first model call — the read re-runs, bash gets the restart note — then continues with the plan's counters; the recorded step is not reported again, the next one carries the settlement's results turn", async () => {
+    const log: string[] = [];
+    const events: RunEvent[] = [];
+    const reports: StepReport[] = [];
+    const provider = scripted([
+      { content: [{ type: "tool_use", id: "p2", name: "probe", input: {} }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ toolset: "none", maxTurns: 5, maxMinutes: 10 }),
+      extraTools: [probe(log)],
+      messages: transcript(),
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+      onStep: async (s) => void reports.push(structuredClone(s)),
+      resume: {
+        settlements: [
+          { toolUse: { type: "tool_use", id: "p1", name: "probe", input: {} }, action: "rerun" },
+          {
+            toolUse: { type: "tool_use", id: "b1", name: "bash", input: { command: "make deploy" } },
+            action: "synthetic",
+            text: RESTART,
+          },
+        ],
+        stepRecorded: true,
+        turn: 1,
+        iteration: 0,
+        remainingMs: 5 * 60_000,
+      },
+    });
+    expect(answer).toBe("done");
+    expect(log).toEqual(["probe", "probe"]); // the settlement re-run, then the next step's call
+    // The first model call saw the transcript plus the settlement's results turn, in the calls' order.
+    const first = provider.requests[0].messages;
+    expect(first.slice(0, 2)).toEqual(transcript());
+    expect(first[2]).toEqual({
+      role: "user",
+      content: [
+        { type: "tool_result", toolUseId: "p1", content: "probe-ok" },
+        { type: "tool_result", toolUseId: "b1", content: RESTART, isError: true },
+      ],
+    });
+    // The stream says what happened: a resumed note, the re-run's call and result, the synthetic result.
+    const note = events.find((e) => e.type === "run_note" && e.kind === "resumed");
+    expect(note).toMatchObject({
+      summary: expect.stringMatching(
+        /2 call\(s\) were in flight — 1 re-run, 1 answered with a restart note; 5 min of budget left/,
+      ),
+    });
+    // The settlement re-run announces no tool_call: its original is on the
+    // stream already (replayed from the ledger); only the next step's call is new.
+    expect(events.filter((e) => e.type === "tool_call").map((e) => (e as { callId?: string }).callId)).toEqual(["p2"]);
+    expect(
+      events
+        .filter((e) => e.type === "tool_result")
+        .map((e) => [(e as { callId?: string }).callId, (e as { ok?: boolean }).ok]),
+    ).toEqual([
+      ["p1", true],
+      ["b1", false],
+      ["p2", true],
+    ]);
+    // The settled step had its record; only the NEXT step is reported, with the settlement's results turn and its own assistant turn.
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      firstIdx: 2,
+      turn: 2,
+      iteration: 1,
+      inFlight: [{ callId: "p2", tool: "probe" }],
+    });
+    expect(reports[0].turns.map((t) => t.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("a step whose record never landed is reported first — no new turns, the calls in flight — and then its calls all run", async () => {
+    const log: string[] = [];
+    const reports: StepReport[] = [];
+    const provider = scripted([text("done")]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ toolset: "none", maxTurns: 5 }),
+      extraTools: [probe(log)],
+      messages: transcript(),
+      toolContext: { executor: fakeExecutor },
+      onStep: async (s) => void reports.push(structuredClone(s)),
+      resume: {
+        settlements: [
+          { toolUse: { type: "tool_use", id: "p1", name: "probe", input: {} }, action: "rerun" },
+          { toolUse: { type: "tool_use", id: "b1", name: "bash", input: { command: "ls" } }, action: "rerun" },
+        ],
+        stepRecorded: false,
+        turn: 2,
+        iteration: 1,
+        remainingMs: 60_000,
+      },
+    });
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toEqual({
+      turns: [],
+      firstIdx: 2,
+      inFlight: [
+        { callId: "p1", tool: "probe" },
+        { callId: "b1", tool: "bash" },
+      ],
+      turn: 2,
+      iteration: 1,
+      remainingMs: expect.any(Number),
+    });
+    expect(log).toEqual(["probe"]);
+    // bash is not in the toolset here: the re-run yields the runner's own unknown-tool result, never a throw.
+    const results = provider.requests[0].messages[2].content as { toolUseId: string; content: string }[];
+    expect(results.map((r) => r.toolUseId)).toEqual(["p1", "b1"]);
+    expect(results[1].content).toContain("Unknown tool: bash");
+  });
+
+  it("the plan's remaining budget is the deadline: with none left the loop takes no step and the finale runs at once", async () => {
+    const provider = scripted([text("wrapped up")]);
+    const events: RunEvent[] = [];
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ toolset: "none" }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: (e) => events.push(e),
+      now: () => 1_000,
+      resume: { settlements: [], stepRecorded: true, turn: 1, iteration: 3, remainingMs: 0 },
+    });
+    // No step ran; the loop went straight to the budget finale (whose own
+    // deadline, also spent, yields the budget notice rather than a write-up).
+    expect(answer).toMatch(/budget/);
+    expect(provider.requests.length).toBeLessThanOrEqual(1);
+    expect(events.some((e) => e.type === "run_note" && e.kind === "time_budget_exhausted")).toBe(true);
+    expect(events.some((e) => e.type === "tool_call")).toBe(false);
+  });
+});

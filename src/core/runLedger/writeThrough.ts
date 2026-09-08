@@ -123,12 +123,31 @@ export interface LedgerRun {
   close(): Promise<void>;
 }
 
+/** A run this generation reclaimed at boot (features/run-history.md item 37):
+ *  its row is already ours — no claim, no seed — and its writes continue from
+ *  where the previous generation stopped. */
+export interface AdoptRunRequest {
+  runId: string;
+  threadKey: string;
+  /** The row's state, so patches merge into what the previous generation recorded. */
+  state: RunState;
+  /** The last step record's number; the next step write is `lastStep + 1`. */
+  lastStep: number;
+  /** The highest event `seq` on the ledger; the next append continues past it. */
+  lastSeq: number;
+  onStop?: (mode: StopMode) => void;
+}
+
 export interface LedgerWriteThrough {
   readonly gen: string;
   /** Claim and seed. `undefined` when the run is not tracked: the thread has a
    *  live row already (another generation's — reclaim is the resume phase's),
    *  the routes are missing, or the claim kept failing. */
   open(req: OpenRunRequest): Promise<LedgerRun | undefined>;
+  /** Take up a reclaimed run: heartbeat, steps, events and state continue
+   *  under this generation with no claim and no seed. Synchronous — the row is
+   *  ours since the boot reclaim, and the heartbeat must start at once. */
+  adopt(req: AdoptRunRequest): LedgerRun;
 }
 
 /** Backoff before a retry: the claim gets both, a step or state write the first. */
@@ -201,8 +220,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private readonly onStop?: (mode: StopMode) => void;
     private detached = false;
     private finished = false;
-    private stepNo = 0;
-    private lastSeq = 0;
+    private stepNo: number;
+    private lastSeq: number;
     private state: RunState;
     private stateSending: Promise<void> = Promise.resolve();
     private stateDirty = false;
@@ -222,11 +241,16 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       ...(opts.schedule ? { schedule: opts.schedule } : {}),
     });
 
-    constructor(req: OpenRunRequest) {
+    constructor(
+      req: Pick<OpenRunRequest, "runId" | "threadKey" | "state" | "onStop">,
+      from: { stepNo: number; lastSeq: number } = { stepNo: 0, lastSeq: 0 },
+    ) {
       this.runId = req.runId;
       this.threadKey = req.threadKey;
       this.state = req.state ?? {};
       this.onStop = req.onStop;
+      this.stepNo = from.stepNo;
+      this.lastSeq = from.lastSeq;
     }
 
     readonly sink: RecordSink = {
@@ -410,6 +434,11 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       if ((await claim(req)) !== "ok") return undefined;
       const run = new TrackedRun(req);
       if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs);
+      run.startHeartbeat();
+      return run;
+    },
+    adopt(req) {
+      const run = new TrackedRun(req, { stepNo: req.lastStep, lastSeq: req.lastSeq });
       run.startHeartbeat();
       return run;
     },

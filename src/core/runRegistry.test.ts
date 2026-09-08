@@ -48,6 +48,31 @@ describe("RunRegistry.create", () => {
     // A capability token needs real entropy — the default is 32 random bytes hex.
     expect(a.token).toMatch(/^[0-9a-f]{64}$/);
   });
+
+  // Feature: features/run-history.md item 37 — a resumed run keeps its identity
+  // and its past: the ledger's run id, and the events published before the
+  // restart under their original seqs, so the stream stays one contiguous record.
+  it("a resume creates the run under a given id with its earlier events replayed under their seqs; new events continue past the highest", () => {
+    const { reg } = testRegistry();
+    const run = reg.create("resumed", undefined, {
+      id: "ledger-run-1",
+      replay: [
+        { type: "tool_call", tool: "bash", summary: "ls", at: 2, seq: 2 },
+        { type: "input", text: "go", at: 1, seq: 1 }, // out of order on purpose: replay sorts by seq
+      ],
+    });
+    expect(run.id).toBe("ledger-run-1");
+    reg.publish(run.id, { type: "tool_result", tool: "bash", ok: true, summary: "x", at: 3 });
+    const snap = reg.snapshot(run.id, run.token)!;
+    expect(snap.events.map((e) => [e.seq, e.type])).toEqual([
+      [1, "input"],
+      [2, "tool_call"],
+      [3, "tool_result"],
+    ]);
+    expect(snap.eventCount).toBe(3);
+    // The next fresh run still mints its own id.
+    expect(reg.create().id).toBe("id-1");
+  });
 });
 
 describe("RunRegistry.subscribe — token gate (constant-time capability)", () => {
