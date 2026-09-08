@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { runDurationMs } from "./runDuration.js";
+import { systemClock } from "./trace/clock.js";
 import { formatDuration } from "./time/formatDuration.js";
 import { authorize } from "./authz/authorize.js";
 import type { Actor, Resource } from "./authz/types.js";
@@ -586,7 +587,7 @@ export function renderCompact(
 ): string {
   if (commandId === "runs.list" && isObject(output) && Array.isArray(output.runs)) {
     const runs = output.runs.filter(isObject);
-    const now = opts.now ?? Date.now();
+    const now = opts.now ?? systemClock();
     const lines = runs.length === 0 ? ["(no runs)"] : runs.map((r) => renderRunLine(r, now, opts.surface ?? "text"));
     // The service degraded to live rows: say so, or a reader takes a short list for the truth.
     if (output.storeUnavailable === true) lines.push(STORE_UNAVAILABLE_BANNER);

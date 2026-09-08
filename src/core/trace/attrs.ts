@@ -76,6 +76,16 @@ export interface AttrDomain {
   clockSkewMs: number;
   timedOut: boolean;
   abandoned: boolean;
+  // the bot's own roots (item 20): slack.catch_up, drain, deploy.step.<worker>
+  signal: "SIGTERM" | "SIGINT" | "other";
+  channels: number;
+  missed: number;
+  orphans: number;
+  skipped: number;
+  runs: number;
+  handed: number;
+  sealed: number;
+  abandonedRuns: number;
 }
 
 export type SpanAttrKey = keyof AttrDomain;
@@ -174,6 +184,15 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   clockSkewMs: "number",
   timedOut: "boolean",
   abandoned: "boolean",
+  signal: "string",
+  channels: "number",
+  missed: "number",
+  orphans: "number",
+  skipped: "number",
+  runs: "number",
+  handed: "number",
+  sealed: "number",
+  abandonedRuns: "number",
 };
 
 export const ATTR_KEYS: readonly SpanAttrKey[] = Object.keys(ATTR_TYPE) as SpanAttrKey[];

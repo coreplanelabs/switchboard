@@ -1,7 +1,7 @@
 // Feature: features/tracing.md — one request, one root: the constructor of
 // roots, its sinks, and what a bound run and a bound card see.
 import { describe, expect, it } from "vitest";
-import { channelOf, startRequestRoot } from "./requestTrace.js";
+import { channelOf, startProcessRoot, startRequestRoot, withProcessRoot } from "./requestTrace.js";
 import { recordingSink } from "./testing/recordingSink.js";
 import { createTickingClock } from "./testing/tickingClock.js";
 import type { RunEvent } from "./runEvents.js";
@@ -102,5 +102,51 @@ describe("startRequestRoot", () => {
     expect(channelOf("cli:local")).toBe("cli");
     expect(channelOf("teams:x")).toBeUndefined();
     expect(channelOf("nocolon")).toBeUndefined();
+  });
+});
+// Feature: features/tracing.md item 20 — a root for the bot's own work outside
+// any request: leading sinks only, the caller's attrs, ended by the caller or
+// by withProcessRoot.
+describe("startProcessRoot", () => {
+  it("starts a named root at the clock (or the given start) with the attrs, on the leading sinks only — nothing streams, nothing paints", () => {
+    const clock = createTickingClock(50_000);
+    const log = recordingSink();
+    const root = startProcessRoot({ clock: clock.now, sinks: [log] }, "drain", {
+      attrs: { signal: "SIGTERM", runs: 2 },
+    });
+    expect(root.record()).toMatchObject({ name: "drain", startedAt: 50_000, attrs: { signal: "SIGTERM", runs: 2 } });
+    expect(root.parentId).toBeUndefined();
+    clock.tick(1_500);
+    root.end("ok", { handed: 1, sealed: 0, abandonedRuns: 1 });
+    expect(log.ends.map((e) => [e.name, e.durationMs, e.attrs])).toEqual([
+      ["drain", 1_500, { signal: "SIGTERM", runs: 2, handed: 1, sealed: 0, abandonedRuns: 1 }],
+    ]);
+    const backdated = startProcessRoot({ clock: clock.now, sinks: [log] }, "slack.catch_up", { startedAt: 40_000 });
+    expect(backdated.record().startedAt).toBe(40_000);
+  });
+
+  it("withProcessRoot ends the root ok on return and failed (classified, no message on the wire) on a throw — which still propagates; with no sinks and no config it is silent", async () => {
+    const log = recordingSink();
+    const deps = { clock: () => 1_000, sinks: [log] };
+    const value = await withProcessRoot(deps, "slack.catch_up", async (root) => {
+      root.setAttrs({ channels: 3, missed: 1, orphans: 0, skipped: 0 });
+      return "done";
+    });
+    expect(value).toBe("done");
+    expect(log.ended("slack.catch_up")).toMatchObject({
+      status: "ok",
+      attrs: { channels: 3, missed: 1, orphans: 0, skipped: 0 },
+    });
+    await expect(
+      withProcessRoot(deps, "deploy.step.bot", async () => {
+        throw new Error(`wrangler exploded with token ghp_${"a".repeat(36)}`);
+      }),
+    ).rejects.toThrow(/wrangler exploded/);
+    const failed = log.ends.find((e) => e.name === "deploy.step.bot");
+    expect(failed?.status).toBe("error");
+    expect(failed?.errorMessage).toContain("wrangler exploded");
+    expect(failed?.errorMessage).not.toContain("a".repeat(36));
+    // No sinks injected, no config: the null sink, no throw.
+    await expect(withProcessRoot({ clock: () => 1 }, "drain", async () => 1)).resolves.toBe(1);
   });
 });

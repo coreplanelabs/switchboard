@@ -10,7 +10,17 @@ describe("streamSpans", () => {
       for (const name of STREAMED_SPANS) expect(classOf(name, owner), name).toBeDefined();
       for (const prefix of Object.keys(STREAMED_PREFIXES)) expect(classOf(`${prefix}x`, owner), prefix).toBeDefined();
     }
-    for (const logOnly of ["exec.exec", "github.rest", "http.client", "post.history_write", "model.block.text"]) {
+    for (const logOnly of [
+      "exec.exec",
+      "github.rest",
+      "http.client",
+      "post.history_write",
+      "model.block.text",
+      "slack.catch_up",
+      "drain",
+      "deploy.step.bot",
+      "deploy.wait_live",
+    ]) {
       expect(isStreamed(logOnly), logOnly).toBe(false);
       expect(classOf(logOnly, "agent"), logOnly).toBeUndefined();
     }

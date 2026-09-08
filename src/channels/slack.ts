@@ -1,7 +1,7 @@
 import { extname } from "node:path";
 import { App, SocketModeReceiver, type webApi } from "@slack/bolt";
 import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
-import { startRequestRoot } from "../core/requestTrace.js";
+import { startRequestRoot, withProcessRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { Span } from "../core/trace/types.js";
 import { catchUpWindowWarning } from "../core/drain.js";
@@ -292,6 +292,7 @@ export function resetSlackNameCaches(): void {
 }
 
 export function createSlackApp(deps: CoreDeps) {
+  const clock = deps.clock ?? systemClock;
   // The receiver is built explicitly (rather than `socketMode: true`) so the
   // adapter can listen to its websocket lifecycle: every `connected` — first
   // start and each reconnect — triggers the missed-mention catch-up (#184).
@@ -343,45 +344,56 @@ export function createSlackApp(deps: CoreDeps) {
         // first so a generation that died since the last connect no longer
         // shields its cards (run-history item 36).
         await refreshForeignLiveCards();
-        await catchUpMissedMentions({
-          client: app.client,
-          botUserId: id,
-          windowMs: catchUp?.windowMinutes != null ? catchUp.windowMinutes * 60_000 : undefined,
-          alreadyHandled: wasHandledHere,
-          // Orphaned-card sweep (item 8): cards a dead process left spinning
-          // are closed as interrupted; cards this process is driving — or that
-          // the run ledger says another live generation holds — are not.
-          isLive: isLiveCard,
-          onOrphanedCard: async (card, frame) => {
-            await app.client.chat.update({ channel: card.channel, ts: card.ts, ...render(frame) });
-          },
-          // Not awaited per message: a run takes minutes and live events run
-          // concurrently too — the runner only awaits the hand-off.
-          onMissed: (m) => {
-            // The scan's alreadyHandled check ran at scan time; a live
-            // delivery that landed between the scan and this dispatch has
-            // claimed the pair since — re-check, or both would run (#346).
-            if (wasHandledHere(m.channel, m.ts)) {
-              console.log(`[catch-up] ${m.channel}:${m.ts}: skipped — handled live since the scan`);
-              return;
-            }
-            void handle(deps, app.client, {
-              channel: m.channel,
-              user: m.user,
-              text: stripMention(m.text, id),
-              ts: m.ts,
-              threadTs: m.threadTs,
-              files: m.files as SlackFile[] | undefined,
-              botUserId: id,
-              caughtUp: true,
-            }).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
-          },
+        // The pass is one `slack.catch_up` root on the span log (features/
+        // tracing.md item 20), its counts as attrs; a throw fails it and still
+        // reaches the catch below.
+        await withProcessRoot(deps, "slack.catch_up", async (root) => {
+          const result = await catchUpMissedMentions({
+            client: app.client,
+            botUserId: id,
+            windowMs: catchUp?.windowMinutes != null ? catchUp.windowMinutes * 60_000 : undefined,
+            alreadyHandled: wasHandledHere,
+            // Orphaned-card sweep (item 8): cards a dead process left spinning
+            // are closed as interrupted; cards this process is driving — or that
+            // the run ledger says another live generation holds — are not.
+            isLive: isLiveCard,
+            onOrphanedCard: async (card, frame) => {
+              await app.client.chat.update({ channel: card.channel, ts: card.ts, ...render(frame) });
+            },
+            // Not awaited per message: a run takes minutes and live events run
+            // concurrently too — the runner only awaits the hand-off.
+            onMissed: (m) => {
+              // The scan's alreadyHandled check ran at scan time; a live
+              // delivery that landed between the scan and this dispatch has
+              // claimed the pair since — re-check, or both would run (#346).
+              if (wasHandledHere(m.channel, m.ts)) {
+                console.log(`[catch-up] ${m.channel}:${m.ts}: skipped — handled live since the scan`);
+                return;
+              }
+              void handle(deps, app.client, {
+                channel: m.channel,
+                user: m.user,
+                text: stripMention(m.text, id),
+                ts: m.ts,
+                threadTs: m.threadTs,
+                files: m.files as SlackFile[] | undefined,
+                botUserId: id,
+                caughtUp: true,
+              }).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
+            },
+          });
+          root.setAttrs({
+            channels: result.channels,
+            missed: result.missed,
+            orphans: result.orphans,
+            skipped: result.skippedChannels,
+          });
         });
       })().catch((err: Error) => {
         // auth.test itself failed (bad token, network): the scan never ran —
         // record that too, or /healthz would keep showing a stale clean run.
         console.error(`[catch-up] ${err.message}`);
-        recordCatchUpOutcome({ at: Date.now(), channels: 0, missed: 0, skippedChannels: 0, error: err.message });
+        recordCatchUpOutcome({ at: clock(), channels: 0, missed: 0, skippedChannels: 0, error: err.message });
       });
     });
   }
@@ -526,7 +538,7 @@ export const STALE_DELIVERY_MS = 60_000;
 export async function dedupeDelivery(
   client: Pick<CatchUpClient, "conversations">,
   ev: { channel: string; ts: string; threadTs: string; botUserId?: string; caughtUp?: true },
-  nowMs = Date.now(),
+  nowMs: number = systemClock(),
   state: { was: (c: string, ts: string) => boolean; mark: (c: string, ts: string) => void } = {
     was: wasHandledHere,
     mark: markHandledHere,
@@ -623,7 +635,7 @@ async function receiveSlackMessage(
   // ack, and overlapped with the file downloads (one Slack round-trip, not a
   // serial one). Awaited before dispatch so the note precedes the run card.
   const delayNote = ev.caughtUp
-    ? new SlackIO(client, ev).reply(catchUpDelayNote(ev.ts, Date.now())).catch((err: Error) => {
+    ? new SlackIO(client, ev).reply(catchUpDelayNote(ev.ts, systemClock())).catch((err: Error) => {
         console.error(`[catch-up] ${ev.channel}:${ev.ts} delay note failed: ${err.message}`);
       })
     : Promise.resolve();

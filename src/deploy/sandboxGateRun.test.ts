@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { LIVE_GATE_DEADLINE_MS, LIVE_GATE_POLL_MS } from "./liveGate.js";
 import { SANDBOX_BEARER_ENV, workersFor, type DeployStep, type SandboxLiveGate } from "./plan.js";
 import { deployStep, waitUntilSandboxLive, type SandboxGateDeps, type SandboxRollout, type StepExec } from "./run.js";
+import type { LogLine } from "../core/trace/sinks.js";
 import {
   probeThreadKey,
   type AppState,
@@ -101,7 +102,11 @@ function harness(script: Scripted, env: Record<string, string> = { SANDBOX_TOKEN
   };
   const io = { log: (l: string) => lines.push(l), warn: (l: string) => lines.push(`WARN ${l}`), stream: () => {} };
   const count = (dep: string) => calls.filter((c) => c.dep === dep).length;
-  return { deps, io, calls, lines, count };
+  /** The runner's own lines, without the span log lines `deployStep` writes to the same output. */
+  const plain = () => lines.filter((l) => !l.startsWith("{"));
+  /** The span log lines, parsed (features/tracing.md item 20). */
+  const spans = () => lines.filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as LogLine);
+  return { deps, io, calls, lines, count, plain, spans };
 }
 
 describe("waitUntilSandboxLive", () => {
@@ -267,7 +272,7 @@ describe("deployStep (sandbox)", () => {
     expect(h.calls[0].args).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
     expect(h.calls[1].args).toEqual([["npm", "run", "deploy"]]);
     expect(h.count("readAppState")).toBe(4);
-    expect(h.lines).toEqual([
+    expect(h.plain()).toEqual([
       "\n[deploy:all] ▶ sandbox (switchboard-sandbox) — deploy/cloudflare-sandbox: npm run deploy",
       "[deploy:all] sandbox: container application at version 11 (image sha256:23e69f9e) before the upload",
       "[deploy:all] sandbox: version 0c48b341-f216-4262-81c0-bc62ecb5669a uploaded — waiting until live (commit e6af1aa)",
@@ -276,6 +281,30 @@ describe("deployStep (sandbox)", () => {
       "[deploy:all] sandbox: deployed, not live yet — rollout: application still at pre-deploy version 11 / image sha256:23e69f9e — the deploy's new version is not registered yet (0m 15s)",
       `[deploy:all] sandbox: live (${LIVE_DETAIL}; 30s after the upload)`,
     ]);
+  });
+
+  // Feature: features/tracing.md item 20; features/release-and-deploy.md item
+  // 19 — the step is a root on the runner's own log and its live gate a child
+  // whose `waitedMs` is the number the "live" line prints.
+  it("the step is a `deploy.step.sandbox` root on the runner's log and its live gate a `deploy.wait_live` child whose waitedMs is the seconds the live line prints", async () => {
+    const h = harness({
+      health: [serving(HEAD)],
+      appState: [before, before, before, after],
+      instances: [preDeployFleet, preDeployFleet, settled()],
+    });
+    await deployStep(sandboxStep, plan, HEAD, h.io, h.deps, exec(h, diff));
+    const spans = h.spans();
+    expect(spans.map((s) => s.span)).toEqual(["deploy.wait_live", "deploy.step.sandbox"]);
+    const [wait, step] = spans as [LogLine, LogLine];
+    expect(wait.parentSpanId).toBe(step.spanId);
+    expect(step.parentSpanId).toBeUndefined();
+    expect(wait).toMatchObject({ status: "ok", ms: 30_000, attrs: { outcome: "live", waitedMs: 30_000 } });
+    expect(h.plain().at(-1)).toContain(`${Math.round((wait.attrs.waitedMs as number) / 1000)}s after the upload`);
+    expect(step).toMatchObject({ status: "ok", attrs: { outcome: "live" } });
+    // The line carries the documented fields and no text.
+    for (const s of spans) expect(Object.keys(s).filter((k) => ["text", "summary", "output"].includes(k))).toEqual([]);
+    // The step root's line comes after every plain line: it ends last.
+    expect(h.lines.at(-1)?.startsWith("{")).toBe(true);
   });
 
   it("a deploy that printed no container change is a Worker-only deploy: the pre-deploy read still happens, no advance is awaited, and the log says so", async () => {
@@ -293,7 +322,7 @@ describe("deployStep (sandbox)", () => {
     expect(h.lines).toContain(
       "[deploy:all] sandbox: wrangler printed no container change — Worker-only deploy, no rollout expected",
     );
-    expect(h.lines.at(-1)).toBe(
+    expect(h.plain().at(-1)).toBe(
       `[deploy:all] sandbox: live (Worker serves e6af1aa; Worker-only deploy — no container change (2 running instance(s) on version 11); probe \`echo ok\` exit 0 from ${KEY} (version 11); 0s after the upload)`,
     );
   });
@@ -325,5 +354,10 @@ describe("deployStep (sandbox)", () => {
       reason:
         "deployed but NOT live — rollout: application still at pre-deploy version 11 / image sha256:23e69f9e — the deploy's new version is not registered yet — still not live after 20 min (deadline 20 min)",
     });
+    // The step's root ends in error naming the outcome; the wait child says not_live and carries no waitedMs.
+    expect(h.spans().map((s) => [s.span, s.status, s.attrs])).toEqual([
+      ["deploy.wait_live", "ok", { outcome: "not_live" }],
+      ["deploy.step.sandbox", "error", { outcome: "not_live" }],
+    ]);
   });
 });
