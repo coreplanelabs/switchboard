@@ -9,6 +9,7 @@ import {
   type DeployPlan,
   type WorkerName,
 } from "../../deploy/plan.js";
+import type { LoadedProfile } from "../../deploy/profile.js";
 import { planRestart, type RestartPlan } from "../../deploy/restart.js";
 import { formatDeployResults, type DeployRunResult, type RestartRunResult } from "../../deploy/run.js";
 import {
@@ -41,6 +42,8 @@ export interface DeployCommandDeps {
     checkout: CheckoutProbe;
     /** `--affected`: which Workers this tree needs deployed, judged per Worker against what it serves (or `base`) — src/deploy/affected.ts over the host (src/deploy/run.ts `computeAffectedOnHost`). */
     affected(opts: { base?: string }): Promise<AffectedReport>;
+    /** The installation the plan is for (src/deploy/profile.ts): `deploy/profile.json`, else the example — which `deploy all` refuses. Throws (→ `unavailable`) when the file is invalid. */
+    profile(): Promise<LoadedProfile>;
   };
 }
 
@@ -121,13 +124,23 @@ async function computePlan(
 ): Promise<DeployPlan> {
   if (options.base !== undefined && !options.affected)
     throw new CommandError("invalid_input", "--base only means something with --affected");
+  const loaded = await loadProfile(deps);
   const affected = options.affected
     ? await deps.deploy.affected(options.base !== undefined ? { base: options.base } : {})
     : undefined;
-  const plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.checkout);
+  const plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.checkout, loaded);
   if (plan.steps.length === 0 && !affected)
     throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
   return plan;
+}
+
+/** The profile, or `unavailable` naming what is wrong with it — the one error a caller can act on. */
+async function loadProfile(deps: DeployCommandDeps): Promise<LoadedProfile> {
+  try {
+    return await deps.deploy.profile();
+  } catch (err) {
+    throw new CommandError("unavailable", `deployment profile: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 const planJson = (plan: DeployPlan): JsonValue => plan as unknown as JsonValue;
@@ -210,12 +223,21 @@ export const deployRestart = defineCommand({
     return `${o.target} restarted — startedAt ${o.startedAt} (was ${o.previousStartedAt ?? "unknown"}), live after ${Math.round((o.waitedMs as number) / 1000)}s`;
   },
   handler: async ({ options, deps }) => {
-    const plan = planRestart({
-      only: options.only ?? "bot",
-      force: options.force ?? false,
-      waitMaxMinutes: options.waitMax ?? 30,
-      pollSeconds: options.poll ?? 60,
-    });
+    const loaded = await loadProfile(deps);
+    if (loaded.origin === "example")
+      throw new CommandError(
+        "unavailable",
+        `${loaded.path} is the example profile — write deploy/profile.json for this installation before restarting its bot`,
+      );
+    const plan = planRestart(
+      {
+        only: options.only ?? "bot",
+        force: options.force ?? false,
+        waitMaxMinutes: options.waitMax ?? 30,
+        pollSeconds: options.poll ?? 60,
+      },
+      loaded.profile,
+    );
     const result = await deps.deploy.restart(plan);
     if (result.kind === "refused")
       throw new CommandError("unavailable", `refusing —\n  - ${result.problems.join("\n  - ")}`);

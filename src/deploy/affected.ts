@@ -1,4 +1,4 @@
-import { WORKERS, type WorkerDef, type WorkerName } from "./plan.js";
+import { WORKER_SPECS, type WorkerName, type WorkerSpec } from "./plan.js";
 
 // Which Workers a tree needs deployed — DERIVED, never declared
 // (features/release-and-deploy.md items 4–7). A PR body saying "bot deploy
@@ -38,6 +38,9 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
     rule: "operator manifests (a new secret is a `wrangler secret put`, not a deploy)",
     test: /^deploy\/(secrets\.manifest\.json|agent-env\.jsonc|agent-env-bootstrap\.sh)$/,
   },
+  // The deployment profile says WHERE the fleet is; it is read by the deploy
+  // tooling, never bundled or copied into an image.
+  { rule: "deployment profile", test: /^deploy\/profile(\.example)?\.json$/ },
   {
     rule: "repo metadata",
     test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|fly\.toml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|project\.json|switchboard\.png)$/,
@@ -59,7 +62,7 @@ export type PathClass =
 /** Who claims a path: an inert rule, the Workers whose declared inputs cover
  *  it (a dir prefix ends with `/`, anything else is an exact file), or nobody.
  *  Inert wins over a claim — a test under `src/` never reaches the image. */
-export function classifyPath(path: string, workers: readonly WorkerDef[] = WORKERS): PathClass {
+export function classifyPath(path: string, workers: readonly WorkerSpec[] = WORKER_SPECS): PathClass {
   const inert = INERT_RULES.find((r) => r.test.test(path));
   if (inert) return { kind: "inert", rule: inert.rule };
   const claimed = workers
@@ -387,7 +390,7 @@ async function liveBase(
 export async function computeAffected(
   probe: AffectedProbe,
   opts: { base?: string } = {},
-  workers: readonly WorkerDef[] = WORKERS,
+  workers: readonly WorkerSpec[] = WORKER_SPECS,
 ): Promise<AffectedReport> {
   const head = await probe.head();
   let lastRelease: Promise<{ tag: string; commit: string } | undefined> | undefined;

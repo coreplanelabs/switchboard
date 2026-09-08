@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { AffectedReport } from "../../deploy/affected.js";
-import { BOT_HEALTH_URL, formatPlan, type DeployPlan } from "../../deploy/plan.js";
+import { formatPlan, type DeployPlan } from "../../deploy/plan.js";
+import { profileUrls, type LoadedProfile } from "../../deploy/profile.js";
 import type { DeployRunResult } from "../../deploy/run.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
 import { callerWith } from "../testing/callers.js";
 import { parseInvocation } from "../commandSurface.js";
-import { BOT_ADMIN_RESTART_URL, RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
+import { RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
+import { TEST_PROFILE } from "../../deploy/testing/profile.js";
 import type { RestartRunResult } from "../../deploy/run.js";
 import { deployAll, deployPlan, deployRestart, registerDeployCommands, type DeployCommandDeps } from "./deploy.js";
 
@@ -52,11 +54,18 @@ const NOTHING: AffectedReport = {
   selected: [],
 };
 
+/** The installation the tests deploy to: the fixture profile, loaded as a real one. */
+const LOADED: LoadedProfile = { profile: TEST_PROFILE, origin: "profile", path: "deploy/profile.json" };
+const URLS = profileUrls(TEST_PROFILE);
+const BOT_HEALTH_URL = URLS.healthUrl("bot");
+const BOT_ADMIN_RESTART_URL = URLS.botAdminRestartUrl;
+
 function bind(
   run: (plan: DeployPlan) => Promise<DeployRunResult>,
   hasNodeModules: (dir: string) => boolean = () => true,
   restart: (plan: RestartPlan) => Promise<RestartRunResult> = neverRestarts,
   affected: (opts: { base?: string }) => Promise<AffectedReport> = neverAffected,
+  profile: () => Promise<LoadedProfile> = async () => LOADED,
 ) {
   const registry = new CommandRegistry<DeployCommandDeps>({ audit: () => {} });
   registerDeployCommands(registry);
@@ -78,6 +87,7 @@ function bind(
         affectedCalls.push(opts);
         return affected(opts);
       },
+      profile,
     },
   });
   return { commands, plans, restartPlans, affectedCalls };

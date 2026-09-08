@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { LIVE_GATE_DEADLINE_MS } from "./liveGate.js";
+import { TEST_PROFILE } from "./testing/profile.js";
 import {
   authorizeRestart,
   constantTimeEqual,
   lookupConstantTime,
-  BOT_ADMIN_RESTART_URL,
   classifyRestartResponse,
   decideRestart,
   formatRestartPlan,
@@ -166,25 +166,24 @@ describe("restart request/response wire shapes", () => {
 });
 
 describe("planRestart / formatRestartPlan", () => {
-  it("the plan names the bot's admin route, its /healthz, the token env, the force flag and the wait budget", () => {
-    const plan = planRestart({ only: "bot", force: false, waitMaxMinutes: 30, pollSeconds: 60 });
+  it("the plan names the bot's admin route and /healthz — derived from the profile's bot hostname — the token env, the force flag and the wait budget", () => {
+    const plan = planRestart({ only: "bot", force: false, waitMaxMinutes: 30, pollSeconds: 60 }, TEST_PROFILE);
     expect(plan).toEqual({
       target: "bot",
-      adminUrl: BOT_ADMIN_RESTART_URL,
-      healthUrl: "https://switchboard.coreplanelabs.dev/healthz",
+      adminUrl: "https://switchboard.example.test/admin/restart",
+      healthUrl: "https://switchboard.example.test/healthz",
       tokenEnv: RESTART_TOKEN_ENV,
       force: false,
       waitMaxMs: 30 * 60_000,
       pollMs: 60_000,
       liveDeadlineMs: LIVE_GATE_DEADLINE_MS,
     });
-    expect(BOT_ADMIN_RESTART_URL).toBe("https://switchboard.coreplanelabs.dev/admin/restart");
     const text = formatRestartPlan(plan);
-    expect(text).toContain("POST https://switchboard.coreplanelabs.dev/admin/restart");
+    expect(text).toContain("POST https://switchboard.example.test/admin/restart");
     expect(text).toContain(RESTART_TOKEN_ENV);
     expect(text).toContain("startedAt");
-    expect(formatRestartPlan(planRestart({ only: "bot", force: true, waitMaxMinutes: 5, pollSeconds: 10 }))).toContain(
-      "FORCED",
-    );
+    expect(
+      formatRestartPlan(planRestart({ only: "bot", force: true, waitMaxMinutes: 5, pollSeconds: 10 }, TEST_PROFILE)),
+    ).toContain("FORCED");
   });
 });

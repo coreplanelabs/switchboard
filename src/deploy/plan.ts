@@ -16,20 +16,21 @@
 // CLOUDFLARE_API_TOKEN is KEPT — it is how CI authenticates — and the runner
 // asserts the account instead (`decideAccount`): a token for another account
 // is refused with wrangler's own words, never silently swapped for a login.
-// No node:* imports here — pure data + functions.
+//
+// WHERE the Workers deploy — the account, each Worker's script name and
+// hostname, where the runtime config comes from — is the deployment profile's
+// (src/deploy/profile.ts), not this file's: the static half of each Worker
+// (its dir, its entry, its inputs, its preflight) is `WORKER_SPECS`, and
+// `workersFor(profile)` binds the two. No node:* imports here — pure data +
+// functions.
 
 import { formatAffectedText, type AffectedReport } from "./affected.js";
-
-/** The coreplane-infra account every wrangler.jsonc under deploy/ pins. */
-export const PRODUCTION_ACCOUNT_ID = "3c7b28f23cc93f09e77bb0a9ffcb7e6f";
+import { profileUrls, type DeploymentProfile, type LoadedProfile } from "./profile.js";
 
 /** Env vars removed from every deploy step's environment. */
 export const UNSET_ENV = ["CLOUDFLARE_ACCOUNT_ID"] as const;
 
 export type WorkerName = "memory" | "bot" | "resident" | "sandbox";
-
-/** The bot's public health probe (deploy/cloudflare/preflight.mjs reads the same URL). */
-export const BOT_HEALTH_URL = "https://switchboard.coreplanelabs.dev/healthz";
 
 /** What a Worker is built from, beyond the import closure of its `entry`
  *  (features/release-and-deploy.md item 5). `paths`: a dir prefix (ends with
@@ -67,32 +68,41 @@ export interface CapabilityCheck {
   needs: string;
 }
 
-export interface WorkerDef {
+/** The static half of a Worker — true for every installation. */
+export interface WorkerSpec {
   name: WorkerName;
-  /** The Cloudflare Worker script name (what `wrangler deployments list` shows). */
-  script: string;
   /** Repo-relative directory holding package.json + wrangler.jsonc. */
   dir: string;
   /** The Worker script wrangler bundles — the root of its import closure. */
   entry: string;
-  /** `GET /healthz` — answers `build.commit`, the commit this Worker serves (execution.md item 13). */
-  healthUrl: string;
   /** Set when `/healthz` sits behind a bearer: the env var holding it. */
   healthBearerEnv?: string;
   inputs: WorkerInputs;
-  /** Present when the dir's `npm run deploy` runs a preflight that can refuse.
-   *  `healthUrl` is the bot's public `/healthz`: the heartbeat reads it while
-   *  waiting, and the live gate polls it after the deploy. */
-  preflight?: { forceEnv: string; healthUrl?: string };
-  /** Present when "deployed" is not "live": the step is done only once
-   *  `healthUrl` is answered by a container that is not draining AND reports
-   *  the deployed commit as its `build.commit` (src/deploy/liveGate.ts). */
-  liveGate?: { healthUrl: string };
+  /** Present when the dir's `npm run deploy` runs a preflight that can refuse. */
+  preflight?: { forceEnv: string };
+  /** True when "deployed" is not "live": the step is done only once the Worker's
+   *  `/healthz` is answered by a container that is not draining AND reports the
+   *  deployed commit as its `build.commit` (src/deploy/liveGate.ts). */
+  liveGated?: boolean;
   /** Env the step needs present (the runner fails fast when a requirement has none of its alternatives). */
   requiredEnv?: readonly EnvRequirement[];
   /** The credential capabilities this Worker's deploy needs beyond Workers Scripts: Edit — each one checked before any Worker deploys. */
   capabilities?: readonly CapabilityCheck[];
   why: string;
+}
+
+/** A Worker bound to an installation: the spec plus what the profile says about it. */
+export interface WorkerDef extends Omit<WorkerSpec, "preflight" | "liveGated"> {
+  /** The Cloudflare Worker script name (what `wrangler deployments list` shows). */
+  script: string;
+  /** `GET /healthz` — answers `build.commit`, the commit this Worker serves (execution.md item 13). */
+  healthUrl: string;
+  /** Present when the dir's `npm run deploy` runs a preflight that can refuse.
+   *  `healthUrl` is the bot's public `/healthz`: the heartbeat reads it while
+   *  waiting, and the live gate polls it after the deploy. */
+  preflight?: { forceEnv: string; healthUrl?: string };
+  /** Present when "deployed" is not "live" (see `WorkerSpec.liveGated`). */
+  liveGate?: { healthUrl: string };
 }
 
 /** The three bearer scopes the resident preflight accepts (deploy/cloudflare-resident/preflight.mjs `TOKEN_ENV_VARS`); read is enough. */
@@ -106,13 +116,11 @@ export const CONTAINERS_CAPABILITY: CapabilityCheck = {
 };
 
 /** Canonical order. Never reorder without updating README + AGENTS.md. */
-export const WORKERS: readonly WorkerDef[] = [
+export const WORKER_SPECS: readonly WorkerSpec[] = [
   {
     name: "memory",
-    script: "switchboard-memory",
     dir: "deploy/cloudflare-memory",
     entry: "deploy/cloudflare-memory/worker.ts",
-    healthUrl: "https://switchboard-memory.coreplanelabs.dev/healthz",
     inputs: {
       paths: ["deploy/cloudflare-memory/"],
       lockfile: [{ workspace: "deploy/cloudflare-memory", includeDev: false }],
@@ -121,10 +129,8 @@ export const WORKERS: readonly WorkerDef[] = [
   },
   {
     name: "bot",
-    script: "switchboard",
     dir: "deploy/cloudflare",
     entry: "deploy/cloudflare/worker.ts",
-    healthUrl: BOT_HEALTH_URL,
     // The Worker shim's dir, plus everything the root Dockerfile COPYs into the
     // image (src/, web/, config/, skills/, the package files, the tsconfigs)
     // and the two files that decide what it copies. The lockfile counts for
@@ -151,18 +157,16 @@ export const WORKERS: readonly WorkerDef[] = [
         { workspace: "deploy/cloudflare", includeDev: false },
       ],
     },
-    preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL },
-    liveGate: { healthUrl: BOT_HEALTH_URL },
+    preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE" },
+    liveGated: true,
     // The preflight reads the container application and the deploy pushes the image: both need Containers.
     capabilities: [CONTAINERS_CAPABILITY],
     why: "container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current env",
   },
   {
     name: "resident",
-    script: "switchboard-resident",
     dir: "deploy/cloudflare-resident",
     entry: "deploy/cloudflare-resident/worker.ts",
-    healthUrl: "https://switchboard-resident.coreplanelabs.dev/healthz",
     inputs: {
       paths: ["deploy/cloudflare-resident/"],
       lockfile: [{ workspace: "deploy/cloudflare-resident", includeDev: false }],
@@ -180,10 +184,8 @@ export const WORKERS: readonly WorkerDef[] = [
   },
   {
     name: "sandbox",
-    script: "switchboard-sandbox",
     dir: "deploy/cloudflare-sandbox",
     entry: "deploy/cloudflare-sandbox/worker.ts",
-    healthUrl: "https://switchboard-sandbox.coreplanelabs.dev/healthz",
     healthBearerEnv: "SANDBOX_TOKEN",
     inputs: {
       paths: ["deploy/cloudflare-sandbox/"],
@@ -195,7 +197,27 @@ export const WORKERS: readonly WorkerDef[] = [
   },
 ];
 
-export const DEPLOY_ORDER: readonly WorkerName[] = WORKERS.map((w) => w.name);
+export const DEPLOY_ORDER: readonly WorkerName[] = WORKER_SPECS.map((w) => w.name);
+
+/** Pure: the Workers of one installation — each spec bound to the script name
+ *  and hostname its profile gives it. Health URLs are derived, never typed. */
+export function workersFor(profile: DeploymentProfile): WorkerDef[] {
+  const urls = profileUrls(profile);
+  return WORKER_SPECS.map(({ preflight, liveGated, ...spec }) => {
+    const healthUrl = urls.healthUrl(spec.name);
+    return {
+      ...spec,
+      script: profile.workers[spec.name].script,
+      healthUrl,
+      ...(preflight ? { preflight: liveGated ? { forceEnv: preflight.forceEnv, healthUrl } : preflight } : {}),
+      ...(liveGated ? { liveGate: { healthUrl } } : {}),
+    };
+  });
+}
+
+/** Where the bot's runtime config lands in the build context — the path the
+ *  Dockerfile copies and the bot Worker points its container at. */
+export const CONFIG_DESTINATION = "config/config.production.yaml";
 
 export interface DeployOptions {
   only: WorkerName[] | undefined;
@@ -244,6 +266,10 @@ export interface DeployPlan {
     /** Step dirs (repo-relative) without `node_modules` when the plan was computed — the runner `npm ci`s each before its deploy. */
     nodeModulesMissing: string[];
   };
+  /** The deployment profile the plan was computed from. `deploy all` refuses a plan from the example. */
+  profile: { origin: LoadedProfile["origin"]; path: string };
+  /** The bot's runtime config: where it comes from, where the runner places it before the image builds. */
+  config: { source: string; destination: string };
   warnings: string[];
 }
 
@@ -255,27 +281,28 @@ export interface CheckoutProbe {
   hasNodeModules(dir: string): boolean;
 }
 
-export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe): DeployPlan {
+export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe, loaded: LoadedProfile): DeployPlan {
+  const { profile } = loaded;
   // `--affected` selects; `--only` (and `--skip`) can only narrow what it selected.
   const selected = opts.affected
     ? opts.affected.selected.filter((n) => !opts.only || opts.only.includes(n))
     : opts.only;
-  const steps = WORKERS.filter(
-    (w) => (selected ? selected.includes(w.name) : true) && !(opts.skip ?? []).includes(w.name),
-  ).map<DeployStep>((w) => ({
-    name: w.name,
-    script: w.script,
-    dir: w.dir,
-    command: ["npm", "run", "deploy"],
-    unsetEnv: UNSET_ENV,
-    setEnv: opts.force && w.preflight ? { [w.preflight.forceEnv]: "1" } : {},
-    requiredEnv: w.requiredEnv ?? [],
-    capabilities: w.capabilities ?? [],
-    retryOnPreflightRefusal: !!w.preflight && !opts.force,
-    ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
-    ...(w.liveGate ? { liveGate: w.liveGate } : {}),
-    why: w.why,
-  }));
+  const steps = workersFor(profile)
+    .filter((w) => (selected ? selected.includes(w.name) : true) && !(opts.skip ?? []).includes(w.name))
+    .map<DeployStep>((w) => ({
+      name: w.name,
+      script: w.script,
+      dir: w.dir,
+      command: ["npm", "run", "deploy"],
+      unsetEnv: UNSET_ENV,
+      setEnv: opts.force && w.preflight ? { [w.preflight.forceEnv]: "1" } : {},
+      requiredEnv: w.requiredEnv ?? [],
+      capabilities: w.capabilities ?? [],
+      retryOnPreflightRefusal: !!w.preflight && !opts.force,
+      ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
+      ...(w.liveGate ? { liveGate: w.liveGate } : {}),
+      why: w.why,
+    }));
   const forcedNames = steps.filter((s) => Object.keys(s.setEnv).length > 0).map((s) => s.name);
   return {
     steps,
@@ -285,17 +312,25 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe): Deploy
     waitMaxMs: opts.waitMaxMinutes * 60_000,
     pollMs: opts.pollSeconds * 1000,
     checks: {
-      account: PRODUCTION_ACCOUNT_ID,
+      account: profile.account,
       cleanTree: true,
       atOriginMain: !opts.allowBranch,
       nodeModulesMissing: steps.filter((s) => !checkout.hasNodeModules(s.dir)).map((s) => s.dir),
     },
-    warnings:
-      forcedNames.length > 0
+    profile: { origin: loaded.origin, path: loaded.path },
+    config: { source: profile.configSource, destination: CONFIG_DESTINATION },
+    warnings: [
+      ...(loaded.origin === "example"
+        ? [
+            `profile: ${loaded.path} is the EXAMPLE — this plan can be read, not deployed; write deploy/profile.json for a real installation`,
+          ]
+        : []),
+      ...(forcedNames.length > 0
         ? [
             `--force: preflights are bypassed — in-flight runs on ${forcedNames.join(" and ")} are SIGTERM-drained (finish if they can, else killed at the drain deadline)`,
           ]
-        : [],
+        : []),
+    ],
   };
 }
 
@@ -308,6 +343,7 @@ export function formatPlan(plan: DeployPlan): string {
       : `node_modules missing in ${missing.join(", ")} — the runner will \`npm ci\` there first`;
   const lines = [
     ...(plan.affected ? [formatAffectedText(plan.affected)] : []),
+    `Profile: ${plan.profile.path}${plan.profile.origin === "example" ? " (example)" : ""}; config: ${plan.config.source} → ${plan.config.destination}`,
     `Checks: wrangler account = ${plan.checks.account}; clean tree; ${plan.checks.atOriginMain ? "HEAD == origin/main" : "any branch (--allow-branch)"}; ${nodeModules}`,
     ...plan.warnings.map((w) => `WARNING ${w}`),
     plan.steps.length === 0 ? "Steps: none — nothing to deploy" : "Steps:",
@@ -422,7 +458,7 @@ export function decideAccount(input: {
     : "run `npx wrangler login` in deploy/cloudflare";
   return {
     ok: false,
-    problem: `wrangler whoami does not list account ${input.account} (coreplane-infra)${verify} — ${wayOut}. wrangler said: ${said}`,
+    problem: `wrangler whoami does not list account ${input.account} (the deployment profile's)${verify} — ${wayOut}. wrangler said: ${said}`,
   };
 }
 

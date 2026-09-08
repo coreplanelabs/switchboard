@@ -14,7 +14,7 @@ import {
   type AffectedProbe,
   type AffectedReport,
 } from "./affected.js";
-import { WORKERS, type WorkerName } from "./plan.js";
+import { WORKER_SPECS as WORKERS, type WorkerName } from "./plan.js";
 
 // Feature: features/release-and-deploy.md items 4–7 — which Workers a release
 // deploys is DERIVED from the tree: each Worker's base is the commit it serves,
@@ -200,6 +200,8 @@ describe("classifyPath", () => {
       "deploy/secrets.manifest.json",
       "deploy/agent-env.jsonc",
       "deploy/agent-env-bootstrap.sh",
+      "deploy/profile.json",
+      "deploy/profile.example.json",
       ".gitignore",
       ".nvmrc",
       ".env.example",

@@ -17,6 +17,7 @@ import { NO_GRANTS } from "./authz/types.js";
 import { callerWith } from "./testing/callers.js";
 import type { DeployPlan } from "../deploy/plan.js";
 import type { RestartPlan } from "../deploy/restart.js";
+import { TEST_PROFILE } from "../deploy/testing/profile.js";
 import type { DeployRunResult, RestartRunResult } from "../deploy/run.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { buildCoreCommands } from "./commandCatalogue.js";
@@ -512,6 +513,7 @@ function fakeDeps(s: Stubs): CoreCommandDeps {
         }),
       // Probes of the checkout and the fleet, not executors: not recorded in `executed`.
       checkout: { hasNodeModules: () => true },
+      profile: async () => ({ profile: TEST_PROFILE, origin: "profile", path: "deploy/profile.json" }),
       affected: async (opts) => ({
         head: "f".repeat(40),
         workers: [

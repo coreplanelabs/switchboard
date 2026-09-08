@@ -1,6 +1,6 @@
 import { parseIngressTokenMap } from "../core/ingressTokens.js";
 import { LIVE_GATE_DEADLINE_MS, parseHealthz, type HealthzBody } from "./liveGate.js";
-import { BOT_HEALTH_URL } from "./plan.js";
+import { profileUrls, type DeploymentProfile } from "./profile.js";
 
 // `deploy restart` — restart the bot container WITHOUT an image build, so a
 // rotated bot secret goes live in seconds instead of a full `deploy all --only
@@ -25,8 +25,10 @@ import { BOT_HEALTH_URL } from "./plan.js";
 // privileged deploy operation is likewise a bearer in the operator's env
 // (`RESIDENT_ADMIN_TOKEN`), and an Access JWT cannot be checked here — the
 // operator rule lives in the container's config.yaml, not in the Worker.
+//
+// The route's URL is the installation's: the deployment profile names the
+// bot's hostname, `planRestart` derives `https://<bot>/admin/restart` from it.
 
-export const BOT_ADMIN_RESTART_URL = "https://switchboard.coreplanelabs.dev/admin/restart";
 /** The operator's env var holding a `SWITCHBOARD_INGRESS_TOKENS` bearer with `deploy:write`. */
 export const RESTART_TOKEN_ENV = "SWITCHBOARD_DEPLOY_TOKEN";
 /** The scope the bearer's identity must carry — the `deploy.restart` command's own. */
@@ -248,11 +250,12 @@ export interface RestartPlan {
   liveDeadlineMs: number;
 }
 
-export function planRestart(opts: RestartOptions): RestartPlan {
+export function planRestart(opts: RestartOptions, profile: DeploymentProfile): RestartPlan {
+  const urls = profileUrls(profile);
   return {
     target: opts.only,
-    adminUrl: BOT_ADMIN_RESTART_URL,
-    healthUrl: BOT_HEALTH_URL,
+    adminUrl: urls.botAdminRestartUrl,
+    healthUrl: urls.healthUrl("bot"),
     tokenEnv: RESTART_TOKEN_ENV,
     force: opts.force,
     waitMaxMs: opts.waitMaxMinutes * 60_000,

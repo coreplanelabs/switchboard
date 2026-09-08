@@ -1,0 +1,13 @@
+{
+  "$comment": "The deployment profile: where THIS installation runs. Copy to deploy/profile.json and fill it in (or run `switchboard deploy init`). The account is your Cloudflare account id; every hostname must be under `zone`, a zone in that account; `configSource` is where `deploy all` reads the bot's runtime config from before building the image — a path, `github://owner/repo/path@ref` (needs CONFIG_REPO_TOKEN), or `op://Vault/Item/field` (needs OP_SERVICE_ACCOUNT_TOKEN); `secretsSource` is where `secrets put` reads values from — a directory of <NAME> files (the default when absent) or `op://Vault/Item`. `deploy plan` reads this example when no profile exists; `deploy all` refuses it.",
+  "account": "00000000000000000000000000000000",
+  "zone": "example.com",
+  "workers": {
+    "memory": { "script": "switchboard-memory", "hostname": "switchboard-memory.example.com" },
+    "bot": { "script": "switchboard", "hostname": "switchboard.example.com" },
+    "resident": { "script": "switchboard-resident", "hostname": "switchboard-resident.example.com" },
+    "sandbox": { "script": "switchboard-sandbox", "hostname": "switchboard-sandbox.example.com" },
+    "docs": { "script": "switchboard-docs", "hostname": "docs.switchboard.example.com" }
+  },
+  "configSource": "config/config.yaml"
+}
