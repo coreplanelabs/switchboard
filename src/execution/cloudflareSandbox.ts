@@ -7,12 +7,15 @@ import {
   type ExecOptions,
   type Executor,
 } from "./executor.js";
+import type { ExecTraceOptions } from "./executor.js";
 import {
   FLEET_BUSY_BACKOFF_MS,
   FLEET_BUSY_REASON,
   FLEET_BUSY_WAIT_MAX_MS,
   fleetBusyExhaustedMessage,
 } from "./sandboxErrors.js";
+import { tracedFetch } from "../core/trace/tracedFetch.js";
+import type { Span } from "../core/trace/types.js";
 
 // Remote execution in a Cloudflare Sandbox, via the authenticated proxy Worker
 // in deploy/cloudflare-sandbox/ (the Sandbox SDK only runs inside Workers).
@@ -116,6 +119,7 @@ export class CloudflareSandboxExecutor implements Executor {
     body: Record<string, unknown>,
     signal?: AbortSignal,
     budgetMs: number = BASH_TIMEOUT_MS,
+    span?: Span,
   ): Promise<Record<string, unknown>> {
     const envs = await this.opts.resolveEnvs();
     const headers: Record<string, string> = {
@@ -136,7 +140,7 @@ export class CloudflareSandboxExecutor implements Executor {
     const budget = Math.min(budgetMs, FLEET_BUSY_WAIT_MAX_MS);
     let waited = 0;
     for (let attempt = 0; ; attempt++) {
-      const answer = await this.send(route, sent, headers, budgetMs, signal);
+      const answer = await this.send(route, sent, headers, budgetMs, signal, span);
       if (answer.kind === "ok") return answer.data;
       if (waited >= budget) throw new ExecCapacityError(fleetBusyExhaustedMessage(waited));
       const delay = Math.min(
@@ -159,6 +163,7 @@ export class CloudflareSandboxExecutor implements Executor {
     headers: Record<string, string>,
     budgetMs: number,
     signal?: AbortSignal,
+    span?: Span,
   ): Promise<{ kind: "ok"; data: Record<string, unknown> } | { kind: "busy" }> {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
     const delays = [0, 3000, 6000, 12000];
@@ -173,15 +178,22 @@ export class CloudflareSandboxExecutor implements Executor {
       // (#531) — the body read is where that wait sits, not the headers.
       const deadline = execDeadline(sendDeadlineMs(budgetMs), signal);
       try {
-        res = await fetch(`${this.opts.url.replace(/\/$/, "")}${route}`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-          // A hard run stop (#101) drops the bot-side request. The sandbox
-          // Worker has no kill route, so the command itself runs on to its own
-          // `timeout` inside the sandbox — the runner has already moved on.
-          signal: deadline,
-        });
+        // One `http.client` span per send under the caller's (features/tracing.md
+        // item 21); the trace context rides only because the sandbox is ours.
+        res = await tracedFetch(
+          span,
+          `${this.opts.url.replace(/\/$/, "")}${route}`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+            // A hard run stop (#101) drops the bot-side request. The sandbox
+            // Worker has no kill route, so the command itself runs on to its own
+            // `timeout` inside the sandbox — the runner has already moved on.
+            signal: deadline,
+          },
+          { route },
+        );
         text = await res.text();
       } catch (err) {
         // The Worker gave no answer inside the deadline (and the run was not
@@ -254,20 +266,20 @@ export class CloudflareSandboxExecutor implements Executor {
     if (opts?.timeoutMs !== undefined) body.timeoutMs = clampBashTimeout(opts.timeoutMs);
     // The fleet wait may spend up to the command's own budget (item 14) — a
     // command the run gave 60 s should not wait five minutes for a slot.
-    const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs));
+    const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs), opts?.span);
     const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
     const exitCode = Number(r.exitCode ?? 0);
     if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);
     return truncate(parts || "(no output)");
   }
 
-  async readFile(path: string): Promise<string> {
-    const r = await this.call("/read", { path });
+  async readFile(path: string, opts?: ExecTraceOptions): Promise<string> {
+    const r = await this.call("/read", { path }, undefined, undefined, opts?.span);
     return truncate(String(r.content ?? ""));
   }
 
-  async writeFile(path: string, content: string): Promise<string> {
-    await this.call("/write", { path, content });
+  async writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string> {
+    await this.call("/write", { path, content }, undefined, undefined, opts?.span);
     return `Wrote ${path}`;
   }
 }

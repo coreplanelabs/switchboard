@@ -1,5 +1,7 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { classifyError } from "../core/trace/classify.js";
+import { tracedFetch } from "../core/trace/tracedFetch.js";
+import type { Span } from "../core/trace/types.js";
 import { redactSecrets, stripAnsi } from "../core/redact.js";
 import { residentState, sanitizeResidentBody } from "./residentText.js";
 import type { ResidentStep } from "./residentStepTrace.js";
@@ -16,6 +18,7 @@ import {
   type ReleaseMode,
   type ReleaseResult,
 } from "./executor.js";
+import type { ExecTraceOptions } from "./executor.js";
 
 // Remote execution against a resident repo environment — the always-warm
 // per-repo service behind the resident Worker (deploy/cloudflare-resident/).
@@ -131,19 +134,24 @@ async function parseResidentBody(res: Response): Promise<Record<string, unknown>
 export class ResidentOperations implements Operations {
   constructor(private opts: { baseUrl: string; token: string }) {}
 
-  async run(op: OpName, req: { repo: string; ref?: string }): Promise<OperationResult> {
+  async run(op: OpName, req: { repo: string; ref?: string }, traceOpts?: ExecTraceOptions): Promise<OperationResult> {
     let res: Response;
     try {
-      res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}/op`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
-        body: JSON.stringify({ resource: repoResourceId(req.repo), op, ...(req.ref ? { ref: req.ref } : {}) }),
-        // Bound the request so a hung resident can't stall the dispatch; an op
-        // (test/build) legitimately runs minutes, so use the exec ceiling. A
-        // timeout throws here and becomes the same legible error as any other
-        // transport failure below.
-        signal: AbortSignal.timeout(BASH_TIMEOUT_MS),
-      });
+      res = await tracedFetch(
+        traceOpts?.span,
+        `${this.opts.baseUrl.replace(/\/$/, "")}/op`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
+          body: JSON.stringify({ resource: repoResourceId(req.repo), op, ...(req.ref ? { ref: req.ref } : {}) }),
+          // Bound the request so a hung resident can't stall the dispatch; an op
+          // (test/build) legitimately runs minutes, so use the exec ceiling. A
+          // timeout throws here and becomes the same legible error as any other
+          // transport failure below.
+          signal: AbortSignal.timeout(BASH_TIMEOUT_MS),
+        },
+        { route: "/op" },
+      );
     } catch (err) {
       return {
         kind: "error",
@@ -219,14 +227,17 @@ export class ResidentExecutor implements Executor {
     token: string,
     resource: string,
     timeoutMs: number,
+    span?: Span,
   ): Promise<ResidentStatusProbe> {
     const url = `${baseUrl.replace(/\/$/, "")}/status?resource=${encodeURIComponent(resource)}`;
     let res: Response;
     try {
-      res = await fetch(url, {
-        headers: { authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      res = await tracedFetch(
+        span,
+        url,
+        { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(timeoutMs) },
+        { route: "/status" },
+      );
     } catch (err) {
       // network failure or probe timeout — not-warm, and negative-cacheable
       return { kind: "unreachable", error: err instanceof Error ? err.message : String(err), transport: true };
@@ -252,26 +263,34 @@ export class ResidentExecutor implements Executor {
     body: Record<string, unknown>,
     timeoutMs: number = BASH_TIMEOUT_MS,
     signal?: AbortSignal,
+    span?: Span,
   ): Promise<{ status: number; data: Record<string, unknown> }> {
     let res: Response;
     try {
-      res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}${route}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.opts.token}`,
+      // One `http.client` span under the caller's (features/tracing.md item 21);
+      // the trace context rides only because the resident is one of our hosts.
+      res = await tracedFetch(
+        span,
+        `${this.opts.baseUrl.replace(/\/$/, "")}${route}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${this.opts.token}`,
+          },
+          body: JSON.stringify({ resource: this.opts.resource, threadKey: this.opts.threadKey, ...body }),
+          // Bound every route so a hung resident can't stall the dispatch; /exec
+          // streams and can legitimately run minutes, so it passes its command
+          // budget plus EXEC_CALL_MARGIN_MS (the server's own exit-124 answer
+          // must win the race); control-plane routes pass a short bound. A timeout throws
+          // here and is translated into the legible request-failed error below,
+          // never an unhandled throw. A hard run stop (#101) joins the deadline:
+          // it drops the bot-side request; the resident's own `timeout` still
+          // bounds the command inside the container.
+          signal: execDeadline(timeoutMs, signal),
         },
-        body: JSON.stringify({ resource: this.opts.resource, threadKey: this.opts.threadKey, ...body }),
-        // Bound every route so a hung resident can't stall the dispatch; /exec
-        // streams and can legitimately run minutes, so it passes its command
-        // budget plus EXEC_CALL_MARGIN_MS (the server's own exit-124 answer
-        // must win the race); control-plane routes pass a short bound. A timeout throws
-        // here and is translated into the legible request-failed error below,
-        // never an unhandled throw. A hard run stop (#101) joins the deadline:
-        // it drops the bot-side request; the resident's own `timeout` still
-        // bounds the command inside the container.
-        signal: execDeadline(timeoutMs, signal),
-      });
+        { route },
+      );
       // The body read is under the SAME deadline: /exec streams heartbeats, so
       // a resident whose exec promise never settles hangs HERE, past the
       // headers, not on the fetch — read it inside the try so that abort is the
@@ -298,12 +317,12 @@ export class ResidentExecutor implements Executor {
    *  KTD6) and the sha the worktree is at. A 200 without both fields is a
    *  malformed resident (the attach contract always carries them) and is an
    *  error, never a half-bound executor. */
-  async attach(): Promise<ResidentBinding> {
+  async attach(span?: Span): Promise<ResidentBinding> {
     const body: Record<string, unknown> = {};
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
     if (this.opts.sha) body.sha = this.opts.sha;
-    const answered = await this.call("/attach", body);
+    const answered = await this.call("/attach", body, undefined, undefined, span);
     const data = answered.data;
     // Post-validation answers stream like /exec (heartbeat whitespace then one
     // JSON document over HTTP 200, item 59) so an attach that waits on a deps
@@ -350,9 +369,9 @@ export class ResidentExecutor implements Executor {
    *  mechanism a re-review after a push uses, applied mid-run. Every later
    *  attach (an eviction recovery) carries the new sha too. Answers the sha the
    *  worktree is at; throws like attach() on a refusal. */
-  async moveTo(sha: string): Promise<{ sha: string }> {
+  async moveTo(sha: string, opts?: ExecTraceOptions): Promise<{ sha: string }> {
     this.opts = { ...this.opts, sha };
-    const binding = await this.attach();
+    const binding = await this.attach(opts?.span);
     return { sha: binding.sha };
   }
 
@@ -362,9 +381,15 @@ export class ResidentExecutor implements Executor {
    *  lets the resident keep a worktree with uncommitted/unpushed work — the
    *  binding (ref) survives either way (KTD6), so the next attach recreates
    *  the tree on the same ref. Best-effort by contract: never throws. */
-  async release(mode: ReleaseMode): Promise<ReleaseResult> {
+  async release(mode: ReleaseMode, opts?: ExecTraceOptions): Promise<ReleaseResult> {
     try {
-      const { status, data } = await this.call("/detach", { force: mode === "always" }, DETACH_TIMEOUT_MS);
+      const { status, data } = await this.call(
+        "/detach",
+        { force: mode === "always" },
+        DETACH_TIMEOUT_MS,
+        undefined,
+        opts?.span,
+      );
       if (status !== 200) return { released: false, reason: `HTTP ${status}: ${String(data.error ?? "")}` };
       return { released: data.released === true, reason: typeof data.reason === "string" ? data.reason : undefined };
     } catch (err) {
@@ -386,6 +411,7 @@ export class ResidentExecutor implements Executor {
     body: Record<string, unknown>,
     signal?: AbortSignal,
     callTimeoutMs: number = BASH_TIMEOUT_MS,
+    span?: Span,
   ): Promise<{ status: number; data: Record<string, unknown> }> {
     // Worktree still gone after a re-attach — the resident is unhealthy
     // (mid-restore or worse). Infra, not a command exit: counts toward
@@ -398,17 +424,17 @@ export class ResidentExecutor implements Executor {
         ),
         { kind: "infra", code: "attach" },
       );
-    let r = await this.call(route, body, callTimeoutMs, signal);
+    let r = await this.call(route, body, callTimeoutMs, signal, span);
     if (r.data.needs === "attach") {
-      await this.attach();
-      r = await this.call(route, body, callTimeoutMs, signal);
+      await this.attach(span); // the recovery rides the same trace as the op it rescues
+      r = await this.call(route, body, callTimeoutMs, signal, span);
       if (r.data.needs === "attach") throw stillGone(r.data);
     }
     if (r.data.reason === "runtime-replaced") {
       this.noteRuntimeReplaced(route, r.data);
-      await this.attach();
+      await this.attach(span); // the recovery rides the same trace as the op it rescues
       if (route === "/read" || route === "/write") {
-        r = await this.call(route, body, callTimeoutMs, signal);
+        r = await this.call(route, body, callTimeoutMs, signal, span);
         if (r.data.reason === "runtime-replaced") this.noteRuntimeReplaced(route, r.data);
         // Compound fault: the deploy also left the worktree evicted. The
         // re-attach above was this op's one re-attach, so name it precisely
@@ -444,7 +470,13 @@ export class ResidentExecutor implements Executor {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
     const body: Record<string, unknown> = { command };
     if (opts?.timeoutMs !== undefined) body.timeoutMs = timeoutMs;
-    const { status, data } = await this.opWithReattach("/exec", body, opts?.signal, timeoutMs + EXEC_CALL_MARGIN_MS);
+    const { status, data } = await this.opWithReattach(
+      "/exec",
+      body,
+      opts?.signal,
+      timeoutMs + EXEC_CALL_MARGIN_MS,
+      opts?.span,
+    );
     // A pre-validation client rejection — a plain HTTP 400 with an {error} and NO
     // `needs` (e.g. command-too-long), nothing streamed — is agent-fixable, not a
     // sick resident. Surface it as a normal Error so it does NOT count toward the
@@ -480,8 +512,8 @@ export class ResidentExecutor implements Executor {
     return truncate(parts || "(no output)");
   }
 
-  async readFile(path: string): Promise<string> {
-    const { status, data } = await this.opWithReattach("/read", { path });
+  async readFile(path: string, opts?: ExecTraceOptions): Promise<string> {
+    const { status, data } = await this.opWithReattach("/read", { path }, undefined, undefined, opts?.span);
     if (status !== 200) {
       throw classifyError(new ExecInfraError(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`), {
         kind: "http",
@@ -491,8 +523,8 @@ export class ResidentExecutor implements Executor {
     return truncate(String(data.content ?? ""));
   }
 
-  async writeFile(path: string, content: string): Promise<string> {
-    const { status, data } = await this.opWithReattach("/write", { path, content });
+  async writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string> {
+    const { status, data } = await this.opWithReattach("/write", { path, content }, undefined, undefined, opts?.span);
     if (status !== 200) {
       throw classifyError(new ExecInfraError(`resident /write: ${String(data.error ?? `HTTP ${status}`)}`), {
         kind: "http",

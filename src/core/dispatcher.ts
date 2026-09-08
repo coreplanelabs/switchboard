@@ -962,6 +962,7 @@ export async function dispatch(
             },
             round: { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
             logKey: msg.threadKey,
+            span,
           });
         } catch (err) {
           const failed = residentTraceOf(err);

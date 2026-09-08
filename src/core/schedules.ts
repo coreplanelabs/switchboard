@@ -257,6 +257,8 @@ export interface ScheduleFiring {
   outcome: FiringOutcome;
   /** A short human note: the reply's first line, or the HTTP status + error. Capped. */
   detail?: string;
+  /** The shim's trace for the firing (features/tracing.md item 21), once the shim has roots. */
+  traceId?: string;
 }
 
 /** Detail cap: a firing record is a row on a dashboard, never a report. */
@@ -270,6 +272,7 @@ export function isScheduleFiring(v: unknown): v is ScheduleFiring {
   if (typeof f.outcome !== "string" || !OUTCOMES.has(f.outcome)) return false;
   if (f.runId !== undefined && typeof f.runId !== "string") return false;
   if (f.detail !== undefined && typeof f.detail !== "string") return false;
+  if (f.traceId !== undefined && typeof f.traceId !== "string") return false;
   return true;
 }
 

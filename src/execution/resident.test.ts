@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExecHealthTracker, ExecInfraError } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations } from "./resident.js";
 import { residentTraceOf } from "./residentTrace.js";
+import { createTracer } from "../core/trace/tracer.js";
+import { recordingSink } from "../core/testing/recordingSink.js";
+import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../core/trace/internalHosts.js";
+import { parseTraceparent } from "../core/trace/traceparent.js";
 
 // Feature: features/resident-repos.md — bot-side resident client (U5): every
 // route POSTs {resource, threadKey, ...}; /exec streams heartbeat whitespace
@@ -577,6 +581,76 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
 // (heartbeat whitespace + one JSON document, parsed from the BODY); a failing
 // op is a RESULT (ok:false), a mutating-entry refusal and not-onboarded are
 // distinct named kinds, and transport failures never masquerade as results.
+// Feature: features/tracing.md item 21 — every resident route is one
+// `http.client` span under the caller's span, and the trace context rides to
+// the resident because it is one of our hosts — and only then.
+describe("ResidentExecutor trace context", () => {
+  it("attach, exec and the status probe are http.client children of the caller's span with host/route/method/status and no secret; traceparent is set for the configured resident host and absent when the host set is empty", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 5_000 }).start("request", { sinks: [log] });
+    const attachSpan = root.start("dispatch.workspace.attach");
+    const execSpan = root.start("exec.exec");
+    configureInternalHosts(internalHostsOf([OPTS.baseUrl]));
+    try {
+      const { calls } = stubFetch(
+        { raw: JSON.stringify(ATTACH_OK) },
+        { raw: JSON.stringify({ stdout: "ok", stderr: "", exitCode: 0 }) },
+        { body: { state: "warm", reason: "" } },
+      );
+      const ex = new ResidentExecutor(OPTS);
+      await ex.attach(attachSpan);
+      await ex.exec("echo hi", { span: execSpan });
+      await ResidentExecutor.probeStatus(OPTS.baseUrl, OPTS.token, OPTS.resource, 1000, root);
+      const clients = log.ends.filter((e) => e.name === "http.client");
+      expect(clients.map((c) => [c.parentSpanId, c.attrs])).toEqual([
+        [attachSpan.id, { host: new URL(OPTS.baseUrl).host, route: "/attach", method: "POST", httpStatus: 200 }],
+        [execSpan.id, { host: new URL(OPTS.baseUrl).host, route: "/exec", method: "POST", httpStatus: 200 }],
+        [root.id, { host: new URL(OPTS.baseUrl).host, route: "/status", method: "GET", httpStatus: 200 }],
+      ]);
+      expect(JSON.stringify(clients)).not.toContain(OPTS.token);
+      for (const [i, c] of calls.entries()) {
+        const tp = parseTraceparent(new Headers(c.init.headers).get("traceparent"));
+        expect(tp?.traceId).toBe(root.traceId);
+        expect(tp?.parentId).toBe(clients[i]!.spanId);
+        expect(new Headers(c.init.headers).get("authorization")).toBe(`Bearer ${OPTS.token}`);
+      }
+    } finally {
+      configureInternalHosts(NO_INTERNAL_HOSTS);
+    }
+    // The same calls with no configured hosts: spans still, header never.
+    const { calls } = stubFetch({ raw: JSON.stringify(ATTACH_OK) });
+    await new ResidentExecutor(OPTS).attach(attachSpan);
+    expect(new Headers(calls[0]!.init.headers).has("traceparent")).toBe(false);
+    // And with no span at all: a plain fetch, no span record either.
+    const before = log.ends.length;
+    stubFetch({ raw: JSON.stringify(ATTACH_OK) });
+    await new ResidentExecutor(OPTS).attach();
+    expect(log.ends.length).toBe(before);
+  });
+});
+
+describe("ResidentExecutor trace context — the recovery re-attach", () => {
+  it("a needs:attach recovery rides the same span as the op it rescues: /exec, /attach and the retried /exec are three http.client children of it", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 5_000 }).start("request", { sinks: [log] });
+    const execSpan = root.start("exec.exec");
+    stubFetch(
+      {
+        body: { error: "worktree-missing: disk was recycled", needs: "attach", stdout: "", stderr: "", exitCode: 127 },
+      },
+      { body: ATTACH_OK },
+      { raw: JSON.stringify({ stdout: "recovered", stderr: "", exitCode: 0 }) },
+    );
+    await expect(new ResidentExecutor(OPTS).exec("echo recovered", { span: execSpan })).resolves.toBe("recovered");
+    const clients = log.ends.filter((e) => e.name === "http.client");
+    expect(clients.map((c) => [c.parentSpanId, c.attrs.route])).toEqual([
+      [execSpan.id, "/exec"],
+      [execSpan.id, "/attach"],
+      [execSpan.id, "/exec"],
+    ]);
+  });
+});
+
 describe("ResidentOperations.run", () => {
   const OPS = { baseUrl: "https://resident.example", token: "op-token" };
 

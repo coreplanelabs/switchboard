@@ -55,6 +55,7 @@ import {
 import { handleAdminCrash } from "./channels/adminCrash.js";
 import { DRAIN_DEADLINE_MS, HANDOFF_BUDGET_MS } from "./core/drain.js";
 import { startProcessRoot } from "./core/requestTrace.js";
+import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHosts.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
@@ -158,6 +159,21 @@ async function main() {
   // #84 — what `friction propose` clusters across) is READ from it: the record
   // carries the diagnosis, so nothing is written twice.
   const runHistoryCfg = config.config.runHistory;
+  // The hosts our own Workers answer on (features/tracing.md item 21): the one
+  // set a `traceparent` may leave for. Computed once from the configured URLs,
+  // named once — nothing else decides where trace context travels.
+  const hosts = internalHostsOf([
+    config.config.execution?.resident?.baseUrl,
+    config.config.execution?.url,
+    runHistoryCfg?.worker?.baseUrl,
+    config.config.schedules?.worker?.baseUrl,
+    config.config.runtimeOverrides?.worker?.baseUrl,
+    process.env.PUBLIC_BASE_URL,
+  ]);
+  configureInternalHosts(hosts);
+  console.log(
+    `[trace] internal hosts (trace context travels to these only): ${hosts.hosts.length > 0 ? hosts.hosts.join(", ") : "none"}`,
+  );
   const runStore = buildRunStore(runHistoryCfg, process.env, {
     dataDir: "./data",
     warn: (m) => console.warn(`[run-history] ${m}`),

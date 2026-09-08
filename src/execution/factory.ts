@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { oneLine } from "../core/redact.js";
 import type { Backend } from "../core/trace/attrs.js";
+import type { Span } from "../core/trace/types.js";
 import type { ResidentStep } from "./residentStepTrace.js";
 import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
@@ -131,7 +132,13 @@ export function resetResidentProbeCache(): void {
   probeOutage = undefined;
 }
 
-export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorContext): Promise<ExecutorSelection> {
+export async function makeExecutor(
+  opts: ExecutorFactoryOptions,
+  ctx: ExecutorContext,
+  /** The caller's span (the dispatcher's `dispatch.workspace.attach`): the
+   *  probe and the attach become its `http.client` children (tracing.md item 21). */
+  span?: Span,
+): Promise<ExecutorSelection> {
   // Agents declare the resources they need (KD2). No repo declared → nothing
   // to provision: no workspace dir, no sandbox created or reconnected, no
   // credential required. The general agent (toolset "none") lands here.
@@ -154,7 +161,7 @@ export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorCo
     const token = process.env[tokenEnv];
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
     const resource = repoResourceId(ctx.repo);
-    const probe = await probeResident(resident, token, resource);
+    const probe = await probeResident(resident, token, resource, span);
     if (probe.kind === "status" && isServiceable(probe.state, probe.reason)) {
       // The resident can degrade between the /status probe and /attach: 503
       // (mirror-busy) or 429 (pool-exhausted) surface only at attach time.
@@ -184,6 +191,7 @@ export async function makeExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorCo
             sha: ctx.headSha,
           },
           nonWarm,
+          span,
         );
       } catch (err) {
         if (err instanceof ResidentNeedsRefError) throw err;
@@ -239,18 +247,19 @@ async function openResident(
   },
   /** `<state>[ (<reason>)]` of a serviceable non-warm resident; undefined when warm. */
   nonWarm?: string,
+  span?: Span,
 ): Promise<ExecutorSelection> {
   let executor = new ResidentExecutor(opts);
   let binding: ResidentBinding;
   let byDefault = false;
   try {
-    binding = await executor.attach();
+    binding = await executor.attach(span);
   } catch (err) {
     if (!(err instanceof ResidentNeedsRefError) || !err.defaultRef) throw err;
     byDefault = true;
     executor = new ResidentExecutor({ ...opts, refHint: err.defaultRef });
     try {
-      binding = await executor.attach();
+      binding = await executor.attach(span);
     } catch (again) {
       if (again instanceof ResidentNeedsRefError) {
         throw new Error(
@@ -353,11 +362,12 @@ async function probeResident(
   cfg: ResidentExecutionConfig,
   token: string,
   resource: string,
+  span?: Span,
 ): Promise<ResidentStatusProbe> {
   if (probeOutage && Date.now() < probeOutage.until) {
     return { kind: "unreachable", error: `${probeOutage.error}; probe skipped during outage window`, transport: true };
   }
-  const probe = await ResidentExecutor.probeStatus(cfg.baseUrl, token, resource, cfg.probeTimeoutMs ?? 2000);
+  const probe = await ResidentExecutor.probeStatus(cfg.baseUrl, token, resource, cfg.probeTimeoutMs ?? 2000, span);
   if (probe.kind === "unreachable" && probe.transport) {
     probeOutage = { until: Date.now() + PROBE_OUTAGE_WINDOW_MS, error: probe.error };
   }

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { BASH_TIMEOUT_MS, bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
+import type { Span } from "../core/trace/types.js";
 
 // The timeout policy (default/floor/ceiling + clamp) lives in bashTimeout.ts
 // so the deploy Workers can bundle it; re-exported here for the many callers
@@ -14,6 +15,13 @@ export { BASH_TIMEOUT_MS, BASH_TIMEOUT_MAX_MS, EXEC_CALL_MARGIN_MS, clampBashTim
 // call an Executor, which is either the local host (dev/CLI) or a remote
 // per-thread sandbox (production).
 
+/** The caller's span — the runner's `exec.*` span — so an executor's own
+ *  outbound calls become its `http.client` children (features/tracing.md item
+ *  21). Absent from a caller with no trace: the call is then a plain fetch. */
+export interface ExecTraceOptions {
+  span?: Span;
+}
+
 export interface Executor {
   /** Run a shell command; returns combined output (never throws on non-zero
    *  exit). `opts.signal` is a hard run stop (#101): an implementation that can
@@ -21,23 +29,23 @@ export interface Executor {
    *  cannot simply ignores it — the runner stops waiting on it either way. */
   exec(command: string, opts?: ExecOptions): Promise<string>;
   /** Read a file, path relative to the execution workspace. */
-  readFile(path: string): Promise<string>;
+  readFile(path: string, opts?: ExecTraceOptions): Promise<string>;
   /** Write a file (creating parent dirs), path relative to the workspace. */
-  writeFile(path: string, content: string): Promise<string>;
+  writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string>;
   /** Optional: give back whatever the run held for this thread once it ends
    *  (a resident's pool user + worktree). "always" — nothing to preserve
    *  (read-only agents); "if-clean" — keep the workspace if it has uncommitted
    *  or unpushed work. Best-effort: implementations report, never throw. */
-  release?(mode: ReleaseMode): Promise<ReleaseResult>;
+  release?(mode: ReleaseMode, opts?: ExecTraceOptions): Promise<ReleaseResult>;
   /** Optional: bring the workspace to `sha` — the PR head that moved while a
    *  review ran (agent-review.md item 12) — fetching as needed, and answer the
    *  commit the workspace is now at (which may differ if the ref moved again).
    *  Absent on executors whose workspace the model manages itself (a sandbox
    *  clone): the dispatcher then tells the model to check the commit out. */
-  moveTo?(sha: string): Promise<{ sha: string }>;
+  moveTo?(sha: string, opts?: ExecTraceOptions): Promise<{ sha: string }>;
 }
 
-export interface ExecOptions {
+export interface ExecOptions extends ExecTraceOptions {
   /** Aborted when the run is hard-stopped; cancel the command if you can. */
   signal?: AbortSignal;
   /** Per-call command budget in ms (the bash tool's `timeoutMs`), already
@@ -145,12 +153,12 @@ export class ExecHealthTracker implements Executor {
     return this.track(() => this.inner.exec(command, opts));
   }
 
-  readFile(path: string): Promise<string> {
-    return this.track(() => this.inner.readFile(path));
+  readFile(path: string, opts?: ExecTraceOptions): Promise<string> {
+    return this.track(() => this.inner.readFile(path, opts));
   }
 
-  writeFile(path: string, content: string): Promise<string> {
-    return this.track(() => this.inner.writeFile(path, content));
+  writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string> {
+    return this.track(() => this.inner.writeFile(path, content, opts));
   }
 }
 

@@ -20,13 +20,15 @@ export class TracingExecutor implements Executor {
     private readonly backend?: Backend,
   ) {
     const innerRelease = inner.release?.bind(inner);
-    if (innerRelease) this.release = (mode) => this.timed("exec.release", () => innerRelease(mode));
+    if (innerRelease) this.release = (mode) => this.timed("exec.release", (s) => innerRelease(mode, { span: s }));
     const innerMoveTo = inner.moveTo?.bind(inner);
-    if (innerMoveTo) this.moveTo = (sha) => this.timed("exec.move_to", () => innerMoveTo(sha));
+    if (innerMoveTo) this.moveTo = (sha) => this.timed("exec.move_to", (s) => innerMoveTo(sha, { span: s }));
   }
 
-  private timed<T>(name: string, fn: () => Promise<T>, extra: { timeoutMs?: number } = {}): Promise<T> {
-    return this.span.span(name, fn, {
+  /** Each op under its own `exec.*` span, handed to the inner executor as
+   *  `opts.span` so its HTTP calls become `http.client` children (item 21). */
+  private timed<T>(name: string, fn: (span: Span) => Promise<T>, extra: { timeoutMs?: number } = {}): Promise<T> {
+    return this.span.span(name, (s) => fn(s), {
       attrs: {
         ...(this.backend !== undefined ? { backend: this.backend } : {}),
         ...(extra.timeoutMs !== undefined ? { timeoutMs: extra.timeoutMs } : {}),
@@ -35,14 +37,16 @@ export class TracingExecutor implements Executor {
   }
 
   exec(command: string, opts?: ExecOptions): Promise<string> {
-    return this.timed("exec.exec", () => this.inner.exec(command, opts), { timeoutMs: opts?.timeoutMs });
+    return this.timed("exec.exec", (s) => this.inner.exec(command, { ...opts, span: s }), {
+      timeoutMs: opts?.timeoutMs,
+    });
   }
 
   readFile(path: string): Promise<string> {
-    return this.timed("exec.read_file", () => this.inner.readFile(path));
+    return this.timed("exec.read_file", (s) => this.inner.readFile(path, { span: s }));
   }
 
   writeFile(path: string, content: string): Promise<string> {
-    return this.timed("exec.write_file", () => this.inner.writeFile(path, content));
+    return this.timed("exec.write_file", (s) => this.inner.writeFile(path, content, { span: s }));
   }
 }
