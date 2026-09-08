@@ -30,6 +30,7 @@ import {
   type StepRecord,
 } from "./runLedger/types.js";
 import { reclaimedRunRecord } from "./dispatcher.js";
+import { shipInterruptedNote } from "./shipPipeline.js";
 
 export interface ReclaimedClosure {
   runId: string;
@@ -43,6 +44,26 @@ export interface ReclaimedClosure {
   events: number;
   /** The run's agent, for the closed card's title. */
   agent?: string;
+  /** The PR the run's events say it opened (a `pr_opened` event), if any. */
+  prUrl?: string;
+  /** What the closed card — and, for a pipeline, the thread — says next: an
+   *  interrupted run's guidance (`closureNote`); absent for a run that replied. */
+  note?: string;
+}
+
+/** The interrupted run's guidance (run-history item 36): a ship pipeline's
+ *  names the PR it had and the re-issue that continues it; every other run's
+ *  says to re-send the request. */
+export function closureNote(agent: string | undefined, prUrl: string | undefined): string {
+  if (agent === "ship") return shipInterruptedNote(prUrl);
+  return "The bot restarted while this run was in flight and it could not be resumed, so this card stopped updating. Re-send your request to run it again.";
+}
+
+/** The PR url a run's events recorded (`pr_opened`), the last one wins. */
+export function prUrlOf(events: readonly AppendableEvent[]): string | undefined {
+  let url: string | undefined;
+  for (const e of events) if (e.type === "pr_opened" && typeof e.url === "string") url = e.url;
+  return url;
 }
 
 export interface LiveElsewhere {
@@ -191,6 +212,7 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         warn(`[reclaim] ${row.runId} ${row.threadKey}: finish refused (${closed.reason})`);
         continue;
       }
+      const prUrl = prUrlOf(events);
       outcome.closed.push({
         runId: row.runId,
         threadKey: row.threadKey,
@@ -200,6 +222,8 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         card: row.card,
         events: events.length,
         ...(row.meta.agent !== undefined ? { agent: row.meta.agent } : {}),
+        ...(prUrl !== undefined ? { prUrl } : {}),
+        ...(status === "interrupted" ? { note: closureNote(row.meta.agent, prUrl) } : {}),
       });
       log(
         `[reclaim] ${row.runId} ${row.threadKey} closed ${status} (from ${run.reclaimedFrom}; ${why}; ${events.length} event(s))`,

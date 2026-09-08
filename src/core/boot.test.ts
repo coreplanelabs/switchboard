@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../providers/types.js";
-import { reclaimRuns, startReclaimSweep } from "./boot.js";
+import { closureNote, reclaimRuns, startReclaimSweep } from "./boot.js";
+import { shipInterruptedNote } from "./shipPipeline.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import type { RunLedger } from "./runLedger/ledger.js";
 import { LEASE_MS, type ClaimRequest } from "./runLedger/types.js";
@@ -141,6 +142,7 @@ describe("reclaimRuns", () => {
         card: { channel: "C1", ts: "r1.1" },
         events: 3,
         agent: "review",
+        note: expect.stringContaining("Re-send your request"),
       },
     ]);
     const record = ledger.finished.get("r1")!;
@@ -238,6 +240,45 @@ describe("reclaimRuns", () => {
     const bare = outcome.closed.find((c) => c.runId === "bare");
     expect(bare).toMatchObject({ status: "interrupted", from: "attaching", why: expect.stringMatching(/request/) });
     expect(ledger.live.get("bare")).toBeUndefined();
+  });
+
+  it("an interrupted closure carries what its card and thread say next: a ship pipeline's note names the PR its events recorded and the re-issue that continues the loop (the task when no PR exists); any other agent's says to re-send; a run that replied gets no note", async () => {
+    const { ledger, run } = harness();
+    await ledger.claim(claim("ship-pr", "slack:C1:1.0", "g1", { meta: { ...claim("x", "t").meta, agent: "ship" } }));
+    await ledger.append("ship-pr", "g1", [
+      { type: "input", text: "in acme/api: fix it", at: 1, seq: 1 },
+      { type: "pr_opened", url: "https://github.com/acme/api/pull/12", number: 12, created: true, at: 2, seq: 2 },
+    ]);
+    await ledger.claim(claim("ship-bare", "slack:C1:2.0", "g1", { meta: { ...claim("x", "t").meta, agent: "ship" } }));
+    await ledger.claim(claim("plain", "slack:C1:3.0"));
+    await ledger.claim(claim("replied", "slack:C1:4.0"));
+    await ledger.finishing("replied", "g1");
+    const outcome = await run();
+    const byId = Object.fromEntries(outcome.closed.map((c) => [c.runId, c]));
+    expect(byId["ship-pr"]).toMatchObject({
+      status: "interrupted",
+      agent: "ship",
+      prUrl: "https://github.com/acme/api/pull/12",
+    });
+    expect(byId["ship-pr"].note).toContain("https://github.com/acme/api/pull/12");
+    expect(byId["ship-pr"].note).toContain("re-issue `agent:ship` in this thread with only the PR URL");
+    expect(byId["ship-bare"].prUrl).toBeUndefined();
+    expect(byId["ship-bare"].note).toContain("no PR was opened yet");
+    expect(byId["ship-bare"].note).toContain("round 0 runs again on the same branch");
+    expect(byId.plain.note).toContain("Re-send your request");
+    expect(byId.replied.note).toBeUndefined();
+    expect(closureNote("ship", "https://x/pull/1")).toBe(shipInterruptedNote("https://x/pull/1"));
+  });
+
+  it("a row this generation owns is never taken by its own sweep, however stale its lease — not closed, not relaunched, not listed elsewhere; the run it belongs to is still ours and running", async () => {
+    const { ledger, run } = harness();
+    await ledger.claim(claim("mine", "slack:C1:1.0", "g2")); // ours, leased until 31 000 < the sweep's 100 000
+    await ledger.claim(claim("theirs", "slack:C1:2.0", "g1"));
+    const outcome = await run();
+    expect(outcome.closed.map((c) => c.runId)).toEqual(["theirs"]);
+    expect(outcome.resumable).toEqual([]);
+    expect(outcome.liveElsewhere).toEqual([]);
+    expect(ledger.live.get("mine")).toMatchObject({ ownerGen: "g2", phase: "live" });
   });
 
   it("rows another generation still holds a current lease on are not taken; they come back as liveElsewhere with their cards", async () => {

@@ -71,7 +71,7 @@ describe("live cards", () => {
     expect(isLiveCard("C3", "3.3")).toBe(true);
   });
 
-  it("closeReclaimedCards closes the cards of runs that had replied with how they ended, skips interrupted runs and runs without a card, and isolates a failed edit", async () => {
+  it("closeReclaimedCards closes the cards of runs that had replied with how they ended and an interrupted run's card with its closure note, skips runs without a card, and isolates a failed edit", async () => {
     const updates: { channel: string; ts: string; text: string }[] = [];
     const client = {
       chat: {
@@ -88,16 +88,22 @@ describe("live cards", () => {
       [
         { status: "completed", agent: "review", card: { channel: "C1", ts: "a.1" } },
         { status: "stopped_soft", agent: "coding", card: { channel: "C1", ts: "b.1" } },
-        { status: "interrupted", agent: "general", card: { channel: "C1", ts: "c.1" } },
+        {
+          status: "interrupted",
+          agent: "ship",
+          card: { channel: "C1", ts: "c.1" },
+          note: "⚠️ re-issue with the PR URL",
+        },
         { status: "completed", agent: "general", card: null },
         { status: "failed", card: { channel: "C1", ts: "fail.1" } },
       ],
       (w) => warnings.push(w),
     );
-    expect(closed).toBe(2);
+    expect(closed).toBe(3);
     expect(updates.map((u) => [u.ts, u.text])).toEqual([
       ["a.1", "✅ review · completed"],
       ["b.1", "⏹ coding · stopped soft"],
+      ["c.1", "❌ ship · interrupted"],
     ]);
     expect(warnings).toEqual(["[slack] reclaimed card C1:fail.1 not closed: message_not_found"]);
   });

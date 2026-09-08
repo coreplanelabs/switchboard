@@ -225,7 +225,7 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]> {
-    const taken = selectReclaim([...this.live.values()], now);
+    const taken = selectReclaim([...this.live.values()], now, gen);
     const out: ReclaimedRun[] = [];
     for (const row of taken) {
       const reclaimedFrom = row.phase;

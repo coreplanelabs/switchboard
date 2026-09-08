@@ -370,6 +370,8 @@ describe("run ledger — finishing, finish, handoff, reclaim (items 31, 33)", ()
     await post("/runs/claim", claimBody(key, "expired", "slack:C1:1.0"));
     await post("/runs/claim", claimBody(key, "handed", "slack:C1:2.0"));
     await post("/runs/claim", claimBody(key, "alive", "slack:C1:3.0", "g1", { leaseMs: 3_600_000 }));
+    // g2's own row with a lapsed lease: never taken by g2's own reclaim (a heartbeat that did not land, not a dead owner).
+    await post("/runs/claim", claimBody(key, "mine", "slack:C1:4.0", "g2"));
     await post("/runs/step", { storeKey: key, runId: "expired", gen: "g1", record: step({ inboxConsumedSeq: 1 }) });
     await post("/runs/inbox", { storeKey: key, runId: "expired", message: { text: "first" } });
     await post("/runs/inbox", { storeKey: key, runId: "expired", message: { text: "second" } });
@@ -397,5 +399,6 @@ describe("run ledger — finishing, finish, handoff, reclaim (items 31, 33)", ()
     ).toBe(200);
     const live = (await post("/runs/live", { storeKey: key })).data.runs as Array<{ runId: string; ownerGen: string }>;
     expect(live.find((x) => x.runId === "alive")?.ownerGen).toBe("g1");
+    expect(live.find((x) => x.runId === "mine")?.ownerGen).toBe("g2"); // untouched by its own generation's reclaim
   });
 });

@@ -208,6 +208,8 @@ describe("InMemoryRunLedger", () => {
     await ledger.claim(claimReq("expired", "slack:C1:1.0"));
     await ledger.claim(claimReq("handed", "slack:C1:2.0"));
     await ledger.claim(claimReq("alive", "slack:C1:3.0"));
+    // Our own row (g2's) with a lapsed lease: a heartbeat that did not land, never taken by our own sweep.
+    await ledger.claim(claimReq("mine", "slack:C1:4.0", "g2"));
     await ledger.step("expired", "g1", { ...stepRecord(1, 2), inboxConsumedSeq: 1 }, []);
     await ledger.pushInbox("expired", { text: "first" });
     await ledger.pushInbox("expired", { text: "second" });
@@ -233,6 +235,7 @@ describe("InMemoryRunLedger", () => {
     expect(await ledger.seed("expired", "g1", [])).toEqual({ ok: false, reason: "fenced" });
     expect(await ledger.step("expired", "g2", stepRecord(2, 2), [])).toEqual({ ok: true });
     expect((await ledger.listLive()).find((r) => r.runId === "alive")?.ownerGen).toBe("g1");
+    expect(ledger.live.get("mine")).toMatchObject({ ownerGen: "g2", phase: "live", leaseUntil: 0 + LEASE_MS }); // untouched
   });
 
   it("handoff marks only this generation's live runs; finishing cannot be handed off; a reclaimed finishing run comes back live", async () => {
