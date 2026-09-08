@@ -78,7 +78,9 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
       - name: the first attempt failed
-        if: steps.release.outcome == 'failure'
+        # `always()`: without a status function GitHub ANDs `success()` in, and
+        # this step would be skipped exactly when the retry failed too.
+        if: always() && steps.release.outcome == 'failure'
         run: echo "::warning title=release-please retried::the first release-please attempt failed (its step above has the message) and the retry ${{ steps.release-retry.outcome }}. GitHub refused the release-branch update once; the retry's outputs drive this run."
 
   # The release PR carries its deploy plan (docs/reference/specs/release-and-deploy.md
