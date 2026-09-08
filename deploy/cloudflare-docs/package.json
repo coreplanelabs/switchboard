@@ -1,5 +1,5 @@
 {
-  "name": "@coreplane/switchboard-docs-worker",
+  "name": "switchboard-docs-worker",
   "private": true,
   "type": "module",
   "engines": {
