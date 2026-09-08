@@ -5,10 +5,10 @@ import { lastThreadDirectives, parseDirectives } from "./directives.js";
 
 describe("parseDirectives", () => {
   it("extracts agent and model and strips them from the text", () => {
-    const d = parseDirectives("agent:review model:openai/gpt-5 look at PR #42");
+    const d = parseDirectives("agent:review model:openai/gpt-5 look at the failing test");
     expect(d.agent).toBe("review");
     expect(d.model).toBe("openai/gpt-5");
-    expect(d.text).toBe("look at PR #42");
+    expect(d.text).toBe("look at the failing test");
   });
 
   it("accepts directives anywhere in the message", () => {

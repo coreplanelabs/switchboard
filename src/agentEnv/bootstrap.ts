@@ -1,12 +1,12 @@
-// Agent env bootstrap (GitHub #72) — populate the agent's EXECUTION ENVIRONMENT
-// (the shell where its `bash` tool runs) with a DOWNSTREAM service's UAT
-// environment variables, resolved from 1Password via a READ-ONLY service
-// account scoped to a UAT vault. When the agent then runs a downstream
-// service's real toolchain (tests, a deploy to that service's UAT), it holds
-// that service's UAT creds — never its prod.
+// Agent env bootstrap — populate the agent's EXECUTION ENVIRONMENT (the shell
+// where its `bash` tool runs) with a DOWNSTREAM service's UAT environment
+// variables, resolved with the `op` CLI via a READ-ONLY service account scoped
+// to a UAT vault. When the agent then runs a downstream service's real
+// toolchain (tests, a deploy to that service's UAT), it holds that service's
+// UAT creds — never its prod.
 //
-// This is NOT switchboard's own Worker-secret provisioning (that was the closed
-// PR #77). Here the WRITE side materializes env vars into the execution env:
+// This is NOT switchboard's own Worker-secret provisioning (`deploy secrets`).
+// Here the WRITE side materializes env vars into the execution env:
 //   - apply writes a chmod-600 dotenv file the toolchain sources (`export …`),
 //     and returns the same NAME->value map for the in-process integration hook
 //     (buildAgentEnv) to merge into a sandbox's `envs`.
@@ -17,8 +17,8 @@
 //     or write, so a prod section in the manifest can never be materialized.
 //     The REAL guard is operational: the service account MUST be read-only and
 //     scoped to the UAT vault, so even a bug can only ever reach UAT creds.
-//   - Dry-run (the default) reads NOTHING from 1Password and writes NOTHING.
-//     It prints the plan: env-var NAMES + their op:// references
+//   - Dry-run (the default) reads NOTHING from the vault and writes NOTHING.
+//     It prints the plan: env-var NAMES + their secret references
 //     (vault/item/field — pointers, never resolved values).
 //   - Apply requires OP_SERVICE_ACCOUNT_TOKEN in the environment; missing it
 //     fails closed before a single ref is read. Resolved values only ever
@@ -41,7 +41,7 @@ import { shellQuote } from "../execution/shellQuote.js";
 export const ALLOWED_ENVS = ["uat"] as const;
 export type AllowedEnv = (typeof ALLOWED_ENVS)[number];
 
-/** Parsed manifest: environment -> downstream service -> ENV_VAR_NAME -> op://
+/** Parsed manifest: environment -> downstream service -> ENV_VAR_NAME -> secret
  *  ref. Keyed env-first then service-first so it reads as "the UAT creds for
  *  <service>"; each service section is the set of env vars that service's
  *  toolchain needs. */
@@ -71,7 +71,7 @@ export interface BootstrapOptions {
   outFile: string;
 }
 
-/** Resolves an op:// reference to its secret value. Real impl shells out to
+/** Resolves a secret reference to its value. Real impl shells out to
  *  `op read` with the service-account token; tests inject a mock. */
 export interface OpReader {
   read(ref: string): Promise<string>;
@@ -107,7 +107,7 @@ export interface BootstrapResult {
 
 /** Strip `//` line comments, block comments, and trailing commas from JSONC —
  *  WITHOUT touching string contents. This string-awareness is load-bearing:
- *  every op:// reference contains `//`, so a naive comment stripper would
+ *  every secret reference is URL-shaped and contains `//`, so a naive comment stripper would
  *  corrupt the manifest it is meant to read. */
 export function stripJsonc(text: string): string {
   let out = "";
@@ -225,10 +225,10 @@ export function parseManifest(text: string): AgentEnvManifest {
 }
 
 // ---------------------------------------------------------------------------
-// op:// reference parsing
+// secret reference parsing
 // ---------------------------------------------------------------------------
 
-/** Parse and validate a 1Password secret reference `op://<vault>/<item>/<field>`
+/** Parse and validate a secret reference `op://<vault>/<item>/<field>`
  *  (a trailing section/field path is folded into `field`). Throws if malformed
  *  so a bad ref fails the plan loudly instead of silently resolving nothing. */
 export function parseOpRef(ref: string): { vault: string; item: string; field: string } {
@@ -286,7 +286,7 @@ export function buildPlan(manifest: AgentEnvManifest, sel: { env: string; servic
 // rendering
 // ---------------------------------------------------------------------------
 
-/** Render the human-readable plan. Shows env-var NAMES and their op:// refs
+/** Render the human-readable plan. Shows env-var NAMES and their secret refs
  *  (vault/item/field — pointers), never resolved values. */
 export function renderPlan(entries: PlanEntry[], opts: BootstrapOptions): string[] {
   const lines: string[] = [];

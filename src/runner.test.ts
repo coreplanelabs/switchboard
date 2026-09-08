@@ -138,7 +138,7 @@ describe("runAgent budgets", () => {
     expect(seen).toBe(25 * 60_000);
   });
 
-  it("caps every tool result the model sees at MAX_TOOL_RESULT_CHARS, visibly — the suite-wide guard behind #615 (a 1 MB tool result was 307k tokens)", async () => {
+  it("caps every tool result the model sees at MAX_TOOL_RESULT_CHARS, visibly — the suite-wide guard behind every tool's own cap (a 1 MB tool result is ~307k tokens)", async () => {
     const huge = "x".repeat(MAX_TOOL_RESULT_CHARS + 50_000);
     const firehose: RunnableTool = {
       name: "firehose",
@@ -395,7 +395,7 @@ describe("effort (features/routing-and-config.md: resolved per run, like model)"
   });
 });
 
-describe("fail-fast on an unrecoverable sandbox (#92)", () => {
+describe("fail-fast on an unrecoverable sandbox", () => {
   // K = MAX_CONSECUTIVE_INFRA_FAILURES in the runner (default 2). These tests
   // assert the observable contract, not the constant's exact value.
   it("aborts via the finale after consecutive infra failures instead of toiling into a dead sandbox", async () => {
@@ -525,11 +525,11 @@ describe("fail-fast on an unrecoverable sandbox (#92)", () => {
 });
 
 // Feature: features/run-loop.md item 7 + features/execution.md item 14 — a full
-// sandbox fleet is capacity, not a dead sandbox. 2026-09-07: the #525 review
-// aborted in 33 s on two identical `Failed to create session: 503` errors that
-// the breaker read as a wedged sandbox. ExecCapacityError does not count toward
-// fail-fast; the model is told to retry or finish, and the stream carries a
-// typed `fleet_busy` note.
+// sandbox fleet is capacity, not a dead sandbox: two identical `Failed to
+// create session: 503` errors from a full fleet would otherwise read to the
+// breaker as a wedged sandbox and abort the run within seconds of its start.
+// ExecCapacityError does not count toward fail-fast; the model is told to retry
+// or finish, and the stream carries a typed `fleet_busy` note.
 describe("fleet-busy capacity errors do not trip fail-fast", () => {
   const CAPACITY_MESSAGE =
     "sandbox fleet busy — no free per-thread sandbox after waiting 300s (the fleet's max_instances is reached); try again in a few minutes";
@@ -966,7 +966,7 @@ describe("tool results carrying non-text parts (M1b)", () => {
   });
 });
 
-describe("run-friction signals in the event stream (#84)", () => {
+describe("run-friction signals in the event stream", () => {
   // Feature: features/run-friction.md — the analyzer needs timestamps, an
   // infra marker, and typed lifecycle notes. All additive to the stream.
   const go = { role: "user" as const, content: [{ type: "text" as const, text: "go" }] };
@@ -1094,10 +1094,10 @@ describe("run-friction signals in the event stream (#84)", () => {
   });
 });
 
-// Feature: features/run-loop.md item 8 — run control (#101): a soft stop wraps
+// Feature: features/run-loop.md item 8 — run control: a soft stop wraps
 // up through the guaranteed finale with no further tool steps; a hard stop
 // aborts the in-flight provider/tool call immediately with no finale.
-describe("run control: soft / hard stop (#101)", () => {
+describe("run control: soft / hard stop", () => {
   /** A provider that keeps asking for bash while tools are offered and answers
    *  the (tool-less) finale with text. `hook` runs at each call so a test can
    *  request a stop mid-run. */
@@ -1277,10 +1277,10 @@ describe("run control: soft / hard stop (#101)", () => {
   });
 
   it("a hard stop that is ALREADY in effect when a call starts leaves no unhandled rejection", async () => {
-    // Review finding (PR #137): the already-aborted fast path used to reject
-    // with HardStopError while the caller's promise — a provider handed an
-    // aborted signal, which rejects promptly — had no handler. Under Node's
-    // default policy that unhandled rejection kills the bot process.
+    // The already-aborted fast path must not reject with HardStopError while
+    // the caller's promise — a provider handed an aborted signal, which rejects
+    // promptly — still has no handler. Under Node's default policy that
+    // unhandled rejection kills the bot process.
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown) => void unhandled.push(reason);
     process.on("unhandledRejection", onUnhandled);
@@ -1843,7 +1843,7 @@ describe("model-call hygiene (features/run-loop.md item 11)", () => {
   });
 });
 
-describe("extra tools (MCP, #394 — features/mcp-tools.md item 12)", () => {
+describe("extra tools (MCP — features/mcp-tools.md item 12)", () => {
   const extra = (name: string, out = "extra ran") => ({
     name,
     description: "per-run tool",
@@ -1920,7 +1920,7 @@ describe("extra tools (MCP, #394 — features/mcp-tools.md item 12)", () => {
 describe("follow-up inbox (features/thread-admission.md)", () => {
   const followUp = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput => ({
     text,
-    userId: "slack:U2",
+    userId: "slack:UB",
     userName: "bob",
     sourceUrl: "https://s/2",
     at: 5,
@@ -2100,8 +2100,9 @@ describe("follow-up inbox (features/thread-admission.md)", () => {
     const prompt = (msgs[msgs.length - 1].content[0] as { text: string }).text;
     expect(prompt).toContain("one more thing");
     // The model is told the answer it just wrote was NOT delivered and that the
-    // next one must cover the original request too (live 2026-09-05: without
-    // this the thread got only "Perfect addition. Let me add that detail…").
+    // next one must cover the original request too (without this the model
+    // answers the follow-up alone — "Perfect addition. Let me add that detail…"
+    // — and the original request is never answered).
     expect(prompt).toContain("That answer was NOT delivered");
     expect(prompt).toContain("covers the original request AND this follow-up");
     // The superseded answer is on the record as narration, never as the answer.

@@ -35,7 +35,7 @@
   "features/authorization.md": {
     "names": 8,
     "trackers": 8,
-    "planIds": 14,
+    "planIds": 13,
     "dates": 1
   },
   "features/capabilities.md": {
@@ -99,7 +99,7 @@
   },
   "features/mcp-tools.md": {
     "names": 7,
-    "trackers": 8
+    "trackers": 7
   },
   "features/memory.md": {
     "names": 16,
@@ -135,7 +135,7 @@
   },
   "features/run-friction.md": {
     "names": 3,
-    "trackers": 4
+    "trackers": 3
   },
   "features/run-history.md": {
     "names": 10,
@@ -145,7 +145,7 @@
   },
   "features/run-loop.md": {
     "names": 5,
-    "trackers": 8,
+    "trackers": 7,
     "dates": 2
   },
   "features/run-visibility.md": {
@@ -181,64 +181,5 @@
     "planIds": 2,
     "names": 2,
     "trackers": 2
-  },
-  "src/agentEnv/bootstrap.test.ts": {
-    "names": 35
-  },
-  "src/agentEnv/bootstrap.ts": {
-    "trackers": 2,
-    "names": 21
-  },
-  "src/ciWorkflow.test.ts": {
-    "dates": 1
-  },
-  "src/cli.test.ts": {
-    "planIds": 6,
-    "trackers": 3
-  },
-  "src/config.test.ts": {
-    "planIds": 9,
-    "trackers": 1
-  },
-  "src/config.ts": {
-    "trackers": 8,
-    "planIds": 6
-  },
-  "src/core/__snapshots__/capabilitySurfaces.test.ts.snap": {
-    "ids": 2
-  },
-  "src/directives.test.ts": {
-    "trackers": 2
-  },
-  "src/directives.ts": {
-    "trackers": 1
-  },
-  "src/load/history.test.ts": {
-    "dates": 1
-  },
-  "src/load/residentLoad.ts": {
-    "dates": 1
-  },
-  "src/prTitleCheck.test.ts": {
-    "planIds": 1
-  },
-  "src/projectFacts.test.ts": {
-    "names": 20,
-    "trackers": 7
-  },
-  "src/runner.test.ts": {
-    "trackers": 8,
-    "dates": 2,
-    "planIds": 1
-  },
-  "src/runner.ts": {
-    "trackers": 8,
-    "dates": 1
-  },
-  "src/sandboxPairCheck.test.ts": {
-    "trackers": 3
-  },
-  "src/specsCheck.test.ts": {
-    "trackers": 3
   }
 }

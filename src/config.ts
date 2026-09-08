@@ -57,7 +57,7 @@ export interface Scope {
   efforts?: Record<string, Effort>;
   /**
    * Free-text custom instructions folded into the system prompt as ADVISORY
-   * content only (#107 phase 2). Channel text applies to every run in the
+   * content only. Channel text applies to every run in the
    * channel; user text applies only to runs that user requests. Never read by
    * `resolve()` or any permission gate. Capped at MAX_INSTRUCTIONS_LENGTH
    * because it rides every turn.
@@ -102,8 +102,9 @@ export interface AppConfig {
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
   /**
-   * The one authorization shape (plan U2 — R8; features/authorization.md item
-   * 9): actor id (`slack:U…`, `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
+   * The one authorization shape (features/authorization.md item 9; see
+   * docs/decisions/0007-authorization-policy-table.md): actor id (`slack:U…`,
+   * `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
    * `access:svc:<cn>`, `schedule:<name>`) → `{ actions, channels, repos }`, each
    * a list of names or the explicit word `all`; an absent axis is the empty
    * set. A `slack:` entry adds to the baseline every Slack user holds (the open
@@ -124,20 +125,20 @@ export interface AppConfig {
   execution?: import("./execution/factory.js").ExecutionConfig;
   workspaceDir?: string;
   /**
-   * Cross-session self-learning memory (Area 7c, #85). Absent or `enabled:
+   * Cross-session self-learning memory. Absent or `enabled:
    * false` (the default) → the dispatcher uses a NullMemoryStore and model
    * input is byte-identical to memory-off. See features/memory.md.
    */
   memory?: MemoryConfig;
   /**
-   * Self-improvement proposals (Area 7b, #84): where `friction propose` files
+   * Self-improvement proposals: where `friction propose` files
    * issues and how it clusters. Absent → every run's diagnosis still lands in
    * run history, but `friction propose` refuses until `repo` is set.
    * See features/self-improvement.md.
    */
   selfImprovement?: SelfImprovementConfig;
   /**
-   * Scheduled jobs (#244): where the Worker shim's cron firings are recorded
+   * Scheduled jobs: where the Worker shim's cron firings are recorded
    * (the state Worker's ScheduleDO) so the /runs "Scheduled" panel can show last
    * fire / outcome / run. Absent → the panel lists the schedules without firing
    * history. See features/live-view.md item 14.
@@ -174,7 +175,7 @@ export interface AppConfig {
   /** Slack adapter behavior that is not pure transport. */
   slack?: SlackConfig;
   /**
-   * Persistent run history (#157). Absent → history is OFF: finished runs stay
+   * Persistent run history. Absent → history is OFF: finished runs stay
    * live-only, as before. `store: "file"` is an explicit host-disk opt-in;
    * otherwise `worker` names the RunHistoryDO on the state Worker. Retention
    * is `retentionDays` / `maxRuns` / `maxBytes`. See features/run-history.md.
@@ -195,7 +196,7 @@ export interface AppConfig {
    */
   tracing?: TracingConfig;
   /**
-   * External MCP servers as agent tools (#394, features/mcp-tools.md item 11):
+   * External MCP servers as agent tools (features/mcp-tools.md item 11):
    * `servers[]` of `{ name, url, auth?: { type: bearer, tokenEnv }, agents? }`.
    * Parsed and validated by `parseMcpConfig` (src/mcp/config.ts) at startup —
    * the bearer is read from the environment there, never stored here. Absent
@@ -206,7 +207,8 @@ export interface AppConfig {
 
 export interface SlackConfig {
   /**
-   * Reconnect catch-up (#184): on every Socket Mode (re)connect, re-read
+   * Reconnect catch-up (docs/decisions/0012-reconnect-catch-up-as-recovery.md):
+   * on every Socket Mode (re)connect, re-read
    * recent history of every channel the bot is in and dispatch mentions /
    * follow-ups that carry no receipt from us (no 👀, no bot reply after them).
    * Absent = enabled with a 30-minute window.
@@ -216,7 +218,7 @@ export interface SlackConfig {
     /**
      * Messages older than this are left alone even if unanswered. Must cover
      * the worst deploy blackout — the 15-min graceful-drain deadline plus a
-     * cold start (`MIN_CATCH_UP_WINDOW_MS`, 20 min; #272). A smaller value is
+     * cold start (`MIN_CATCH_UP_WINDOW_MS`, 20 min). A smaller value is
      * kept as configured but warned about at startup.
      */
     windowMinutes?: number;
@@ -524,7 +526,7 @@ export class ConfigStore {
       restrict: validateRestrict(this.config.restrict),
       agentNames: Object.keys(AGENTS),
       commandGroups: options.commandGroups,
-      // The schedule registry's declared actors (R9): the floor for `schedule:<name>` ids.
+      // The schedule registry's declared actors: the floor for `schedule:<name>` ids.
       schedules: SCHEDULES.filter(isRunSchedule).map((s) => s.action.actor),
     });
 
@@ -726,7 +728,7 @@ export class ConfigStore {
   }
 
   /**
-   * Repo-management gate (KTD9): FAIL-CLOSED — the `repo:write` grant, which
+   * Repo-management gate: FAIL-CLOSED — the `repo:write` grant, which
    * admins hold through `all`; no grant means admins only, because `repo
    * onboard`/`rebuild` provision billable always-on compute and bind GitHub
    * credentials.
@@ -735,7 +737,7 @@ export class ConfigStore {
     return hasAction(this.grantsFor(userId).actions, "repo:write");
   }
 
-  /** The one grants lookup (plan U2/U4, R8): what `grants[<actorId>]` declares
+  /** The one grants lookup: what `grants[<actorId>]` declares
    *  on top of its namespace's baseline (the chat `open` commands and every
    *  unrestricted agent for a Slack user, every group's read for a browser
    *  session), else that baseline alone, else nothing. Attached to every
@@ -1107,7 +1109,7 @@ function validateConfig(cfg: AppConfig): void {
   validateDashboardConfig(cfg.dashboard);
 }
 
-/** `grants` (plan U2): every finding names the actor id and axis it is about —
+/** `grants`: every finding names the actor id and axis it is about —
  *  an unknown namespace, a misspelled `all`, an unknown field — and the load
  *  fails, because a silently dropped entry would be a silently missing grant. */
 function validateGrants(raw: unknown): ReadonlyMap<string, Grants> {
@@ -1148,7 +1150,7 @@ function validateTracing(t: TracingConfig): void {
   }
 }
 
-/** `runHistory` (features/run-history.md, KTD14): retention bounds are enforced
+/** `runHistory` (features/run-history.md): retention bounds are enforced
  *  at load so a typo cannot silently become "keep nothing"; the Worker URL must
  *  be https: because the bearer rides every request. */
 function validateRunHistory(rh: RunHistoryConfig): void {

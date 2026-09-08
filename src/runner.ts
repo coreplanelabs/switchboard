@@ -33,7 +33,7 @@ import { formatDuration } from "./core/time/formatDuration.js";
 // requested tools, feed results back, repeat until the model stops or the
 // turn budget runs out.
 
-// #92: a sandbox that becomes unrecoverable (e.g. a heavy `pnpm install` OOMs
+// A sandbox that becomes unrecoverable (e.g. a heavy `pnpm install` OOMs
 // or fills the disk and wedges the exec worker) surfaces every command — even a
 // bare `echo` — as an ExecInfraError, distinct from a normal nonzero exit.
 // After this many CONSECUTIVE infra-level failures with no successful exec
@@ -79,7 +79,7 @@ export interface RunOptions {
   span?: Span;
   /** Where the run's commands execute, recorded on its `exec.*` spans. */
   backend?: Backend;
-  /** Operator stop control (#101), minted per run by the RunRegistry. Soft:
+  /** Operator stop control, minted per run by the RunRegistry. Soft:
    *  the loop takes no new step and wraps up through the finale. Hard: the
    *  in-flight provider/tool call is abandoned (and cancelled where the
    *  implementation can) and the run ends at once with no finale. Absent (CLI,
@@ -166,7 +166,7 @@ const HARD_STOP_MESSAGE =
 
 export async function runAgent(opts: RunOptions): Promise<string> {
   const control = opts.control;
-  // Every run event is stamped `at: now()` so the friction analyzer (#84) can
+  // Every run event is stamped `at: now()` so the friction analyzer can
   // attribute wall time; lifecycle notices go out BOTH as free-text progress
   // (the card/log) and as a typed `run_note` event (the stream).
   const now = opts.now ?? Date.now;
@@ -212,7 +212,7 @@ async function runLoop(
   // Watch exec-infrastructure health through the executor seam: the tracker
   // counts consecutive ExecInfraError throws (a dead/wedged sandbox) and resets
   // on any successful op. Tools consume the wrapped executor via ToolContext, so
-  // the runner reads sandbox health without knowing which tool ran (#92).
+  // the runner reads sandbox health without knowing which tool ran.
   const execTracker = new ExecHealthTracker(opts.toolContext.executor);
   const toolContext: ToolContext = {
     ...opts.toolContext,
@@ -427,7 +427,7 @@ async function runLoop(
         });
         settle(!exit?.failed, exit?.exitCode !== undefined ? { exitCode: exit.exitCode } : {});
         // The model never receives more than MAX_TOOL_RESULT_CHARS of text from
-        // one tool, whatever the tool returned (providers/types.ts, #615).
+        // one tool, whatever the tool returned (providers/types.ts).
         return { type: "tool_result", toolUseId: tu.id, content: capToolResultContent(output) };
       } catch (err) {
         // A hard stop is not a tool error to feed back to the model — unwind.
@@ -775,7 +775,7 @@ class FinaleTimeoutError extends Error {
 const FINALE_TIMEOUT_MS = 3 * 60_000;
 
 /** The guaranteed finale shared by every wind-down path (budget exhaustion, a
- *  dead sandbox #92, a soft stop #101): push one final tool-less instruction
+ *  dead sandbox, a soft stop): push one final tool-less instruction
  *  and make a single inference-only call, so the run always closes with a
  *  written-up answer even when no more tools can run. Each caller supplies the
  *  instruction and formats the returned text into its own outcome message.
@@ -811,7 +811,7 @@ async function runFinale(
   }
 }
 
-/** Soft stop (#101): an operator asked the run to wind down. Same guaranteed
+/** Soft stop: an operator asked the run to wind down. Same guaranteed
  *  finale as budget exhaustion — the model is told to stop and write up — so the
  *  thread gets a real summary, labeled as an early stop rather than a budget. */
 async function finishSoftStop(
@@ -835,11 +835,12 @@ async function finishSoftStop(
 }
 
 /** The one-line diagnostic surfaced when the run aborts into an unrecoverable
- *  sandbox (#92) — the run outcome the user acts on. It states what was
- *  OBSERVED (the count and the last exec-transport error, verbatim) and never
- *  asserts a cause: the 2026-08-29 abort blamed "OOM/disk" when the real cause
- *  was three `wrangler deploy`s replacing the resident isolate mid-run. The
- *  generic hint appears only when no error text was captured. */
+ *  sandbox — the run outcome the user acts on. It states what was OBSERVED (the
+ *  count and the last exec-transport error, verbatim) and never asserts a cause:
+ *  the same consecutive-failure shape is produced by a sandbox that ran out of
+ *  memory or disk AND by a deploy replacing the isolate under a live run, and a
+ *  diagnosis that names the wrong one sends the operator down the wrong path.
+ *  The generic hint appears only when no error text was captured. */
 function sandboxDeadDiagnosis(lastInfraError: string | undefined): string {
   const evidence = lastInfraError?.trim()
     ? `last: ${lastInfraError.trim()}`

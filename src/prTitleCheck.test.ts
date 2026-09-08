@@ -59,7 +59,7 @@ describe("checkPrTitle rejects, naming the fix", () => {
   });
 
   it("a title with no type", () => {
-    expect(reject("authz U7 step 1: config is native grants only")[0]).toMatch(/start with a type and a colon/);
+    expect(reject("authz step 1: config is native grants only")[0]).toMatch(/start with a type and a colon/);
   });
 
   it("an uppercase type", () => {

@@ -35,11 +35,11 @@ import { registerCoreCommands, type CoreCommandDeps } from "./core/commands/all.
 import type { AffectedReport } from "./deploy/affected.js";
 
 // Feature: features/command-registry.md — the derived CLI (`npx tsx src/cli.ts
-// <group> <verb> [args…] [--option value…] [--json]`, KTD21): argv goes through
+// <group> <verb> [args…] [--option value…] [--json]`): argv goes through
 // the SAME grammar chat uses; `runCli` is the transport-free path `main()` and
 // the contract test share. Exit codes: 2 = the invocation was rejected (usage,
 // or `invalid_input` from the grammar or the registry), 1 = command error. The one
-// built-in beside the derived commands is `ask` (KTD22).
+// built-in beside the derived commands is `ask`.
 
 const NOW = 1_700_000_000_000;
 
@@ -49,7 +49,7 @@ async function fixture() {
   const live = reg.create("coding · acme/live", {
     agent: "coding",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UA",
     threadKey: "slack:C1:t",
   });
   const store = new InMemoryRunStore({ now: () => NOW });
@@ -58,7 +58,7 @@ async function fixture() {
     id: "fin-1",
     agent: "coding",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UA",
     threadKey: "slack:C1:fin-1",
     channelVisibility: "unknown",
     startedAt: NOW - 11_000,
@@ -79,7 +79,7 @@ async function fixture() {
 }
 
 describe("CLI_CALLER — the local operator", () => {
-  it("is cli:local, the cli:local Actor holding every grant — the one input the policy table reads about it (plan U2/U4)", () => {
+  it("is cli:local, the cli:local Actor holding every grant — the one input the policy table reads about it", () => {
     expect(CLI_CALLER).toEqual({
       kind: "cli",
       id: "cli:local",
@@ -328,7 +328,7 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
       id: "fin-9",
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UA",
       threadKey: "slack:C1:fin-9",
       channelVisibility: "unknown",
       startedAt: NOW - 11_000,
@@ -594,8 +594,8 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
   });
 });
 
-// #409 — the config open is awaited only by the deps that reach for it.
-describe("a command that never touches the config never waits for the open (#409)", () => {
+// The config open is awaited only by the deps that reach for it.
+describe("a command that never touches the config never waits for the open", () => {
   it("with a state Worker that never answers, `deploy plan` and `help show` return at once and never ask for the config; `config show` asks — and waits", async () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-cli-409-"));
     const cfg = join(dir, "config.yaml");
@@ -641,7 +641,7 @@ describe("a command that never touches the config never waits for the open (#409
 
 // Feature: features/command-registry.md item 28 — the CLI's catalogue hides what
 // is off, resolved ONCE at startup from the config FILE (a synchronous read; the
-// async store open of #409 is never waited for).
+// async store open is never waited for).
 describe("cliCapabilities — what the CLI's catalogue is bound to", () => {
   const yaml = (extra: string) =>
     `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n${extra}`;

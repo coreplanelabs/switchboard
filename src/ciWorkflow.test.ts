@@ -273,9 +273,9 @@ describe("the verify scripts", () => {
 });
 
 describe("the image check builds every image the deploy builds", () => {
-  // 2026-09-08, release 1.2.0: the resident's Dockerfile gained a RUN whose
-  // last command exited 1, and the first build of that image was the production
-  // deploy — CI's `check:image` built the bot image alone. The rule: an image
+  // A Dockerfile RUN whose last command exits non-zero fails only when the
+  // image is built, and if CI builds the bot image alone the first build of any
+  // other Worker's image is the production deploy. The rule: an image
   // is whatever a Worker's wrangler template points `image` at, and every such
   // Worker builds it with its own `check:image` (from the context wrangler
   // uses) and has one leg of the fan-out under the `image` gate. The set is

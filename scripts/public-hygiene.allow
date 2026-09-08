@@ -269,3 +269,56 @@ src/channels/mcpConnectView.ts	`<style>body{font:15px system-ui,sans-serif;max-w
 
 # A W3C trace id is 32 hex characters by definition; this fixture is one.
 src/channels/scheduledPanel.test.ts	const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+# 1Password is a supported optional config/secrets source (the `op` CLI); `op://` is the integration's own scheme and the vault names here are neutral.
+src/agentEnv/bootstrap.test.ts	DATABASE_URL: "op://Downstream UAT/billing/database-url",
+src/agentEnv/bootstrap.test.ts	STRIPE_API_KEY: "op://Downstream UAT/billing/stripe-key",
+src/agentEnv/bootstrap.test.ts	REDIS_URL: "op://Downstream UAT/checkout/redis-url",
+src/agentEnv/bootstrap.test.ts	it("preserves op:// (with its //) inside string values", () => {
+src/agentEnv/bootstrap.test.ts	const src = '{ "K": "op://Vault/Item/field" }';
+src/agentEnv/bootstrap.test.ts	expect(JSON.parse(stripJsonc(src))).toEqual({ K: "op://Vault/Item/field" });
+src/agentEnv/bootstrap.test.ts	it("strips line comments outside strings but not the op:// inside them", () => {
+src/agentEnv/bootstrap.test.ts	"DATABASE_URL": "op://V/billing/db" // trailing note
+src/agentEnv/bootstrap.test.ts	expect(JSON.parse(stripJsonc(src))).toEqual({ DATABASE_URL: "op://V/billing/db" });
+src/agentEnv/bootstrap.test.ts	/* block */ "A": "op://V/a/f",
+src/agentEnv/bootstrap.test.ts	"B": "op://V/b/f",
+src/agentEnv/bootstrap.test.ts	expect(JSON.parse(stripJsonc(src))).toEqual({ A: "op://V/a/f", B: "op://V/b/f" });
+src/agentEnv/bootstrap.test.ts	"uat": { "billing": { "DATABASE_URL": "op://V/i/f" } }
+src/agentEnv/bootstrap.test.ts	expect(m.uat.billing.DATABASE_URL).toBe("op://V/i/f");
+src/agentEnv/bootstrap.test.ts	expect(() => parseManifest('{ "uat": { "billing": "op://V/i/f" } }')).toThrow(/must be an object/);
+src/agentEnv/bootstrap.test.ts	expect(() => parseManifest('{ "uat": { "svc": { "BAD NAME": "op://v/i/f" } } }')).toThrow(
+src/agentEnv/bootstrap.test.ts	expect(() => parseManifest('{ "uat": { "svc": { "1BAD": "op://v/i/f" } } }')).toThrow(/not a valid env var name/);
+src/agentEnv/bootstrap.test.ts	expect(() => parseManifest('{ "uat": { "svc": { "X;rm": "op://v/i/f" } } }')).toThrow(/not a valid env var name/);
+src/agentEnv/bootstrap.test.ts	parseManifest('{ "uat": { "svc": { "API_TOKEN": "op://v/i/f", "_x": "op://v/i/f", "A1_B2": "op://v/i/f" } } }'),
+src/agentEnv/bootstrap.test.ts	expect(parseOpRef("op://My Vault/my-item/my-field")).toEqual({
+src/agentEnv/bootstrap.test.ts	expect(parseOpRef("op://V/item/section/field")).toEqual({ vault: "V", item: "item", field: "section/field" });
+src/agentEnv/bootstrap.test.ts	expect(() => parseOpRef("op://V/only-item")).toThrow(/malformed op:\/\//);
+src/agentEnv/bootstrap.test.ts	expect(() => buildPlan({ prod: { billing: { X: "op://V/i/f" } } }, { env: "prod", service: "billing" })).toThrow(
+src/agentEnv/bootstrap.test.ts	expect(text).toContain("op://Downstream UAT/billing/database-url");
+src/agentEnv/bootstrap.test.ts	expect(deps.reader.read).toHaveBeenCalledWith("op://Downstream UAT/billing/database-url");
+src/agentEnv/bootstrap.test.ts	expect(deps.reader.read).toHaveBeenCalledWith("op://Downstream UAT/billing/stripe-key");
+src/agentEnv/bootstrap.test.ts	expect(call.contents).toContain("VALUE::op://Downstream UAT/billing/database-url");
+src/agentEnv/bootstrap.test.ts	DATABASE_URL: "VALUE::op://Downstream UAT/billing/database-url",
+src/agentEnv/bootstrap.test.ts	STRIPE_API_KEY: "VALUE::op://Downstream UAT/billing/stripe-key",
+src/agentEnv/bootstrap.test.ts	const deps = mockDeps({ manifest: { prod: { billing: { X: "op://V/i/f" } } } });
+src/agentEnv/bootstrap.test.ts	expect(map).toEqual({ REDIS_URL: "V::op://Downstream UAT/checkout/redis-url" });
+src/agentEnv/bootstrap.test.ts	manifest: { prod: { checkout: { X: "op://V/i/f" } } },
+src/agentEnv/bootstrap.ts	throw new Error('agent-env manifest must be a JSON object of { <env>: { <service>: { <NAME>: "op://…" } } }');
+src/agentEnv/bootstrap.ts	throw new Error(`agent-env manifest: ${env}.${service} must be an object of NAME -> op:// ref`);
+src/agentEnv/bootstrap.ts	throw new Error(`agent-env manifest: ${env}.${service}.${name} must be a string op:// ref`);
+src/agentEnv/bootstrap.ts	/** Parse and validate a secret reference `op://<vault>/<item>/<field>`
+src/agentEnv/bootstrap.ts	if (!ref.startsWith("op://")) {
+src/agentEnv/bootstrap.ts	throw new Error(`not a 1Password reference (must start with op://): "${ref}"`);
+src/agentEnv/bootstrap.ts	const parts = ref.slice("op://".length).split("/");
+src/agentEnv/bootstrap.ts	throw new Error(`malformed op:// reference, expected op://<vault>/<item>/<field>: "${ref}"`);
+src/agentEnv/bootstrap.ts	`UAT-vault-scoped 1Password service account — this allowlist is defense in depth.`,
+src/agentEnv/bootstrap.ts	lines.push(`  ${e.name}  <-  op://${e.vault}/${e.item}/${e.field}`);
+src/agentEnv/bootstrap.ts	lines.push("DRY RUN — nothing read from 1Password, nothing written. Re-run with --apply to materialize these.");
+src/agentEnv/bootstrap.ts	`# Resolved from 1Password (read-only, ${meta.env}-scoped service account). chmod 600.`,
+src/agentEnv/bootstrap.ts	"OP_SERVICE_ACCOUNT_TOKEN is not set. Export a READ-ONLY, UAT-vault-scoped 1Password " +
+
+# The `deploy plan` snapshot prints the documented placeholder account id, not an account.
+src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD == origin/main; node_modules present in every dir
+
+# load/history: perDay is keyed by UTC date by contract; the fixture's dates are arbitrary.
+src/load/history.test.ts	expect(perDay).toEqual({ "2026-09-04": 2, "2026-09-07": 1 });

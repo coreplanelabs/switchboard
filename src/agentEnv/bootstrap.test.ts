@@ -17,8 +17,8 @@ import {
 
 // Feature: features/agent-env-bootstrap.md — materialize a DOWNSTREAM service's
 // UAT environment variables into the agent's execution environment, resolved
-// from 1Password via a READ-ONLY, UAT-vault-scoped service account. UAT-only by
-// an env-name allowlist (never prod), dry-run shows NAMES + op:// refs (never
+// with the `op` CLI via a READ-ONLY, UAT-vault-scoped service account. UAT-only by
+// an env-name allowlist (never prod), dry-run shows NAMES + secret refs (never
 // values), apply resolves each ref and writes a chmod-600 env file the
 // toolchain sources, missing token fails closed.
 
@@ -54,7 +54,7 @@ function mockDeps(overrides: Partial<BootstrapDeps> = {}): BootstrapDeps & {
 }
 
 // ---------------------------------------------------------------------------
-// JSONC parsing — string-aware so op:// (which contains //) survives.
+// JSONC parsing — string-aware so a secret ref (which contains //) survives.
 // ---------------------------------------------------------------------------
 
 describe("stripJsonc", () => {
