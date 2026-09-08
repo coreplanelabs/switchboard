@@ -418,11 +418,18 @@ export interface ResumeContext {
   inbox: InboxItem[];
 }
 
-/** The durable copy of a steered follow-up (run-history item 40): the message
- *  without its attachment bytes — the text is what a resume must not lose;
- *  images and documents stay with the in-memory copy. */
+/** The most a durable inbox row may weigh, serialized: the state Worker caps
+ *  `/runs/inbox` bodies at 512 KiB (`MAX_BODY_BYTES`), and the row travels
+ *  inside a JSON envelope with the store key and run id. */
+export const DURABLE_INBOX_MAX_BYTES = 400 * 1024;
+
+/** The durable copy of a steered follow-up (run-history item 40): the message,
+ *  attachments included when the row stays under `DURABLE_INBOX_MAX_BYTES` —
+ *  a follow-up's screenshot must survive a restart as much as its text. Over
+ *  the cap the bytes are left with the in-memory copy and the row says how
+ *  many attachments it lost, so the resumed run's follow-up can say so too. */
 export function durableInboxMessage(msg: IncomingMessage, text: string, at: number): Record<string, unknown> {
-  return {
+  const base: Record<string, unknown> = {
     channelId: msg.channelId,
     userId: msg.userId,
     threadKey: msg.threadKey,
@@ -432,6 +439,47 @@ export function durableInboxMessage(msg: IncomingMessage, text: string, at: numb
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
   };
+  const images = msg.images ?? [];
+  const documents = msg.documents ?? [];
+  if (images.length === 0 && documents.length === 0) return base;
+  const withAttachments = {
+    ...base,
+    ...(images.length > 0 ? { images: images.map(attachmentRow) } : {}),
+    ...(documents.length > 0 ? { documents: documents.map(attachmentRow) } : {}),
+  };
+  // Bytes as the Worker counts them (Content-Length), not UTF-16 code units.
+  if (Buffer.byteLength(JSON.stringify(withAttachments), "utf8") <= DURABLE_INBOX_MAX_BYTES) return withAttachments;
+  // All or nothing by design: a partial carry would hand the model some of the
+  // sender's attachments as if they were all of them; the note names the count.
+  return { ...base, attachmentsDropped: { images: images.length, documents: documents.length } };
+}
+
+const attachmentRow = (a: { mediaType: string; data: string; name?: string }) => ({
+  mediaType: a.mediaType,
+  data: a.data,
+  ...(a.name !== undefined ? { name: a.name } : {}),
+});
+
+/** A stored attachment list back as typed attachments; an entry that is not
+ *  `{mediaType, data}` strings is dropped, never fatal. */
+function attachmentsFromInbox(v: unknown): { mediaType: string; data: string; name?: string }[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.flatMap((e) => {
+    if (typeof e !== "object" || e === null) return [];
+    const r = e as Record<string, unknown>;
+    if (typeof r.mediaType !== "string" || typeof r.data !== "string") return [];
+    return [{ mediaType: r.mediaType, data: r.data, ...(typeof r.name === "string" ? { name: r.name } : {}) }];
+  });
+  return out.length > 0 ? out : undefined;
+}
+
+/** What a resumed run's follow-up says when its attachments did not fit the durable row. */
+function droppedNote(dropped: unknown): string | undefined {
+  if (typeof dropped !== "object" || dropped === null) return undefined;
+  const d = dropped as Record<string, unknown>;
+  const n = (typeof d.images === "number" ? d.images : 0) + (typeof d.documents === "number" ? d.documents : 0);
+  if (n <= 0) return undefined;
+  return `(${n} attachment${n === 1 ? "" : "s"} from this reply could not be carried across the bot's restart and ${n === 1 ? "is" : "are"} not attached.)`;
 }
 
 /** A durable inbox item back as a follow-up for the resumed run, on the
@@ -450,20 +498,28 @@ export function followUpFromInbox(item: InboxItem, io: ChannelIO, fallbackAt: nu
   const sourceUrl = str("sourceUrl");
   const channelName = str("channelName");
   const at = typeof m.at === "number" && Number.isFinite(m.at) ? m.at : fallbackAt;
+  const images = attachmentsFromInbox(m.images);
+  const documents = attachmentsFromInbox(m.documents);
+  const note = droppedNote(m.attachmentsDropped);
+  const fullText = note ? `${text}\n\n${note}` : text;
   const msg: IncomingMessage = {
     channelId,
     userId,
     threadKey,
-    text,
+    text: fullText,
     ...(userName !== undefined ? { userName } : {}),
     ...(sourceUrl !== undefined ? { sourceUrl } : {}),
     ...(channelName !== undefined ? { channelName } : {}),
+    ...(images ? { images } : {}),
+    ...(documents ? { documents } : {}),
   };
   return {
-    text,
+    text: fullText,
     userId,
     ...(userName !== undefined ? { userName } : {}),
     ...(sourceUrl !== undefined ? { sourceUrl } : {}),
+    ...(images ? { images } : {}),
+    ...(documents ? { documents } : {}),
     at,
     ledgerSeq: item.seq,
     msg,
