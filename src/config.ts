@@ -5,7 +5,7 @@ import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "./effort.js";
 import YAML from "yaml";
 import type { ProviderConfig } from "./providers/types.js";
 import type { MemoryConfig } from "./core/memory/types.js";
-import type { SelfImprovementConfig } from "./core/selfImprovement.js";
+import { RETIRED_SELF_IMPROVEMENT_KEYS, type SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
 import type { ShipConfig } from "./core/shipPipeline.js";
@@ -155,8 +155,8 @@ export interface AppConfig {
   memory?: MemoryConfig;
   /**
    * Self-improvement proposals (Area 7b, #84): where `friction propose` files
-   * issues and how it clusters. Absent → runs are still recorded to the
-   * friction ledger, but `friction propose` refuses until `repo` is set.
+   * issues and how it clusters. Absent → every run's diagnosis still lands in
+   * run history, but `friction propose` refuses until `repo` is set.
    * See features/self-improvement.md.
    */
   selfImprovement?: SelfImprovementConfig;
@@ -438,16 +438,16 @@ export function overridesBackingFor(
   return new WorkerOverridesBacking({ baseUrl: worker.baseUrl, token, ...(opts.fetch ? { fetch: opts.fetch } : {}) });
 }
 
-/** Parse + validate config YAML text; `warn` receives the non-fatal findings. */
-export function parseAppConfigText(text: string, warn: (message: string) => void): AppConfig {
+/** Parse + validate config YAML text; throws naming the first fatal finding. */
+export function parseAppConfigText(text: string): AppConfig {
   const config = YAML.parse(text) as AppConfig;
-  validateConfig(config, warn);
+  validateConfig(config);
   return config;
 }
 
-/** Read + validate `config.yaml` once; `warn` receives the non-fatal findings. */
-export function loadAppConfig(configPath: string, warn: (message: string) => void): AppConfig {
-  return parseAppConfigText(readFileSync(resolve(configPath), "utf8"), warn);
+/** Read + validate `config.yaml` once. */
+export function loadAppConfig(configPath: string): AppConfig {
+  return parseAppConfigText(readFileSync(resolve(configPath), "utf8"));
 }
 
 /**
@@ -463,7 +463,7 @@ export async function loadAppConfigFrom(
   opts: { env: Record<string, string | undefined>; warn: (message: string) => void; fetch?: typeof fetch },
 ): Promise<AppConfig> {
   const parsed = parseConfigLocation(location);
-  if (parsed.kind === "file") return loadAppConfig(parsed.path, opts.warn);
+  if (parsed.kind === "file") return loadAppConfig(parsed.path);
   const worker = stateWorkerFromEnv(opts.env);
   if (!worker.ok) throw new Error(`SWITCHBOARD_CONFIG=${location}: ${worker.problem}`);
   const client = new ConfigDocumentClient({
@@ -480,7 +480,7 @@ export async function loadAppConfigFrom(
   opts.warn(
     `[config] base document "${parsed.key}" v${read.version} from ${read.document.source} (sha256 ${read.document.sha256.slice(0, 12)}, pushed ${read.document.pushedAt})`,
   );
-  return parseAppConfigText(read.document.yaml, opts.warn);
+  return parseAppConfigText(read.document.yaml);
 }
 
 /** What the grants table needs beyond config.yaml: the ingress token map (its
@@ -538,7 +538,7 @@ export class ConfigStore {
     warn: (message: string) => void = (m) => console.warn(m),
     options: ConfigStoreOptions = {},
   ) {
-    this.config = typeof config === "string" ? loadAppConfig(config, warn) : config.validated;
+    this.config = typeof config === "string" ? loadAppConfig(config) : config.validated;
     // The native block already passed `validateConfig` (either path above); this parse just builds the table.
     this.grants = grantsTable({
       grants: validateGrants(this.config.grants),
@@ -1104,9 +1104,9 @@ function holdsEverything(g: Grants): boolean {
   return g.actions === "all" && g.channels === "all" && g.repos === "all";
 }
 
-/** Validates in place (throws on the first fatal finding, `warn`s the rest) and
- *  returns the parsed native `grants` table (empty when the block is absent). */
-function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
+/** Validates in place: throws on the first fatal finding. The one non-fatal
+ *  finding (an identity both `grants` and `permissions` name) is the ConfigStore's to warn about. */
+function validateConfig(cfg: AppConfig): void {
   validateScopeEfforts(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
   if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
@@ -1135,7 +1135,8 @@ function validateConfig(cfg: AppConfig, warn: (message: string) => void): void {
       Object.entries(cfg.permissions.repos).map(([slug, users]) => [slug.toLowerCase(), users]),
     );
   }
-  if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory, cfg.selfImprovement, warn);
+  validateSelfImprovement(cfg.selfImprovement);
+  if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory);
   if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.ship !== undefined) validateShip(cfg.ship);
@@ -1179,11 +1180,7 @@ function validateTracing(t: TracingConfig): void {
 /** `runHistory` (features/run-history.md, KTD14): retention bounds are enforced
  *  at load so a typo cannot silently become "keep nothing"; the Worker URL must
  *  be https: because the bearer rides every request. */
-function validateRunHistory(
-  rh: RunHistoryConfig,
-  si: SelfImprovementConfig | undefined,
-  warn: (message: string) => void,
-): void {
+function validateRunHistory(rh: RunHistoryConfig): void {
   if (typeof rh !== "object" || rh === null) throw new Error("config.yaml: runHistory must be a mapping");
   for (const key of ["retentionDays", "maxRuns"] as const) {
     const v = rh[key];
@@ -1204,11 +1201,20 @@ function validateRunHistory(
     if (!url || url.protocol !== "https:")
       throw new Error("config.yaml: runHistory.worker.baseUrl must be an https: URL");
   }
-  if (si?.ledgerMax !== undefined) {
-    warn(
-      "config.yaml: selfImprovement.ledgerMax is set alongside runHistory — the friction ledger is now read from the run store, " +
-        "so runHistory.retentionDays/maxRuns bound the friction population; ledgerMax only affects the legacy FrictionDO writes.",
-    );
+}
+
+/** `selfImprovement`: the section's own ledger is gone — the friction ledger is
+ *  run history — so a key from that era is refused with its replacement, never
+ *  silently ignored as if it still did something. */
+function validateSelfImprovement(si: AppConfig["selfImprovement"]): void {
+  if (si === undefined) return;
+  if (typeof si !== "object" || si === null) throw new Error("config.yaml: selfImprovement must be a mapping");
+  for (const key of RETIRED_SELF_IMPROVEMENT_KEYS) {
+    if (key in si) {
+      throw new Error(
+        `config.yaml: selfImprovement.${key} is gone — the friction ledger is run history; configure \`runHistory.worker\` (retention bounds the runs \`friction report\` sees) and remove the key`,
+      );
+    }
   }
 }
 

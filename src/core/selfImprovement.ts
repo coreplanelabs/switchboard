@@ -30,19 +30,12 @@ export interface SelfImprovementConfig {
   minRuns?: number;
   /** Proposals filed per pass (top-ranked patterns). Default 3. */
   top?: number;
-  /** JSONL ledger path (the host-disk ledger, used when no `worker`). Default `<dataDir>/friction.jsonl`. */
-  ledgerPath?: string;
-  /** Runs retained in the ledger (file and Worker alike). Default 500. */
-  ledgerMax?: number;
-  /** The durable ledger: the FrictionDO on the state Worker (deploy/cloudflare-memory/).
-   *  Absent → the host-disk file ledger, which an ephemeral-disk deploy loses on redeploy. */
-  worker?: {
-    /** Base URL, e.g. https://switchboard-memory.coreplanelabs.dev */
-    baseUrl: string;
-    /** Env var holding the bearer secret. Default MEMORY_TOKEN. */
-    tokenEnv?: string;
-  };
 }
+
+/** Keys the section used to carry for its own ledger. The ledger is run history
+ *  now (`runHistory.worker`), so a config that still names them is refused with
+ *  the replacement — a silently ignored key would look like a working setting. */
+export const RETIRED_SELF_IMPROVEMENT_KEYS = ["worker", "ledgerPath", "ledgerMax"] as const;
 
 export interface RunSelfImprovementOptions {
   records: readonly FrictionRunRecord[];

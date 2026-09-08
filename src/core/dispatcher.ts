@@ -72,7 +72,6 @@ import { markdownOutput } from "./llmOutput/index.js";
 import type { RunHistoryWriter } from "./runHistoryWriter.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { startReviewReadingDiff } from "./readingDiff.js";
-import type { FrictionLedger } from "./frictionLedger.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { RestGithubApi, type GithubApi } from "../execution/githubApi.js";
 import type { GithubCapability } from "../tools/github.js";
@@ -241,15 +240,6 @@ export interface CoreDeps {
    * `canUseRepo` write gate (`githubCapabilityFor`).
    */
   githubApi?: GithubApi;
-  /**
-   * Friction ledger (Area 7b, #84): after every run the dispatcher analyzes the
-   * run's event stream (`analyzeRunFriction`) and records the diagnosis here,
-   * so `friction propose` can cluster friction ACROSS recent runs (the live
-   * registry forgets a finished run after its TTL). Absent (most unit tests) →
-   * nothing is recorded and the friction commands report the ledger as
-   * unavailable. Production wires a FileFrictionLedger (src/index.ts).
-   */
-  frictionLedger?: FrictionLedger;
   /**
    * The write path onto `runStore` (#157 KTD4): after every run the dispatcher
    * builds the `RunRecord` at finish and hands it here AFTER the reply is sent —
@@ -1479,7 +1469,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // consumer is wired (nothing to diagnose for, nothing to persist). The
       // backlog is byte-bounded (oldest evicted), so the diagnosis is told when
       // it is looking at a head-truncated stream.
-      const snap = deps.frictionLedger || deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
+      const snap = deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
       const events = snap?.events ?? [];
       const diagnosis = analyzeRunFriction(events, { finished: true, truncated: snap?.truncated ?? false });
       const finishedAt = snap?.finishedAt ?? Date.now(); // the registry's finish clock: row and record agree
@@ -1504,28 +1494,8 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
             diagnosis,
           });
       }
-      // Friction ledger (#84): keep this run's diagnosis for the cross-run
-      // proposer. Best-effort and fire-and-forget — a ledger failure is a
-      // warning line, never a failed run or a delayed reply. With run history
-      // on, the ledger is READ from the run store and `record()` only forwards
-      // to the legacy FrictionDO until its decommission (KD3 call-out) — so this
-      // write stays regardless of what the history writer does.
-      if (deps.frictionLedger) {
-        const ledger = deps.frictionLedger;
-        void ledger
-          .record({
-            runId: run.id,
-            ...(run.label !== undefined ? { label: run.label } : {}),
-            agent: agent.name,
-            finishedAt,
-            diagnosis,
-          })
-          .catch((err: unknown) =>
-            console.warn(
-              `[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`,
-            ),
-          );
-      }
+      // The diagnosis rides the run record (above): the friction ledger the
+      // cross-run proposer reads (#84) is run history, so nothing is written twice.
     }
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
@@ -2023,26 +1993,10 @@ async function runShipBranch(
     // With a writer the finish write (below, through the ledger sink) closes
     // the ledger row; without one the heartbeat must stop here.
     if (!deps.runHistoryWriter) void ledgerRun?.close();
-    const snap = deps.frictionLedger || deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
+    const snap = deps.runHistoryWriter ? registry.snapshot(run.id, run.token) : null;
     const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
     const finishedAt = snap?.finishedAt ?? Date.now();
     io.runFinished?.({ id: run.id, status });
-    if (deps.frictionLedger) {
-      const ledger = deps.frictionLedger;
-      void ledger
-        .record({
-          runId: run.id,
-          ...(run.label !== undefined ? { label: run.label } : {}),
-          agent: agent.name,
-          finishedAt,
-          diagnosis,
-        })
-        .catch((err: unknown) =>
-          console.warn(
-            `[friction] ${msg.threadKey} ledger write failed: ${err instanceof Error ? err.message : String(err)}`,
-          ),
-        );
-    }
     if (deps.runHistoryWriter) {
       const writer = deps.runHistoryWriter;
       // Mirrors the main path's `failedAfterFinish` handling: a completed

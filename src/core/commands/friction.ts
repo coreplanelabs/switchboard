@@ -72,7 +72,7 @@ const positiveInt = z.coerce.number().int().positive();
 const repoSlug = z.string().refine((s) => /^[\w.-]+\/[\w.-]+$/.test(s), "expected an owner/name slug");
 
 export const NO_LEDGER_MESSAGE =
-  "The friction ledger isn't wired in this process, so there are no recent runs to analyze.";
+  "Run history is not configured in this deployment (`runHistory`), so there are no recent runs to analyze.";
 export const NO_REPO_MESSAGE =
   "Set `selfImprovement.repo` (an `owner/name`) in config.yaml to tell `friction propose` where to file issues.";
 

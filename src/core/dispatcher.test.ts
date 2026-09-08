@@ -40,7 +40,7 @@ import { matchesPredicate, NO_GRANTS, predicateFor, type Actor, type ChannelDire
 import { SlackChannelDirectory } from "../channels/slackChannelDirectory.js";
 import { InMemorySkillStore, type Skill } from "../skills/index.js";
 import { StaticMcpToolSource, InMemoryMcpClient } from "../mcp/index.js";
-import { InMemoryFrictionLedger, RunStoreFrictionLedger } from "./frictionLedger.js";
+import { InMemoryFrictionLedger, RunStoreFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
@@ -56,7 +56,13 @@ import type { ResidentAdminClient } from "./residentAdmin.js";
 /** `CoreDeps` plus the two backends the registry's `repo.*` commands reach
  *  through the catalogue wiring (tests inject them here; production resolves
  *  them from config) and the invoke spy `wireCommands` fills. */
-type TestDeps = CoreDeps & { residentAdmin?: ResidentAdminClient; operations?: Operations; invoked: string[] };
+type TestDeps = CoreDeps & {
+  residentAdmin?: ResidentAdminClient;
+  operations?: Operations;
+  invoked: string[];
+  /** The friction ledger the catalogue's `friction.*` commands read (wiring, not a CoreDeps slice since the dispatcher stopped writing one). */
+  frictionLedger?: FrictionLedger;
+};
 
 /** The ONE catalogue src/index.ts hands the dispatcher (`buildCoreCommands`),
  *  bound over the CoreDeps slices — resident admin, operations backend, memory
@@ -4614,38 +4620,29 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     };
   }
 
-  it("records every finished run's friction diagnosis to the ledger, keyed by the registry run id", async () => {
-    const ledger = new InMemoryFrictionLedger();
+  it("every finished run's friction diagnosis reaches the ledger through run history — the record's diagnosis, keyed by the registry run id", async () => {
+    const store = new InMemoryRunStore();
+    const registry = new RunRegistry({ genId: () => "run-friction-1", genToken: () => "tok" });
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
     const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
-    deps.frictionLedger = ledger;
-    deps.runRegistry = new RunRegistry({ genId: () => "run-friction-1", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
     const { io } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
+    await writer.settled();
 
-    const [rec] = await ledger.recent();
+    const [rec] = await new RunStoreFrictionLedger(store).recent();
     expect(rec.runId).toBe("run-friction-1");
     expect(rec.agent).toBe("general");
     expect(rec.label).toContain("general");
     expect(rec.diagnosis.eventCount).toBe(2); // tool_call + tool_result (the two `turn` receipts are narrative, not steps)
     // The general agent has no shell: its `bash` call is an unknown tool → a failed_tool finding.
     expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
-  });
-
-  it("a ledger write failure is logged, never surfaced to the user or the run", async () => {
-    const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
-    deps.frictionLedger = {
-      record: async () => {
-        throw new Error("disk full");
-      },
-      recent: async () => [],
-    };
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg("hello there"), io);
-    expect(replies.some((r) => r.includes("answer"))).toBe(true);
-    expect(replies.some((r) => r.includes("disk full"))).toBe(false);
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("disk full"))).toBe(true);
-    warn.mockRestore();
   });
 
   // Feature: features/memory.md §24 (#278) — `memory list`/`memory forget` are
@@ -5093,7 +5090,6 @@ describe("inline command runs + run receipts (#244)", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     deps.frictionLedger = {
-      record: async () => {},
       recent: async () => {
         await gate;
         return [];
@@ -5121,7 +5117,6 @@ describe("inline command runs + run receipts (#244)", () => {
   it("a command that throws still finishes its run as `failed`, then the error reaches the dispatcher's handler", async () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.frictionLedger = {
-      record: async () => {},
       recent: async () => {
         throw new Error("ledger exploded");
       },
@@ -5374,7 +5369,7 @@ describe("friction diagnosis reads the registry backlog (#157 U11)", () => {
     vi.mocked(makeExecutor).mockClear();
   });
 
-  it("the ledger's diagnosis equals analyzeRunFriction(registry.snapshot(...).events)", async () => {
+  it("the run record's diagnosis — what the friction ledger reads — equals analyzeRunFriction(registry.snapshot(...).events)", async () => {
     let n = 0;
     const provider: Provider = {
       name: "fake",
@@ -5388,13 +5383,20 @@ describe("friction diagnosis reads the registry backlog (#157 U11)", () => {
         return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
       },
     };
-    const ledger = new InMemoryFrictionLedger();
+    const store = new InMemoryRunStore();
     const registry = new RunRegistry({ genId: () => "run-f", genToken: () => "tok" });
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
     const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.frictionLedger = ledger;
     deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
     await dispatch(deps, msg("hello there"), fakeIO().io);
-    const [rec] = await ledger.recent();
+    await writer.settled();
+    const [rec] = await new RunStoreFrictionLedger(store).recent();
     const snap = registry.snapshot("run-f", "tok");
     expect(snap).not.toBeNull();
     expect(rec.diagnosis).toEqual(analyzeRunFriction(snap!.events, { finished: true }));
@@ -5797,14 +5799,12 @@ describe("run history write path (#157 U4)", () => {
 
   it("the record and the friction row carry the registry's redacted label — a pasted token in the request never reaches either", async () => {
     const { deps, store, writer } = wired(capturingProvider());
-    const ledger = new InMemoryFrictionLedger();
-    deps.frictionLedger = ledger;
     await dispatch(deps, msg("please rotate ghp_abcdefghijklmnopqrstuvwxyz0123 now"), fakeIO().io);
     await writer.settled();
     const rec = await store.get("run-h");
     expect(rec!.label).toContain("«redacted-github-token»");
     expect(rec!.label).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
-    const [row] = await ledger.recent();
+    const [row] = await new RunStoreFrictionLedger(store).recent();
     expect(row.label).toContain("«redacted-github-token»");
     expect(row.label).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
     expect(JSON.stringify(await store.list({}))).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
@@ -5932,7 +5932,7 @@ describe("run history write path (#157 U4)", () => {
     expect(replies.some((r) => r.includes("413"))).toBe(false);
   });
 
-  it("a 404 (RouteMissingError) logs once, is not retried, sets degraded, and the friction ledger record() still lands", async () => {
+  it("a 404 (RouteMissingError) logs once, is not retried, sets degraded; the runs are still counted", async () => {
     let attempts = 0;
     const store = {
       put: async () => {
@@ -5940,9 +5940,7 @@ describe("run history write path (#157 U4)", () => {
         throw new RouteMissingError("run store /runs/put HTTP 404");
       },
     } as unknown as RunStore;
-    const legacy = new InMemoryFrictionLedger();
     const { deps, writer, warnings } = wired(toolThenAnswer(), { store });
-    deps.frictionLedger = new RunStoreFrictionLedger(store, legacy);
     await dispatch(deps, msg("hello there"), fakeIO().io);
     await dispatch(deps, msg("hello again"), fakeIO().io);
     await writer.settled();
@@ -5953,7 +5951,6 @@ describe("run history write path (#157 U4)", () => {
     expect(writer.degraded()).toBe(true);
     expect(writer.failures()).toBe(3);
     expect(warnings.filter((w) => w.includes("state Worker has no /runs/put"))).toHaveLength(1);
-    expect(await legacy.recent()).toHaveLength(1); // same run id twice → upsert; the ledger write path is untouched
   });
 
   it("without a writer nothing is written and the run behaves as before", async () => {

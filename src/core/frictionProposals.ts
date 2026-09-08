@@ -36,7 +36,7 @@ export interface FrictionRunRecord {
 
 /** Structural check on a record from outside the process (a ledger line, a
  *  Worker response, a CLI input file): only the fields the clusterer relies on.
- *  Pure — shared by the bot and the state Worker's FrictionDO. */
+ *  Pure — the shape the run store's listing is projected to. */
 export function isFrictionRunRecord(v: unknown): v is FrictionRunRecord {
   if (typeof v !== "object" || v === null) return false;
   const r = v as Record<string, unknown>;

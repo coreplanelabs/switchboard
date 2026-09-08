@@ -5,7 +5,7 @@ Switchboard isn't one service. It's one long-lived process (the bot, wherever yo
 | Piece | What it is | Why it exists |
 |---|---|---|
 | **The bot** | One always-on container, holds Slack + model provider keys | The only thing that must run continuously — everything it depends on is designed so that *it* restarting or redeploying loses nothing |
-| **State Worker** (`switchboard-memory`) | Durable Objects: config overrides, cross-session memory, the friction ledger, run history, schedule firings | Outlives the bot's own process. If the bot's disk is ephemeral (it is, on Cloudflare Containers), anything that must survive a restart has to live somewhere else |
+| **State Worker** (`switchboard-memory`) | Durable Objects: config overrides, cross-session memory, run history (the friction ledger reads it), schedule firings | Outlives the bot's own process. If the bot's disk is ephemeral (it is, on Cloudflare Containers), anything that must survive a restart has to live somewhere else |
 | **Resident Worker** (`switchboard-resident`) | Per-repo Durable Objects running Cloudflare Sandbox containers: a bare mirror, a warm checkout, per-thread worktrees | Keeps *specific, chosen* repos always-warm so a coding request doesn't pay clone-and-install every time — and holds its own GitHub credential, isolated from the bot |
 | **Sandbox Worker** (`switchboard-sandbox`) | A thin proxy in front of per-thread Cloudflare Sandbox containers | Where a tool call actually executes when you want it off the bot host entirely — no persistent identity, just exec-per-thread |
 
@@ -15,7 +15,7 @@ Switchboard isn't one service. It's one long-lived process (the bot, wherever yo
 flowchart TD
     BOT["Bot<br/>Slack + model keys only<br/>no GH_TOKEN, no tool execution"]
 
-    STATE[("State Worker<br/>ConfigDO · MemoryDO · FrictionDO<br/>RunHistoryDO · ScheduleDO")]
+    STATE[("State Worker<br/>ConfigDO · MemoryDO<br/>RunHistoryDO · ScheduleDO")]
     RESIDENT["Resident Worker<br/>own GitHub App key<br/>mints 1h repo-scoped tokens"]
     SANDBOX["Sandbox Worker<br/>proxy only, no persistent state"]
 

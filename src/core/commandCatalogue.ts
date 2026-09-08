@@ -27,7 +27,6 @@ import {
 } from "./commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import { selectFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
-import { buildFrictionLedger } from "./frictionLedgerWorker.js";
 import type { MemoryStore } from "./memory/types.js";
 import { MCP_OFF_MESSAGE, type McpService } from "../mcp/service.js";
 import type { Operations } from "./operations.js";
@@ -42,8 +41,8 @@ import type { ScheduleStore } from "./scheduleStore.js";
 // THE one catalogue every in-process binding shares — src/index.ts (bot) and
 // src/cli.ts (the derived CLI): `registerCoreCommands` bound over the run store
 // from `runHistory` config (null → live-only), the same `RunRegistry`, the
-// friction ledger selected the way the bot selects it (run store when
-// configured, legacy rows unioned), the resident admin client from
+// friction ledger read from that run store (none without one), the resident
+// admin client from
 // `execution.resident` + its bearer, the deterministic-op backend the execution
 // config implies, the memory store, and the schedule store. A surface that
 // binds anything else would answer `runs list` differently from the others.
@@ -55,12 +54,12 @@ export interface CoreCommandWiring {
    *  commands see the runs the dispatcher creates. */
   registry: RunRegistry;
   env: Record<string, string | undefined>;
-  /** Where the host-disk fallbacks (friction JSONL) live. */
+  /** Where host-disk fallbacks live (the file run store, `runHistory.store: file`). */
   dataDir: string;
   warn: (message: string) => void;
   /** Reuse an already-built service (index.ts shares ONE RunsService with the /runs pages). */
   runs?: RunsService;
-  /** Reuse an already-selected ledger (index.ts shares it with `record()`). */
+  /** Reuse an already-selected ledger (index.ts selects it once from the run store). */
   frictionLedger?: FrictionLedger;
   /** Where `friction.propose` files (index.ts passes the dispatcher's `issueTracker`); default: GitHub REST. */
   tracker?: IssueTracker;
@@ -153,21 +152,9 @@ export function buildCoreCommands(
 ): CommandInvoker {
   const registry = new CommandRegistry<CoreCommandDeps>(wiring.audit ? { audit: wiring.audit } : {});
   registerCoreCommands(registry);
-  const warn = (prefix: string) => (m: string) => wiring.warn(`[${prefix}] ${m}`);
   const cfg = once(config);
   const runStore = once(store);
-  const ledger = once(
-    async () =>
-      wiring.frictionLedger ??
-      selectFrictionLedger(
-        await runStore(),
-        buildFrictionLedger((await cfg()).config.selfImprovement, wiring.env, {
-          dataDir: wiring.dataDir,
-          warn: warn("friction"),
-        }),
-        warn("friction"),
-      ),
-  );
+  const ledger = once(async () => wiring.frictionLedger ?? selectFrictionLedger(await runStore()));
   const runs = once(
     async () => wiring.runs ?? createRunsService({ registry: wiring.registry, store: await runStore() }),
   );

@@ -12,7 +12,7 @@ Every top-level block, what it's for, and what happens when it's absent. Copy `c
 | `execution` | Where tool calls actually run: `local` (bot host), `e2b` / `cloudflare` (per-thread sandbox), plus an optional `resident` block for always-warm per-repo environments | `local` — fine for dev, not for untrusted users reaching `coding` |
 | `workspaceDir` | Where local-execution workspaces live on disk | `./workspaces` |
 | `memory` | Cross-session memory: read/write to a durable store, per-scope budget | off — model input is byte-identical to memory disabled |
-| `selfImprovement` | The friction-ledger → GitHub-issue pipeline: target repo, label, thresholds | `friction propose` refuses (no target repo); `friction report` still works from the in-memory ledger |
+| `selfImprovement` | The friction → GitHub-issue pipeline over run history: target repo, label, thresholds | `friction propose` refuses (no target repo); `friction report` still works over `runHistory` |
 | `schedules` | Where the `/runs` Scheduled panel reads cron firing history from | the panel lists schedules with no firing history |
 | `ship` | `agent:ship` pipeline caps: `maxRounds`, `maxMinutes` | sane built-in defaults (3 rounds, 120 min) |
 | `costs` | `/costs` dashboard: Cloudflare account + token, optional Anthropic admin key, named groups of Workers/containers/DOs to price | `/costs` refuses to start — nothing to report on |
@@ -23,7 +23,7 @@ Every top-level block, what it's for, and what happens when it's absent. Copy `c
 
 ## Two blocks that matter most for "does a restart lose anything"
 
-`runtimeOverrides.worker` and `runHistory.worker` (and `memory.worker`, `selfImprovement.worker`, `schedules.worker`) all point at the same state Worker (`deploy/cloudflare-memory/`) with the same bearer. Set them, and a bot restart loses nothing durable: overrides, memory, run history, and the friction ledger all live on Durable Objects, not the container's disk. Skip them (the default on a fresh clone), and all four fall back to a host-disk file or in-memory store — fine for local dev, silently ephemeral on a platform with no persistent disk. See [explanation: Worker topology](../explanation/worker-topology.md).
+`runtimeOverrides.worker` and `runHistory.worker` (and `memory.worker`, `schedules.worker`) all point at the same state Worker (`deploy/cloudflare-memory/`) with the same bearer. Set them, and a bot restart loses nothing durable: overrides, memory, and run history (the friction ledger reads it) all live on Durable Objects, not the container's disk. Skip them (the default on a fresh clone), and all three fall back to a host-disk file or in-memory store — fine for local dev, silently ephemeral on a platform with no persistent disk. See [explanation: Worker topology](../explanation/worker-topology.md).
 
 ## Full annotated example
 

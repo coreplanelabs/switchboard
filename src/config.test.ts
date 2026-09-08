@@ -608,17 +608,27 @@ describe("runHistory config", () => {
     );
     expect(() => load(withRunHistory("  store: disk\n"))).toThrow(/runHistory\.store must be "worker" or "file"/);
   });
+});
 
-  it("warns when selfImprovement.ledgerMax is set alongside runHistory (the ledger is served from the run store)", async () => {
-    const warnings: string[] = [];
-    load(withRunHistory("  retentionDays: 30\n", "selfImprovement:\n  repo: o/r\n  ledgerMax: 500\n"), (m) =>
-      warnings.push(m),
-    );
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/selfImprovement\.ledgerMax.*runHistory/);
-    warnings.length = 0;
-    load(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n  ledgerMax: 500\n`, (m) => warnings.push(m));
-    expect(warnings).toEqual([]);
+// Feature: self-improvement.md item 1 — the section has no ledger of its own
+// any more; a key from that era is refused with its replacement, never ignored.
+describe("selfImprovement", () => {
+  it("loads with repo/label/minRuns/top", () => {
+    const s = store(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n  label: friction\n  minRuns: 3\n  top: 2\n`);
+    expect(s.config.selfImprovement).toEqual({ repo: "o/r", label: "friction", minRuns: 3, top: 2 });
+  });
+
+  it("refuses worker / ledgerPath / ledgerMax naming runHistory.worker as the replacement; a non-mapping is refused too", () => {
+    for (const key of [
+      "worker:\n    baseUrl: https://state.example\n",
+      "ledgerPath: data/friction.jsonl\n",
+      "ledgerMax: 500\n",
+    ]) {
+      expect(() => store(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n  ${key}`)).toThrow(
+        /selfImprovement\.(worker|ledgerPath|ledgerMax) is gone — the friction ledger is run history; configure `runHistory\.worker`/,
+      );
+    }
+    expect(() => store(`${YAML_FIXTURE}\nselfImprovement: 3\n`)).toThrow(/selfImprovement must be a mapping/);
   });
 });
 
@@ -817,10 +827,11 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
   });
 
   it("openConfigStore parses and validates config.yaml ONCE — a load-time warning is reported once, not again by the constructor", async () => {
-    const { dir, cfg } = cfgFile(`${YAML_FIXTURE}\nrunHistory: {}\nselfImprovement:\n  ledgerMax: 5\n`);
+    // An id named by both `grants` and `permissions` is the one load-time warning (authorization.md item 9).
+    const { dir, cfg } = cfgFile(`${YAML_FIXTURE}\ngrants:\n  "slack:UADMIN":\n    actions: all\n`);
     const warnings: string[] = [];
     await openConfigStore(cfg, { overridesPath: join(dir, "overrides.json"), env: {}, warn: (m) => warnings.push(m) });
-    expect(warnings.filter((w) => w.includes("ledgerMax"))).toHaveLength(1);
+    expect(warnings.filter((w) => w.includes("grants and permissions both name"))).toHaveLength(1);
   });
 });
 

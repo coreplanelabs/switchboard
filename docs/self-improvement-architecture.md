@@ -17,7 +17,7 @@ flowchart TB
     RUN["Agent run<br/>(coding, review, ship, general…)"]
     OBS["Observe<br/>run-event stream:<br/>tool calls, results, timings,<br/>budget and infra notes"]
     DIAG["Diagnose<br/>analyzeRunFriction<br/>slow tools, failed tools, retries,<br/>installs, wrap-up, budget hits"]
-    MEM["Remember<br/>diagnosis stored with the run record<br/>(RunHistoryDO + FrictionDO)"]
+    MEM["Remember<br/>diagnosis stored with the run record<br/>(RunHistoryDO)"]
     CLUS["Cluster<br/>same friction in ≥2 distinct runs<br/>→ ranked pattern"]
     PROP["Propose<br/>GitHub issue per pattern:<br/>evidence + suggested fix,<br/>deduped by marker"]
     HUMAN{{"Human triage"}}
@@ -54,17 +54,15 @@ flowchart TB
 
     subgraph state ["State Worker — deploy/cloudflare-memory (Durable Objects, bearer-gated)"]
         HDO[("RunHistoryDO<br/>every finished run's record,<br/>diagnosis included")]
-        FDO[("FrictionDO<br/>legacy diagnosis rows,<br/>still written until decommission")]
         SDO[("ScheduleDO<br/>firing records for the<br/>/runs Scheduled panel")]
     end
 
     GH["GitHub Issues<br/>label: self-improvement<br/>marker: an HTML comment<br/>naming the pattern key"]
 
     SLACK & CLI & API & CRON --> CMD
-    DISP -->|after every run: run record + friction row| HDO & FDO
+    DISP -->|after every run: the run record, diagnosis included| HDO
     CMD --> LEDGER
     LEDGER -->|list recent runs| HDO
-    LEDGER -.->|union, one retention window| FDO
     LEDGER --> PURE
     PURE -->|fresh proposals| TRACKER -->|create issue| GH
     TRACKER -->|list open labeled issues for dedupe| GH

@@ -18,9 +18,6 @@
     // impossible by construction.
     "bindings": [
       { "name": "MEMORY", "class_name": "MemoryDO" },
-      // One FrictionDO per ledger key (`friction:<repo>`): the durable friction
-      // ledger behind `friction propose` (#84, features/self-improvement.md).
-      { "name": "FRICTION", "class_name": "FrictionDO" },
       // ONE ScheduleDO (named "schedules"): every cron firing the bot's Worker
       // shim makes, for the /runs Scheduled panel (#244, features/live-view.md).
       { "name": "SCHEDULES", "class_name": "ScheduleDO" },
@@ -44,6 +41,10 @@
     { "tag": "v3", "new_sqlite_classes": ["ScheduleDO"] },
     { "tag": "v4", "new_sqlite_classes": ["RunHistoryDO"] },
     { "tag": "v5", "new_sqlite_classes": ["ConfigDO"] },
-    { "tag": "v6", "new_sqlite_classes": ["RunTranscriptDO"] }
+    { "tag": "v6", "new_sqlite_classes": ["RunTranscriptDO"] },
+    // The friction ledger is read from run history (RunHistoryDO carries every
+    // run's diagnosis); the FrictionDO that once mirrored those diagnoses is
+    // retired with its rows — features/self-improvement.md item 1.
+    { "tag": "v7", "deleted_classes": ["FrictionDO"] }
   ]
 }
