@@ -44,19 +44,24 @@ export const RESTART_SCOPE = "deploy:write";
 export interface RestartVerdict {
   allow: boolean;
   forced: boolean;
+  /** What refuses (fail-closed: no JSON body, an impossible count). */
   problems: string[];
+  /** What is said but does not refuse: runs in flight (they hand off), a drain under way. */
+  warnings: string[];
   message: string;
 }
-
 /**
  * Whether the container may be stopped now — the deploy preflight's rules
- * (deploy/cloudflare/preflight.mjs `decide`) minus the rollout-state check
- * (a restart is not a rollout): refuse while runs are in flight or a drain is
- * already under way; fail closed on a body that is not JSON or an impossible
- * count. `force` allows anyway, with the warning.
+ * (deploy/cloudflare/preflight.mjs `decide`) minus the rollout-state check (a
+ * restart is not a rollout). Since the handoff (features/run-history.md item
+ * 39) runs in flight and a drain under way are WARNINGS, not refusals: SIGTERM
+ * hands every resumable run to the next generation. Fail closed on a body
+ * that is not JSON or an impossible count; `force` allows those anyway, with
+ * the warning.
  */
 export function decideRestart(body: HealthzBody | undefined, opts: { force: boolean }): RestartVerdict {
   const problems: string[] = [];
+  const warnings: string[] = [];
   if (!body) {
     problems.push(
       "bot not answering with JSON on /healthz (container restarting, unreachable, or a Worker that predates the preflight)",
@@ -65,28 +70,33 @@ export function decideRestart(body: HealthzBody | undefined, opts: { force: bool
     if (!Number.isInteger(body.inFlight) || (body.inFlight as number) < 0) {
       problems.push(`bot reports an impossible inFlight=${JSON.stringify(body.inFlight)} (counter bug or old Worker)`);
     } else if ((body.inFlight as number) > 0) {
-      problems.push(`${body.inFlight} run(s) in flight — a restart would kill them`);
+      warnings.push(
+        `${body.inFlight} run(s) in flight — handed to the next generation on SIGTERM (run-history item 39); they continue there`,
+      );
     }
     if (body.draining === true)
-      problems.push(
-        "bot is already draining (a deploy or an earlier restart is in progress) — it restarts on its own when the drain ends",
+      warnings.push(
+        "bot is already draining (a deploy or an earlier restart is in progress) — it restarts on its own when the drain ends; a second stop is harmless",
       );
   }
-  if (problems.length === 0)
-    return { allow: true, forced: false, problems, message: "restart ok: no runs in flight, not draining" };
+  const said =
+    warnings.length > 0 ? ` —\n${warnings.map((w) => `  - ${w}`).join("\n")}` : ": no runs in flight, not draining";
+  if (problems.length === 0) return { allow: true, forced: false, problems, warnings, message: `restart ok${said}` };
   const detail = problems.map((p) => `  - ${p}`).join("\n");
   if (opts.force)
     return {
       allow: true,
       forced: true,
       problems,
-      message: `restart WARNING: stopping by force despite —\n${detail}\n  in-flight runs get SIGTERM'd into the drain: they finish if they can, else are killed at the drain deadline and their status cards left for the next connect's sweep to close`,
+      warnings,
+      message: `restart WARNING: stopping by force despite —\n${detail}`,
     };
   return {
     allow: false,
     forced: false,
     problems,
-    message: `restart REFUSED —\n${detail}\n  wait and retry, or pass --force to drain (and at the deadline kill) what is in flight`,
+    warnings,
+    message: `restart REFUSED —\n${detail}\n  wait and retry, or pass --force to stop blind`,
   };
 }
 

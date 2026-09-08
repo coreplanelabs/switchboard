@@ -7,6 +7,7 @@ import { createLogSink } from "../core/trace/sinks.js";
 import type { Span } from "../core/trace/types.js";
 import { computeAffected, formatAffectedText, type AffectedProbe, type AffectedReport } from "./affected.js";
 import {
+  servedStartedAt,
   decideLive,
   decideRestarted,
   heartbeatLine,
@@ -96,12 +97,6 @@ export interface DeployStepResult {
   /** `live` (gated and confirmed), `n/a` (no gate), `not deployed`, or `deployed, not live: <reason>`. */
   live: string;
   status: string;
-  /** The step never deployed because its preflight was still refusing when the
-   *  wait budget ran out — runs in flight, a drain under way. Nothing is
-   *  broken and nothing needs changing: the same deploy later succeeds once
-   *  they finish. Absent on every other outcome, so the caller can tell
-   *  "wait and retry" from "fix something". */
-  preflightTimedOut?: true;
 }
 
 export type DeployRunResult =
@@ -459,7 +454,6 @@ export interface StepOutcome {
   versionId?: string;
   live: string;
   reason?: string;
-  preflightTimedOut?: true;
 }
 
 /**
@@ -474,12 +468,17 @@ async function waitUntilLive(
   expectedCommit: string,
   io: DeployRunnerIO,
   clock: () => number,
+  /** The container's `startedAt` read before the upload: what a draining
+   *  same-commit container must be later than to count as the new one. */
+  previousStartedAt: string | undefined,
 ): Promise<GateOutcome> {
   const started = clock();
   for (;;) {
     const elapsed = clock() - started;
     const body = await fetchHealthz(healthUrl);
-    const d = decideLive(body, expectedCommit, elapsed);
+    const d = decideLive(body, expectedCommit, elapsed, LIVE_GATE_DEADLINE_MS, {
+      ...(previousStartedAt !== undefined ? { previousStartedAt } : {}),
+    });
     if (d.kind === "live") return { live: true, detail: `commit ${d.commit.slice(0, 7)}`, waitedMs: elapsed };
     if (d.kind === "timeout")
       return {
@@ -721,7 +720,6 @@ export async function deployStep(
 /** The one word a step's root carries for how it ended. */
 function stepOutcomeWord(r: StepOutcome): string {
   if (r.ok) return r.live === "live" ? "live" : "deployed";
-  if (r.preflightTimedOut) return "busy";
   return r.live.startsWith("deployed, not live") ? "not_live" : "failed";
 }
 
@@ -741,6 +739,13 @@ async function deployStepTraced(
     const sandbox =
       step.liveGate?.kind === "sandbox"
         ? { gate: step.liveGate, before: await readAppBeforeUpload(step, step.liveGate, io, deps) }
+        : undefined;
+    // The bot gate's pre-upload reading (liveGate.ts `decideLive`): the container's
+    // `startedAt` now, so a same-commit rollout is told from its draining
+    // predecessor. Best-effort — unreadable means the commit alone judges.
+    const previousStartedAt =
+      step.liveGate && step.liveGate.kind !== "sandbox"
+        ? await fetchHealthz(step.liveGate.healthUrl).then((b) => (b ? servedStartedAt(b) : undefined))
         : undefined;
     const r = await exec(step, io);
     const outcome = classifyDeployOutput(r.code, r.output);
@@ -766,7 +771,7 @@ async function deployStepTraced(
               : `[deploy:all] ${step.name}: wrangler printed no container change — Worker-only deploy, no rollout expected`,
           );
           g = await waitUntilSandboxLive(step, sandbox.gate, expectedCommit, { ...sandbox, target }, io, deps);
-        } else g = await waitUntilLive(step, liveGate.healthUrl, expectedCommit, io, deps.now);
+        } else g = await waitUntilLive(step, liveGate.healthUrl, expectedCommit, io, deps.now, previousStartedAt);
         wait.setAttrs(g.live ? { outcome: "live", waitedMs: g.waitedMs } : { outcome: "not_live" });
         return g;
       });
@@ -789,8 +794,7 @@ async function deployStepTraced(
         return {
           ok: false,
           live: "not deployed",
-          reason: `preflight still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to kill what is in flight`,
-          preflightTimedOut: true,
+          reason: `preflight still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to deploy over it`,
         };
       // Never a silent wait: say what is in flight and how far into the budget we are.
       const body = step.healthUrl ? await fetchHealthz(step.healthUrl) : undefined;
@@ -903,7 +907,6 @@ export async function runDeployPlan(
       ...(r.versionId !== undefined ? { versionId: r.versionId } : {}),
       live: r.live,
       status: r.ok ? (r.versionId ? "deployed" : "deployed (no version id in output?)") : `FAILED: ${r.reason}`,
-      ...(r.preflightTimedOut ? { preflightTimedOut: true } : {}),
     });
     if (!r.ok) {
       io.warn(`[deploy:all] ${step.name} failed — stopping here so the order holds (later Workers were NOT deployed)`);
@@ -1047,8 +1050,9 @@ async function fetchHealthzWith(deps: RestartRunnerDeps, url: string): Promise<H
 
 /**
  * Restart the bot container without a build: POST the Worker's `/admin/restart`
- * (bearer from `plan.tokenEnv`); a 409 (runs in flight, or already draining)
- * is waited out with a heartbeat and retried every `pollMs` up to `waitMaxMs`
+ * (bearer from `plan.tokenEnv`); a 409 (the bot not answering with JSON — the
+ * fail-closed cases; runs in flight hand off and never refuse, run-history item
+ * 39) is waited out with a heartbeat and retried every `pollMs` up to `waitMaxMs`
  * — never forced unless the plan says so; then poll `/healthz` until a
  * non-draining container reports a `startedAt` later than the old one's
  * (`decideRestarted`), logging every poll so the drain is visible.
@@ -1118,7 +1122,7 @@ export async function runBotRestart(
           ok: false,
           target: plan.target,
           waitedMs: deps.now() - started,
-          reason: `still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to kill what is in flight`,
+          reason: `still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to stop blind`,
         };
       const body = await fetchHealthzWith(deps, plan.healthUrl);
       io.log(heartbeatLine(plan.target, body, deps.now() - started, plan.waitMaxMs, tag));

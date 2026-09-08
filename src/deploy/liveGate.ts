@@ -59,27 +59,34 @@ function servedCommit(body: HealthzBody): string | undefined {
   return typeof c === "string" && c !== "" ? c : undefined;
 }
 
-/** The part of a live decision every gate shares: a non-JSON body and a
- *  draining container are never live; a non-draining JSON body is judged by
- *  `identify` — the identity that proves the NEW container is answering, or the
- *  reason it is not. Past `deadlineMs` the reason becomes a timeout. */
+/** The part of a live decision every gate shares: a non-JSON body is never
+ *  live; a JSON body is judged by `identify` — the identity that proves the NEW
+ *  container is answering, or the reason it is not. A draining body is judged
+ *  the same way (run-history item 39: a container that already serves the
+ *  deployed identity IS live, whatever is rolling it next); when the identity
+ *  is the old one, the reason names the drain — the more useful fact — unless
+ *  `identify` already judged the same identity draining (`sameIdentity`: a
+ *  same-commit rollout, decided by `startedAt`) and said why. Past
+ *  `deadlineMs` the reason becomes a timeout. */
 function decideReady<Identity>(
   body: HealthzBody | undefined,
   elapsedMs: number,
   deadlineMs: number,
-  identify: (body: HealthzBody) => { live: true; identity: Identity } | { live: false; reason: string },
+  identify: (
+    body: HealthzBody,
+  ) => { live: true; identity: Identity } | { live: false; reason: string; sameIdentity?: true },
 ): ReadyDecision<Identity> {
   let reason: string;
   if (!body) {
     reason = "/healthz not answering with JSON (container restarting, or unreachable)";
-  } else if (body.draining === true) {
-    const n = typeof body.inFlight === "number" ? body.inFlight : "?";
-    const since = typeof body.drainStartedAt === "string" ? ` since ${body.drainStartedAt}` : "";
-    reason = `old container still draining — ${n} run(s) in flight${since}`;
   } else {
     const verdict = identify(body);
     if (verdict.live) return { kind: "live", ...verdict.identity };
-    reason = verdict.reason;
+    if (body.draining === true && !verdict.sameIdentity) {
+      const n = typeof body.inFlight === "number" ? body.inFlight : "?";
+      const since = typeof body.drainStartedAt === "string" ? ` since ${body.drainStartedAt}` : "";
+      reason = `old container still draining — ${n} run(s) in flight${since}`;
+    } else reason = verdict.reason;
   }
   return elapsedMs >= deadlineMs ? { kind: "timeout", reason } : { kind: "waiting", reason };
 }
@@ -95,17 +102,25 @@ export function sameCommit(a: string, b: string): boolean {
 }
 
 /**
- * The decision for one poll. `live` only when the body is JSON, not draining,
- * and carries the expected commit. Everything else is `waiting` with the reason
- * an operator would want to read — until `elapsedMs` reaches `deadlineMs`, when
- * the same reason becomes a `timeout` (the CLI exits non-zero: never report
- * success when not live).
+ * The decision for one poll. `live` only when the body is JSON and carries the
+ * expected commit — and, when that container is DRAINING, only if it is provably
+ * the new one: a rollout of the SAME commit (a Worker recovered with
+ * `--only bot`, a forced `all` with no code change) drains an old container
+ * that serves the deployed commit too, so the commit alone would call it live the
+ * moment SIGTERM landed. The runner reads `startedAt` before the upload
+ * (`opts.previousStartedAt`) and a draining same-commit container counts only
+ * with a later one; without a pre-upload reading, a draining same-commit
+ * container waits. Everything else is `waiting` with the reason an operator
+ * would want to read — until `elapsedMs` reaches `deadlineMs`, when the same
+ * reason becomes a `timeout` (the CLI exits non-zero: never report success when
+ * not live).
  */
 export function decideLive(
   body: HealthzBody | undefined,
   expectedCommit: string,
   elapsedMs: number,
   deadlineMs: number = LIVE_GATE_DEADLINE_MS,
+  opts: { previousStartedAt?: string } = {},
 ): LiveDecision {
   return decideReady(body, elapsedMs, deadlineMs, (b) => {
     const commit = servedCommit(b);
@@ -121,12 +136,25 @@ export function decideLive(
         live: false,
         reason: `serving commit ${commit.slice(0, 7)}, expected ${expectedCommit.slice(0, 7)} (old container still up)`,
       };
+    if (b.draining === true) {
+      const started = servedStartedAt(b);
+      const newer =
+        started !== undefined &&
+        opts.previousStartedAt !== undefined &&
+        Date.parse(started) > Date.parse(opts.previousStartedAt);
+      if (!newer)
+        return {
+          live: false,
+          sameIdentity: true,
+          reason: `the deployed commit answers but is draining${started ? ` (started ${started})` : ""} — a same-commit rollout replaces it; waiting for the new container`,
+        };
+    }
     return { live: true, identity: { commit } };
   });
 }
 
 /** A parseable ISO `startedAt` from a body, else undefined. */
-function servedStartedAt(body: HealthzBody): string | undefined {
+export function servedStartedAt(body: HealthzBody): string | undefined {
   const s = body.startedAt;
   return typeof s === "string" && Number.isFinite(Date.parse(s)) ? s : undefined;
 }

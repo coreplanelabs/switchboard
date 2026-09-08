@@ -156,7 +156,7 @@ describe("deploy.plan", () => {
     expect(plan).toMatchObject({
       dryRun: true,
       force: false,
-      waitMaxMs: 30 * 60_000,
+      waitMaxMs: 10 * 60_000,
       pollMs: 60_000,
       checks: { atOriginMain: true },
     });
@@ -379,8 +379,8 @@ describe("deploy.all", () => {
     ).toMatchObject({ ok: false, error: "invalid_input" });
   });
 
-  it("a step whose preflight was still refusing at the end of the wait budget is `busy`, not `unavailable`: nothing is broken, the same deploy succeeds once the runs in flight finish (exit 75 on the CLI — the workflow's cue to re-dispatch)", async () => {
-    const busy = bind(async () => ({
+  it("a step whose preflight was still refusing at the end of the wait budget is `unavailable` like any stopped run: what a refusal names now is a rollout still settling, a real anomaly past the budget (runs in flight no longer refuse — run-history item 39)", async () => {
+    const stuck = bind(async () => ({
       kind: "ran",
       ok: false,
       results: [
@@ -389,22 +389,18 @@ describe("deploy.all", () => {
           name: "bot",
           script: "switchboard",
           live: "not deployed",
-          status: "FAILED: preflight still refusing after 45 min (2 run(s) in flight)",
-          preflightTimedOut: true,
+          status: "FAILED: preflight still refusing after 10 min (container rollout in progress: state=updating)",
         },
       ],
       notAttempted: ["resident", "sandbox"],
     }));
-    const res = await busy.commands.invoke("deploy.all", {}, cli);
-    expect(res).toMatchObject({ ok: false, error: "busy" });
+    const res = await stuck.commands.invoke("deploy.all", {}, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
     const message = res.ok ? "" : res.message;
-    expect(message).toMatch(
-      /^deploy waited out its budget — bot: preflight still refusing after 45 min \(2 run\(s\) in flight\)/,
-    );
+    expect(message).toMatch(/^deploy stopped —/);
+    expect(message).toContain("state=updating");
     expect(message).toContain("memory    switchboard-memory     v1");
     expect(message).toContain("not attempted: resident, sandbox");
-    // A real failure after a timed-out step elsewhere in the table is still a failure: the
-    // table is read as a whole, and only "every failure is a timeout" is busy.
     const mixed = bind(async () => ({
       kind: "ran",
       ok: false,
@@ -509,7 +505,7 @@ describe("deploy.restart", () => {
         healthUrl: BOT_HEALTH_URL,
         tokenEnv: RESTART_TOKEN_ENV,
         force: false,
-        waitMaxMs: 30 * 60_000,
+        waitMaxMs: 10 * 60_000,
         pollMs: 60_000,
         liveDeadlineMs: expect.any(Number),
       },
