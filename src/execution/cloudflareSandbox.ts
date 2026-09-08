@@ -27,11 +27,11 @@ export interface CloudflareSandboxOptions {
   token: string;
   threadKey: string;
   /** Env vars forwarded into the sandbox (e.g. GH_TOKEN), resolved on EVERY
-   *  call and sent as `env` in the request body (plus `x-env-*` headers for
-   *  one release, see `call`) — the Worker applies them to that one command,
-   *  so each command carries the credential current at its own start, never
-   *  one captured when the run began (2026-09-07: a run-start token expired
-   *  under a 20-minute first command and every later command carried it dead). */
+   *  call and sent as `env` in the request body — the Worker applies them to
+   *  that one command, so each command carries the credential current at its
+   *  own start, never one captured when the run began (2026-09-07: a run-start
+   *  token expired under a 20-minute first command and every later command
+   *  carried it dead). */
   resolveEnvs: () => Promise<Record<string, string>>;
   /** resident repo/ref context — reserved for resident environments (not yet used) */
   repo?: string;
@@ -124,16 +124,13 @@ export class CloudflareSandboxExecutor implements Executor {
       "x-thread-key": this.opts.threadKey,
     };
     // The env map rides in the BODY on every route (the Worker uses it only
-    // for /exec, but one shape everywhere) — the authoritative channel:
-    // Workers Logs record an invocation's request headers and redact them by
-    // a name heuristic only — a per-variable header whose name did not look
-    // sensitive was logged in clear (2026-09-07, the #447 receipt) — while
-    // bodies are not recorded. The per-variable headers below are the
-    // COMPATIBILITY path for a sandbox Worker not yet on the body reader:
-    // `deploy all` deploys the bot before the sandbox Worker, so without them
-    // every cold run in that window would run with no GH_TOKEN. They retire
-    // next release (tracked in #447), leaving the body alone.
-    for (const [k, v] of Object.entries(envs)) headers[`x-env-${k}`] = v;
+    // for /exec, but one shape everywhere) — the ONLY channel. Workers Logs
+    // record an invocation's request headers and redact them by a name
+    // heuristic only — a per-variable header whose name did not look sensitive
+    // was logged in clear (2026-09-07, the #447 receipt) — while bodies are not
+    // recorded. A one-release per-variable-header fallback carried a body-only
+    // bot against a header-only Worker during the #597 rollout; the body reader
+    // is live everywhere now, so no credential ever rides in a header (#447).
     const sent: Record<string, unknown> = { ...body, env: envs };
 
     const budget = Math.min(budgetMs, FLEET_BUSY_WAIT_MAX_MS);

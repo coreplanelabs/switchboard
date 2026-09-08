@@ -8,27 +8,23 @@
 // heuristic — `x-env-gh_token` showed as REDACTED, but the receipt probe's
 // `x-env-PROBE_VAR: hello-from-env-option` was logged in clear. Request bodies
 // are not recorded. So the executor sends the map as `env` in the JSON body on
-// every route, and the Worker reads it from there. The `x-env-*` header path is
-// read as a FALLBACK for one release — a bot deployed after the Worker still
-// works — and retires with the next release.
+// every route and the Worker reads it from there — the ONLY channel. A one-
+// release `x-env-*` header path carried a body-only bot against a header-only
+// Worker during the #597 rollout; the body reader is live everywhere now, so it
+// retired (#447): request headers are never a credential channel.
 
 /** A shell identifier: what an env NAME must be after upper-casing. Same rule
  *  as the resident Worker's `ENV_NAME_RE`; anything else is dropped, never
  *  interpolated. */
 export const ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 
-const HEADER_PREFIX = "x-env-";
-
-/** The validated env map for one request: `body.env` (an object of string
- *  values) first, `x-env-<NAME>` headers as the fallback; when both name a
- *  key the body wins. Names are upper-cased and must match
+/** The validated env map for one request, read from `body.env` alone (an
+ *  object of string values). Names are upper-cased and must match
  *  `ENV_NAME_PATTERN`; non-string values and an `env` that is not a plain
- *  object are dropped. Never throws — a malformed request yields `{}`. */
-export function envFromRequest(req: { body: unknown; headers: Iterable<[string, string]> }): Record<string, string> {
+ *  object are dropped. Request headers are never read — Workers Logs record
+ *  them (see above). Never throws — a malformed request yields `{}`. */
+export function envFromRequest(req: { body: unknown }): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [name, value] of req.headers) {
-    if (name.toLowerCase().startsWith(HEADER_PREFIX)) put(out, name.slice(HEADER_PREFIX.length), value);
-  }
   const env = isPlainObject(req.body) ? req.body.env : undefined;
   if (isPlainObject(env)) {
     for (const [name, value] of Object.entries(env)) put(out, name, value);
