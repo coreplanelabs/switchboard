@@ -2,7 +2,7 @@
 
 Switchboard is an agent gateway: a message arrives over a channel (Slack, the CLI, HTTP, MCP), a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor it never touches directly. Slack is one channel, not the architecture.
 
-Every agent working here reads this file, as does a person asking how we work: how a change is made, the invariants, where things are, the commands that are the repo's whole interface, and the rules. Detail is a link away: [README.md](README.md) (engineering), [docs/](docs/README.md) (the human-facing tree, published at <https://docs.switchboard.coreplanelabs.dev>), [docs/reference/specs/](docs/reference/specs/README.md) (the behavioral contract).
+Every agent working here reads this file, as does a person asking how we work: how a change is made, the invariants, where things are, the commands that are the repo's whole interface, and the rules. Detail is a link away: [README.md](README.md) (engineering), [docs/](docs/README.md) (the human-facing tree, published at <https://openswitchboard.dev>), [docs/reference/specs/](docs/reference/specs/README.md) (the behavioral contract).
 
 ## How a change is made
 

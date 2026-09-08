@@ -82,6 +82,27 @@ describe("parseProfile", () => {
     expect(clash.ok ? [] : clash.problems).toEqual(["workers: two Workers share a script name"]);
   });
 
+  it("a Worker may name its own zone — a public docs site on a product domain — and its hostname is judged against that zone", () => {
+    const ownZone = parseProfile({
+      ...TEST_PROFILE,
+      workers: {
+        ...TEST_PROFILE.workers,
+        docs: { script: "switchboard-docs", hostname: "product.example", zone: "product.example" },
+      },
+    });
+    expect(ownZone.ok).toBe(true);
+    const outsideOwnZone = parseProfile({
+      ...TEST_PROFILE,
+      workers: {
+        ...TEST_PROFILE.workers,
+        docs: { script: "switchboard-docs", hostname: "docs.example.test", zone: "product.example" },
+      },
+    });
+    expect(outsideOwnZone.ok ? [] : outsideOwnZone.problems).toEqual([
+      "workers.docs.hostname: not under zone product.example",
+    ]);
+  });
+
   it("the docs Worker and the secrets source are optional; access is optional and strict when present", () => {
     const { docs: _docs, ...runtimeOnly } = TEST_PROFILE.workers;
     expect(parseProfile({ ...TEST_PROFILE, workers: runtimeOnly }).ok).toBe(true);

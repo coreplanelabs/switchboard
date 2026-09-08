@@ -29,9 +29,6 @@ web/src/pages/costs.test.ts	expect(w.find('table.data td[title="2026-08-27"]').e
 web/src/pages/scheduled.test.ts	traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
 web/src/pages/scheduled.test.ts	expect(w.find(".trace").attributes("title")).toBe("trace 4bf92f3577b34da6a3ce929d0e0e4736");
 
-# project.json's docs URL; changes with D4.
-docs/README.md	You can read this tree here on GitHub or as a site — [docs.switchboard.coreplanelabs.dev](https://docs.switchboard.coreplanelabs.dev), also reachable at `/docs` on the dashboard and from the docs icon in its header. Same markdown, same links: the site is compiled from these files on every push, with search, diagrams, and dark mode.
-
 # `#111` is a CSS colour in a mermaid style line.
 docs/explanation/how-switchboard-improves-itself.md	style HUMAN fill:#fde68a,stroke:#b45309,color:#111
 
@@ -46,7 +43,6 @@ docs/reference/authorization.md	slack:U0123ADMIN:                 # an admin, sp
 
 # The project's own repository and docs URL: real infrastructure, held equal to project.json by check:project-facts.
 src/core/selfDescription.ts	export const SWITCHBOARD_REPO = "coreplanelabs/switchboard";
-src/core/docsLink.ts	export const PROJECT_DOCS_URL = "https://docs.switchboard.coreplanelabs.dev";
 src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Source of truth: the code lives in the GitHub repo coreplanelabs/switchboard — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under docs/reference/specs/*.md (e.g. docs/reference/specs/resident-repos.md, docs/reference/specs/routing-and-config.md, docs/reference/specs/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on coreplanelabs/switchboard) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings."
 
 # Synthetic Slack ids of the real shape: mention-rendering and directive-position tests need a valid <@U…>/<#C…|name> token.
@@ -102,7 +98,6 @@ package.json	"url": "git+https://github.com/coreplanelabs/switchboard.git"
 package.json	"url": "https://github.com/coreplanelabs/switchboard/issues"
 .github/ISSUE_TEMPLATE/config.yml	url: https://github.com/coreplanelabs/switchboard/discussions
 .github/ISSUE_TEMPLATE/config.yml	url: https://github.com/coreplanelabs/switchboard/security/advisories/new
-AGENTS.md	Every agent working here reads this file, as does a person asking how we work: how a change is made, the invariants, where things are, the commands that are the repo's whole interface, and the rules. Detail is a link away: [README.md](README.md) (engineering), [docs/](docs/README.md) (the human-facing tree, published at <https://docs.switchboard.coreplanelabs.dev>), [docs/reference/specs/](docs/reference/specs/README.md) (the behavioral contract).
 CODE_OF_CONDUCT.md	<dev@coreplane.ai>. All complaints will be reviewed and investigated promptly
 SECURITY.md	repository's Security tab, or email <dev@coreplane.ai> with a description, the
 CONTRIBUTING.md	git clone https://github.com/coreplanelabs/switchboard.git
