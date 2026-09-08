@@ -38,11 +38,21 @@ jobs:
     name: scorecard analysis
     needs: visibility
     runs-on: ubuntu-latest
+    # A job-level block REPLACES the workflow's `read-all`, so every read the
+    # action needs must be named here. On a private repository the action's
+    # GraphQL setup (ListCommits: commits with their pull requests, reviews and
+    # checks) fails with "Resource not accessible by integration" without the
+    # last three — every run since #471 failed that way (2026-09-08, run
+    # 34177000969). These are the reads the action's README lists for private
+    # repositories; the writes are for publishing, which `visibility` gates.
     permissions:
       security-events: write
       id-token: write
       contents: read
       actions: read
+      issues: read
+      pull-requests: read
+      checks: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
