@@ -95,9 +95,11 @@ import {
   type RunSnapshot,
   type RunSummary,
   REPLAY_EVERYTHING,
+  type SealResult,
 } from "./runRegistry.js";
 import { inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 import { createCardShell, type CardShell } from "./statusCardFrame.js";
+import { createRunEnding, type RunEnding } from "./runEnding.js";
 import { coalesceStatus } from "./statusCoalescer.js";
 import type {
   ChannelIO,
@@ -420,26 +422,20 @@ export async function dispatch(
   // (#317). Config commands and refusals hold the slot for their few hundred
   // milliseconds too — cheaper than a second gap.
   activeRuns++;
-  // The run record (#157 KTD4): its inputs — the registry snapshot and the
-  // diagnosis — are captured synchronously when the run finishes, inside the
-  // run's try/catch, so a failed run has them too. The record itself is
-  // assembled and byte-budgeted (`fitRecordToBudget`) here, only AFTER the
-  // reply went out (success path: after the answer reply; failure path: after the
-  // error reply in the outer catch), so neither persistence nor the budgeting
-  // pass can delay the user. Undefined until a run finished, or when no writer
-  // is configured.
-  // `failedAfterFinish` is set by the outer catch: a run whose loop completed
-  // but whose post-run steps (card close, reply) threw is a FAILED run, not a
-  // completed one — a stop that already ended it keeps its `stopped_*` status.
-  let buildHistoryRecord: ((failedAfterFinish: boolean) => RunRecord) | undefined;
-  const writeHistory = (failedAfterFinish = false) => {
-    if (!buildHistoryRecord || !deps.runHistoryWriter) return;
-    const build = buildHistoryRecord;
-    buildHistoryRecord = undefined; // exactly one write per run
-    // A tracked run finishes through the ledger: the record replaces its live
-    // rows in one transaction (a refused finish falls back to the store).
-    deps.runHistoryWriter.write(build(failedAfterFinish), ledgerRun ? { via: ledgerRun.sink } : undefined);
-  };
+  // How this dispatch's runs end (runEnding.ts; features/tracing.md): a run is
+  // SEALED once its first reply attempt has completed, and its record — its
+  // inputs (the registry snapshot, the diagnosis) captured synchronously at
+  // finish inside the run's try/catch, so a failed run has them too — is
+  // assembled, byte-budgeted (`fitRecordToBudget`) and written by the drain
+  // right after the seal, so it carries the seal's stamps and the events
+  // published between finish and seal, and neither persistence nor the
+  // budgeting pass ever delays the user. The reply wrap drains on the success
+  // path, the outer catch drains around the error reply, and the outer finally
+  // drains as the backstop: every run is sealed and its record written exactly
+  // once. A writer's `failedAfterFinish` flips a run whose loop completed but
+  // whose card close or reply threw to `failed` — the thread never saw the
+  // answer — while a stop that already ended it keeps its `stopped_*` status.
+  const ending = createRunEnding({ registry: deps.runRegistry ?? defaultRunRegistry });
   // The ack card while setup is still in progress. Cleared the moment it
   // becomes the run card, so the outer catch closes ONLY a card that setup
   // left open — a run failure is closed (with its checklist) by the run loop.
@@ -456,8 +452,8 @@ export async function dispatch(
   let admitted: LiveThread<DispatchFollowUp> | undefined;
   let liveControl: RunControl | undefined;
   // The run's row on the ledger (item 35), once claimed; undefined for an
-  // untracked run. Read by `writeHistory` (the finish goes through it) and the
-  // outer finally (its heartbeat stops with the run).
+  // untracked run. Read by the record writer (the finish goes through it) and
+  // the outer finally (its heartbeat stops with the run).
   let ledgerRun: LedgerRun | undefined;
   try {
     // Stage A — the ONE text-only fast path (#157 U13/KTD19, phase 4b): a
@@ -480,8 +476,12 @@ export async function dispatch(
     if (deps.commands) {
       const chatCmd = parseChatCommand(msg.text, deps.commands);
       if (chatCmd) {
-        const res = await runChatCommand(deps, msg, io, chatCmd);
-        await replyCommandOutput(io, chatCmd, res.text);
+        const res = await runChatCommand(deps, msg, io, chatCmd, ending);
+        // The command run (if the command made one) seals after its reply.
+        await ending.sealAfterReply(
+          async () => {},
+          () => replyCommandOutput(io, chatCmd, res.text),
+        );
         if (res.followUp) postSettledOutcome(res.followUp, io);
         return;
       }
@@ -510,11 +510,18 @@ export async function dispatch(
         id: `repo.${opAsk.op}`,
         input: { args: [opAsk.repo, opAsk.ref], options: {} },
       };
-      const res = await runChatCommand(deps, msg, io, translated);
+      const res = await runChatCommand(deps, msg, io, translated, ending);
       if (!(res.error === "not_found" || res.error === "unavailable")) {
-        await io.reply(res.text);
+        await ending.sealAfterReply(
+          async () => {},
+          () => io.reply(res.text),
+        );
         return;
       }
+      // A fall-through: the command run answered nothing the agent will not; it
+      // is sealed now with no reply attempted, and the agent run below is a
+      // second run in this dispatch.
+      await ending.sealAfterReply(async () => {});
     }
 
     // Thread stickiness: a follow-up without explicit directives runs on the
@@ -790,6 +797,7 @@ export async function dispatch(
         repoCtx,
         memoryBlockP,
         live: admitted,
+        ending,
       });
       return;
     }
@@ -1581,7 +1589,6 @@ export async function dispatch(
       publishText("answer", answer, undefined, rawAnswer);
     } catch (err) {
       runFailed = true;
-      await card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail() }));
       await releaseWorkspace();
       throw err;
     } finally {
@@ -1616,25 +1623,42 @@ export async function dispatch(
       // single-shot channel hands it to its caller — the Worker shim records a
       // scheduled firing's run from it (#244).
       io.runFinished?.({ id: run.id, status });
+      // The run finished: it is sealed by the next drain (after the reply), and
+      // its record — everything captured now, assembled after the seal — is
+      // written by that drain. The card's total stops at the finish stamp.
+      ending.finished(run.id);
+      shell.freeze(finishedAt);
       if (deps.runHistoryWriter) {
-        // Everything the record needs is captured now; assembly + budgeting
-        // run in `writeHistory()`, after the reply.
-        buildHistoryRecord = (failedAfterFinish) =>
-          assembleRunRecord({
-            run,
-            snap,
-            agent: agent.name,
-            model: resolved.modelRef,
-            msg,
-            channelVisibility,
-            repo: repoCtx.repo,
-            finishedAt,
-            status: failedAfterFinish && status === "completed" ? "failed" : status,
-            diagnosis,
-          });
+        const writer = deps.runHistoryWriter;
+        // A tracked run finishes through the ledger: the record replaces its
+        // live rows in one transaction (a refused finish falls back to the store).
+        ending.register({
+          runId: run.id,
+          flipOnPostFinishFailure: true,
+          write: (seal, failedAfterFinish) =>
+            writer.write(
+              assembleRunRecord({
+                run,
+                snap,
+                agent: agent.name,
+                model: resolved.modelRef,
+                msg,
+                channelVisibility,
+                repo: repoCtx.repo,
+                finishedAt,
+                status: failedAfterFinish && status === "completed" ? "failed" : status,
+                diagnosis,
+                seal,
+              }),
+              ledgerRun ? { via: ledgerRun.sink } : undefined,
+            ),
+        });
       }
       // The diagnosis rides the run record (above): the friction ledger the
       // cross-run proposer reads (#84) is run history, so nothing is written twice.
+      // A run whose loop threw closes its card here, after the finish, so the
+      // card's total is the run's; the outer catch replies and drains.
+      if (runFailed) await card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail() })).catch(() => {});
     }
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
@@ -1661,17 +1685,12 @@ export async function dispatch(
       if ((await ledgerRun?.finishing()) === "fenced") {
         // Nothing more from here: no reply, no card close, and no record — the
         // run is the other generation's now and its record is theirs to write
-        // (a partial record from this process could race the real finish).
+        // (a partial record from this process could race the real finish). The
+        // outer finally still seals the stream here.
         console.log(`[run] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
+        ending.drop(run.id);
         return;
       }
-      await card.done(
-        shell.close({
-          kind: "done",
-          icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
-          detail: stopped ? finalDetail() : checkedOffDetail(),
-        }),
-      );
       // A review verdict carries its run link (as standard Markdown — each
       // adapter renders its own dialect): the verdict message is what gets
       // scanned in the review loop, and the card above scrolls away. Projection
@@ -1681,16 +1700,27 @@ export async function dispatch(
       // The PR note (post-step above) is a projection too: the `answer` event
       // stays the model's own words — the PR facts live in the pr_description
       // event and the [pr-post] log line.
-      await io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer);
-      // Run history (#157 KTD4): the record built at finish goes to the store
-      // now that the reply has landed (a reply that threw lands in the outer
-      // catch and is written as `failed` there) — and BEFORE the workspace
-      // release below: the record does not depend on it, and on the ledger the
-      // finish is what frees the thread, which must not wait ~90 s on a sandbox
-      // teardown (features/run-history.md item 36). Fire-and-forget; the
-      // writer's `pending()` is incremented here, before the outer finally's
-      // `activeRuns--`, so the shutdown drain never observes "0 runs, 0 writes".
-      writeHistory();
+      // The card close, the reply, then the drain: the run is sealed with how
+      // the reply went and its record (#157 KTD4) goes to the store — BEFORE the
+      // workspace release below: the record does not depend on it, and on the
+      // ledger the finish is what frees the thread, which must not wait ~90 s on
+      // a sandbox teardown (features/run-history.md item 36). Fire-and-forget;
+      // the writer's `pending()` is incremented inside the drain, before the
+      // outer finally's `activeRuns--`, so the shutdown drain never observes
+      // "0 runs, 0 writes". A reply that threw still seals (`replyOk: false`)
+      // and writes (`failed`) here, then reaches the outer catch for the error
+      // reply.
+      await ending.sealAfterReply(
+        () =>
+          card.done(
+            shell.close({
+              kind: "done",
+              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
+              detail: stopped ? finalDetail() : checkedOffDetail(),
+            }),
+          ),
+        () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer),
+      );
     } finally {
       await releaseWorkspace();
     }
@@ -1763,13 +1793,22 @@ export async function dispatch(
       await setupCard
         .done(setupShell.close({ kind: "setup_failed", reason: oneLine(redactAndCap(errMsg, 120)) }))
         .catch(() => {});
-    await io.reply(redactSecrets(stripAnsi(errorReply(err)))).catch(() => {});
-    // A run that threw still has its record (status `failed`, built at finish);
-    // a setup failure before the run started has none — nothing to write. A run
-    // whose loop completed but whose card close or reply threw lands here too:
-    // its record is written as `failed`, never `completed`.
-    writeHistory(true);
+    // The error reply seals whatever finished run is still unsealed (a run
+    // whose loop threw: `replyOk` says how this reply went) and drains: the
+    // `failed` record is written now. A setup failure before any run started
+    // has nothing to seal or write. A run whose card close or reply threw was
+    // already sealed and written by its own wrap; this is a no-op for it.
+    await ending
+      .sealAfterReply(
+        async () => {},
+        () => io.reply(redactSecrets(stripAnsi(errorReply(err)))),
+      )
+      .catch(() => {});
   } finally {
+    // The backstop: a finished run no reply attempt reached (a fenced run, a
+    // branch that returned early) is sealed with no `replyOk`, and any record
+    // still registered is written.
+    ending.drain(undefined);
     // A resumed dispatch that ended before its run was created — an unknown
     // provider, a refusal, a gate — has adopted a row it will never finish
     // (item 38). Close it `interrupted` here, or the sweep would relaunch it
@@ -1844,6 +1883,8 @@ interface ShipBranchContext {
    *  1): the ship branch names its run on it once registered, so a refused
    *  follow-up in a live ship thread links the run page like any other. */
   live: LiveThread<DispatchFollowUp>;
+  /** The dispatch's run ending: the ship run seals after its reply like any other. */
+  ending: RunEnding;
 }
 
 /**
@@ -1861,7 +1902,7 @@ async function runShipBranch(
   io: ChannelIO,
   ctx: ShipBranchContext,
 ): Promise<void> {
-  const { agent, card, directives, history, repoCtx, label } = ctx;
+  const { agent, card, directives, history, repoCtx, label, ending } = ctx;
   // The same one-builder card shell as the main path, on the same label and clock.
   const shell = createCardShell({ label, startedAt: ctx.startedAt, now: systemClock });
   const pre = await shipPreflight({
@@ -2085,7 +2126,6 @@ async function runShipBranch(
   shell.setLink(liveLink);
   const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
   let outcome: ShipOutcome | undefined;
-  let writeRecordAfterReply: ((failedAfterReply?: boolean) => void) | undefined;
   try {
     outcome = await runShipPipeline({
       entry,
@@ -2133,10 +2173,10 @@ async function runShipBranch(
     // The run record is the source of truth: the report enters the stream
     // BEFORE finish() below (a publish on a finished run is a no-op).
     publishText("answer", outcome.reply);
-  } catch (err) {
-    await card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail() })).catch(() => {});
-    throw err; // the outer catch replies; the finally below persisted `failed`
   } finally {
+    // A throw passes through to dispatch()'s outer catch (the error reply, the
+    // drain); this block still finishes the run, registers its `failed` record
+    // and closes the card.
     clearInterval(heartbeat);
     // RunStatus is the run-store contract (shared with the memory worker):
     // an aborted or capped pipeline still finished and delivered its report,
@@ -2156,32 +2196,40 @@ async function runShipBranch(
     const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
     const finishedAt = snap?.finishedAt ?? Date.now();
     io.runFinished?.({ id: run.id, status });
+    ending.finished(run.id);
+    shell.freeze(finishedAt);
     if (deps.runHistoryWriter) {
       const writer = deps.runHistoryWriter;
-      // Mirrors the main path's `failedAfterFinish` handling: a completed
-      // pipeline whose final reply throws is recorded `failed` — the thread
-      // never saw the report — while a stopped status stays what it was.
-      const record = (failedAfterReply = false) =>
-        writer.write(
-          assembleRunRecord({
-            run,
-            snap,
-            agent: agent.name,
-            model: ctx.modelRef,
-            msg,
-            channelVisibility,
-            repo: repoCtx.repo,
-            finishedAt,
-            status: failedAfterReply && status === "completed" ? "failed" : status,
-            diagnosis,
-          }),
-          ledgerRun ? { via: ledgerRun.sink } : undefined,
-        );
-      // A throw skips the post-reply write below — persist the failed record
-      // now; the happy path writes after the reply, like the main path.
-      if (outcome) writeRecordAfterReply = record;
-      else record();
+      // Mirrors the main path: a completed pipeline whose final reply throws is
+      // recorded `failed` — the thread never saw the report — while a stopped
+      // status stays what it was. Written by the drain after the seal; a throw
+      // reaches dispatch()'s outer catch, which drains.
+      ending.register({
+        runId: run.id,
+        flipOnPostFinishFailure: true,
+        write: (seal, failedAfterFinish) =>
+          writer.write(
+            assembleRunRecord({
+              run,
+              snap,
+              agent: agent.name,
+              model: ctx.modelRef,
+              msg,
+              channelVisibility,
+              repo: repoCtx.repo,
+              finishedAt,
+              status: failedAfterFinish && status === "completed" ? "failed" : status,
+              diagnosis,
+              seal,
+            }),
+            ledgerRun ? { via: ledgerRun.sink } : undefined,
+          ),
+      });
     }
+    // A pipeline that threw closes its card here, after the finish, so the
+    // card's total is the run's.
+    if (outcome === undefined)
+      await card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail() })).catch(() => {});
   }
   if (!outcome) return; // unreachable: the catch above rethrew
   console.log(`[done] ${msg.threadKey} ship ${outcome.reply.length} chars (${outcome.status})`);
@@ -2197,35 +2245,31 @@ async function runShipBranch(
         : outcome.status === "completed"
           ? "✅"
           : "⚠️";
-  try {
-    ledgerRun?.setState({
-      finalStatus:
-        outcome.status === "stopped_soft" || outcome.status === "stopped_hard" ? outcome.status : "completed",
-    });
-    if ((await ledgerRun?.finishing()) === "fenced") {
-      console.log(`[ship] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
-      writeRecordAfterReply = undefined; // the record is the other generation's
-      return;
-    }
-    await card.done(
-      shell.close({
-        kind: "done",
-        icon,
-        detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
-      }),
-    );
-    await io.reply(outcome.reply);
-  } catch (err) {
-    // The report never reached the thread: the record must say `failed`,
-    // never `completed` — the main path's invariant (its outer catch writes
-    // the failed record when a reply throws after the loop). The registry
-    // row keeps its terminal status for the TTL, exactly like the main path.
-    writeRecordAfterReply?.(true);
-    throw err;
+  ledgerRun?.setState({
+    finalStatus: outcome.status === "stopped_soft" || outcome.status === "stopped_hard" ? outcome.status : "completed",
+  });
+  if ((await ledgerRun?.finishing()) === "fenced") {
+    console.log(`[ship] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
+    ending.drop(run.id); // the record is the other generation's; the outer finally still seals the stream here
+    return;
   }
-  // Fire-and-forget AFTER the reply (the writer's `pending()` counts it for
-  // the shutdown drain), so persistence can never delay the thread.
-  writeRecordAfterReply?.();
+  // The card close, the reply, then the drain: sealed with how the reply went,
+  // the record written after the seal (fire-and-forget; the writer's
+  // `pending()` counts it for the shutdown drain). A report that never reached
+  // the thread flips the record to `failed`, never `completed` — the main
+  // path's invariant — and the throw reaches the outer catch; the registry row
+  // keeps its terminal status for the TTL, exactly like the main path.
+  await ending.sealAfterReply(
+    () =>
+      card.done(
+        shell.close({
+          kind: "done",
+          icon,
+          detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
+        }),
+      ),
+    () => io.reply(outcome.reply),
+  );
 }
 
 /** The `pr_description` event's payload: every string LEAF passed through
@@ -2263,6 +2307,7 @@ async function runChatCommand(
   msg: IncomingMessage,
   io: ChannelIO,
   parsed: ParsedChatCommand,
+  ending: RunEnding,
 ): Promise<ChatCommandResult> {
   const commands = deps.commands;
   if (!commands) return { ok: false, text: "" };
@@ -2270,7 +2315,7 @@ async function runChatCommand(
     (await resolveRepoForCommand(deps, msg, await io.history())).repo;
   const invoke = () => invokeChatCommand({ commands, parsed, msg, config: deps.config, resolveRepo });
   if (parsed.kind === "invoke" && isInlineRunCommand(parsed.id))
-    return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke);
+    return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending);
   return invoke();
 }
 
@@ -2329,6 +2374,7 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
   command: string,
   io: ChannelIO,
   execute: () => Promise<T>,
+  ending: RunEnding,
 ): Promise<T> {
   const registry = deps.runRegistry ?? defaultRunRegistry;
   const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
@@ -2366,24 +2412,33 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
     const status: RunStatus = result?.ok ? "completed" : "failed";
     registry.finish(run.id, status);
     io.runFinished?.({ id: run.id, status });
+    // Sealed by the caller's drain after its reply (or at once, with no reply,
+    // when the command fell through to the agent); the record is written then.
+    // A command's status is its own `ok` — a reply that throws never flips it.
+    ending.finished(run.id);
     if (deps.runHistoryWriter) {
-      // Two events and no tool output: assembling the record here is cheap, and
-      // `write` is fire-and-forget, so the reply is not delayed.
+      const writer = deps.runHistoryWriter;
       const snap = registry.snapshot(run.id, run.token);
       const finishedAt = snap?.finishedAt ?? Date.now();
       const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
-      deps.runHistoryWriter.write(
-        assembleRunRecord({
-          run,
-          snap,
-          agent: COMMAND_RUN_AGENT,
-          msg,
-          channelVisibility,
-          finishedAt,
-          status,
-          diagnosis,
-        }),
-      );
+      ending.register({
+        runId: run.id,
+        flipOnPostFinishFailure: false,
+        write: (seal) =>
+          writer.write(
+            assembleRunRecord({
+              run,
+              snap,
+              agent: COMMAND_RUN_AGENT,
+              msg,
+              channelVisibility,
+              finishedAt,
+              status,
+              diagnosis,
+              seal,
+            }),
+          ),
+      });
     }
   }
 }
@@ -2572,9 +2627,14 @@ function assembleRunRecord(input: {
   finishedAt: number;
   status: RunStatus;
   diagnosis: FrictionDiagnosis;
+  /** The run's seal (features/tracing.md): the events published between finish
+   *  and seal are appended, the published total takes the larger count, and the
+   *  two seal stamps ride the record — omitted when the seal has none. */
+  seal?: SealResult;
 }): RunRecord {
-  const { run, snap, msg } = input;
-  const events = snap?.events ?? [];
+  const { run, snap, msg, seal } = input;
+  const atFinish = snap?.events ?? [];
+  const events = seal && seal.events.length > 0 ? [...atFinish, ...seal.events] : atFinish;
   const fitted = fitRecordToBudget({
     id: run.id,
     ...(run.label !== undefined ? { label: run.label } : {}),
@@ -2587,8 +2647,10 @@ function assembleRunRecord(input: {
     ...(input.repo !== undefined ? { repo: input.repo } : {}),
     startedAt: snap?.startedAt ?? input.finishedAt,
     finishedAt: input.finishedAt,
+    ...(seal?.sealedAt !== undefined ? { sealedAt: seal.sealedAt } : {}),
+    ...(seal?.replyOk !== undefined ? { replyOk: seal.replyOk } : {}),
     status: input.status,
-    eventCount: snap?.eventCount ?? events.length,
+    eventCount: Math.max(snap?.eventCount ?? atFinish.length, seal?.eventCount ?? 0),
     storedEventCount: events.length,
     truncated: false,
     events,

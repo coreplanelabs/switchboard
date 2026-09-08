@@ -103,6 +103,16 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(shell.close({ kind: "done", icon: "❌" })).toEqual({ title: `❌ ${LABEL} · 252s`, detail: undefined, link });
   });
 
+  it("freeze(finishedAt) ends every later frame's elapsed at the run's finish stamp, so a done close painted late still reads the run's duration", () => {
+    let now = 1_000_000;
+    const shell = createCardShell({ label: LABEL, startedAt: 1_000_000, now: () => now });
+    now += 252_000; // the agent stopped here
+    shell.freeze(now);
+    now += 9_000; // the card close lands 9 s later (the reply took its time)
+    expect(shell.close({ kind: "done", icon: "✅" }).title).toBe(`✅ ${LABEL} · 252s`);
+    expect(shell.live().title).toBe(`◐ ${LABEL} · 252s`);
+  });
+
   it("the live prefixes are the spinner glyphs plus the 👀 ack — derived, so they cannot drift", () => {
     expect(LIVE_CARD_PREFIXES).toEqual([...SPINNER_GLYPHS, "👀"]);
     const shell = shellAt(0);

@@ -324,7 +324,7 @@ describe("serveEvents (SSE, transport-free)", () => {
     expect(rec.body()).toContain(`data: ${JSON.stringify({ ...call("earlier"), seq: 1 })}`);
   });
 
-  it("writes the `finished` frame then the terminal `end` frame (with the seal stamp) and closes the stream when the run finishes", () => {
+  it("writes the `finished` frame at finish and the terminal `end` frame (with the seal stamp) at the seal, then closes the stream", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
@@ -334,12 +334,14 @@ describe("serveEvents (SSE, transport-free)", () => {
     );
     reg.publish(id, call("x"));
     reg.finish(id);
+    expect(rec.ended).toBe(false);
+    reg.seal(id);
     expect(rec.body()).toMatch(FINISHED_THEN_END);
     expect(rec.ended).toBe(true);
   });
 
   it("a finished-but-unsealed run: `finished` is written and the stream stays open, span records still flow, and the seal writes `end` carrying `replyOk` and closes it", () => {
-    const reg = fixedRegistry({ sealAtFinish: false });
+    const reg = fixedRegistry();
     const { id, token } = reg.create();
     const rec = recordingSink();
     serveEvents(
@@ -357,11 +359,12 @@ describe("serveEvents (SSE, transport-free)", () => {
     expect(rec.ended).toBe(true);
   });
 
-  it("an already-finished run replays its backlog, then `finished`, then `end`, immediately (still 200)", () => {
+  it("an already-sealed run replays its backlog, then `finished`, then `end`, immediately (still 200)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     reg.publish(id, call("done-earlier"));
     reg.finish(id);
+    reg.seal(id);
     const rec = recordingSink();
     serveEvents(
       (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
@@ -1011,6 +1014,7 @@ describe("serveEvents — live replay budget (item 5)", () => {
     const { id, token } = reg.create();
     for (let i = 1; i <= 2500; i++) reg.publish(id, call(`$ step ${i}`));
     reg.finish(id);
+    reg.seal(id);
     const rec = recordingSink();
     serveEvents(
       (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
@@ -1413,6 +1417,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const h = harness({ store: null });
       const run = h.registry.create();
       h.registry.finish(run.id);
+      h.registry.seal(run.id); // the TTL runs from the seal
       h.tick(120_000);
       const t = fakeReqRes("GET", `/runs/${run.id}`);
       h.handler(t.req, t.res);
@@ -1732,6 +1737,8 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       // Eviction: the hidden run's `removed` never names its id; the visible run's arrives.
       h.registry.finish(priv.id);
       h.registry.finish(pub.id);
+      h.registry.seal(priv.id);
+      h.registry.seal(pub.id); // the TTL runs from the seal
       h.tick(120_000);
       h.registry.create("sweeper", meta(PUBLIC, "t3")); // create() sweeps the TTL-expired runs
       const removed = [...feed.body().matchAll(/"type":"removed","id":"([^"]+)"/g)].map((m) => m[1]);

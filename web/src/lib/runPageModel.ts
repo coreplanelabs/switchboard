@@ -9,6 +9,7 @@ import {
   type TimelineStep,
 } from "@core/channels/runTimeline.js";
 import { runDurationMs } from "@core/core/runDuration.js";
+import { formatDuration } from "./format";
 
 // The run page's view model: the ONE fold for seeded history and live frames
 // (both go through `handle`, exactly like the old inline script — a seeded
@@ -564,6 +565,35 @@ export function createRunClock(seed: RunClockSeed, browserNowAtSeed: number): Ru
       return runDurationMs({ receivedAt: seed.receivedAt, startedAt: seed.startedAt, finishedAt }) ?? 0;
     },
   };
+}
+
+/** Parse an `end` frame's payload: the seal stamp and the tri-state `replyOk`
+ *  (features/tracing.md). A stored stream's `end` carries `{}` — no stamp, no
+ *  caption; anything malformed reads the same. */
+export function parseEndFrame(data: string | undefined): { sealedAt?: number; replyOk?: boolean } {
+  if (typeof data !== "string") return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null) return {};
+  const { sealedAt, replyOk } = parsed as { sealedAt?: unknown; replyOk?: unknown };
+  return {
+    ...(typeof sealedAt === "number" && Number.isFinite(sealedAt) && sealedAt > 0 ? { sealedAt } : {}),
+    ...(typeof replyOk === "boolean" ? { replyOk } : {}),
+  };
+}
+
+/** The delivery caption beside a finished run's duration: `delivered in 2s`
+ *  when the first reply attempt landed (`replyOk` true, and both stamps known),
+ *  `reply failed` when it threw, nothing when none was measured — a fall-through
+ *  command run, a backstop or sweep seal, a legacy record. */
+export function deliveryCaption(run: { finishedAt?: number; sealedAt?: number; replyOk?: boolean }): string {
+  if (run.replyOk === false) return "reply failed";
+  if (run.replyOk !== true || run.finishedAt === undefined || run.sealedAt === undefined) return "";
+  return `delivered in ${formatDuration(Math.max(0, run.sealedAt - run.finishedAt), "clock")}`;
 }
 
 /** Parse a `finished` frame's payload — one finite server stamp — or null. */

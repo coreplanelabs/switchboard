@@ -1193,9 +1193,12 @@ describe("deterministic ops fast-path (U6)", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("a non-onboarded repo natural-language ask falls through to the agent path", async () => {
+  it("a non-onboarded repo natural-language ask falls through to the agent path; the command run is sealed with no reply attempted, the agent run after its reply", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
+    deps.runRegistry = registry;
     const ops = fakeOps({ kind: "not-onboarded" });
     deps.operations = ops;
     const { io, replies } = fakeIO();
@@ -1203,6 +1206,12 @@ describe("deterministic ops fast-path (U6)", () => {
     expect(ops.calls).toHaveLength(1); // the op was attempted…
     expect(provider.requests).toHaveLength(1); // …and the agent path served the ask
     expect(replies).toContain("answer");
+    const rows = registry.listActive().sort((a, b) => a.id.localeCompare(b.id));
+    expect(rows.map((r) => r.id)).toEqual(["run-1", "run-2"]);
+    expect(rows[0]).toMatchObject({ finished: true }); // the command run: sealed, no reply was attempted for it
+    expect(rows[0].sealedAt).toBeDefined();
+    expect(rows[0].replyOk).toBeUndefined();
+    expect(rows[1]).toMatchObject({ finished: true, replyOk: true }); // the agent run: sealed after its reply
   });
 
   it("an explicit `repo test` on a non-onboarded repo gets a named reply (config-family commands never silently become a model turn)", async () => {
@@ -5773,8 +5782,10 @@ describe("run history write path (#157 U4)", () => {
     expect(activeRunCount()).toBe(0);
   });
 
-  it("a reply that throws after the run loop completed yields status failed (not completed); a stop keeps its stopped_* status", async () => {
-    const { deps, store, writer } = wired(capturingProvider());
+  it("a reply that throws after the run loop completed yields status failed (not completed) and seals the run once with replyOk false; a stop keeps its stopped_* status", async () => {
+    const sealing = new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
+    const sealSpy = vi.spyOn(sealing, "seal");
+    const { deps, store, writer } = wired(capturingProvider(), { registry: sealing });
     const { io } = fakeIO();
     const throwing: ChannelIO = {
       ...io,
@@ -5786,8 +5797,15 @@ describe("run history write path (#157 U4)", () => {
     await writer.settled();
     const rec = await store.get("run-h");
     expect(rec?.status).toBe("failed");
+    expect(rec?.replyOk).toBe(false); // the first reply attempt threw
+    expect(rec?.sealedAt).toBeGreaterThanOrEqual(rec!.finishedAt);
     expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input", "answer"]); // the loop did finish
     expect(activeRunCount()).toBe(0);
+    // Sealed once with the reply's outcome (the writer re-reads the result; the
+    // error reply's wrap and the backstop find nothing left to seal).
+    expect(sealSpy.mock.calls.filter(([, o]) => o?.replyOk !== undefined)).toEqual([["run-h", { replyOk: false }]]);
+    expect(sealing.getById("run-h")).toMatchObject({ finished: true, replyOk: false, status: "completed" });
+    expect(await store.get("run-h")).toMatchObject({ sealedAt: sealing.getById("run-h")!.sealedAt });
 
     const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
     const stopped = wired(
@@ -5797,6 +5815,28 @@ describe("run history write path (#157 U4)", () => {
     await dispatch(stopped.deps, msg("hello there"), throwing);
     await stopped.writer.settled();
     expect((await stopped.store.get("run-h"))?.status).toBe("stopped_soft");
+  });
+
+  it("a delivered run is sealed after its reply with replyOk true, and the record and the registry row carry the same sealedAt", async () => {
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok" });
+    const { deps, store, writer } = wired(capturingProvider(), { registry });
+    const { io } = fakeIO();
+    let sealedDuringReply: number | undefined;
+    const observing: ChannelIO = {
+      ...io,
+      reply: async (t) => {
+        sealedDuringReply = registry.getById("run-h")?.sealedAt;
+        return io.reply(t);
+      },
+    };
+    await dispatch(deps, msg("hello there"), observing);
+    await writer.settled();
+    expect(sealedDuringReply).toBeUndefined(); // the seal comes after the reply, never before
+    const row = registry.getById("run-h")!;
+    expect(row).toMatchObject({ finished: true, replyOk: true });
+    const rec = await store.get("run-h");
+    expect(rec).toMatchObject({ status: "completed", replyOk: true, sealedAt: row.sealedAt });
+    expect(rec!.sealedAt).toBeGreaterThanOrEqual(rec!.finishedAt);
   });
 
   it("the record and the friction row carry the registry's redacted label — a pasted token in the request never reaches either", async () => {
@@ -5812,22 +5852,31 @@ describe("run history write path (#157 U4)", () => {
     expect(JSON.stringify(await store.list({}))).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
   });
 
-  it("a reply slower than the registry TTL still yields a full record (built at finish, not after the reply)", async () => {
+  it("a reply slower than the registry TTL: the finished run stays unsealed (readable, its stream open) through the reply, is sealed after it with replyOk true, and its full record carries the seal; the TTL then runs from the seal", async () => {
     const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", ttlMs: 10 });
     const { deps, store, writer } = wired(toolThenAnswer(), { registry });
     const { io, replies } = fakeIO();
+    let unsealedDuringReply: boolean | undefined;
     const slow: ChannelIO = {
       ...io,
       reply: async (t) => {
         await new Promise((r) => setTimeout(r, 40));
+        unsealedDuringReply =
+          registry.getById("run-h")?.finished === true && registry.getById("run-h")?.sealedAt === undefined;
         replies.push(t);
       },
     };
     await dispatch(deps, msg("hello there"), slow);
     await writer.settled();
-    expect(registry.snapshot("run-h", "tok")).toBeNull(); // evicted before the write
+    expect(unsealedDuringReply).toBe(true); // the 15-minute hold, not the TTL, governs a finished-unsealed run
+    const row = registry.getById("run-h");
+    expect(row).toMatchObject({ finished: true, replyOk: true });
+    expect(row!.sealedAt).toBeGreaterThanOrEqual(row!.finishedAt!);
     const rec = await store.get("run-h");
     expect(rec?.status).toBe("completed");
+    expect(rec).toMatchObject({ sealedAt: row!.sealedAt, replyOk: true });
+    await new Promise((r) => setTimeout(r, 15));
+    expect(registry.snapshot("run-h", "tok")).toBeNull(); // evicted at sealedAt + TTL
     expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input", "answer"]);
     expect(rec!.events.length).toBeGreaterThan(2);
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
@@ -7776,6 +7825,8 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     await writer.settled();
     expect((await store.get("rship-w"))?.status).toBe("failed");
+    expect((await store.get("rship-w"))?.replyOk).toBe(false); // sealed with the reply's outcome, like the main path
+    expect(registry.getById("rship-w")).toMatchObject({ finished: true, replyOk: false });
   });
 
   it("card close is truthful: an abort closes ⚠️ over the un-rewritten checklist; merge-ready keeps ✅ with checked-off items", async () => {
@@ -8775,6 +8826,12 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     // a partial record from this process would race (and could clobber) the real finish.
     expect(fallbackPuts).toEqual([]);
     expect(inner.finished.has("run-l")).toBe(false);
+    // The stream here is still sealed — by the outer finally's backstop, with
+    // no reply attempted from this generation.
+    const row = deps.runRegistry!.getById("run-l"); // `wired` hands the dispatch its registry
+    expect(row).toMatchObject({ finished: true });
+    expect(row?.sealedAt).toBeDefined();
+    expect(row?.replyOk).toBeUndefined();
   });
 
   it("a review's verdict lands in the run's ledger state as it is submitted", async () => {

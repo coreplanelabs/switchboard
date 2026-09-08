@@ -18,6 +18,7 @@ import {
   surfaceOf,
   whenTip,
   type IndexRow,
+  delivering,
 } from "./indexRow";
 import { formatLocalIso } from "./format";
 
@@ -36,7 +37,7 @@ const base: IndexRow = {
 };
 const row = (over: Partial<IndexRow> = {}): IndexRow => ({ ...base, ...over });
 const finished = (status: IndexRow["status"], over: Partial<IndexRow> = {}) =>
-  row({ finished: true, finishedAt: 1_000_000 + 63_000, status, ...over });
+  row({ finished: true, finishedAt: 1_000_000 + 63_000, sealedAt: 1_000_000 + 65_000, status, ...over });
 
 describe("status vocabulary", () => {
   it("shows display words, not the enum: succeeded / failed / killed / stopped early", () => {
@@ -51,6 +52,27 @@ describe("status vocabulary", () => {
     expect(statusWord(row())).toBe("live");
     expect(statusWord(finished("completed"))).toBe("succeeded");
     expect(statusWord(row({ finished: true }))).toBe("finished");
+  });
+
+  it("a finished row with no seal yet and no record is `delivering`: amber, whatever its status, and its tip says so; a seal or a persisted record ends it", () => {
+    const unsealed = row({ finished: true, finishedAt: 1_000_000 + 63_000, status: "completed" });
+    expect(delivering(unsealed)).toBe(true);
+    expect(statusDot(unsealed)).toBe("amber");
+    expect(dotTip(unsealed)).toBe("succeeded in 1m 03s · delivering the reply");
+    const failedUnsealed = row({
+      finished: true,
+      finishedAt: 1_000_000 + 63_000,
+      status: "failed",
+      activity: "⚠️ boom",
+    });
+    expect(statusDot(failedUnsealed)).toBe("amber"); // the reply (the failure text) is still on its way
+    expect(dotTip(failedUnsealed)).toBe("failed in 1m 03s · delivering the reply\n⚠️ boom");
+    expect(delivering(finished("completed"))).toBe(false); // sealed
+    expect(delivering(row({ finished: true, finishedAt: 1_000_000 + 63_000, persisted: true }))).toBe(false); // written after its seal
+    expect(statusDot(row({ finished: true, finishedAt: 1_000_000 + 63_000, persisted: true, status: "failed" }))).toBe(
+      "red",
+    );
+    expect(delivering(row())).toBe(false); // live
   });
 
   it("dot tone: green live, red failed/killed/interrupted, amber stopped early, grey succeeded", () => {
