@@ -1473,6 +1473,59 @@ describe("model turn and tool spans (features/tracing.md)", () => {
     expect(spanNames(all).slice(0, 5)).toEqual(["+run.agent", "+model.turn", "-model.turn", "assistant", "+tool.bash"]);
   });
 
+  // Feature: features/tracing.md item 23 — the GitHub client a tool sees is a view under its own span.
+  it("a tool call's github capability is the client's withSpan view for that call's span; a client without withSpan is passed as is", async () => {
+    const bound: string[] = [];
+    const api = {
+      withSpan: (span: { name: string }) => {
+        bound.push(span.name);
+        return api;
+      },
+    } as unknown as import("./execution/githubApi.js").GithubApi;
+    let seen: unknown;
+    const probe: RunnableTool = {
+      name: "probe",
+      description: "records the github capability it was handed",
+      inputSchema: { type: "object", properties: {} },
+      run: async (_input, ctx) => {
+        seen = ctx.github?.api;
+        return "ok";
+      },
+    };
+    const { root } = traced();
+    const provider = scripted([
+      { content: [{ type: "tool_use", id: "p1", name: "probe", input: {} }], stopReason: "tool_use" },
+      text("done"),
+    ]);
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor, github: { api, canWrite: () => true } },
+      extraTools: [probe],
+      span: root,
+    });
+    expect(bound).toEqual(["tool.probe"]);
+    expect(seen).toBe(api);
+    const plain = { listRepos: async () => [] } as unknown as import("./execution/githubApi.js").GithubApi;
+    let seenPlain: unknown;
+    const probe2: RunnableTool = { ...probe, run: async (_i, ctx) => ((seenPlain = ctx.github?.api), "ok") };
+    await runAgent({
+      provider: scripted([
+        { content: [{ type: "tool_use", id: "p2", name: "probe", input: {} }], stopReason: "tool_use" },
+        text("done"),
+      ]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor, github: { api: plain, canWrite: () => true } },
+      extraTools: [probe2],
+      span: traced().root,
+    });
+    expect(seenPlain).toBe(plain);
+  });
+
   it("a refusal is still a turn: stopReason folds to `other` on the span", async () => {
     const { root, all, onEvent } = traced();
     await runAgent({

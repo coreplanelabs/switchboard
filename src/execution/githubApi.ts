@@ -1,3 +1,5 @@
+import { tracedFetch } from "../core/trace/tracedFetch.js";
+import type { Span } from "../core/trace/types.js";
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 import { classifyError } from "../core/trace/classify.js";
 import { redactAndCap } from "../core/redact.js";
@@ -90,6 +92,10 @@ export interface IssuePatch {
 }
 
 export interface GithubApi {
+  /** A view of this client whose calls are `github.rest` children of `span`
+   *  (features/tracing.md item 23) — the runner binds one per tool call. A
+   *  client without it (a test double) is used as is. */
+  withSpan?(span: Span): GithubApi;
   listRepos(): Promise<InstallationRepo[]>;
   readFile(repo: string, path: string, ref?: string): Promise<RepoFile>;
   listTree(repo: string, path?: string, ref?: string): Promise<TreeEntry[]>;
@@ -122,9 +128,26 @@ export interface RestGithubApiOptions {
   /** Injectable for tests; defaults to global fetch. */
   fetch?: typeof fetch;
   /** Credential resolver per scope; defaults to the App installation token
-   *  (read-scoped for reads, write-scoped for writes), else GH_TOKEN. */
-  token?: (scope: GithubTokenScope) => Promise<string | null>;
+   *  (read-scoped for reads, write-scoped for writes), else GH_TOKEN. The
+   *  caller's span, when it has one, so a mint is a `github.token_mint` child. */
+  token?: (scope: GithubTokenScope, span?: Span) => Promise<string | null>;
 }
+
+/** The closed table of routes a `github.rest` span names — never the path,
+ *  which carries a repo, a file path or a query. */
+export type GithubRoute =
+  | "installation_repos"
+  | "contents"
+  | "contents_raw"
+  | "search_code"
+  | "issues"
+  | "issue"
+  | "issue_comments"
+  | "issue_create"
+  | "issue_update"
+  | "issue_comment_create"
+  | "graphql"
+  | "app_installation_token";
 
 const clipBody = (body: string | undefined): string | undefined =>
   body !== undefined && body.length > MAX_BODY_CHARS
@@ -133,17 +156,32 @@ const clipBody = (body: string | undefined): string | undefined =>
 
 export class RestGithubApi implements GithubApi {
   private readonly fetchImpl: typeof fetch;
-  private readonly token: (scope: GithubTokenScope) => Promise<string | null>;
+  private readonly token: (scope: GithubTokenScope, span?: Span) => Promise<string | null>;
+  /** The span this view's calls hang under; the shared client has none. */
+  private parent: Span | undefined;
 
   constructor(opts: RestGithubApiOptions = {}) {
     this.fetchImpl = opts.fetch ?? fetch;
-    this.token = opts.token ?? ((scope) => resolveGithubToken(scope));
+    this.token = opts.token ?? ((scope, span) => resolveGithubToken(scope, span));
+  }
+
+  withSpan(span: Span): RestGithubApi {
+    // The same fetch and the same token resolver (its cache is module-wide),
+    // one span: a view, not a second client.
+    const view = new RestGithubApi({ fetch: this.fetchImpl, token: this.token });
+    view.parent = span;
+    return view;
   }
 
   async listRepos(): Promise<InstallationRepo[]> {
     const out: InstallationRepo[] = [];
     for (let page = 1; page <= 3; page++) {
-      const res = await this.request("read", "GET", `/installation/repositories?per_page=100&page=${page}`);
+      const res = await this.request(
+        "read",
+        "GET",
+        "installation_repos",
+        `/installation/repositories?per_page=100&page=${page}`,
+      );
       const body = (await res.json()) as { repositories?: Array<Record<string, unknown>>; total_count?: number };
       for (const r of body.repositories ?? []) {
         out.push({
@@ -160,7 +198,7 @@ export class RestGithubApi implements GithubApi {
 
   async readFile(repo: string, path: string, ref?: string): Promise<RepoFile> {
     const q = ref ? `?ref=${encodeURIComponent(ref)}` : "";
-    const res = await this.request("read", "GET", `/repos/${repo}/contents/${encodePath(path)}${q}`);
+    const res = await this.request("read", "GET", "contents", `/repos/${repo}/contents/${encodePath(path)}${q}`);
     const body = (await res.json()) as Record<string, unknown>;
     if (Array.isArray(body)) throw new GithubApiError(400, `${path} is a directory — list it with github_tree`);
     if (body.type !== "file") throw new GithubApiError(400, `${path} is a ${String(body.type)}, not a file`);
@@ -175,6 +213,7 @@ export class RestGithubApi implements GithubApi {
       const raw = await this.request(
         "read",
         "GET",
+        "contents_raw",
         `/repos/${repo}/contents/${encodePath(path)}${q}`,
         undefined,
         "application/vnd.github.raw+json",
@@ -195,7 +234,7 @@ export class RestGithubApi implements GithubApi {
 
   async listTree(repo: string, path = "", ref?: string): Promise<TreeEntry[]> {
     const q = ref ? `?ref=${encodeURIComponent(ref)}` : "";
-    const res = await this.request("read", "GET", `/repos/${repo}/contents/${encodePath(path)}${q}`);
+    const res = await this.request("read", "GET", "contents", `/repos/${repo}/contents/${encodePath(path)}${q}`);
     const body = (await res.json()) as unknown;
     if (!Array.isArray(body)) throw new GithubApiError(400, `${path || "/"} is a file — read it with github_file`);
     return (body as Array<Record<string, unknown>>).map((e) => ({
@@ -210,6 +249,7 @@ export class RestGithubApi implements GithubApi {
     const res = await this.request(
       "read",
       "GET",
+      "search_code",
       `/search/code?q=${encodeURIComponent(q)}&per_page=${Math.min(Math.max(limit, 1), 30)}`,
       undefined,
       "application/vnd.github.text-match+json",
@@ -244,7 +284,7 @@ export class RestGithubApi implements GithubApi {
         direction: "desc",
       });
       if (opts.labels?.length) params.set("labels", opts.labels.join(","));
-      const res = await this.request("read", "GET", `/repos/${repo}/issues?${params.toString()}`);
+      const res = await this.request("read", "GET", "issues", `/repos/${repo}/issues?${params.toString()}`);
       const rows = (await res.json()) as Array<Record<string, unknown>>;
       for (const r of rows) if (!("pull_request" in r)) out.push(toIssue(r));
       if (rows.length < 100) break;
@@ -253,13 +293,18 @@ export class RestGithubApi implements GithubApi {
   }
 
   async getIssue(repo: string, number: number): Promise<{ issue: IssueSummary; comments: IssueComment[] }> {
-    const res = await this.request("read", "GET", `/repos/${repo}/issues/${number}`);
+    const res = await this.request("read", "GET", "issue", `/repos/${repo}/issues/${number}`);
     const row = (await res.json()) as Record<string, unknown>;
     if ("pull_request" in row) throw new GithubApiError(400, `#${number} is a pull request, not an issue`);
     const issue = toIssue(row);
     let comments: IssueComment[] = [];
     if ((issue.comments ?? 0) > 0) {
-      const c = await this.request("read", "GET", `/repos/${repo}/issues/${number}/comments?per_page=30`);
+      const c = await this.request(
+        "read",
+        "GET",
+        "issue_comments",
+        `/repos/${repo}/issues/${number}/comments?per_page=30`,
+      );
       comments = ((await c.json()) as Array<Record<string, unknown>>).map((x) => ({
         author: String((x.user as Record<string, unknown> | undefined)?.login ?? "?"),
         createdAt: String(x.created_at ?? ""),
@@ -270,7 +315,7 @@ export class RestGithubApi implements GithubApi {
   }
 
   async createIssue(repo: string, input: NewIssueInput): Promise<IssueSummary> {
-    const res = await this.request("write", "POST", `/repos/${repo}/issues`, {
+    const res = await this.request("write", "POST", "issue_create", `/repos/${repo}/issues`, {
       title: input.title,
       ...(input.body !== undefined ? { body: clipBody(input.body) } : {}),
       ...(input.labels?.length ? { labels: input.labels } : {}),
@@ -280,7 +325,7 @@ export class RestGithubApi implements GithubApi {
   }
 
   async updateIssue(repo: string, number: number, patch: IssuePatch): Promise<IssueSummary> {
-    const res = await this.request("write", "PATCH", `/repos/${repo}/issues/${number}`, {
+    const res = await this.request("write", "PATCH", "issue_update", `/repos/${repo}/issues/${number}`, {
       ...patch,
       ...(patch.body !== undefined ? { body: clipBody(patch.body) } : {}),
     });
@@ -288,20 +333,26 @@ export class RestGithubApi implements GithubApi {
   }
 
   async commentIssue(repo: string, number: number, body: string): Promise<{ url: string }> {
-    const res = await this.request("write", "POST", `/repos/${repo}/issues/${number}/comments`, {
-      body: clipBody(body),
-    });
+    const res = await this.request(
+      "write",
+      "POST",
+      "issue_comment_create",
+      `/repos/${repo}/issues/${number}/comments`,
+      {
+        body: clipBody(body),
+      },
+    );
     const row = (await res.json()) as Record<string, unknown>;
     return { url: String(row.html_url ?? "") };
   }
 
   async deleteIssue(repo: string, number: number): Promise<void> {
-    const res = await this.request("read", "GET", `/repos/${repo}/issues/${number}`);
+    const res = await this.request("read", "GET", "issue", `/repos/${repo}/issues/${number}`);
     const row = (await res.json()) as Record<string, unknown>;
     if ("pull_request" in row) throw new GithubApiError(400, `#${number} is a pull request, not an issue`);
     const nodeId = String(row.node_id ?? "");
     if (!nodeId) throw new GithubApiError(500, `GitHub returned no node id for ${repo}#${number}`);
-    const gql = await this.request("write", "POST", "/graphql", {
+    const gql = await this.request("write", "POST", "graphql", "/graphql", {
       query: "mutation($id: ID!) { deleteIssue(input: { issueId: $id }) { clientMutationId } }",
       variables: { id: nodeId },
     });
@@ -323,23 +374,32 @@ export class RestGithubApi implements GithubApi {
   private async request(
     scope: GithubTokenScope,
     method: "GET" | "POST" | "PATCH",
+    route: GithubRoute,
     path: string,
     body?: unknown,
     accept = "application/vnd.github+json",
   ): Promise<Response> {
-    const token = await this.token(scope);
+    const token = await this.token(scope, this.parent);
     if (!token) throw new GithubApiError(401, "no GitHub credential available (configure the GitHub App or GH_TOKEN)");
-    const res = await this.fetchImpl(`https://api.github.com${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept,
-        "user-agent": "switchboard",
-        ...(body !== undefined ? { "content-type": "application/json" } : {}),
+    // One `github.rest` span under the view's parent (features/tracing.md item
+    // 23): the route word, the method and the status — never the path. GitHub
+    // is not one of our hosts, so no trace context leaves with the request.
+    const res = await tracedFetch(
+      this.parent,
+      `https://api.github.com${path}`,
+      {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept,
+          "user-agent": "switchboard",
+          ...(body !== undefined ? { "content-type": "application/json" } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+      { route, name: "github.rest", fetchImpl: this.fetchImpl },
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       // Item 62: a GitHub error body is remote text — redact BEFORE the slice.
