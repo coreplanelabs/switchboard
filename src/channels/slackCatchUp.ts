@@ -7,11 +7,12 @@ import type { StatusUpdate } from "../core/types.js";
 import { recordCatchUpOutcome, type CatchUpOutcome } from "./slackCatchUpStatus.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 
-// Reconnect catch-up (#184). Socket Mode does not queue events while the app
-// is disconnected, so every bot rollover (deploy → container swap → websocket
-// down for the drain + cold start) silently drops whatever was posted in that
-// window: no 👀, no run, the caller waits forever. On every (re)connect the
-// adapter re-reads recent channel history and dispatches what it never saw.
+// Reconnect catch-up (docs/decisions/0012-reconnect-catch-up-as-recovery.md).
+// Socket Mode does not queue events while the app is disconnected, so every
+// bot rollover (deploy → container swap → websocket down for the drain + cold
+// start) silently drops whatever was posted in that window: no 👀, no run, the
+// caller waits forever. On every (re)connect the adapter re-reads recent
+// channel history and dispatches what it never saw.
 //
 // Slack itself is the durable "was this handled" record (invariant 6 — no
 // in-memory state a restart loses, and no host-disk last-seen ts that an
@@ -23,12 +24,11 @@ import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 //
 // The same scan sweeps ORPHANED STATUS CARDS (features/slack-channel.md item
 // 8): a card still showing a live glyph whose process is gone — a deploy
-// rollout killed the container before its drain finished (live 2026-08-29
-// 23:51Z: PR #214's review card froze at "153s — thinking" for good, and the
-// run vanished from /runs). The card is the only durable trace of that run, so
-// the next connect closes it as interrupted with what to do. Cards this
-// process owns are never touched — a websocket reconnect without a restart
-// must not close a running run's card.
+// rollout killed the container before its drain finished, so the card froze
+// mid-"thinking" for good while the run vanished from /runs. The card is the
+// only durable trace of that run, so the next connect closes it as interrupted
+// with what to do. Cards this process owns are never touched — a websocket
+// reconnect without a restart must not close a running run's card.
 
 /** Bot's acceptance reaction — must match the one `handle()` adds. */
 export const ACK_EMOJI = "eyes";
@@ -43,18 +43,18 @@ export const ORPHAN_CARD_WINDOW_MS = 2 * 3_600_000;
 /** Messages posted inside this window with no receipt from us are re-run. Must
  *  cover the worst blackout: the drain closes the socket on SIGTERM and the
  *  next container starts only after this one exits, so a deploy over a run in
- *  flight blacks Slack out for up to DRAIN_DEADLINE_MS plus a cold start (#272)
+ *  flight blacks Slack out for up to DRAIN_DEADLINE_MS plus a cold start
  *  — `MIN_CATCH_UP_WINDOW_MS`, pinned by `src/core/drain.test.ts`. Older
  *  un-acked mentions are left alone — re-running a request from an hour ago is
  *  worse than the human re-posting it. */
 export const DEFAULT_WINDOW_MS = 30 * 60_000;
 /** A 👀-acked message with NO bot reply after it is a run that died between
- *  the ack and its status card (2026-08-30 16:33Z, #317: a deploy rollover
- *  killed the process 8 s after it acked a thread reply; the reply never got a
- *  card and the old scan skipped it as "acked"). Re-run it — unless it is
- *  younger than this, in which case the ack may belong to a process that is
- *  about to post its card (the ack and the card are ~1 s apart live), and
- *  re-running would double-run. */
+ *  the ack and its status card (a deploy rollover that kills the process
+ *  seconds after it acked a thread reply: the reply never gets a card, and a
+ *  scan that treated 👀 as terminal would skip it as "acked"). Re-run it —
+ *  unless it is younger than this, in which case the ack may belong to a
+ *  process that is about to post its card (the ack and the card are ~1 s
+ *  apart live), and re-running would double-run. */
 export const ACK_GRACE_MS = 30_000;
 if (DEFAULT_WINDOW_MS < MIN_CATCH_UP_WINDOW_MS) {
   throw new Error(
@@ -140,7 +140,7 @@ export function isAckedByBot(m: SlackHistoryMessage, botUserId: string): boolean
 const isFromBot = (m: SlackHistoryMessage, botUserId: string): boolean => Boolean(m.bot_id) || m.user === botUserId;
 
 /** Has the bot posted in this thread after `m` — a status card or a reply?
- *  Exported for the adapter's redelivery guard (#346), which asks the same
+ *  Exported for the adapter's redelivery guard, which asks the same
  *  question about a stale delivered event before starting a run. */
 export function botRepliedAfter(
   thread: SlackHistoryMessage[],
@@ -248,10 +248,10 @@ export function findOrphanedCards(input: FindOrphanedInput): OrphanedCard[] {
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // The dispatcher's transient title suffix (`quietSuffix`): the model's thinking
-// time, or the tool in flight (#531) — either form goes from an interrupted card.
+// time, or the tool in flight — either form goes from an interrupted card.
 const ACTIVITY_SUFFIX = / — (?:thinking \(\d+s since last tool\)|running \S+ \(\d+s\))$/u;
 const LIVE_GLYPH_PREFIX = new RegExp(`^(?:${LIVE_CARD_PREFIXES.map(escapeRegExp).join("|")})\\s*`, "u");
-// The drain notice the dispatcher appends after the thinking suffix (#357).
+// The drain notice the dispatcher appends after the thinking suffix.
 // Slack history can return the leading ⏸ either as the unicode char or as its
 // :shortcode:, so the pattern anchors on the notice's WORDS and accepts one
 // optional token where the glyph was; the ` · ` separator keeps it from ever
@@ -266,7 +266,7 @@ const SHUTDOWN_NOTICE_SUFFIX = new RegExp(
 /** The closed frame for an orphaned card: the run label and elapsed time it
  *  reached are kept (they are the only record of how far it got); the spinner,
  *  the transient "thinking" suffix, and the drain notice go (an interrupted
- *  card must not claim the bot is "finishing this run" — it did not, #357);
+ *  card must not claim the bot is "finishing this run" — it did not);
  *  the detail says what happened and what to do. History text comes back
  *  mrkdwn-escaped; un-escape so the adapter's render() does not double-escape
  *  `&amp;` → `&amp;amp;`. */
@@ -305,7 +305,7 @@ export interface CatchUpOptions {
   orphanWindowMs?: number;
   parentLookbackMs?: number;
   log?: (line: string) => void;
-  /** Where the outcome goes so `/healthz` can show it (#271); defaults to the
+  /** Where the outcome goes so `/healthz` can show it; defaults to the
    *  in-process record in `slackCatchUpStatus.ts`. */
   record?: (outcome: CatchUpOutcome) => void;
 }
@@ -467,7 +467,7 @@ async function fetchParents(client: CatchUpClient, channel: string, oldestSec: n
  *  single page of a long thread would drop exactly the newest — in-window —
  *  messages; the full thread is also what `threadIncludesBot` / `botRepliedAfter`
  *  need to judge participation. Exported for the adapter's redelivery guard
- *  (#346), which reads one thread the same way. */
+ *  which reads one thread the same way. */
 export async function fetchReplies(
   client: Pick<CatchUpClient, "conversations">,
   channel: string,

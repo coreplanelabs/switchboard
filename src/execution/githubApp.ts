@@ -58,10 +58,10 @@ const cache = new Map<GithubTokenScope, CachedToken>();
  *  for the exec transport and clock skew. Anything shorter re-mints. With
  *  1-hour tokens that is one mint per ~35 minutes per scope.
  *
- *  Why not "5 minutes before expiry" (the original rule): 2026-09-07, review
- *  of #521 — the cache handed a token minted 51 minutes earlier to a run whose
- *  first command then ran for the full 20-minute ceiling; the token expired
- *  under it and every later command in the run got `401 Bad credentials`. */
+ *  Why not a fixed "5 minutes before expiry": a token handed out with, say,
+ *  9 minutes left to a command that runs for the full 20-minute ceiling
+ *  expires under it, and every later command in the run gets `401 Bad
+ *  credentials`. A command that STARTS on a token must FINISH on it. */
 export const TOKEN_REUSE_MARGIN_MS = BASH_TIMEOUT_MAX_MS + 5 * 60_000;
 
 export function githubAppConfigured(): boolean {

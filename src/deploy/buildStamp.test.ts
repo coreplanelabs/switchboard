@@ -4,9 +4,8 @@ import { buildId, injectedBuildStamp, resolveBuildStamp, UNKNOWN_COMMIT } from "
 
 // Feature: features/execution.md item 13 — every Worker script reports the
 // commit it was built from on its own /healthz, injected at deploy time. This
-// replaces the resident's hand-edited `BUILD_MARKER`, which went unbumped
-// across five deploys (2026-08-30 → 2026-09-04) and so could neither prove a
-// deploy nor expire a stale test override.
+// replaces a hand-edited build marker, which a deploy could forget to bump and
+// then could neither prove a deploy nor expire a stale test override.
 
 describe("resolveBuildStamp (what a Worker reports)", () => {
   it("keeps an injected commit and timestamp", () => {

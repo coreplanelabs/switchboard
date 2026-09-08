@@ -1,6 +1,6 @@
 /** Which way a resident's snapshot bytes travel (features/resident-repos.md
- *  item 61, #614), kept pure so the decision is a unit test and the Worker
- *  only reads it.
+ *  item 61), kept pure so the decision is a unit test and the Worker only
+ *  reads it.
  *
  *  The Sandbox SDK has two transfer modes for `createBackup` / `restoreBackup`:
  *  - `localBucket: true` — the Durable Object reads the archive from the R2
@@ -8,10 +8,10 @@
  *    reverse on upload). The SDK documents this as the LOCAL-DEVELOPMENT mode
  *    ("required for local development where presigned URLs and FUSE are
  *    unavailable"). It puts a 128 MB isolate in the data path of every
- *    transfer: live 2026-09-08 02:34 UTC the nominal resident's 1.16 GB
- *    checkout restore exceeded the isolate's memory while a `du` exec shared
- *    the connection, the isolate was reset, and the resident sat in
- *    `restoring` with no way out but a manual rebuild (#572).
+ *    transfer: a checkout restore larger than the isolate's memory (a full
+ *    checkout runs to gigabytes) resets the isolate mid-transfer, and a
+ *    resident whose restore was reset sits in `restoring` with no way out but
+ *    a manual rebuild.
  *  - presigned — the DO signs GET/PUT URLs; the container downloads
  *    (`downloadBackupParallel`, resumable) and uploads the bytes itself. The
  *    DO orchestrates and judges; its memory no longer scales with the archive.

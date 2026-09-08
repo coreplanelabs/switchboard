@@ -16,7 +16,7 @@ import type { Capabilities } from "../core/capabilities.js";
 
 /** One runs-index row: a `RunView` plus, for a LIVE row only, its capability
  *  token (the client builds the token href from it — a finished row never
- *  carries one, R10). */
+ *  carries one; see docs/decisions/0013-capability-tokens-for-live-run-pages.md). */
 export interface RunIndexRowSeed extends RunView {
   token?: string;
 }

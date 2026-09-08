@@ -295,7 +295,8 @@ export function createSlackApp(deps: CoreDeps) {
   const clock = deps.clock ?? systemClock;
   // The receiver is built explicitly (rather than `socketMode: true`) so the
   // adapter can listen to its websocket lifecycle: every `connected` — first
-  // start and each reconnect — triggers the missed-mention catch-up (#184).
+  // start and each reconnect — triggers the missed-mention catch-up
+  // (docs/decisions/0012-reconnect-catch-up-as-recovery.md).
   const receiver = new SocketModeReceiver({ appToken: process.env.SLACK_APP_TOKEN ?? "" });
   const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver });
 
@@ -306,7 +307,7 @@ export function createSlackApp(deps: CoreDeps) {
   const catchUp = deps.config.config.slack?.catchUp;
   if (catchUp?.enabled !== false) {
     // A window shorter than the drain deadline + cold start cannot cover a
-    // full-length deploy blackout (#272). Warn, keep the operator's value.
+    // full-length deploy blackout. Warn, keep the operator's value.
     const windowWarning = catchUpWindowWarning(catchUp?.windowMinutes);
     if (windowWarning) console.warn(`[catch-up] ${windowWarning}`);
     // Socket-state record for /healthz: connected/disconnected transitions, so
@@ -324,11 +325,11 @@ export function createSlackApp(deps: CoreDeps) {
           botUserId ??= auth.user_id ?? undefined;
           if (!scopesChecked) {
             scopesChecked = true;
-            // Startup scope check (#271): every Web API result carries the
-            // token's granted scopes. Missing ones are the silent failure mode —
-            // live 2026-08-30 the catch-up could not list channels for hours and
-            // nothing said so — so they are logged loudly once and kept on the
-            // status record that /healthz reports.
+            // Startup scope check: every Web API result carries the token's
+            // granted scopes. Missing ones are the silent failure mode — without
+            // `channels:read`/`groups:read` the catch-up cannot list channels
+            // and its scan is a no-op that nothing reports — so they are logged
+            // loudly once and kept on the status record that /healthz reports.
             const missing = missingBotScopes(auth.response_metadata?.scopes);
             recordMissingScopes(missing);
             if (missing.length > 0) {
@@ -365,7 +366,7 @@ export function createSlackApp(deps: CoreDeps) {
             onMissed: (m) => {
               // The scan's alreadyHandled check ran at scan time; a live
               // delivery that landed between the scan and this dispatch has
-              // claimed the pair since — re-check, or both would run (#346).
+              // claimed the pair since — re-check, or both would run.
               if (wasHandledHere(m.channel, m.ts)) {
                 console.log(`[catch-up] ${m.channel}:${m.ts}: skipped — handled live since the scan`);
                 return;
@@ -451,7 +452,7 @@ export function createSlackApp(deps: CoreDeps) {
     });
   });
 
-  // The receiver rides along for the Bolt-level wiring test (#259): emitting
+  // The receiver rides along for the Bolt-level wiring test: emitting
   // `connected` on `receiver.client` is exactly what a real reconnect does, so
   // the test can drive the hook without a live socket. Production
   // (src/index.ts) uses only `app`.
@@ -476,9 +477,10 @@ interface SlackEvent {
 }
 
 /** The one-line thread note a replayed message gets, so a caller who waited
- *  through a deploy blackout (2026-08-30: 7.5 min with no 👀 on PR #300's
- *  re-review) learns the delay was the bot restarting — not the request being
- *  ignored, and not something to re-send. Pure; exported for tests. */
+ *  through a deploy blackout (minutes with no 👀 — indistinguishable, from the
+ *  thread, from being ignored) learns the delay was the bot restarting — not
+ *  the request being ignored, and not something to re-send. Pure; exported
+ *  for tests. */
 export function catchUpDelayNote(messageTs: string, nowMs: number): string {
   const lateMs = Math.max(0, nowMs - Number(messageTs) * 1000);
   const mins = Math.round(lateMs / 60_000);
@@ -510,13 +512,13 @@ function wasHandledHere(channel: string, ts: string): boolean {
  *  Only those pay the guard's one thread fetch. */
 export const STALE_DELIVERY_MS = 60_000;
 
-/** Delivery-time dedupe (#346). Live 2026-08-30 20:31:57Z: Slack re-delivered
- *  a mention posted at 20:25:51 into the deploy blackout — the reconnect
- *  catch-up had already answered it at 20:28 (⏱ note, card, answer, PR review)
- *  — and the adapter ran it AGAIN in full: `handle()` marked the handled-set
- *  but nothing ever consulted it on the live path (only the catch-up scan
- *  did), and a second LGTM review landed on the PR. Both deploy-window
- *  mentions that evening were re-delivered at +~6 min and double-ran.
+/** Delivery-time dedupe. Slack re-delivers an event whose original delivery
+ *  was never acked — a mention posted into a deploy blackout comes back
+ *  minutes later, after the reconnect catch-up has already answered it (⏱
+ *  note, card, answer). The handled-set alone does not cover that: `handle()`
+ *  marks it, but only the catch-up scan consulted it, so the live path ran
+ *  the redelivery again in full and a second answer landed. This guard is the
+ *  live path's consult.
  *
  *  Claims (channel, ts) and answers why the event must be DROPPED, or null to
  *  proceed:
@@ -526,7 +528,8 @@ export const STALE_DELIVERY_MS = 60_000;
  *     delivery older than `STALE_DELIVERY_MS` pays ONE `conversations.replies`
  *     fetch and is dropped when the bot has already posted in the thread after
  *     it. A stale event with 👀 but NO bot reply after it still runs — that is
- *     #317's ack-then-killed shape, and re-running it is the point.
+ *     the ack-then-killed shape (docs/decisions/0012-reconnect-catch-up-as-recovery.md),
+ *     and re-running it is the point.
  *  Fail-open: an unfetchable thread runs the event — a lost request is worse
  *  than the duplicate this guard exists to prevent. Catch-up replays
  *  (`caughtUp`) skip both checks: the scan already decided, against the same
@@ -613,7 +616,7 @@ async function receiveSlackMessage(
   ev: SlackEvent,
   span: Span,
 ): Promise<Omit<IncomingMessage, "receivedAt" | "originAt"> | undefined> {
-  // Redelivery guard (#346): claim (channel, ts) and drop the event when it
+  // Redelivery guard: claim (channel, ts) and drop the event when it
   // demonstrably ran already — in this process, or (for a stale delivery)
   // visibly answered in its own thread. Before the ack: a dropped redelivery
   // already wears the first handling's 👀.
@@ -698,8 +701,9 @@ export async function fetchImages(
   // apply the byte budgets, so which file gets cut when the budget overflows is
   // the same as it was serially. One deliberate drift from the serial loop: the
   // count budget is spent by CANDIDATES, not by successful downloads, so a
-  // failed fetch no longer frees its slot for a later file (serially, image #11
-  // got in when #3 failed). Refilling would mean a second download round;
+  // failed fetch no longer frees its slot for a later file (serially, the
+  // eleventh image got in when the third failed). Refilling would mean a
+  // second download round;
   // a failed Slack fetch is rare and the cost is one fewer attachment.
   const candidates: Array<{ f: SlackFile; label: string; url: string; mediaType: string }> = [];
   for (const f of files ?? []) {
@@ -1098,7 +1102,7 @@ export function isLiveCard(channel: string, ts: string): boolean {
  *
  *  The body MUST be a `rich_text` block, never a `section`: Slack's client
  *  collapses a section's mrkdwn behind "Show more" at FIVE rendered lines
- *  (measured live, 2026-08-30 — 8/12/16/20-line sections all fold; rich_text
+ *  (measured against the live client — 8/12/16/20-line sections all fold; rich_text
  *  at 30 lines does not), and a folded card re-renders expanded-then-collapsed
  *  on every chat.update, shoving the whole thread up and down on each 5s
  *  heartbeat. The card is link + checklist + activity ≈ 6+ lines, permanently
@@ -1176,11 +1180,11 @@ async function threadIfBotInIt(
  *  parsers (`repo onboard …` saw `*Sent` as a bad token). Only whole trailing
  *  footers of exactly that shape are removed (repeated for stacked footers);
  *  the phrase inside a user's own text is untouched. The footer is anchored to
- *  the END of the text, not to its own line: the raw event text seen live on
- *  2026-08-29 was `friction report *Sent using* <@U0BJJMDUCKY>` — same line,
- *  no newline — and a line-anchored regex let `*Sent` reach the command
- *  parser (`repo list` had masked this because it ignores trailing text). An
- *  optional bracketed sender attribution after the mention is tolerated too. */
+ *  the END of the text, not to its own line: the raw event text arrives as
+ *  `friction report *Sent using* <@UAPP>` — same line, no newline — so a
+ *  line-anchored regex lets `*Sent` reach the command parser (`repo list`
+ *  masks this because it ignores trailing text). An optional bracketed sender
+ *  attribution after the mention is tolerated too. */
 const APP_FOOTER_RE = /(?:^|\s)(?:\*Sent using\*|Sent using)\s+<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s*\[[^\]\n]*\])?\s*$/;
 
 /** Exported for tests. */

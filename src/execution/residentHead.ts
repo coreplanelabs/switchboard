@@ -29,7 +29,7 @@ export function parseWantSha(value: unknown): ParsedWantSha {
 
 /** The expected head applies to the ref the caller resolved it FOR (`refHint`,
  *  the PR's head branch). A thread whose sticky binding is another branch
- *  (KTD6: the binding wins over a differing refHint) can never have that
+ *  (the binding wins over a differing refHint) can never have that
  *  branch's tip at the PR head, so the sha is dropped rather than forcing a
  *  fetch on every attach of a permanently mismatched thread. No refHint (a
  *  follow-up that named no branch) → the caller means the bound ref. */

@@ -74,7 +74,7 @@ describe("POST /admin/restart/authorize", () => {
     expect(writes.status).toBe(503);
   });
 
-  it("the Worker's subject header decides on the grants alone, bearer or no bearer — the container's own token map may be a generation behind during a rotation (#667)", () => {
+  it("the Worker's subject header decides on the grants alone, bearer or no bearer — the container's own token map may be a generation behind during a rotation", () => {
     const h = harness({ tokens: undefined }); // no map in the container at all: the bearer path would be 503
     const { req, res, writes } = request("POST", undefined, "ops");
     handleAdminRestartAuthorize(req, res, h.deps);

@@ -1,15 +1,15 @@
 import { STATIC_CHANNEL_DIRECTORY } from "../core/authz/channelDirectory.js";
 import type { ChannelDirectory, ChannelVisibility } from "../core/authz/types.js";
 
-// The Slack `ChannelDirectory` (authorization plan R10, KTD4, U5): the adapter
+// The Slack `ChannelDirectory`: the adapter
 // fact the static id mapping cannot supply — whether a `slack:C…` (or `G…`)
 // channel is public or private — asked of `conversations.info` once per
-// channel per TTL and stamped on every run dispatched there (KTD7), so a run in
+// channel per TTL and stamped on every run dispatched there, so a run in
 // a public channel is readable by everyone (`member-of`'s public half) while a
 // private channel or DM stays grants-only. `authorize` never calls this: it
 // reads the stamp.
 //
-// Fail-closed (R7): any failure — an API error, a missing scope, an empty reply
+// Fail-closed: any failure — an API error, a missing scope, an empty reply
 // — is `unknown`, never a guess, and is remembered for the TTL so a failing
 // channel costs one Slack call and one log line per window, not one per
 // message. A `slack:D…` id is a DM by construction and never reaches the API
@@ -24,7 +24,7 @@ import type { ChannelDirectory, ChannelVisibility } from "../core/authz/types.js
 
 /** Default time a channel's visibility is served from the cache. Channels
  *  rarely flip public ↔ private; a stale window of minutes is accepted and
- *  documented (KTD4). A stale-DENY is impossible: `unknown` denies. */
+ *  documented. A stale-DENY is impossible: `unknown` denies. */
 export const CHANNEL_INFO_TTL_MS = 10 * 60_000;
 /** Bound on cached channels, FIFO like the adapter's name caches. */
 export const CHANNEL_INFO_CACHE_MAX = 1000;
@@ -91,7 +91,7 @@ export class SlackChannelDirectory implements ChannelDirectory {
     return lookup;
   }
 
-  /** Membership is not enumerated yet: the fallback's `unknown` — not a member (R7). */
+  /** Membership is not enumerated yet: the fallback's `unknown` — not a member. */
   isMember(actorId: string, channelId: string): Promise<boolean | "unknown"> {
     return this.fallback.isMember(actorId, channelId);
   }

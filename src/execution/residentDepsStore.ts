@@ -1,19 +1,20 @@
 /** The resident's content-addressed dependency store (features/resident-repos.md
- *  item 59, #555), kept pure and dependency-free so it is unit-testable from
+ *  item 59), kept pure and dependency-free so it is unit-testable from
  *  src/ and imported by the resident Worker like residentDepCache — the
  *  tested code IS the shipped code.
  *
- *  Background (2026-09-07): dependencies were installed IN PLACE and PER
+ *  Background: dependencies used to be installed IN PLACE and PER
  *  CONSUMER — provisioning into the checkout, the refresh cycle into the
  *  checkout again on every lockfile change, a thread whose branch lockfile
- *  differed from the checkout's into its own 1.9 GiB tree. Three install
- *  sites, three budgets, none aware of the others: the refresh spiral (#529)
- *  and the ship attach that died mid-install (#552) both lived in the seams.
- *  The switchboard resident ran 32 installs that day for ~14 distinct
- *  lockfile keys, because "older than main's lockfile" and "different from
- *  main's lockfile" were the same comparison.
+ *  differed from the checkout's into its own gigabyte tree. Three install
+ *  sites, three budgets, none aware of the others: a refresh cycle whose
+ *  install outlived its budget spiralled (the next cycle's clean raced the
+ *  orphaned installer), and an attach could die mid-install; both faults
+ *  lived in the seams. A resident ran dozens of installs a day for a dozen
+ *  distinct lockfile keys, because "older than the default branch's lockfile"
+ *  and "different from it" were the same comparison.
  *
- *  Shape: one entry per lockfile key (the KTD7 hash of the committed
+ *  Shape: one entry per lockfile key (the hash of the committed
  *  lockfile — a pure function of the commit) under DEPS_STORE_DIR, holding
  *  the tree's top-level `node_modules` exactly as the install produced it.
  *  An entry is IMMUTABLE once complete (`.complete` written last, inside the
@@ -24,9 +25,9 @@
  *  clone, MOVE its node_modules into a staging dir, rename to the entry,
  *  mark). The installer runs OUTSIDE the mirror lock — it reads the mirror's
  *  objects through a `--shared` clone and touches no consumer's tree — so a
- *  full install no longer holds every attach behind it (#170).
+ *  full install no longer holds every attach behind it.
  *
- *  Eviction: the store is a cache (KTD3). Protected keys (the checkout's,
+ *  Eviction: the store is a cache. Protected keys (the checkout's,
  *  every live binding's, every install in flight) never go; among the rest,
  *  debris (incomplete, nothing in flight) first, then coldest `.used` first,
  *  keeping at most DEPS_STORE_MAX_UNREFERENCED warm spares. */
@@ -76,7 +77,7 @@ export type DepsMaterializationPlan =
 /** A complete entry wins over everything (a stale in-flight memo after a DO
  *  reset must never make a caller wait for an install that is not running);
  *  an install already running for the key is joined, never duplicated; a
- *  recorded entry backup (item 61, #614) is restored before anything is
+ *  recorded entry backup (item 61) is restored before anything is
  *  installed — the container downloads a finished tree instead of building
  *  one — and only a key with neither installs. */
 export function planDepsMaterialization(input: {
@@ -92,7 +93,7 @@ export function planDepsMaterialization(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Entry backups (item 61, #614 PR B): content-addressed snapshots of the store
+// Entry backups (item 61): content-addressed snapshots of the store
 // ---------------------------------------------------------------------------
 
 /** The checkout snapshot leaves out its top-level node_modules: since item 59
@@ -167,10 +168,9 @@ export const NO_LOCKFILE_KEY = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934c
  *  and an empty entry when it has none — a repo whose install command is a
  *  no-op (`true`, a terraform tree) keys to NO_LOCKFILE_KEY and gets an empty
  *  node_modules, owned by the build user like an installed one, so every
- *  consumer's view links an empty directory and nothing else changes. Live
- *  2026-09-08 05:03 UTC the infrastructure resident's rebuild failed at this
- *  step (`find: '…/node_modules': No such file or directory`) for exactly
- *  that shape. */
+ *  consumer's view links an empty directory and nothing else changes. Without
+ *  the empty case, such a repo's rebuild fails at this step (`find:
+ *  '…/node_modules': No such file or directory`). */
 export function depsHardenScript(input: {
   scratchDir: string;
   /** chown spec for the created empty directory (`user:group`) — the build user's. */

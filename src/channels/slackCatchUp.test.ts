@@ -50,10 +50,10 @@ describe("findMissed (pure selection over fetched history)", () => {
     expect(findMissed({ ...base, channel: "C1", parents: [m], threads: new Map() })).toEqual([]);
   });
 
-  // #317 (2026-08-30 16:33Z): the process acked a thread reply, a deploy
-  // rollover killed it 8 s later — before the status card — and the next
-  // process's scan skipped the reply as "acked". 👀 alone is not "handled".
-  it("re-runs a 👀-acked message older than ACK_GRACE_MS when the bot never replied after it (#317)", () => {
+  // A process acks a thread reply and a deploy rollover kills it seconds later
+  // — before the status card. A scan that treats 👀 as terminal skips the reply
+  // as "acked" and it is lost. 👀 alone is not "handled".
+  it("re-runs a 👀-acked message older than ACK_GRACE_MS when the bot never replied after it", () => {
     const parent = mention({ ts: ts(ACK_GRACE_MS / 1000 + 1), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
     expect(findMissed({ ...base, channel: "C1", parents: [parent], threads: new Map() }).map((x) => x.ts)).toEqual([
       parent.ts,
@@ -397,8 +397,8 @@ describe("catchUpMissedMentions (runner over the Slack Web API)", () => {
 
 // Feature: features/slack-channel.md item 8 — a status card left spinning by a
 // process that died mid-run (a deploy rollout that killed the container before
-// the drain finished — live 2026-08-29 23:51Z, PR #214's review froze at
-// "153s — thinking") is closed as interrupted by the next connect's sweep, so
+// the drain finished leaves a card frozen mid-"thinking" for good) is closed
+// as interrupted by the next connect's sweep, so
 // the requester never stares at a frozen spinner.
 describe("findOrphanedCards (pure selection of the bot's own frozen live cards)", () => {
   const cutoff = NOW - ORPHAN_CARD_WINDOW_MS;
@@ -464,7 +464,7 @@ describe("interruptedCardFrame", () => {
     expect(f.title).toBe("❌ interrupted · *general* · &lt;tag&gt; · 3s");
   });
 
-  // #357 (live 2026-08-30 22:06Z): a card frozen mid-drain carries the shutdown
+  // A card frozen mid-drain carries the shutdown
   // notice; the interrupted title must not keep the stale "finishing this run"
   // clause — the run was NOT finished.
   it("drops the trailing drain notice (unicode ⏸ form), keeping label and elapsed", () => {
@@ -495,7 +495,7 @@ describe("interruptedCardFrame", () => {
     expect(f.title).toBe("❌ interrupted · *coding* on `m` · 323s");
   });
 
-  // #531 (live 2026-09-07): a card frozen while a tool was in flight carries
+  // A card frozen while a tool was in flight carries
   // the running-tool suffix instead of the thinking one — dropped the same way.
   it("drops the running-tool suffix (an in-flight tool is labelled running, not thinking)", () => {
     const f = interruptedCardFrame("◓ *coding* on `anthropic/claude-fable-5` · 3661s — running bash (3601s)");
@@ -605,7 +605,7 @@ describe("catchUpMissedMentions — orphaned-card sweep", () => {
   });
 });
 
-// #271 — the runner records its outcome so /healthz can show it.
+// The runner records its outcome so /healthz can show it.
 describe("catchUpMissedMentions — outcome record", () => {
   it("records channels/missed and zero skipped after a clean scan", async () => {
     const client = mockClient({ channels: [{ id: "C1" }, { id: "C2" }], history: { C1: [mention()], C2: [] } });
@@ -622,7 +622,7 @@ describe("catchUpMissedMentions — outcome record", () => {
     expect(record).toHaveBeenCalledWith({ at: NOW, channels: 2, missed: 1, skippedChannels: 0 });
   });
 
-  it("records the channel-listing failure as `error` (the 2026-08-30 missing_scope silence)", async () => {
+  it("records the channel-listing failure as `error` (the missing_scope silence)", async () => {
     const client = mockClient();
     client.users.conversations.mockRejectedValue(new Error("An API error occurred: missing_scope"));
     const record = vi.fn();

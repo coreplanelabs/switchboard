@@ -66,7 +66,7 @@ export class OpenAICompatProvider implements Provider {
         ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
       },
       body: JSON.stringify(body),
-      // A hard run stop (#101) cancels the request instead of waiting it out.
+      // A hard run stop cancels the request instead of waiting it out.
       ...(req.signal ? { signal: req.signal } : {}),
     });
     if (!res.ok) {

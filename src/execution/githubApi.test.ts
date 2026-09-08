@@ -372,7 +372,7 @@ describe("RestGithubApi — writes use the write token", () => {
             status: 200,
             body: { data: null, errors: [{ type: "FORBIDDEN", message: "Resource not accessible by integration" }] },
           };
-        // The live answer for an App installation (2026-09-03): no `type`, this message.
+        // What an App installation gets: no `type`, this message.
         if (id === "I_viewer")
           return { status: 200, body: { data: null, errors: [{ message: "Viewer not authorized to delete" }] } };
         return { status: 200, body: { data: { deleteIssue: { clientMutationId: null } } } };

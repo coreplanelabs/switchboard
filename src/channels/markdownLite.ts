@@ -11,7 +11,7 @@
 //   - unknown syntax degrades to plain text instead of erroring.
 //
 // Supported blocks: paragraphs, #–###### headings, fenced code, quotes,
-// lists (one nested level), and a GFM table subset (#209: header row +
+// lists (one nested level), and a GFM table subset (header row +
 // `|---|` separator + body rows, built as table/thead/tbody/tr/th/td).
 //
 // It ships into the page by interpolating `String(renderMarkdownInto)` into the
@@ -58,7 +58,7 @@ export function renderMarkdownInto(root: MdElement, text: string): void {
     if (s) parent.appendChild(doc.createTextNode(s));
   }
 
-  // GFM table subset (#209): a header row, a `|---|` separator (alignment
+  // GFM table subset: a header row, a `|---|` separator (alignment
   // colons accepted, ignored), then body rows. A table exists only when the
   // separator sits directly under a pipe-bearing header with the SAME cell
   // count — anything else stays text. Cells go through the inline renderer;
@@ -233,7 +233,7 @@ export function renderMarkdownInto(root: MdElement, text: string): void {
       // Progress guarantee: a line that LOOKS like a block start but matched no
       // block above (a bare `# ` heading marker, a `>` past the quote-depth cap)
       // would otherwise leave `p` empty and `i` unmoved — an infinite loop that
-      // froze every viewer's tab (review of #179). Consume it as plain text.
+      // froze every viewer's tab. Consume it as plain text.
       if (p.length === 0) p.push(src[i++]);
       inline(el(parent, "p"), p.join("\n"));
     }

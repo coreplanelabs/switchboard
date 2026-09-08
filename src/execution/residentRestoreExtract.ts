@@ -1,17 +1,17 @@
 /** Extracting an R2 restore onto the resident's own disk (features/resident-repos.md
- *  item 61, #614), kept pure and dependency-free so it is unit-testable from
+ *  item 61), kept pure and dependency-free so it is unit-testable from
  *  src/ and imported by the resident Worker — the tested code IS the shipped
  *  code.
  *
- *  Background (2026-09-08): in presigned mode the Sandbox SDK's restore does
+ *  Background: in presigned mode the Sandbox SDK's restore does
  *  not extract the archive, it MOUNTS it — squashfuse on the `.sqsh` under
  *  `/var/backups/mounts/<id>_<ts>_<rand>/lower`, then fuse-overlayfs at the
  *  handle's `dir` with a writable upper next to it — and leaves the `.sqsh` in
  *  `/var/backups`. (Extraction with `unsquashfs` is the SDK's LOCAL-DEV path.)
- *  The first day of presigned mode showed what a mount point does to code that
- *  expects a directory on one ext4 filesystem: `rm -rf /workspace/mirror` →
- *  "Device or resource busy" (nominal looped `degraded` on its wake path),
- *  `chown -R` → a copy-up of every inode (timed out at 300 s), `du -x` → the
+ *  A mount point breaks code that expects a directory on one ext4 filesystem:
+ *  `rm -rf /workspace/mirror` → "Device or resource busy" (a resident loops
+ *  `degraded` on its wake path), `chown -R` → a copy-up of every inode (past
+ *  any step budget), `du -x` → the
  *  mirror and checkout measured as ~1 MiB, and every hardlink or rename
  *  between the checkout and the deps store crossed devices.
  *
@@ -45,8 +45,8 @@ const BACKUP_ID_RE = /^(?=.*[0-9a-fA-F])[0-9a-fA-F-]{8,64}$/;
  *  first, then every squashfuse lower under the SDK's `<backupId>_<ts>_<rand>`
  *  dirs, then those dirs. The lower is found by the backup id, not by the
  *  overlay's options: fuse-overlayfs exposes no `lowerdir=` in /proc/mounts
- *  (live 2026-09-08 18:24 UTC the first extraction left two squashfuse lowers
- *  mounted for exactly that reason — each pinning its unlinked `.sqsh`).
+ *  (an unmount keyed on the overlay's options leaves the squashfuse lowers
+ *  mounted, each pinning its unlinked `.sqsh`).
  *  `fusermount3 -u` is the FUSE way; `umount -l` the fallback for a busy
  *  mount. */
 export function unmountRestoreScript(input: { mountDir: string; backupId: string }): string {

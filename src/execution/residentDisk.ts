@@ -1,17 +1,17 @@
-// A full container disk, named for what it is (#457, features/resident-repos.md
+// A full container disk, named for what it is (features/resident-repos.md
 // item 54). Pure decisions the resident Worker (deploy/cloudflare-resident/
 // worker.ts) imports; no I/O, no clock — `now` is an input.
 //
-// Why this exists: on 2026-09-04 the nominal resident's disk filled. The
-// refresh cycle's credential-file write failed with ENOSPC and was recorded as
+// Why this exists: when a resident's disk fills, the refresh cycle's
+// credential-file write fails with ENOSPC. Recorded as
 // `degraded(github-unreachable: …)` — a reason on the bot's serviceable
-// allow-list — so every run attached, failed at git-setup with git's errno-less
+// allow-list — every run attaches, fails at git-setup with git's errno-less
 // `failed to write new configuration file /etc/gitconfig.lock` (exit 4), and
-// fell back cold with a message that read like a lock bug. Nothing freed the
-// disk. Two facts fix that: the failure is classified `disk-full` (never
+// falls back cold with a message that reads like a lock bug, and nothing frees
+// the disk. Two facts fix that: the failure is classified `disk-full` (never
 // serviceable, so the bot skips the attach and the card names the disk), and
-// the resident recycles its container — the disk is a cache (KTD3); the next
-// alarm restores mirror + checkout from R2 — once nothing live would be lost.
+// the resident recycles its container — the disk is a cache; the next alarm
+// restores mirror + checkout from R2 — once nothing live would be lost.
 
 /** The errno wording tools print for ENOSPC: Node's `ENOSPC` code and libc's
  *  strerror text (git, cp, tar, pnpm all pass it through). A message carrying
@@ -23,8 +23,8 @@ export function isDiskFullMessage(message: string): boolean {
 }
 
 /** Below this much free space the disk is "full" for the resident's purposes:
- *  128 MiB is less than one checkout of the largest onboarded tree (nominal:
- *  75 MB) plus git's pack/lock scratch, so a fetch or a `worktree add` cannot
+ *  128 MiB is less than one checkout of a mid-sized repository (tens of MB)
+ *  plus git's pack/lock scratch, so a fetch or a `worktree add` cannot
  *  complete — waiting for a literal 0 would only change which step dies. The
  *  probe is consulted only after a step has already failed, and only when the
  *  step's own message did not carry the errno (`git config`'s write_error
@@ -37,8 +37,8 @@ export const DF_FREE_ARGV = ["df", "-Pk", "/workspace"] as const;
 
 /** The three size columns of `df -Pk <path>` output (1024-blocks, Used,
  *  Available), in KiB; `null` when there is no data row or a column is not a
- *  number — unknown is never reported as 0. The disk budget (#448,
- *  `residentDiskBudget.ts`) samples all three; the disk-full classifier below
+ *  number — unknown is never reported as 0. The disk budget
+ *  (`residentDiskBudget.ts`) samples all three; the disk-full classifier below
  *  reads only `free`. */
 export function parseDfKiB(stdout: string): { totalKiB: number; usedKiB: number; freeKiB: number } | null {
   const rows = stdout.split("\n").filter((l) => l.trim() !== "");

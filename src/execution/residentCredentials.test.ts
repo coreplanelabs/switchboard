@@ -17,8 +17,8 @@ const fresh = {
   readonly: false,
 };
 
-describe("shouldRefreshThreadCredentials (KTD12: the per-attach token must outlive a long run)", () => {
-  it("the expiry margin covers the longest single exec (#534 sibling: BASH_TIMEOUT_MAX_MS + slack)", () => {
+describe("shouldRefreshThreadCredentials (the per-attach token must outlive a long run)", () => {
+  it("the expiry margin covers the longest single exec (BASH_TIMEOUT_MAX_MS + slack)", () => {
     expect(CREDENTIAL_EXPIRY_MARGIN_MS).toBeGreaterThanOrEqual(BASH_TIMEOUT_MAX_MS);
     expect(CREDENTIAL_EXPIRY_MARGIN_MS).toBeLessThan(60 * 60_000);
     expect(CREDENTIAL_REFRESH_AFTER_MS).toBe(45 * 60_000);
@@ -37,7 +37,7 @@ describe("shouldRefreshThreadCredentials (KTD12: the per-attach token must outli
     expect(shouldRefreshThreadCredentials({ ...fresh, fileBytes: 0 })).toEqual({ refresh: true, reason: "empty" });
   });
 
-  describe("expiry-driven refresh (the #528 fix): the token's own life, not the file's age", () => {
+  describe("expiry-driven refresh: the token's own life, not the file's age", () => {
     it("a near-expiry token (3 min left) refreshes with reason expiring, though the file was just written", () => {
       expect(
         shouldRefreshThreadCredentials({ ...fresh, writtenAtMs: now, tokenExpiresAtMs: now + 3 * 60_000 }),

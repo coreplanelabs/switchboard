@@ -8,7 +8,7 @@ import { skillGuidanceBlock } from "./index.js";
 import type { Skill } from "./types.js";
 
 // Feature: features/skills.md — the SkillStore seam, frontmatter parsing,
-// per-agent scoping, and the progressive-disclosure prompt block (#100).
+// per-agent scoping, and the progressive-disclosure prompt block.
 
 const REVIEW_SKILL = `---
 name: code-review-and-quality

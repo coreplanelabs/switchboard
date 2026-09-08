@@ -1,10 +1,10 @@
-/** Per-directory mechanism for the resident's dep/build cache (KTD7,
- *  features/resident-repos.md item 18), kept pure and dependency-free so it
+/** Per-directory mechanism for the resident's dep/build cache
+ *  (features/resident-repos.md item 18), kept pure and dependency-free so it
  *  is unit-testable from src/ and imported by the resident Worker
  *  (deploy/cloudflare-resident/worker.ts `materializeThreadDeps`) like
  *  residentReadonly / residentHead — the tested code IS the shipped code.
  *
- *  Background (2026-08-30, review of switchboard#315): every cached dir was
+ *  Background: every cached dir used to be
  *  hardlink-copied (`cp -al`) from the warm checkout with the FILE inodes
  *  left worker1-owned and stripped of group/world write — right for
  *  node_modules, which a thread only ever reads, and the whole point of the
@@ -41,9 +41,9 @@ export function depCacheMaterialization(dir: DepCacheDir): DepCacheMaterializati
  *  reconciles only the delta on top of the seed, because npm/pnpm replace a
  *  changed package with fresh inodes and can never write through a shared one
  *  (the seed's file inodes are worker1-owned with group/world write stripped).
- *  Before this the diverged case installed from an empty tree: 1.94 GiB
- *  projected and 5+ min on the 1 vCPU it shares with the refresh cycle (live
- *  2026-09-07, #552 and the 21:38 disk-pressure refusal). No install command
+ *  Before this the diverged case installed from an empty tree: gigabytes
+ *  projected and minutes on the 1 vCPU it shares with the refresh cycle, long
+ *  enough for the bot's /attach to die first. No install command
  *  (item 52's package.json-less table) leaves a diverged tree unseeded: a seed
  *  nothing can reconcile would be the WRONG deps presented as ready. */
 export interface ThreadDepsPlan {
@@ -111,9 +111,9 @@ export function threadDepsMechanism(input: {
  *  actually live (the top-level entries are symlinks into it). It is
  *  immutable after install, exactly like the packages it holds, so it stays
  *  hardlinked; a `.cache` nested inside it is still a cache and still copied.
- *  2026-09-05: swapping it for a plain copy made every thread tree of a pnpm
- *  workspace a full 2.6 GB copy of its dependencies and a fresh attach ~190 s
- *  (nominal), and one thread filled the old 8 GB resident disk (#448).
+ *  Swapping it for a plain copy makes every thread tree of a pnpm workspace a
+ *  full copy of its dependencies (gigabytes, minutes per fresh attach) — one
+ *  thread can fill a resident's disk that way.
  *
  *  `mutableCacheFindArgv` is the exact `find` the Worker runs to enumerate
  *  those paths; `mutableCachePaths` turns its output lines into the list to
@@ -184,7 +184,7 @@ export function foldDepsMechanism(
 }
 
 // ---------------------------------------------------------------------------
-// One-fork materialization (#356 item 4)
+// One-fork materialization
 // ---------------------------------------------------------------------------
 //
 // materializeThreadDeps used to spawn per dir: `test -d`, `test -e`, the
@@ -199,8 +199,9 @@ export function foldDepsMechanism(
 // parses with `parseDepCacheScriptOutput`, filters the listing through the
 // unchanged `mutableCachePaths`, and `mutableCacheSwapScript` performs every
 // swap in the second fork. The resulting ownership/permission state is
-// byte-identical to the per-spawn version (KTD5-adjacent — see each block's
-// comment); only the fork count changed.
+// byte-identical to the per-spawn version (the security posture is in the
+// ownership and mode bits — see each block's comment); only the fork count
+// changed.
 
 /** What the DO reads back from one script run. `failedStep` carries the
  *  `err=` tag a failing block emitted (the old per-spawn StepError names:

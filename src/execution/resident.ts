@@ -27,7 +27,7 @@ import type { ExecTraceOptions } from "./executor.js";
 // x-env-* by design), and per-thread state is a git worktree bound to a sticky
 // ref inside the resident, not a whole sandbox.
 //
-// U4 route contracts this client implements:
+// Route contracts this client implements:
 //   /attach {resource, threadKey, refHint?, readonly?, sha?} → 200 attach result
 //     | 409 {needs:"ref"} (thread has no ref binding — ask the user)
 //     | 400 unknown-ref/pattern | 404 not onboarded | 503 mirror-busy | 429 pool
@@ -75,7 +75,7 @@ export interface ResidentBinding {
   sha: string;
   /** Absolute path of the thread's worktree inside the resident — the cwd of
    *  every /exec. Advisory (named to the model so it never goes looking for
-   *  the repository, #282); undefined if the attach answer lacked it. */
+   *  the repository); undefined if the attach answer lacked it. */
   workspace?: string;
   /** The resident's own step trace for the attach (features/tracing.md item
    *  19), sanitized at the parse; absent from a Worker predating it. */
@@ -84,9 +84,9 @@ export interface ResidentBinding {
   attachMs?: number;
 }
 
-/** 409 needs:"ref" from /attach — the thread has no ref binding yet (KTD6:
- *  binding is explicit-or-ask-once, never a silent guess). Typed so the
- *  dispatcher can catch it and ask the user ONE clarifying question (U7)
+/** 409 needs:"ref" from /attach — the thread has no ref binding yet (a
+ *  binding is explicit or asked for once, never a silent guess). Typed so the
+ *  dispatcher can catch it and ask the user ONE clarifying question
  *  instead of surfacing a raw error; the user's answer in the thread carries
  *  the ref on the next message and re-attach binds it. */
 export class ResidentNeedsRefError extends Error {
@@ -123,7 +123,7 @@ async function parseResidentBody(res: Response): Promise<Record<string, unknown>
   return sanitizeResidentBody(data);
 }
 
-/** Deterministic-ops client (U6, KTD8) for the resident Worker's POST /op:
+/** Deterministic-ops client for the resident Worker's POST /op:
  *  a name from the fixed op enum resolves resident-side ONLY through the
  *  onboard-time command table and runs in a disposable per-op checkout —
  *  never a thread's attached worktree, so no threadKey rides in the body.
@@ -197,7 +197,7 @@ export class ResidentExecutor implements Executor {
   /** Consecutive `runtime-replaced` outcomes with no successful op between
    *  them. One is a deploy that swapped the resident isolate under a command
    *  (routine, recoverable); two in a row is a flapping resident and becomes
-   *  infra so the runner's fail-fast (#92) still has teeth. */
+   *  infra so the runner's fail-fast still has teeth. */
   private runtimeReplacedStreak = 0;
 
   private lastBinding?: ResidentBinding;
@@ -284,7 +284,7 @@ export class ResidentExecutor implements Executor {
           // budget plus EXEC_CALL_MARGIN_MS (the server's own exit-124 answer
           // must win the race); control-plane routes pass a short bound. A timeout throws
           // here and is translated into the legible request-failed error below,
-          // never an unhandled throw. A hard run stop (#101) joins the deadline:
+          // never an unhandled throw. A hard run stop joins the deadline:
           // it drops the bot-side request; the resident's own `timeout` still
           // bounds the command inside the container.
           signal: execDeadline(timeoutMs, signal),
@@ -294,13 +294,13 @@ export class ResidentExecutor implements Executor {
       // The body read is under the SAME deadline: /exec streams heartbeats, so
       // a resident whose exec promise never settles hangs HERE, past the
       // headers, not on the fetch — read it inside the try so that abort is the
-      // legible request-failed error below and NOT a raw TimeoutError (#531).
+      // legible request-failed error below and NOT a raw TimeoutError.
       return { status: res.status, data: await parseResidentBody(res) };
     } catch (err) {
       // Network-level failure or a deadline abort mid-body: the command may
       // still be running (or have run) in the resident — never blind-retry a
       // possibly side-effectful call. Infra (not a command exit): the runner
-      // counts these toward fail-fast (#92).
+      // counts these toward fail-fast.
       throw classifyError(
         new ExecInfraError(
           `resident worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
@@ -313,8 +313,8 @@ export class ResidentExecutor implements Executor {
 
   /** Bind/reuse this thread's worktree. Legible errors for every named
    *  refusal the service can answer with. Answers the binding the resident
-   *  reported: the bound ref (authoritative — a differing refHint is ignored,
-   *  KTD6) and the sha the worktree is at. A 200 without both fields is a
+   *  reported: the bound ref (authoritative — a differing refHint is ignored)
+   *  and the sha the worktree is at. A 200 without both fields is a
    *  malformed resident (the attach contract always carries them) and is an
    *  error, never a half-bound executor. */
   async attach(span?: Span): Promise<ResidentBinding> {
@@ -379,7 +379,7 @@ export class ResidentExecutor implements Executor {
    *  now that the run is over, instead of holding both until the inactivity
    *  sweep. `force` (mode "always") skips the resident's clean check; "if-clean"
    *  lets the resident keep a worktree with uncommitted/unpushed work — the
-   *  binding (ref) survives either way (KTD6), so the next attach recreates
+   *  binding (ref) survives either way, so the next attach recreates
    *  the tree on the same ref. Best-effort by contract: never throws. */
   async release(mode: ReleaseMode, opts?: ExecTraceOptions): Promise<ReleaseResult> {
     try {
@@ -415,7 +415,7 @@ export class ResidentExecutor implements Executor {
   ): Promise<{ status: number; data: Record<string, unknown> }> {
     // Worktree still gone after a re-attach — the resident is unhealthy
     // (mid-restore or worse). Infra, not a command exit: counts toward
-    // fail-fast so the run doesn't keep dispatching into it (#92).
+    // fail-fast so the run doesn't keep dispatching into it.
     const stillGone = (data: Record<string, unknown>): ExecInfraError =>
       classifyError(
         new ExecInfraError(
@@ -480,7 +480,7 @@ export class ResidentExecutor implements Executor {
     // A pre-validation client rejection — a plain HTTP 400 with an {error} and NO
     // `needs` (e.g. command-too-long), nothing streamed — is agent-fixable, not a
     // sick resident. Surface it as a normal Error so it does NOT count toward the
-    // fail-fast infra counter (#92) and false-trip the abort on a HEALTHY
+    // fail-fast infra counter and false-trip the abort on a HEALTHY
     // resident. Discriminated on the same signals attach() uses: HTTP status +
     // absence of `needs`.
     if (status === 400 && typeof data.error === "string" && data.error && data.needs === undefined) {
@@ -500,7 +500,7 @@ export class ResidentExecutor implements Executor {
     if (typeof data.error === "string" && data.error) {
       // post-validation failure (exitCode 127 shape) — legible, never retried.
       // Infra (the exec transport failed), not a command exit: counts toward
-      // fail-fast (#92).
+      // fail-fast.
       throw classifyError(new ExecInfraError(`resident /exec: ${data.error}`), { kind: "infra" });
     }
     if (status !== 200) {

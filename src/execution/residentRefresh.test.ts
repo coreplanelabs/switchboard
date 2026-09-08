@@ -41,9 +41,9 @@ const disk = (over: Partial<RefreshDisk> = {}): RefreshDisk => ({
 });
 
 describe("planRefresh: a timed-out install resumes instead of starting over", () => {
-  // Live 2026-09-07 19:06–19:52 UTC: switchboard's cold `npm install` outran
-  // the 5-min step budget four cycles in a row; each cycle found no deps
-  // marker, wiped node_modules and began again from zero — never converging.
+  // A cold `npm install` that outruns the 5-min step budget cycle after cycle
+  // used to start over each time: every cycle found no deps marker, wiped
+  // node_modules and began again from zero — never converging.
   it("no deps marker but an installing marker for THIS lockfile → rebuild WITH install on a keep-deps clean (npm reconciles the partial tree)", () => {
     const plan = planRefresh({
       sha: NEW,
@@ -76,7 +76,7 @@ describe("planRefresh: a timed-out install resumes instead of starting over", ()
   });
 });
 
-describe("planRefresh (#163: lockfile-hash install gate + on-disk checkpoints)", () => {
+describe("planRefresh (lockfile-hash install gate + on-disk checkpoints)", () => {
   it("default branch did not move → unchanged, whatever the disk says", () => {
     expect(planRefresh({ sha: OLD, factsSha: OLD, lockfileKey: KEY_A, disk: disk() })).toEqual({ action: "unchanged" });
     expect(
@@ -101,7 +101,7 @@ describe("planRefresh (#163: lockfile-hash install gate + on-disk checkpoints)",
     expect(plan.action === "rebuild" && plan.why).toMatch(/lockfile changed/);
   });
 
-  it("no deps marker on disk (pre-#163 container, or a full clean that was interrupted) → conservative full install", () => {
+  it("no deps marker on disk (a container predating the markers, or a full clean that was interrupted) → conservative full install", () => {
     const plan = planRefresh({ sha: NEW, factsSha: OLD, lockfileKey: KEY_A, disk: disk({ installedKey: null }) });
     expect(plan).toMatchObject({ action: "rebuild", install: true, clean: "all" });
     expect(plan.action === "rebuild" && plan.why).toMatch(/no deps marker/);
@@ -223,7 +223,7 @@ describe("killStaleBuildProcessesCommand (a build-user step never starts beside 
   });
 });
 
-describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an interruption, not evidence)", () => {
+describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interruption, not evidence)", () => {
   const live = "exit 143: Session terminated, killing shell... ...killed.";
 
   it("exit 143 during build → refresh-interrupted, reason prefixed for the streak gate", () => {
@@ -262,13 +262,13 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
     expect(f.reason).toMatch(/^build-failed: /);
   });
 
-  it("snapshot step killed by a container replacement — 'Process supervisor is closed' → refresh-interrupted (#335)", () => {
+  it("snapshot step killed by a container replacement — 'Process supervisor is closed' → refresh-interrupted", () => {
     const f = classifyRefreshFailure({ step: "snapshot", message: "Process supervisor is closed" });
     expect(f.interrupted).toBe(true);
     expect(f.reason).toBe("refresh-interrupted: snapshot Process supervisor is closed");
   });
 
-  it("SDK stale-handle wording ('previous runtime incarnation') → refresh-interrupted, any step (#335)", () => {
+  it("SDK stale-handle wording ('previous runtime incarnation') → refresh-interrupted, any step", () => {
     const f = classifyRefreshFailure({
       step: "fetch",
       message: "Process handle refers to a previous runtime incarnation",
@@ -277,7 +277,7 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
     expect(f.reason).toMatch(/^refresh-interrupted: fetch /);
   });
 
-  it("the SDK replacement wording is case-insensitive and covers the whole isRuntimeReplacement message family (#335)", () => {
+  it("the SDK replacement wording is case-insensitive and covers the whole isRuntimeReplacement message family", () => {
     for (const msg of [
       "process supervisor is closed",
       "operation was interrupted because the runtime changed",
@@ -290,7 +290,7 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
     }
   });
 
-  it("our own timeout kill still wins over a replacement wording in the same message (#335)", () => {
+  it("our own timeout kill still wins over a replacement wording in the same message", () => {
     const f = classifyRefreshFailure({
       step: "snapshot",
       message: "exit 1 (timed out): Process supervisor is closed",
@@ -306,12 +306,12 @@ describe("classifyRefreshFailure (#216: a build SIGTERM'd by a deploy is an inte
   });
 });
 
-describe("RUNTIME_REPLACEMENT_WORDING (#566: a deploy that ROLLS the container, not just swaps the isolate)", () => {
-  // The exact string the resident logged when a review run aborted at 23:08 UTC
-  // 2026-09-07 — `sandbox.exec error … The container is not running, consider
-  // calling start()` — twice, as the deploy rolled the container onto an empty
-  // ephemeral disk. It is a raw workerd binding refusal (no typed SDK class),
-  // so the shared message wording is the ONLY signal isRuntimeReplacement has.
+describe("RUNTIME_REPLACEMENT_WORDING (a deploy that ROLLS the container, not just swaps the isolate)", () => {
+  // The exact string the resident logs when a deploy rolls the container onto
+  // an empty ephemeral disk under a run — `sandbox.exec error … The container
+  // is not running, consider calling start()`. It is a raw workerd binding
+  // refusal (no typed SDK class), so the shared message wording is the ONLY
+  // signal isRuntimeReplacement has.
   const CONTAINER_ROLLED = "The container is not running, consider calling start()";
 
   it("classifies the stopped-container spawn refusal as a runtime replacement", () => {
@@ -345,9 +345,9 @@ describe("RUNTIME_REPLACEMENT_WORDING (#566: a deploy that ROLLS the container, 
   });
 });
 
-describe("classifyRefreshFailure (#457: a full container disk is `disk-full`, not GitHub's fault and not the repo's)", () => {
-  // The refresh reason the nominal resident actually carried on 2026-09-04
-  // while every attach failed at git-setup — recorded as github-unreachable.
+describe("classifyRefreshFailure (a full container disk is `disk-full`, not GitHub's fault and not the repo's)", () => {
+  // The refresh reason a full disk produces — recorded as github-unreachable,
+  // every attach fails at git-setup.
   const credWrite =
     "Failed to write file '/workspace/.resident/git-credentials': ENOSPC: no space left on device, write '/workspace/.resident/git-credentials'";
 
@@ -401,7 +401,7 @@ describe("classifyRefreshFailure (#457: a full container disk is `disk-full`, no
   });
 });
 
-describe("nextRefreshDelayS (#216: re-arm short after an interruption or an image-stale restart)", () => {
+describe("nextRefreshDelayS (re-arm short after an interruption or an image-stale restart)", () => {
   const cadence = { intervalS: 600, idleIntervalS: 21600 };
 
   it("normal outcome → the regular interval", () => {
@@ -456,7 +456,7 @@ describe("nextRefreshDelayS (#216: re-arm short after an interruption or an imag
   });
 });
 
-describe("withTimeout (#356 item 7a: R2 snapshot/restore calls get an explicit budget)", () => {
+describe("withTimeout (R2 snapshot/restore calls get an explicit budget)", () => {
   it("passes a value through when the promise settles in time", async () => {
     await expect(withTimeout(Promise.resolve(42), 1_000, "mirror backup")).resolves.toBe(42);
   });
@@ -484,11 +484,11 @@ describe("withTimeout (#356 item 7a: R2 snapshot/restore calls get an explicit b
   });
 });
 
-describe("judgeRestoreProgress (#572: an R2 restore is judged by the bytes still arriving, not by a clock)", () => {
-  // Live 2026-09-07 23:35–23:47 UTC, switchboard resident: the checkout restore
-  // (~2 GiB) completed in 481 s; the fixed 300 s budget had already declared it
-  // failed, a second hydrate ran `rm -rf` over the still-writing first one, and
-  // the resident went down(r2-restore-failed) on a disk with 11.5 GiB free.
+describe("judgeRestoreProgress (an R2 restore is judged by the bytes still arriving, not by a clock)", () => {
+  // A ~2 GiB checkout restore can take eight minutes; under a fixed 300 s
+  // budget it was declared failed while still writing, a second hydrate ran
+  // `rm -rf` over the still-writing first one, and the resident went
+  // down(r2-restore-failed) on a disk with plenty of room.
   const t0 = 1_000_000;
   const s = (offsetS: number, kiB: number | null) => ({ atMs: t0 + offsetS * 1000, kiB });
 
@@ -546,10 +546,10 @@ describe("judgeRestoreProgress (#572: an R2 restore is judged by the bytes still
   });
 });
 
-describe("restoreArchivePath (#572 follow-up: a restore's bytes land in the SDK's staging archive first, not the target)", () => {
-  // Live 2026-09-08 00:51–00:53 UTC, the first hydrate on #576's build: eight
-  // `du` samples of /workspace/checkout read 0 while the 2 GiB archive was still
-  // downloading to /var/backups/<id>.sqsh; the judge called it stalled at 123 s.
+describe("restoreArchivePath (a restore's bytes land in the SDK's staging archive first, not the target)", () => {
+  // Judged on the target alone, every `du` sample of /workspace/checkout reads
+  // 0 while the archive is still downloading to /var/backups/<id>.sqsh, and the
+  // judge calls a healthy restore stalled.
   it("names the SDK's staging archive for a backup id", () => {
     expect(restoreArchivePath("21fe85c3-826f-47f1-932a-a4a9b8bb2e04")).toBe(
       "/var/backups/21fe85c3-826f-47f1-932a-a4a9b8bb2e04.sqsh",

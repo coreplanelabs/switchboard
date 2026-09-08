@@ -438,10 +438,10 @@ describe("serveIndexEvents (index SSE, transport-free)", () => {
   });
 });
 
-// Feature: features/live-view.md item 14 (#244) — the Scheduled tab: its seed
+// Feature: features/live-view.md item 14 — the Scheduled tab: its seed
 // is built from the schedule registry + the ScheduleStore's latest firings
 // before the page is written; a missing/failing store is reported as such.
-describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
+describe("scheduled tab — GET /runs/scheduled (item 18)", () => {
   const NOW = Date.UTC(2026, 7, 29, 12, 0);
   function panelHandler(registry: RunRegistry, options: Pick<LiveViewDeps, "scheduled">) {
     return adminByDefault(
@@ -545,7 +545,7 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
     expect(rows.some((r) => r.name === "keep-alive")).toBe(false); // internal plumbing stays off the dashboard
   });
 
-  it("links a live firing with its token only for a viewer who may read that run — an unlisted browser session gets the bare tokenless href (authorization.md items 5–7, #428)", async () => {
+  it("links a live firing with its token only for a viewer who may read that run — an unlisted browser session gets the bare tokenless href (authorization.md items 5–7)", async () => {
     const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
     registry.create("friction · #cron · cron", {
       channelId: "http:cron",
@@ -831,7 +831,7 @@ describe("createLiveViewHandler (node:http)", () => {
   });
 });
 
-describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => {
+describe("GET /runs/:id/friction — read-only friction diagnosis", () => {
   it("parseRunRoute matches the friction route", () => {
     expect(parseRunRoute("/runs/abc123/friction")).toEqual({ id: "abc123", kind: "friction" });
     expect(parseRunRoute("/runs/abc123/friction/")).toEqual({ id: "abc123", kind: "friction" });
@@ -892,9 +892,9 @@ describe("GET /runs/:id/friction — read-only friction diagnosis (#84)", () => 
   });
 });
 
-// Feature: features/live-view.md item 10 — run control from /runs (#101):
+// Feature: features/live-view.md item 10 — run control from /runs:
 // `POST /runs/:id/stop?t=…&mode=soft|hard` behind the same token gate.
-describe("run control: POST /runs/:id/stop (#101)", () => {
+describe("run control: POST /runs/:id/stop", () => {
   it("parseRunRoute matches the stop route", () => {
     expect(parseRunRoute("/runs/abc/stop")).toEqual({ id: "abc", kind: "stop" });
     expect(parseRunRoute("/runs/abc/stop/")).toEqual({ id: "abc", kind: "stop" });
@@ -1085,11 +1085,11 @@ describe("serveEvents — live replay budget (item 5)", () => {
 });
 
 // Feature: features/live-view.md / run-history.md — the live view on
-// `RunsService` (#157 U8): finished/persisted runs are seeded tokenless in
+// `RunsService`: finished/persisted runs are seeded tokenless in
 // history mode; the index seeds active runs by default (never touching the
 // store) and everything with `?all=1`; live rows keep their capability tokens
 // in the seed, finished rows never carry one.
-describe("live view on RunsService: history pages + index toggle (#157 U8)", () => {
+describe("live view on RunsService: history pages + index toggle", () => {
   const NOW = 1_700_000_000_000;
   const text = (type: "input" | "context" | "assistant" | "answer", t: string, seq: number): RunEvent =>
     ({ type, text: t, seq }) as RunEvent;
@@ -1108,7 +1108,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       agent: "coding",
       model: "anthropic/claude",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UA",
       threadKey: `slack:C1:${id}`,
       channelVisibility: "unknown",
       startedAt: NOW - 70_000,
@@ -1407,7 +1407,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     });
   });
 
-  describe("404 shapes (R4/R10)", () => {
+  describe("404 shapes", () => {
     it("unknown, expired, and wrong-token-on-live give the identical 404 page seed; events and friction keep the text body", async () => {
       const h = harness();
       await h.store!.put(record("old", { finishedAt: NOW - 31 * 86_400_000 }));
@@ -1465,7 +1465,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         gen: "g-OTHER",
         leaseMs: 30_000,
         startedAt: NOW - 5_000,
-        meta: { channelId: "slack:C9", userId: "slack:U9", threadKey: "slack:C9:far", agent: "review" },
+        meta: { channelId: "slack:C9", userId: "slack:UB", threadKey: "slack:C9:far", agent: "review" },
         card: null,
         system: "sys",
         tools: [],
@@ -1513,7 +1513,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         gen: "g-OTHER",
         leaseMs: 30_000,
         startedAt: NOW - 5_000,
-        meta: { channelId: "slack:C9", userId: "slack:U9", threadKey: "slack:C9:far", agent: "review" },
+        meta: { channelId: "slack:C9", userId: "slack:UB", threadKey: "slack:C9:far", agent: "review" },
         card: null,
         system: "sys",
         tools: [],
@@ -1572,7 +1572,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       for (const finished of [fin.id, "p1", "p2"]) {
         const row = byId.get(finished);
         expect(row?.finished).toBe(true);
-        expect(row?.token).toBeUndefined(); // a finished row never carries a token (R10)
+        expect(row?.token).toBeUndefined(); // a finished row never carries a token
       }
       expect(byId.get("p2")).toMatchObject({ status: "failed", finishedAt: NOW - 30_000 });
       expect(t.body()).not.toContain(fin.token);
@@ -1709,12 +1709,12 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     });
   });
 
-  // Feature: features/authorization.md items 5–7 on the HTML surface (#428).
+  // Feature: features/authorization.md items 5–7 on the HTML surface.
   // The viewer is the Access identity's actor (index.ts resolves it with the
   // same `accessActor` /api/* uses): the index lists through the actor's
   // predicate, and a tokenless read of a finished run is `authorize`d against
-  // the run's own attributes — a deny is the same 404 as an unknown id (KTD8).
-  describe("the viewer's actor binds the index and the tokenless history routes (authorization.md items 5–7, #428)", () => {
+  // the run's own attributes — a deny is the same 404 as an unknown id.
+  describe("the viewer's actor binds the index and the tokenless history routes (authorization.md items 5–7)", () => {
     // Grants as config resolves them for the Access surface: alice is an
     // unlisted browser session (every group's read, no channel grants), bob is
     // granted the private channel natively, the admin holds everything.
@@ -1732,13 +1732,13 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     const alice = viewer("alice");
     const bob = viewer("bob");
     const admin = viewer("admin");
-    /** A viewer config names nothing for — not even the browser read baseline (R7's `NO_GRANTS`). */
+    /** A viewer config names nothing for — not even the browser read baseline (`NO_GRANTS`). */
     const nobody: LiveViewContext = { actor: accessActor({ sub: "nobody" }, () => NO_GRANTS) };
     const PUBLIC = { channelId: "slack:C_PUB", channelVisibility: "public" } as const;
     const PRIVATE = { channelId: "slack:G_PRIV", channelVisibility: "private" } as const;
     const meta = (channel: typeof PUBLIC | typeof PRIVATE, threadKey: string) => ({
       ...channel,
-      userId: "slack:U1",
+      userId: "slack:UA",
       threadKey,
     });
 
@@ -1765,7 +1765,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       const h = harness();
       await h.store!.put(record("pub", PUBLIC));
       await h.store!.put(record("priv", PRIVATE));
-      await h.store!.put(record("unk")); // stamped `unknown` — never public (R7)
+      await h.store!.put(record("unk")); // stamped `unknown` — never public
       const list = vi.spyOn(h.service, "listRuns");
       expect((await index(h, "/runs?all=1", alice)).ids).toEqual(["pub"]);
       expect((await index(h, "/runs?all=1", bob)).ids).toEqual(["priv", "pub"]);
@@ -1807,7 +1807,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       feed.fireClose();
     });
 
-    it("a tokenless finished run the viewer may not read is the same 404 as an unknown id — the page byte-identical, events and friction the text body, the stop's 409 a 404 — with the reason on the audit line and never in the reply (KTD8)", async () => {
+    it("a tokenless finished run the viewer may not read is the same 404 as an unknown id — the page byte-identical, events and friction the text body, the stop's 409 a 404 — with the reason on the audit line and never in the reply", async () => {
       const audit = vi.fn();
       const h = harness({ audit });
       await h.store!.put(record("priv", PRIVATE));

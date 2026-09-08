@@ -60,7 +60,7 @@ describe("startedAt on /healthz", () => {
 // Feature: features/slack-channel.md item 8 — `GET /healthz` is the bot deploy
 // preflight's source of truth (deploy/cloudflare/preflight.mjs): it must say
 // how many runs are in flight and whether a drain is already under way; and
-// item 7 (#272) — an operator must be able to see how long the Slack blackout
+// item 7 — an operator must be able to see how long the Slack blackout
 // a drain causes can last.
 describe("healthPayload", () => {
   it("reports ok with the in-flight count, the draining flag and the drain deadline", () => {
@@ -87,7 +87,7 @@ describe("healthPayload", () => {
   });
 });
 
-// Feature: features/slack-channel.md item 7 (#271) — /healthz also carries the
+// Feature: features/slack-channel.md item 7 — /healthz also carries the
 // reconnect catch-up's last outcome and the bot token's missing scopes, so a
 // silent catch-up is visible without container logs.
 describe("healthPayload — catchUp", () => {
@@ -139,7 +139,7 @@ describe("healthPayload — slack socket state", () => {
     expect(Object.keys(boot.slack ?? {})).toEqual(["connected"]);
   });
 
-  it("carries httpListeningAt (ISO) when given — with slack.since it is the one-poll, one-clock listen-before-connect receipt (#298)", () => {
+  it("carries httpListeningAt (ISO) when given — with slack.since it is the one-poll, one-clock listen-before-connect receipt", () => {
     const p = healthPayload({ inFlight: 0, draining: false, httpListeningAt: 1_700_000_000_000 });
     expect(p.httpListeningAt).toBe("2023-11-14T22:13:20.000Z");
     expect(healthPayload({ inFlight: 0, draining: false }).httpListeningAt).toBeUndefined();

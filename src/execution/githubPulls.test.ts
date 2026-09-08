@@ -214,11 +214,11 @@ describe("githubPulls", () => {
   // Feature: features/agent-ship.md items 9–10 — the read-only repo/PR facts
   // the ship gate consumes. Both lookups answer undefined on ANY failure (the
   // caller fail-closes); neither ever throws.
-  // Feature: features/agent-ship.md item 3 (KTD12) — ship round 0 creates the
+  // Feature: features/agent-ship.md item 3 — ship round 0 creates the
   // pipeline branch on origin BEFORE the first attach: the resident refuses to
   // bind a thread to a ref GitHub does not have. 422 "already exists" is
   // success (a restarted pipeline reuses its own deterministic branch name).
-  describe("createBranchRef (ship round 0, KTD12)", () => {
+  describe("createBranchRef (ship round 0)", () => {
     const BASE_SHA = "c".repeat(40);
 
     /** Base-ref lookup answers `main`'s tip; the ref create answers `createStatus`. */
@@ -330,7 +330,7 @@ describe("githubPulls", () => {
     const openPr = {
       state: "open",
       html_url: "https://github.com/acme/api/pull/7",
-      user: { login: "coreplane-switchboard[bot]", id: 318072483 },
+      user: { login: "acme-switchboard[bot]", id: 318072483 },
       head: { ref: "ship/fix-x-abc123", sha: "c".repeat(40), repo: { full_name: "acme/api" } },
     };
 
@@ -339,7 +339,7 @@ describe("githubPulls", () => {
       const calls = stubFetch(() => new Response(JSON.stringify(openPr), { status: 200 }));
       expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toEqual({
         state: "open",
-        author: { login: "coreplane-switchboard[bot]", id: 318072483 },
+        author: { login: "acme-switchboard[bot]", id: 318072483 },
         headRef: "ship/fix-x-abc123",
         headSha: "c".repeat(40),
         sameRepoHead: true,

@@ -1,4 +1,4 @@
-/** The worktree clean-check as ONE spawn (#356 item 6), kept pure and
+/** The worktree clean-check as ONE spawn, kept pure and
  *  dependency-free so it is unit-testable from src/ and imported by the
  *  resident Worker (deploy/cloudflare-resident/worker.ts
  *  `worktreeCleanliness`) like residentDepCache — the tested code IS the
@@ -17,7 +17,7 @@
  *    - tracked changes or unpushed commits → NOT clean, both counts named;
  *    - else clean.
  *
- *  Security posture (KTD5), preserved exactly: the git probes run AS THE
+ *  Security posture, preserved exactly: the git probes run AS THE
  *  THREAD USER via `su` — the worktree is thread-owned, root git in it would
  *  be refused by safe.directory and would be the repo-local-config execution
  *  vector safe.directory exists to block. Only the `test -d` runs as the

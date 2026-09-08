@@ -73,7 +73,7 @@ export class E2BExecutor implements Executor {
     return new E2BExecutor(sbx, opts.resolveEnvs);
   }
 
-  /** The e2b command API takes no AbortSignal, so a hard run stop (#101)
+  /** The e2b command API takes no AbortSignal, so a hard run stop
    *  degrades safely here: the runner stops waiting on this call, and the
    *  dispatcher's `release("always")` then kills the whole sandbox below.
    *  `opts.timeoutMs` (the bash tool's per-call budget, re-clamped here) IS

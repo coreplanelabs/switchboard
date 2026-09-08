@@ -7,8 +7,8 @@ import { renderWorkerConfigs, workerConfigTargets } from "./wranglerTemplate.js"
 import { existsSync, readFileSync } from "node:fs";
 
 // The host's profile loader: the env var wins — a path, or the `github://` /
-// `op://` forms `configSource` takes, read through the same loaders (our
-// production's profile lives in the infrastructure repository) — then the
+// `op://` forms `configSource` takes, read through the same loaders (a
+// production profile can live in an infrastructure repository) — then the
 // installation's own gitignored file, then the checked-in example. The example
 // is the example wherever it was read from, so `deploy all`'s refusal cannot
 // be sidestepped by pointing the env var at it (or at a copy with the

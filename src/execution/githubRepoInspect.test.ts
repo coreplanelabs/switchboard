@@ -46,7 +46,7 @@ describe("githubRepoInspector", () => {
         };
       return undefined;
     });
-    const r = await githubRepoInspector({ fetch, token })("coreplanelabs/nominal", "main");
+    const r = await githubRepoInspector({ fetch, token })("acme/web", "main");
     expect(r).toEqual({
       ok: true,
       facts: {
@@ -55,8 +55,8 @@ describe("githubRepoInspector", () => {
       },
     });
     expect(calls.map((c) => c.url)).toEqual([
-      "https://api.github.com/repos/coreplanelabs/nominal/git/trees/main",
-      "https://api.github.com/repos/coreplanelabs/nominal/contents/package.json?ref=main",
+      "https://api.github.com/repos/acme/web/git/trees/main",
+      "https://api.github.com/repos/acme/web/contents/package.json?ref=main",
     ]);
     for (const c of calls) expect(c.headers.authorization).toBe("Bearer tok-read");
     expect(calls[1].headers.accept).toBe("application/vnd.github.raw+json");
@@ -65,12 +65,12 @@ describe("githubRepoInspector", () => {
   it("no package.json at the root → one call, entries only", async () => {
     const { fetch, calls } = fakeFetch((url) =>
       url.includes("/git/trees/")
-        ? { status: 200, body: { tree: [{ path: "Taskfile.yaml" }, { path: "terrateam" }] } }
+        ? { status: 200, body: { tree: [{ path: "Taskfile.yaml" }, { path: "modules" }] } }
         : undefined,
     );
-    expect(await githubRepoInspector({ fetch, token })("coreplanelabs/infrastructure", "main")).toEqual({
+    expect(await githubRepoInspector({ fetch, token })("acme/infra", "main")).toEqual({
       ok: true,
-      facts: { entries: ["Taskfile.yaml", "terrateam"] },
+      facts: { entries: ["Taskfile.yaml", "modules"] },
     });
     expect(calls).toHaveLength(1);
   });

@@ -239,7 +239,7 @@ export function serveIndexEvents(
 }
 
 /**
- * The stored stream with the truncation made visible (R12 / AE11): when the
+ * The stored stream with the truncation made visible: when the
  * record holds fewer events than the run published (`eventCount`), a
  * `replay_note` — "N records omitted" (records, since the count includes span records) — marks EVERY gap in `seq` with that gap's
  * own size (a gap at the start puts one first), and whatever the gaps do not
@@ -280,11 +280,11 @@ export function withOmittedMarkers(events: readonly RunEvent[], eventCount: numb
 }
 
 /**
- * Serve a finished run's stored stream (R12) from the events the caller already
+ * Serve a finished run's stored stream from the events the caller already
  * holds — one `getRun({ include: "messages" })` read carries the whole record,
- * so the history path knows every event before it writes a head (KTD6) without
+ * so the history path knows every event before it writes a head without
  * re-reading the record per page. Then the 200 head, the prelude, each frame
- * (with the AE11 omission marker in place), and the terminal `end`.
+ * (with the omission marker in place), and the terminal `end`.
  * `eventCount` is the run's published total, for the marker.
  */
 export function serveHistoryEvents(events: readonly RunEvent[], eventCount: number, sink: SseSink): void {

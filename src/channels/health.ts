@@ -8,15 +8,15 @@ import type { SlackSocketStatus } from "./slackSocketStatus.js";
 // of truth (deploy/cloudflare/preflight.mjs, features/slack-channel.md item 8):
 // a `wrangler deploy` rolls the container, and a rollout that lands on a run
 // in flight — or on an instance already draining from a previous rollout —
-// kills the run and freezes its status card (live 2026-08-29 23:51Z). The
-// preflight refuses while `inFlight > 0` or `draining` is true.
+// kills the run and freezes its status card. The preflight refuses while
+// `inFlight > 0` or `draining` is true.
 //
-// A drain also blacks Slack out until the process exits (#272, item 7), so the
+// A drain also blacks Slack out until the process exits (item 7), so the
 // body carries the drain deadline and, while draining, when it started: an
 // operator can read how long the blackout can still last.
 //
 // It also carries the reconnect catch-up's last outcome and the bot token's
-// missing scopes (item 7, #271) — the only place those are visible without
+// missing scopes (item 7) — the only place those are visible without
 // container logs; the preflight WARNS on them but never refuses.
 //
 // `startedAt` (process start) is what `deploy restart`'s live gate compares:
@@ -80,7 +80,7 @@ export interface HealthState {
    *  `build.commit`) tells the restarted container from the old one by this. */
   startedAt?: number;
   /** Epoch ms when the HTTP server's listen() callback fired. With `slack.since`
-   *  it proves the listen-before-Slack ordering (#298) from ONE poll on ONE
+   *  it proves the listen-before-Slack ordering from ONE poll on ONE
    *  clock: `httpListeningAt < slack.since` — no race against the boot window,
    *  which the Worker shim's coarse port polling makes externally unobservable. */
   httpListeningAt?: number;

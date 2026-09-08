@@ -35,8 +35,8 @@ import {
 const GIB = 1024 * 1024;
 const MB = 1024; // KiB per MB, near enough for the fixtures below
 
-// The nominal shape measured 2026-09-05/07 (#448): 15 GiB disk, mirror 0.36 GB,
-// deps 2.1 GB, checkout rest 0.43 GB (history + tree).
+// A measured production shape: 15 GiB disk, mirror 0.36 GB, deps 2.1 GB,
+// checkout rest 0.43 GB (history + tree).
 const LAYOUT: DiskLayout = {
   mirrorDir: "/workspace/mirror",
   depsStoreDir: "/workspace/deps",
@@ -77,7 +77,7 @@ function sample(overrides: Partial<DiskSample> = {}, parts: Partial<DiskSample["
 }
 
 describe("measurement — one df, one du, hardlinks counted once", () => {
-  it("the df probe is #472's exact argv (one parser for both the classifier and the gauge)", () => {
+  it("the df probe is the disk-full classifier's exact argv (one parser for both the classifier and the gauge)", () => {
     expect([...DF_SAMPLE_ARGV]).toEqual(["df", "-Pk", "/workspace"]);
     expect(parseDfKiB(DF_OUT)).toEqual({ totalKiB: 15_086_920, usedKiB: 8_100_000, freeKiB: 6_986_920 });
     expect(parseDfKiB("Filesystem 1024-blocks Used Available Capacity Mounted on\n")).toBeNull();
@@ -200,7 +200,7 @@ describe("diskBudgetMb — an operator cap below the physical disk", () => {
 });
 
 describe("checkDiskAdmission — free − reserve ≥ projected", () => {
-  // nominal on 15 GiB: reserve = 0.6 × 2.89 GB + 1 GiB ≈ 2.74 GiB.
+  // the fixture shape on 15 GiB: reserve = 0.6 × 2.89 GB + 1 GiB ≈ 2.74 GiB.
   it("plenty of room → fits, with the math", () => {
     const v = checkDiskAdmission({ sample: sample(), kind: "hardlink" });
     expect(v.fits).toBe(true);

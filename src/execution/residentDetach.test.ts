@@ -3,7 +3,7 @@ import { busyAfterKillReason, busyReason, planForceDetach } from "./residentDeta
 
 const poolUsers = ["worker2", "worker3", "worker17"];
 
-describe("planForceDetach (#159: force-detach kills the thread's in-flight processes)", () => {
+describe("planForceDetach (force-detach kills the thread's in-flight processes)", () => {
   it("nothing in flight → proceed, force or not", () => {
     expect(planForceDetach({ force: false, inFlight: 0, user: "worker2", poolUsers })).toEqual({ action: "proceed" });
     expect(planForceDetach({ force: true, inFlight: 0, user: "worker2", poolUsers })).toEqual({ action: "proceed" });

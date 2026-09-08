@@ -32,9 +32,9 @@ export interface CloudflareSandboxOptions {
   /** Env vars forwarded into the sandbox (e.g. GH_TOKEN), resolved on EVERY
    *  call and sent as `env` in the request body — the Worker applies them to
    *  that one command, so each command carries the credential current at its
-   *  own start, never one captured when the run began (2026-09-07: a run-start
-   *  token expired under a 20-minute first command and every later command
-   *  carried it dead). */
+   *  own start, never one captured when the run began (a run-start token
+   *  that expires under a 20-minute first command would leave every later
+   *  command carrying it dead). */
   resolveEnvs: () => Promise<Record<string, string>>;
   /** resident repo/ref context — reserved for resident environments (not yet used) */
   repo?: string;
@@ -53,10 +53,10 @@ function isFleetBusyAnswer(res: Response, data: Record<string, unknown>): boolea
 /** The bot-side wait for ONE send: the operation's budget plus the margin
  *  that lets the Worker's own answer (a streamed exit 124 at the command
  *  budget) win the race against this deadline (features/execution.md item
- *  11). Every route has one — 2026-09-07 (#531): a coding run waited 60+
- *  minutes on a single `/exec` whose sandbox container was gone; the Worker
- *  kept heartbeating while its exec promise never settled, and the bot's read
- *  of the body had no deadline at all. */
+ *  11). Every route has one: without it a single `/exec` whose sandbox
+ *  container is gone can wait for hours — the Worker keeps heartbeating while
+ *  its exec promise never settles, and a body read with no deadline sits out
+ *  the whole thing. */
 function sendDeadlineMs(budgetMs: number): number {
   return budgetMs + EXEC_CALL_MARGIN_MS;
 }
@@ -75,7 +75,7 @@ function noAnswerMessage(route: string, budgetMs: number): string {
 }
 
 /** Resolve after `ms`, or reject with `ExecCapacityError` the moment `signal`
- *  fires — a hard stop (#101) must not sit out a fleet wait. */
+ *  fires — a hard stop must not sit out a fleet wait. */
 function waitForSlot(ms: number, waitedMs: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const stopped = () =>
@@ -130,11 +130,9 @@ export class CloudflareSandboxExecutor implements Executor {
     // The env map rides in the BODY on every route (the Worker uses it only
     // for /exec, but one shape everywhere) — the ONLY channel. Workers Logs
     // record an invocation's request headers and redact them by a name
-    // heuristic only — a per-variable header whose name did not look sensitive
-    // was logged in clear (2026-09-07, the #447 receipt) — while bodies are not
-    // recorded. A one-release per-variable-header fallback carried a body-only
-    // bot against a header-only Worker during the #597 rollout; the body reader
-    // is live everywhere now, so no credential ever rides in a header (#447).
+    // heuristic only — a per-variable header whose name does not look
+    // sensitive is logged in clear — while bodies are not recorded. So no
+    // credential ever rides in a header.
     const sent: Record<string, unknown> = { ...body, env: envs };
 
     const budget = Math.min(budgetMs, FLEET_BUSY_WAIT_MAX_MS);
@@ -175,7 +173,7 @@ export class CloudflareSandboxExecutor implements Executor {
       // The deadline covers the whole exchange: `/exec` answers HTTP 200 at
       // once and streams heartbeat whitespace until the command's outcome, so
       // a Worker whose sandbox died mid-command keeps the body open forever
-      // (#531) — the body read is where that wait sits, not the headers.
+      // — the body read is where that wait sits, not the headers.
       const deadline = execDeadline(sendDeadlineMs(budgetMs), signal);
       try {
         // One `http.client` span per send under the caller's (features/tracing.md
@@ -187,7 +185,7 @@ export class CloudflareSandboxExecutor implements Executor {
             method: "POST",
             headers,
             body: JSON.stringify(body),
-            // A hard run stop (#101) drops the bot-side request. The sandbox
+            // A hard run stop drops the bot-side request. The sandbox
             // Worker has no kill route, so the command itself runs on to its own
             // `timeout` inside the sandbox — the runner has already moved on.
             signal: deadline,
@@ -198,7 +196,7 @@ export class CloudflareSandboxExecutor implements Executor {
       } catch (err) {
         // The Worker gave no answer inside the deadline (and the run was not
         // stopped): the sandbox may be gone, or its Durable Object hung —
-        // either way an infra failure that fail-fast (#92) counts, never an
+        // either way an infra failure that fail-fast counts, never an
         // indefinite wait. A hard stop takes the generic path below: the
         // runner has already moved on and does not read the message.
         if (deadline.aborted && !signal?.aborted) throw new ExecInfraError(noAnswerMessage(route, budgetMs));
@@ -207,7 +205,7 @@ export class CloudflareSandboxExecutor implements Executor {
         // sandbox's COMMAND_TIMEOUT_MS margin surfaces here, not as exit 124.
         // Don't retry — the command may have side effects and may still be
         // running in the sandbox; give the agent a legible error instead. Infra
-        // (not a command exit): the runner counts these toward fail-fast (#92).
+        // (not a command exit): the runner counts these toward fail-fast.
         throw new ExecInfraError(
           `sandbox worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
             "The command may still be running or have been killed mid-flight in the sandbox; " +
@@ -227,11 +225,11 @@ export class CloudflareSandboxExecutor implements Executor {
       if (isFleetBusyAnswer(res, data)) return { kind: "busy" };
       // A success body has no `error` key at all, so a PRESENT but empty
       // `error` is the Worker's failure shape with its text missing — infra,
-      // not a command exit. 2026-09-07 (#569): a thread placed on a
-      // previous-image container during a rollout got `{error: ""}` for every
-      // command; the truthy check below let it through as a plain `exit 127`,
-      // the health tracker counted a success, and the model reported its
-      // shell "down". A bare exit 127 with no output and NO error key is not
+      // not a command exit. A thread placed on a previous-image container
+      // during a rollout gets `{error: ""}` for every command; a truthy check
+      // would let it through as a plain `exit 127`, the health tracker would
+      // count a success, and the model would report its shell "down". A bare
+      // exit 127 with no output and NO error key is not
       // this: `foo 2>/dev/null` is a legitimate silent 127.
       if (res.ok && "error" in data && data.error === "") {
         throw new ExecInfraError(

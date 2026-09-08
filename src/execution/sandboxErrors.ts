@@ -4,14 +4,13 @@
 // (which waits on it). Deliberately free of node: imports so wrangler can
 // bundle it into the Worker, like bashTimeout.ts and shellQuote.ts.
 //
-// Why this exists (2026-09-07): thirteen cold runs in 45 minutes exhausted
-// the sandbox fleet's `max_instances` (then 10). The @cloudflare/sandbox 0.3.x
-// client, which production ran at the time, could not parse the platform's
-// plain-text "no instance available" 503 and threw the bare `Failed to create
-// session: 503`; the Worker carried it in-body as an ordinary failure, the
-// executor threw ExecInfraError on it, and the runner's fail-fast breaker (#92)
-// read two of them in a row as a WEDGED sandbox — the #525 review aborted in
-// 33 s. A full fleet is capacity: nothing ran, nothing is broken, and the right
+// Why this exists: enough concurrent cold runs exhaust the sandbox fleet's
+// `max_instances`. The @cloudflare/sandbox 0.3.x client could not parse the
+// platform's plain-text "no instance available" 503 and threw the bare
+// `Failed to create session: 503`; carried in-body as an ordinary failure, the
+// executor threw ExecInfraError on it, and the runner's fail-fast breaker read
+// two of them in a row as a WEDGED sandbox and aborted the run within seconds.
+// A full fleet is capacity: nothing ran, nothing is broken, and the right
 // move is to wait for an instance. On 0.12.x the SDK throws a typed
 // `ContainerUnavailableError` (code `CONTAINER_UNAVAILABLE`) for the same
 // condition; the recognizer below takes the type first and the text second.
@@ -38,7 +37,7 @@ export const FLEET_BUSY_BACKOFF_MS: readonly number[] = [10_000, 20_000, 30_000]
 
 /** The messages a full fleet produces, across SDK generations:
  *  - `Failed to create session: 503` — the 0.3.x client's unparsed answer to
- *    the base Container's plain-text 503 (production until 2026-09-07);
+ *    the base Container's plain-text 503;
  *  - "no container instance that can be provided to this durable object" /
  *    "no Container instance available" — the platform's own wording, which the
  *    0.12.x SDK keeps as the message of its `ContainerUnavailableError`;
@@ -136,9 +135,9 @@ export function fleetBusyExhaustedMessage(waitedMs: number): string {
  *  naming the error's name and code, and the one condition known to produce
  *  it. Never the empty string (features/execution.md items 3 and 6).
  *
- *  Why (2026-09-07, #569): during the 0.4.0 Worker+image rollout a new
- *  thread's Durable Object landed on a container still running the 0.3.7
- *  image. The 0.12.9 client posted `{command, sessionId}`, the old server
+ *  Why: during a Worker+image rollout a new thread's Durable Object can land
+ *  on a container still running the previous (0.3.x) image. The 0.12.x
+ *  client posts `{command, sessionId}`, the old server
  *  answered 400 `{"error": "Session ID and command are required"}`, and the
  *  client built a `SandboxError` from a body with no `message` — so
  *  `err.message` was `""`. The Worker's `shape.message ?? String(err)` kept
@@ -159,7 +158,7 @@ export function thrownText(shape: ThrownShape): string {
   );
 }
 
-/** The shape a 0.12.x client produces against a 0.3.x container (#569): the
+/** The shape a 0.12.x client produces against a 0.3.x container: the
  *  base `SandboxError` — not one of its typed subclasses — whose message is
  *  empty and whose `code` is undefined, carrying the old server's body as
  *  `errorResponse` with a non-empty `error` string and NO `message` (the

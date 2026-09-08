@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 //
 // The site's dead-link check covers INTERNAL links only, so a malformed
 // absolute URL keeps the build green — which is how a batch of
-// `https:///github.com/…` links (an extra slash) reached review on PR #435.
+// `https:///github.com/…` links (an extra slash) reached review unnoticed.
 // Nothing else catches that shape: for http(s) the WHATWG URL parser collapses
 // the extra slashes, so browsers follow such a link to the right page and
 // `new URL(...)` reports the correct host. It is wrong-but-working, and the

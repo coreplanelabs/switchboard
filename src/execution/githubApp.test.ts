@@ -157,9 +157,9 @@ describe("resolveGithubToken", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2); // one mint each, then cache hits
   });
 
-  // 2026-09-07 (review of #521): a token minted 51 minutes earlier was handed
-  // to a run whose first command then took the full 20-minute ceiling — the
-  // token expired under it and every later command got 401 Bad credentials.
+  // A token handed out with a few minutes left to a run whose first command
+  // takes the full 20-minute ceiling expires under it, and every later command
+  // gets 401 Bad credentials.
   // The reuse margin must cover the longest single command plus slack, so a
   // command that STARTS on a token always FINISHES on it.
   it("the reuse margin covers the longest single command (BASH_TIMEOUT_MAX_MS) plus slack", async () => {

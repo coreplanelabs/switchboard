@@ -3,15 +3,13 @@
 // free of node: imports so wrangler can bundle it into the Worker, like
 // bashTimeout.ts, shellQuote.ts and sandboxErrors.ts.
 //
-// Why the body and not headers (2026-09-07, the #447 receipt): Workers Logs
-// record every invocation's request HEADERS and redact them by a name
-// heuristic — `x-env-gh_token` showed as REDACTED, but the receipt probe's
-// `x-env-PROBE_VAR: hello-from-env-option` was logged in clear. Request bodies
-// are not recorded. So the executor sends the map as `env` in the JSON body on
-// every route and the Worker reads it from there — the ONLY channel. A one-
-// release `x-env-*` header path carried a body-only bot against a header-only
-// Worker during the #597 rollout; the body reader is live everywhere now, so it
-// retired (#447): request headers are never a credential channel.
+// Why the body and not headers: Workers Logs record every invocation's request
+// HEADERS and redact them by a name heuristic — a header named like a token
+// (`x-env-gh_token`) shows as REDACTED, but any other env name
+// (`x-env-PROBE_VAR: hello`) is logged in clear. Request bodies are not
+// recorded. So the executor sends the map as `env` in the JSON body on every
+// route and the Worker reads it from there — the ONLY channel. Request headers
+// are never a credential channel.
 
 /** A shell identifier: what an env NAME must be after upper-casing. Same rule
  *  as the resident Worker's `ENV_NAME_RE`; anything else is dropped, never

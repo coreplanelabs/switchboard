@@ -1,6 +1,6 @@
 import type { RunnableTool } from "./workspace.js";
 
-// Skill-loading tools (#100). Both are READ-only (they add methodology text to
+// Skill-loading tools. Both are READ-only (they add methodology text to
 // the model's context; they never touch the workspace), so they live in BOTH
 // the readonly (review) and full (coding) toolsets. The skill store and the
 // calling agent's name ride on ToolContext (injected by the dispatcher); the

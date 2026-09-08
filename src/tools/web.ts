@@ -2,7 +2,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { RunnableTool } from "./workspace.js";
 
-// Provider-agnostic web tools (Area 5 / R16): URL reading (web_fetch) and web
+// Provider-agnostic web tools: URL reading (web_fetch) and web
 // search (web_search). These do network I/O in the bot process directly — NOT
 // through the Executor seam — so a no-repo agent (research) can use them with
 // no workspace. Search is a swappable seam with >=2 implementations (Brave +
@@ -269,14 +269,14 @@ export function assertUrlAllowed(raw: string): URL {
 /** How much of a page is READ: enough to strip a script-heavy HTML document
  *  down to its text. Not what the model sees — that is MAX_FETCH_TEXT_CHARS. */
 const MAX_FETCH_BYTES = 1_000_000;
-/** How much text ONE fetch hands the model. #615: a single ~1 MB page handed
- *  over whole was 307k tokens and killed the run with `prompt is too long`
+/** How much text ONE fetch hands the model. A single ~1 MB page handed
+ *  over whole is ~300k tokens and kills the run with `prompt is too long`
  *  before a second tool call. 40k characters is ~10k tokens — a documentation
  *  page or two per call, and a dozen calls still fit a 200k context. Longer
  *  pages are read in pages of this size with `offset`; the header says where
  *  the window sits and how to get the rest, so nothing is cut silently. */
 export const MAX_FETCH_TEXT_CHARS = 40_000;
-// Binary links reach the model as image/document blocks (M1b), so the caps
+// Binary links reach the model as image/document blocks, so the caps
 // match the attachment path's per-file limits (src/channels/slack.ts): the
 // provider's per-image hard limit and the PDF cap. Truncating a binary is
 // meaningless, so over-cap bytes are refused with a message, never trimmed.

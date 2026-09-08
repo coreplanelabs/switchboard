@@ -27,11 +27,11 @@ describe("agent registry matches the feature specs", () => {
   });
 
   it("general's prompt names its GitHub tools and redirects code/PR/web-research asks to the other agents", () => {
-    // Live failure 2026-08-21: general invented a repo URL and told the user
-    // to run git themselves instead of pointing at the agents that can.
-    // 2026-09-03 (features/github-tools.md): "open an issue on the switchboard
-    // app" bounced to agent:coding — general now holds the issue tools itself
-    // and must say what it can do, never that it has no tools.
+    // The general agent points at the agents that can act — it never invents a
+    // repo URL or tells the user to run git themselves. It holds the issue tools
+    // itself (features/github-tools.md), so "open an issue on the app" is
+    // answered here rather than bounced to agent:coding, and the prompt must
+    // say what it can do, never that it has no tools.
     expect(AGENTS.general.system).toContain("agent:coding");
     expect(AGENTS.general.system).toContain("agent:review");
     expect(AGENTS.general.system).toContain("agent:research");
@@ -52,8 +52,8 @@ describe("agent registry matches the feature specs", () => {
   });
 
   it("research's prompt names the GitHub read tools and forbids concluding a private repo is inaccessible from a public 404", () => {
-    // Live failure 2026-09-01: research reported "repo is private, inaccessible"
-    // for our own repo after a public-web 404, with the App credential unused.
+    // A public-web 404 says nothing about a private repo the App credential can
+    // reach, so the prompt forbids the "inaccessible" conclusion.
     for (const tool of ["github_repos", "github_tree", "github_file", "github_search_code", "github_issue_list"])
       expect(AGENTS.research.system).toContain(tool);
     expect(AGENTS.research.system).toMatch(/never conclude a repo is inaccessible from a public-web 404/);
@@ -61,7 +61,7 @@ describe("agent registry matches the feature specs", () => {
   });
 
   it("resource declarations: coding and review require a repo; general declares none", () => {
-    // KD2: agents declare the resources they need; the general-purpose agent
+    // Agents declare the resources they need; the general-purpose agent
     // runs without a repo, so executor selection provisions it nothing.
     expect(AGENTS.coding.resources?.repo).toBe("required");
     expect(AGENTS.review.resources?.repo).toBe("required");
@@ -74,7 +74,7 @@ describe("agent registry matches the feature specs", () => {
   });
 });
 
-// Feature: features/resident-repos.md (U7) — resident-path prompt variants:
+// Feature: features/resident-repos.md — resident-path prompt variants:
 // the workspace is a ready worktree (no cloning, no installs, no repo
 // discovery, no gh CLI); selected by the dispatcher AFTER executor resolution,
 // never by mutating the shared AgentDef.
@@ -115,12 +115,12 @@ describe("resident prompt variants", () => {
   });
 });
 
-// Feature: features/distilled-diffs.md (R14). The resident prompts use the
+// Feature: features/distilled-diffs.md. The resident prompts use the
 // digest two ways: coding lets it shape the submitted PR description; review
 // orients with it before reading. Review READS the code — it never runs the
 // project's tests or build (CI's verify gate does that, item 7).
 describe("distilled-diffs prompt behavior (resident variants)", () => {
-  it("coding resident: calls diff_digest to inform the submitted description (R14)", () => {
+  it("coding resident: calls diff_digest to inform the submitted description", () => {
     const sys = AGENTS.coding.residentSystem!;
     expect(sys).toContain("diff_digest");
     expect(sys).toMatch(/distilled/i);
@@ -164,11 +164,11 @@ describe("distilled-diffs prompt behavior (resident variants)", () => {
   });
 });
 
-// Feature: features/agent-review.md (issue #69) — posting the review back to the
+// Feature: features/agent-review.md — posting the review back to the
 // PR is the system's job (a deterministic dispatcher post-step), NOT the model's.
 // Both review prompts must forbid self-posting so the run never double-comments,
 // and must say the system posts by default (comment-only) with an opt-out.
-describe("review post-step: prompts defer posting to the system (issue #69)", () => {
+describe("review post-step: prompts defer posting to the system", () => {
   it("both review prompts forbid self-posting and say the system posts by default", () => {
     for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
       expect(sys).toMatch(/do NOT post your review to GitHub yourself/i);
@@ -323,9 +323,9 @@ describe("coding prompts: the PR-description content contract (submitted object)
 // Feature: features/agent-ship.md item 1 — `agent:ship` resolves through the
 // registry like every directive, but the ship branch in dispatch() never calls
 // runAgent with THIS def: children run on the coding/review defs (clipped), so
-// ship's budgets are nominal and its prompt is never sent to a model.
+// ship's budgets are placeholders and its prompt is never sent to a model.
 describe("ship agent (features/agent-ship.md)", () => {
-  it("ship: repo required, full toolset, nominal budgets (never used for a model call)", () => {
+  it("ship: repo required, full toolset, placeholder budgets (never used for a model call)", () => {
     expect(AGENTS.ship.resources?.repo).toBe("required");
     expect(AGENTS.ship.toolset).toBe("full");
     expect(AGENTS.ship.maxTurns).toBe(1);

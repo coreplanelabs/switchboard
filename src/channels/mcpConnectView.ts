@@ -329,8 +329,9 @@ function hostOf(url: string): string {
 }
 
 /** The shared page headers with `form-action 'self'`: this is the one HTML
- *  surface that posts a form, and the shell's `form-action 'none'` blocked it
- *  (live, 2026-09-04). Every other directive is unchanged — no script runs. */
+ *  surface that posts a form, and the shell's `form-action 'none'` would block
+ *  the submit. Every other directive is unchanged — no script runs (see
+ *  docs/decisions/0014-dashboard-csp-script-src-self.md). */
 const CONNECT_HTML_HEADERS: Record<string, string> = { ...WEB_HTML_HEADERS, "content-security-policy": FORM_PAGE_CSP };
 
 function page(res: ServerResponse, status: number, title: string, body: string, head = ""): void {

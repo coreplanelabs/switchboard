@@ -4,15 +4,15 @@ import { redactSecrets, stripAnsi } from "../core/redact.js";
 // item 53). Pure, so the shape is a unit test and not a live post-mortem.
 //
 // The rule this module exists to enforce: a failure report may never CHOOSE
-// between the two streams. It used to — `tail(r.stderr || r.stdout)` — and on
-// 2026-09-04 that cost a whole diagnosis. `coreplanelabs/nominal` went
-// `down (provision-failed at install: exit 1: [WARN] The "pnpm" field in
-// package.json is no longer read by pnpm …)`. That warning cannot fail an
-// install: the same command prints those exact 239 bytes on stderr and exits
-// 0 (reproduced on nominal's tree inside the resident's own base image). The
-// pnpm family reports through its own logger on STDOUT, so `stderr || stdout`
-// let a harmless warning shadow the error that named the exit — and nothing
-// else recorded the command's output, so the real cause is gone for good.
+// between the two streams. It used to — `tail(r.stderr || r.stdout)` — and
+// that cost a whole diagnosis once: a resident went `down (provision-failed at
+// install: exit 1: [WARN] The "pnpm" field in package.json is no longer read
+// by pnpm …)`. That warning cannot fail an install: the same command prints
+// those exact bytes on stderr and exits 0 (reproducible on the same tree
+// inside the resident's own base image). The pnpm family reports through its
+// own logger on STDOUT, so `stderr || stdout` let a harmless warning shadow
+// the error that named the exit — and nothing else recorded the command's
+// output, so the real cause was gone for good.
 //
 // Every stream a step can write is therefore reported, labelled, tail-first
 // (a tool's error is its last output), each bounded on its own so one noisy

@@ -4,9 +4,9 @@
  *  packages by the resident Worker (like residentDetach) — the tested code IS
  *  the shipped code.
  *
- *  Background (#163): the refresh used to `git clean -fdx` + `npm install` on
- *  EVERY default-branch advance (a 130 s refresh was observed live), even
- *  though the committed lockfile — the dependency cache key (KTD7) — rarely
+ *  Background: the refresh used to `git clean -fdx` + `npm install` on
+ *  EVERY default-branch advance (a refresh over two minutes long), even
+ *  though the committed lockfile — the dependency cache key — rarely
  *  moves. A refresh longer than the bot's 60 s attach wait sends runs cold.
  *  The `-x` clean itself is load-bearing: attached, sha-pinned thread
  *  worktrees hardlink the checkout's dep/build FILE inodes, so a rebuild must
@@ -52,7 +52,7 @@ export function planRefresh(input: {
   sha: string;
   /** The sha the recorded facts (and the last snapshot) are at. */
   factsSha: string;
-  /** Committed-lockfile key at `sha` (pure function of the commit, KTD7). */
+  /** Committed-lockfile key at `sha` (pure function of the commit). */
   lockfileKey: string;
   disk: RefreshDisk;
 }): RefreshPlan {
@@ -71,7 +71,7 @@ export function planRefresh(input: {
     // sweep has killed any writer it left). npm reconciles a partial tree to
     // the lockfile, so resuming converges where wipe-and-restart cannot: a
     // repo whose cold install outruns one step budget still lands over cycles
-    // (live 2026-09-07: four consecutive full installs, none finishing).
+    // (wipe-and-restart runs full installs back to back, none finishing).
     // Safe for the hardlink invariant (review 1b): threads only link deps
     // whose key the deps marker vouches for, and no marker vouched for these.
     return {
@@ -107,22 +107,22 @@ export function checkoutUpdateCommand(sha: string, clean: CleanScope): string {
   return `${base} && git clean -fdx -e node_modules && ${sweep}`;
 }
 
-// -- interruption vs. failure (#216) -----------------------------------------
+// -- interruption vs. failure ------------------------------------------------
 
 /** How a refresh-cycle step failed. `interrupted` is the one outcome that says
  *  NOTHING about the repository: the step was killed from outside because the
  *  CONTAINER was replaced under it — an image-changing deploy or an explicit
  *  container stop/restart. (A Worker-only deploy swaps the DO isolate but
- *  leaves the container and its processes running — live 2026-08-30, #335 — so
- *  it cannot interrupt a step at all.) The kill surfaces either as the shell's
+ *  leaves the container and its processes running, so it cannot interrupt a
+ *  step at all.) The kill surfaces either as the shell's
  *  own death (SIGTERM, exit 143, "Session terminated") or, past the shell, as
  *  the SDK's replacement errors (stale process handle, closed supervisor).
  *  Everything else is the repo's own build failing. */
 export interface RefreshFailure {
   /** The `degraded` reason to record. Interruptions are prefixed
    *  `refresh-interrupted:` so the park-streak gate can exclude them by prefix,
-   *  exactly like the watchdog's stamps; a full disk is `disk-full:` (#457,
-   *  `residentDisk.ts` — the cycle's entry gate and the recycle decision key
+   *  exactly like the watchdog's stamps; a full disk is `disk-full:`
+   *  (`residentDisk.ts` — the cycle's entry gate and the recycle decision key
    *  on it); real failures keep `<step>-failed:`. */
   reason: string;
   interrupted: boolean;
@@ -132,15 +132,15 @@ export interface RefreshFailure {
 /** Root argv that kills every process the build user still owns and waits
  *  (bounded, 5 s) until none is left. Runs before EVERY build-user step.
  *
- *  Why (2026-09-07, switchboard resident): `npm install` outlived its budget
- *  and the SDK's output grace; the cycle recorded the timeout and moved on
- *  while npm kept extracting into CHECKOUT_DIR/node_modules. The next cycle's
- *  `git clean -fdx` raced it — `warning: failed to remove node_modules/dayjs:
- *  Directory not empty` on exactly the packages being written — and the
- *  resident spiralled between `checkout-update-failed` and install timeouts
- *  (each cycle's install now sharing 1 vCPU with the last one's orphan) for
- *  as long as main kept moving. A Worker-only deploy is the other way to
- *  orphan a step: the DO isolate resets, the container keeps running.
+ *  Why: an `npm install` that outlives its budget and the SDK's output grace
+ *  is recorded as a timeout while npm keeps extracting into
+ *  CHECKOUT_DIR/node_modules. The next cycle's `git clean -fdx` races it —
+ *  `warning: failed to remove node_modules/<pkg>: Directory not empty` on
+ *  exactly the packages being written — and the resident spirals between
+ *  `checkout-update-failed` and install timeouts (each cycle's install now
+ *  sharing 1 vCPU with the last one's orphan) for as long as the default
+ *  branch keeps moving. A Worker-only deploy is the other way to orphan a
+ *  step: the DO isolate resets, the container keeps running.
  *
  *  Scoped to the TREE the step is about to touch (`dir`): a process counts as
  *  stale when its cwd is `dir` or below it. Steps on one tree are strictly
@@ -181,7 +181,7 @@ const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM/;
  *  `ProcessSpawnFailedError` ("Process supervisor is closed"), one of the SDK's
  *  interruption messages, or — when a deploy ROLLS the container out from under
  *  the run rather than just swapping the DO isolate — the raw workerd binding
- *  refusal "The container is not running, consider calling start()" (#566). That
+ *  refusal "The container is not running, consider calling start()". That
  *  last one is a spawn-phase refusal: workerd rejected the process start because
  *  the container was not running at all, so nothing launched (safe to re-attach
  *  and let the model re-check). It is NOT a typed SDK error (the SDK's own
@@ -194,10 +194,9 @@ const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM/;
  *  ("the container is not listening"), which must stay ordinary failures.
  *  Shared with the resident Worker's `isRuntimeReplacement`
  *  (deploy/cloudflare-resident/worker.ts) as its message-level fallback, so the
- *  exec path and the refresh classifier agree on one wording list (#335: a
- *  `stop-container` mid-snapshot produced "Process supervisor is closed" and was
- *  classified as the repo's own `snapshot-failed`, re-arming at the full
- *  cadence). */
+ *  exec path and the refresh classifier agree on one wording list (a container
+ *  stop mid-snapshot produces "Process supervisor is closed"; classified as the
+ *  repo's own `snapshot-failed` it would re-arm at the full cadence). */
 export const RUNTIME_REPLACEMENT_WORDING =
   /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid|process supervisor is closed|container is not running, consider calling start/i;
 
@@ -236,8 +235,7 @@ export function classifyRefreshFailure(input: {
  *  45 s: comfortably longer than a container restart plus rehydration
  *  (~10–20 s observed), so the retry finds a live runtime, and an order of
  *  magnitude under the 600 s cadence that previously left the resident
- *  `degraded` (every run falling back cold) until the next regular alarm
- *  (#216, live 2026-08-29: 22:31 → 22:42). */
+ *  `degraded` (every run falling back cold) until the next regular alarm. */
 export const INTERRUPTED_REARM_S = 45;
 
 export type RefreshOutcome =
@@ -248,7 +246,7 @@ export type RefreshOutcome =
   /** `reconcileImage` stopped the container so it restarts on the new image. */
   | "image-stale-restart"
   /** The disk-full recovery stopped the container so it restarts on an empty
-   *  disk and the next alarm restores from R2 (#457, `residentDisk.ts`). */
+   *  disk and the next alarm restores from R2 (`residentDisk.ts`). */
   | "disk-full-restart"
   /** Idle gate parked the resident. */
   | "idle";
@@ -284,7 +282,7 @@ export function nextRefreshDelayS(input: {
   }
 }
 
-/** Bound a promise that offers no timeout of its own (#356 item 7a: the
+/** Bound a promise that offers no timeout of its own (the
  *  Sandbox SDK's createBackup/restoreBackup take neither a timeout nor an
  *  AbortSignal). On expiry, rejects with an error naming `what` and the
  *  budget, so a hung R2 transfer fails the refresh cycle into its existing
@@ -292,14 +290,14 @@ export function nextRefreshDelayS(input: {
  *  until the 30-min watchdog. The losing promise keeps running (nothing can
  *  cancel it) — its eventual rejection is swallowed so it never surfaces as
  *  an unhandled rejection. */
-// -- restore progress (#572) ---------------------------------------------------------
+// -- restore progress ---------------------------------------------------------------
 
 /** How often the wake path samples a restore's target directory. */
 export const RESTORE_POLL_MS = 15_000;
 /** A restore whose target has not grown for this long is stalled. Generous
- *  against R2's own hiccups, tight against a hung SDK operation: the live
- *  restores of 2026-09-07 wrote continuously (47 s, 104 s, 481 s for the same
- *  ~2 GiB checkout snapshot). */
+ *  against R2's own hiccups, tight against a hung SDK operation: a healthy
+ *  restore writes continuously, even when the same ~2 GiB checkout snapshot
+ *  takes anywhere from under a minute to eight minutes. */
 export const RESTORE_STALL_MS = 120_000;
 /** Absolute cap for ONE HYDRATE — the wait for a previous attempt's restore,
  *  the mirror restore and the checkout restore share it (one deadline, see
@@ -359,10 +357,10 @@ export type RestoreVerdict = { verdict: "wait" } | { verdict: "stalled" | "cappe
 
 /** Judge a running restore by its bytes, not by a clock. The Sandbox SDK's
  *  restoreBackup accepts no timeout, progress callback or AbortSignal, and a
- *  promise abandoned by a fixed budget keeps writing (live 2026-09-07 23:35–
- *  23:47 UTC: the checkout restore finished in 481 s, the 300 s budget had
- *  already gone `down(r2-restore-failed)`, and the next hydrate ran `rm -rf`
- *  over the tree the first one was still filling). So the wake path polls the
+ *  promise abandoned by a fixed budget keeps writing (a checkout restore that
+ *  outlives a fixed 300 s budget has already sent the resident
+ *  `down(r2-restore-failed)`, and the next hydrate runs `rm -rf` over the tree
+ *  the first one is still filling). So the wake path polls the
  *  target directory: while bytes keep arriving it waits — a slow transfer is
  *  a slow transfer — and it gives up only when nothing has been written for
  *  RESTORE_STALL_MS (the clock runs from the start until the first byte) or

@@ -1,15 +1,15 @@
 import { resolveGithubToken } from "./githubApp.js";
 import { redactAndCap } from "../core/redact.js";
 
-// Opening and editing pull requests from the bot process (agent:ship pipeline,
-// issue #131). After a coding run pushes its branch and submits the typed
+// Opening and editing pull requests from the bot process (agent:ship
+// pipeline). After a coding run pushes its branch and submits the typed
 // PrDescription, the BOT renders the body and opens the PR itself over the
 // GitHub REST API with the App installation token — never the model from
 // inside the sandbox/resident and never a `gh` shell-out (AGENTS.md
 // invariant 5). The App needs `pull_requests:write`. This is the same
 // REST-with-App-token path githubComments.ts and repoContext.ts use.
 //
-// Open-or-edit idempotency (ship plan KTD9/R11): openPullRequest ALWAYS looks
+// Open-or-edit idempotency: openPullRequest ALWAYS looks
 // up the open PR for the head branch first and edits it when one exists — a
 // fix round, a re-run, or a restarted pipeline can never open a duplicate PR.
 //
@@ -143,7 +143,7 @@ export async function updatePullRequest(
 
 /**
  * Create `refs/heads/<branch>` at the current tip of `fromRef` (ship round 0,
- * features/agent-ship.md item 3 / KTD12). The resident binds a thread's
+ * features/agent-ship.md item 3). The resident binds a thread's
  * worktree to a ref that must already exist on origin — an attach naming a
  * branch GitHub has never heard of is refused, and the executor factory's
  * sandbox fallback would then misreport "onboard the repo" on every fresh

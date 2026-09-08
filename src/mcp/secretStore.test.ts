@@ -12,11 +12,11 @@ import {
 
 // features/mcp-tools.md items 15–16: where sealed credentials and tickets live.
 
-const sealed: SealedCredential = { serverId: "user:slack:U1/vanta", keyId: "k1", sealed: "AAAA", updatedAt: 2 };
+const sealed: SealedCredential = { serverId: "user:slack:UA/vanta", keyId: "k1", sealed: "AAAA", updatedAt: 2 };
 const ticket: McpTicket = {
   nonce: "n".repeat(24),
-  serverId: "user:slack:U1/vanta",
-  requesterId: "slack:U1",
+  serverId: "user:slack:UA/vanta",
+  requesterId: "slack:UA",
   createdAt: 1,
   expiresAt: Date.now() + 600_000,
   state: "pending",

@@ -279,7 +279,11 @@ export function fakeAuthorizationServer(opts: FakeAuthorizationServerOptions) {
         return json(status, {
           jsonrpc: "2.0",
           id: 1,
-          result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "fake", version: "0" } },
+          result: {
+            protocolVersion: MCP_PROTOCOL_VERSION,
+            capabilities: {},
+            serverInfo: { name: "fake", version: "0" },
+          },
         });
       const hint =
         opts.metadata === false || opts.selfIssued

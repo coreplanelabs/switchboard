@@ -25,7 +25,7 @@ export interface ExecTraceOptions {
 
 export interface Executor {
   /** Run a shell command; returns combined output (never throws on non-zero
-   *  exit). `opts.signal` is a hard run stop (#101): an implementation that can
+   *  exit). `opts.signal` is a hard run stop: an implementation that can
    *  cancel the underlying command does so and returns/throws promptly; one that
    *  cannot simply ignores it — the runner stops waiting on it either way. */
   exec(command: string, opts?: ExecOptions): Promise<string>;
@@ -57,11 +57,11 @@ export interface ExecOptions extends ExecTraceOptions {
 }
 
 /** The per-call deadline for a remote route, joined with an optional hard-stop
- *  signal (#101): whichever fires first aborts the fetch — and, because the
+ *  signal: whichever fires first aborts the fetch — and, because the
  *  same signal is what `fetch` hands the response body, the body read too.
  *  A plain timer rather than `AbortSignal.timeout`: Node runs that one on an
  *  internal timer that neither fake timers nor a test can observe, so a
- *  deadline built on it could never be proven to fire (#531). The timer is
+ *  deadline built on it could never be proven to fire. The timer is
  *  unref'd (it never holds the process open) and dropped as soon as the
  *  hard stop wins the race. */
 export function execDeadline(timeoutMs: number, signal?: AbortSignal): AbortSignal {
@@ -92,7 +92,7 @@ export interface ReleaseResult {
  *  and NEVER as a throw. Remote executors throw this (not a bare `Error`) for
  *  infra failures so the runner can tell a wedged sandbox from a command the
  *  agent should keep handling, and fail fast instead of toiling commands into a
- *  dead sandbox (#92). Extends `Error`, so `err.message`/`instanceof Error`
+ *  dead sandbox. Extends `Error`, so `err.message`/`instanceof Error`
  *  callers are unaffected. */
 export class ExecInfraError extends Error {
   readonly infra = true as const;
@@ -107,8 +107,8 @@ export class ExecInfraError extends Error {
  *  Nothing ran and nothing is broken — the fleet's `max_instances` is reached
  *  — so this is deliberately NOT an `ExecInfraError`: `ExecHealthTracker`
  *  neither counts it nor resets on it, and the runner hands it to the model as
- *  a retry-later outcome instead of aborting the run (2026-09-07: two of these
- *  in a row, read as infra, aborted the #525 review in 33 s). `extends Error`
+ *  a retry-later outcome instead of aborting the run (two of these in a row,
+ *  read as infra, would abort the run within seconds). `extends Error`
  *  so message/`instanceof Error` callers are unaffected. */
 export class ExecCapacityError extends Error {
   readonly capacity = true as const;
@@ -120,7 +120,7 @@ export class ExecCapacityError extends Error {
 
 /** Decorates an Executor to track CONSECUTIVE exec-infrastructure failures
  *  (`ExecInfraError`) with no successful operation between them — the signal the
- *  runner uses to detect an unrecoverable sandbox (#92). A successful op resets
+ *  runner uses to detect an unrecoverable sandbox. A successful op resets
  *  the count to 0 (proves the sandbox is alive, so a one-off blip never aborts);
  *  an `ExecInfraError` increments it; any OTHER throw (e.g. a path-escape
  *  rejection, a missing file) is neither a health signal nor a reset and leaves
@@ -209,8 +209,8 @@ export class LocalExecutor implements Executor {
 }
 
 /** Dev-only deterministic ops against the thread's LOCAL workspace directory
- *  (U6, KTD8) — the second Operations implementation (≥2-implementations
- *  invariant) and the CLI-testable one. Honest about its limits: there is no
+ *  — the second Operations implementation (≥2-implementations invariant,
+ *  docs/decisions/0001-seams-with-two-implementations.md) and the CLI-testable one. Honest about its limits: there is no
  *  onboard-time command table and no refs locally, so ops run fixed Node
  *  conventions (test → `npm test`, build → `npm run build --if-present`,
  *  status → workspace existence) against the workspace AS IT STANDS, and a
@@ -269,7 +269,7 @@ async function runLocalCommand(command: string, cwd: string): Promise<{ exitCode
  *  or undefined when signal-killed) and message — each caller formats its own
  *  result. `timedOut` is true only for the budget's own kill: the child died
  *  from execFile's timeout signal (signal-killed, no error code) at or after
- *  the deadline — a hard-stop abort (#101), a maxBuffer kill
+ *  the deadline — a hard-stop abort, a maxBuffer kill
  *  (ERR_CHILD_PROCESS_STDIO_MAXBUFFER), and ordinary nonzero exits all keep it
  *  false. An optional AbortSignal (hard run stop) kills the child; that
  *  surfaces as an `error` like any other abnormal exit — never a throw. */

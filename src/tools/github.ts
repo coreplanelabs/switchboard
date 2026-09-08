@@ -85,7 +85,7 @@ export const githubReposTool: RunnableTool = {
   sideEffectFree: true,
   name: "github_repos",
   description:
-    'List the GitHub repositories Switchboard can reach (the org repos in its GitHub App installation), with default branch and description. Use it to resolve a repo the user named loosely ("the switchboard app" → coreplanelabs/switchboard).',
+    'List the GitHub repositories Switchboard can reach (the org repos in its GitHub App installation), with default branch and description. Use it to resolve a repo the user named loosely ("the web app" → acme/web).',
   inputSchema: { type: "object", properties: {} },
   async run(_input, ctx) {
     if (!ctx.github) return UNAVAILABLE;
@@ -420,8 +420,9 @@ export const githubIssueDeleteTool: RunnableTool = {
       return `Deleted ${repo}#${number} permanently.`;
     } catch (err) {
       // GitHub allows issue deletion only to a repository admin's USER
-      // credential — never to an App installation (live 2026-09-03: "Viewer
-      // not authorized to delete"). Say exactly that, and what IS possible.
+      // credential — never to an App installation, which GitHub refuses with a
+      // 403 "Viewer not authorized to delete". Say exactly that, and what IS
+      // possible.
       if (err instanceof GithubApiError && err.status === 403) {
         return `github_issue_delete: GitHub refused — issue deletion is not available to Switchboard's GitHub App credential (only a repository admin can delete an issue, in the GitHub UI). Nothing was changed. Offer to close it instead (github_issue_update state=closed), or tell the user to delete ${repo}#${number} themselves.`;
       }

@@ -30,7 +30,7 @@ describe("parseConfigSource", () => {
       "github://acme/infrastructure/switchboard/config.yaml",
       { kind: "github", owner: "acme", repo: "infrastructure", path: "switchboard/config.yaml", ref: "main" },
     ],
-    ["op://Prod/Switchboard config/notesPlain", { kind: "op", ref: "op://Prod/Switchboard config/notesPlain" }],
+    ["op://Acme/Switchboard config/notesPlain", { kind: "op", ref: "op://Acme/Switchboard config/notesPlain" }],
   ])("%s", (input, expected) => {
     expect(parseConfigSource(input)).toEqual({ ok: true, source: expected });
   });
@@ -117,7 +117,7 @@ describe("readConfigSource", () => {
   });
 
   it("an op source needs the service-account token and the CLI, and keeps op's last line on failure", async () => {
-    const src = { kind: "op", ref: "op://Prod/Switchboard/config" } as const;
+    const src = { kind: "op", ref: "op://Acme/Switchboard/config" } as const;
     expect(await readConfigSource(src, io())).toMatchObject({
       ok: false,
       problem: expect.stringContaining(`needs ${OP_TOKEN_ENV}`),
@@ -137,6 +137,6 @@ describe("readConfigSource", () => {
         src,
         io({ env: { [OP_TOKEN_ENV]: "ops_x" }, opRead: async () => ({ code: 0, output: "providers: {}\n" }) }),
       ),
-    ).toEqual({ ok: true, text: "providers: {}\n", how: "config from op://Prod/Switchboard/config" });
+    ).toEqual({ ok: true, text: "providers: {}\n", how: "config from op://Acme/Switchboard/config" });
   });
 });

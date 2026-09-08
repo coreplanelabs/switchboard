@@ -3,14 +3,13 @@
 //
 // Why this exists: the resident image installed its package managers as
 // `RUN npm install -g pnpm@latest yarn@latest`. That makes the pnpm version a
-// property of WHEN the image was last built, not of any commit — and the
-// 2026-09-03 rebuild ([#396](https://github.com/coreplanelabs/switchboard/pull/396),
-// which edited that very line) moved pnpm 10 → 11. pnpm 11 stopped reading
-// `package.json`'s `pnpm` field, so a repo keeping its `overrides` /
-// `patchedDependencies` / `onlyBuiltDependencies` there installs against
-// settings pnpm no longer sees: `pnpm install --frozen-lockfile` then fails
-// with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH (reproduced 2026-09-04). Nothing in
-// the repo changed, nothing in the repo could have caught it.
+// property of WHEN the image was last built, not of any commit — and a routine
+// rebuild (a commit that edited that very line) moved pnpm 10 → 11. pnpm 11
+// stopped reading `package.json`'s `pnpm` field, so a repo keeping its
+// `overrides` / `patchedDependencies` / `onlyBuiltDependencies` there installs
+// against settings pnpm no longer sees: `pnpm install --frozen-lockfile` then
+// fails with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH. Nothing in the repo changed,
+// nothing in the repo could have caught it.
 //
 // Two rules, deliberately different in strictness:
 //   - a global package-manager install must name an EXACT version — these are

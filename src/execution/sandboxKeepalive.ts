@@ -1,19 +1,18 @@
 // Sandbox activity keepalive (features/execution.md item 2): one in-flight
 // exec never outlives the container's activity timeout.
 //
-// On @cloudflare/containers 0.0.28 (production until 2026-09-07) the base
-// class kept an activity clock that every proxied fetch renewed ONCE, before
-// the fetch, and an alarm loop stopped the container (SIGTERM) the moment the
-// clock read expired — with no notion of a request still in flight. So a
-// single command running longer than `sleepAfter` had its container killed
-// under it, deterministically, at exactly `sleepAfter` (2026-09-07, the #521
-// review's first command: 20:00 of a 20-minute budget, `Command execution
-// failed`, a fresh container with an empty /workspace). Renewing the clock on
-// a timer WHILE a command runs turned `sleepAfter` into what its name says:
-// idle time. The 0.3.x containers class that ships with sandbox 0.12.x counts
-// in-flight requests itself and refuses to expire while one is open, so the
-// keepalive is now belt-and-braces; it stays until the live long-command
-// receipt on the tracker (#228) proves the SDK's own tracking on our path.
+// On @cloudflare/containers 0.0.28 the base class kept an activity clock that
+// every proxied fetch renewed ONCE, before the fetch, and an alarm loop
+// stopped the container (SIGTERM) the moment the clock read expired — with no
+// notion of a request still in flight. So a single command running longer
+// than `sleepAfter` had its container killed under it, deterministically, at
+// exactly `sleepAfter`: the command ends in `Command execution failed` and
+// the next one lands in a fresh container with an empty /workspace. Renewing
+// the clock on a timer WHILE a command runs turns `sleepAfter` into what its
+// name says: idle time. The 0.3.x containers class that ships with sandbox
+// 0.12.x counts in-flight requests itself and refuses to expire while one is
+// open, so the keepalive is now belt-and-braces; it stays until a live
+// long-command run proves the SDK's own tracking on our path.
 //
 // Deliberately free of node: imports so wrangler can bundle it into the
 // sandbox Worker.
@@ -75,7 +74,7 @@ export async function withActivityKeepalive<T>(
  *  pending call, and the disconnect text for a sandbox `destroy()`ed under a
  *  pending call — which the Worker's own one-shot heal of a legacy-image
  *  container can cause for a command concurrently pending on the same
- *  Durable Object (#569). Anything else — a transport error, a file-op
+ *  Durable Object. Anything else — a transport error, a file-op
  *  failure — is never recycle-shaped, whenever it arrives. */
 const RECYCLE_SHAPED: readonly RegExp[] = [
   /^Command execution failed$/,

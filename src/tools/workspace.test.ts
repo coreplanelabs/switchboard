@@ -11,7 +11,7 @@ import {
   type ToolContext,
 } from "./workspace.js";
 
-// Feature: features/distilled-diffs.md (R14). The diff_digest tool is a thin
+// Feature: features/distilled-diffs.md. The diff_digest tool is a thin
 // wrapper: it runs `git diff <base>...HEAD` through the Executor seam and
 // distills the raw output. These tests use a fake Executor so no repo/process
 // is needed.
@@ -243,7 +243,7 @@ describe("submit_verdict tool", () => {
 });
 
 // Feature: features/agent-ship.md item 6 — fix rounds record one disposition
-// per review finding through this tool; the ship orchestrator (U7) injects
+// per review finding through this tool; the ship orchestrator injects
 // the round's known finding ids and consumes the last valid call.
 describe("submit_dispositions tool", () => {
   const ctxWith = (onDispositions?: ToolContext["onDispositions"], knownFindingIds?: string[]): ToolContext =>
@@ -304,7 +304,7 @@ describe("submit_dispositions tool", () => {
     expect(String(out)).toContain("F9");
   });
 
-  it("without knownFindingIds the id-existence check is skipped (the orchestrator supplies it in U7)", async () => {
+  it("without knownFindingIds the id-existence check is skipped (the ship orchestrator supplies it)", async () => {
     const got: unknown[] = [];
     const out = await tool().run(
       { dispositions: [{ findingId: "F9", disposition: "fixed", note: "n" }] },
@@ -523,9 +523,9 @@ describe("bash tool timeoutMs", () => {
   });
 
   // Feature: features/execution.md item 12 — a command's budget is clipped to
-  // the run's remaining wall clock minus a reserve for the write-up. 2026-09-07
-  // (review of #521): one 20-minute command consumed 80% of a 25-minute review
-  // budget; the model had ~4 minutes left to recover and none to review.
+  // the run's remaining wall clock minus a reserve for the write-up. Without
+  // the clip one long command can consume most of a review budget, leaving
+  // the model minutes to recover and none to review.
   describe("clipped to the run's remaining wall clock", () => {
     it("plenty of run left changes nothing: the request passes through and no request stays no request", async () => {
       const { seen, ctx } = capturing();

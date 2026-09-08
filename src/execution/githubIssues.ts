@@ -1,7 +1,7 @@
 import { resolveGithubToken } from "./githubApp.js";
 import { redactAndCap } from "../core/redact.js";
 
-// Filing GitHub issues from the bot process (Area 7b / #84): the IssueTracker
+// Filing GitHub issues from the bot process: the IssueTracker
 // seam the friction proposer files its proposals through. GithubIssueTracker
 // speaks the GitHub REST API with the App installation token — the same
 // REST-with-App-token path githubComments.ts and repoContext.ts use, never a
@@ -40,7 +40,7 @@ const NEWEST_UNFILTERED = 30;
 const REQUEST_TIMEOUT_MS = 15_000;
 /** Label color/description used when the triage label does not exist yet. */
 const LABEL_COLOR = "0e8a16";
-const LABEL_DESCRIPTION = "Proposed by Switchboard's self-improvement pass (#84) — triage, then fix or close";
+const LABEL_DESCRIPTION = "Proposed by Switchboard's self-improvement pass — triage, then fix or close";
 
 export interface GithubIssueTrackerOptions {
   /** Injectable for tests; defaults to global fetch. */
@@ -62,9 +62,9 @@ export class GithubIssueTracker implements IssueTracker {
 
   /**
    * Label-filtered listing, paginated, PLUS the newest open issues unfiltered.
-   * The unfiltered page exists because GitHub's label-filtered list was observed
-   * to lag a few seconds behind issue creation (validation of #138: a pass re-run
-   * right after filing refiled the same pattern). Dedupe keys on the marker in
+   * The unfiltered page exists because GitHub's label-filtered list lags a few
+   * seconds behind issue creation, so a pass re-run right after filing would
+   * refile the same pattern. Dedupe keys on the marker in
    * the body — not the label — so the freshest issues are covered even before
    * the label index catches up.
    */

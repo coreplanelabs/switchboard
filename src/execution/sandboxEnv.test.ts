@@ -3,11 +3,9 @@ import { ENV_NAME_PATTERN, envFromRequest } from "./sandboxEnv.js";
 
 // Feature: features/execution.md item 5 — the env map the bot forwards into a
 // per-thread sandbox rides ONLY in the request BODY; request headers are never
-// a credential channel. 2026-09-07 (#447 receipt): Workers Logs record every
-// invocation's request headers and redact by a NAME heuristic — `x-env-gh_token`
-// showed as REDACTED, but the probe's `x-env-PROBE_VAR: hello-from-env-option`
-// was logged in clear. Bodies are not recorded. The one-release `x-env-*` header
-// fallback (#597) retired once the body reader was live everywhere (#447), so
+// a credential channel: Workers Logs record every invocation's request headers
+// and redact by a NAME heuristic — `x-env-gh_token` shows as REDACTED, but
+// `x-env-PROBE_VAR: hello` is logged in clear. Bodies are not recorded. So
 // `envFromRequest` reads the body alone and takes no headers.
 
 describe("envFromRequest", () => {

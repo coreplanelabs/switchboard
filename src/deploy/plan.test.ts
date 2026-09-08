@@ -188,7 +188,7 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     expect(specs.bot.liveGate).toEqual({ kind: "health" });
     expect(byName.bot.liveGate).toEqual({ kind: "health", healthUrl: BOT_HEALTH_URL });
     expect(BOT_HEALTH_URL).toBe("https://switchboard.example.test/healthz");
-    // The sandbox gate (#569) reads its Worker, its container application and an /exec probe, all with the
+    // The sandbox gate reads its Worker, its container application and an /exec probe, all with the
     // same bearer its /healthz needs — so the gate's bearer IS the health bearer — and the application is the
     // one wrangler names from the profile's script + the static class in deploy/cloudflare-sandbox/wrangler.jsonc.
     expect(specs.sandbox.liveGate).toEqual({
@@ -224,7 +224,7 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     expect(text).toContain(
       "then wait until live (https://switchboard-sandbox.example.test/healthz build.commit == HEAD + every running switchboard-sandbox-switchboardsandbox instance on the app version + an /exec probe answers ok from one)",
     );
-    expect(byName.sandbox.why).toContain("#569");
+    expect(byName.sandbox.why).toContain("an `echo ok` probe answers from one");
   });
 
   it("the bot step says how a rotated secret goes live — `wrangler secret put` alone leaves the running container on its old env; `deploy restart` (no build) restarts it", () => {

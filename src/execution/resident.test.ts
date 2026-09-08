@@ -7,7 +7,7 @@ import { recordingSink } from "../core/testing/recordingSink.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../core/trace/internalHosts.js";
 import { parseTraceparent } from "../core/trace/traceparent.js";
 
-// Feature: features/resident-repos.md — bot-side resident client (U5): every
+// Feature: features/resident-repos.md — bot-side resident client: every
 // route POSTs {resource, threadKey, ...}; /exec streams heartbeat whitespace
 // then one JSON document with in-body errors; needs:"attach" (evicted or
 // disk-recycled worktree) is recovered by exactly one re-attach + retry.
@@ -55,7 +55,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("ResidentExecutor.attach over a heartbeat stream (#555 item 59: an attach that waits on an install must not lose the connection)", () => {
+describe("ResidentExecutor.attach over a heartbeat stream (item 59: an attach that waits on an install must not lose the connection)", () => {
   it("parses heartbeat whitespace then the binding, exactly like /exec", async () => {
     stubFetch({ raw: "\n\n\n" + JSON.stringify(ATTACH_OK) });
     const ex = new ResidentExecutor(OPTS);
@@ -162,7 +162,7 @@ describe("ResidentExecutor.exec", () => {
     });
     const ex = new ResidentExecutor(OPTS);
     await expect(ex.exec("node -e \"console.log('hi')\"")).resolves.toBe("hi\n");
-    // every route carries resource + threadKey in the JSON body (U4 contract)
+    // every route carries resource + threadKey in the JSON body
     expect(route(calls[0])).toBe("/exec");
     expect(sentBody(calls[0])).toMatchObject({
       resource: "repo:jshttp/vary",
@@ -222,7 +222,7 @@ describe("ResidentExecutor.exec", () => {
     const ex = new ResidentExecutor(OPTS);
     const err = await ex.exec("echo x").catch((e: unknown) => e);
     // worktree still gone after a re-attach → the resident is unhealthy: genuine
-    // infra, so it counts toward fail-fast (#92).
+    // infra, so it counts toward fail-fast.
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toMatch(/re-attach/);
   });
@@ -327,11 +327,11 @@ describe("ResidentExecutor.exec", () => {
   });
 });
 
-// The #92 fail-fast counter (ExecHealthTracker) must fire on a genuinely dead
+// The fail-fast counter (ExecHealthTracker) must fire on a genuinely dead
 // resident but NEVER on a healthy one that merely rejected agent-fixable input.
 // A client/validation rejection (command-too-long) is the exact false-positive
-// the classification fix closes.
-describe("ResidentExecutor infra classification through ExecHealthTracker (#92)", () => {
+// the classification closes.
+describe("ResidentExecutor infra classification through ExecHealthTracker", () => {
   it("two consecutive command-too-long rejections don't increment the infra counter (healthy resident)", async () => {
     stubFetch(
       { status: 400, body: { error: "command must be a non-empty string of at most 64000 chars" } },
@@ -391,13 +391,13 @@ describe("ResidentExecutor infra classification through ExecHealthTracker (#92)"
     expect(tracker.consecutiveInfraFailures).toBe(1);
   });
 
-  // #566: a deploy that ROLLS the container (not just swaps the isolate) makes
+  // A deploy that ROLLS the container (not just swaps the isolate) makes
   // the resident answer the SAME `reason:"runtime-replaced"` it does for an
-  // isolate swap — because worker.ts now classifies the raw workerd refusal
+  // isolate swap — because worker.ts classifies the raw workerd refusal
   // "The container is not running, consider calling start()" as a replacement.
-  // Before that fix the resident answered it as a bare infra error, so two of
-  // them in a row tripped MAX_CONSECUTIVE_INFRA_FAILURES (2) and aborted the run
-  // with a misleading "Sandbox exec transport failed". These two assert the new
+  // Answered as a bare infra error instead, two of them in a row would trip
+  // MAX_CONSECUTIVE_INFRA_FAILURES (2) and abort the run with a misleading
+  // "Sandbox exec transport failed". These two assert the
   // contract at the fail-fast boundary the bug tripped.
   const containerRolled = {
     error:
@@ -503,8 +503,9 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
   });
 
   // features/resident-repos.md item 51: the expected head rides along so the
-  // resident fetches a mirror whose ref tip lags it (the #214 re-review
-  // attached to a stale tip). Sent only when set — older body otherwise.
+  // resident fetches a mirror whose ref tip lags it (a re-review after a push
+  // would otherwise attach to a stale tip). Sent only when set — older body
+  // otherwise.
   it("sends sha in the attach body when an expected head is known, and omits the field otherwise", async () => {
     const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK });
     await ResidentExecutor.open({ ...OPTS, refHint: "master", sha: "47c4230692cbc5961682532afb822e9c2f1f40b7" });
@@ -531,7 +532,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     });
   });
 
-  it("a 200 attach answer without a string `workspace` still binds — the path is just unknown (#282: the path is advisory for the prompt)", async () => {
+  it("a 200 attach answer without a string `workspace` still binds — the path is just unknown (the path is advisory for the prompt)", async () => {
     stubFetch({ body: { ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05", user: "worker2" } });
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
     expect(ex.binding).toEqual({ ref: "master", sha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05" });
@@ -563,7 +564,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     await expect(ResidentExecutor.open(OPTS)).rejects.toThrow(/branch/i);
   });
 
-  it('409 needs:"ref" is a TYPED error the dispatcher can catch for the ask-once flow (U7)', async () => {
+  it('409 needs:"ref" is a TYPED error the dispatcher can catch for the ask-once flow', async () => {
     stubFetch({ status: 409, body: { error: "needs-ref: this thread has no ref binding yet", needs: "ref" } });
     const err = await ResidentExecutor.open(OPTS).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ResidentNeedsRefError);
@@ -576,7 +577,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
   });
 });
 
-// Feature: features/resident-repos.md — U6 ResidentOperations (KTD8): the
+// Feature: features/resident-repos.md — ResidentOperations: the
 // deterministic-ops client for POST /op. Responses stream like /exec
 // (heartbeat whitespace + one JSON document, parsed from the BODY); a failing
 // op is a RESULT (ok:false), a mutating-entry refusal and not-onboarded are
@@ -913,13 +914,13 @@ describe("ResidentExecutor per-call timeout", () => {
   });
 });
 
-// #531 (review of #604): the resident bounds every send with a bot-side
-// deadline (execDeadline), and — like the sandbox — the deadline must cover the
-// BODY read, not just the headers. /exec streams heartbeat whitespace, so a
-// resident whose exec promise never settles hangs past the headers; that abort
-// must surface as the legible `ExecInfraError` the runner counts toward
-// fail-fast (#92), never a raw TimeoutError that escapes classification.
-describe("ResidentExecutor per-send deadline (#531)", () => {
+// The resident bounds every send with a bot-side deadline (execDeadline),
+// and — like the sandbox — the deadline must cover the BODY read, not just the
+// headers. /exec streams heartbeat whitespace, so a resident whose exec
+// promise never settles hangs past the headers; that abort must surface as
+// the legible `ExecInfraError` the runner counts toward fail-fast, never a raw
+// TimeoutError that escapes classification.
+describe("ResidentExecutor per-send deadline", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 

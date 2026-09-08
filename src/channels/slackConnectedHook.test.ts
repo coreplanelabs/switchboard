@@ -6,8 +6,8 @@ import { getCatchUpStatus, resetCatchUpStatus, REQUIRED_BOT_SCOPES } from "./sla
 import { getSocketStatus, resetSocketStatus } from "./slackSocketStatus.js";
 import { dispatch, type CoreDeps } from "../core/dispatcher.js";
 
-// Feature: features/slack-channel.md item 7 — reconnect catch-up wiring
-// (#259). Bolt-level harness: `createSlackApp` builds a real App on a real
+// Feature: features/slack-channel.md item 7 — reconnect catch-up wiring.
+// Bolt-level harness: `createSlackApp` builds a real App on a real
 // `SocketModeReceiver`, and the receiver's socket client is a plain
 // EventEmitter that only dials out on `start()` — so emitting `connected` on
 // it is exactly the event a live reconnect fires, and the hook's whole path
@@ -62,7 +62,7 @@ function makeApp(config: object, api: ReturnType<typeof fakeWebApi>) {
   return { app, receiver };
 }
 
-describe("connected-hook wiring (Bolt-level harness, #259)", () => {
+describe("connected-hook wiring (Bolt-level harness)", () => {
   const envBefore = { app: process.env.SLACK_APP_TOKEN, bot: process.env.SLACK_BOT_TOKEN };
 
   beforeEach(() => {
@@ -119,7 +119,7 @@ describe("connected-hook wiring (Bolt-level harness, #259)", () => {
 
   it("re-dispatches a missed mention through handle(): 👀 ack, ⏱ note and one dispatch — and a second connect skips it via the seen-set", async () => {
     const ts = (Date.now() / 1000 - 120).toFixed(6); // 2 min ago: inside the window
-    const api = fakeWebApi([{ ts, user: "U1", text: `<@${BOT}> hello there` }]);
+    const api = fakeWebApi([{ ts, user: "UA", text: `<@${BOT}> hello there` }]);
     const { receiver } = makeApp({}, api);
 
     receiver.client.emit("connected");

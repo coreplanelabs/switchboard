@@ -25,7 +25,7 @@ describe("StaticMcpToolSource", () => {
   it("serves only the servers scoped to the agent; review gets none unless listed", async () => {
     const { factory } = clients();
     const src = new StaticMcpToolSource([linear, github], { factory });
-    const general = await src.toolsFor("general", { userId: "slack:U1" });
+    const general = await src.toolsFor("general", { userId: "slack:UA" });
     expect(general.tools.map((t) => t.name).sort()).toEqual([
       "mcp__github__get_pr",
       "mcp__linear__create_issue",
@@ -35,19 +35,19 @@ describe("StaticMcpToolSource", () => {
       { server: "linear", toolCount: 2 },
       { server: "github", toolCount: 1 },
     ]);
-    const research = await src.toolsFor("research", { userId: "slack:U1" });
+    const research = await src.toolsFor("research", { userId: "slack:UA" });
     expect(research.tools.map((t) => t.name)).toEqual(["mcp__linear__search_issues", "mcp__linear__create_issue"]);
-    const review = await src.toolsFor("review", { userId: "slack:U1" });
+    const review = await src.toolsFor("review", { userId: "slack:UA" });
     expect(review.tools.map((t) => t.name)).toEqual(["mcp__github__get_pr"]); // listed explicitly
     const onlyLinear = new StaticMcpToolSource([linear], { factory });
-    expect(await onlyLinear.toolsFor("review", { userId: "slack:U1" })).toEqual({ tools: [], servers: [] });
+    expect(await onlyLinear.toolsFor("review", { userId: "slack:UA" })).toEqual({ tools: [], servers: [] });
   });
 
   it("a failing server is an outcome, the others still serve", async () => {
     const { byName, factory } = clients();
     byName.linear.failListWith = "HTTP 503 from https://mcp.linear.app/mcp?token=abc";
     const src = new StaticMcpToolSource([linear, github], { factory });
-    const out = await src.toolsFor("general", { userId: "slack:U1" });
+    const out = await src.toolsFor("general", { userId: "slack:UA" });
     expect(out.tools.map((t) => t.name)).toEqual(["mcp__github__get_pr"]);
     expect(out.servers[0].server).toBe("linear");
     expect(out.servers[0].toolCount).toBeUndefined();
@@ -124,14 +124,14 @@ describe("CompositeMcpToolSource (config wins over registry, item 1)", () => {
     });
     const b = new StaticMcpToolSource(
       [
-        { id: "user:slack:U1/linear", name: "linear", url: "https://b.example/mcp", agents: ["general"] },
+        { id: "user:slack:UA/linear", name: "linear", url: "https://b.example/mcp", agents: ["general"] },
         { name: "vanta", url: "https://v.example/mcp", agents: ["general"] },
       ],
       {
         factory: () => new InMemoryMcpClient([{ name: "search_issues", inputSchema: {} }]),
       },
     );
-    const out = await new CompositeMcpToolSource([a, b]).toolsFor("general", { userId: "slack:U1" });
+    const out = await new CompositeMcpToolSource([a, b]).toolsFor("general", { userId: "slack:UA" });
     expect(out.tools.map((t) => t.name)).toEqual(["mcp__linear__search_issues", "mcp__vanta__search_issues"]);
     expect(out.servers).toEqual([
       { server: "linear", toolCount: 1 },
@@ -156,7 +156,7 @@ describe("CompositeMcpToolSource (config wins over registry, item 1)", () => {
 describe("NullMcpToolSource — the source of a process without MCP", () => {
   it("scopes no server to any agent or caller, so the guidance block is absent", async () => {
     const source = new NullMcpToolSource();
-    const forRun = await source.toolsFor("coding", { userId: "slack:U1", channelId: "slack:C1" });
+    const forRun = await source.toolsFor("coding", { userId: "slack:UA", channelId: "slack:C1" });
     expect(forRun).toEqual({ tools: [], servers: [] });
     expect(mcpGuidanceBlock(forRun.servers)).toBeUndefined();
   });

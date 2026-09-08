@@ -18,7 +18,7 @@ import { TEST_PROFILE } from "./testing/profile.js";
 // bearer; once it serves the deployed commit, probe `echo ok` through the gate's
 // thread and read the container application's state and instances; live only
 // when all three agree — the application having LEFT the version read before
-// the upload when wrangler printed a container change (#589) — waiting through
+// the upload when wrangler printed a container change — waiting through
 // everything a rollout can cause, failing at the shared deadline with the last
 // reason. Every I/O is injected: nothing here reaches the network, wrangler or
 // the clock. `deployStep` is driven with the step's command injected too, so
@@ -29,7 +29,7 @@ const OLD = "610682f7abcdef0123456789abcdef0123456789";
 const KEY = probeThreadKey(HEAD);
 const V = 12;
 const PRE = 11;
-const REGISTRY = "registry.cloudflare.com/3c7b28f23cc93f09e77bb0a9ffcb7e6f/switchboard-sandbox-switchboardsandbox";
+const REGISTRY = "registry.cloudflare.com/0123456789abcdef0123456789abcdef/switchboard-sandbox-switchboardsandbox";
 const OLD_IMAGE = `${REGISTRY}@sha256:23e69f9ee5513879b8a44019e9a21b2981cf81bb242236955a0dc59ee96f5367`;
 const NEW_IMAGE = `${REGISTRY}@sha256:eb7d4f2863a3ccd1970d76c5505402bd458ffdaacbb6bf777afdcbedf465ef2f`;
 const before: Read<AppState> = { value: { version: PRE, image: OLD_IMAGE } };
@@ -47,11 +47,11 @@ const inst = (name: string | null, state: string, version: number | null = V): C
   version,
 });
 const settled = (...extra: ContainerInstance[]): Read<ContainerInstance[]> => ({
-  value: [inst("slack:C0BQS7KPJHK:1788824120.915519", "running"), inst(KEY, "running"), ...extra],
+  value: [inst("slack:C1234567890:1788824120.915519", "running"), inst(KEY, "running"), ...extra],
 });
 /** The fleet before the rollout moved anything: every instance on the pre-deploy version. */
 const preDeployFleet: Read<ContainerInstance[]> = {
-  value: [inst("slack:C0BQS7KPJHK:1788824120.915519", "running", PRE), inst(KEY, "running", PRE)],
+  value: [inst("slack:C1234567890:1788824120.915519", "running", PRE), inst(KEY, "running", PRE)],
 };
 const ok: ProbeResult = { body: { stdout: "ok\n", stderr: "", exitCode: 0 } };
 const fleetBusy: ProbeResult = {
@@ -151,7 +151,7 @@ describe("waitUntilSandboxLive", () => {
     ]);
   });
 
-  it("the application still at the pre-deploy version for two polls — instances all on it, probe ok — is waiting both times; live on the third poll, once it advanced and the instances followed (#589)", async () => {
+  it("the application still at the pre-deploy version for two polls — instances all on it, probe ok — is waiting both times; live on the third poll, once it advanced and the instances followed", async () => {
     const h = harness({
       health: [serving(HEAD)],
       appState: [before, before, after],
@@ -203,7 +203,7 @@ describe("waitUntilSandboxLive", () => {
     expect(r).toEqual({
       live: false,
       reason:
-        "probe: /exec failed with an EMPTY error — the probe's container may still run the previous image (#569) — still not live after 20 min (deadline 20 min)",
+        "probe: /exec failed with an EMPTY error — the probe's container may still run the previous image — still not live after 20 min (deadline 20 min)",
     });
     expect(h.count("readHealth")).toBe(LIVE_GATE_DEADLINE_MS / LIVE_GATE_POLL_MS + 1);
     expect(h.lines).toHaveLength(LIVE_GATE_DEADLINE_MS / LIVE_GATE_POLL_MS);

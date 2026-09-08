@@ -192,3 +192,80 @@ deploy/profile.example.json	"account": "00000000000000000000000000000000",
 # The profile and the secrets manifest document the op://Vault/Item source form that src/deploy/configSource.ts and src/deploy/secrets.ts parse.
 deploy/profile.example.json	"$comment": "The deployment profile: where THIS installation runs. Copy to deploy/profile.json and fill it in (or run `switchboard deploy init`). The account is your Cloudflare account id; every hostname must be under `zone`, a zone in that account; `workers.bot` is the one required Worker — leave `memory`, `resident`, `sandbox` or `docs` out and `deploy plan` has no step for them (a bot-only profile is a one-step plan; without `memory` the config is not pushed anywhere); `configSource` is where `deploy all` reads the bot's runtime config from before building the image — a path, `github://owner/repo/path@ref` (needs CONFIG_REPO_TOKEN), or `op://Vault/Item/field` (needs OP_SERVICE_ACCOUNT_TOKEN); `secretsSource` is where `secrets put` reads values from — a directory of <NAME> files (the default when absent) or `op://Vault/Item`. `deploy plan` reads this example when no profile exists; `deploy all` refuses it.",
 deploy/secrets.manifest.json	"$comment": "Every Cloudflare Worker secret Switchboard provisions: its name and which Worker(s) hold it. This file is the contract — src/core/secretsManifest.test.ts keeps it equal to each worker.ts `Env` interface and to the bot container's forwarding list. WHERE the values live is the deployment profile's `secretsSource` (a directory of <NAME> files, `~/.secrets/switchboard` by default, or a 1Password item `op://Vault/Item` with one field per name); `deploy secrets <worker>` (`npm run secrets` in each deploy/cloudflare*/) puts them, refusing before any upload when a required value is absent. A shared bearer must carry ONE value on every Worker listed for it. Rotation: new value at the source, `deploy secrets` on EVERY listed Worker, then `deploy restart` for the bot (its running container keeps the env it started with). Public config (URLs, ids of no consequence) is a wrangler.jsonc var, not a secret.",
+# 1Password is a supported optional config/secrets source (the `op` CLI); `op://` is the integration's own scheme and the vault names here are neutral.
+src/deploy/configSource.test.ts	// a GitHub repository, or a 1Password field — one seam, every failure a
+src/deploy/configSource.test.ts	["op://Acme/Switchboard config/notesPlain", { kind: "op", ref: "op://Acme/Switchboard config/notesPlain" }],
+src/deploy/configSource.test.ts	expect(parseConfigSource("op://Vault/Item")).toMatchObject({ ok: false });
+src/deploy/configSource.test.ts	const src = { kind: "op", ref: "op://Acme/Switchboard/config" } as const;
+src/deploy/configSource.test.ts	).toEqual({ ok: true, text: "providers: {}\n", how: "config from op://Acme/Switchboard/config" });
+src/deploy/configSource.ts	// 1Password item field (read with the `op` CLI and a service-account token).
+src/deploy/configSource.ts	if (value.startsWith("op://")) {
+src/deploy/configSource.ts	// op://<vault>/<item>/<field> — three segments at least; `op read` does the rest.
+src/deploy/configSource.ts	return { ok: false, problem: `configSource "${value}" — expected op://Vault/Item/field` };
+src/deploy/configSource.ts	return { ok: false, problem: `configSource "${value}" — unknown scheme; use a path, github://, or op://` };
+src/deploy/configSource.ts	if (!r) return { ok: false, problem: `configSource ${source.ref}: the 1Password CLI (op) is not installed` };
+src/deploy/loadProfile.test.ts	// `op://` forms `configSource` takes, read through the same loaders (a
+src/deploy/profile.test.ts	expect(parseProfile({ ...TEST_PROFILE, secretsSource: "op://Vault/Switchboard" }).ok).toBe(true);
+src/deploy/profile.ts	/** `path` | `github://owner/repo/path@ref` | `op://Vault/Item/field` — parsed by src/deploy/configSource.ts. */
+src/deploy/profile.ts	*  `op://Vault/Item` with the secret's name as the field. Optional: the
+src/deploy/run.ts	* or the same `github://owner/repo/path@ref` / `op://Vault/Item/field` forms
+src/deploy/secrets.test.ts	expect(parseSecretsSource("op://Acme/Switchboard secrets")).toEqual({
+src/deploy/secrets.test.ts	"op://Acme/Switchboard secrets/MEMORY_TOKEN",
+src/deploy/secrets.test.ts	expect(parseSecretsSource("op://Acme/Item/FIELD")).toMatchObject({
+src/deploy/secrets.test.ts	problem: expect.stringContaining("expected op://Vault/Item"),
+src/deploy/secrets.test.ts	expect(parseSecretsSource("op://Acme")).toMatchObject({ ok: false });
+src/deploy/secrets.ts	// `secretsSource` — a directory of `<NAME>` files (the default) or a 1Password
+src/deploy/secrets.ts	// item (`op://Vault/Item`, the secret's name as the field). `deploy secrets
+src/deploy/secrets.ts	*  `op://Vault/Item` — exactly two segments; the secret's name is the field. */
+src/deploy/secrets.ts	if (s.startsWith("op://")) {
+src/deploy/secrets.ts	const segments = s.slice("op://".length).split("/").filter(Boolean);
+src/deploy/secrets.ts	if (segments.length !== 2 || s.slice("op://".length).split("/").length !== 2)
+src/deploy/secrets.ts	return { ok: false, problem: `secretsSource "${s}" — expected op://Vault/Item (the secret's name is the field)` };
+src/deploy/secrets.ts	return { ok: false, problem: `secretsSource "${s}" — unknown scheme; use a directory path or op://Vault/Item` };
+src/deploy/secrets.ts	return source.kind === "dir" ? `${source.path}/${name}` : `op://${source.vault}/${source.item}/${name}`;
+src/deploy/secretsHost.ts	// (files under a directory, or a 1Password item through the `op` CLI), and the
+src/deploy/secretsHost.ts	/** The 1Password item's field labels — one `op item get`, never a read per name. */
+src/deploy/secretsHost.ts	problem: `secretsSource op://${source.vault}/${source.item} needs OP_SERVICE_ACCOUNT_TOKEN (or an \`op signin\` session) in the environment`,
+src/deploy/secretsHost.ts	problem: `secretsSource op://${source.vault}/${source.item}: the 1Password CLI (op) is not installed`,
+src/deploy/secretsHost.ts	problem: `secretsSource op://${source.vault}/${source.item}: op item get exited ${r.code} — ${r.stderr.trim().split("\n").at(-1) ?? ""}`,
+src/deploy/secretsHost.ts	return { ok: false, problem: `secretsSource op://${source.vault}/${source.item}: op item get returned no JSON` };
+src/deploy/secretsHost.ts	const r = await spawnCollect("op", ["read", `op://${source.vault}/${source.item}/${name}`]);
+
+# The profile schema and the registry path require a 32-hex Cloudflare account id; these are the documented placeholder and synthetic test ids, not an account.
+src/deploy/profile.ts	export const EXAMPLE_ACCOUNT = "00000000000000000000000000000000";
+src/deploy/sandboxGateRun.test.ts	const REGISTRY = "registry.cloudflare.com/0123456789abcdef0123456789abcdef/switchboard-sandbox-switchboardsandbox";
+src/deploy/sandboxLiveGate.test.ts	const REGISTRY = "registry.cloudflare.com/0123456789abcdef0123456789abcdef/switchboard-sandbox-switchboardsandbox";
+src/deploy/testing/profile.ts	account: "1234567890abcdef1234567890abcdef",
+src/deploy/wranglerTemplate.test.ts	'{ "name": "switchboard", "account_id": "1234567890abcdef1234567890abcdef",',
+
+# The MCP protocol's own version identifier is a date string.
+src/channels/mcp.test.ts	const res = await handleMcpRequest(rpc("initialize", { protocolVersion: "2025-06-18" }), deps, { auth: good });
+src/channels/mcp.ts	const PROTOCOL_VERSION = "2025-06-18";
+src/mcp/client.ts	export const MCP_PROTOCOL_VERSION = "2025-06-18";
+
+# Cost-report fixture days: a per-day cost row is an ISO date by shape; the values are arbitrary.
+src/channels/costsView.test.ts	const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3)];
+src/channels/costsView.test.ts	range: { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: true },
+
+# Record fixtures: frontmatter and plan file names need an ISO date; the values are arbitrary.
+src/docs/decisions.test.ts	record("0002-b.md", { title: "B decides", status: "accepted", date: "2026-09-08", pattern: "Strategy" }),
+src/docs/decisions.test.ts	date: "2026-09-01",
+src/docs/decisions.test.ts	"| 0001 | [A decides](../decisions/0001-a.md) | Ports & Adapters | implemented | 2026-09-01 |",
+src/docs/decisions.test.ts	"| 0002 | [B decides](../decisions/0002-b.md) | Strategy | accepted | 2026-09-08 |",
+src/docs/decisions.test.ts	record("0003-c.md", { title: "C | old", status: "superseded", date: "2026-09-02", superseded_by: "0004-d.md" }),
+src/docs/decisions.test.ts	date: "2026-09-03",
+src/docs/decisions.test.ts	date: "2026-09-04",
+src/docs/decisions.test.ts	superseded_by: "docs/plans/2026-09-09-001-feat-h-plan.md",
+src/docs/decisions.test.ts	"| 0003 | [C \\| old](../decisions/0003-c.md) | — | superseded → [0004-d.md](../decisions/0004-d.md) | 2026-09-02 |",
+src/docs/decisions.test.ts	"| 0005 | [E](../decisions/0005-e.md) | — | superseded → [0006-f.md](../decisions/0006-f.md) | 2026-09-03 |",
+src/docs/decisions.test.ts	"| 0007 | [G](../decisions/0007-g.md) | — | superseded → [2026-09-09-001-feat-h-plan.md](../plans/2026-09-09-001-feat-h-plan.md) | 2026-09-04 |",
+src/docs/decisions.test.ts	{ path: "docs/plans/2026-09-08-001-feat-x-plan.md", text: "---\ntitle: P\nstatus: accepted\n---\n" },
+src/docs/records.test.ts	const { fields, body } = parseFrontmatter("---\ntitle: X\nstatus: accepted\ndate: 2026-09-08\n---\n# X\n\nbody\n");
+src/docs/records.test.ts	expect(fields).toEqual({ title: "X", status: "accepted", date: "2026-09-08" });
+src/docs/records.test.ts	const good = rec("docs/decisions/0001-x.md", { title: "X", status: "accepted", date: "2026-09-08" });
+
+# A CSS colour in the connect page's stylesheet looks like an issue number.
+src/channels/mcpConnectView.ts	`<style>body{font:15px system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#222}code{background:#f3f3f3;padding:.1em .3em;border-radius:3px}label{display:block;margin:1rem 0 .3rem;font-weight:600}input{width:100%;padding:.6rem;font-size:1rem;border:1px solid #bbb;border-radius:4px}button{margin-top:1rem;padding:.6rem 1.2rem;font-size:1rem;border-radius:4px;border:0;background:#1f6feb;color:#fff}.err{color:#b00020}.warn{color:#8a6d00}</style>` +
+
+# A W3C trace id is 32 hex characters by definition; this fixture is one.
+src/channels/scheduledPanel.test.ts	const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";

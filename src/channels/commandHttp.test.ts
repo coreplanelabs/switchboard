@@ -35,7 +35,7 @@ import {
 } from "./commandHttp.js";
 
 // Feature: features/command-registry.md — the generic HTTP adapter for `/api/*`
-// (R7/R9/R10, KTD13/KTD15). No per-command code: every registered command is
+// No per-command code: every registered command is
 // served by name; write safety and caller resolution are the adapter's only
 // logic (who may reach /api at all is the dashboard auth strategy's decision,
 // dashboardAuth.test.ts).
@@ -54,7 +54,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
     agent: "coding",
     model: "anthropic/claude",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UA",
     threadKey: `slack:C1:${id}`,
     channelVisibility: "public",
     ...over,
@@ -75,18 +75,18 @@ async function fixture(over: Partial<CommandHttpOptions> = {}) {
   const live = reg.create("coding · acme/live", {
     agent: "coding",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UA",
     threadKey: "slack:C1:t",
     channelVisibility: "public",
   });
   reg.publish(live.id, { type: "input", text: "live request" });
   const store = new InMemoryRunStore({ now: () => NOW });
   await store.put(record("fin-1", NOW - 1000));
-  // A finished run from a private Slack group (authorization R5): visible to all-channels holders and its own user only.
+  // A finished run from a private Slack group: visible to all-channels holders and its own user only.
   await store.put(
     record("fin-priv", NOW - 2000, {
       channelId: "slack:G_PRIV",
-      userId: "slack:U7",
+      userId: "slack:UC",
       threadKey: "slack:G_PRIV:fin-priv",
       channelVisibility: "private",
     }),
@@ -179,7 +179,7 @@ function stopNotes(reg: RunRegistry, id: string): RunEvent[] {
   return (reg.snapshotById(id)?.events ?? []).filter((e) => e.type === "run_note" && e.kind === "stop_requested");
 }
 
-describe("isCommandPath (the ONE gate predicate, KTD13)", () => {
+describe("isCommandPath (the ONE gate predicate)", () => {
   it("claims /api and everything under /api/, including sloppy and encoded spellings", () => {
     for (const p of [
       "/api",
@@ -308,7 +308,7 @@ describe("createCommandHttpHandler — read commands", () => {
   });
 });
 
-describe("createCommandHttpHandler — write safety (KTD15, AE8)", () => {
+describe("createCommandHttpHandler — write safety", () => {
   it("GET /api/runs.stop → 405 with allow: POST and no stop_requested note", async () => {
     const { handler, reg, live } = await fixture();
     const t = fakeReqRes({ method: "GET", url: `/api/runs.stop?id=${live.id}&mode=soft` });
@@ -398,7 +398,7 @@ describe("createCommandHttpHandler — write safety (KTD15, AE8)", () => {
   });
 });
 
-describe("createCommandHttpHandler — caller resolution (R9)", () => {
+describe("createCommandHttpHandler — caller resolution", () => {
   it("a browser identity without an operators entry: 200 on runs.list, 403 on POST runs.stop before the body is read", async () => {
     const { handler, reg, live } = await fixture();
     const list = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
@@ -443,15 +443,15 @@ describe("createCommandHttpHandler — caller resolution (R9)", () => {
   });
 });
 
-describe("createCommandHttpHandler — the Access API is bound by channel visibility (authorization.md items 5–7, R5)", () => {
-  /** An operator configured NATIVELY without `channels: all` (OQ1): every runs action, no channel membership. */
+describe("createCommandHttpHandler — the Access API is bound by channel visibility (authorization.md items 5–7)", () => {
+  /** An operator configured NATIVELY without `channels: all`: every runs action, no channel membership. */
   const nativeOperator: AccessIdentity = { sub: "op-2" };
   const nativeGrants = (id: string) =>
     id === "access:op-2"
       ? { actions: new Set(["runs:read", "runs:write"]), channels: new Set<string>(), repos: new Set<string>() }
       : grantsFor(id, { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] });
 
-  it("an Access operator without all-channels gets 404 not_found on a private-channel run, byte-identical to a run that does not exist (R12 b); the legacy operator (all-channels) reads it", async () => {
+  it("an Access operator without all-channels gets 404 not_found on a private-channel run, byte-identical to a run that does not exist; the legacy operator (all-channels) reads it", async () => {
     const { handler } = await fixture({ grantsFor: nativeGrants });
     const priv = fakeReqRes({ method: "GET", url: "/api/runs.get?id=fin-priv" });
     await handler(priv.req, priv.res, nativeOperator);
@@ -521,7 +521,7 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
     expect(callerIdFor(readerBot)).not.toBe("access:");
   });
 
-  it("callerFor carries the identity as the Actor the table decides on: browser sub → user access:<sub>, service token → service access:svc:<cn>, grants from the lookup (plan U2/U4) — nothing else", async () => {
+  it("callerFor carries the identity as the Actor the table decides on: browser sub → user access:<sub>, service token → service access:svc:<cn>, grants from the lookup — nothing else", async () => {
     const opts: Pick<CommandHttpOptions, "grantsFor"> = {
       grantsFor: (id) =>
         grantsFor(id, {
@@ -561,7 +561,7 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
     const live = reg.create("x", {
       agent: "coding",
       channelId: "slack:C1",
-      userId: "slack:U1",
+      userId: "slack:UA",
       threadKey: "slack:C1:x",
     });
     const t = stopPost(live.id);

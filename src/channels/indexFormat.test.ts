@@ -42,18 +42,14 @@ describe("formatRelative", () => {
 
 describe("splitRunLabel", () => {
   it('splits the dispatcher\'s `agent · scope · "snippet"` label into its parts', () => {
-    expect(
-      splitRunLabel(
-        'review · coreplanelabs/switchboard · "github.com/coreplanelabs/switchboard/pull/268 — re-review:…"',
-      ),
-    ).toEqual({
+    expect(splitRunLabel('review · acme/api · "github.com/acme/api/pull/268 — re-review:…"')).toEqual({
       agent: "review",
-      scope: "coreplanelabs/switchboard",
-      snippet: "github.com/coreplanelabs/switchboard/pull/268 — re-review:…",
+      scope: "acme/api",
+      snippet: "github.com/acme/api/pull/268 — re-review:…",
     });
-    expect(splitRunLabel('general · #switchboard-prompting · justin · "hello there"')).toEqual({
+    expect(splitRunLabel('general · #eng-prompting · ada · "hello there"')).toEqual({
       agent: "general",
-      scope: "#switchboard-prompting · justin",
+      scope: "#eng-prompting · ada",
       snippet: "hello there",
     });
   });

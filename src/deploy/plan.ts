@@ -6,8 +6,10 @@
 // Why this order (README "Deploying on Cloudflare Containers"):
 //   1. memory   — the state Worker: Durable Object migrations must exist before
 //                 the bot writes to them (friction ledger, memory, schedule firings).
-//   2. bot      — the container shim; its own preflight refuses while runs are in
-//                 flight (a rollout kills them — #250/#261).
+//   2. bot      — the container shim; its own preflight refuses over a rollout in
+//                 progress and only warns about runs in flight, which are handed
+//                 to the next generation on SIGTERM
+//                 (docs/decisions/0019-durable-run-ledger-resume-after-kill.md).
 //   3. resident — per-repo DOs; its preflight refuses while a resident has work
 //                 in flight; needs the admin bearer in the env.
 //   4. sandbox  — the per-thread exec proxy; stateless per run, no preflight.
@@ -36,7 +38,7 @@ export type WorkerName = "memory" | "bot" | "resident" | "sandbox";
 /** What a Worker is built from, beyond the import closure of its `entry`
  *  (features/release-and-deploy.md item 5). `paths`: a dir prefix (ends with
  *  `/`) or an exact file. `lockfile`: how the ONE root `package-lock.json`
- *  (npm workspaces, #496) is judged for this Worker — the dependency closure
+ *  (npm workspaces) is judged for this Worker — the dependency closure
  *  of each named workspace (`""` = the root package): production only for a
  *  wrangler bundle (a devDependency bump changes no bundle), dev included for
  *  an image whose `npm ci` installs the toolchain that builds the artifact. */
@@ -87,7 +89,7 @@ export type LiveGateSpec =
   /** The bot: `/healthz` answered by a container that is not draining AND reporting
    *  the deployed commit as its `build.commit` (src/deploy/liveGate.ts `decideLive`). */
   | { kind: "health" }
-  /** The sandbox (#569): the Worker serves the deployed commit (bearer from `bearerEnv`),
+  /** The sandbox: the Worker serves the deployed commit (bearer from `bearerEnv`),
    *  every RUNNING instance of its container application is on the application's
    *  version, and an `/exec` probe answers `echo ok` from an instance on that version
    *  (src/deploy/sandboxLiveGate.ts `decideSandboxLive`). */
@@ -249,14 +251,14 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
       lockfile: [{ workspace: "deploy/cloudflare-sandbox", includeDev: false }],
     },
     // A Worker + image pair: the upload is instant, the image rollout is not, and a
-    // thread placed in between lands on the previous image (#569). Done only when the
+    // thread placed in between lands on the previous image. Done only when the
     // Worker, the rollout and a probe agree — all three read with the bearer, so the
     // step needs it in the env.
     liveGate: { kind: "sandbox", bearerEnv: SANDBOX_BEARER_ENV, containerClass: SANDBOX_CONTAINER_CLASS },
     requiredEnv: [{ anyOf: [SANDBOX_BEARER_ENV] }],
     // Its image needs Containers too.
     capabilities: [CONTAINERS_CAPABILITY],
-    why: "per-thread exec proxy — stateless per run; done only when the Worker serves the commit, every running container is on the new image and an `echo ok` probe answers from one (#569)",
+    why: "per-thread exec proxy — stateless per run; done only when the Worker serves the commit, every running container is on the new image and an `echo ok` probe answers from one",
   },
 ];
 

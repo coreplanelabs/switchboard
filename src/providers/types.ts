@@ -50,7 +50,7 @@ export function toolResultText(content: ToolResultContent): string {
  *  tool caps its own output where it knows the shape (bash 120k, GitHub files
  *  200k, web pages 40k with paging); this is the ceiling behind all of them, so
  *  a tool that forgets — or a new one — can never fill the context in one
- *  call (#615: a 1 MB `web_fetch` result was 307k tokens and killed the run).
+ *  call (a 1 MB `web_fetch` result is ~300k tokens — enough to kill the run).
  *  Sized to the bash cap: the largest a tool legitimately returns. */
 export const MAX_TOOL_RESULT_CHARS = 120_000;
 
@@ -91,7 +91,7 @@ export interface CompletionRequest {
   maxTokens: number;
   /** model effort hint; providers apply it only where the model supports it */
   effort?: Effort;
-  /** Cancellation for a hard run stop (#101): providers pass it to their HTTP
+  /** Cancellation for a hard run stop: providers pass it to their HTTP
    *  call so an aborted run stops billing/streaming now. Absent → never aborts. */
   signal?: AbortSignal;
   /** Prompt-cache TTL for this call's breakpoints; providers that cache apply

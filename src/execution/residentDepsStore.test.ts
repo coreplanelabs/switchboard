@@ -29,7 +29,7 @@ const KEY_A = "a".repeat(64);
 const KEY_B = "b".repeat(64);
 const KEY_C = "c".repeat(64);
 
-describe("deps store layout (#555: one content-addressed entry per lockfile key)", () => {
+describe("deps store layout (one content-addressed entry per lockfile key)", () => {
   it("entries live under the store dir by key; the marker is INSIDE the entry so a rename carries it", () => {
     expect(DEPS_STORE_DIR).toBe("/workspace/deps");
     expect(depsEntryPath(KEY_A)).toBe(`/workspace/deps/${KEY_A}`);
@@ -339,7 +339,7 @@ describe("deps-harden: the install's node_modules is made owner-read-only, and a
   });
 });
 
-describe("entry backups: content-addressed snapshots of the store (item 61, #614 PR B)", () => {
+describe("entry backups: content-addressed snapshots of the store (item 61)", () => {
   it("the checkout snapshot excludes the top-level node_modules — the store entry carries it", () => {
     expect(CHECKOUT_SNAPSHOT_EXCLUDES).toEqual(["node_modules"]);
   });

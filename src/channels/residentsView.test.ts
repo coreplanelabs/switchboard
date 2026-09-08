@@ -40,7 +40,7 @@ const WARM = {
 };
 
 const DOWN = {
-  resource: "repo:coreplanelabs/switchboard",
+  resource: "repo:acme/api",
   commands: { test: "npm test" },
   defaultRef: "main",
   live: { state: "down", reason: "provision-failed at clone: fatal: could not read Username" },
@@ -103,9 +103,9 @@ describe("parseResidentsRoute", () => {
 
   it("matches a per-repo detail page by owner/name slug (lowercased)", () => {
     expect(parseResidentsRoute("/residents/jshttp/vary")).toEqual({ kind: "detail", slug: "jshttp/vary" });
-    expect(parseResidentsRoute("/residents/CorePlaneLabs/Switchboard/")).toEqual({
+    expect(parseResidentsRoute("/residents/Acme/Api/")).toEqual({
       kind: "detail",
-      slug: "coreplanelabs/switchboard",
+      slug: "acme/api",
     });
   });
 

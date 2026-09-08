@@ -6,7 +6,7 @@ import { degradedIsServiceable, isServiceable, SERVICEABLE_STATES } from "./resi
 // that leave the checkout + dep cache intact (fetch/bookkeeping failures); a
 // failure inside the rebuild lock section (checkout-update/install/build/
 // snapshot) can leave a broken cache that a fresh thread would hardlink, so
-// those stay cold until the next cycle rebuilds (review finding on #162).
+// those stay cold until the next cycle rebuilds.
 
 describe("isServiceable", () => {
   it("warm and refreshing attach regardless of reason", () => {
@@ -35,7 +35,7 @@ describe("isServiceable", () => {
       "snapshot-failed: createBackup timed out",
       "refresh-failed: something else",
       "facts-failed: no repo facts recorded despite hydration",
-      // #457: a full disk cannot take a worktree, a credential file, or even
+      // a full disk cannot take a worktree, a credential file, or even
       // /etc/gitconfig.lock — attaching would fail at git-setup every time
       "disk-full: fetch Failed to write file '/workspace/.resident/git-credentials': ENOSPC: no space left on device (/workspace: 0 KiB free)",
       "",

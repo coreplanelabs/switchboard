@@ -11,8 +11,9 @@ import {
 
 // features/slack-channel.md item 8 — deployed ≠ live: `deploy:all` exits 0 for
 // the bot only once `/healthz` is answered by the NEW container (not draining,
-// `build.commit` == the deployed commit). Incident 2026-08-30 05:12Z: the script
-// said `deployed` while the old container was still draining two runs.
+// `build.commit` == the deployed commit). Without the gate the script says
+// `deployed` while the old container is still draining runs
+// (docs/decisions/0015-deploy-order-deployed-is-not-live.md).
 
 const HEAD = "e6af1aa0b7c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9";
 const live = (commit = HEAD) => ({

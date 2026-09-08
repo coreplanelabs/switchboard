@@ -9,7 +9,7 @@ const r = (stdout: string, over: Partial<{ stderr: string; exitCode: number; tim
   ...over,
 });
 
-describe("worktreeCleanlinessScript (#356 item 6: three probes in one spawn)", () => {
+describe("worktreeCleanlinessScript (three probes in one spawn)", () => {
   const script = worktreeCleanlinessScript("/workspace/threads/t1/wt", "worker3");
   it("probes .git existence before touching git, and short-circuits when it is missing", () => {
     expect(script).toContain("test -d '/workspace/threads/t1/wt/.git'");

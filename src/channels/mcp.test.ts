@@ -341,7 +341,7 @@ describe("createMcpHandler (node:http wrapper)", () => {
     expect(d.calls[0].msg.userId).toBe("mcp:alice");
   });
 
-  // Unified with #56: an unauthorized caller is rejected from headers without
+  // An unauthorized caller is rejected from headers without
   // the body ever being read/buffered.
   it("rejects an unauthorized request without reading the body (pre-auth)", async () => {
     const d = fakeDispatch();
@@ -393,7 +393,7 @@ describe("createMcpHandler (node:http wrapper)", () => {
   });
 });
 
-// --- Registry commands as MCP tools (#157 U7: R7/R9, KTD2/KTD11/KTD17) -------
+// --- Registry commands as MCP tools ------------------------------------------
 
 const NOW = 1_700_000_000_000;
 
@@ -407,7 +407,7 @@ async function commandFixture() {
   const live = reg.create("coding · acme/live", {
     agent: "coding",
     channelId: "slack:C1",
-    userId: "slack:U1",
+    userId: "slack:UA",
     threadKey: "slack:C1:t",
     channelVisibility: "public",
   });
@@ -428,7 +428,7 @@ async function commandFixture() {
     agent: "coding",
     model: "anthropic/claude",
     channelId,
-    userId: "slack:U1",
+    userId: "slack:UA",
     threadKey: `${channelId}:${id}`,
     channelVisibility,
     startedAt: finishedAt - 10_000,
@@ -462,7 +462,7 @@ function toolJson(res: { body?: unknown }): unknown {
   return JSON.parse(text.slice(nl + 1));
 }
 
-describe("toCaller — the Caller a tool call runs as carries the mcp: Actor (plan U2)", () => {
+describe("toCaller — the Caller a tool call runs as carries the mcp: Actor", () => {
   it("the caller is the service actor mcp:<subject> with exactly what the grants lookup says for that id; nothing from the token entry rides on it — no `channel` pin, no scopes", () => {
     const auth = scoped(["runs:read"], "ops");
     const asked: string[] = [];
@@ -478,7 +478,7 @@ describe("toCaller — the Caller a tool call runs as carries the mcp: Actor (pl
     });
   });
 
-  it("a token with no grants entry holds nothing (OQ4, option a — fail-closed); the lookup decides, never the token map", () => {
+  it("a token with no grants entry holds nothing (fail-closed); the lookup decides, never the token map", () => {
     const auth = scoped(["dispatch"]);
     expect(toCaller(auth.tokens.tok, () => NO_GRANTS).actor).toEqual({
       kind: "service",

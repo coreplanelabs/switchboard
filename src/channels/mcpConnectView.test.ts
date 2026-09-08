@@ -19,9 +19,9 @@ import { createMcpConnectViewHandler, isConnectPath, parseConnectRoute } from ".
 
 const YAML =
   "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n";
-const alice: McpActor = { id: "slack:U1", orgAdmin: false, channelAdmin: true };
+const alice: McpActor = { id: "slack:UA", orgAdmin: false, channelAdmin: true };
 const ME = { kind: "user" as const, id: alice.id };
-const KEY_ID = "user:slack:U1/vanta";
+const KEY_ID = "user:slack:UA/vanta";
 
 function harness(opts: { rejectTokens?: string[]; email?: string; oauth?: FakeAuthorizationServerOptions } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "swb-connect-"));
@@ -61,8 +61,8 @@ async function serve(
   const server = createServer((req, res) => {
     // The identity index.ts would have verified: chosen by a test header.
     const identity: AccessIdentity = {
-      sub: String(req.headers["x-test-sub"] ?? "cf-justin"),
-      email: String(req.headers["x-test-email"] ?? "justin@coreplane.ai"),
+      sub: String(req.headers["x-test-sub"] ?? "cf-ada"),
+      email: String(req.headers["x-test-email"] ?? "ada@example.com"),
     };
     if (!handler(req, res, identity)) {
       res.writeHead(404);
@@ -103,7 +103,7 @@ describe("connect route parsing", () => {
 
 describe("GET /mcp/connect/<nonce>", () => {
   it("shows the form to the right person, refuses a stranger (403), an unknown nonce (404), and a used one (410); never leaks the URL's query", async () => {
-    const h = harness({ email: "justin@coreplane.ai" });
+    const h = harness({ email: "ada@example.com" });
     const { server, base } = await serve(h.handler);
     try {
       await h.addVanta("https://mcp.vanta.com/mcp?k=SECRET");
@@ -123,11 +123,7 @@ describe("GET /mcp/connect/<nonce>", () => {
       expect(await stranger.text()).toContain("belongs to another user");
       expect((await fetch(`${base}/mcp/connect/${"z".repeat(24)}`)).status).toBe(404);
       expect((await fetch(`${base}/mcp/connect/tiny`)).status).toBe(404);
-      await h.service.completeTicket(
-        "nonce-00000000000000000001",
-        { sub: "cf-justin", email: "justin@coreplane.ai" },
-        "tok",
-      );
+      await h.service.completeTicket("nonce-00000000000000000001", { sub: "cf-ada", email: "ada@example.com" }, "tok");
       expect((await fetch(`${base}${NONCE1}`)).status).toBe(410);
     } finally {
       server.close();
@@ -211,7 +207,7 @@ describe("POST /mcp/connect/<nonce>", () => {
   });
 
   it("the wrong person cannot complete a bound ticket even with the link", async () => {
-    const h = harness({ email: "justin@coreplane.ai" });
+    const h = harness({ email: "ada@example.com" });
     const { server, base } = await serve(h.handler);
     try {
       await h.addVanta();

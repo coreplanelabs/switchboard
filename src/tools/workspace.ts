@@ -30,7 +30,7 @@ export interface ToolContext {
    *  itself (an MCP round trip, an executor op) is a child of it. Absent (CLI,
    *  most unit tests) → the tool measures nothing. */
   span?: Span;
-  /** Aborted on a hard run stop (#101). Tools that run something cancellable
+  /** Aborted on a hard run stop. Tools that run something cancellable
    *  (bash → `executor.exec`) pass it through; the runner stops waiting on the
    *  tool regardless, so a tool that ignores it degrades safely. */
   signal?: AbortSignal;
@@ -41,10 +41,10 @@ export interface ToolContext {
   remainingMs?: () => number;
   /** Replace the user-facing progress checklist on the status card. */
   reportProgress?: (checklist: string) => void;
-  /** Web fetch + search capability (Area 5). Injected by the dispatcher;
+  /** Web fetch + search capability. Injected by the dispatcher;
    *  absent → web tools report themselves unavailable. */
   web?: WebCapability;
-  /** Skill store backing list_skills/use_skill (#100). Injected by the
+  /** Skill store backing list_skills/use_skill. Injected by the
    *  dispatcher; absent → the skill tools report themselves unavailable. */
   skills?: SkillStore;
   /** GitHub capability behind the `github_*` tools (features/github-tools.md):
@@ -82,7 +82,7 @@ export interface ToolContext {
    *  outside this list is a string error naming it. The tool cannot know the
    *  findings on its own, so validation runs against this list — optional:
    *  when absent (plain coding runs, unit contexts) the id-existence check is
-   *  skipped; the ship orchestrator (U7) supplies it from the parsed
+   *  skipped; the ship orchestrator supplies it from the parsed
    *  verdict's findings. */
   knownFindingIds?: string[];
 }
@@ -185,7 +185,7 @@ export const writeFileTool: RunnableTool = {
   },
 };
 
-// R14: a distilled summary of the branch's diff — per-file churn, totals, and
+// A distilled summary of the branch's diff — per-file churn, totals, and
 // risky-file flags — NOT the raw diff. The coding agent includes it in the PR
 // body; the review agent uses it to orient. The parse/render lives in the pure
 // distillDiff (src/core/diffDigest.ts); this tool only bridges the Executor.
@@ -484,9 +484,9 @@ export const updateStatusTool: RunnableTool = {
   },
 };
 
-// R16: URL reading (web_fetch) is available broadly to agents with tool loops;
+// URL reading (web_fetch) is available broadly to agents with tool loops;
 // web_search is gated to the research-capable toolset ("web").
-// #100: the read-only skill tools (list_skills/use_skill) join both the full
+// The read-only skill tools (list_skills/use_skill) join both the full
 // (coding) and readonly (review) toolsets — loading a methodology into context
 // never mutates the workspace, so it is safe for the read-only review agent.
 // submit_pr_description and submit_dispositions are full-only: only the coding

@@ -1,23 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { PRESIGNED_BACKUP_ENV, backupTransferMode } from "./residentBackupTransfer.js";
 
-// Feature: features/resident-repos.md item 61 (#614) — which way snapshot bytes
+// Feature: features/resident-repos.md item 61 — which way snapshot bytes
 // travel. `localBucket: true` (the Sandbox SDK's local-development mode) pumps
-// every archive through the Durable Object over the control RPC; live
-// 2026-09-08 02:34 UTC a 1.16 GB checkout restore exceeded the isolate's
-// memory while a `du` exec shared the connection. Presigned mode has the
-// container move the bytes itself; it needs four env values, and a missing one
-// must fail CLOSED to local mode with the gap named — never to a broken
-// resident.
+// every archive through the Durable Object over the control RPC, so a checkout
+// restore larger than the isolate's memory resets the isolate mid-transfer.
+// Presigned mode has the container move the bytes itself; it needs four env
+// values, and a missing one must fail CLOSED to local mode with the gap named
+// — never to a broken resident.
 
 const full = {
-  CLOUDFLARE_ACCOUNT_ID: "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
+  CLOUDFLARE_ACCOUNT_ID: "account-id",
   BACKUP_BUCKET_NAME: "switchboard-resident-cache",
   R2_ACCESS_KEY_ID: "k",
   R2_SECRET_ACCESS_KEY: "s",
 };
 
-describe("backupTransferMode (#614: transfers leave the DO's data path only when every presigned input is present)", () => {
+describe("backupTransferMode (transfers leave the DO's data path only when every presigned input is present)", () => {
   it("names the four inputs the SDK's requirePresignedURLSupport reads, and nothing else", () => {
     expect([...PRESIGNED_BACKUP_ENV]).toEqual([
       "CLOUDFLARE_ACCOUNT_ID",
