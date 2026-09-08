@@ -187,6 +187,7 @@ export class InMemoryRunLedger implements RunLedger {
     const taken = selectReclaim([...this.live.values()], now);
     const out: ReclaimedRun[] = [];
     for (const row of taken) {
+      const reclaimedFrom = row.phase;
       row.ownerGen = gen;
       row.leaseUntil = now + leaseMs;
       row.phase = "live";
@@ -197,12 +198,17 @@ export class InMemoryRunLedger implements RunLedger {
       const consumed = lastStep?.inboxConsumedSeq ?? 0;
       out.push({
         row,
+        reclaimedFrom,
         lastStep,
         inbox: (this.inbox.get(row.runId) ?? []).filter((i) => i.seq > consumed),
         jobs: this.jobs.get(row.runId) ?? [],
       });
     }
     return out;
+  }
+
+  async readEvents(runId: string): Promise<AppendableEvent[]> {
+    return [...(this.events.get(runId) ?? [])].sort((a, b) => a.seq - b.seq);
   }
 
   async listLive(): Promise<LiveRunRow[]> {

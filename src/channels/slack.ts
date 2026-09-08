@@ -334,14 +334,19 @@ export function createSlackApp(deps: CoreDeps) {
         }
         if (!botUserId) return;
         const id = botUserId;
+        // The sweep below asks `isLiveCard`; the ledger's answer is refreshed
+        // first so a generation that died since the last connect no longer
+        // shields its cards (run-history item 36).
+        await refreshForeignLiveCards();
         await catchUpMissedMentions({
           client: app.client,
           botUserId: id,
           windowMs: catchUp?.windowMinutes != null ? catchUp.windowMinutes * 60_000 : undefined,
           alreadyHandled: wasHandledHere,
           // Orphaned-card sweep (item 8): cards a dead process left spinning
-          // are closed as interrupted; cards this process is driving are not.
-          ownedHere: ownsLiveCard,
+          // are closed as interrupted; cards this process is driving — or that
+          // the run ledger says another live generation holds — are not.
+          isLive: isLiveCard,
           onOrphanedCard: async (card, frame) => {
             await app.client.chat.update({ channel: card.channel, ts: card.ts, ...render(frame) });
           },
@@ -937,6 +942,65 @@ const liveCards = new Set<string>();
 const liveCardKey = (channel: string, ts: string) => `${channel}:${ts}`;
 export function ownsLiveCard(channel: string, ts: string): boolean {
   return liveCards.has(liveCardKey(channel, ts));
+}
+// Cards of runs another generation still holds a current lease on (the boot
+// reclaim's `liveElsewhere`, features/run-history.md item 36): a rollout
+// overlap, or a container that kept running. The orphan sweep must not close
+// them — their runs are live, just not here.
+const foreignLiveCards = new Set<string>();
+export function markForeignLiveCards(cards: Iterable<{ channel: string; ts: string }>): void {
+  foreignLiveCards.clear();
+  for (const c of cards) foreignLiveCards.add(liveCardKey(c.channel, c.ts));
+}
+// Where the set comes from on every reconnect (the ledger's live rows under a
+// CURRENT lease held by another generation): refreshed right before each
+// catch-up scan, so an overlapping generation that later dies loses its hold
+// on its cards — the sweep then closes them like any orphan. A failed refresh
+// keeps the previous set (never widens the sweep on a blip).
+let foreignLiveCardsSource: (() => Promise<Iterable<{ channel: string; ts: string }>>) | undefined;
+export function setForeignLiveCardsSource(source: typeof foreignLiveCardsSource): void {
+  foreignLiveCardsSource = source;
+}
+export async function refreshForeignLiveCards(warn: (line: string) => void = console.warn): Promise<void> {
+  if (!foreignLiveCardsSource) return;
+  try {
+    markForeignLiveCards(await foreignLiveCardsSource());
+  } catch (err) {
+    warn(`[slack] foreign live cards not refreshed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+/** Close the cards of the runs a boot reclaim finished on the ledger with a
+ *  terminal status other than `interrupted` (features/run-history.md item 36):
+ *  their reply is in the thread, so the card says how the run ended rather
+ *  than being swept as interrupted. Interrupted runs' cards are left for the
+ *  sweep. Best-effort per card; a failure is logged and the rest go on. */
+export async function closeReclaimedCards(
+  client: { chat: { update(args: { channel: string; ts: string; text: string; blocks: object[] }): Promise<unknown> } },
+  closures: Iterable<{ status: string; agent?: string; card: { channel: string; ts: string } | null }>,
+  warn: (line: string) => void = console.warn,
+): Promise<number> {
+  const glyph: Record<string, string> = { completed: "✅", stopped_soft: "⏹", stopped_hard: "⛔", failed: "❌" };
+  let closed = 0;
+  for (const c of closures) {
+    if (!c.card || !(c.status in glyph)) continue;
+    const frame: StatusUpdate = {
+      title: `${glyph[c.status]} ${c.agent ?? "run"} · ${c.status.replace("_", " ")}`,
+      detail: "The bot restarted after this run replied; its record is complete.",
+    };
+    try {
+      await client.chat.update({ channel: c.card.channel, ts: c.card.ts, ...render(frame) });
+      closed++;
+    } catch (err) {
+      warn(
+        `[slack] reclaimed card ${c.card.channel}:${c.card.ts} not closed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return closed;
+}
+/** The sweep's question: is this card's run live anywhere we know of? */
+export function isLiveCard(channel: string, ts: string): boolean {
+  return ownsLiveCard(channel, ts) || foreignLiveCards.has(liveCardKey(channel, ts));
 }
 
 /** Status frames render as Block Kit: context headline + rich_text activity.

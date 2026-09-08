@@ -139,6 +139,9 @@ describe("InMemoryRunLedger", () => {
     expect(expired.row).toMatchObject({ ownerGen: "g2", phase: "live", leaseUntil: 40_000 + LEASE_MS });
     expect(expired.lastStep?.step).toBe(1);
     expect(expired.inbox.map((i) => i.message.text)).toEqual(["second"]);
+    // Where each row came from: an expired lease was `live`, the drained one `handoff`.
+    expect(expired.reclaimedFrom).toBe("live");
+    expect(taken.find((r) => r.row.runId === "handed")!.reclaimedFrom).toBe("handoff");
     // The old generation is fenced everywhere, transcript included; the new one owns it.
     expect(await ledger.step("expired", "g1", stepRecord(2, 4), [])).toEqual({ ok: false, reason: "fenced" });
     expect(await ledger.seed("expired", "g1", [])).toEqual({ ok: false, reason: "fenced" });

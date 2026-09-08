@@ -7,6 +7,7 @@ import { lastThreadDirectives, parseDirectives, type RequestDirectives, type Thr
 import { mergeTools, runAgent } from "../runner.js";
 import { TOOLSETS } from "../tools/workspace.js";
 import type { LedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
+import type { AppendableEvent, LiveRunRow } from "./runLedger/types.js";
 import { makeWebCapability } from "../tools/web.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
@@ -1078,7 +1079,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
           ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
         ),
-        seed: messages,
+        seed: { messages, budgetMs: agent.maxMinutes * 60_000 },
         // A stop asked of another container (`/runs/stop` there) reaches this
         // run through its heartbeat and is honored like a local one.
         onStop: (mode) => void run.control.requestStop(mode),
@@ -1529,7 +1530,10 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // `live → finishing` on the ledger BEFORE anything reaches the thread
       // (item 35): the double-answer protection once runs resume — a
       // generation that lost the run is refused here and must not reply.
-      // Phase 2 records the refusal; the resume phase acts on it.
+      // Phase 2 records the refusal; the resume phase acts on it. The status
+      // the record will carry rides on the row first, so a reclaim of a
+      // `finishing` row (replied, died before `finish`) closes it truthfully.
+      ledgerRun?.setState({ finalStatus: stopped ? `stopped_${stopped}` : "completed" });
       await ledgerRun?.finishing();
       await card.done({
         title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"),
@@ -1546,15 +1550,18 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
       // stays the model's own words — the PR facts live in the pr_description
       // event and the [pr-post] log line.
       await io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer);
+      // Run history (#157 KTD4): the record built at finish goes to the store
+      // now that the reply has landed (a reply that threw lands in the outer
+      // catch and is written as `failed` there) — and BEFORE the workspace
+      // release below: the record does not depend on it, and on the ledger the
+      // finish is what frees the thread, which must not wait ~90 s on a sandbox
+      // teardown (features/run-history.md item 36). Fire-and-forget; the
+      // writer's `pending()` is incremented here, before the outer finally's
+      // `activeRuns--`, so the shutdown drain never observes "0 runs, 0 writes".
+      writeHistory();
     } finally {
       await releaseWorkspace();
     }
-    // Run history (#157 KTD4): the record built at finish goes to the store now
-    // that the reply has landed (a reply that threw lands in the outer catch and
-    // is written as `failed` there). Fire-and-forget; the writer's `pending()`
-    // is incremented here, BEFORE the outer finally's `activeRuns--`, so the
-    // shutdown drain never observes "0 runs, 0 writes" between the two.
-    writeHistory();
 
     // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has
     // landed, distill this run into memory records: fire-and-forget (tracked
@@ -2061,6 +2068,10 @@ async function runShipBranch(
           ? "✅"
           : "⚠️";
   try {
+    ledgerRun?.setState({
+      finalStatus:
+        outcome.status === "stopped_soft" || outcome.status === "stopped_hard" ? outcome.status : "completed",
+    });
     await ledgerRun?.finishing(); // before anything reaches the thread (item 35)
     await card.done({
       title: title(icon),
@@ -2322,6 +2333,50 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
     finishedAt,
     status: "interrupted",
     diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated }),
+  });
+}
+
+/**
+ * The record a booting generation closes a reclaimed run with (features/
+ * run-history.md item 36): the ledger row's identity and meta, the events it
+ * appended while it ran (the registry that published them died with the old
+ * process, so the ledger's copy is the whole stream — `eventCount` is its
+ * last `seq`), the terminal status the reclaim decided, and `finishedAt` =
+ * the reclaim's clock (nobody knows when the old process died). No label: the
+ * row carries none.
+ */
+export function reclaimedRunRecord(input: {
+  row: LiveRunRow;
+  events: AppendableEvent[];
+  status: RunStatus;
+  finishedAt: number;
+}): RunRecord {
+  const { row, events, status, finishedAt } = input;
+  const snap: RunSnapshot = {
+    events,
+    finished: true,
+    startedAt: row.startedAt,
+    finishedAt,
+    eventCount: events.reduce((max, e) => Math.max(max, e.seq), 0),
+    truncated: false,
+  };
+  return assembleRunRecord({
+    run: { id: row.runId },
+    snap,
+    agent: row.meta.agent,
+    model: row.meta.model,
+    msg: {
+      channelId: row.meta.channelId,
+      userId: row.meta.userId,
+      threadKey: row.threadKey,
+      sourceUrl: row.meta.sourceUrl,
+      userName: row.meta.userName,
+    },
+    channelVisibility: row.meta.channelVisibility ?? "unknown",
+    repo: row.meta.repo,
+    finishedAt,
+    status,
+    diagnosis: analyzeRunFriction(events, { finished: status !== "interrupted", truncated: false }),
   });
 }
 

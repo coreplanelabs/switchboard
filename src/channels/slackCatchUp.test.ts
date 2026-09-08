@@ -413,7 +413,7 @@ describe("findOrphanedCards (pure selection of the bot's own frozen live cards)"
     ...over,
   });
   const threads = (...replies: SlackHistoryMessage[]) => new Map([[parent.ts, [parent, ...replies]]]);
-  const base = { channel: "C1", botUserId: BOT, cutoffMs: cutoff, ownedHere: () => false };
+  const base = { channel: "C1", botUserId: BOT, cutoffMs: cutoff, isLive: () => false };
 
   it("picks a bot card whose text starts with a live glyph (spinner or 👀 setup), inside the window", () => {
     for (const glyph of ["◐", "◓", "◑", "◒", "👀"]) {
@@ -438,7 +438,7 @@ describe("findOrphanedCards (pure selection of the bot's own frozen live cards)"
     const out = findOrphanedCards({
       ...base,
       threads: threads(mine),
-      ownedHere: (ch, t) => ch === "C1" && t === mine.ts,
+      isLive: (ch, t) => ch === "C1" && t === mine.ts,
     });
     expect(out).toEqual([]);
   });
@@ -544,7 +544,7 @@ describe("catchUpMissedMentions — orphaned-card sweep", () => {
       now: NOW,
       alreadyHandled: () => false,
       onMissed,
-      ownedHere: () => false,
+      isLive: () => false,
       onOrphanedCard,
       log,
     });
@@ -594,7 +594,7 @@ describe("catchUpMissedMentions — orphaned-card sweep", () => {
       now: NOW,
       alreadyHandled: () => false,
       onMissed: vi.fn(),
-      ownedHere: () => false,
+      isLive: () => false,
       onOrphanedCard,
       log,
     });

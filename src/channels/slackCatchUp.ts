@@ -218,15 +218,17 @@ export interface FindOrphanedInput {
   cutoffMs: number;
   /** Full replies (parent first) per thread, by parent ts. */
   threads: Map<string, SlackHistoryMessage[]>;
-  /** Does THIS process currently own the live card (channel, ts)? Those are running, not orphaned. */
-  ownedHere: (channel: string, ts: string) => boolean;
+  /** Is the card's run still live anywhere this process knows of — driven here,
+   *  or leased on the run ledger by another generation (features/run-history.md
+   *  item 36)? Those are running, not orphaned. */
+  isLive: (channel: string, ts: string) => boolean;
 }
 
 /** Pure selection: the bot's own cards still wearing a live glyph, inside the
- *  window, not owned by this process. Bot-authored only — a human can type a
+ *  window, whose run is live nowhere this process knows of. Bot-authored only — a human can type a
  *  spinner too. */
 export function findOrphanedCards(input: FindOrphanedInput): OrphanedCard[] {
-  const { channel, botUserId, cutoffMs, ownedHere } = input;
+  const { channel, botUserId, cutoffMs, isLive } = input;
   const out: OrphanedCard[] = [];
   for (const thread of input.threads.values()) {
     for (const m of thread) {
@@ -234,7 +236,7 @@ export function findOrphanedCards(input: FindOrphanedInput): OrphanedCard[] {
       if (!isFromBot(m, botUserId)) continue;
       const text = m.text ?? "";
       if (!LIVE_CARD_PREFIXES.some((p) => text.startsWith(p))) continue;
-      if (ownedHere(channel, m.ts)) continue;
+      if (isLive(channel, m.ts)) continue;
       out.push({ channel, ts: m.ts, text });
     }
   }
@@ -289,11 +291,11 @@ export interface CatchUpOptions {
   alreadyHandled: (channel: string, ts: string) => boolean;
   /** Called once per missed message, oldest first, awaited; a rejection is logged and skipped. */
   onMissed: (m: MissedMessage) => void | Promise<void>;
-  /** Orphaned-card sweep — both must be given to turn it on. `ownedHere`: does
+  /** Orphaned-card sweep — both must be given to turn it on. `isLive`: does
    *  this process own the live card (channel, ts)? `onOrphanedCard`: close the
    *  card with the given frame (the adapter's `chat.update`); awaited, a
    *  rejection is logged and the sweep continues. */
-  ownedHere?: (channel: string, ts: string) => boolean;
+  isLive?: (channel: string, ts: string) => boolean;
   onOrphanedCard?: (card: OrphanedCard, frame: StatusUpdate) => void | Promise<void>;
   now?: number;
   windowMs?: number;
@@ -325,8 +327,7 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<Catch
   const lookbackMs = opts.parentLookbackMs ?? DEFAULT_PARENT_LOOKBACK_MS;
   const log = opts.log ?? ((line) => console.log(line));
   const cutoffMs = now - windowMs;
-  const sweep =
-    opts.ownedHere && opts.onOrphanedCard ? { ownedHere: opts.ownedHere, close: opts.onOrphanedCard } : undefined;
+  const sweep = opts.isLive && opts.onOrphanedCard ? { isLive: opts.isLive, close: opts.onOrphanedCard } : undefined;
   const orphanCutoffMs = now - (opts.orphanWindowMs ?? ORPHAN_CARD_WINDOW_MS);
   // Threads are fetched once for both jobs: active since the EARLIER cutoff.
   const threadCutoffMs = sweep ? Math.min(cutoffMs, orphanCutoffMs) : cutoffMs;
@@ -369,7 +370,7 @@ export async function catchUpMissedMentions(opts: CatchUpOptions): Promise<Catch
         alreadyHandled: opts.alreadyHandled,
       });
       const orphaned = sweep
-        ? findOrphanedCards({ channel, botUserId, cutoffMs: orphanCutoffMs, threads, ownedHere: sweep.ownedHere })
+        ? findOrphanedCards({ channel, botUserId, cutoffMs: orphanCutoffMs, threads, isLive: sweep.isLive })
         : [];
       return { found, orphaned };
     } catch (err) {

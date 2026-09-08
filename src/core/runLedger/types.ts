@@ -130,7 +130,12 @@ export type ClaimResult =
 export type FenceResult = { ok: true } | { ok: false; reason: "fenced" | "unknown-run" };
 
 export interface ReclaimedRun {
+  /** The row as the new generation now holds it (`phase: live`, its lease). */
   row: LiveRunRow;
+  /** The phase the row was in when taken: `live` (an expired lease — the
+   *  owner died), `handoff` (the owner drained), or `finishing` (the owner
+   *  had replied and died before `finish` — the run is closed, never resumed). */
+  reclaimedFrom: LivePhase;
   lastStep: StepRecord | null;
   inbox: InboxItem[];
   jobs: RunJob[];

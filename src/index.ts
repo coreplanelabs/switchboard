@@ -42,6 +42,9 @@ import { createRunsService } from "./core/runsService.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
 import { createLedgerWriteThrough, mintGeneration } from "./core/runLedger/writeThrough.js";
+import { reclaimAtBoot } from "./core/boot.js";
+import { closeReclaimedCards, markForeignLiveCards, setForeignLiveCardsSource } from "./channels/slack.js";
+import { handleAdminCrash } from "./channels/adminCrash.js";
 import { DRAIN_DEADLINE_MS } from "./core/drain.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
@@ -453,6 +456,15 @@ async function main() {
         mcp(req, res);
         return;
       }
+      // Kill injection for the durable-runs receipts (run-history item 36):
+      // a `deploy:write` bearer SIGKILLs this process after a 202.
+      if (path === "/admin/crash") {
+        handleAdminCrash(req, res, {
+          tokens: process.env.SWITCHBOARD_INGRESS_TOKENS,
+          generation: runLedger ? generation : undefined,
+        });
+        return;
+      }
       // The web app's hashed static assets (js/css). Code only — no data, no
       // tokens — and referenced by pages a capability-token viewer can load,
       // so served without the in-process Access gate (the edge policy still
@@ -589,6 +601,41 @@ async function main() {
   // the deploy preflight), /ingress and /mcp (the cron identity's scheduled
   // runs) have nothing to do with Slack, and a slow or failing Slack handshake
   // used to hold every one of them dark.
+  //
+  // But the ledger reclaim comes BEFORE the socket (run-history item 36, plan
+  // D7): every run the previous generation left is taken over and closed with
+  // a record built from the ledger's events, and the rows another generation
+  // still holds are marked so the reconnect handler's orphan sweep leaves their
+  // cards alone. Awaited: the sweep decides ownership inside the connect, so
+  // this is the one safe ordering point. Never throws; a ledger that cannot be
+  // reached is a warning and the bot boots as before.
+  if (ledgerClient && runLedger) {
+    const reclaimed = await reclaimAtBoot({
+      ledger: ledgerClient,
+      gen: generation,
+      log: (l) => console.log(l),
+      warn: (w) => console.warn(w),
+    });
+    markForeignLiveCards(reclaimed.liveElsewhere.flatMap((r) => (r.card ? [r.card] : [])));
+    // …and on every later reconnect, the ledger's current answer: rows under a
+    // live lease held by another generation. An expired lease is a dead
+    // generation — its cards are orphans again, its rows the next boot's.
+    const client = ledgerClient;
+    setForeignLiveCardsSource(async () =>
+      (await client.listLive())
+        .filter((r) => r.ownerGen !== generation && r.leaseUntil > Date.now())
+        .flatMap((r) => (r.card ? [r.card] : [])),
+    );
+    // A reclaimed run that had replied keeps a truthful card: closed with how
+    // it ended, before the socket opens (the sweep would otherwise mark it
+    // interrupted). Interrupted runs' cards are the sweep's.
+    const closedCards = await closeReclaimedCards(
+      app.client,
+      reclaimed.closed.map((c) => ({ status: c.status, agent: c.agent, card: c.card })),
+      (w) => console.warn(w),
+    );
+    if (closedCards > 0) console.log(`[reclaim] closed ${closedCards} card(s) of runs that had replied`);
+  }
   await app.start();
 
   console.log(

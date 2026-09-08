@@ -8,6 +8,12 @@ import {
   classifyMessage,
   fetchDocuments,
   fetchImages,
+  isLiveCard,
+  closeReclaimedCards,
+  markForeignLiveCards,
+  ownsLiveCard,
+  refreshForeignLiveCards,
+  setForeignLiveCardsSource,
   render,
   resetSlackNameCaches,
   SlackIO,
@@ -21,6 +27,80 @@ import {
 // run) and image-attachment ingestion within budgets.
 
 const BOT = "U0BOT";
+
+// Feature: features/run-history.md item 36 — the orphan sweep's question is
+// "live anywhere we know of", not "driven here": a card the ledger says another
+// generation still holds is not an orphan.
+describe("live cards", () => {
+  afterEach(() => markForeignLiveCards([]));
+
+  it("a card marked live on the ledger elsewhere is live to the sweep though this process does not drive it; re-marking replaces the set", () => {
+    expect(ownsLiveCard("C1", "1.1")).toBe(false);
+    expect(isLiveCard("C1", "1.1")).toBe(false);
+    markForeignLiveCards([{ channel: "C1", ts: "1.1" }]);
+    expect(ownsLiveCard("C1", "1.1")).toBe(false); // not ours
+    expect(isLiveCard("C1", "1.1")).toBe(true); // but live
+    expect(isLiveCard("C1", "1.2")).toBe(false);
+    markForeignLiveCards([{ channel: "C2", ts: "9.9" }]);
+    expect(isLiveCard("C1", "1.1")).toBe(false); // the boot's list replaces, never accumulates
+    expect(isLiveCard("C2", "9.9")).toBe(true);
+  });
+
+  it("the refresh asks the source (the ledger's live rows) each time, so a generation that died since loses its hold; a failed refresh keeps the previous set and warns", async () => {
+    let rows = [{ channel: "C1", ts: "1.1" }];
+    let fail = false;
+    setForeignLiveCardsSource(async () => {
+      if (fail) throw new Error("HTTP 503");
+      return rows;
+    });
+    const warnings: string[] = [];
+    await refreshForeignLiveCards((w) => warnings.push(w));
+    expect(isLiveCard("C1", "1.1")).toBe(true);
+    rows = []; // the other generation's lease expired
+    await refreshForeignLiveCards((w) => warnings.push(w));
+    expect(isLiveCard("C1", "1.1")).toBe(false);
+    rows = [{ channel: "C3", ts: "3.3" }];
+    await refreshForeignLiveCards((w) => warnings.push(w));
+    fail = true;
+    await refreshForeignLiveCards((w) => warnings.push(w));
+    expect(isLiveCard("C3", "3.3")).toBe(true); // kept: a blip never widens the sweep
+    expect(warnings).toEqual(["[slack] foreign live cards not refreshed: HTTP 503"]);
+    setForeignLiveCardsSource(undefined);
+    await refreshForeignLiveCards((w) => warnings.push(w)); // no source: a no-op
+    expect(isLiveCard("C3", "3.3")).toBe(true);
+  });
+
+  it("closeReclaimedCards closes the cards of runs that had replied with how they ended, skips interrupted runs and runs without a card, and isolates a failed edit", async () => {
+    const updates: { channel: string; ts: string; text: string }[] = [];
+    const client = {
+      chat: {
+        update: async (args: { channel: string; ts: string; text: string; blocks: object[] }) => {
+          if (args.ts === "fail.1") throw new Error("message_not_found");
+          updates.push({ channel: args.channel, ts: args.ts, text: args.text });
+          return {};
+        },
+      },
+    };
+    const warnings: string[] = [];
+    const closed = await closeReclaimedCards(
+      client,
+      [
+        { status: "completed", agent: "review", card: { channel: "C1", ts: "a.1" } },
+        { status: "stopped_soft", agent: "coding", card: { channel: "C1", ts: "b.1" } },
+        { status: "interrupted", agent: "general", card: { channel: "C1", ts: "c.1" } },
+        { status: "completed", agent: "general", card: null },
+        { status: "failed", card: { channel: "C1", ts: "fail.1" } },
+      ],
+      (w) => warnings.push(w),
+    );
+    expect(closed).toBe(2);
+    expect(updates.map((u) => [u.ts, u.text])).toEqual([
+      ["a.1", "✅ review · completed"],
+      ["b.1", "⏹ coding · stopped soft"],
+    ]);
+    expect(warnings).toEqual(["[slack] reclaimed card C1:fail.1 not closed: message_not_found"]);
+  });
+});
 
 describe("classifyMessage (trigger gating)", () => {
   it("skips bot messages — no bot-loop", () => {

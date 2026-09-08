@@ -200,8 +200,20 @@ describe("run ledger — steps, events, inbox, state (items 30–31)", () => {
         .map((r) => r.seq),
     );
     expect(seqs).toEqual([1, 2, 3]);
-    // Live runs are not finished runs: the history routes answer as for an unknown id.
+    // Live runs are not finished runs: the history routes answer as for an unknown id —
+    // the ledger's own read is how a reclaim gets at them (item 36); an unknown run is empty.
     expect((await post("/runs/events", { storeKey: key, id: "r1" })).data.events).toBeNull();
+    const liveEvents = (await post("/runs/live-events", { storeKey: key, runId: "r1" })).data.events as Array<{
+      seq: number;
+      type: string;
+    }>;
+    expect(liveEvents.map((e) => [e.seq, e.type])).toEqual([
+      [1, "tool_call"],
+      [2, "tool_call"],
+      [3, "tool_call"],
+    ]);
+    expect((await post("/runs/live-events", { storeKey: key, runId: "nope" })).data.events).toEqual([]);
+    expect((await post("/runs/live-events", { storeKey: key, runId: "bad id" })).status).toBe(400);
     const huge = { type: "tool_result", tool: "bash", summary: "x", output: "y".repeat(70_000), seq: 4 };
     expect((await post("/runs/append", { storeKey: key, runId: "r1", gen: "g1", events: [huge] })).status).toBe(400);
     expect(await post("/runs/step", { storeKey: key, runId: "r1", gen: "g1", record: step() })).toEqual({

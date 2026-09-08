@@ -17,6 +17,7 @@
 //   POST /runs/finish           {storeKey, runId, gen, record}           → {ok, stored} | 409 fenced
 //   POST /runs/reclaim          {storeKey, gen, now, leaseMs}            → {runs: ReclaimedRun[]}
 //   POST /runs/live             {storeKey}                               → {runs: LiveRunRow[]}
+//   POST /runs/live-events      {storeKey, runId}                        → {events: AppendableEvent[]}
 //   POST /runs/transcript/owner {runId, gen}                             → {ok}
 //   POST /runs/transcript/write {runId, gen, rows, attachments}          → {ok} | 409 fenced
 //   POST /runs/transcript/read  {runId}                                  → {rows, attachments}
@@ -262,6 +263,12 @@ export class WorkerRunLedger implements RunLedger {
   async listLive(): Promise<LiveRunRow[]> {
     const r = await this.post("/runs/live", { storeKey: this.opts.storeKey });
     return Array.isArray(r.data.runs) ? (r.data.runs as LiveRunRow[]) : [];
+  }
+
+  async readEvents(runId: string): Promise<AppendableEvent[]> {
+    this.checkIds(runId);
+    const r = await this.post("/runs/live-events", { storeKey: this.opts.storeKey, runId });
+    return Array.isArray(r.data.events) ? (r.data.events as AppendableEvent[]) : [];
   }
 
   async readTranscript(runId: string): Promise<AssembledTranscript> {
