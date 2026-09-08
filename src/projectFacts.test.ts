@@ -13,32 +13,31 @@ const read = (p: string) => readFileSync(new URL(p, `file://${root}`), "utf8");
 const facts = {
   name: "switchboard",
   displayName: "Switchboard",
-  organization: "coreplanelabs",
-  repository: "https://github.com/coreplanelabs/switchboard",
-  docs: "https://docs.switchboard.coreplanelabs.dev",
-  contact: "dev@coreplane.ai",
-  steward: { name: "Coreplane Labs", url: "https://coreplane.ai" },
+  organization: "acme",
+  repository: "https://github.com/acme/switchboard",
+  docs: "https://docs.switchboard.example.com",
+  contact: "dev@example.com",
+  steward: { name: "Acme Labs", url: "https://acme.example" },
   commands: {},
 };
 
 const goodPkg = JSON.stringify({
   name: "switchboard",
-  homepage: "https://github.com/coreplanelabs/switchboard#readme",
-  repository: { url: "git+https://github.com/coreplanelabs/switchboard.git" },
-  bugs: { url: "https://github.com/coreplanelabs/switchboard/issues" },
+  homepage: "https://github.com/acme/switchboard#readme",
+  repository: { url: "git+https://github.com/acme/switchboard.git" },
+  bugs: { url: "https://github.com/acme/switchboard/issues" },
 });
 
 describe("factsProblems", () => {
   it("is silent when every copy agrees", () => {
     const files = {
       "package.json": goodPkg,
-      "SECURITY.md": "email <dev@coreplane.ai> or the Security tab",
-      "docs/README.md":
-        "published at https://docs.switchboard.coreplanelabs.dev/ and https://github.com/coreplanelabs/switchboard",
+      "SECURITY.md": "email <dev@example.com> or the Security tab",
+      "docs/README.md": "published at https://docs.switchboard.example.com/ and https://github.com/acme/switchboard",
       "deploy/cloudflare-docs/wrangler.jsonc":
-        '"routes": [{ "pattern": "docs.switchboard.coreplanelabs.dev", "custom_domain": true }]',
-      NOTICE: "Copyright 2026 Coreplane Labs",
-      "GOVERNANCE.md": "stewarded by Coreplane Labs",
+        '"routes": [{ "pattern": "docs.switchboard.example.com", "custom_domain": true }]',
+      NOTICE: "Copyright 2026 Acme Labs",
+      "GOVERNANCE.md": "stewarded by Acme Labs",
     };
     expect(factsProblems(facts, files)).toEqual([]);
   });
@@ -52,28 +51,28 @@ describe("factsProblems", () => {
     };
     const what = factsProblems(facts, files).map((p) => `${p.file}: ${p.what}`);
     expect(what).toEqual([
-      'SECURITY.md: contact address "security@old.example" — project.json says dev@coreplane.ai',
-      'docs/README.md: docs URL "https://docs.switchboard.old.example" — project.json says https://docs.switchboard.coreplanelabs.dev',
-      'docs/README.md: repository "github.com/someone-else/switchboard" — project.json says https://github.com/coreplanelabs/switchboard',
-      'deploy/cloudflare-docs/wrangler.jsonc: route pattern "docs.old.example" — project.json says docs.switchboard.coreplanelabs.dev',
+      'SECURITY.md: contact address "security@old.example" — project.json says dev@example.com',
+      'docs/README.md: docs URL "https://docs.switchboard.old.example" — project.json says https://docs.switchboard.example.com',
+      'docs/README.md: repository "github.com/someone-else/switchboard" — project.json says https://github.com/acme/switchboard',
+      'deploy/cloudflare-docs/wrangler.jsonc: route pattern "docs.old.example" — project.json says docs.switchboard.example.com',
     ]);
   });
 
   it("leaves a third party's docs host alone, and flags one under the organization's name", () => {
     const files = {
       "README.md": "see https://docs.github.com/en/actions and https://docs.anthropic.com/",
-      "SUPPORT.md": "old: https://docs.coreplanelabs.dev/switchboard",
+      "SUPPORT.md": "old: https://docs.acme.example/switchboard",
     };
     const what = factsProblems(facts, files).map((p) => `${p.file}: ${p.what}`);
     expect(what).toEqual([
-      'SUPPORT.md: docs URL "https://docs.coreplanelabs.dev" — project.json says https://docs.switchboard.coreplanelabs.dev',
+      'SUPPORT.md: docs URL "https://docs.acme.example" — project.json says https://docs.switchboard.example.com',
     ]);
   });
 
   it("leaves other repositories under the org alone, and checks package.json's four fields", () => {
     const files = {
       "package.json": JSON.stringify({ name: "other", homepage: "x", repository: { url: "y" }, bugs: { url: "z" } }),
-      "README.md": "see https://github.com/coreplanelabs/infrastructure",
+      "README.md": "see https://github.com/acme/infrastructure",
     };
     const problems = factsProblems(facts, files);
     expect(problems.filter((p) => p.file === "README.md")).toEqual([]);

@@ -12,9 +12,10 @@ import {
 
 // The image/SDK gate's decision, and the repository's own Workers against it.
 // A Worker built on the cloudflare/sandbox image drives its container through
-// the @cloudflare/sandbox SDK of the same version; #503 moved the cold
-// sandbox Worker's SDK from 0.3 to 0.12 while its Dockerfile stayed at 0.3.7,
-// and nothing failed until this check existed.
+// the @cloudflare/sandbox SDK of the same version. Nothing else fails when a
+// dependency bump moves a Worker's SDK pin (0.3 → 0.12) while its Dockerfile
+// stays at the old tag — the mismatch surfaces only at run time, so the pin must
+// equal the tag and this check is what enforces it.
 
 describe("check-sandbox-pair imageTag", () => {
   it("reads the tag from a docker.io-qualified FROM line", () => {
@@ -53,7 +54,7 @@ describe("check-sandbox-pair pairMismatches", () => {
     ).toEqual([]);
   });
 
-  it("fails a pin that differs from the tag (the #503 shape)", () => {
+  it("fails a pin that differs from the tag (an SDK bump without the image)", () => {
     const problems = pairMismatches([{ label: "cold", imageTag: "0.3.7", sdkPin: "0.12.9" }]);
     expect(problems).toHaveLength(1);
     expect(problems[0].label).toBe("cold");
@@ -76,9 +77,9 @@ describe("check-sandbox-pair pairMismatches", () => {
   });
 });
 
-// #553: the pin and the lockfile agreed on 0.3.7 while the main checkout's
-// nested node_modules held 0.12.9 — wrangler bundles what is INSTALLED, so a
-// deploy from that tree would have shipped an SDK the image did not speak.
+// The pin and the lockfile can agree on 0.3.7 while a stale nested
+// node_modules holds 0.12.9 — wrangler bundles what is INSTALLED, so a deploy
+// from that tree would ship an SDK the image does not speak.
 describe("check-sandbox-pair installMismatches", () => {
   it("passes when the installed SDK equals the pin, and when nothing is installed yet (a fresh clone)", () => {
     expect(

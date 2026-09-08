@@ -228,7 +228,7 @@ describe("resolveRefs", () => {
 
 describe("fix mode — explicitSegment / explicitSpan", () => {
   const parts = [
-    "reviewed-head guard (#194)",
+    "reviewed-head guard (fail closed)",
     "classifyHeadMove — what a moved head means",
     "review agent",
     "review post-step",
@@ -247,8 +247,8 @@ describe("fix mode — explicitSegment / explicitSpan", () => {
   });
 
   const nodes = [
-    { parts: ["reviewed-head guard (#194)"], leaf: false },
-    { parts: ["reviewed-head guard (#194)", "the PR head is unknown, so the run never starts"], leaf: true },
+    { parts: ["reviewed-head guard (fail closed)"], leaf: false },
+    { parts: ["reviewed-head guard (fail closed)", "the PR head is unknown, so the run never starts"], leaf: true },
     { parts: ["escapes a `delimiter` echo"], leaf: true },
     { parts: ["review agent"], leaf: false },
     { parts: ["review post-step"], leaf: false },

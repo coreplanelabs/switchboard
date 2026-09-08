@@ -2,7 +2,7 @@ import { AGENTS } from "./agents/registry.js";
 import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "./effort.js";
 
 // Per-request directives are inline tokens at the start (or anywhere) in the
-// message:  "@switchboard agent:review model:openai/gpt-5 effort:low look at PR #42"
+// message:  "@switchboard agent:review model:openai/gpt-5 effort:low look at the failing test"
 // Recognized keys: agent, model, effort. Unknown keys are left in the text untouched.
 
 export interface RequestDirectives {

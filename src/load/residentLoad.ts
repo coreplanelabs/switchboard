@@ -1,9 +1,9 @@
 // `load:resident`: N synthetic threads straight at the resident Worker through
 // the bot's own client, each running a review- or coding-shaped tool mix on a
-// loop for the hold period, then releasing. It answers the per-repo questions
-// of the plan (docs/plans/2026-09-07-001-feat-fifty-concurrent-runs-plan.md,
-// Phase 0): attach latency under load, exec latency under contended CPU, and
-// which named refusals appear at which N. Guards (D9): the target must report
+// loop for the hold period, then releasing. It answers the per-repo capacity
+// questions that size a resident (docs/explanation/capacity-and-sizing.md):
+// attach latency under load, exec latency under contended CPU, and which named
+// refusals appear at which N. Guards: the target must report
 // nothing in flight, more than RESIDENT_LOAD_MAX_THREADS needs an explicit
 // override, and the bindings the run created are purged on the way out.
 

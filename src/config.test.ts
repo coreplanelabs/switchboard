@@ -238,10 +238,10 @@ describe("permission gates", () => {
 });
 
 // Feature: features/resident-repos.md — per-repo access is open unless the repo
-// is listed under `restrict.repos` (KD7): then only actors whose `repos` grant
+// is listed under `restrict.repos`: then only actors whose `repos` grant
 // covers it (or `all`) may use it.
 describe("per-repo access (canUseRepo)", () => {
-  it("no restrict.repos → every repo is open (KD7 open-when-absent)", async () => {
+  it("no restrict.repos → every repo is open (open-when-absent)", async () => {
     const s = store(); // YAML_FIXTURE restricts no repo
     expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(true);
   });
@@ -279,7 +279,7 @@ describe("per-repo access (canUseRepo)", () => {
   });
 });
 
-// Feature: features/resident-repos.md — repo management is FAIL-CLOSED (KTD9):
+// Feature: features/resident-repos.md — repo management is FAIL-CLOSED:
 // `repo:write` is never a baseline, because onboarding provisions billable
 // always-on compute and binds GitHub credentials.
 describe("repo management gate (canManageRepos)", () => {
@@ -392,7 +392,7 @@ describe("grantsFor — the grants the policy table decides on", () => {
 });
 
 // Feature: features/routing-and-config.md behavior 9 — per-scope custom
-// instructions (#107 phase 2): stored on Scope, capped, advisory only.
+// instructions: stored on Scope, capped, advisory only.
 describe("custom instructions (Scope.instructions)", () => {
   const withUser = (id: string, instructions: string) =>
     YAML_FIXTURE.replace("users:\n", `users:\n  "${id}":\n    instructions: "${instructions}"\n`);
@@ -455,8 +455,8 @@ describe("custom instructions (Scope.instructions)", () => {
   });
 });
 
-// Feature: features/run-history.md — the `runHistory` section (KTD14).
-describe("grants config — the one shape (plan U2, R7/R8/KTD6)", () => {
+// Feature: features/authorization.md — the `grants` block parses fail-closed.
+describe("grants config — the one shape", () => {
   const load = (yaml: string, options?: ConstructorParameters<typeof ConfigStore>[2]) => {
     const dir = mkdtempSync(join(tmpdir(), "swb-config-grants-"));
     const cfg = join(dir, "config.yaml");
@@ -493,11 +493,11 @@ describe("grants config — the one shape (plan U2, R7/R8/KTD6)", () => {
   });
 
   it("a misspelled `all`, an unknown axis, and a non-mapping block fail the load naming the id and field", () => {
-    expect(() => load(withGrants(`  "slack:U1":\n    actions: ALL\n`))).toThrow(
-      /grants\["slack:U1"\]\.actions: expected "all" or a list/,
+    expect(() => load(withGrants(`  "slack:UA":\n    actions: ALL\n`))).toThrow(
+      /grants\["slack:UA"\]\.actions: expected "all" or a list/,
     );
-    expect(() => load(withGrants(`  "slack:U1":\n    agents: [coding]\n`))).toThrow(
-      /grants\["slack:U1"\]: unknown field agents/,
+    expect(() => load(withGrants(`  "slack:UA":\n    agents: [coding]\n`))).toThrow(
+      /grants\["slack:UA"\]: unknown field agents/,
     );
     expect(() => load(YAML_FIXTURE.replace(/grants:[\s\S]*$/, "grants: [a]\n"))).toThrow(/grants must be a mapping/);
   });
@@ -540,6 +540,7 @@ describe("restrict — closed unless granted (authorization.md item 11)", () => 
   });
 });
 
+// Feature: features/run-history.md — the `runHistory` section.
 describe("runHistory config", () => {
   const withRunHistory = (block: string, extra = "") => `${YAML_FIXTURE}\n${extra}\nrunHistory:\n${block}\n`;
   const load = (yaml: string) => {
