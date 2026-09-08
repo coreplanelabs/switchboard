@@ -1067,6 +1067,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
         shell,
         service,
         index: registry,
+        now, // the seeds carry `serverNow`: two renders compared byte-for-byte need one clock
         retention: opts.retention === undefined ? { retentionDays: 30 } : opts.retention,
         ...(opts.devBypass ? { devBypass: opts.devBypass } : {}),
         ...(opts.audit ? { audit: opts.audit } : {}),

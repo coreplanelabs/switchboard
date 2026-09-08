@@ -11,7 +11,7 @@
   "src/core/codingPrPostStep.ts": 1,
   "src/core/commandRegistry.ts": 1,
   "src/core/costs.ts": 2,
-  "src/core/dispatcher.ts": 23,
+  "src/core/dispatcher.ts": 20,
   "src/core/memory/index.ts": 1,
   "src/core/readingDiff.ts": 1,
   "src/core/reviewRound.ts": 1,

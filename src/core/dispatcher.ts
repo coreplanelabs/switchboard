@@ -97,6 +97,7 @@ import {
   REPLAY_EVERYTHING,
 } from "./runRegistry.js";
 import { inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
+import { createCardShell, type CardShell } from "./statusCardFrame.js";
 import { coalesceStatus } from "./statusCoalescer.js";
 import type {
   ChannelIO,
@@ -443,6 +444,7 @@ export async function dispatch(
   // becomes the run card, so the outer catch closes ONLY a card that setup
   // left open — a run failure is closed (with its checklist) by the run loop.
   let setupCard: StatusHandle | undefined;
+  let setupShell: CardShell | undefined;
   // Thread admission (features/thread-admission.md): the slot this dispatch
   // holds on its thread while its run is in flight, claimed after the agent
   // gate below and released in the outer finally — where whatever follow-ups
@@ -690,20 +692,21 @@ export async function dispatch(
     // nothing for that whole stretch. The same handle becomes the run's status
     // card below; a refusal or setup failure closes it with a reason instead of
     // leaving a spinner behind.
-    let label = `*${agent.name}* on \`${resolved.modelRef}\``;
     // A resumed run's clock is the original start (its ledger row's), so the
     // card's elapsed time spans the whole run, not the resume.
-    const startedAt = resume?.row.startedAt ?? Date.now();
-    let frame = 0;
-    const title = (icon?: string) =>
-      `${icon ?? SPINNER_GLYPHS[frame++ % SPINNER_GLYPHS.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
+    const startedAt = resume?.row.startedAt ?? systemClock();
+    // One builder for every paint of this card (statusCardFrame.ts): the ack,
+    // the spinner frames, the closes before the run starts, the done frame.
+    const shell = createCardShell({
+      label: `*${agent.name}* on \`${resolved.modelRef}\``,
+      startedAt,
+      now: systemClock,
+    });
     // Coalesced: the run below refreshes it on every event, the channel sees at
     // most one edit per STATUS_UPDATE_MIN_MS, always the newest frame.
-    const card = coalesceStatus(
-      await io.status({ title: `👀 ${label} · preparing workspace…` }),
-      deps.statusUpdateMinMs ?? STATUS_UPDATE_MIN_MS,
-    );
+    const card = coalesceStatus(await io.status(shell.ack()), deps.statusUpdateMinMs ?? STATUS_UPDATE_MIN_MS);
     setupCard = card;
+    setupShell = shell;
 
     // The repo/ref resolution started above (before the ack) lands here; the
     // gate below runs against it exactly as before.
@@ -722,7 +725,7 @@ export async function dispatch(
     if (needsRepo && !repoCtx.repo && repoCtx.rejectedRepo) {
       const slug = repoCtx.rejectedRepo;
       console.log(`[dispatch] ${msg.threadKey} not started: repo not onboarded (${slug})`);
-      await card.done({ title: `📦 ${label} · not started (repo not onboarded)` });
+      await card.done(shell.close({ kind: "not_started", icon: "📦", reason: "repo not onboarded" }));
       // `repo onboard` is admin-gated (canManageRepos, fail-closed): only tell
       // someone to run it if they can; everyone else is pointed at who can.
       const onboardHint = deps.config.canManageRepos(msg.userId)
@@ -747,7 +750,7 @@ export async function dispatch(
       console.log(
         `[dispatch] ${msg.threadKey} not started: repo could not be verified (${slug}: resident registry unreachable)`,
       );
-      await card.done({ title: `📦 ${label} · not started (repo could not be verified)` });
+      await card.done(shell.close({ kind: "not_started", icon: "📦", reason: "repo could not be verified" }));
       await io.reply(
         `⚠️ I couldn't verify that \`${slug}\` is an onboarded repo — the resident registry didn't answer — so I did not start a *${agent.name}* run rather than guess which repo you meant. ` +
           `Try again in a minute, or name the repository by URL (https://github.com/${slug}) to run in a cold per-thread sandbox.`,
@@ -759,7 +762,7 @@ export async function dispatch(
     // the repo is unlisted; a configured allowlist refuses BY NAME — a
     // refused user must see why, never get a silent per-thread fallback.
     if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(msg.userId, repoCtx.repo)) {
-      await card.done({ title: `🚫 ${label} · not started (repo access)` });
+      await card.done(shell.close({ kind: "not_started", icon: "🚫", reason: "repo access" }));
       await io.reply(
         `🚫 You're not on the allowlist for the \`${repoCtx.repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`,
       );
@@ -778,7 +781,7 @@ export async function dispatch(
       await runShipBranch(deps, msg, io, {
         agent,
         modelRef: resolved.modelRef,
-        label,
+        label: shell.label,
         startedAt,
         card,
         directives,
@@ -807,7 +810,7 @@ export async function dispatch(
     const preflight = checkPrHeadPreflight({ agent, requestText: directives.text, repoCtx });
     if (!preflight.ok) {
       console.log(`[review] ${msg.threadKey} not started: PR head unknown (${preflight.where})`);
-      await card.done({ title: `🔀 ${label} · not started (PR head unknown)` });
+      await card.done(shell.close({ kind: "not_started", icon: "🔀", reason: "PR head unknown" }));
       await io.reply(preflight.reply);
       return;
     }
@@ -836,7 +839,7 @@ export async function dispatch(
       // user's answer in the thread (e.g. "on main") carries the ref on the
       // next message and re-attach binds it.
       if (err instanceof ResidentNeedsRefError) {
-        await card.done({ title: `🌿 ${label} · not started (which branch?)` });
+        await card.done(shell.close({ kind: "not_started", icon: "🌿", reason: "which branch?" }));
         await io.reply(
           `🌿 Which branch of \`${repoCtx.repo}\` should this thread work on? ` +
             `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
@@ -873,7 +876,7 @@ export async function dispatch(
         verifiedAtAttach = true;
       } else if (guard.outcome === "refused") {
         if (executor.release) await executor.release("always").catch(() => {});
-        await card.done({ title: `🔀 ${label} · not started (branch moved)` });
+        await card.done(shell.close({ kind: "not_started", icon: "🔀", reason: "branch moved" }));
         await io.reply(guard.reply);
         return;
       }
@@ -990,10 +993,10 @@ export async function dispatch(
     // cached prefix and thinking blocks are bound to it.
     const system = resume ? resume.row.system : composeSystem({ sha: reviewHead, verified: verifiedAtAttach });
 
-    if (note) label = `${label} · ${oneLine(note)}`;
+    if (note) shell.setLabel(`${shell.label} · ${oneLine(note)}`);
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
     setupCard = undefined; // from here the run loop owns the card's close
-    card.update({ title: title() }); // the ack card becomes the run card
+    card.update(shell.live()); // the ack card becomes the run card
     let lastActivityAt = Date.now();
     // Live run view (Area 2 / #43): register the run and mint its capability
     // link AFTER the card exists (so nothing awaits between create() and the
@@ -1101,6 +1104,7 @@ export async function dispatch(
       });
     const liveUrl = liveViewLink(run.id, run.token);
     const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
+    shell.setLink(liveLink);
     // The thread's live slot now names its run: a follow-up's ack/refusal can
     // link the run page (thread-admission item 1), and the finally reads this
     // control to tell a stopped run from one that ended by itself (item 4).
@@ -1225,19 +1229,14 @@ export async function dispatch(
     // The tool whose call has no result yet — the title says the wait is the
     // tool's (`running bash (Ns)`), not the model's (`thinking …`), #531.
     let inFlightTool: string | undefined;
-    const currentFrame = () => {
-      const detail = [checklist, lastActivity].filter(Boolean).join("\n");
-      // The shutdown notice rides on the LIVE frame only: the closed card is
-      // built from title()/finalDetail() and never mentions the restart.
-      return {
-        title:
-          title() +
-          quietSuffix(Date.now() - lastActivityAt, inFlightTool) +
-          (shutdownNotice ? ` · ${shutdownNotice}` : ""),
-        detail: detail || undefined,
-        link: liveLink,
-      };
-    };
+    // The shutdown notice rides on the LIVE frame only: the closed card is
+    // built from `shell.close` and never mentions the restart.
+    const currentFrame = () =>
+      shell.live({
+        suffix: quietSuffix(Date.now() - lastActivityAt, inFlightTool),
+        notice: shutdownNotice,
+        detail: [checklist, lastActivity],
+      });
     // The closed card keeps the run link (the run page outlives the run and
     // shows the final answer) and the agent's checklist; only the transient
     // activity trace is dropped. On a clean ✅ finish every item is marked ✓ —
@@ -1481,7 +1480,7 @@ export async function dispatch(
           notify: {
             reply: (text) => io.reply(text),
             headMoved: (suffix) => {
-              label = `${label} · ${suffix}`;
+              shell.setLabel(`${shell.label} · ${suffix}`);
               card.update(currentFrame());
             },
           },
@@ -1582,7 +1581,7 @@ export async function dispatch(
       publishText("answer", answer, undefined, rawAnswer);
     } catch (err) {
       runFailed = true;
-      await card.done({ title: title("❌"), detail: finalDetail(), link: liveLink });
+      await card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail() }));
       await releaseWorkspace();
       throw err;
     } finally {
@@ -1666,11 +1665,13 @@ export async function dispatch(
         console.log(`[run] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
         return;
       }
-      await card.done({
-        title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"),
-        detail: stopped ? finalDetail() : checkedOffDetail(),
-        link: liveLink,
-      });
+      await card.done(
+        shell.close({
+          kind: "done",
+          icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
+          detail: stopped ? finalDetail() : checkedOffDetail(),
+        }),
+      );
       // A review verdict carries its run link (as standard Markdown — each
       // adapter renders its own dialect): the verdict message is what gets
       // scanned in the review loop, and the card above scrolls away. Projection
@@ -1758,7 +1759,10 @@ export async function dispatch(
     // loop with its checklist, and must not be relabeled here.
     // Item 62: the error may carry remote text (a resident reason, a GitHub
     // body) — one redacted line on the card, a redacted reply in the thread.
-    await setupCard?.done({ title: `❌ setup failed · ${oneLine(redactAndCap(errMsg, 120))}` }).catch(() => {});
+    if (setupCard && setupShell)
+      await setupCard
+        .done(setupShell.close({ kind: "setup_failed", reason: oneLine(redactAndCap(errMsg, 120)) }))
+        .catch(() => {});
     await io.reply(redactSecrets(stripAnsi(errorReply(err)))).catch(() => {});
     // A run that threw still has its record (status `failed`, built at finish);
     // a setup failure before the run started has none — nothing to write. A run
@@ -1858,6 +1862,8 @@ async function runShipBranch(
   ctx: ShipBranchContext,
 ): Promise<void> {
   const { agent, card, directives, history, repoCtx, label } = ctx;
+  // The same one-builder card shell as the main path, on the same label and clock.
+  const shell = createCardShell({ label, startedAt: ctx.startedAt, now: systemClock });
   const pre = await shipPreflight({
     channelId: msg.channelId,
     threadKey: msg.threadKey,
@@ -1871,7 +1877,7 @@ async function runShipBranch(
   });
   if (!pre.ok) {
     console.log(`[ship] ${msg.threadKey} not started: ${pre.where}`);
-    await card.done({ title: `🚫 ${label} · ${pre.card}` });
+    await card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card }));
     await io.reply(pre.reply);
     return;
   }
@@ -1997,11 +2003,8 @@ async function runShipBranch(
     }
   }
 
-  // The card shell — the main path's frame vocabulary (spinner title,
-  // checklist + one-line activity trace, heartbeat, shutdown notice).
-  let frame = 0;
-  const title = (icon?: string) =>
-    `${icon ?? SPINNER_GLYPHS[frame++ % SPINNER_GLYPHS.length]} ${label} · ${Math.round((Date.now() - ctx.startedAt) / 1000)}s`;
+  // The card's frames — the main path's vocabulary (spinner title, checklist +
+  // one-line activity trace, heartbeat, shutdown notice) through `shell`.
   const liveUrl = liveViewLink(run.id, run.token);
   const liveLink = liveUrl ? { url: liveUrl, label: "Live run" } : undefined;
   ctx.live.runId = run.id;
@@ -2013,14 +2016,7 @@ async function runShipBranch(
   // `lastActivity` — so a child's update_status (which replaces the checklist
   // outright) can never erase which round the pipeline is in.
   let roundHeader: string | undefined;
-  const currentFrame = () => {
-    const detail = [roundHeader, checklist, lastActivity].filter(Boolean).join("\n");
-    return {
-      title: title() + (shutdownNotice ? ` · ${shutdownNotice}` : ""),
-      detail: detail || undefined,
-      link: liveLink,
-    };
-  };
+  const currentFrame = () => shell.live({ notice: shutdownNotice, detail: [roundHeader, checklist, lastActivity] });
   const finalDetail = () => checklist;
   const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
   const onEvent = (e: RunEvent) => {
@@ -2085,7 +2081,8 @@ async function runShipBranch(
   console.log(
     `[run] ${msg.threadKey} user=${msg.userId} agent=ship model=${ctx.modelRef} entry=${entry.resume ? `resume ${entry.repo}#${entry.resume.pr}` : `round0 ${entry.branch}`}`,
   );
-  card.update({ title: title() });
+  card.update(shell.live());
+  shell.setLink(liveLink);
   const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
   let outcome: ShipOutcome | undefined;
   let writeRecordAfterReply: ((failedAfterReply?: boolean) => void) | undefined;
@@ -2137,7 +2134,7 @@ async function runShipBranch(
     // BEFORE finish() below (a publish on a finished run is a no-op).
     publishText("answer", outcome.reply);
   } catch (err) {
-    await card.done({ title: title("❌"), detail: finalDetail(), link: liveLink }).catch(() => {});
+    await card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail() })).catch(() => {});
     throw err; // the outer catch replies; the finally below persisted `failed`
   } finally {
     clearInterval(heartbeat);
@@ -2210,11 +2207,13 @@ async function runShipBranch(
       writeRecordAfterReply = undefined; // the record is the other generation's
       return;
     }
-    await card.done({
-      title: title(icon),
-      detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
-      link: liveLink,
-    });
+    await card.done(
+      shell.close({
+        kind: "done",
+        icon,
+        detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
+      }),
+    );
     await io.reply(outcome.reply);
   } catch (err) {
     // The report never reached the thread: the record must say `failed`,
@@ -2869,17 +2868,6 @@ export function composeRunLabel(input: RunLabelInput): string {
 /** Prefixes the core stamps on status text — adapters use this to filter their
  *  own status noise out of history. */
 export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
-
-/** The live card's rotating glyph (one step per heartbeat/event frame). */
-const SPINNER_GLYPHS = ["◐", "◓", "◑", "◒"];
-
-/** Prefixes that mean "this card's run is still in flight": the spinner, and
- *  the 👀 setup card posted before the run loop owns it. A card that still
- *  starts with one of these after its process is gone is an orphan — the
- *  Slack adapter's reconnect sweep closes it as interrupted (features/
- *  slack-channel.md item 8). Kept next to the glyphs it derives from so the
- *  two cannot drift apart. */
-export const LIVE_CARD_PREFIXES = [...SPINNER_GLYPHS, "👀"];
 
 /** The notice the drain (src/index.ts) sets on SIGTERM from a deploy rollout.
  *  Exported so the Slack adapter's orphan sweep can strip it from a frozen

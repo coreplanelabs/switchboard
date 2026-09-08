@@ -1,4 +1,5 @@
-import { DEPLOY_RESTART_NOTICE, LIVE_CARD_PREFIXES } from "../core/dispatcher.js";
+import { DEPLOY_RESTART_NOTICE } from "../core/dispatcher.js";
+import { LIVE_CARD_PREFIXES } from "../core/statusCardFrame.js";
 import { MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
 import { mapLimit } from "../core/mapLimit.js";
 import type { StatusUpdate } from "../core/types.js";
