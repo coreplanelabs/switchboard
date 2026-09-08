@@ -9,6 +9,8 @@ workspaces
 
 # Lockfiles and generated files: owned by their generators, never hand-formatted
 package-lock.json
+# Rendered by `deploy init` from each dir's wrangler.template.jsonc (which IS formatted)
+deploy/*/wrangler.jsonc
 web/auto-imports.d.ts
 web/components.d.ts
 src/core/__snapshots__

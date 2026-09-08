@@ -29,7 +29,9 @@ import { execFile } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const DEFAULT_BASE_URL = "https://switchboard.coreplanelabs.dev";
+/** The env var naming this Worker's origin. `deploy all` sets it from the deployment profile; the
+ *  preflight has no address of its own (deploy/profile.json is the only place the fleet's hostnames live). */
+export const BASE_URL_ENV = "SWITCHBOARD_BASE_URL";
 /** The Containers application `wrangler deploy` creates for `SwitchboardServer` in wrangler.jsonc. */
 export const APP_NAME = "switchboard-switchboardserver";
 /** Application states in which no rollout is in progress. Anything else —
@@ -218,7 +220,13 @@ export function decide({ health, apps }, { force = false } = {}) {
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const force = argv.includes("--force") || env.SWITCHBOARD_DEPLOY_FORCE === "1";
-  const baseUrl = env.SWITCHBOARD_BASE_URL || DEFAULT_BASE_URL;
+  const baseUrl = env[BASE_URL_ENV];
+  if (!baseUrl) {
+    console.error(
+      `[bot-preflight] ${BASE_URL_ENV} is not set — the bot's origin comes from the deployment profile; deploy through \`npm run cli -- deploy all\` (it sets it), or set it to https://<bot hostname> to run this alone`,
+    );
+    return 2;
+  }
   const [health, apps] = await Promise.all([fetchHealth(baseUrl), listContainerApps()]);
   const d = decide({ health, apps }, { force });
   (d.allow && !d.forced && d.warnings.length === 0 ? console.log : console.error)(`[bot-preflight] ${d.message}`);

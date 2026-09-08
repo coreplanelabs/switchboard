@@ -1,12 +1,9 @@
-// GENERATED — do not edit. `npm run deploy:gen` (the CLI's `deploy init`) renders this file from
-// wrangler.template.jsonc in this directory and the deployment profile (deploy/profile.json).
-// Change the template or the profile and re-render; `npm run deploy:check` fails on a hand edit.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "switchboard-docs",
+  "name": "{{script}}",
   "compatibility_date": "2026-08-01",
   // The installation's Cloudflare account (deploy/profile.json `account`) — every Worker deploys to it.
-  "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
+  "account_id": "{{account}}",
   // ASSETS ONLY: no `main`, so there is no Worker script, no Durable Object,
   // and no container. Nothing here can be mid-rollout or draining, which is
   // exactly why CI may deploy it on every docs change, while the four runtime
@@ -25,6 +22,6 @@
   // The Access application for this hostname is created in the Zero Trust
   // dashboard by hand (wrangler's token has no Access scope).
   "workers_dev": false,
-  "routes": [{ "pattern": "docs.switchboard.coreplanelabs.dev", "custom_domain": true }],
+  "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
   "observability": { "enabled": true }
 }

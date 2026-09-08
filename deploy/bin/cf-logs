@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Query historical Workers Logs for a coreplane-infra Worker (the "what did
-# the sandbox/resident/bot Worker log at 15:26?" question `wrangler tail`
-# can't answer — tail is live-only, and the wrangler OAuth login has no
+# Query historical Workers Logs for one of the installation's Workers (the
+# "what did the sandbox/resident/bot Worker log at 15:26?" question `wrangler
+# tail` can't answer — tail is live-only, and the wrangler OAuth login has no
 # observability scope). Needs an API token with Account → Workers
 # Observability: Read (+ Workers Scripts: Read) in CLOUDFLARE_OBS_TOKEN —
-# deliberately NOT CLOUDFLARE_API_TOKEN, which wrangler would pick up.
+# deliberately NOT CLOUDFLARE_API_TOKEN, which wrangler would pick up. The
+# account is the deployment profile's (deploy/profile.json, or the file
+# SWITCHBOARD_DEPLOY_PROFILE names).
 #
 #   deploy/bin/cf-logs <service> [minutes-back=60] [grep-pattern]
 #   deploy/bin/cf-logs switchboard-sandbox 240 'exit|OOM|error'
 set -euo pipefail
-ACCOUNT=3c7b28f23cc93f09e77bb0a9ffcb7e6f   # coreplane-infra
+PROFILE=${SWITCHBOARD_DEPLOY_PROFILE:-"$(dirname "$0")/../profile.json"}
+ACCOUNT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).account' "$PROFILE")
 SERVICE=${1:?service (switchboard | switchboard-sandbox | switchboard-resident | switchboard-memory)}
 MINUTES=${2:-60}
 PATTERN=${3:-}

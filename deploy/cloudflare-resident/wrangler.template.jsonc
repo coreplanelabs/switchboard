@@ -1,26 +1,23 @@
-// GENERATED — do not edit. `npm run deploy:gen` (the CLI's `deploy init`) renders this file from
-// wrangler.template.jsonc in this directory and the deployment profile (deploy/profile.json).
-// Change the template or the profile and re-render; `npm run deploy:check` fails on a hand edit.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "switchboard-resident",
+  "name": "{{script}}",
   "main": "worker.ts",
   "compatibility_date": "2026-08-01",
   // @cloudflare/sandbox@next needs Node builtins (same as the SDK's own examples).
   "compatibility_flags": ["nodejs_compat"],
   // The installation's Cloudflare account (deploy/profile.json `account`) — every Worker deploys to it.
-  "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
+  "account_id": "{{account}}",
   // Reachable only with the RESIDENT_ADMIN_TOKEN / RESIDENT_OPERATOR_TOKEN
   // bearer secrets (plus an unauthenticated GET /healthz wake ping). Custom
   // domain on the installation's zone so the bot config has a stable URL.
   "workers_dev": false,
-  "routes": [{ "pattern": "switchboard-resident.coreplanelabs.dev", "custom_domain": true }],
+  "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
   "observability": { "enabled": true },
   "vars": {
     // The state Worker (deploy/cloudflare-memory/): where scheduled() records
     // each resident-watchdog firing (#244/#307). Public URL — a var, not a
     // secret; the bearer is the MEMORY_TOKEN secret (deploy/secrets.manifest.json).
-    "STATE_WORKER_URL": "https://switchboard-memory.coreplanelabs.dev"
+    "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}"
   },
   "containers": [
     {
@@ -86,7 +83,7 @@
   // CLOUDFLARE_R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /
   // BACKUP_BUCKET_NAME secrets. The bucket is named after this Worker's script
   // (`<script>-cache`), so two installations on one account never share one.
-  "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "switchboard-resident-cache" }],
+  "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "{{script}}-cache" }],
   // Watchdog cadence (KTD4): every 10 minutes, strictly BELOW the container
   // sleep window (SLEEP_AFTER = "20m" in worker.ts) so a healthy resident is
   // re-warmed before the platform can ever sleep it. Invariant: watchdog/alarm

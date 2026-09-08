@@ -7,6 +7,7 @@ import type { LoadedProfile } from "../deploy/profile.js";
 import {
   computeAffectedOnHost,
   hasNodeModules,
+  hostDeployFiles,
   loadProfileOnHost,
   runBotRestart,
   runDeployPlan,
@@ -217,6 +218,7 @@ export function buildCoreCommands(
       checkout: { hasNodeModules },
       affected: wiring.affected ?? computeAffectedOnHost,
       profile: wiring.profile ?? loadProfileOnHost,
+      files: hostDeployFiles,
     },
     env: { bootstrap: bootstrapOnHost },
   };

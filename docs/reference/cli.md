@@ -101,6 +101,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 | `deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why. | every surface |
 | `deploy all [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]` | Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an `echo ok` probe — until the new containers are live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy. | CLI only |
 | `deploy restart [--only <bot>] [--force] [--wait-max <integer>] [--poll <integer>]` | Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): refused while runs are in flight unless --force; done once /healthz answers with a later startedAt. | CLI only |
+| `deploy init [--check]` | Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the `deploy:check` gate). | CLI only |
 
 ### `env`
 

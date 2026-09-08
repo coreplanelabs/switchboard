@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { decide, readToken } from "./preflight.mjs";
+import { BASE_URL_ENV, decide, main, readToken } from "./preflight.mjs";
+
+describe("resident deploy preflight — main()", () => {
+  it(`refuses (exit 2) before reading anything when ${BASE_URL_ENV} is not set — the Worker's origin is the deployment profile's, handed over by deploy all`, async () => {
+    const errors = [];
+    const original = console.error;
+    console.error = (line) => errors.push(String(line));
+    try {
+      expect(await main([], { RESIDENT_READ_TOKEN: "r" })).toBe(2);
+    } finally {
+      console.error = original;
+    }
+    expect(errors.join("\n")).toContain(`${BASE_URL_ENV} is not set`);
+    expect(errors.join("\n")).toContain("deploy all");
+  });
+});
 
 const payload = (residents) => ({
   ok: true,

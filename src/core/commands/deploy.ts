@@ -12,6 +12,7 @@ import {
 import type { LoadedProfile } from "../../deploy/profile.js";
 import { planRestart, type RestartPlan } from "../../deploy/restart.js";
 import { formatDeployResults, type DeployRunResult, type RestartRunResult } from "../../deploy/run.js";
+import { renderWorkerConfigs, workerConfigTargets } from "../../deploy/wranglerTemplate.js";
 import {
   CommandError,
   commandDefiner,
@@ -44,6 +45,11 @@ export interface DeployCommandDeps {
     affected(opts: { base?: string }): Promise<AffectedReport>;
     /** The installation the plan is for (src/deploy/profile.ts): `deploy/profile.json`, else the example — which `deploy all` refuses. Throws (→ `unavailable`) when the file is invalid. */
     profile(): Promise<LoadedProfile>;
+    /** `deploy init`'s file access, repo-relative: the templates and rendered configs under deploy/ (src/deploy/run.ts `hostDeployFiles`). */
+    files: {
+      read(path: string): Promise<string | undefined>;
+      write(path: string, text: string): Promise<void>;
+    };
   };
 }
 
@@ -252,10 +258,73 @@ export const deployRestart = defineCommand({
   },
 });
 
+const initOptions = z.object({
+  check: flag
+    .optional()
+    .describe(
+      "compare only: report each rendered file that differs from the one on disk and fail when any does (the `deploy:check` gate); nothing is written",
+    ),
+});
+
+/** What `deploy init` found for one rendered file. `stale`/`missing` only under --check (without it, the file is written). */
+type InitStatus = "unchanged" | "written" | "stale" | "missing";
+interface InitOutput {
+  profile: { origin: LoadedProfile["origin"]; path: string };
+  files: { path: string; status: InitStatus }[];
+}
+
+export const deployInit = defineCommand({
+  id: "deploy.init",
+  options: initOptions,
+  action: "deploy:write",
+  effect: "write",
+  surfaces: { chat: false, mcp: false, http: false },
+  describe:
+    "Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the `deploy:check` gate).",
+  render: (output) => {
+    const o = output as unknown as InitOutput;
+    const from = `${o.profile.path}${o.profile.origin === "example" ? " (the EXAMPLE profile)" : ""}`;
+    return [`Worker configs from ${from}:`, ...o.files.map((f) => `  ${f.status.padEnd(9)} ${f.path}`)].join("\n");
+  },
+  handler: async ({ options, deps }) => {
+    const loaded = await loadProfile(deps);
+    const templates = new Map<string, string | undefined>();
+    for (const t of workerConfigTargets(loaded.profile))
+      templates.set(t.templatePath, await deps.deploy.files.read(t.templatePath));
+    const rendered = renderWorkerConfigs(loaded.profile, (path) => templates.get(path));
+    if (!rendered.ok)
+      throw new CommandError(
+        "unavailable",
+        `cannot render the Worker configs —\n  - ${rendered.problems.join("\n  - ")}`,
+      );
+    const files: InitOutput["files"] = [];
+    for (const f of rendered.files) {
+      const current = await deps.deploy.files.read(f.path);
+      let status: InitStatus;
+      if (current === f.text) status = "unchanged";
+      else if (options.check) status = current === undefined ? "missing" : "stale";
+      else {
+        await deps.deploy.files.write(f.path, f.text);
+        status = "written";
+      }
+      files.push({ path: f.path, status });
+    }
+    const drift = files.filter((f) => f.status === "stale" || f.status === "missing");
+    if (drift.length > 0)
+      throw new CommandError(
+        "conflict",
+        `Worker configs are not the render of their templates — ${drift.map((f) => `${f.path} (${f.status})`).join(", ")}; run \`npm run deploy:gen\` and commit the result`,
+      );
+    const output: InitOutput = { profile: { origin: loaded.origin, path: loaded.path }, files };
+    return output as unknown as JsonValue;
+  },
+});
+
 export const deployCommands: readonly CommandDef<DeployCommandDeps>[] = [
   deployPlan,
   deployAll,
   deployRestart,
+  deployInit,
 ] as unknown as CommandDef<DeployCommandDeps>[];
 
 export function registerDeployCommands<D extends DeployCommandDeps>(registry: CommandRegistry<D>): void {

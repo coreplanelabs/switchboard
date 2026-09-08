@@ -1,18 +1,15 @@
-// GENERATED — do not edit. `npm run deploy:gen` (the CLI's `deploy init`) renders this file from
-// wrangler.template.jsonc in this directory and the deployment profile (deploy/profile.json).
-// Change the template or the profile and re-render; `npm run deploy:check` fails on a hand edit.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "switchboard-memory",
+  "name": "{{script}}",
   "main": "worker.ts",
   "compatibility_date": "2026-08-01",
   // The installation's Cloudflare account (deploy/profile.json `account`) — every Worker deploys to it.
-  "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
+  "account_id": "{{account}}",
   // Reachable only with the MEMORY_TOKEN bearer secret (plus an unauthenticated
   // GET /healthz wake ping). Custom domain on the installation's zone so the
   // bot config (memory.worker.baseUrl) has a stable URL.
   "workers_dev": false,
-  "routes": [{ "pattern": "switchboard-memory.coreplanelabs.dev", "custom_domain": true }],
+  "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
   "observability": { "enabled": true },
   "durable_objects": {
     // One MemoryDO per scopeKey (the DO name IS the scope key, e.g.

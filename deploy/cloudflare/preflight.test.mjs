@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { APP_NAME, catchUpWarnings, decide, wranglerFailureText } from "./preflight.mjs";
+import { APP_NAME, BASE_URL_ENV, catchUpWarnings, decide, main, wranglerFailureText } from "./preflight.mjs";
+
+describe("bot deploy preflight — main()", () => {
+  it(`refuses (exit 2) before reading anything when ${BASE_URL_ENV} is not set — the Worker's origin is the deployment profile's, handed over by deploy all`, async () => {
+    const errors = [];
+    const original = console.error;
+    console.error = (line) => errors.push(String(line));
+    try {
+      expect(await main([], {})).toBe(2);
+    } finally {
+      console.error = original;
+    }
+    expect(errors.join("\n")).toContain(`${BASE_URL_ENV} is not set`);
+    expect(errors.join("\n")).toContain("deploy all");
+  });
+});
 
 describe("bot deploy preflight — wranglerFailureText()", () => {
   it("keeps wrangler's own [ERROR] lines from STDOUT (where wrangler prints them), ANSI stripped, npm noise dropped, with the exit code", () => {

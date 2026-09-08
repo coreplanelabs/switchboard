@@ -191,6 +191,23 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "write",
+    "id": "deploy.init",
+    "options": [
+      {
+        "name": "check",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
     "action": "deploy:read",
     "args": [],
     "effect": "read",

@@ -16,6 +16,7 @@ import {
   workersFor,
   type CheckoutProbe,
   type DeployOptions,
+  type DeployPlan,
 } from "./plan.js";
 import { EXAMPLE_ACCOUNT, profileUrls, type LoadedProfile } from "./profile.js";
 import { TEST_PROFILE } from "./testing/profile.js";
@@ -65,8 +66,19 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
     expect(byName.memory.preflight).toBeUndefined();
     expect(byName.sandbox.preflight).toBeUndefined();
-    expect(byName.bot.preflight).toEqual({ forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: BOT_HEALTH_URL });
-    expect(byName.resident.preflight).toEqual({ forceEnv: "RESIDENT_DEPLOY_FORCE" });
+    expect(byName.bot.preflight).toEqual({
+      forceEnv: "SWITCHBOARD_DEPLOY_FORCE",
+      baseUrlEnv: "SWITCHBOARD_BASE_URL",
+      healthUrl: BOT_HEALTH_URL,
+    });
+    expect(byName.resident.preflight).toEqual({ forceEnv: "RESIDENT_DEPLOY_FORCE", baseUrlEnv: "RESIDENT_BASE_URL" });
+    // Each Worker knows its own origin — what its preflight is pointed at.
+    expect(WORKERS.map((w) => w.baseUrl)).toEqual([
+      "https://switchboard-memory.example.test",
+      "https://switchboard.example.test",
+      "https://switchboard-resident.example.test",
+      "https://switchboard-sandbox.example.test",
+    ]);
     // The same three the resident's preflight.mjs reads (TOKEN_ENV_VARS): CI holds the read token and nothing more.
     expect(byName.resident.requiredEnv).toEqual([
       { anyOf: ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"] },
@@ -105,7 +117,12 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     expect(other.find((w) => w.name === "bot")).toMatchObject({
       script: "sb",
       healthUrl: "https://sb.example.test/healthz",
-      preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", healthUrl: "https://sb.example.test/healthz" },
+      baseUrl: "https://sb.example.test",
+      preflight: {
+        forceEnv: "SWITCHBOARD_DEPLOY_FORCE",
+        baseUrlEnv: "SWITCHBOARD_BASE_URL",
+        healthUrl: "https://sb.example.test/healthz",
+      },
       liveGate: { kind: "health", healthUrl: "https://sb.example.test/healthz" },
     });
     // The sandbox's container application follows its script name: another script, another app.
@@ -222,17 +239,42 @@ describe("planDeploy", () => {
     expect(plan({ only: ["bot", "resident"], skip: ["resident"] }).steps.map((s) => s.name)).toEqual(["bot"]);
   });
 
-  it("each step spawns its dir's deploy script with only CLOUDFLARE_ACCOUNT_ID removed (the API token is CI's credential; the account is asserted, not assumed) and never a force env unless --force", () => {
-    for (const s of plan().steps) {
+  it("each step spawns its dir's deploy script with only CLOUDFLARE_ACCOUNT_ID removed (the API token is CI's credential; the account is asserted, not assumed); a preflighted step gets its origin from the profile, and a force env only under --force", () => {
+    const byName = (p: DeployPlan) => Object.fromEntries(p.steps.map((s) => [s.name, s]));
+    const plain = byName(plan());
+    for (const s of Object.values(plain)) {
       expect(s.command).toEqual(["npm", "run", "deploy"]);
       expect(s.unsetEnv).toEqual(["CLOUDFLARE_ACCOUNT_ID"]);
-      expect(s.setEnv).toEqual({});
     }
-    const forced = plan({ force: true });
-    expect(forced.steps.find((s) => s.name === "bot")!.setEnv).toEqual({ SWITCHBOARD_DEPLOY_FORCE: "1" });
-    expect(forced.steps.find((s) => s.name === "resident")!.setEnv).toEqual({ RESIDENT_DEPLOY_FORCE: "1" });
-    expect(forced.steps.find((s) => s.name === "memory")!.setEnv).toEqual({});
-    expect(forced.warnings).toEqual([
+    // The preflights have no address of their own: deploy all tells each one where its Worker is.
+    expect(plain.bot.setEnv).toEqual({ SWITCHBOARD_BASE_URL: "https://switchboard.example.test" });
+    expect(plain.resident.setEnv).toEqual({ RESIDENT_BASE_URL: "https://switchboard-resident.example.test" });
+    expect(plain.memory.setEnv).toEqual({});
+    expect(plain.sandbox.setEnv).toEqual({});
+    // Unguarded steps whose /healthz is public are woken once after the deploy; the bot's live gate
+    // polls instead, and the sandbox's /healthz needs a bearer.
+    expect(plain.memory.wakeUrl).toBe("https://switchboard-memory.example.test/healthz");
+    expect(plain.resident.wakeUrl).toBe("https://switchboard-resident.example.test/healthz");
+    expect(plain.bot).not.toHaveProperty("wakeUrl");
+    expect(plain.sandbox).not.toHaveProperty("wakeUrl");
+    const forcedPlan = plan({ force: true });
+    const forced = byName(forcedPlan);
+    expect(forced.bot.setEnv).toEqual({
+      SWITCHBOARD_BASE_URL: "https://switchboard.example.test",
+      SWITCHBOARD_DEPLOY_FORCE: "1",
+    });
+    expect(forced.resident.setEnv).toEqual({
+      RESIDENT_BASE_URL: "https://switchboard-resident.example.test",
+      RESIDENT_DEPLOY_FORCE: "1",
+    });
+    expect(forced.memory.setEnv).toEqual({});
+    // The plan text names the force env alone — the base URL is set too, but not to 1.
+    expect(forced.bot.forcedBy).toBe("SWITCHBOARD_DEPLOY_FORCE");
+    expect(plain.bot).not.toHaveProperty("forcedBy");
+    expect(formatPlan(forcedPlan)).toContain("preflight FORCED (SWITCHBOARD_DEPLOY_FORCE=1)");
+    expect(formatPlan(forcedPlan)).toContain("preflight FORCED (RESIDENT_DEPLOY_FORCE=1)");
+    expect(formatPlan(forcedPlan)).not.toContain("BASE_URL,");
+    expect(forcedPlan.warnings).toEqual([
       "--force: preflights are bypassed — in-flight runs on bot and resident are SIGTERM-drained (finish if they can, else killed at the drain deadline)",
     ]);
   });

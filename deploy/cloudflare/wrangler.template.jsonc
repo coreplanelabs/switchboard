@@ -1,13 +1,10 @@
-// GENERATED — do not edit. `npm run deploy:gen` (the CLI's `deploy init`) renders this file from
-// wrangler.template.jsonc in this directory and the deployment profile (deploy/profile.json).
-// Change the template or the profile and re-render; `npm run deploy:check` fails on a hand edit.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "switchboard",
+  "name": "{{script}}",
   "main": "worker.ts",
   "compatibility_date": "2026-08-01",
   // The installation's Cloudflare account (deploy/profile.json `account`) — every Worker deploys to it.
-  "account_id": "3c7b28f23cc93f09e77bb0a9ffcb7e6f",
+  "account_id": "{{account}}",
   // Custom domain on the installation's zone (profile `zone`; the state,
   // resident and sandbox Workers sit beside it). Slack traffic is the
   // container's outbound websocket; the inbound HTTP surface here is the cron
@@ -16,7 +13,7 @@
   // Cloudflare Access (SSO), and Access can only front a real zone domain —
   // leaving the workers.dev URL up would expose an un-SSO'd copy of /runs.
   "workers_dev": false,
-  "routes": [{ "pattern": "switchboard.coreplanelabs.dev", "custom_domain": true }],
+  "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
   // Non-secret, deploy-constant config for the container. PUBLIC_BASE_URL: the
   // live-view link base — the dispatcher (in the container) reads
   // process.env.PUBLIC_BASE_URL to put the /runs/<id>?t=… link on the status
@@ -29,12 +26,14 @@
   // renders neither var, and the gate then treats Access as not configured:
   // every dashboard request is denied.
   "vars": {
-    "PUBLIC_BASE_URL": "https://switchboard.coreplanelabs.dev",
-    "ACCESS_TEAM_DOMAIN": "coreplane.cloudflareaccess.com",
-    "ACCESS_AUD": "3886ef9ed724728da863bbeb96d09f79e53c0832f2fdabc1534f155dca9a4f5c",
+    "PUBLIC_BASE_URL": "{{urls.publicBaseUrl}}",
+    // {{#if access}}
+    "ACCESS_TEAM_DOMAIN": "{{access.teamDomain}}",
+    "ACCESS_AUD": "{{access.aud}}",
+    // {{/if}}
     // The state Worker (deploy/cloudflare-memory/): where worker.ts records each
     // scheduled firing for the /runs Scheduled panel (#244), with MEMORY_TOKEN.
-    "STATE_WORKER_URL": "https://switchboard-memory.coreplanelabs.dev"
+    "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}"
   },
   "observability": { "enabled": true, "traces": { "enabled": true } },
   "containers": [

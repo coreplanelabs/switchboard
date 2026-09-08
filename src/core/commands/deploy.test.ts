@@ -9,7 +9,15 @@ import { parseInvocation } from "../commandSurface.js";
 import { RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
 import { TEST_PROFILE } from "../../deploy/testing/profile.js";
 import type { RestartRunResult } from "../../deploy/run.js";
-import { deployAll, deployPlan, deployRestart, registerDeployCommands, type DeployCommandDeps } from "./deploy.js";
+import { GENERATED_HEADER, TEMPLATE_FILE, workerConfigTargets } from "../../deploy/wranglerTemplate.js";
+import {
+  deployAll,
+  deployInit,
+  deployPlan,
+  deployRestart,
+  registerDeployCommands,
+  type DeployCommandDeps,
+} from "./deploy.js";
 
 // Feature: features/command-registry.md (phase 4b): the production deploy order
 // as commands — `deploy plan` (pure, every surface) and `deploy all` (CLI only;
@@ -66,12 +74,14 @@ function bind(
   restart: (plan: RestartPlan) => Promise<RestartRunResult> = neverRestarts,
   affected: (opts: { base?: string }) => Promise<AffectedReport> = neverAffected,
   profile: () => Promise<LoadedProfile> = async () => LOADED,
+  disk: Map<string, string> = new Map(),
 ) {
   const registry = new CommandRegistry<DeployCommandDeps>({ audit: () => {} });
   registerDeployCommands(registry);
   const plans: DeployPlan[] = [];
   const restartPlans: RestartPlan[] = [];
   const affectedCalls: { base?: string }[] = [];
+  const writes: string[] = [];
   const commands = bindCommands(registry, {
     deploy: {
       run: (plan) => {
@@ -88,10 +98,22 @@ function bind(
         return affected(opts);
       },
       profile,
+      files: {
+        read: async (path) => disk.get(path),
+        write: async (path, text) => {
+          writes.push(path);
+          disk.set(path, text);
+        },
+      },
     },
   });
-  return { commands, plans, restartPlans, affectedCalls };
+  return { commands, plans, restartPlans, affectedCalls, disk, writes };
 }
+
+/** A one-line template per Worker dir: enough to see the profile land in the render. */
+const TEMPLATE = '{ "name": "{{script}}", "account_id": "{{account}}", "routes": [{ "pattern": "{{hostname}}" }] }\n';
+const templatesOnDisk = () =>
+  new Map<string, string>(workerConfigTargets(TEST_PROFILE).map((t) => [t.templatePath, TEMPLATE]));
 const neverRunsPlan = async (): Promise<DeployRunResult> => {
   throw new Error("must not run");
 };
@@ -530,5 +552,89 @@ describe("deploy.restart", () => {
     const res = await notLive.commands.invoke("deploy.restart", {}, cli);
     expect(res).toMatchObject({ ok: false, error: "unavailable" });
     expect(res.ok ? "" : res.message).toContain("bot NOT restarted — old container still answering");
+  });
+});
+
+describe("deploy.init", () => {
+  const init = (disk: Map<string, string>, profile: () => Promise<LoadedProfile> = async () => LOADED) =>
+    bind(neverRunsPlan, () => true, neverRestarts, neverAffected, profile, disk);
+
+  it("is CLI-only, deploy:write, operator-gated — like deploy.all", async () => {
+    const { commands } = init(templatesOnDisk());
+    expect(deployInit).toMatchObject({
+      action: "deploy:write",
+      effect: "write",
+      surfaces: { chat: false, mcp: false, http: false },
+    });
+    expect(await commands.invoke("deploy.init", {}, admin)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await commands.invoke("deploy.init", {}, mcp("deploy:write"))).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+  });
+
+  it("renders every Worker's wrangler.jsonc from its template and the profile (header first), writes it, and is a no-op the second time", async () => {
+    const { commands, disk, writes } = init(templatesOnDisk());
+    const res = await commands.invoke("deploy.init", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    const targets = workerConfigTargets(TEST_PROFILE);
+    expect(res.value).toEqual({
+      profile: { origin: "profile", path: "deploy/profile.json" },
+      files: targets.map((t) => ({ path: t.outputPath, status: "written" })),
+    });
+    expect(writes).toEqual(targets.map((t) => t.outputPath));
+    expect(disk.get("deploy/cloudflare-resident/wrangler.jsonc")).toBe(
+      `${GENERATED_HEADER.join("\n")}\n{ "name": "switchboard-resident", "account_id": "${TEST_PROFILE.account}", "routes": [{ "pattern": "switchboard-resident.example.test" }] }\n`,
+    );
+    expect(renderText(commands.get("deploy.init")!, res.value)).toBe(
+      ["Worker configs from deploy/profile.json:", ...targets.map((t) => `  written   ${t.outputPath}`)].join("\n"),
+    );
+    const again = await commands.invoke("deploy.init", {}, cli);
+    if (!again.ok) throw new Error(again.message);
+    expect((again.value as { files: { status: string }[] }).files.every((f) => f.status === "unchanged")).toBe(true);
+    expect(writes).toHaveLength(targets.length);
+  });
+
+  it("--check writes nothing: equal files pass; a hand-edited or absent rendered file is `conflict` (exit 1) naming it and the fix", async () => {
+    const disk = templatesOnDisk();
+    const { commands, writes } = init(disk);
+    const missing = await commands.invoke("deploy.init", { options: { check: true } }, cli);
+    expect(missing).toMatchObject({ ok: false, error: "conflict" });
+    expect(missing.ok ? "" : missing.message).toContain("deploy/cloudflare-memory/wrangler.jsonc (missing)");
+    expect(missing.ok ? "" : missing.message).toContain("run `npm run deploy:gen` and commit the result");
+    expect(writes).toEqual([]);
+    // Generate, then the check passes …
+    await commands.invoke("deploy.init", {}, cli);
+    expect(await commands.invoke("deploy.init", { options: { check: true } }, cli)).toMatchObject({ ok: true });
+    // … until someone edits a rendered file by hand.
+    disk.set("deploy/cloudflare/wrangler.jsonc", `${disk.get("deploy/cloudflare/wrangler.jsonc")}// tweak\n`);
+    const stale = await commands.invoke("deploy.init", { options: { check: true } }, cli);
+    expect(stale).toMatchObject({ ok: false, error: "conflict" });
+    expect(stale.ok ? "" : stale.message).toContain("deploy/cloudflare/wrangler.jsonc (stale)");
+    expect(stale.ok ? "" : stale.message).not.toContain("cloudflare-memory");
+  });
+
+  it("a missing template or a placeholder the profile cannot fill is `unavailable` naming the template file; nothing is written", async () => {
+    const disk = templatesOnDisk();
+    disk.delete(`deploy/cloudflare-sandbox/${TEMPLATE_FILE}`);
+    disk.set(`deploy/cloudflare/${TEMPLATE_FILE}`, '"{{access.aud}}"\n');
+    const { commands, writes } = init(disk);
+    const res = await commands.invoke("deploy.init", {}, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
+    expect(res.ok ? "" : res.message).toContain(`deploy/cloudflare-sandbox/${TEMPLATE_FILE}: no such file`);
+    expect(res.ok ? "" : res.message).toContain(
+      `deploy/cloudflare/${TEMPLATE_FILE} line 1: {{access.aud}} has no value in the deployment profile`,
+    );
+    expect(writes).toEqual([]);
+  });
+
+  it("renders from the example profile too (a fresh clone can see the shape) and the text says so", async () => {
+    const example: LoadedProfile = { ...LOADED, origin: "example", path: "deploy/profile.example.json" };
+    const { commands } = init(templatesOnDisk(), async () => example);
+    const res = await commands.invoke("deploy.init", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(renderText(commands.get("deploy.init")!, res.value)).toContain(
+      "Worker configs from deploy/profile.example.json (the EXAMPLE profile):",
+    );
   });
 });
