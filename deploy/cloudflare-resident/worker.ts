@@ -173,6 +173,7 @@ import {
   stepFailureLog,
   type StepResult,
 } from "../../src/execution/residentStepReport.js";
+import { backupTransferMode } from "../../src/execution/residentBackupTransfer.js";
 import {
   DEPS_STORE_DIR,
   depsCompletePath,
@@ -204,6 +205,16 @@ interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
   REGISTRY: DurableObjectNamespace<ResidentRegistryDO>;
   BACKUP_BUCKET: R2Bucket;
+  // Presigned snapshot transfers (item 61, #614): with all four present the
+  // container moves archive bytes itself over presigned R2 URLs and the DO
+  // stays out of the data path; any one absent → the SDK's local-bucket mode
+  // (the DO pumps the bytes — a 1.16 GB restore exceeded the isolate's memory
+  // live 2026-09-08). Read exactly as `requirePresignedURLSupport` reads them.
+  // The first two are wrangler vars; the keys are secrets (secrets.manifest.json).
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  BACKUP_BUCKET_NAME?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
   RESIDENT_ADMIN_TOKEN: string;
   RESIDENT_OPERATOR_TOKEN: string;
   /** Optional read-only bearer: GET /residents and the read-only /debug ops
@@ -1572,16 +1583,23 @@ export class ResidentDO extends Sandbox<Env> {
     lockfileHash: string,
   ): Promise<SnapshotRecord> {
     try {
+      // Item 61 (#614): presigned transfers when the env allows — the
+      // container moves the bytes, the DO only signs — else the SDK's
+      // local-bucket mode (the DO in the data path). The handle records the
+      // mode, so the restore of THIS snapshot travels the same way.
+      const { localBucket, mode, missing } = backupTransferMode(this.env as unknown as Record<string, unknown>);
+      if (mode === "local")
+        console.log(`snapshot: local-bucket transfer (presigned env missing: ${missing.join(", ")})`);
       const [mirror, checkout] = await Promise.all([
         withTimeout(
-          this.createBackup({ dir: MIRROR_DIR, localBucket: true, ttl: SNAPSHOT_TTL_S, name: `${resource} mirror` }),
+          this.createBackup({ dir: MIRROR_DIR, localBucket, ttl: SNAPSHOT_TTL_S, name: `${resource} mirror` }),
           R2_TRANSFER_TIMEOUT_MS,
           "mirror backup",
         ),
         withTimeout(
           this.createBackup({
             dir: CHECKOUT_DIR,
-            localBucket: true,
+            localBucket,
             ttl: SNAPSHOT_TTL_S,
             name: `${resource} checkout`,
           }),
@@ -5145,7 +5163,18 @@ export default {
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
     // `build` names the commit this bundle was deployed from, so a deploy's
     // propagation is provable from the outside without auth.
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, build: BUILD });
+    // `backupTransfer` (item 61, #614): "presigned" when the container moves
+    // snapshot bytes itself, "local" when the DO does — the one GET that proves
+    // the R2 credentials landed (their names, never their values, on a miss).
+    if (url.pathname === "/healthz" && request.method === "GET") {
+      const transfer = backupTransferMode(env as unknown as Record<string, unknown>);
+      return json({
+        ok: true,
+        build: BUILD,
+        backupTransfer: transfer.mode,
+        ...(transfer.missing.length > 0 ? { backupTransferMissing: transfer.missing } : {}),
+      });
+    }
 
     // Auth precedes existence: unknown paths demand admin before revealing
     // 404 vs 401, so an unauthenticated scanner learns nothing.

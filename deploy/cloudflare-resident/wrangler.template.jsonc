@@ -17,7 +17,17 @@
     // The state Worker (deploy/cloudflare-memory/): where scheduled() records
     // each resident-watchdog firing (#244/#307). Public URL — a var, not a
     // secret; the bearer is the MEMORY_TOKEN secret (deploy/secrets.manifest.json).
-    "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}"
+    "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}",
+    // Presigned snapshot transfers (features/resident-repos.md item 61, #614):
+    // with these two vars AND the R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
+    // secrets (deploy/secrets.manifest.json) present, the container moves
+    // archive bytes itself over presigned R2 URLs and the Durable Object stays
+    // out of the data path; any one absent → the SDK's local-bucket mode, the
+    // pre-#614 behavior. BACKUP_BUCKET_NAME MUST equal the BACKUP_BUCKET
+    // binding's bucket below — the SDK signs URLs for this name, the offboard
+    // sweep deletes through the binding. Public config, not secrets.
+    "CLOUDFLARE_ACCOUNT_ID": "{{account}}",
+    "BACKUP_BUCKET_NAME": "{{script}}-cache"
   },
   "containers": [
     {
@@ -76,13 +86,16 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ResidentDO", "ResidentRegistryDO"] }],
   // Resident cache + snapshots. The binding name BACKUP_BUCKET is load-bearing:
-  // the Sandbox SDK's createBackup({ localBucket: true }) resolves exactly this
-  // binding from the DO's env (verified live on 0.13.0-next.751.1 — a backup +
-  // restore round-trip works in production with only this binding, no R2 API
-  // keys). Non-localBucket (presigned) backups would additionally need the
-  // CLOUDFLARE_R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /
-  // BACKUP_BUCKET_NAME secrets. The bucket is named after this Worker's script
-  // (`<script>-cache`), so two installations on one account never share one.
+  // metadata reads and the offboard sweep go through it, and the SDK's
+  // local-bucket mode (createBackup({ localBucket: true })) moves the archive
+  // bytes through it too — via the Durable Object, which is what put a 128 MB
+  // isolate in the data path of a 1.16 GB restore (item 61, #614). Production
+  // mode is presigned: the CLOUDFLARE_ACCOUNT_ID / BACKUP_BUCKET_NAME vars
+  // above plus the R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets let the
+  // container move the bytes itself; with any of the four absent the Worker
+  // falls back to local mode and says so on /healthz. The bucket is named after
+  // this Worker's script (`<script>-cache`), so two installations on one
+  // account never share one — and BACKUP_BUCKET_NAME must say the same name.
   "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "{{script}}-cache" }],
   // Watchdog cadence (KTD4): every 10 minutes, strictly BELOW the container
   // sleep window (SLEEP_AFTER = "20m" in worker.ts) so a healthy resident is
