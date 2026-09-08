@@ -2,6 +2,7 @@
 title: Persistent Run History and Command Registry - Plan
 type: feat
 date: 2026-08-29
+status: implemented
 deepened: 2026-08-29
 topic: run-history-command-registry
 artifact_contract: ce-unified-plan/v1

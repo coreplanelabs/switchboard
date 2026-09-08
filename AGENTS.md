@@ -2,24 +2,24 @@
 
 Switchboard is an agent gateway: a message arrives over a channel (Slack, the CLI, HTTP, MCP), a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor it never touches directly. Slack is one channel, not the architecture.
 
-This file is read by every agent that works on this repository — Claude Code, Switchboard's own review and coding agents, and a person asking "how do these people work?" It states how a change is made, the invariants it must keep, where things are, the commands that are the whole interface to the repo, and the rules for agents. Detail is one link away: [README.md](README.md) (engineering), [docs/](docs/README.md) (the human-facing tree, published at <https://docs.switchboard.coreplanelabs.dev>), [features/](features/README.md) (the behavioral contract).
+Every agent working here reads this file — Claude Code, Switchboard's own review and coding agents, and a person asking how we work. It states how a change is made, the invariants, where things are, the commands that are the whole interface to the repo, and the rules for agents. Detail is one link away: [README.md](README.md) (engineering), [docs/](docs/README.md) (the human-facing tree, published at <https://docs.switchboard.coreplanelabs.dev>), [features/](features/README.md) (the behavioral contract).
 
 ## How a change is made
 
-1. **The spec says what should be true.** Every behavior has a row in a spec under `features/`: the criterion, and its proof — a test named `file::describe::it`, a written procedure an agent runs live, or a `[gap]` linked to the issue that closes it. A change starts by writing or editing that row, in the same PR as the code. A spec describing code that no longer exists is a bug.
-2. **A failing test, then the code.** Unit tests are the default proof. `npx vitest run --changed origin/main` is the working loop; `npm test` before pushing.
+1. **The spec says what should be true.** Every behavior has a row in a spec under `features/`: the criterion, and its proof — a test named `file::describe::it`, a written procedure an agent runs live, or a `[gap]` linked to the issue that closes it. A change starts with that row, in the same PR as the code. A spec describing code that no longer exists is a bug.
+2. **A failing test, then the code.** Unit tests are the default proof. `npx vitest run --changed origin/main` is the loop; `npm test` before pushing.
 3. **`npm run fix`, then `npm run verify`.** `fix` regenerates every generated artifact and repairs lint and formatting. `verify` is the whole gate and exactly what CI runs — nothing lives only in CI, and a unit test over the workflow files keeps it that way.
-4. **A PR written for the reader.** Conventional title (`feat(scope): …` — it becomes the squash commit and a changelog line; a required check refuses anything else). Body: two sentences a stranger can act on, then a Tour of the change in reading order with permalinks at the pushed head, the non-obvious decisions, and the validation with receipts. Docs describing changed behavior change in the same PR.
-5. **Switchboard reviews it, in the open.** The PR is posted to `agent:review`; the verdict's findings are addressed or declined with a reason on the thread, the branch is rewritten so every commit is a reviewable unit, and review is re-requested at the new head. `LGTM` auto-approves; a person merges.
-6. **Squash-merge, release, deploy.** The title is the commit. release-please accumulates a release PR; merging it tags the version and CI deploys only the Workers whose inputs changed. Why the loop has this shape: [How we work](docs/explanation/how-we-work.md).
+4. **A PR written for the reader.** Conventional title (`feat(scope): …` — the squash commit and a changelog line; a required check refuses anything else). Body: two sentences a stranger can act on, then a Tour of the change in reading order with permalinks at the pushed head, the non-obvious decisions, and the validation with receipts. Docs describing changed behavior change in the same PR.
+5. **Switchboard reviews it, in the open.** The PR is posted to `agent:review`; the verdict's findings are addressed or declined with a reason on the thread, the branch is rewritten into reviewable commits and review is re-requested at the new head. `LGTM` auto-approves; a person merges.
+6. **Squash-merge, release, deploy.** The title is the commit. release-please accumulates a release PR; merging it tags the version and CI deploys only the Workers whose inputs changed. Why this shape: [How we work](docs/explanation/how-we-work.md).
 
 ## Invariants
 
-1. **The core never imports a platform SDK.** Slack lives in `src/channels/slack.ts`; the core sees `ChannelIO` and `IncomingMessage`. Need something platform-specific? Extend the seam.
-2. **Every boundary is an interface with at least two implementations** — channel, provider, executor, agent (as data), store. New capability = a new implementation behind the existing seam, never a special case in the core.
+1. **The core never imports a platform SDK.** Slack lives in `src/channels/slack.ts`; the core sees `ChannelIO` and `IncomingMessage`. Platform-specific? Extend the seam.
+2. **Every boundary is an interface with at least two implementations** — channel, provider, executor, agent (as data), store. A new capability is a new implementation behind the seam, never a special case in the core.
 3. **Authorization is one table, asked once per request, against the *resolved* actor and agent.** Every command and every agent run passes `authorize` over the policy rows in `src/core/authz/`; adapters resolve identity, never authority; no registry command starts an agent run — that is `dispatch()`'s job alone.
 4. **IDs are platform-namespaced** (`slack:C…`, `slack:U…`, `slack:C…:<ts>`). Config scopes, grants, and memory key on them; a new adapter brings its own prefix.
-5. **Tools never touch the host.** They call `ctx.executor`; `LocalExecutor` is the only place local process or file access is allowed, and the bot process never shells out to `gh` — GitHub is the REST API on the App credential.
+5. **Tools never touch the host.** They call `ctx.executor`; `LocalExecutor` is the only place local process or file access is allowed; the bot never shells out to `gh` — GitHub is the REST API on the App credential.
 6. **State survives restarts.** Conversation context rebuilds from channel history; workspaces re-clone; anything durable lives in a store behind a seam. No in-memory state a restart would lose silently.
 7. **Model refs are `<provider>/<model>` strings resolved through the config layers** (directive > thread > user > channel > defaults), and effort rides the same layers. Never hardcode a model or an effort in an agent or the core.
 
@@ -83,6 +83,7 @@ The whole interface to this repository: deterministic, non-interactive, no crede
 | `npm run docs:gen` | Writes the generated regions of the reference docs from the command registry. | After changing a command, flag, route, or config key; part of `fix`. |
 | `npm run docs:check` | The generated doc regions equal what the code would generate. | Part of `check:consistency`. |
 | `npm run specs:check` | Every `file::describe::it` proof in `features/*.md` names a real test; header paths exist; every `[gap]` links an issue. | After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit. |
+| `npm run decisions:check` | Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`. | Part of `check:consistency`; when a record fails it, write a new record and supersede the old one instead of editing it. |
 | `npm run docs:changed` | Says whether the last push touched the docs or their build (a CI job output). | CI only — gates the docs deploy. |
 | `npm run deploy:targets` | Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment. | CI only — the `deploy targets` job. |
 | `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs. |
@@ -92,7 +93,7 @@ The whole interface to this repository: deterministic, non-interactive, no crede
 
 <!-- /generated:commands -->
 
-Workspaces have their own `verify` (`-w web`, `-w docs`, `-w deploy/<worker>`); the root `verify` runs them all. Node is `.nvmrc`'s; `npm ci` at the root installs every workspace.
+Workspaces have their own `verify` (`-w web`, `-w docs`, `-w deploy/<worker>`); the root `verify` runs them all.
 
 ## Rules for agents
 
@@ -100,10 +101,10 @@ Workspaces have their own `verify` (`-w web`, `-w docs`, `-w deploy/<worker>`); 
 - **Never hand-edit a generated file or region.** Anything between `<!-- generated:… -->` markers, the vendored skills, the reference tables, and each Worker's `wrangler.jsonc` come from `npm run fix`; change the source and regenerate.
 - **The spec follows the code, never the reverse.** Do not rename a test to satisfy a spec row; fix the row. A proof reference is exact or wildcarded (`title…`), never a truncation.
 - **Tidy first.** Structural change (rename, move, extract) and behavioral change are separate commits, so each can be read on its own terms.
-- **One coherent change per PR, rewritten before review.** No trails of fix-up commits; names and types tell the truth; a comment that was true earlier in the review cycle and is not now is removed.
-- **Decisions are written down.** Non-obvious choices go in the PR's Decisions section; a choice that shapes the architecture becomes a dated record under `docs/plans/` with a status line, superseded rather than edited.
+- **One coherent change per PR, rewritten before review.** No fix-up trails; names and types tell the truth; a comment that stopped being true during review is removed.
+- **Decisions are written down.** Non-obvious choices go in the PR's Decisions section; one that shapes the architecture becomes a record under `docs/decisions/` (a plan under `docs/plans/`), never edited — superseded, and `decisions:check` holds that line.
 - **Tests move with code.** A moved module takes its tests and its spec rows with it in the same commit.
-- **Credentials are never in the tree** and never on the bot host when a sandbox executes tools; a missing one fails fast by name. Config is `config/config.yaml` (gitignored); `config/config.example.yaml` documents every knob.
+- **Credentials are never in the tree** and never on the bot host when a sandbox executes tools; a missing one fails fast by name. `config/config.example.yaml` documents every knob of the gitignored `config/config.yaml`.
 - **Run only what the Commands table names.** Need something else done? Add a script and describe it; `agents:check` refuses an undescribed one.
 
 ## Switchboard develops Switchboard

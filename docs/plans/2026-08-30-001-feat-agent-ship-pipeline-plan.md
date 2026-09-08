@@ -2,6 +2,7 @@
 title: agent:ship Pipeline - Plan
 type: feat
 date: 2026-08-30
+status: implemented
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
