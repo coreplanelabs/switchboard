@@ -124,6 +124,10 @@
       "does": "Every `file::describe::it` proof in `features/*.md` names a real test; header paths exist; every `[gap]` links an issue.",
       "when": "After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit."
     },
+    "decisions:check": {
+      "does": "Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`.",
+      "when": "Part of `check:consistency`; when a record fails it, write a new record and supersede the old one instead of editing it."
+    },
     "agents:gen": {
       "does": "Writes the Commands table in AGENTS.md from `package.json` and this file.",
       "when": "After adding or changing a script; part of `fix`."

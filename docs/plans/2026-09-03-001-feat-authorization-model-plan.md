@@ -2,6 +2,7 @@
 title: One authorization model (actor / action / resource) - Plan
 type: feat
 date: 2026-09-03
+status: implemented
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: review-ready
 product_contract_source: session 2026-09-03 (Justin + Claude), issue #395

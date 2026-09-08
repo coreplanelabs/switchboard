@@ -2,7 +2,7 @@
 title: A sandbox Worker/image rollout never looks like a dead or silent sandbox - Plan
 type: fix
 date: 2026-09-07
-status: accepted
+status: implemented
 execution: code
 ---
 

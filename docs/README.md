@@ -56,6 +56,7 @@ You can read this tree here on GitHub or as a site — [docs.switchboard.corepla
 - [One definition, every surface](explanation/one-command-many-surfaces.md) — how one command definition becomes chat, CLI, HTTP, and MCP with no per-surface code.
 - [Runs: live, then remembered](explanation/runs-live-and-history.md) — why a run has two lives, and what a restart does and doesn't lose.
 - [How Switchboard improves itself](explanation/how-switchboard-improves-itself.md) — the friction → pattern → GitHub-issue loop, and where each piece runs.
+- [Design decisions](explanation/design-decisions.md) — the architecture decision records: what was decided, why, what was rejected, and the pattern each one instantiates.
 
 ## Where the ground truth lives
 
