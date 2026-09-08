@@ -16,3 +16,21 @@ Every place-specific fact the deploy tooling needs — the Cloudflare account, e
 
 The Worker configs are rendered from the profile, not edited. Each `deploy/cloudflare*/wrangler.jsonc` is generated from the `wrangler.template.jsonc` beside it by `npm run deploy:gen` (`deploy init`): the account, script name, hostname, the bot's public URL and state-Worker URL, and the Access team domain and AUD are placeholders the profile fills. The rendered files are gitignored: `npm test`, every Worker's `verify` and `deploy all` render them first from the profile in force (the example in a fresh clone or a pull request's CI, the real profile on a deploy), so the account and hostnames in them are never committed. Change the template (a binding, a cron, an instance size) and commit it; change the profile where it lives. `npm run deploy:gen` renders by hand (before `wrangler dev`, say); `npm run deploy:check` says whether a rendered file was edited by hand. The templates are valid JSONC — editors and prettier treat them as the config they describe — and the rendered files are what wrangler reads.
 `secretsSource` is where `deploy secrets <worker>` (`npm run secrets` in each Worker's directory) reads the values of the secrets `deploy/secrets.manifest.json` lists for that Worker: a directory of `<NAME>` files (`~/.secrets/switchboard` when the profile names none) or a 1Password item, `op://Vault/Item`, with one field per secret name (needs `OP_SERVICE_ACCOUNT_TOKEN` or an `op signin` session). The command asks the source once which names it holds and refuses before any upload when a required one is absent; each value goes to `wrangler secret put` on stdin and is never printed. A shared bearer must be put on every Worker the manifest lists for it, and a bot secret is live only after `deploy restart`.
+
+## Read the bot's span log
+
+The bot container's stdout is not readable from outside Cloudflare, and `tracing.log` prints only roots there anyway. The bot keeps its own span log in the process — every span end, at every level, as the same JSON line the log sink prints, in a ring of the last 20 000 lines or 8 MiB — and serves it to an ingress bearer whose actor holds `trace:read` (`features/tracing.md` item 26). Give the grant to the token's subject in `config.yaml` (`grants: { "http:<subject>": { actions: [trace:read] } }`), then:
+
+```sh
+# the last 50 GitHub calls, with their trace ids and routes
+curl -sS -H "authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
+  "https://switchboard.coreplanelabs.dev/admin/trace/log?span=github&limit=50"
+# everything one run did, from its run_meta.traceId
+curl -sS -H "authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
+  "https://switchboard.coreplanelabs.dev/admin/trace/log?traceId=<32 hex>&limit=5000"
+# what ended in the last ten minutes
+curl -sS -H "authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
+  "https://switchboard.coreplanelabs.dev/admin/trace/log?since=$(( $(date +%s) * 1000 - 600000 ))"
+```
+
+The answer is `{ ok, lines, matched, kept, dropped, oldestAt }`: `lines` oldest first (the newest `limit` of what matched), `dropped` how many the ring has let go since the container started, `oldestAt` how far back it reaches. Filters: `since` (epoch ms, on the span's end), `traceId`, `span` (a name, or a family: `github` matches `github.rest` and `github.token_mint`), `limit` (500 by default, 5 000 at most). A malformed filter is a 400; without a bearer the route is a 401, with a bearer that lacks `trace:read` a 403. The ring empties with the container: a restart starts it over, so read before you deploy.

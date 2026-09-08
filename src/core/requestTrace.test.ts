@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { channelOf, startProcessRoot, startRequestRoot, withProcessRoot } from "./requestTrace.js";
 import { recordingSink } from "./testing/recordingSink.js";
+import { createSpanLog } from "./trace/spanLog.js";
 import { createTickingClock } from "./testing/tickingClock.js";
 import type { RunEvent } from "./runEvents.js";
 
@@ -93,6 +94,26 @@ describe("startRequestRoot", () => {
     } finally {
       console.log = orig;
     }
+  });
+
+  it("the process's span log joins the leading sinks beside the log sink, whatever the level, and every span end lands in it (features/tracing.md item 26)", async () => {
+    const spanLog = createSpanLog();
+    const orig = console.log;
+    console.log = () => {};
+    try {
+      const trace = startRequestRoot({ config: config("roots"), spanLog }, { channel: "cli", receivedAt: 1 });
+      await trace.root.span("dispatch.history", () => undefined);
+      trace.root.end();
+    } finally {
+      console.log = orig;
+    }
+    expect(spanLog.read().lines.map((l) => l.span)).toEqual(["dispatch.history", "request"]);
+    // injected sinks win outright: a test's recording sink sees the spans, the log does not
+    const other = createSpanLog();
+    const rec = recordingSink();
+    startRequestRoot({ sinks: [rec], spanLog: other }, { channel: "cli", receivedAt: 1 }).root.end();
+    expect(rec.ends).toHaveLength(1);
+    expect(other.read().kept).toBe(0);
   });
 
   it("channelOf reads the namespaced prefix and names no channel for anything else", () => {

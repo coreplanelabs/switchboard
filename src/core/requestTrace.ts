@@ -9,6 +9,7 @@ import { isStreamed } from "./trace/streamSpans.js";
 import { createTracer } from "./trace/tracer.js";
 import { systemClock } from "./trace/clock.js";
 import type { Clock, Span, SpanRecord, SpanSink, Tracer } from "./trace/types.js";
+import type { SpanLog } from "./trace/spanLog.js";
 
 // One request, one root (features/tracing.md, Sink scoping). `startRequestRoot`
 // is the constructor of request roots: the channel adapters call it at receipt
@@ -45,6 +46,8 @@ export interface RequestTraceDeps {
   tracer?: Tracer;
   /** The root's leading sinks; defaults to the one log sink at `tracing.log`. */
   sinks?: SpanSink[];
+  /** The in-process span log (features/tracing.md item 26): joins the leading sinks whenever they are not injected. */
+  spanLog?: SpanLog;
 }
 
 export interface RequestRootOptions {
@@ -54,11 +57,15 @@ export interface RequestRootOptions {
 }
 
 /** The root's leading sinks: the injected ones (a test's recording sink), else
- *  the one log sink at `tracing.log`, else nothing. */
+ *  the one log sink at `tracing.log` (else nothing) plus the process's span
+ *  log when it has one — every span end, at every level, readable in-process. */
 function leadingSinks(deps: RequestTraceDeps): SpanSink[] {
   if (deps.sinks) return deps.sinks;
   const level = deps.config?.config.tracing?.log;
-  return [level ? createLogSink({ level, write: (line) => console.log(line) }) : NULL_SINK];
+  return [
+    level ? createLogSink({ level, write: (line) => console.log(line) }) : NULL_SINK,
+    ...(deps.spanLog ? [deps.spanLog.sink] : []),
+  ];
 }
 
 export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOptions): RequestTrace {

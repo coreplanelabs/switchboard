@@ -52,6 +52,8 @@ import {
   setForeignLiveCardsSource,
 } from "./channels/slack.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
+import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js";
+import { createSpanLog } from "./core/trace/spanLog.js";
 import { handleAdminRestartAuthorize } from "./channels/adminRestartAuthorize.js";
 import { RESTART_AUTHORIZE_PATH } from "./deploy/restart.js";
 import { DRAIN_DEADLINE_MS, HANDOFF_BUDGET_MS } from "./core/drain.js";
@@ -267,9 +269,14 @@ async function main() {
   const fleetWatcher = residentFleetWatcherFor(residentAdminClient, { warn: (m) => console.warn(m) });
   fleetWatcher?.start();
   const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;
+  // The bot's span log (features/tracing.md item 26): every root this process
+  // starts also writes here, bounded, and `GET /admin/trace/log` reads it for a
+  // `trace:read` bearer — the container's stdout, without the container.
+  const spanLog = createSpanLog();
   const deps: CoreDeps = {
     config,
     providers,
+    spanLog,
     capabilities,
     residentFleet,
     skills,
@@ -513,6 +520,16 @@ async function main() {
       }
       // Kill injection for the durable-runs receipts (run-history item 36):
       // a `deploy:write` bearer SIGKILLs this process after a 202.
+      // The span log (features/tracing.md item 26): a `trace:read` bearer reads
+      // what this process's roots recorded, at every level, filtered.
+      if (path === TRACE_LOG_PATH) {
+        handleAdminTraceLog(req, res, {
+          tokens: process.env.SWITCHBOARD_INGRESS_TOKENS,
+          grantsFor: (id) => config.grantsFor(id),
+          spanLog,
+        });
+        return;
+      }
       if (path === "/admin/crash") {
         handleAdminCrash(req, res, {
           tokens: process.env.SWITCHBOARD_INGRESS_TOKENS,
