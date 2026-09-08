@@ -4,7 +4,6 @@
 
 - **Code**: [`src/core/costs.ts`](../../../src/core/costs.ts) (`parseCostsConfig`, `CLOUDFLARE_PRICES`, `containerCostUsd`, `doDurationCostUsd`, `doRequestsCostUsd`, `buildCostReport`, `resolveRange`, `CloudflareGraphqlUsageSource`, `AnthropicCostReportSource`, `NullLlmCostSource`, `createCostsService`); [`src/channels/costsView.ts`](../../../src/channels/costsView.ts) (`parseCostsRoute`, `createCostsViewHandler` — serves the shared web shell with a `CostsSeed`, see [live-view.md](live-view.md)'s Rendering paragraph); the page rendering in `web/`: `web/src/pages/CostsPage.vue` (mobile layout included), `web/src/components/costs/CostChart.vue`, `web/src/lib/costs.ts`; [`src/index.ts`](../../../src/index.ts) (builds the service from `costs:` config + env, gates `/costs*` behind Access next to `/runs*` and `/residents*`); [`deploy/cloudflare/worker.ts`](../../../deploy/cloudflare/worker.ts) (forwards `CF_ANALYTICS_TOKEN` / `ANTHROPIC_ADMIN_KEY` into the container env).
 - **Tests**: [`src/core/costs.test.ts`](../../../src/core/costs.test.ts), [`src/channels/costsView.test.ts`](../../../src/channels/costsView.test.ts) (routing + seed), `web/src/pages/costs.test.ts` (rendering).
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/227
 - **Docs**: [Code map](../../reference/code-map.md), [Capacity and sizing](../../explanation/capacity-and-sizing.md), [access-gate.md](access-gate.md), [resident-repos.md](resident-repos.md) (sibling Access-gated dash).
 
 ## Configuration

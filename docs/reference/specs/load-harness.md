@@ -4,7 +4,6 @@ The repeatable measurement of Switchboard under many concurrent runs, and the re
 
 - **Code**: `src/load/aggregate.ts` (samples → per-op percentiles, refusals by reason, D10 checks, the markdown receipt), `src/load/history.ts` (run-store paging + the concurrency sweep-line), `src/load/runLoop.ts` (the staggered N-thread driver with guaranteed teardown), `src/load/reasons.ts` (refusal tokens from client errors), `src/load/residentLoad.ts`, `src/load/sandboxLoad.ts`, `src/load/e2eLoad.ts`, `src/load/cardsLoad.ts` (the four drivers), `src/load/scriptedProvider.ts` (the OpenAI-compatible scripted model + the review/coding profile scripts), `src/load/fakeSlack.ts` (the rate-limited Slack Web API stand-in), `src/execution/bindingPurge.ts` (the resident's `purge-bindings` decision), `src/channels/processMetrics.ts` (`/healthz.process`), `scripts/load.ts` (the entrypoint behind `npm run load`)
 - **Tests**: `src/load/aggregate.test.ts`, `src/load/history.test.ts`, `src/load/runLoop.test.ts`, `src/load/reasons.test.ts`, `src/load/residentLoad.test.ts`, `src/load/sandboxLoad.test.ts`, `src/load/e2eLoad.test.ts`, `src/load/cardsLoad.test.ts`, `src/load/scriptedProvider.test.ts`, `src/load/fakeSlack.test.ts`, `src/execution/bindingPurge.test.ts`, `src/channels/processMetrics.test.ts`
-- **Receipts**: [#556](https://github.com/coreplanelabs/switchboard/issues/556)
 - **Docs**: [how-to: run a load test](../../how-to/run-a-load-test.md)
 
 ## Behavior

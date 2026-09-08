@@ -121,7 +121,7 @@
       "when": "Part of `check:consistency`."
     },
     "specs:check": {
-      "does": "Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist; every `[gap]` links an issue.",
+      "does": "Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist.",
       "when": "After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit."
     },
     "decisions:check": {

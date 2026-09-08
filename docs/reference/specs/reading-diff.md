@@ -6,7 +6,6 @@ Shaped on the 2026-08-30 measurement (project memory `provider-ab-harness` metho
 
 - **Code**: `src/core/readingDiff.ts` (`resolveReadingDiff`, `readingDiffCommand`, `parseMeatJson`, `capDiff`, `produceReadingDiff`, `startReviewReadingDiff`, `READING_DIFF_CAP`, `MEAT_TIMEOUT_S_DEFAULT`); the `review_artifact` event in `src/core/runEvents.ts`; dispatcher wiring in `src/core/dispatcher.ts`; config `AppConfig.review.readingDiff` (`src/config.ts`).
 - **Tests**: `src/core/readingDiff.test.ts`, `src/core/dispatcher.test.ts::reading-diff artifact on review runs`, `src/core/runEventLines.test.ts`, `src/core/runFriction.skillUse.test.ts` (side-fact invisibility), `src/channels/runTimeline.test.ts`.
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/225 (the review agent's receipts issue)
 
 ## Behavior
 

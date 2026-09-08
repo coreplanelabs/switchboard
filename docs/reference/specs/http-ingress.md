@@ -6,7 +6,6 @@ HTTP is single-shot request/response, unlike Slack's long-lived threads. The end
 
 - **Code**: `src/channels/http.ts` (`authenticate` pure auth, `handleIngressRequest` transport gating, `HttpIO` single-shot `ChannelIO`, `readBody` size cap, `createIngressHandler` node:http wrapper, `parseIngressTokens` env→config); `src/index.ts` (wires `POST /ingress` into the existing http server alongside the health probe).
 - **Tests**: `src/channels/http.test.ts`.
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/229
 - **Docs**: [AGENTS.md invariants 1, 2, 3, 4](../../../AGENTS.md), [README — Architecture](../../../README.md#architecture).
 
 ## Behavior

@@ -8,7 +8,6 @@ Switchboard itself runs in prod, which is fine — the safety is not where switc
 
 - **Code**: `src/agentEnv/bootstrap.ts` (dependency-injected core: `stripJsonc` + `parseManifest` JSONC parsing, `parseOpRef`, `ALLOWED_ENVS` + `assertAllowedEnv` allowlist, `buildPlan`, `renderPlan`, `renderEnvFile`, `runBootstrap`, the `buildAgentEnv` integration hook — `OpReader`/`EnvSink`/`log` injected, no real `op` ever runs). `src/agentEnv/host.ts` (the host half: real `op read`, real chmod-600 file sink, manifest + path defaults) behind the registry command `env bootstrap` (`src/core/commands/env.ts`, CLI only — [command-registry.md](command-registry.md) item 20; the option grammar, exit codes and usage are the registry's). `deploy/agent-env.jsonc` (operator-filled manifest template with `REPLACE-ME` placeholders). `deploy/agent-env-bootstrap.sh` + the `agent-env-bootstrap` npm script.
 - **Tests**: `src/agentEnv/bootstrap.test.ts`.
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/223
 
 ## The manifest
 

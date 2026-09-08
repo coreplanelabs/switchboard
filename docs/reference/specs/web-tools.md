@@ -4,7 +4,6 @@ Agents can read a web page the user links and search the web for current informa
 
 - **Code**: `src/tools/web.ts` (the `WebSearch` seam, `BraveWebSearch` + `NullWebSearch`, `makeWebCapability`, SSRF guards `assertUrlAllowed`/`ipInBlockedRange` (sync literal guard, full IPv6 expansion) and `makeSsrfLookup` (the undici connect-time IP-pinning guard), `webFetchTool`, `webSearchTool`); `src/tools/workspace.ts` (`ToolContext.web`, `TOOLSETS` wiring); `src/agents/registry.ts` (the `research` agent + `RESEARCH_SYSTEM`, `general` prompt points web asks at it); `src/core/dispatcher.ts` (injects `makeWebCapability(process.env)` into the tool context).
 - **Tests**: `src/tools/web.test.ts`.
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/242
 
 ## Behavior
 

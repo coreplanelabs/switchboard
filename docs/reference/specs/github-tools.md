@@ -4,7 +4,6 @@ Every agent with a tool loop can read the org's repositories and read/write thei
 
 - **Code**: `src/execution/githubApi.ts` (the `GithubApi` seam; `RestGithubApi` — REST + the one GraphQL `deleteIssue` mutation, read-scoped token for reads and write-scoped for writes; `InMemoryGithubApi`), `src/tools/github.ts` (the ten `github_*` tools, `GithubCapability`, `GITHUB_READ_TOOLS` / `GITHUB_ISSUE_WRITE_TOOLS`), `src/tools/workspace.ts` (`ToolContext.github`, `TOOLSETS` incl. the new `assistant` set), `src/agents/registry.ts` (`general` on `assistant`, prompts), `src/core/dispatcher.ts` (`githubCapabilityFor` — the per-run capability with the requesting user's `canUseRepo` gate; injected into every tool context, ship children included), `src/execution/githubApp.ts` (`issues:read` in the read-scoped permission set).
 - **Tests**: `src/execution/githubApi.test.ts`, `src/tools/github.test.ts`, `src/agents/registry.test.ts`, `src/core/dispatcher.test.ts` (the `self-description … and the github_* tools` block).
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/242 (shared with web-tools until this spec has its own receipts issue)
 
 ## Behavior
 

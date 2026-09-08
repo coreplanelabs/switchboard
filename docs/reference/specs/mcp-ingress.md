@@ -6,7 +6,6 @@ Transport is a **minimal MCP server over streamable-HTTP**: JSON-RPC 2.0 over a 
 
 - **Code**: `src/channels/mcp.ts` (`handleMcpRequest` transport gating + JSON-RPC routing, `McpIO` single-shot `ChannelIO`, `createMcpHandler` node:http wrapper; auth reused from `src/channels/http.ts` — `authenticate`, `readBody`, `MAX_BODY_BYTES`, `IngressConfig`, `IngressIdentity`, `DispatchFn`); `src/index.ts` (wires `POST /mcp` into the existing http server alongside the health probe and `POST /ingress`, sharing the one parsed token map).
 - **Tests**: `src/channels/mcp.test.ts`.
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/231
 - **Docs**: [AGENTS.md invariants 1, 2, 3, 4](../../../AGENTS.md), [HTTP ingress](http-ingress.md).
 
 ## Behavior

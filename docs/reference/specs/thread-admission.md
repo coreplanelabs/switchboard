@@ -5,7 +5,6 @@ A thread reply that arrives while a run is already in flight in that thread is f
 - **Code**: `src/core/threadAdmission.ts` (pure: the live-thread map, the inbox, the steer/refuse decision, the replies), `src/core/runLedger/threadsElsewhere.ts` (the threads live on the ledger but not here, item 5), `src/core/dispatcher.ts` (claim after the agent gate, release in the outer finally), `src/runner.ts` (drains the inbox at step boundaries), `src/core/shipPipeline.ts` (hands the thread's inbox to every child round)
 - **Docs**: [How a request flows](../../explanation/how-a-request-flows.md)
 - **Tests**: `src/core/threadAdmission.test.ts`, `src/core/runLedger/threadsElsewhere.test.ts`, `src/runner.test.ts` (`follow-up inbox`), `src/core/dispatcher.test.ts` (`thread admission`, `run ledger write-through`)
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/455
 
 ## Why
 

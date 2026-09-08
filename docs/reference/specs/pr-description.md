@@ -6,7 +6,6 @@ This is the data half of the coding agent's PR description ([agent-coding.md](ag
 
 - **Code**: `src/core/prDescription.ts` (`PrDescriptionSchema` / `parsePrDescription`, `renderPrDescriptionMarkdown`, `anchorUrl`); `src/tools/workspace.ts` (`submit_pr_description`); `src/execution/githubPulls.ts` (`findOpenPrByHead` / `openPullRequest` / `updatePullRequest`); the coding PR post-step in `src/core/codingPrPostStep.ts` (`trackPushedBranch` / `pushedBranchOf`, `observeCodingWorkspace`, `runCodingPrPostStep`), wired from `src/core/dispatcher.ts` and `src/core/shipPipeline.ts`; `scripts/render-pr-description.ts`; fixture + golden `src/core/testing/goldenTour.description.json` / `goldenTour.body.md`.
 - **Tests**: `src/core/prDescription.test.ts`; `src/tools/workspace.test.ts` (`submit_pr_description tool`); `src/execution/githubPulls.test.ts`; `src/core/dispatcher.test.ts` (`coding PR post-step`).
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/222 (the coding agent's receipts issue — the description is its deliverable)
 
 ## Behavior
 

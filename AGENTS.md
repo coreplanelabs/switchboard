@@ -6,7 +6,7 @@ Every agent working here reads this file, as does a person asking how we work: h
 
 ## How a change is made
 
-1. **The spec says what should be true.** Every behavior has a row in a spec under `docs/reference/specs/`: the criterion and its proof — a `file::describe::it` test, a procedure an agent runs live, or a `[gap]` linking the issue that closes it. A change starts with that row, in the same PR as the code. A spec describing code that no longer exists is a bug.
+1. **The spec says what should be true.** Every behavior has a row in a spec under `docs/reference/specs/`: the criterion and its proof — a `file::describe::it` test, a procedure an agent runs live, or a `[gap]` still to be proven. A change starts with that row, in the same PR as the code. A spec describing code that no longer exists is a bug.
 2. **A failing test, then the code.** Unit tests are the default proof. `npx vitest run --changed origin/main` is the loop; `npm test` before pushing.
 3. **`npm run fix`, then `npm run verify`.** `fix` regenerates every generated artifact and repairs lint and formatting. `verify` is the whole gate and exactly what CI runs — nothing lives only in CI; a unit test over the workflow files keeps it so.
 4. **A PR written for the reader.** Conventional title (`feat(scope): …`; a required check refuses anything else). Body: two sentences a stranger can act on, then a Tour of the change in reading order with permalinks at the pushed head, the non-obvious decisions, and the validation with receipts. Docs describing changed behavior change in the same PR.
@@ -84,7 +84,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run licenses:check` | Every production dependency's license is on the allowlist. | After adding a dependency. |
 | `npm run docs:gen` | Writes the generated regions of the reference docs from the command registry. | After changing a command, flag, route, or config key; part of `fix`. |
 | `npm run docs:check` | The generated doc regions equal what the code would generate. | Part of `check:consistency`. |
-| `npm run specs:check` | Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist; every `[gap]` links an issue. | After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit. |
+| `npm run specs:check` | Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist. | After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit. |
 | `npm run decisions:check` | Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`. | Part of `check:consistency`; when a record fails it, write a new record and supersede the old one instead of editing it. |
 | `npm run hygiene:check` | The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks. | Part of `check:consistency`. New hit: rewrite the line or allow it by name in `scripts/public-hygiene.allow`; `-- --list <prefix>` shows the rest. |
 | `npm run hygiene:gen` | Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`. | Part of `fix`, safe to run blindly: new imprint fails it like `hygiene:check`. |

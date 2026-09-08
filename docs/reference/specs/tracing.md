@@ -5,7 +5,6 @@ One measurement primitive, a span, records every unit of work Switchboard does â
 - **Code**: `src/core/trace/` (types, tracer, context, sinks, runStreamSink, cardSink, streamSpans, attrs, partition, classify, spanLog, traceparent, displayNames, clockReads, clockScan, clockAllowlist.json), `src/core/normalizeSpans.ts` (the stream Adapter: `normalizeSpans`, `spansFromEvents`, `lossesFromStream`), `src/core/time/formatDuration.ts`, `src/core/testing/` (recordingSink, tickingClock), `scripts/clock-allowlist.mts`, the `clock-ban` rule in `eslint.config.mjs`, `tracing` in `src/config.ts`
 - **Docs**: [reference: configuration](../../reference/configuration.md) (`tracing.log`); [README â€” Architecture](../../../README.md#architecture)
 - **Tests**: `src/core/trace/*.test.ts`, `src/core/normalizeSpans.test.ts`, `src/core/time/formatDuration.test.ts`
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/612
 
 ## Behavior
 

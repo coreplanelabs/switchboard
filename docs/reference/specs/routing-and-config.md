@@ -5,7 +5,6 @@ Every message resolves to exactly one (agent, model, effort) triple through laye
 - **Code**: `src/directives.ts`, `src/config.ts`, `src/core/dashboardAuthConfig.ts` (the `dashboard` block, item 17), `src/effort.ts`, `src/core/dispatcher.ts`, `src/core/capabilities.ts` (item 16), `src/core/selfDescription.ts` + `src/core/residentFleet.ts` (item 11), `src/core/configAwareness.ts`, `src/core/customInstructions.ts`, `src/core/commands/config.ts` + `src/core/commands/help.ts` (the `config.*` / `help.show` registry commands), `src/core/commands/repo.ts` + `src/core/operations.ts` (deterministic ops)
 - **Docs**: [README — Configuration layers](../../../README.md#configuration-layers), [AGENTS.md invariants 3, 4, 7](../../../AGENTS.md)
 - **Tests**: `src/directives.test.ts`, `src/config.test.ts`, `src/core/dashboardAuthConfig.test.ts`, `src/core/dispatcher.test.ts`, `src/core/capabilities.test.ts`, `src/core/selfDescription.test.ts`, `src/core/residentFleet.test.ts`, `src/core/configAwareness.test.ts`, `src/core/customInstructions.test.ts`, `src/runner.test.ts` (effort reaches the provider)
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/234
 
 ## Behavior
 

@@ -5,7 +5,6 @@ Every LLM call's output is an assumption the system made — this feature makes 
 - **Code**: `src/core/llmOutput/` — `types.ts` (the `OutputType` seam + `acceptOutput` control loop), `markdown.ts` (prose canonicalization), `json.ts` (fence-strip + `JSON.parse` + zod)
 - **Consumers**: `src/core/dispatcher.ts` (the answer boundary), `src/core/memory/reflection.ts` (the reflection envelope)
 - **Tests**: `src/core/llmOutput/markdown.test.ts`, `src/core/llmOutput/json.test.ts`, `src/core/llmOutput/types.test.ts`, `src/core/dispatcher.test.ts::typed answer output`
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/371
 
 ## Behavior
 

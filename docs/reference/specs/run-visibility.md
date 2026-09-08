@@ -6,7 +6,6 @@ You can see what an agent is doing while it works, in real time (Area 2 / R12). 
 
 - **Code**: `src/core/runEvents.ts` (the `RunEvent` type, `redactSecrets`, `summarizeToolResult`, `parseExitPrefix`, `prepareToolOutput`); `src/runner.ts` (`RunOptions.onEvent`, emits `tool_call`/`tool_result`/`run_note`/`assistant`/`turn`); `src/core/statusCardFrame.ts` (`createCardShell`: the one builder for every card paint — ack, spinner frames, the pre-run closes, the done frame); `src/core/dispatcher.ts` (consumes `onEvent` → live card refresh with a one-line activity trace; publishes `input`, `context`, `run_meta`, `answer`, `pr_description` and `pr_opened` directly to the run registry; `attachmentSuffix`); `src/core/statusCardLabel.ts` (`quietSuffix`, `inFlightToolAfter` — the title's thinking / running-tool suffix).
 - **Tests**: `src/core/runEvents.test.ts`, `src/runner.test.ts` (`run-visibility events`), `src/core/statusCardLabel.test.ts`, `src/core/statusCardFrame.test.ts`.
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/237
 
 ## Behavior
 

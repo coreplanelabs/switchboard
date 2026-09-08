@@ -10,7 +10,6 @@ This is delivered in stages. **PR1 (this spec) ships the seam + two stores + the
 - **Docs**: [AGENTS.md invariants 2 (≥2 impls, core sees the interface), 4 (namespacing), 7 (no hardcoded models)](../../../AGENTS.md), [#100](https://github.com/coreplanelabs/switchboard/issues/100).
 - **Attribution**: the bundled skills are vendored from [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) (MIT) at the commit pinned in `skills/manifest.yaml` (items 9–10); the frontmatter gains only `agents` scoping, the pinned `source` link and the `upstream` provenance block; the body is upstream's, byte-for-byte.
 - **Tests**: `src/skills/skills.test.ts`, `src/tools/skills.test.ts`, `src/core/dispatcher.test.ts`.
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/239
 
 ## Behavior (PR1 — seam + load path)
 

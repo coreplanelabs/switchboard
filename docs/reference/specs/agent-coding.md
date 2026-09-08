@@ -5,7 +5,6 @@ Takes a task from Slack, scopes fast, implements the change in its sandbox, push
 - **Code**: `src/agents/registry.ts` (`CODING_SYSTEM`; resident-path variant `CODING_SYSTEM_RESIDENT`)
 - **Docs**: [README — Agents](../../../README.md#agents)
 - **Budgets**: 60 turns / 45 min / 64k tokens · no built-in effort — set it per deployment/channel/user/thread/message through the config layers ([routing-and-config.md](routing-and-config.md) item 2; e.g. `config set channel efforts.coding=medium` — the wall clock is the real budget, and a 31-min live run at the model's default effort spent 97 % of it thinking between one-line greps) · toolset `full`
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/222
 
 ## Behavior
 

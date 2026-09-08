@@ -5,7 +5,6 @@ Slack is a pure transport: it turns Slack events into `IncomingMessage`s, render
 - **Code**: `src/channels/slack.ts`, `src/channels/slackTriggers.ts` (pure trigger gating), `src/channels/slackCatchUp.ts` (reconnect catch-up + orphaned-card sweep), `src/channels/slackCatchUpStatus.ts` (catch-up status record + bot-scope check), `src/channels/mrkdwn.ts`, `src/channels/health.ts` (`/healthz` body), `src/channels/processMetrics.ts` (`/healthz.process`), `src/core/drain.ts` (drain deadline + catch-up window minimum), `deploy/cloudflare/preflight.mjs` (bot deploy preflight), `src/deploy/restart.ts` + `deploy/cloudflare/worker.ts` (`deploy restart`: `/admin/restart` authorization + refusal decision; the Container DO `stop()`)
 - **Docs**: [README — Architecture](../../../README.md#architecture), [AGENTS.md invariant 1](../../../AGENTS.md)
 - **Tests**: `src/channels/mrkdwn.test.ts`, `src/channels/slack.test.ts`, `src/channels/slackCatchUp.test.ts`, `src/channels/health.test.ts`, `src/channels/processMetrics.test.ts`, `src/core/drain.test.ts`, `deploy/cloudflare/preflight.test.mjs`, `src/deploy/restart.test.ts`, `src/deploy/restartRun.test.ts`, `src/deploy/liveGate.test.ts`
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/240
 
 ## Behavior
 

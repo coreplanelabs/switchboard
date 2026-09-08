@@ -9,11 +9,6 @@ export interface HeaderPath {
   line: number;
   path: string;
 }
-export interface GapRow {
-  line: number;
-  linked: boolean;
-  criterion: string;
-}
 export interface TestNode {
   parts: string[];
   leaf: boolean;
@@ -34,7 +29,6 @@ export function explicitSegment(segment: string, parts: string[]): string;
 export function explicitSpan(raw: string, nodes: TestNode[]): string | null;
 export function resolveBareTestFile(name: string, candidates: string[]): { file: string; ambiguous: string[] };
 export function parseHeaderPaths(markdown: string): HeaderPath[];
-export function parseGapRows(markdown: string): GapRow[];
 export function collectTestTitles(source: string, fileName?: string): TestNode[];
 export function segmentMatches(segment: string, part: string): boolean;
 export function refMatchesNode(titles: string[], node: TestNode): boolean;

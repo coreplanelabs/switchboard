@@ -5,7 +5,6 @@ The runner is provider-blind: complete → execute tools → append results → 
 - **Code**: `src/runner.ts`, budgets on `src/agents/registry.ts`
 - **Docs**: [README — Agent loop](../../../README.md#architecture)
 - **Tests**: `src/runner.test.ts`
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/236
 
 ## Behavior
 

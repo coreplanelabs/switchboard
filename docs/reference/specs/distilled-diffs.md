@@ -8,7 +8,6 @@ The parsing/rendering core is `distillDiff`, a pure `string -> string` function 
 
 - **Code**: `src/core/diffDigest.ts` (the pure `distillDiff`); `src/tools/workspace.ts` (the `diff_digest` `RunnableTool` + `full`/`readonly` toolset wiring; reuses `src/execution/shellQuote.ts` to quote the base ref); `src/agents/registry.ts` (`CODING_SYSTEM_RESIDENT` has the digest inform the submitted description; `REVIEW_SYSTEM` / `REVIEW_SYSTEM_RESIDENT` orient with it and forbid running tests/build).
 - **Tests**: `src/core/diffDigest.test.ts`, `src/tools/workspace.test.ts`, `src/agents/registry.test.ts`.
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/241
 
 ## Behavior
 

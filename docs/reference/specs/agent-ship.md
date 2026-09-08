@@ -5,7 +5,6 @@ The coding → review → fix loop to LGTM as one pipeline ([#131](https://githu
 - **Code**: `src/core/dispatcher.ts` (the ship branch + round loop), `src/core/reviewRound.ts` + `src/core/codingPrPostStep.ts` (the per-round units), `src/core/reviewVerdict.ts` (findings), `src/tools/workspace.ts` (`submit_dispositions`), `src/agents/registry.ts` (`AGENTS["ship"]`), `src/config.ts` (`ship` caps block)
 - **Docs**: [pr-description.md](pr-description.md) (the PR gate ship builds on), [agent-coding.md](agent-coding.md), [agent-review.md](agent-review.md), [resident-repos.md](resident-repos.md)
 - **Budgets**: child rounds run on their own agent budgets (coding 60 turns/45 min, review 30 turns/25 min) **clipped to the pipeline's remaining wall clock**; pipeline caps `ship.maxRounds` (default 3) and `ship.maxMinutes` (default 120) resolve through the standard config layers — the wall clock is authoritative and whichever cap hits first ends the loop
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/388
 
 ## Behavior
 

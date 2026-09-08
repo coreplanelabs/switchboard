@@ -7,7 +7,6 @@ This is delivered in stages. **PR1 shipped the seam + the READ path; PR2 the WRI
 - **Code**: `src/core/memory/` (`types.ts`, `scorer.ts`, `engine.ts`, `scope.ts`, `stores.ts`, `workerStore.ts`, `buildStore.ts`, `reflection.ts`, `index.ts`), wired in `src/core/dispatcher.ts` (retrieve → inject before `buildMessages`; `scheduleReflection` after the reply), store selection + drain in `src/index.ts`, config in `src/config.ts`; the Memory Worker in `deploy/cloudflare-memory/` (`worker.ts`, `wrangler.jsonc`)
 - **Docs**: [AGENTS.md invariants 1, 2, 4, 6, 7](../../../AGENTS.md), [#85](https://github.com/coreplanelabs/switchboard/issues/85) (design proposal), [README → Deployment](../../../README.md#deployment)
 - **Tests**: `src/core/memory/scorer.test.ts`, `engine.test.ts`, `stores.test.ts`, `workerStore.test.ts`, `buildStore.test.ts`, `scope.test.ts`, `memory.test.ts`, `reflection.test.ts`, `src/core/dispatcher.test.ts`; `deploy/cloudflare-memory/worker.test.ts` (runs inside workerd)
-- **Receipts**: https://github.com/coreplanelabs/switchboard/issues/232
 
 ## Behavior (PR1 — seam + read path)
 
