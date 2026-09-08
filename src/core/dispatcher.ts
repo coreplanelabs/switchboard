@@ -624,6 +624,7 @@ export async function dispatch(
         lastStep: resume.lastStep.step,
         lastSeq: resume.lastSeq,
         onStop: (mode) => void liveControl?.requestStop(mode),
+        onFenced: () => void liveControl?.requestStop("hard"),
       });
     }
 
@@ -690,7 +691,9 @@ export async function dispatch(
     // card below; a refusal or setup failure closes it with a reason instead of
     // leaving a spinner behind.
     let label = `*${agent.name}* on \`${resolved.modelRef}\``;
-    const startedAt = Date.now();
+    // A resumed run's clock is the original start (its ledger row's), so the
+    // card's elapsed time spans the whole run, not the resume.
+    const startedAt = resume?.row.startedAt ?? Date.now();
     let frame = 0;
     const title = (icon?: string) =>
       `${icon ?? SPINNER_GLYPHS[frame++ % SPINNER_GLYPHS.length]} ${label} · ${Math.round((Date.now() - startedAt) / 1000)}s`;
@@ -1028,7 +1031,7 @@ export async function dispatch(
         ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
         ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       },
-      resume ? { id: resume.row.runId, replay: resume.events } : {},
+      resume ? { id: resume.row.runId, replay: resume.events, startedAt: resume.row.startedAt } : {},
     );
     if (resume) {
       console.log(
@@ -1182,8 +1185,11 @@ export async function dispatch(
         ),
         seed: { messages, budgetMs: agent.maxMinutes * 60_000 },
         // A stop asked of another container (`/runs/stop` there) reaches this
-        // run through its heartbeat and is honored like a local one.
+        // run through its heartbeat and is honored like a local one; a fence
+        // (another generation took the run) is a hard stop — nothing more may
+        // run or reply here (D9).
         onStop: (mode) => void run.control.requestStop(mode),
+        onFenced: () => void run.control.requestStop("hard"),
       });
       if (opened) {
         ledgerRun = opened;
@@ -1647,11 +1653,19 @@ export async function dispatch(
       // `live → finishing` on the ledger BEFORE anything reaches the thread
       // (item 35): the double-answer protection once runs resume — a
       // generation that lost the run is refused here and must not reply.
-      // Phase 2 records the refusal; the resume phase acts on it. The status
-      // the record will carry rides on the row first, so a reclaim of a
-      // `finishing` row (replied, died before `finish`) closes it truthfully.
+      // The status the record will carry rides on the row first, so a reclaim
+      // of a `finishing` row (replied, died before `finish`) closes it
+      // truthfully. A `fenced` answer means another generation reclaimed this
+      // run while it ran (a handoff, or a lease that lapsed) and is driving it
+      // now: nothing more reaches the thread from here — the record is theirs.
       ledgerRun?.setState({ finalStatus: stopped ? `stopped_${stopped}` : "completed" });
-      await ledgerRun?.finishing();
+      if ((await ledgerRun?.finishing()) === "fenced") {
+        // Nothing more from here: no reply, no card close, and no record — the
+        // run is the other generation's now and its record is theirs to write
+        // (a partial record from this process could race the real finish).
+        console.log(`[run] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
+        return;
+      }
       await card.done({
         title: title(stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅"),
         detail: stopped ? finalDetail() : checkedOffDetail(),
@@ -1972,6 +1986,7 @@ async function runShipBranch(
       system: "",
       tools: [],
       onStop: (mode) => void run.control.requestStop(mode),
+      onFenced: () => void run.control.requestStop("hard"),
     });
     if (ledgerRun) {
       const opened = ledgerRun;
@@ -2190,7 +2205,11 @@ async function runShipBranch(
       finalStatus:
         outcome.status === "stopped_soft" || outcome.status === "stopped_hard" ? outcome.status : "completed",
     });
-    await ledgerRun?.finishing(); // before anything reaches the thread (item 35)
+    if ((await ledgerRun?.finishing()) === "fenced") {
+      console.log(`[ship] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
+      writeRecordAfterReply = undefined; // the record is the other generation's
+      return;
+    }
     await card.done({
       title: title(icon),
       detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
@@ -2516,10 +2535,13 @@ export function writeAbandonedRunRecords(
   writer: Pick<RunHistoryWriter, "write">,
   now: number,
   log: (line: string) => void = console.log,
+  /** Runs handed to the next generation (run-history item 39): their record is
+   *  the ledger's, not a tombstone from here. */
+  exclude: ReadonlySet<string> = new Set(),
 ): number {
   let written = 0;
   for (const summary of registry.listActive()) {
-    if (summary.finished) continue;
+    if (summary.finished || exclude.has(summary.id)) continue;
     const snap = registry.snapshotById(summary.id);
     if (!snap) continue;
     writer.write(interruptedRunRecord(summary, snap, now), { provisional: true });
@@ -2864,7 +2886,7 @@ export const LIVE_CARD_PREFIXES = [...SPINNER_GLYPHS, "👀"];
  *  card's title (#357) — an interrupted card must not keep the stale
  *  "finishing this run" clause. Shared like LIVE_CARD_PREFIXES, so the text
  *  the drain appends and the text the sweep strips cannot drift apart. */
-export const DEPLOY_RESTART_NOTICE = "⏸ deploy in progress — finishing this run before the bot restarts";
+export const DEPLOY_RESTART_NOTICE = "⏸ deploy in progress — this run continues through the bot restart";
 
 /** Set by the process-wide drain (SIGTERM from a deploy rollout) and appended to
  *  every live card's heartbeat frame, so a reader can tell "finishing this run

@@ -99,7 +99,16 @@ export interface OpenRunRequest {
   /** A stop another generation requested (`/runs/stop` on a different
    *  container), relayed by the heartbeat — once per mode. */
   onStop?: (mode: StopMode) => void;
+  /** Another generation owns this run now (a write was `fenced`, plan D9): the
+   *  caller must stop the run at once — it must not reply, and its next tool
+   *  call would act on a run someone else is driving. Once per run. */
+  onFenced?: () => void;
 }
+
+/** `finishing()`'s answer: `ok` — reply; `fenced` — another generation owns
+ *  the run, do NOT reply (it will); `unavailable` — the ledger could not be
+ *  asked or this run is untracked, reply as before (the run is this process's). */
+export type FinishingGate = "ok" | "fenced" | "unavailable";
 
 /** One tracked run. Every method is safe to call after a detach (a no-op). */
 export interface LedgerRun {
@@ -113,8 +122,14 @@ export interface LedgerRun {
   event(event: RunEvent, seq: number): void;
   /** Merge into the run's state and send it (coalesced: the newest wins). */
   setState(patch: RunState): void;
-  /** `live → finishing`, before the reply. False when refused or unreachable. */
-  finishing(): Promise<boolean>;
+  /** `live → finishing`, before the reply — the double-answer gate (D9). */
+  finishing(): Promise<FinishingGate>;
+  /** True when a resume could continue this run: its seed and seed record
+   *  landed (or it was adopted from a resume). A ship pipeline, a detached run
+   *  and a run whose seed failed are not. */
+  readonly resumable: boolean;
+  /** True once this generation handed the run to the next (SIGTERM). */
+  readonly handedOff: boolean;
   /** The finish record's sink: the ledger's one-transaction `finish`, else the
    *  plain store — never both, never neither. Throws only a transient failure
    *  (the writer retries it; a repeated `finish` is idempotent). */
@@ -136,6 +151,7 @@ export interface AdoptRunRequest {
   /** The highest event `seq` on the ledger; the next append continues past it. */
   lastSeq: number;
   onStop?: (mode: StopMode) => void;
+  onFenced?: () => void;
 }
 
 export interface LedgerWriteThrough {
@@ -148,6 +164,13 @@ export interface LedgerWriteThrough {
    *  under this generation with no claim and no seed. Synchronous — the row is
    *  ours since the boot reclaim, and the heartbeat must start at once. */
   adopt(req: AdoptRunRequest): LedgerRun;
+  /** The runs this generation is driving right now (opened or adopted, not yet finished). */
+  liveRuns(): LedgerRun[];
+  /** SIGTERM (plan D8): mark every resumable live run `handoff` on the ledger so
+   *  the next generation takes it at once, whatever its lease. The runs keep
+   *  running here until the process exits; their writes are fenced the moment
+   *  the next generation reclaims them. Returns the run ids marked. */
+  handoff(): Promise<{ marked: string[]; failed?: string }>;
 }
 
 /** Backoff before a retry: the claim gets both, a step or state write the first. */
@@ -170,6 +193,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   const stopInterval = opts.clearInterval ?? ((t) => clearInterval(t as NodeJS.Timeout));
   const claimAttempts = opts.claimAttempts ?? RETRY_MS.length + 1;
   let routeMissingWarned = false;
+  const live = new Set<TrackedRun>();
 
   const routeMissing = (): void => {
     if (routeMissingWarned) return;
@@ -218,8 +242,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     readonly runId: string;
     private readonly threadKey: string;
     private readonly onStop?: (mode: StopMode) => void;
+    private readonly onFenced?: () => void;
+    private fencedTold = false;
     private detached = false;
     private finished = false;
+    private seeded = false;
+    private adopted = false;
+    handedOff = false;
     private stepNo: number;
     private lastSeq: number;
     private state: RunState;
@@ -242,20 +271,31 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     });
 
     constructor(
-      req: Pick<OpenRunRequest, "runId" | "threadKey" | "state" | "onStop">,
-      from: { stepNo: number; lastSeq: number } = { stepNo: 0, lastSeq: 0 },
+      req: Pick<OpenRunRequest, "runId" | "threadKey" | "state" | "onStop" | "onFenced">,
+      from: { stepNo: number; lastSeq: number; resumable?: boolean } = { stepNo: 0, lastSeq: 0 },
     ) {
       this.runId = req.runId;
       this.threadKey = req.threadKey;
       this.state = req.state ?? {};
       this.onStop = req.onStop;
+      this.onFenced = req.onFenced;
       this.stepNo = from.stepNo;
       this.lastSeq = from.lastSeq;
+      this.adopted = from.resumable === true;
+    }
+
+    get resumable(): boolean {
+      return !this.detached && (this.seeded || this.adopted);
+    }
+
+    markHandedOff(): void {
+      this.handedOff = true;
     }
 
     readonly sink: RecordSink = {
       put: async (record) => {
         this.finished = true; // no event or state write after this point
+        live.delete(this);
         await this.close();
         let result: Awaited<ReturnType<RunLedger["finish"]>>;
         try {
@@ -281,6 +321,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.detached = true;
       warn(`[ledger] ${this.threadKey} run ${this.runId} detached: ${reason} — this run is not resumable`);
       this.stopHeartbeat();
+      live.delete(this);
+      // A fence means another generation owns the run now (it reclaimed the
+      // row): this process must stop driving it, and must not reply (D9).
+      if (reason.includes("(fenced)") && this.onFenced && !this.fencedTold) {
+        this.fencedTold = true;
+        this.onFenced();
+      }
     }
 
     /** The seed, then the seed record: step 0 with no calls in flight and
@@ -312,6 +359,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           [],
         );
         if (!recorded.ok) this.detach(`seed record refused (${recorded.reason})`);
+        else this.seeded = true;
       } catch (err) {
         this.detach(`seed failed: ${describe(err)}`);
       }
@@ -381,15 +429,22 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
     }
 
-    async finishing(): Promise<boolean> {
-      if (this.detached) return false;
+    async finishing(): Promise<FinishingGate> {
+      if (this.detached) return "unavailable";
       try {
         const result = await ledger.finishing(this.runId, gen);
-        if (!result.ok) warn(`[ledger] ${this.threadKey} finishing refused (${result.reason})`);
-        return result.ok;
+        if (result.ok) return "ok";
+        // Refused: another generation took the row (`fenced`), or the row is
+        // gone (`unknown-run` — the other generation already finished it).
+        // Either way this process must not answer the thread.
+        warn(
+          `[ledger] ${this.threadKey} finishing refused (${result.reason}) — another generation owns this run; no reply from here`,
+        );
+        this.detach(`finishing refused (fenced)`);
+        return "fenced";
       } catch (err) {
         warn(`[ledger] ${this.threadKey} finishing failed: ${describe(err)}`);
-        return false;
+        return "unavailable";
       }
     }
 
@@ -435,12 +490,30 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       const run = new TrackedRun(req);
       if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs);
       run.startHeartbeat();
+      live.add(run);
       return run;
     },
     adopt(req) {
-      const run = new TrackedRun(req, { stepNo: req.lastStep, lastSeq: req.lastSeq });
+      const run = new TrackedRun(req, { stepNo: req.lastStep, lastSeq: req.lastSeq, resumable: true });
       run.startHeartbeat();
+      live.add(run);
       return run;
+    },
+    liveRuns: () => [...live],
+    async handoff() {
+      const candidates = [...live].filter((r) => r.resumable && r.tracked() && !r.handedOff);
+      if (candidates.length === 0) return { marked: [] };
+      try {
+        const { marked } = await ledger.handoff(
+          gen,
+          candidates.map((r) => r.runId),
+        );
+        const markedSet = new Set(marked);
+        for (const r of candidates) if (markedSet.has(r.runId)) r.markHandedOff();
+        return { marked };
+      } catch (err) {
+        return { marked: [], failed: describe(err) };
+      }
     },
   };
 }

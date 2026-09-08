@@ -75,6 +75,9 @@ export class RunControl {
 export interface CreateOptions {
   id?: string;
   replay?: RunEvent[];
+  /** The run's original start (the ledger row's), so the record and the
+   *  card's elapsed time span the whole run, not the resume. */
+  startedAt?: number;
 }
 
 export interface RunHandle {
@@ -423,7 +426,7 @@ export class RunRegistry {
       finished: false,
       label: stored,
       meta,
-      startedAt: this.now(),
+      startedAt: opts.startedAt ?? this.now(),
       seq: ++this.seq,
       eventCount: 0,
       control: new RunControl(),

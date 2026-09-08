@@ -42,13 +42,16 @@ export function selectReclaim<T extends { leaseUntil: number; phase: LivePhase }
 }
 
 /** The compare-and-swap table for a run's phase. `live → handoff` (SIGTERM),
- *  `live → finishing` (before the reply), and back to `live` from either by a
- *  reclaim. Nothing else. */
+ *  `live → finishing` (before the reply), `handoff → finishing` (the owner
+ *  finished inside its own handoff window, before any reclaim — the fence on
+ *  the generation still keeps a reclaimed row from it), and back to `live`
+ *  from `handoff` or `finishing` by a reclaim. Nothing else. */
 export function phaseTransition(from: LivePhase, to: LivePhase): boolean {
   switch (from) {
     case "live":
       return to === "handoff" || to === "finishing";
     case "handoff":
+      return to === "live" || to === "finishing";
     case "finishing":
       return to === "live";
     default:

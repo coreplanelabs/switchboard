@@ -54,13 +54,13 @@ describe("selectReclaim — expired leases and handed-off runs", () => {
 });
 
 describe("phaseTransition — the CAS table", () => {
-  it("allows live→handoff, live→finishing, handoff→live (reclaim), finishing→live (reclaim), and nothing else", () => {
+  it("allows live→handoff, live→finishing, handoff→live (reclaim), handoff→finishing (the owner finished inside its handoff window), finishing→live (reclaim), and nothing else", () => {
     expect(phaseTransition("live", "handoff")).toBe(true);
     expect(phaseTransition("live", "finishing")).toBe(true);
     expect(phaseTransition("handoff", "live")).toBe(true);
     expect(phaseTransition("finishing", "live")).toBe(true);
     expect(phaseTransition("finishing", "handoff")).toBe(false);
-    expect(phaseTransition("handoff", "finishing")).toBe(false);
+    expect(phaseTransition("handoff", "finishing")).toBe(true);
     expect(phaseTransition("live", "live")).toBe(false);
   });
 });
