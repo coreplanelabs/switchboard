@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.8.0](https://github.com/coreplanelabs/switchboard/compare/v0.7.0...v0.8.0) (2026-09-08)
+
+
+### Features
+
+* **deploy:** the deploy workflow takes wait_max — a dispatch can shorten the preflight budget, so the busy retry can be rehearsed against a real busy bot ([#607](https://github.com/coreplanelabs/switchboard/issues/607)) ([528d49e](https://github.com/coreplanelabs/switchboard/commit/528d49e82255e86911b978c4ec3682b94b09d793))
+* **deploy:** the installation's identity leaves the tree — profile and config in the infrastructure repo, rendered Worker configs generated ([#608](https://github.com/coreplanelabs/switchboard/issues/608)) ([705e8bc](https://github.com/coreplanelabs/switchboard/commit/705e8bcad42f541e67d45778b7c3b482a5b100e8))
+* **run-ledger:** the next generation reclaims every run the last one left — closed with a record from the ledger before the Slack socket opens; seed record, /runs/live-events, /admin/crash, finish before release ([#610](https://github.com/coreplanelabs/switchboard/issues/610)) ([683ab12](https://github.com/coreplanelabs/switchboard/commit/683ab12a0702c2e2182ca954d69e0ae273338669))
+
+
+### Bug fixes
+
+* **execution:** the sandbox credential rides only in the request body — drop the x-env-* header channel ([#609](https://github.com/coreplanelabs/switchboard/issues/609)) ([5aeeb5e](https://github.com/coreplanelabs/switchboard/commit/5aeeb5eb2e1b9b8715599e7aafc7b3746677c39b))
+
+
+### Documentation
+
+* **plans:** run tracing plan — one measurement primitive, the timeline as a side effect ([#613](https://github.com/coreplanelabs/switchboard/issues/613)) ([9fc89c4](https://github.com/coreplanelabs/switchboard/commit/9fc89c4c3089003c21e077b359b9c16a87dc5915))
+
 ## [0.7.0](https://github.com/coreplanelabs/switchboard/compare/v0.6.1...v0.7.0) (2026-09-08)
 
 
