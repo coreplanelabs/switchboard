@@ -55,6 +55,20 @@ export interface RunRecord {
   /** Epoch ms. */
   startedAt: number;
   finishedAt: number;
+  /** The seven stamps and the one duration (features/tracing.md). `receivedAt`:
+   *  our process saw the message, from the adapter's clock (stamped by the
+   *  dispatcher once the adapters carry it; absent until then, so every reader
+   *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
+   *  reply attempt completed or the branch was abandoned; `replyOk` is
+   *  tri-state — `true` a reply was attempted and delivered, `false` attempted
+   *  and threw, absent none was made. `stepCount`: content events only (span
+   *  records excluded). `schema`: the record's stream schema (2 once spans are
+   *  emitted); absent is legacy. All omitted when absent. */
+  receivedAt?: number;
+  sealedAt?: number;
+  replyOk?: boolean;
+  stepCount?: number;
+  schema?: number;
   status: RunStatus;
   /** Events the run published in total — unchanged by truncation. */
   eventCount: number;
@@ -381,6 +395,15 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility))
     return false;
   if (!isFiniteNumber(r.startedAt) || !isFiniteNumber(r.finishedAt)) return false;
+  // The tracing stamps (features/tracing.md): each optional, typed when present.
+  for (const key of ["receivedAt", "sealedAt"] as const) {
+    if (r[key] !== undefined && !isFiniteNumber(r[key])) return false;
+  }
+  if (r.replyOk !== undefined && typeof r.replyOk !== "boolean") return false;
+  for (const key of ["stepCount", "schema"] as const) {
+    if (r[key] !== undefined && (!isFiniteNumber(r[key]) || !Number.isInteger(r[key]) || (r[key] as number) < 0))
+      return false;
+  }
   if (!RUN_STATUSES.includes(r.status as RunStatus)) return false;
   if (!isFiniteNumber(r.eventCount) || !isFiniteNumber(r.storedEventCount)) return false;
   if (typeof r.truncated !== "boolean") return false;

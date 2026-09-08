@@ -152,6 +152,13 @@ function isNarrative(ev: RunEvent): ev is NarrativeEvent {
 }
 
 /** Analyze a run's event stream. Pure and deterministic; never mutates `events`. */
+/** A span record on the stream (features/tracing.md; emitted from PR 4 on): the
+ *  analyzer reads timing from spans in a later step — until then, and for the
+ *  step counts and the stream's first/last stamps always, they are invisible. */
+function isSpanEvent(ev: { type: string }): boolean {
+  return ev.type === "span_start" || ev.type === "span_end";
+}
+
 export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOptions = {}): FrictionDiagnosis {
   const slowToolMs = opts.slowToolMs ?? DEFAULT_SLOW_TOOL_MS;
   const slowModelTurnMs = opts.slowModelTurnMs ?? DEFAULT_SLOW_MODEL_TURN_MS;
@@ -202,7 +209,12 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   // of its own, so it is invisible to timing as well.
   let narrativeEvents = 0;
   let sideFactEvents = 0; // skill_use / review_artifact / pr_description / pr_opened / ship_round: facts about the run, not steps
+  let spanEvents = 0; // span_start / span_end (features/tracing.md): timing records, not steps and not the stream's clock
   events.forEach((ev, index) => {
+    if (isSpanEvent(ev)) {
+      spanEvents++;
+      return;
+    }
     if (isNarrative(ev)) narrativeEvents++;
     if (ev.type === "context") return;
     if (ev.at !== undefined) {
@@ -409,7 +421,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   }
 
   const diagnosis: FrictionDiagnosis = {
-    eventCount: events.length - narrativeEvents - sideFactEvents,
+    eventCount: events.length - narrativeEvents - sideFactEvents - spanEvents,
     toolCalls,
     hasTimings,
     ...(firstAt !== undefined && lastAt !== undefined ? { runMs: lastAt - firstAt, toolTimeMs, modelTimeMs } : {}),

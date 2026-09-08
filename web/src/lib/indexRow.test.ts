@@ -99,6 +99,14 @@ describe("stopwatch", () => {
     expect(elapsedText(row({ finished: true, finishedAt: 1_000_000 + 3_780_000 }), 99)).toBe("1h 03m");
     expect(elapsedText(row(), undefined)).toBe("");
   });
+
+  it("receivedAt opens the window when present (features/tracing.md): live and finished rows both measure from it; a tombstone is empty", () => {
+    expect(elapsedText(row({ receivedAt: 1_000_000 - 20_000 }), 1_000_000 + 40_000)).toBe("1m 00s");
+    expect(
+      elapsedText(row({ finished: true, receivedAt: 1_000_000 - 20_000, finishedAt: 1_000_000 + 40_000 }), 99),
+    ).toBe("1m 00s");
+    expect(elapsedText(row({ finished: true }), 99)).toBe("");
+  });
 });
 
 describe("tooltips", () => {
@@ -110,6 +118,15 @@ describe("tooltips", () => {
     );
     expect(dotTip(finished("stopped_hard", { activity: "$ npm test" }))).toBe("killed in 1m 03s\n$ npm test");
     expect(dotTip(finished("completed", { activity: "done" }))).toBe("succeeded in 1m 03s");
+  });
+
+  it("the tooltips switch to the received basis together, and only when the run carries receivedAt", () => {
+    const r = 1_000_000 - 7_000;
+    expect(dotTip(finished("completed", { receivedAt: r, activity: "done" }))).toBe(
+      "succeeded in 1m 10s (received to finish)",
+    );
+    expect(whenTip(row({ receivedAt: r }))).toBe(`received ${formatLocalIso(r)}\nstarted ${formatLocalIso(1_000_000)}`);
+    expect(whenTip(row())).toBe(`started ${formatLocalIso(1_000_000)}`);
   });
 
   it("the started column's tip: exact local stamps, one per line", () => {
@@ -181,6 +198,16 @@ describe("feed reconciliation (R11)", () => {
     expect(merged.status).toBe("completed");
     // a live previous row keeps nothing
     expect(mergeRow(row(), summary)).toEqual(summary);
+    // the tracing stamps ride the record, never a registry upsert: a repaint keeps them
+    const stamped = row({
+      finished: true,
+      finishedAt: 2_000_000,
+      receivedAt: 990_000,
+      sealedAt: 2_000_500,
+      replyOk: true,
+    });
+    const repaint = mergeRow(stamped, row({ finished: true }));
+    expect(repaint).toMatchObject({ receivedAt: 990_000, sealedAt: 2_000_500, replyOk: true, finishedAt: 2_000_000 });
     // the summary's own fields always win
     const withOwn = mergeRow(kept, finished("failed", { finishedAt: 42 }));
     expect(withOwn.status).toBe("failed");

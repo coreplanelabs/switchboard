@@ -1,4 +1,5 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { runDurationMs } from "../core/runDuration.js";
 import {
   authorize,
   matchesPredicate,
@@ -457,6 +458,7 @@ export function createLiveViewHandler(
     // pre-history handler (KTD6).
     if (access) {
       if (route.kind === "page") {
+        const snap = access.snapshot();
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
           deps.shell("Live run", {
@@ -466,6 +468,11 @@ export function createLiveViewHandler(
             // Stop control (#101): same token, POST-only; `&mode=` is appended client-side.
             eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
             stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}`,
+            // The stamps the header's one duration reads (features/tracing.md).
+            serverNow: now(),
+            startedAt: snap?.startedAt ?? now(),
+            ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
+            ...(snap?.finishedAt !== undefined ? { finishedAt: snap.finishedAt } : {}),
           }),
         );
         return true;
@@ -599,7 +606,12 @@ export function createLiveViewHandler(
             events: withOmittedMarkers(view.events ?? [], view.eventCount),
             ...(view.status ? { status: view.status } : {}),
             eventCount: view.eventCount,
-            ...(typeof view.finishedAt === "number" ? { durationMs: view.finishedAt - view.startedAt } : {}),
+            startedAt: view.startedAt,
+            ...(view.receivedAt !== undefined ? { receivedAt: view.receivedAt } : {}),
+            ...(view.finishedAt !== undefined ? { finishedAt: view.finishedAt } : {}),
+            ...(view.sealedAt !== undefined ? { sealedAt: view.sealedAt } : {}),
+            ...(view.replyOk !== undefined ? { replyOk: view.replyOk } : {}),
+            ...(runDurationMs(view) !== undefined ? { durationMs: runDurationMs(view) } : {}),
           }),
         );
         return;

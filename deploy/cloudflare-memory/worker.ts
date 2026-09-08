@@ -1366,7 +1366,15 @@ export class RunHistoryDO extends DurableObject<Env> {
       const now = Date.now();
       const policy = proposal ? this.applyProposal(proposal, now).policy : this.policyState().policy;
       const finishedAt = Math.min(record.finishedAt, now + RUN_MAX_FUTURE_MS);
-      const stored: RunRecord = { ...record, finishedAt };
+      // The tracing stamps get the same skew clamp (features/tracing.md).
+      const stored: RunRecord = {
+        ...record,
+        finishedAt,
+        ...(record.receivedAt !== undefined
+          ? { receivedAt: Math.min(record.receivedAt, now + RUN_MAX_FUTURE_MS) }
+          : {}),
+        ...(record.sealedAt !== undefined ? { sealedAt: Math.min(record.sealedAt, now + RUN_MAX_FUTURE_MS) } : {}),
+      };
       const { events, ...summary } = stored;
       const bytes = utf8ByteLength(JSON.stringify(stored));
       const existing = this.sql

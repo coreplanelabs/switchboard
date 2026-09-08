@@ -4,8 +4,7 @@ import {
   liveWait,
   modelName,
   runnerNow,
-  runningHeader,
-  runSpan,
+  createRunClock,
   sameModel,
   type StepVm,
 } from "./runPageModel";
@@ -401,15 +400,17 @@ describe("header stopwatch (item 22)", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("the stopwatch projects the runner clock — newest stamped event + wall time since it arrived; runSpan is the finished duration", () => {
-    const m = model();
-    vi.setSystemTime(1_000_000);
-    m.handle({ type: "assistant", text: "x", at: 10_000 });
-    vi.setSystemTime(1_000_500);
-    m.handle({ type: "assistant", text: "y", at: 40_000 });
-    expect(runSpan(m.state)).toBe("30s");
-    expect(runnerNow(m.state, 1_005_500)).toBe(45_000);
-    expect(runningHeader(m.state, 1_005_500)).toBe("running · 35s");
+  it("the header's duration is the one definition on the projected server clock: received (or started) → serverNow plus the browser time since the seed, never an event stamp", () => {
+    const clock = createRunClock({ serverNow: 1_000_000, startedAt: 940_000 }, 5_000);
+    expect(clock.now(5_000)).toBe(1_000_000);
+    expect(clock.elapsedMs(5_000)).toBe(60_000);
+    expect(clock.elapsedMs(35_000)).toBe(90_000);
+    // receivedAt opens the window before startedAt
+    const fromReceipt = createRunClock({ serverNow: 1_000_000, startedAt: 940_000, receivedAt: 900_000 }, 5_000);
+    expect(fromReceipt.elapsedMs(5_000)).toBe(100_000);
+    // a finished seed is frozen whatever the browser clock says
+    const done = createRunClock({ serverNow: 1_000_000, startedAt: 940_000, finishedAt: 970_000 }, 5_000);
+    expect(done.elapsedMs(999_999)).toBe(30_000);
   });
 
   it("a frame without a runner stamp (a replay notice) never moves the clock — the stopwatch cannot reset on a reconnect", () => {
@@ -419,14 +420,27 @@ describe("header stopwatch (item 22)", () => {
     vi.setSystemTime(1_600_000); // ten minutes later the stream reconnects and replays
     m.handle({ type: "replay_note", summary: "replaying last 200 of 300 events" });
     expect(m.state.lastAtWall).toBe(1_000_000);
-    expect(runningHeader(m.state, 1_600_000)).toBe("running · 10m 00s");
+    expect(runnerNow(m.state, 1_600_000)).toBe(610_000);
   });
 
-  it("no stamped events yet → no clock, no running header, empty span", () => {
+  it("span records never move the runner clock or the stream's first/last stamps; no stamped events yet → no clock", () => {
     const m = model();
     expect(runnerNow(m.state, Date.now())).toBeNull();
-    expect(runningHeader(m.state, Date.now())).toBeNull();
-    expect(runSpan(m.state)).toBe("");
+    vi.setSystemTime(1_000_000);
+    m.handle({ type: "span_start", spanId: "s", name: "dispatch.history", at: 5_000 });
+    expect(m.state.firstAt).toBeNull();
+    m.handle({ type: "assistant", text: "x", at: 10_000 });
+    m.handle({
+      type: "span_end",
+      spanId: "s",
+      name: "dispatch.history",
+      startedAt: 5_000,
+      durationMs: 90_000,
+      status: "ok",
+      at: 95_000,
+    });
+    expect(m.state.firstAt).toBe(10_000);
+    expect(m.state.lastAt).toBe(10_000);
   });
 });
 

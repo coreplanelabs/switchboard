@@ -56,6 +56,17 @@ export interface RunLiveSeed {
   id: string;
   eventsUrl: string;
   stopUrl: string;
+  /** The server clock when the seed was built: the page projects it forward
+   *  arrival-relative (`serverNow` + time since the seed arrived), so a live
+   *  stopwatch never subtracts a server stamp from the browser's clock. */
+  serverNow: number;
+  /** The run's stamps (features/tracing.md): the header's one duration opens at
+   *  `receivedAt` (falling back to `startedAt`) and freezes at `finishedAt`. */
+  startedAt: number;
+  receivedAt?: number;
+  finishedAt?: number;
+  sealedAt?: number;
+  replyOk?: boolean;
 }
 
 /** The history run page: the stored events (with AE11 omission markers already
@@ -67,7 +78,13 @@ export interface RunHistorySeed {
   events: LiveFrame[];
   status?: RunStatus;
   eventCount: number;
-  /** `finishedAt - startedAt` when the record knows both. */
+  /** The record's stamps (features/tracing.md). */
+  startedAt: number;
+  receivedAt?: number;
+  finishedAt?: number;
+  sealedAt?: number;
+  replyOk?: boolean;
+  /** `runDurationMs(record)` — the one duration every surface prints. */
   durationMs?: number;
 }
 

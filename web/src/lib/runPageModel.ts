@@ -8,7 +8,7 @@ import {
   type TimelineSource,
   type TimelineStep,
 } from "@core/channels/runTimeline.js";
-import { formatDuration } from "./format";
+import { runDurationMs } from "@core/core/runDuration.js";
 
 // The run page's view model: the ONE fold for seeded history and live frames
 // (both go through `handle`, exactly like the old inline script — a seeded
@@ -427,8 +427,11 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   }
 
   function handle(event: unknown): void {
-    const e = event as { at?: unknown } | null;
-    if (e && typeof e.at === "number") {
+    const e = event as { at?: unknown; type?: unknown } | null;
+    // Span records (features/tracing.md) are timing, not content: they never
+    // move the stream's first/last stamps or the runner clock.
+    const isSpan = e?.type === "span_start" || e?.type === "span_end";
+    if (e && !isSpan && typeof e.at === "number") {
       if (state.firstAt === null || e.at < state.firstAt) state.firstAt = e.at;
       if (state.lastAt === null || e.at >= state.lastAt) {
         state.lastAt = e.at;
@@ -484,12 +487,33 @@ export function runnerNow(state: RunPageModel["state"], nowWall: number): number
   return state.lastAt + (nowWall - state.lastAtWall);
 }
 
-/** The header stopwatch while live (item 22): the whole run, from its first
- *  event to the projected runner clock. */
-export function runningHeader(state: RunPageModel["state"], nowWall: number): string | null {
-  const now = runnerNow(state, nowWall);
-  if (state.firstAt === null || now === null) return null;
-  return `running · ${formatDuration(now - state.firstAt, "clock")}`;
+/** The header's one duration (live-view item 22; features/tracing.md): the
+ *  whole run from `receivedAt` (falling back to `startedAt`) on the SERVER
+ *  clock, projected forward arrival-relative — `serverNow` plus the browser
+ *  time since the seed arrived — so the tick never subtracts a server stamp
+ *  from the browser's clock. `finishedAt` on the seed freezes it. The same
+ *  `runDurationMs` the index row, `runs list` and the history seed use. */
+export interface RunClockSeed {
+  serverNow: number;
+  startedAt: number;
+  receivedAt?: number;
+  finishedAt?: number;
+}
+
+export interface RunClock {
+  /** The projected server clock at `browserNow`. */
+  now(browserNow: number): number;
+  /** The run's duration at `browserNow`: frozen once `finishedAt` is known. */
+  elapsedMs(browserNow: number): number;
+}
+
+export function createRunClock(seed: RunClockSeed, browserNowAtSeed: number): RunClock {
+  return {
+    now: (browserNow) => seed.serverNow + (browserNow - browserNowAtSeed),
+    elapsedMs(browserNow) {
+      return runDurationMs(seed, this.now(browserNow)) ?? 0;
+    },
+  };
 }
 
 /** The projected runner clock, provided by the run page to every card so a
@@ -545,11 +569,4 @@ export function liveWait(state: RunPageModel["state"], pending: CallVm | null, n
     return { kind: "call", call: pending, elapsedMs: Math.max(0, now - (pending.startedAt ?? state.lastAt)) };
   const elapsedMs = Math.max(0, now - state.lastAt);
   return { kind: "thinking", elapsedMs, slow: elapsedMs >= SLOW_TURN_MS };
-}
-
-/** The finished duration on the runner clock (first → last event). */
-export function runSpan(state: RunPageModel["state"]): string {
-  return state.firstAt !== null && state.lastAt !== null && state.lastAt > state.firstAt
-    ? formatDuration(state.lastAt - state.firstAt, "clock")
-    : "";
 }

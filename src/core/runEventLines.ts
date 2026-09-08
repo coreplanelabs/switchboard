@@ -31,13 +31,18 @@ export function parseRunEventLines(text: string): { events: RunEvent[]; skipped:
       continue;
     }
     if (isRunEvent(parsed)) events.push(parsed);
-    else if (!isEmptyObject(parsed)) skipped++; // `{}` is the terminal `end` frame's payload, not garbage
+    else if (!isTransportFrame(parsed)) skipped++; // garbage, or an event-shaped payload this reader does not know
   }
   return { events, skipped };
 }
 
-function isEmptyObject(v: unknown): boolean {
-  return typeof v === "object" && v !== null && !Array.isArray(v) && Object.keys(v).length === 0;
+/** A plain object with no `type` is a transport frame — `end`'s `{}` today,
+ *  `{ sealedAt, replyOk }` and the `finished`/`replay_elided` payloads later
+ *  (features/tracing.md) — never garbage. Anything else that is not an event
+ *  (a number, a string, an array, an object whose `type` this reader does not
+ *  know) is skipped and counted. */
+function isTransportFrame(v: unknown): boolean {
+  return typeof v === "object" && v !== null && !Array.isArray(v) && typeof (v as { type?: unknown }).type !== "string";
 }
 
 /** Structural check of the fields the analyzer actually relies on — a recognized
