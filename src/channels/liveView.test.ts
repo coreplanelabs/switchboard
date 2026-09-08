@@ -33,6 +33,7 @@ import type { RunEvent } from "../core/runEvents.js";
 import type { RunRecord } from "../core/runRecord.js";
 import { INDEX_PAGE_SIZE } from "./liveView.js";
 import { InMemoryRunStore } from "../core/runStore.js";
+import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { createRunsService } from "../core/runsService.js";
 import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
 import { FIXTURE_SCHEDULES } from "./scheduledPanel.test.js";
@@ -479,10 +480,13 @@ describe("scheduled tab — GET /runs/scheduled (#244, item 18)", () => {
   }
   const tick = () => new Promise((r) => setTimeout(r, 0));
 
-  it("the runs index seed carries no schedule rows — the tab is its own page with its own seed", () => {
-    const index = pageFor({ scheduled: { schedules: FIXTURE_SCHEDULES } }, "/runs");
+  it("the runs index seed carries no schedule rows — the tab is its own page with its own seed", async () => {
+    const registry = new RunRegistry({ genId: () => "run-live", genToken: () => "tok-live" });
+    const index = fakeReqRes("GET", "/runs");
+    panelHandler(registry, { scheduled: { schedules: FIXTURE_SCHEDULES } })(index.req, index.res);
+    await index.finished; // the index awaits the service's rows live elsewhere (run-history item 41)
     expect(index.status).toBe(200);
-    expect(indexSeedOf(index.body).page).toBe("runs");
+    expect(indexSeedOf(index.body()).page).toBe("runs");
     const tab = pageFor({ scheduled: { schedules: FIXTURE_SCHEDULES } });
     expect(tab.status).toBe(200);
     expect(tab.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
@@ -693,12 +697,13 @@ describe("createLiveViewHandler (node:http)", () => {
   // The bare /runs index is the Access-gated home page: it is NOT token-gated
   // (Cloudflare Access is the "who" gate), and its seed carries the per-run
   // capability tokens — so it must only ever be exposed behind Access.
-  it("serves the index shell at bare /runs: live rows with tokens in the seed, strict headers, the live count in the title", () => {
+  it("serves the index shell at bare /runs: live rows with tokens in the seed, strict headers, the live count in the title", async () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create("coding · owner/repo");
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs");
     expect(handler(t.req, t.res)).toBe(true);
+    await t.finished;
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toContain("text/html");
     expect(t.headers["content-security-policy"]).toContain("default-src 'none'");
@@ -713,21 +718,23 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.body()).toContain("<title>(1) Live runs</title>"); // item 21: the tab carries the live count
   });
 
-  it("also serves the index at /runs/ (trailing slash)", () => {
+  it("also serves the index at /runs/ (trailing slash)", async () => {
     const reg = fixedRegistry();
     reg.create();
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs/");
     expect(handler(t.req, t.res)).toBe(true);
+    await t.finished;
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toContain("text/html");
   });
 
-  it("seeds an empty row list (and a bare title) when there are no active runs", () => {
+  it("seeds an empty row list (and a bare title) when there are no active runs", async () => {
     const reg = fixedRegistry();
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs");
     handler(t.req, t.res);
+    await t.finished;
     expect(t.status).toBe(200);
     expect(indexSeedOf(t.body()).rows).toEqual([]);
     expect(t.body()).toContain("<title>Live runs</title>");
@@ -741,12 +748,13 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.status).toBe(405);
   });
 
-  it("a hostile run label is inert in the page: the seed island escapes every angle bracket", () => {
+  it("a hostile run label is inert in the page: the seed island escapes every angle bracket", async () => {
     const reg = new RunRegistry({ genId: () => "run-1", genToken: () => "tok-1" });
     reg.create("</script><script>alert(1)</script>");
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs");
     handler(t.req, t.res);
+    await t.finished;
     const html = t.body();
     expect(html).not.toContain("<script>alert(1)</script>");
     // exactly the shell's own two script elements (the seed island + the module)
@@ -754,13 +762,14 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(indexSeedOf(html).rows[0].label).toBe("</script><script>alert(1)</script>"); // …and survives the round trip as data
   });
 
-  it("routes /runs (no flag) to HTML and /runs?stream=1 to the index SSE feed", () => {
+  it("routes /runs (no flag) to HTML and /runs?stream=1 to the index SSE feed", async () => {
     const reg = fixedRegistry();
     reg.create("coding · owner/repo");
     const handler = liveOnlyHandler(reg);
 
     const htmlReq = fakeReqRes("GET", "/runs");
     handler(htmlReq.req, htmlReq.res);
+    await htmlReq.finished;
     expect(htmlReq.headers["content-type"]).toContain("text/html");
 
     const sseReq = fakeReqRes("GET", "/runs?stream=1");
@@ -1117,6 +1126,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
       devBypass?: LiveViewDeps["devBypass"];
       audit?: LiveViewDeps["audit"];
       indexPageSize?: number;
+      ledger?: InMemoryRunLedger;
     } = {},
   ) {
     let clock = NOW;
@@ -1124,7 +1134,7 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     let n = 0;
     const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, now });
     const store = opts.store === undefined ? new InMemoryRunStore({ now }) : opts.store;
-    const service = createRunsService({ registry, store });
+    const service = createRunsService({ registry, store, ...(opts.ledger ? { ledger: opts.ledger } : {}) });
     const handler = adminByDefault(
       createLiveViewHandler({
         shell,
@@ -1443,6 +1453,82 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
   });
 
   describe("index: active by default, everything with ?all=1", () => {
+    it("a run live on the ledger under another generation opens tokenless (item 41): the page in history mode with the ledger's events and no token, the events route a replay that ends, friction a live diagnosis, and the tokenless stop goes to the ledger", async () => {
+      const ledger = new InMemoryRunLedger(() => NOW);
+      const h = harness({ ledger });
+      await ledger.claim({
+        runId: "far-1",
+        threadKey: "slack:C9:far",
+        gen: "g-OTHER",
+        leaseMs: 30_000,
+        startedAt: NOW - 5_000,
+        meta: { channelId: "slack:C9", userId: "slack:U9", threadKey: "slack:C9:far", agent: "review" },
+        card: null,
+        system: "sys",
+        tools: [],
+      });
+      await ledger.append("far-1", "g-OTHER", [
+        { type: "input", text: "far away", at: NOW - 5_000, seq: 1 },
+        { type: "tool_call", tool: "bash", summary: "$ ls", at: NOW - 4_000, seq: 2 },
+      ]);
+      const page = fakeReqRes("GET", "/runs/far-1");
+      h.handler(page.req, page.res);
+      await done(page);
+      expect(page.status).toBe(200);
+      const seed = runSeedOf(page.body()) as RunHistorySeed;
+      expect(seed.mode).toBe("history");
+      expect(seed.events.some((e) => "text" in e && e.text === "far away")).toBe(true);
+      expect(seed.eventCount).toBe(2);
+      expect(seed.finishedAt).toBeUndefined(); // live: no finish stamp, no duration
+      expect(page.body()).not.toMatch(/\?t=/); // no token anywhere: the page token is the other generation's
+      const events = fakeReqRes("GET", "/runs/far-1/events");
+      h.handler(events.req, events.res);
+      await done(events);
+      expect(events.status).toBe(200);
+      expect(events.body()).toContain("far away");
+      expect(events.body()).toContain("event: end");
+      const friction = fakeReqRes("GET", "/runs/far-1/friction");
+      h.handler(friction.req, friction.res);
+      await done(friction);
+      expect(friction.status).toBe(200);
+      expect(JSON.parse(friction.body())).toMatchObject({ id: "far-1", finished: false });
+      const stop = fakeReqRes("POST", "/runs/far-1/stop?mode=soft");
+      h.handler(stop.req, stop.res);
+      await done(stop);
+      expect(stop.status).toBe(200);
+      expect(JSON.parse(stop.body())).toEqual({ id: "far-1", mode: "soft", state: "stopping" });
+      expect(ledger.live.get("far-1")!.stop).toBe("soft");
+    });
+
+    it("the default view also seeds the runs live on the ledger under another generation (run-history item 41): tokenless, live, after this process's rows; still never a store call", async () => {
+      const ledger = new InMemoryRunLedger(() => NOW);
+      const h = harness({ ledger });
+      const active = h.registry.create("active one");
+      await ledger.claim({
+        runId: "far-1",
+        threadKey: "slack:C9:far",
+        gen: "g-OTHER",
+        leaseMs: 30_000,
+        startedAt: NOW - 5_000,
+        meta: { channelId: "slack:C9", userId: "slack:U9", threadKey: "slack:C9:far", agent: "review" },
+        card: null,
+        system: "sys",
+        tools: [],
+      });
+      await ledger.append("far-1", "g-OTHER", [{ type: "input", text: "far", at: NOW - 5_000, seq: 1 }]);
+      const list = vi.spyOn(h.store!, "list");
+      const t = fakeReqRes("GET", "/runs");
+      h.handler(t.req, t.res);
+      await done(t);
+      expect(t.status).toBe(200);
+      const seed = indexSeedOf(t.body());
+      expect(seed.rows.map((r) => r.id)).toEqual([active.id, "far-1"]);
+      expect(seed.rows[1]).toMatchObject({ finished: false, agent: "review", ownerGen: "g-OTHER", eventCount: 1 });
+      expect(seed.rows[1].token).toBeUndefined(); // the page token is the other generation's
+      expect(t.body()).toContain("<title>(2) Live runs</title>");
+      expect(list).not.toHaveBeenCalled();
+    });
+
     it("the default view seeds only unfinished runs and never calls the store", async () => {
       const h = harness();
       await h.store!.put(record("p1"));

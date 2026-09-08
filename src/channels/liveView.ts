@@ -131,7 +131,8 @@ export interface LiveViewDeps {
   /** Every run read and the tokenless stop go through the service (KTD7). */
   service: RunsService;
   /** The registry's index face: the live rows (with tokens, for their hrefs) and
-   *  the live feed. The default `/runs` view is served from this alone (R11). */
+   *  the live feed. The default `/runs` view is this plus the service's rows live
+   *  elsewhere (run-history item 41); never the store (R11). */
   index: Pick<RunRegistry, "listActive" | "subscribeIndex">;
   /** The configured run-history retention, for the index toggle's tooltip; null
    *  when history is off (store: null). */
@@ -405,9 +406,12 @@ export function createLiveViewHandler(
         res.end(deps.shell(title, seed));
       };
       if (!all) {
-        // Nothing to await: the default view is the registry alone (R11 — never a
-        // store read), rendered synchronously as before.
-        render({ rows: live.filter((s) => !s.finished) });
+        // The default view is the registry plus the ledger's rows live under
+        // other generations (run-history item 41) — tokenless, static (the index
+        // feed is the registry's). Still never a store read (R11).
+        run(res, async () =>
+          render({ rows: [...live.filter((s) => !s.finished), ...(await service.liveElsewhere(visibleTo))] }),
+        );
         return true;
       }
       run(res, async () => render(await mergedRows(live, visibleTo, parseIndexCursor(url.searchParams))));
@@ -528,13 +532,19 @@ export function createLiveViewHandler(
       return true;
     }
 
-    // ── History path: no token, or one the registry refused. Only a FINISHED run
-    // the viewer's actor may read is readable here (R10: a live run keeps
-    // requiring its token — a wrong token on it is the same 404 as an unknown
-    // run; a finished run the table denies is that same 404 too); a finished run
-    // still in the registry and a persisted one render identically through the
-    // service.
+    // ── History path: no token, or one the registry refused. A FINISHED run the
+    // viewer's actor may read is readable here (R10: a live run of THIS process
+    // keeps requiring its token — a wrong token on it is the same 404 as an
+    // unknown run; a finished run the table denies is that same 404 too); a
+    // finished run still in the registry and a persisted one render identically
+    // through the service. So is a run LIVE ELSEWHERE (run-history item 41 —
+    // the ledger's row under another generation, `ownerGen` set): its token is
+    // the other generation's, so the attribute decision is the only gate it can
+    // have, and it renders in history mode with the ledger's events — no
+    // stream to follow, no stop controls on the page; the tokenless stop route
+    // stops it through the ledger.
     const actor = ctx.actor;
+    const servable = (view: RunView): boolean => view.finished || view.ownerGen !== undefined;
     if (route.kind === "stop") {
       const mode = parseStopMode(url.searchParams.get("mode"));
       if (!mode) {
@@ -543,10 +553,25 @@ export function createLiveViewHandler(
       }
       run(res, async () => {
         // The 409 says "this run exists and is over" — a fact only a viewer who
-        // may read the run is told.
+        // may read the run is told. A run live elsewhere is stopped through the
+        // ledger (the owner reads the stop on its next heartbeat).
         const found = await service.getRun(route.id);
-        if (!found.ok || !found.value.finished || !readable(actor, found.value, "stop")) text(res, 404, NOT_FOUND);
-        else text(res, 409, "run already finished");
+        if (!found.ok || !servable(found.value) || !readable(actor, found.value, "stop")) {
+          text(res, 404, NOT_FOUND);
+          return;
+        }
+        if (found.value.finished) {
+          text(res, 409, "run already finished");
+          return;
+        }
+        const stopped = await service.stopRun(route.id, mode, { kind: "access", id: actor.id });
+        if (!stopped.ok) {
+          if (stopped.error === "conflict") text(res, 409, "run already finished");
+          else text(res, 404, NOT_FOUND);
+          return;
+        }
+        res.writeHead(200, JSON_NO_STORE);
+        res.end(JSON.stringify(stopped.value));
       });
       return true;
     }
@@ -561,10 +586,10 @@ export function createLiveViewHandler(
         // The summary row carries what the decision reads; the diagnosis is fetched only for an allowed viewer.
         const found = await service.getRun(route.id);
         const friction =
-          found.ok && found.value.finished && readable(actor, found.value, "friction")
+          found.ok && servable(found.value) && readable(actor, found.value, "friction")
             ? await service.getRunFriction(route.id)
             : null;
-        if (!friction?.ok || !friction.value.finished) {
+        if (!friction?.ok || (!friction.value.finished && !(found.ok && found.value.ownerGen !== undefined))) {
           text(res, 404, NOT_FOUND);
           return;
         }
@@ -579,7 +604,7 @@ export function createLiveViewHandler(
       // already holds every event, so the events route never re-reads it page
       // by page. The same read carries the attributes the decision needs.
       const found = await service.getRun(route.id, { include: "messages" });
-      if (!found.ok || !found.value.finished || !readable(actor, found.value, route.kind)) {
+      if (!found.ok || !servable(found.value) || !readable(actor, found.value, route.kind)) {
         if (route.kind === "events") {
           // the same 404 shape the live stream writes
           const sink = nodeSseSink(req, res);
