@@ -1,0 +1,57 @@
+# Third-party skills vendored into skills/<name>/SKILL.md (docs/reference/specs/skills.md
+# items 9–10). Never edit a vendored SKILL.md by hand — edit this file and run
+# `npm run skills:sync`: it resolves each source's ref to a commit, pins it
+# here, fetches every listed file at that commit, and rewrites the vendored
+# copies (upstream body byte-for-byte under our frontmatter: agents, pinned
+# source URL, upstream provenance). `npm run skills:check` (also run by the
+# test suite and CI) proves the vendored tree matches this manifest.
+#
+# To add a third-party skill: add a `skills` entry (and its source if new),
+# run the sync, review the diff, commit both. To take upstream changes: run the
+# sync — the pinned commit moves and the bodies update.
+sources:
+  addyosmani/agent-skills:
+    repo: https://github.com/addyosmani/agent-skills
+    ref: main
+    commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+skills:
+  # First-party (local: true): authored in this repo, never synced — git is
+  # the integrity; the check verifies presence + agents and refuses an
+  # upstream block.
+  - name: pr-tour
+    local: true
+    agents: [ coding ]
+  - name: address-review-findings
+    local: true
+    agents: [ coding ]
+  - name: re-review-delta
+    local: true
+    agents: [ review ]
+  - name: code-review-and-quality
+    source: addyosmani/agent-skills
+    path: skills/code-review-and-quality/SKILL.md
+    agents: [ review ]
+  - name: security-and-hardening
+    source: addyosmani/agent-skills
+    path: skills/security-and-hardening/SKILL.md
+    agents: [ review ]
+  - name: performance-optimization
+    source: addyosmani/agent-skills
+    path: skills/performance-optimization/SKILL.md
+    agents: [ review ]
+  - name: spec-driven-development
+    source: addyosmani/agent-skills
+    path: skills/spec-driven-development/SKILL.md
+    agents: [ coding ]
+  - name: incremental-implementation
+    source: addyosmani/agent-skills
+    path: skills/incremental-implementation/SKILL.md
+    agents: [ coding ]
+  - name: test-driven-development
+    source: addyosmani/agent-skills
+    path: skills/test-driven-development/SKILL.md
+    agents: [ coding ]
+  - name: doubt-driven-development
+    source: addyosmani/agent-skills
+    path: skills/doubt-driven-development/SKILL.md
+    agents: [ coding ]
