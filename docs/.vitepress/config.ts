@@ -84,7 +84,7 @@ export default withMermaid(
             { text: "Slack commands", link: "/reference/slack-commands" },
             { text: "CLI", link: "/reference/cli" },
             { text: "Configuration", link: "/reference/configuration" },
-            { text: "Permissions", link: "/reference/permissions" },
+            { text: "Authorization", link: "/reference/authorization" },
             { text: "Dashboard routes", link: "/reference/dashboard-routes" },
             { text: "Code map", link: "/reference/code-map" },
           ],

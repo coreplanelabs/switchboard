@@ -186,7 +186,7 @@ describe("github_issue_* writes", () => {
       [githubIssueDeleteTool, { number: 40 }],
     ] as const) {
       expect(await text(tool, { repo: "coreplanelabs/switchboard", ...input }, ctx)).toBe(
-        `${tool.name}: you are not allowed to write to coreplanelabs/switchboard (permissions.repos) — say so to the user instead of retrying.`,
+        `${tool.name}: you are not allowed to write to coreplanelabs/switchboard (it is restricted and you hold no grant for it) — say so to the user instead of retrying.`,
       );
     }
     expect(api.deleted).toEqual([]);

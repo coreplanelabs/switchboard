@@ -150,10 +150,10 @@ defaults:
     general: anthropic/general-model
     review: anthropic/review-model
     coding: anthropic/coding-model
-permissions:
-  admins: ["slack:UADMIN"]
-  agents:
-    coding: ["slack:UADMIN"]
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+restrict:
+  agents: [coding]
 workspaceDir: __WORKDIR__
 `;
 
@@ -883,12 +883,12 @@ defaults:
   models:
     general: anthropic/general-model
     coding: anthropic/coding-model
-permissions:
-  admins: ["slack:UADMIN"]
-  agents:
-    coding: ["slack:UADMIN", "slack:UDEV"]
-  repos:
-    "acme/api": ["slack:UADMIN"]
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+  "slack:UDEV": { actions: [agent:run:coding] }
+restrict:
+  agents: [coding]
+  repos: ["acme/api"]
 workspaceDir: __WORKDIR__
 `;
 
@@ -4626,11 +4626,8 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
     );
   });
 
-  it("the issue write is gated by permissions.repos for the requesting user — refused before the API, allowed for a listed user", async () => {
-    const gated = YAML_FIXTURE.replace(
-      "permissions:\n",
-      'permissions:\n  repos:\n    "coreplanelabs/switchboard": ["slack:UADMIN"]\n',
-    );
+  it("the issue write is gated by restrict.repos for the requesting user — refused before the API, allowed for a granted user", async () => {
+    const gated = YAML_FIXTURE.replace("restrict:\n", 'restrict:\n  repos: ["coreplanelabs/switchboard"]\n');
     const call = (): Provider => {
       let n = 0;
       return {
@@ -4662,7 +4659,7 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
     const d = fakeIO();
     await dispatch(denied, msg("open an issue", "slack:UX"), d.io);
     expect(d.replies.at(-1)).toContain(
-      "github_issue_create: you are not allowed to write to coreplanelabs/switchboard (permissions.repos)",
+      "github_issue_create: you are not allowed to write to coreplanelabs/switchboard (it is restricted and you hold no grant for it)",
     );
     expect(await api.listIssues("coreplanelabs/switchboard")).toEqual([]);
     const allowed = makeDeps(gated, call());
@@ -4798,7 +4795,7 @@ channels:
   });
 
   it("channel-config gating is stated per the invoking user", async () => {
-    const gatedYaml = YAML_FIXTURE.replace("permissions:\n", "permissions:\n  channelConfig: []\n");
+    const gatedYaml = YAML_FIXTURE; // config:write is never a baseline: gated unless granted
     const user = capturingProvider();
     await dispatch(makeDeps(gatedYaml, user), msg("hi"), fakeIO().io);
     expect(user.requests[0].system).toMatch(/config set channel[^\n]*restricted for this user/i);
@@ -5014,8 +5011,8 @@ describe("custom instructions in the system prompt", () => {
     expect(ux).toMatch(/active for this run \(channel, user\)/);
   });
 
-  it("channel instructions ride the channelConfig gate", async () => {
-    const gatedYaml = YAML_FIXTURE.replace("permissions:\n", "permissions:\n  channelConfig: []\n");
+  it("channel instructions ride the config:write gate", async () => {
+    const gatedYaml = YAML_FIXTURE; // config:write is never a baseline: gated unless granted
     const provider = capturingProvider();
     const deps = makeDeps(gatedYaml, provider);
     const { io, replies } = fakeIO();
@@ -5301,7 +5298,7 @@ describe("inline command runs + run receipts (#244)", () => {
     expect(receipts).toEqual([{ id: "fr-1", status: "completed" }]);
   });
 
-  it("a refused `friction propose` (non-admin, no repoManagement grant) is a run that finished `failed`; the \ud83d\udeab reply is its answer", async () => {
+  it("a refused `friction propose` (non-admin, no friction:write grant) is a run that finished `failed`; the \ud83d\udeab reply is its answer", async () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.frictionLedger = new InMemoryFrictionLedger();
     deps.runRegistry = sequentialRegistry("fr");
@@ -5316,11 +5313,11 @@ describe("inline command runs + run receipts (#244)", () => {
     });
   });
 
-  it("`http:cron` listed in permissions.repoManagement may `friction propose` \u2014 the run completes", async () => {
+  it("`http:cron` granted friction:write may `friction propose` \u2014 the run completes", async () => {
     const deps = makeDeps(
       YAML_FIXTURE.replace(
-        "permissions:\n",
-        'selfImprovement:\n  repo: o/r\npermissions:\n  repoManagement: ["http:cron"]\n',
+        "grants:\n",
+        'selfImprovement:\n  repo: o/r\ngrants:\n  "http:cron": { actions: [friction:write] }\n',
       ),
       capturingProvider(),
     );
@@ -5973,10 +5970,7 @@ describe("run history write path (#157 U4)", () => {
     const registry = new RunRegistry({ genId: () => `cmd-${++n}`, genToken: () => "tok" });
     const { deps, store, writer } = wired(capturingProvider(), {
       registry,
-      yaml: YAML_FIXTURE.replace(
-        "permissions:\n",
-        'grants:\n  "http:cron":\n    actions: [friction:read]\npermissions:\n',
-      ),
+      yaml: YAML_FIXTURE.replace("grants:\n", 'grants:\n  "http:cron":\n    actions: [friction:read]\n'),
     });
     deps.frictionLedger = new InMemoryFrictionLedger();
     wireCommands(deps);
@@ -6772,12 +6766,13 @@ defaults:
     general: anthropic/general-model
     review: anthropic/review-model
     coding: anthropic/coding-model
-permissions:
-  admins: ["slack:UADMIN"]
-  agents:
-    coding: ["slack:UADMIN", "slack:UDEV"]
-  repos:
-    "acme/api": ["slack:UADMIN", "slack:UREV"]
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+  "slack:UDEV": { actions: [agent:run:coding] }
+  "slack:UREV": { repos: ["acme/api"] }
+restrict:
+  agents: [coding]
+  repos: ["acme/api"]
 workspaceDir: __WORKDIR__
 `;
 

@@ -102,7 +102,7 @@ describe("renderChatCommands", () => {
     expect(out).toContain(
       "| `thing show <me\\|channel> [--dry-run] [--limit <integer>]` | Show a thing; per-agent forms take --models.&lt;agent&gt;. | anyone |",
     );
-    expect(out).toContain("| `thing wipe <id>` | Wipe it. | repo managers (`repoManagement`) |");
+    expect(out).toContain("| `thing wipe <id>` | Wipe it. | repo managers (`repo:write`) |");
     expect(out).toContain("| Command | What it does | Who can run it |");
   });
 });
@@ -121,9 +121,9 @@ describe("whoMayRun", () => {
     expect(whoMayRun(cmd("help:read"))).toBe("anyone");
     expect(whoMayRun(cmd("config:write"))).toBe("anyone"); // a person's own scope; the channel scope is the handler's question
     expect(whoMayRun(cmd("repo:exec", () => ({ type: "agent", name: "coding" })))).toBe(
-      "anyone allowed to run `coding`",
+      "anyone granted `agent:run:coding`",
     );
-    expect(whoMayRun(cmd("friction:write"))).toBe("repo managers (`repoManagement`)");
+    expect(whoMayRun(cmd("friction:write"))).toBe("repo managers (`repo:write`)");
     expect(whoMayRun(cmd("runs:read"))).toBe("admins");
   });
 

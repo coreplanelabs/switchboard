@@ -1,16 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleAdminCrash } from "./adminCrash.js";
+import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 
 // `POST /admin/crash` (features/run-history.md item 36, plan D12): the kill
 // injection behind the durable-runs receipts — authorized exactly like
 // `deploy restart` (a `deploy:write` bearer), answered before the process
 // exits hard (PID 1 cannot SIGKILL itself; the exit is the same event).
 
-const TOKENS = JSON.stringify({
-  "tok-deployer": { subject: "ops", scopes: ["deploy:write"] },
-  "tok-reader": { subject: "reader", scopes: ["runs:read"] },
-});
+const TOKENS = JSON.stringify({ "tok-deployer": { subject: "ops" }, "tok-reader": { subject: "reader" } });
+// Config's grants for the tokens' `http:<subject>` actors: only ops holds deploy:write.
+const GRANTS: Record<string, Grants> = {
+  "http:ops": { actions: new Set(["deploy:write"]), channels: new Set(), repos: new Set() },
+  "http:reader": { actions: new Set(["runs:read"]), channels: new Set(), repos: new Set() },
+};
 
 function request(method: string, authorization?: string) {
   const writes: { status?: number; body?: string } = {};
@@ -28,6 +31,7 @@ function harness(over: { tokens?: string | undefined } = {}) {
   const logs: string[] = [];
   const deps = {
     tokens: "tokens" in over ? over.tokens : TOKENS,
+    grantsFor: (id: string) => GRANTS[id] ?? NO_GRANTS,
     generation: "20260907T231512Z-3fa9c1d2",
     kill: () => void killed.push("exit 137"),
     defer: (fn: () => void) => void deferred.push(fn),

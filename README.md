@@ -110,7 +110,7 @@ flowchart LR
 
 **State plane** (`deploy/cloudflare-memory/`): one Worker, its Durable Object classes behind a constant-time bearer — cross-session memory, run history (which the friction ledger reads), schedule firings, config documents. Every finished run is built into a record at finish and written after the reply (retried, drain-tracked); the `RunHistoryDO` owns the retention policy (`retentionDays` / `maxRuns` / `maxBytes`, applied identically by the bot and the Worker through one shared module) and sweeps on an alarm. Without a `runHistory` config block, history is off and runs are live-only. Contract: [features/run-history.md](features/run-history.md).
 
-**Commands** ([features/command-registry.md](features/command-registry.md)): an operator command is a typed TypeScript method registered once — id, positional `args` and camelCase `options` declared with zod (and inferred into the handler), scope, chat gate, effect, handler — and every surface is derived from that definition with no per-command code: HTTP `GET|POST /api/<group>.<verb>` (arguments and options by name; kebab-case query keys, camelCase JSON) behind Cloudflare Access (browser session or service token), MCP tool `<group>_<verb>` with a derived `inputSchema`, CLI `npx tsx src/cli.ts <group> <verb> <args…> [--kebab-option value…] [--json]`, and chat — the same grammar as a message (`runs stop <id> --mode soft`, `friction propose --dry-run --top 3`, `config set me --effort low`), with `--help`, `<group> help` and the bare `help` derived too. Every operator command is one of these — there is no other kind: `help show`, `config show|set|clear|instructions`, `runs list|get|events|friction|stop`, `friction report|propose|analyze`, `repo list|onboard|offboard|reconfigure|rebuild|test|build`, `memory list|forget`, `schedule list`, `deploy plan|all`, `env bootstrap` (the last three that spawn processes — `deploy all`, `env bootstrap`, `friction analyze` — are CLI-only). Authorization is resolved by the adapter (token scopes, Access identity + `permissions.operators` / `permissions.serviceTokens`, Slack admin gates) and checked before the input is parsed; no command ever starts an agent run — that path is `dispatch()` alone, reached from the CLI's `ask` built-in (`npx tsx src/cli.ts ask "…"`) and MCP's `dispatch` tool, which are channels, not commands.
+**Commands** ([features/command-registry.md](features/command-registry.md)): an operator command is a typed TypeScript method registered once — id, positional `args` and camelCase `options` declared with zod (and inferred into the handler), scope, chat gate, effect, handler — and every surface is derived from that definition with no per-command code: HTTP `GET|POST /api/<group>.<verb>` (arguments and options by name; kebab-case query keys, camelCase JSON) behind Cloudflare Access (browser session or service token), MCP tool `<group>_<verb>` with a derived `inputSchema`, CLI `npx tsx src/cli.ts <group> <verb> <args…> [--kebab-option value…] [--json]`, and chat — the same grammar as a message (`runs stop <id> --mode soft`, `friction propose --dry-run --top 3`, `config set me --effort low`), with `--help`, `<group> help` and the bare `help` derived too. Every operator command is one of these — there is no other kind: `help show`, `config show|set|clear|instructions`, `runs list|get|events|friction|stop`, `friction report|propose|analyze`, `repo list|onboard|offboard|reconfigure|rebuild|test|build`, `memory list|forget`, `schedule list`, `deploy plan|all`, `env bootstrap` (the last three that spawn processes — `deploy all`, `env bootstrap`, `friction analyze` — are CLI-only). Authorization is resolved by the adapter (the caller's `grants` entry by its namespaced id — token subject, Access identity, Slack user) and checked before the input is parsed; no command ever starts an agent run — that path is `dispatch()` alone, reached from the CLI's `ask` built-in (`npx tsx src/cli.ts ask "…"`) and MCP's `dispatch` tool, which are channels, not commands.
 
 **Resident repo environments** (`deploy/cloudflare-resident/`): repos an admin onboards (`repo onboard <owner/name>` in chat) each get an always-warm per-repo service — a bare mirror kept fresh by a refresh alarm, a built checkout, and per-thread git worktrees with OS-user isolation — so a coding request on an onboarded repo starts with zero setup (no clone, no install). Any other resident state falls back to the per-thread sandbox with a named reason on the status card. Behavioral contract: [features/resident-repos.md](features/resident-repos.md).
 
@@ -310,30 +310,33 @@ fly deploy && fly logs   # set workspaceDir: ./data/workspaces in config.yaml fi
 
 DMs to the bot work the same way (no mention needed). In channels, only the first message of a conversation needs the mention: once the bot is part of a thread (it replied, or was mentioned anywhere in it), every follow-up reply in that thread reaches it without re-mentioning.
 
-## Permissions
+## Authorization
 
-Optional `permissions` block in `config.yaml` — absent means everything is open:
+Two optional blocks in `config.yaml`: `grants` (what each actor holds) and `restrict` (what is closed unless granted). With neither, every Slack user may run every agent against every repo — and nobody may change channel config, onboard repos, or read the run history, because those are never a baseline:
 
 ```yaml
-permissions:
-  admins: [slack:U0123ADMIN]      # bypass all restrictions
-  agents:
-    coding: [slack:U0456DEV]      # only these users (+ admins) may run coding
-  channelConfig: []          # who may run `config set/clear channel`
-                             # empty = admins only; key absent = everyone
-  repos:                     # per-repo access for resident environments
-    acme/api: [slack:U0456DEV]   # a listed repo admits members + admins and
-                             # refuses everyone else BY NAME; map or key
-                             # absent = open to every allowed coding user
-  repoManagement: []         # who may run `repo onboard/offboard/reconfigure/
-                             # rebuild` (`repo list` is open). FAIL-CLOSED:
-                             # key absent OR empty = admins only
+restrict:
+  agents: [coding]                # run only for actors granted agent:run:coding (or `all`)
+  repos: [acme/api]               # used only by actors whose `repos` axis names it (or `all`);
+                                  # everyone else is refused BY NAME; unlisted repos stay open
+grants:
+  slack:U0123ADMIN:               # an admin: everything
+    actions: all
+    channels: all
+    repos: all
+  slack:U0456DEV:
+    actions: [agent:run:coding, config:write]   # may run coding and `config set/clear channel`
+    repos: [acme/api]
+  slack:U0789OPS:
+    actions: [repo:write, friction:write]       # `repo onboard/offboard/reconfigure/rebuild`, `friction propose`
 ```
 
-- Agent allowlists are enforced **at run time against the resolved agent**, so they can't be bypassed via `agent:` directives, `config set me`, or channel defaults.
+- Restrictions are enforced **at run time against the resolved agent or repo**, so they can't be bypassed via `agent:` directives, `config set me`, or channel defaults.
 - `config set me` is always allowed — pointing yourself at a restricted agent is harmless because the run-time gate still applies.
 - Denials reply in-thread naming the admins to ask; `config show` lists which agents are unavailable to you.
-- **`repoManagement` is the one fail-closed gate** — every other key is open when absent, but repo management defaults to admins-only because `repo onboard`/`rebuild` provision billable always-on compute and bind GitHub credentials.
+- **`repo:write` and `config:write` are never a baseline** — a Slack user holds the open chat commands and every unrestricted agent, nothing more, until a `grants` entry adds to that. Repo management stays admins-only by default because `repo onboard`/`rebuild` provision billable always-on compute and bind GitHub credentials.
+
+Full vocabulary, the machine surfaces, and the per-namespace baselines: [docs/reference/authorization.md](docs/reference/authorization.md).
 
 ## Setup
 
@@ -362,7 +365,7 @@ permissions:
          baseUrl: https://switchboard-resident.<your-zone>
      ```
      with `RESIDENT_OPERATOR_TOKEN` (runtime tool calls) and `RESIDENT_ADMIN_TOKEN` (repo-management commands) in the bot's env. Set the `GITHUB_APP_*` secrets on the **resident Worker** too — it self-mints repo-scoped tokens (trust model above); without them, clones are anonymous (public repos only) and pushes from resident threads are unavailable.
-   - Onboard repos from chat (admin-gated, fail-closed via `permissions.repoManagement`):
+   - Onboard repos from chat (needs the `repo:write` grant — admins only until granted):
      ```
      @switchboard repo onboard acme/api --ref main --test "npm test" --build "npm run build" --install "npm ci"
      @switchboard repo list                      # lifecycle: onboarding → warm

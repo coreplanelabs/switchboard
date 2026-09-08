@@ -6,7 +6,7 @@ By default, every repo runs cold: a fresh workspace directory per thread, cloned
 
 ## Onboard one
 
-Onboarding provisions billable, always-on compute and binds GitHub credentials, so it's gated by `repoManagement` — **the one permission that's locked by default**: unless an admin has explicitly opened it, only admins can run these commands.
+Onboarding provisions billable, always-on compute and binds GitHub credentials, so it needs the `repo:write` grant — **never a baseline**: unless an admin has granted it to someone, only admins can run these commands.
 
 ```
 @switchboard repo onboard acme/api --ref main --test "npm test" --build "npm run build" --install "npm ci"
@@ -51,10 +51,10 @@ A resident whose container disk fills up anyway shows `degraded` with a `disk-fu
 
 ## Who can use a warm repo
 
-Onboarding is separate from *using* an onboarded repo. Restrict the latter per repo with `permissions.repos` — see [restrict who can do what](restrict-who-can-do-what.md).
+Onboarding is separate from *using* an onboarded repo. Restrict the latter per repo with `restrict.repos` plus a `repos` grant — see [restrict who can do what](restrict-who-can-do-what.md).
 
 ## See also
 
 - [Reference: dashboard routes](../reference/dashboard-routes.md) — the residents pages in full.
-- [Reference: permissions](../reference/permissions.md) — `repoManagement` vs `repos`, and why one fails closed and the other doesn't.
+- [Reference: authorization](../reference/authorization.md) — `repo:write` vs `restrict.repos`, and why one is never a baseline and the other is open unless listed.
 - [Explanation: Worker topology](../explanation/worker-topology.md) — what a resident actually is, underneath.

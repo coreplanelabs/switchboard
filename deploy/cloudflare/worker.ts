@@ -12,10 +12,13 @@
 import { Container, getContainer } from "@cloudflare/containers";
 import { parseHealthz } from "../../src/deploy/liveGate.ts";
 import {
-  authorizeRestart,
+  authenticateRestart,
   decideRestart,
+  parseRestartAuthorization,
   parseRestartRequest,
+  RESTART_AUTHORIZE_PATH,
   restartResponse,
+  type RestartAuth,
   type RestartOutcome,
 } from "../../src/deploy/restart.ts";
 import {
@@ -56,7 +59,7 @@ interface Env {
   DOCS_BASE_URL?: string; // var: this installation's docs site (profile `workers.docs`) — the /docs redirect target; absent → the project's published docs
   ACCESS_TEAM_DOMAIN?: string; // live-view SSO gate: Cloudflare Access team domain (JWKS + iss)
   ACCESS_AUD?: string; // live-view SSO gate: Cloudflare Access application AUD tag
-  SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present; an entry with `deploy:write` may POST /admin/restart
+  SWITCHBOARD_INGRESS_TOKENS?: string; // enables HTTP /ingress + MCP /mcp (JSON token→identity map); the `cron` entry is what scheduled runs present; an entry whose `http:<subject>` actor holds `deploy:write` in the bot's config may POST /admin/restart
   BRAVE_SEARCH_API_KEY?: string; // web_search backend (Brave); web_fetch works without it
   CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
   ANTHROPIC_ADMIN_KEY?: string; // costs dash (optional): Anthropic Admin API key for the LLM cost report
@@ -153,6 +156,37 @@ export class SwitchboardServer extends Container<Env> {
    */
   async restart(opts: { force: boolean }): Promise<RestartOutcome> {
     if (!this.ctx.container?.running) return { kind: "not-running" };
+    return this.restartRunning(opts);
+  }
+
+  /**
+   * `deploy restart`, authorized: the Worker knows WHO the bearer is (the token
+   * map); WHETHER that identity may restart is the bot's config (`grants` —
+   * authorization.md item 9), which only the container holds. So ask it —
+   * `POST /admin/restart/authorize` — and stop only on a 200. A container that
+   * is not running is started first (the bot must answer): if the bearer is
+   * allowed, that start already put the current env live, so nothing is
+   * stopped and the outcome is `not-running`, exactly as before; if not, the
+   * refusal is relayed and the started container simply keeps serving.
+   */
+  async restartAuthorized(
+    authorization: string,
+    opts: { force: boolean },
+  ): Promise<{ auth: RestartAuth; outcome?: RestartOutcome }> {
+    const wasRunning = this.ctx.container?.running === true;
+    await this.startBot();
+    const answer = await this.containerFetch(
+      new Request(`${INTERNAL}${RESTART_AUTHORIZE_PATH}`, { method: "POST", headers: { authorization } }),
+      this.defaultPort,
+    );
+    const auth = parseRestartAuthorization(answer.status, await answer.text().catch(() => ""));
+    if (!auth.ok) return { auth };
+    if (!wasRunning) return { auth, outcome: { kind: "not-running" } };
+    return { auth, outcome: await this.restartRunning(opts) };
+  }
+
+  /** The stop itself, for a running container: the preflight's refusal rules over `/healthz`, then SIGTERM. */
+  private async restartRunning(opts: { force: boolean }): Promise<RestartOutcome> {
     const health = await this.containerFetch(new Request(`${INTERNAL}/healthz`), this.defaultPort);
     const body = parseHealthz(await health.text().catch(() => ""));
     const verdict = decideRestart(body, opts);
@@ -176,29 +210,41 @@ export class SwitchboardServer extends Container<Env> {
 
 /** `POST /admin/restart` — the operator surface behind `deploy restart`
  *  (src/deploy/restart.ts documents the authorization choice: a
- *  SWITCHBOARD_INGRESS_TOKENS bearer whose identity carries `deploy:write`).
+ *  SWITCHBOARD_INGRESS_TOKENS bearer whose `http:<subject>` actor holds
+ *  `deploy:write` in the bot's config). The Worker authenticates the bearer
+ *  against the map it holds — an unknown bearer never touches the container —
+ *  and the Container DO asks the bot for the grant before stopping anything.
  *  Body `{ "force": true }` bypasses the in-flight/draining refusal. */
 async function handleAdminRestart(request: Request, env: Env): Promise<Response> {
   const json = (status: number, body: Record<string, unknown>) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   if (request.method !== "POST") return json(405, { ok: false, error: "method not allowed: POST /admin/restart" });
-  const auth = authorizeRestart(request.headers.get("authorization") ?? undefined, env.SWITCHBOARD_INGRESS_TOKENS);
-  if (!auth.ok) {
-    console.warn(`[restart] ${auth.status} — ${auth.reason}`);
-    return json(auth.status, { ok: false, error: auth.reason });
+  const authorization = request.headers.get("authorization") ?? undefined;
+  const authn = authenticateRestart(authorization, env.SWITCHBOARD_INGRESS_TOKENS);
+  if (!authn.ok) {
+    console.warn(`[restart] ${authn.status} — ${authn.reason}`);
+    return json(authn.status, { ok: false, error: authn.reason });
   }
   const parsed = parseRestartRequest(await request.text().catch(() => ""));
   if (!parsed.ok) return json(400, { ok: false, error: parsed.reason });
-  let outcome: RestartOutcome;
+  let auth: RestartAuth;
+  let outcome: RestartOutcome | undefined;
   try {
-    outcome = await getContainer(env.SWITCHBOARD, INSTANCE).restart({ force: parsed.force });
+    ({ auth, outcome } = await getContainer(env.SWITCHBOARD, INSTANCE).restartAuthorized(authorization!, {
+      force: parsed.force,
+    }));
   } catch (err) {
     // The container's /healthz probe or the DO call threw (container mid-transition,
     // port not answering): fail closed in the route's own JSON shape so the CLI reads
     // a reason instead of the platform's HTML 500. Nothing was stopped.
     const reason = err instanceof Error ? err.message : String(err);
-    console.error(`[restart] ${auth.subject} → error before stop: ${reason}`);
+    console.error(`[restart] ${authn.identity.subject} → error before stop: ${reason}`);
     return json(500, { ok: false, error: `restart failed before stopping anything: ${reason}` });
+  }
+  if (!auth.ok || outcome === undefined) {
+    const refusal = auth.ok ? { status: 503 as const, reason: "restart disabled: no outcome" } : auth;
+    console.warn(`[restart] ${refusal.status} — ${refusal.reason}`);
+    return json(refusal.status, { ok: false, error: refusal.reason });
   }
   console.log(
     `[restart] ${auth.subject} → ${outcome.kind}${outcome.kind === "refused" ? `: ${outcome.problems.join("; ")}` : ""}`,

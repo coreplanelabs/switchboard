@@ -121,14 +121,13 @@ export const ACTORS = {
   agentUser: actor("user", "slack:U4", { actions: new Set(["agent:run:coding"]) }),
   /** A user allowed to run every agent through the wildcard. */
   allAgents: actor("user", "slack:U4", { actions: new Set(["agent:run:*"]) }),
-  /** A plain Slack user under the legacy keys: the `open` chat commands, and
-   *  `config:write` because `permissions.channelConfig` is absent. */
+  /** A Slack user granted `config:write` on top of the `open` chat commands. */
   chatUser: actor("user", "slack:U6", { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write"]) }),
-  /** The same user once `permissions.channelConfig` is present and does not name them. */
+  /** A plain Slack user: the `open` chat commands alone (`config:write` is never a baseline). */
   chatUserGated: actor("user", "slack:U7", { actions: new Set(CHAT_OPEN_ACTIONS) }),
   /** An unlisted Access browser session: every group's read, nothing else. */
   browser: actor("user", "access:viewer", { actions: browserReadActions(COMMAND_GROUPS) }),
-  /** An Access operator (`permissions.operators`): every read + write, fleet-wide, never exec. */
+  /** An Access operator (granted every read + write with `channels: all`): fleet-wide, never exec. */
   operator: actor("user", "access:op", {
     actions: new Set(COMMAND_GROUPS.flatMap((g) => [`${g}:read`, `${g}:write`])),
     channels: "all",

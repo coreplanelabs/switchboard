@@ -14,8 +14,11 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { authorizeRestart } from "../deploy/restart.js";
+import type { GrantsLookup } from "../core/authz/actor.js";
 
 export interface AdminCrashDeps {
+  /** Grants by actor id (`ConfigStore.grantsFor`): the bearer's `http:<subject>` must hold `deploy:write`. */
+  grantsFor: GrantsLookup;
   /** `SWITCHBOARD_INGRESS_TOKENS` as the process sees it. */
   tokens: string | undefined;
   /** This process's run-ledger generation, echoed so the caller can tell the
@@ -38,7 +41,7 @@ export function handleAdminCrash(req: IncomingMessage, res: ServerResponse, deps
     json(405, { ok: false, error: "method not allowed: POST /admin/crash" });
     return;
   }
-  const auth = authorizeRestart(req.headers.authorization, deps.tokens);
+  const auth = authorizeRestart(req.headers.authorization, deps.tokens, deps.grantsFor);
   if (!auth.ok) {
     (deps.log ?? console.warn)(`[admin/crash] ${auth.status} — ${auth.reason}`);
     json(auth.status, { ok: false, error: auth.reason });

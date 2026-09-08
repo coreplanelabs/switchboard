@@ -41,7 +41,7 @@ import {
 //
 // Gates (R13, unchanged): `report` is open in chat and needs `friction:read`
 // elsewhere; `propose` files to GitHub, so chat keeps the fail-closed
-// repo-management set (`repoManager` = admins ∪ permissions.repoManagement)
+// repo-management set (`repoManager` = holders of `repo:write`; admins through `all`)
 // and machine callers need `friction:write`. WHAT either analyzes is the
 // authorization policy (authorization.md item 6, OQ2): the runs the actor may
 // read — `predicateFor(actor, "runs:read", "run")` handed to the ledger, which

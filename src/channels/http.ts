@@ -4,6 +4,9 @@ import { dispatch as realDispatch, type CoreDeps, type DispatchOptions } from ".
 import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import { parseIngressTokenMap, type IngressIdentity } from "../core/ingressTokens.js";
+import { hasAction } from "../core/authz/authorize.js";
+import type { GrantsLookup } from "../core/authz/actor.js";
+import type { Grants } from "../core/authz/types.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusHandle, StatusUpdate } from "../core/types.js";
 
 // HTTP channel adapter: adapter #3. Like Slack and the CLI, it is pure
@@ -31,7 +34,7 @@ export const MAX_BODY_BYTES = 1_000_000; // 1 MB
  *  Defined in src/core/ingressTokens.ts (node-free, shared with the Worker
  *  shim); re-exported here so the MCP adapter and tests keep one import site. */
 export type { IngressIdentity };
-export { DEFAULT_INGRESS_SCOPES, parseScopes } from "../core/ingressTokens.js";
+export { RETIRED_TOKEN_FIELD } from "../core/ingressTokens.js";
 
 /** Ingress auth config: raw bearer token -> identity. An empty map means the
  *  endpoint is DISABLED (fail-closed) — never open. */
@@ -232,7 +235,7 @@ export interface IngressResponse {
  *   3b. token lacks `dispatch` -> 403 forbidden (code unauthorized)
  *   4. invalid/bad JSON body   -> 400
  *   5. authed + valid          -> dispatch(), reply collected -> 200
- * Steps 1-3b are header-only (`authorizeRequest` + `requireDispatchScope`), so the node wrapper runs them
+ * Steps 1-3b are header-only (`authorizeRequest` + `requireDispatch`), so the node wrapper runs them
  * BEFORE reading the body — an unauthorized/wrong-method/disabled caller never
  * buffers a body. Body-size enforcement (413) is streamed in `readBody`.
  */
@@ -260,21 +263,23 @@ export function authorizeRequest(
   return { identity };
 }
 
-/** The scope that lets a token start an agent run through this endpoint (and
- *  the MCP `dispatch` tool). Every token held it before scopes existed; a
- *  token whose entry names `scopes` without it is a registry-only credential. */
-export const DISPATCH_SCOPE = "dispatch";
+/** The action that lets an actor start an agent run through this endpoint (and
+ *  the MCP `dispatch` tool): a grant on `http:<subject>` / `mcp:<subject>` in
+ *  config.yaml (`actions: [dispatch, …]`, or `all`). A token with no entry
+ *  holds nothing and dispatches nothing (authorization.md item 9). */
+export const DISPATCH_ACTION = "dispatch";
 
-/** True when the token may start an agent run. */
-export function hasDispatchScope(identity: IngressIdentity): boolean {
-  return identity.scopes.includes(DISPATCH_SCOPE);
+/** True when these grants let their holder start an agent run. */
+export function hasDispatch(grants: Grants): boolean {
+  return hasAction(grants.actions, DISPATCH_ACTION);
 }
 
-/** Header-only, after `authorizeRequest`: a token without the `dispatch` scope
- *  is refused (403) before its body is read and before `dispatch()` is ever
- *  reached — fail-closed, the same `code:"unauthorized"` the registry uses. */
-export function requireDispatchScope(identity: IngressIdentity): IngressResponse | null {
-  if (hasDispatchScope(identity)) return null;
+/** Header-only, after `authorizeRequest`: a token whose `http:<subject>` actor
+ *  holds no `dispatch` grant is refused (403) before its body is read and before
+ *  `dispatch()` is ever reached — fail-closed, the same `code:"unauthorized"`
+ *  the registry uses. */
+export function requireDispatch(identity: IngressIdentity, grantsFor: GrantsLookup): IngressResponse | null {
+  if (hasDispatch(grantsFor(`${PLATFORM}:${identity.subject}`))) return null;
   return { status: 403, body: { error: "forbidden", code: "unauthorized" } };
 }
 
@@ -340,7 +345,7 @@ export async function handleIngressRequest(
 ): Promise<IngressResponse> {
   const gate = authorizeRequest(req.method, req.headers, options);
   if ("status" in gate) return gate;
-  const scopeRefusal = requireDispatchScope(gate.identity);
+  const scopeRefusal = requireDispatch(gate.identity, (id) => deps.config.grantsFor(id));
   if (scopeRefusal) return scopeRefusal;
   return handleAuthorized(gate.identity, req.body, deps, options);
 }
@@ -392,7 +397,7 @@ export function createIngressHandler(
           req.destroy();
           return;
         }
-        const scopeRefusal = requireDispatchScope(gate.identity);
+        const scopeRefusal = requireDispatch(gate.identity, (id) => deps.config.grantsFor(id));
         if (scopeRefusal) {
           write(res, scopeRefusal.status, scopeRefusal.body);
           req.destroy();
@@ -420,18 +425,20 @@ export function createIngressHandler(
  * Parse ingress token config from the environment. `SWITCHBOARD_INGRESS_TOKENS`
  * is a JSON object mapping raw bearer token -> identity, e.g.
  *   {"s3cr3t":{"subject":"alice","channel":"ops"},
- *    "ci-bot":{"subject":"ci","scopes":["dispatch","runs:read"]}}
- * Each entry: `subject` (required, non-empty), `channel` (optional pin),
- * `scopes` (optional array of non-empty strings; absent => ["dispatch"], i.e.
- * the pre-scopes behavior — POST /ingress only, no registry commands).
- * Absent, empty, or malformed => an empty map => the endpoint is DISABLED
- * (fail-closed). A malformed value is logged (without token material) and
- * treated as no tokens rather than silently opening the endpoint. An entry
- * with malformed `scopes` is skipped entirely — never widened to the default.
+ *    "ci-bot":{"subject":"ci"}}
+ * Each entry: `subject` (required, non-empty) and `channel` (optional: the
+ * channel a dispatch through this token is recorded under). A token is a
+ * credential and nothing more — what its bearer may do is the `grants` entry
+ * for `http:<subject>` / `mcp:<subject>` in config.yaml. Absent, empty, or
+ * malformed => an empty map => the endpoint is DISABLED (fail-closed). A
+ * malformed value is logged (without token material) and treated as no tokens
+ * rather than silently opening the endpoint; an entry still carrying the
+ * retired `scopes` field is kept and warned about by subject.
  */
 export function parseIngressTokens(env: Record<string, string | undefined>): IngressConfig {
   // One parser for the bot and the Worker shim (src/core/ingressTokens.ts).
   const parsed = parseIngressTokenMap(env.SWITCHBOARD_INGRESS_TOKENS);
   if (!parsed.ok) console.error(`[ingress] SWITCHBOARD_INGRESS_TOKENS is ${parsed.reason} — ingress disabled`);
+  for (const warning of parsed.warnings) console.warn(`[ingress] SWITCHBOARD_INGRESS_TOKENS: ${warning}`);
   return { tokens: parsed.tokens };
 }

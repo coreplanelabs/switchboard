@@ -88,9 +88,9 @@ export const POLICY: readonly Rule[] = [
   // `channel` scope is the handler's question about `config-scope/channel`.
   { action: "config:write", resource: "command", actorKinds: ["user"], when: [] },
   { action: "config:write", resource: "command", when: [grant("config:write")] },
-  // Channel config: the `permissions.channelConfig` right as a grant (KTD6 —
-  // absent → every Slack user holds it; admins, Access operators, and tokens
-  // minted with `config:write` hold it too). Membership is NOT a condition
+  // Channel config: the `config:write` grant (held only where `grants` say so:
+  // admins through `all`, anyone granted it by name; never a baseline). Membership
+  // is NOT a condition
   // here: a chat user may target another channel with `--channel`, and no
   // adapter proves channel membership yet (plan U5, the directory).
   { action: "config:write", resource: "config-scope", resourceKind: "channel", when: [grant("config:write")] },

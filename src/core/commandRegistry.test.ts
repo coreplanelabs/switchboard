@@ -122,13 +122,13 @@ const cli: Caller = callerWith("cli", "cli:local", "all");
 /** A default ingress token: `dispatch` alone. */
 const mcpDispatchOnly: Caller = callerWith("mcp", "mcp:agent", ["dispatch"]);
 const mcpRunsRead: Caller = callerWith("mcp", "mcp:agent", ["runs:read"]);
-/** An unlisted Access browser session: every group's read, as the translation gives it. */
+/** An unlisted Access browser session: every group's read, the browser baseline. */
 const browser: Caller = callerWith("access", "access:alice@example.com", ["runs:read"]);
-/** Listed in `permissions.operators`: reads and writes. */
+/** Granted the writes natively on top of the reads. */
 const browserOperator: Caller = callerWith("access", "access:alice@example.com", ["runs:read", "runs:write"]);
-/** An Access service token: exactly its scopes, no implicit reads. */
+/** An Access service token: exactly its grants entry, no implicit reads. */
 const svcToken: Caller = callerWith("access", "access:svc:ci", ["runs:write"]);
-/** A Slack admin (`permissions.admins`): everything. */
+/** A Slack admin (granted `all`): everything. */
 const chatOperator: Caller = callerWith("chat", "slack:UADMIN", "all");
 /** A plain Slack user: the open chat baseline, no run grants. */
 const chatRandom: Caller = callerWith("chat", "slack:URANDOM", ["help:read", "config:read"]);
@@ -359,7 +359,7 @@ describe("CommandRegistry.invoke — auth before parse", () => {
     });
   });
 
-  it("browser Access identity: the reads its translation gives, a write only when granted (permissions.operators)", async () => {
+  it("browser Access identity: the reads its baseline gives, a write only when granted", async () => {
     const { registry, deps } = setup();
     expect(await registry.invoke("demo.echo", opts({ status: "all" }), browser, deps)).toMatchObject({ ok: true });
     expect(await registry.invoke("demo.fail", opts({ code: "conflict" }), browser, deps)).toMatchObject({

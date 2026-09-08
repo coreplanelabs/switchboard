@@ -33,7 +33,7 @@ You can read this tree here on GitHub or as a site — [docs.switchboard.corepla
 - [Connect an MCP server](how-to/connect-an-mcp-server.md) — give an agent tools from Linear, Notion, or your own service.
 - [Onboard a repo](how-to/onboard-a-repo.md) — make a repo always-warm instead of cloning cold every time.
 - [Watch a run and check spend](how-to/watch-a-run-and-check-spend.md) — the dashboard: live runs, history, stopping one, costs.
-- [Restrict who can do what](how-to/restrict-who-can-do-what.md) — the `permissions` block, built up from open to locked down.
+- [Restrict who can do what](how-to/restrict-who-can-do-what.md) — `grants` and `restrict`, built up from open to locked down.
 - [Add a provider or an agent](how-to/add-a-provider-or-agent.md) — extend Switchboard without touching the dispatcher.
 - [Deploy and rotate a secret](how-to/deploy-and-rotate-a-secret.md) — the one command to ship, the runbook to rotate a credential.
 - [Run a load test](how-to/run-a-load-test.md) — a number for how Switchboard behaves with many runs at once, before and after a capacity change.
@@ -43,7 +43,7 @@ You can read this tree here on GitHub or as a site — [docs.switchboard.corepla
 - [Slack commands](reference/slack-commands.md) — every directive and command, by category.
 - [CLI](reference/cli.md) — command form, every group, exit codes.
 - [Configuration](reference/configuration.md) — every `config.yaml` block, what it does, its off-state.
-- [Permissions](reference/permissions.md) — every `permissions` key, its default, open vs. closed.
+- [Authorization](reference/authorization.md) — the `grants` and `restrict` blocks: every axis, every baseline, what fails closed.
 - [Dashboard routes](reference/dashboard-routes.md) — every route, its auth, what it shows.
 
 ## Explanation

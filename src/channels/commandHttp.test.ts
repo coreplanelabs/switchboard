@@ -10,8 +10,20 @@ import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
 import type { AccessIdentity } from "./accessAuth.js";
-import { ALL_GRANTS, grantsFor } from "../core/authz/grants.js";
+import { ALL_GRANTS, grantsFor, parseGrantsConfig, type GrantsConfig } from "../core/authz/grants.js";
 import { NO_GRANTS } from "../core/authz/types.js";
+
+/** A parsed `grants` block (config.yaml's shape) — throws on a malformed fixture. */
+const native = (cfg: GrantsConfig) => {
+  const parsed = parseGrantsConfig(cfg);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.grants;
+};
+/** One operator (every read + write over every channel) and one service token; everyone else is a plain browser session. */
+const OPERATOR_AND_READER: GrantsConfig = {
+  "access:op-1": { actions: ["runs:read", "runs:write"], channels: "all" },
+  "access:svc:reader-bot": { actions: ["runs:read"], channels: "all" },
+};
 import { callerWith } from "../core/testing/callers.js";
 import {
   callerFor,
@@ -84,12 +96,8 @@ async function fixture(over: Partial<CommandHttpOptions> = {}) {
   registerRunsCommands(registry);
   const commands: CommandInvoker = bindCommands(registry, { runs: async () => runs });
   const opts: CommandHttpOptions = {
-    // The two legacy keys, as `ConfigStore.grantsFor` translates them: an operator, one service token; every other browser session holds the reads.
-    grantsFor: (id) =>
-      grantsFor(id, {
-        permissions: { operators: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } },
-        commandGroups: ["runs"],
-      }),
+    // Config's grants as `ConfigStore.grantsFor` resolves them: an operator (every read + write over every channel), one service token; every other browser session holds the reads.
+    grantsFor: (id) => grantsFor(id, { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] }),
     devBypassActive: false,
     ...over,
   };
@@ -421,7 +429,10 @@ describe("createCommandHttpHandler — caller resolution (R9)", () => {
 
   it("a service token with runs:write stops a run as actor access:svc:<common_name>", async () => {
     const { handler, reg, live } = await fixture({
-      grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "ops-bot": ["runs:read", "runs:write"] } } }),
+      grantsFor: (id) =>
+        grantsFor(id, {
+          grants: native({ "access:svc:ops-bot": { actions: ["runs:read", "runs:write"], channels: "all" } }),
+        }),
     });
     const t = stopPost(live.id);
     await handler(t.req, t.res, { sub: "", commonName: "ops-bot" });
@@ -439,10 +450,7 @@ describe("createCommandHttpHandler — the Access API is bound by channel visibi
   const nativeGrants = (id: string) =>
     id === "access:op-2"
       ? { actions: new Set(["runs:read", "runs:write"]), channels: new Set<string>(), repos: new Set<string>() }
-      : grantsFor(id, {
-          permissions: { operators: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } },
-          commandGroups: ["runs"],
-        });
+      : grantsFor(id, { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] });
 
   it("an Access operator without all-channels gets 404 not_found on a private-channel run, byte-identical to a run that does not exist (R12 b); the legacy operator (all-channels) reads it", async () => {
     const { handler } = await fixture({ grantsFor: nativeGrants });
@@ -553,7 +561,10 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
     const opts: Pick<CommandHttpOptions, "grantsFor"> = {
       grantsFor: (id) =>
         grantsFor(id, {
-          permissions: { admins: ["access:op-1"], serviceTokens: { "reader-bot": ["runs:read"] } },
+          grants: native({
+            "access:op-1": { actions: "all", channels: "all", repos: "all" },
+            "access:svc:reader-bot": { actions: ["runs:read"], channels: "all" },
+          }),
           commandGroups: ["runs"],
         }),
     };
@@ -580,7 +591,8 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
 
   it("is the id callerFor's Caller carries", async () => {
     const { handler, reg } = await fixture({
-      grantsFor: (id) => grantsFor(id, { permissions: { serviceTokens: { "reader-bot": ["runs:write"] } } }),
+      grantsFor: (id) =>
+        grantsFor(id, { grants: native({ "access:svc:reader-bot": { actions: ["runs:write"], channels: "all" } }) }),
     });
     const live = reg.create("x", {
       agent: "coding",

@@ -29,9 +29,8 @@ channels:
     mcpServers:
       notion: { url: "https://mcp.notion.so/mcp", auth: none }
       compliance: { url: "https://mcp.vanta.com/mcp", auth: oauth }
-permissions:
-  admins: ["slack:UADMIN"]
-  repoManagement: ["slack:UADMIN"]
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
 `;
 
 const admin: McpActor = { id: "slack:UADMIN", orgAdmin: true, channelAdmin: true };
@@ -59,7 +58,7 @@ function harness(
   const cfg = join(dir, "config.yaml");
   writeFileSync(cfg, YAML);
   const backing = new InMemoryOverridesBacking();
-  const config = new ConfigStore(cfg, { backing, initial: undefined }, () => {});
+  const config = new ConfigStore(cfg, { backing, initial: undefined });
   const secrets = new InMemoryMcpSecretStore();
   let t = 1_000_000;
   let n = 0;

@@ -1,91 +1,108 @@
 # Restrict who can do what
 
-Goal: lock down a real deployment. By default, a fresh `config.yaml` has no `permissions` block at all — **everything is open to everyone who can reach the bot.** That's fine for a solo dev box; it's not what you want once real teammates (and real GitHub write access) are involved.
+Goal: lock down a real deployment. Authorization is two blocks in `config.yaml`: **`grants`** — what each person or credential holds — and **`restrict`** — which agents and repos are closed to everyone not granted them. A fresh config with neither block is open: every Slack user can run every agent against every repo, but nobody can change channel config, onboard repos, read the run history, or act over HTTP/MCP, because none of those is ever a baseline.
 
-Every key below is independent — set only the ones you need. All but one are **open when absent**; read the last section before you assume the rest are safe by default.
-
-## Start here: admins
+## Start here: an admin
 
 ```yaml
-permissions:
-  admins: [slack:U0123ADMIN]
+grants:
+  slack:U0123ADMIN:
+    actions: all
+    channels: all
+    repos: all
 ```
 
-Admins bypass every restriction below. Everyone else is subject to whatever you set.
+`all` on every axis is what "admin" means. Without such an entry nobody is one: the 🚫 replies have nobody to name, and the fail-closed commands below are refused for everyone.
 
 ## Gate an agent
 
 ```yaml
-permissions:
-  agents:
-    coding: [slack:U0456DEV]      # only these users (+ admins) may run `coding`
+restrict:
+  agents: [coding]                      # closed unless granted …
+grants:
+  slack:U0456DEV:
+    actions: [agent:run:coding]         # … and here is the grant
 ```
 
-This is enforced **at run time, against the resolved agent** — after directives, thread stickiness, and every config layer have already been applied. There's no way around it by typing `agent:coding` if you're not on the list; you'll just get a run of the agent you were already allowed to use, with a reply naming who to ask. `config set me --agent coding` is always allowed to *set*, harmlessly, because the gate still applies when the run actually happens.
+The restriction is enforced **at run time, against the resolved agent** — after directives, thread stickiness, and every config layer. Typing `agent:coding` without the grant gets you a run of the agent you were already allowed to use, with a reply naming who to ask. `config set me --agent coding` is always allowed to *set*, harmlessly, because the gate applies when the run actually happens. Agents not listed under `restrict.agents` stay open to everyone.
 
 ## Gate who can touch a repo's resident
 
 ```yaml
-permissions:
-  repos:
-    acme/api: [slack:U0456DEV]    # listed → only these users (+ admins), everyone else refused BY NAME
+restrict:
+  repos: [acme/payments]                # closed unless granted …
+grants:
+  slack:U0456DEV:
+    repos: [acme/payments]              # … to whoever's `repos` axis names it
 ```
 
-A repo with no entry here is open to anyone already allowed to run the coding agent. A repo *with* an entry is closed to everyone not on it — including people who could otherwise run `coding` fine, just not against this repo.
+Repos not listed stay open to anyone who may run the coding agent. A listed repo refuses everyone else **by name**, before any executor is created and before any GitHub write on it. Slugs compare case-insensitively.
 
-## Gate channel-level config changes
+## Channel-level config changes
+
+`config set/clear/instructions channel` (and channel-tier MCP servers) need `config:write`, which no one holds by default. Grant it:
 
 ```yaml
-permissions:
-  channelConfig: []    # empty list = admins only. Omit the key entirely = everyone.
+grants:
+  slack:U0456DEV:
+    actions: [config:write]
 ```
 
-Careful with the difference: **key absent** (from a `permissions` block you do write) → open; **key present but empty** → admins only. A config with no `permissions` block at all — native `grants` only — gives `config:write` to nobody but the actors whose `grants` entry carries it. This is the one place an empty list and a missing key mean opposite things — everywhere else, listing zero people isn't meaningfully different from not writing the key.
+A Slack user's own scope (`config set me`) is always open.
 
-## The one gate that's locked by default: repoManagement
+## Repo management
+
+`repo onboard/offboard/reconfigure/rebuild` provision always-on billable compute and bind GitHub credentials — real money and real repo access. They need `repo:write`, never a baseline: only admins until you say otherwise.
 
 ```yaml
-permissions:
-  repoManagement: []    # this is ALSO the default if you never write this key at all
+grants:
+  slack:U0789OPS:
+    actions: [repo:write, friction:write]   # friction propose files issues; usually the same people
 ```
 
-`repo onboard/offboard/reconfigure/rebuild` provision always-on billable compute and bind GitHub credentials — real money and real repo access. Unlike every key above, **`repoManagement` fails closed**: if the key is absent from your config entirely, or present but empty, only admins can run these commands. `repo list` (read-only) stays open regardless. If you want a wider group able to onboard repos, you have to say so explicitly:
+`repo list` (read-only) is open regardless.
+
+## The machine surfaces (HTTP/MCP)
+
+The `/api/*` and MCP surfaces run the same commands chat does, for identities that are not Slack users:
 
 ```yaml
-permissions:
-  repoManagement: [slack:U0456DEV, slack:U0789OPS]
+grants:
+  access:jane@acme.com:                 # a Cloudflare Access browser identity (its `sub`)
+    actions: [runs:write, friction:write]
+    channels: all                       # sees the whole fleet's runs
+  access:svc:ops-bot:                   # an Access service token (its common_name)
+    actions: [runs:read, runs:write, friction:read]
+    channels: all
+  http:ci:                              # an ingress token's subject over /ingress …
+    actions: [dispatch, runs:read]
+  mcp:ci:                               # … and the same subject over MCP
+    actions: [dispatch, runs:read]
 ```
 
-## Gating the machine surfaces (HTTP/MCP)
-
-Chat is gated by `admins`/`repoManagement` as above. The `/api/*` and MCP surfaces use two more keys:
-
-```yaml
-permissions:
-  operators: [access:jane@acme.com]           # browser Access identities granted every *:write scope
-  serviceTokens:
-    ops-bot: [runs:read, runs:write, friction:read]   # a service token's exact scopes, nothing implied
-```
-
-Every signed-in Access identity gets `*:read` for free; only `operators` gets write. Service tokens get exactly the scopes listed and nothing more — an unlisted token has none.
+Every signed-in Access browser session holds every group's `read` for free; writes come from a grant. Service tokens and ingress tokens hold **exactly** their entry — an unlisted one can do nothing, not even start a run (`dispatch`). The token map itself (`SWITCHBOARD_INGRESS_TOKENS`) only identifies: `{ "<token>": { "subject": "ci" } }`.
 
 ## A realistic locked-down example
 
 ```yaml
-permissions:
-  admins: [slack:U0100FOUNDER]
-  agents:
-    coding: [slack:U0456DEV, slack:U0457DEV]
-    ship: [slack:U0456DEV]
-  channelConfig: [slack:U0456DEV]
-  repos:
-    acme/payments: [slack:U0456DEV]     # only this one repo is name-restricted
-  repoManagement: [slack:U0456DEV]
+restrict:
+  agents: [coding, ship]
+  repos: [acme/payments]                # only this one repo is name-restricted
+grants:
+  slack:U0100FOUNDER:
+    actions: all
+    channels: all
+    repos: all
+  slack:U0456DEV:
+    actions: [agent:run:coding, agent:run:ship, config:write, repo:write, friction:write]
+    repos: [acme/payments]
+  slack:U0457DEV:
+    actions: [agent:run:coding]
 ```
 
-Everything not mentioned (the `review`/`research`/`general` agents, every other repo) stays open — permissions are additive restrictions per key, not an all-or-nothing switch.
+Everything not mentioned — the `review`/`research`/`general` agents, every other repo — stays open. A restriction closes one thing; a grant opens one thing for one actor; neither is an all-or-nothing switch.
 
 ## See also
 
-- [Reference: permissions](../reference/permissions.md) — every key, its default, and whether it fails open or closed.
-- [Onboard a repo](onboard-a-repo.md) — the command surface `repoManagement` is gating.
+- [Reference: authorization](../reference/authorization.md) — every axis, every baseline, the actions vocabulary, and the mapping from the retired `permissions` block.
+- [Onboard a repo](onboard-a-repo.md) — the command surface `repo:write` is gating.

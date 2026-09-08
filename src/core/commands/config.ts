@@ -25,8 +25,8 @@ import {
 // `command` in the policy table. The `channel` scope affects everyone in the
 // channel, so it is a refusal the DATA decides: the handler asks the same
 // table about `config-scope { channel }` only when that scope is named
-// (`permissions.channelConfig` translated: absent → every Slack user holds
-// `config:write`; admins, Access operators, and tokens minted with it too).
+// (`config:write` is held only where `grants` say so: admins through `all`,
+// anyone granted it by name, on any surface).
 // Dotted option keys (`--models.coding x`) nest on every surface (KTD21). None
 // of this reaches a model or starts a run.
 

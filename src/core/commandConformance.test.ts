@@ -13,7 +13,8 @@ import { callerFor, createCommandHttpHandler } from "../channels/commandHttp.js"
 import { handleMcpRequest, toCaller } from "../channels/mcp.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { authorize } from "./authz/authorize.js";
-import { NO_GRANTS } from "./authz/types.js";
+import { NO_GRANTS, type Grants } from "./authz/types.js";
+import { ALL_GRANTS } from "./authz/grants.js";
 import { callerWith } from "./testing/callers.js";
 import type { DeployPlan } from "../deploy/plan.js";
 import type { RestartPlan } from "../deploy/restart.js";
@@ -67,8 +68,8 @@ import {
 import { InMemoryOverridesBacking, type Overrides } from "../config.js";
 import {
   admits,
+  AUTHZ_GRANTS,
   AUTHZ_INGRESS_TOKENS,
-  AUTHZ_PERMISSIONS,
   AUTHZ_ROLES,
   buildAuthorizationMatrix,
   buildConformanceMatrix,
@@ -199,26 +200,24 @@ defaults:
     general: anthropic/general-model
 `;
 
-/** The generic fixture's deployment: one Slack admin, no `channelConfig` (open-when-absent), and the
- *  HTTP power caller granted everything NATIVELY (`adminsHint`, folded by caller id in the
- *  cross-surface comparison, names Slack admins only, so the hint reads the same on every surface). */
-const CONFIG_YAML = `${BASE_YAML}permissions:
-  admins: ["${POWER}"]
-  repoManagement: ["${POWER}"]
-grants:
+/** The generic fixture's deployment: one Slack admin and the HTTP power caller, both granted everything (`adminsHint`, folded by caller id in the
+ *  cross-surface comparison, names Slack admins only, so the hint reads the same on every surface); the plain Slack user is granted
+ *  `config:write`, so the channel-scoped `config.*` happy inputs are admitted for them by the handler exactly as the table admits them. */
+const CONFIG_YAML = `${BASE_YAML}grants:
+  "${POWER}":
+    actions: all
+    channels: all
+    repos: all
   "access:power":
     actions: all
     channels: all
     repos: all
+  "${NOBODY}":
+    actions: [config:write]
 `;
 
-/** The authorization matrix's deployment: `AUTHZ_PERMISSIONS`, spelled as config.yaml. */
-const AUTHZ_YAML = `${BASE_YAML}permissions:
-  admins: ${JSON.stringify(AUTHZ_PERMISSIONS.admins)}
-  repoManagement: ${JSON.stringify(AUTHZ_PERMISSIONS.repoManagement)}
-  channelConfig: ${JSON.stringify(AUTHZ_PERMISSIONS.channelConfig)}
-  operators: ${JSON.stringify(AUTHZ_PERMISSIONS.operators)}
-  serviceTokens: ${JSON.stringify(AUTHZ_PERMISSIONS.serviceTokens)}
+/** The authorization matrix's deployment: `AUTHZ_GRANTS`, spelled as config.yaml (a JSON flow mapping is YAML). */
+const AUTHZ_YAML = `${BASE_YAML}grants: ${JSON.stringify(AUTHZ_GRANTS)}
 `;
 
 const CONFIG_DIR = (() => {
@@ -229,15 +228,11 @@ const CONFIG_DIR = (() => {
 })();
 let configN = 0;
 /** A fresh config store per fixture: overrides are on-disk state a write changes.
- *  The store knows the catalogue's groups (operators, browser reads) and the
- *  matrix's ingress tokens, as the bot's does at startup. */
+ss *  The store knows the catalogue's groups (the browser-session reads), as the bot's does at startup. */
 function freshConfig(yaml: "config" | "authz" = "config"): { store: ConfigStore; overridesPath: string } {
   const overridesPath = join(CONFIG_DIR, `overrides-${++configN}.json`);
   return {
-    store: new ConfigStore(join(CONFIG_DIR, `${yaml}.yaml`), overridesPath, () => {}, {
-      commandGroups: coreCommandGroups(),
-      ingressTokens: AUTHZ_INGRESS_TOKENS,
-    }),
+    store: new ConfigStore(join(CONFIG_DIR, `${yaml}.yaml`), overridesPath, { commandGroups: coreCommandGroups() }),
     overridesPath,
   };
 }
@@ -397,7 +392,7 @@ function fakeMcpService(): McpService {
     users: Object.fromEntries(CALLER_IDS.map((id) => [id, { mcpServers: { linear: linear(id) } }])),
   };
   const backing = new InMemoryOverridesBacking(doc);
-  const config = new ConfigStore(join(CONFIG_DIR, "config.yaml"), { backing, initial: structuredClone(doc) }, () => {});
+  const config = new ConfigStore(join(CONFIG_DIR, "config.yaml"), { backing, initial: structuredClone(doc) });
   return new McpService({
     config,
     secrets: new InMemoryMcpSecretStore(),
@@ -674,7 +669,8 @@ const CATALOGUE: CommandDef<unknown>[] = (() => {
   return registry.list() as CommandDef<unknown>[];
 })();
 
-const ALL_ACTIONS = [...new Set(CATALOGUE.map((c) => c.action))];
+/** What the MCP `nobody` bearer's actor holds: dispatch and nothing else. */
+const DISPATCH_ONLY: Grants = { actions: new Set(["dispatch"]), channels: new Set(), repos: new Set() };
 
 // ---- the surfaces ---------------------------------------------------------------------------------
 
@@ -790,11 +786,12 @@ const mcp: Surface = {
       {
         auth: {
           tokens: {
-            power: { subject: "power", scopes: ALL_ACTIONS },
-            nobody: { subject: "nobody", scopes: ["dispatch"] },
+            power: { subject: "power" },
+            nobody: { subject: "nobody" },
           },
         },
         commands: f.commands,
+        grantsFor: (id) => (id === "mcp:power" ? ALL_GRANTS : DISPATCH_ONLY),
       },
     );
     return mcpOutcome(res.body);
@@ -1109,10 +1106,7 @@ describe("command conformance — catalogue fences", () => {
           case "access":
             return callerFor(httpIdentityOf(role), httpOptions(f)).actor;
           case "mcp":
-            return toCaller(AUTHZ_INGRESS_TOKENS[role.id.slice("mcp:".length)]!, {
-              auth: { tokens: AUTHZ_INGRESS_TOKENS },
-              grantsFor: (id) => f.config.grantsFor(id),
-            }).actor;
+            return toCaller(AUTHZ_INGRESS_TOKENS[role.id.slice("mcp:".length)]!, (id) => f.config.grantsFor(id)).actor;
           case "cli":
             return CLI_CALLER.actor;
         }
@@ -1306,7 +1300,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
       },
       {} as CoreDeps,
-      { auth: { tokens: { power: { subject: "power", scopes: ALL_ACTIONS } } }, commands: f.commands },
+      { auth: { tokens: { power: { subject: "power" } } }, commands: f.commands, grantsFor: () => ALL_GRANTS },
     );
     const tools = (list.body as { result: { tools: { name: string; inputSchema: unknown }[] } }).result.tools;
     const tool = tools.find((t) => t.name === names.mcp);

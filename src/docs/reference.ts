@@ -27,7 +27,7 @@ export interface DocCommand {
   usage: string;
   describe: string;
   action: CommandAction;
-  /** Who may run it in Slack, in the vocabulary of docs/reference/permissions.md (`whoMayRun`). */
+  /** Who may run it in Slack, in the vocabulary of docs/reference/authorization.md (`whoMayRun`). */
   who: string;
   effect: "read" | "write";
   surfaces: readonly SurfaceName[];
@@ -48,18 +48,20 @@ const SURFACE_LABEL: Readonly<Record<SurfaceName, string>> = {
 const slackUser = (id: string, extra: readonly string[]): Actor => ({
   kind: "user",
   id,
-  grants: { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write", ...extra]), channels: new Set(), repos: new Set() },
+  grants: { actions: new Set([...CHAT_OPEN_ACTIONS, ...extra]), channels: new Set(), repos: new Set() },
 });
 
 /** The Slack readers a command's "Who can run it" is decided for, narrowest
- *  first, each labelled as docs/reference/permissions.md names the set: a plain
- *  user (the open baseline, `permissions.channelConfig` absent), one allowed to
- *  run the coding agent, a repo manager, an admin. The label is the first the
- *  policy table admits — the same `authorize` the registry asks. */
+ *  first, each labelled as docs/reference/authorization.md names the set: a
+ *  plain user (the baseline every Slack user holds), one granted the coding
+ *  agent, one granted `repo:write` (a repo manager), one granted `config:write`
+ *  (channel config), an admin. The label is the first the policy table admits —
+ *  the same `authorize` the registry asks. */
 const SLACK_READERS: ReadonlyArray<{ label: string; actor: Actor }> = [
   { label: "anyone", actor: slackUser("slack:UDOC", []) },
-  { label: "anyone allowed to run `coding`", actor: slackUser("slack:UDOC", ["agent:run:coding"]) },
-  { label: "repo managers (`repoManagement`)", actor: slackUser("slack:UDOC", ["repo:write", "friction:write"]) },
+  { label: "anyone granted `agent:run:coding`", actor: slackUser("slack:UDOC", ["agent:run:coding"]) },
+  { label: "repo managers (`repo:write`)", actor: slackUser("slack:UDOC", ["repo:write", "friction:write"]) },
+  { label: "channel-config holders (`config:write`)", actor: slackUser("slack:UDOC", ["config:write"]) },
   {
     label: "admins",
     actor: { kind: "user", id: "slack:UDOC", grants: { actions: "all", channels: "all", repos: "all" } },

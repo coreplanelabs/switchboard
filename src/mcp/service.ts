@@ -96,7 +96,7 @@ export interface McpActor {
   id: string;
   /** May manage ORG servers: `cli:local`, a machine token with `mcp:write`, a chat caller the repo-management gate admits. */
   orgAdmin: boolean;
-  /** May manage CHANNEL servers: the `channelConfig` gate (open when unconfigured), like `config set channel`. */
+  /** May manage CHANNEL servers: the `config:write` grant (never a baseline), like `config set channel`. */
   channelAdmin: boolean;
 }
 

@@ -4,13 +4,12 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { CLI_ACTOR, resolveActor } from "../authz/actor.js";
-import { ALL_GRANTS, grantsFor } from "../authz/grants.js";
+import { ALL_GRANTS, grantsFor, parseGrantsConfig } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
 import { chatCallerFor } from "../commandChat.js";
 import { CommandRegistry, UNTRUSTED_OPEN, type Caller } from "../commandRegistry.js";
 import { callerWith } from "../testing/callers.js";
 import { jsonSchemaFor } from "../commandSurface.js";
-import type { IngressTokenMap } from "../ingressTokens.js";
 import type { RunEvent } from "../runEvents.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import type { RunRecord } from "../runRecord.js";
@@ -84,11 +83,14 @@ const actor = (
   channels: Set<string> | "all",
 ): Actor => ({ kind, id, grants: { actions, channels, repos: set() } });
 
-/** The ingress token map every machine caller below is translated from (`grantsFor`, KTD6). */
-const TOKENS: IngressTokenMap = {
-  "tok-x": { subject: "x-bot", channel: "X", scopes: ["runs:read", "runs:write"] },
-  "tok-ci": { subject: "ci", scopes: ["runs:read", "runs:write"] },
+/** Config's grants for the machine callers below (`grantsFor`, KTD6): x-bot is granted its one channel, ci none. */
+const MACHINE_GRANTS = {
+  "mcp:x-bot": { actions: ["runs:read", "runs:write"], channels: ["mcp:X"] },
+  "mcp:ci": { actions: ["runs:read", "runs:write"] },
 };
+const machineGrants = parseGrantsConfig(MACHINE_GRANTS);
+if (!machineGrants.ok) throw new Error(machineGrants.errors.join("; "));
+const MACHINE_SOURCE = { grants: machineGrants.grants };
 
 const cli: Caller = { kind: "cli", id: "cli:local", actor: CLI_ACTOR };
 /** A machine reader granted every channel natively (an ops token). */
@@ -101,13 +103,13 @@ const reader: Caller = {
 const pinnedX: Caller = {
   kind: "mcp",
   id: "mcp:x-bot",
-  actor: resolveActor({ surface: "mcp", subjectId: "x-bot" }, (id) => grantsFor(id, { ingressTokens: TOKENS })),
+  actor: resolveActor({ surface: "mcp", subjectId: "x-bot" }, (id) => grantsFor(id, MACHINE_SOURCE)),
 };
 /** A token WITHOUT a `channel` key: no channel grant at all (OQ4, option a). */
 const unpinned: Caller = {
   kind: "mcp",
   id: "mcp:ci",
-  actor: resolveActor({ surface: "mcp", subjectId: "ci" }, (id) => grantsFor(id, { ingressTokens: TOKENS })),
+  actor: resolveActor({ surface: "mcp", subjectId: "ci" }, (id) => grantsFor(id, MACHINE_SOURCE)),
 };
 const dispatchOnly: Caller = {
   kind: "mcp",
@@ -346,12 +348,9 @@ describe("channel visibility (authorization.md items 5–7)", () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-runs-authz-"));
     writeFileSync(
       join(dir, "config.yaml"),
-      'organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\npermissions:\n  admins: ["slack:UADMIN"]\n',
+      'organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\ngrants:\n  "slack:UADMIN": { actions: all, channels: all, repos: all }\n  "mcp:x-bot": { actions: [runs:read, runs:write], channels: [mcp:X] }\n  "mcp:ci": { actions: [runs:read, runs:write] }\n',
     );
-    const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), () => {}, {
-      ingressTokens: TOKENS,
-      commandGroups: ["runs"],
-    });
+    const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), { commandGroups: ["runs"] });
     const spokenInX = chatCallerFor({ userId: "mcp:ci", channelId: "mcp:X", threadKey: "mcp:X:t" }, config);
     expect(ids(await registry.invoke("runs.list", { options: { status: "all" } }, spokenInX, deps))).toEqual([
       "fin-pub",

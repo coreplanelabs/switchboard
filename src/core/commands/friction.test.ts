@@ -257,9 +257,9 @@ describe("friction.report", () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-friction-authz-"));
     writeFileSync(
       join(dir, "config.yaml"),
-      'organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\npermissions:\n  admins: ["slack:UADMIN"]\n  repoManagement: ["schedule:self-improvement"]\n',
+      'organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\ngrants:\n  "slack:UADMIN": { actions: all, channels: all, repos: all }\n',
     );
-    const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), () => {}, {
+    const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), {
       commandGroups: ["friction"],
     });
     // The firing as chat sees it: the schedule actor speaking in the cron's machine channel.

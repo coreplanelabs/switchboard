@@ -1,4 +1,6 @@
-import { parseIngressTokenMap } from "../core/ingressTokens.js";
+import { parseIngressTokenMap, type IngressIdentity } from "../core/ingressTokens.js";
+import { hasAction } from "../core/authz/authorize.js";
+import type { GrantsLookup } from "../core/authz/actor.js";
 import { LIVE_GATE_DEADLINE_MS, parseHealthz, type HealthzBody } from "./liveGate.js";
 import { profileUrls, type DeploymentProfile } from "./profile.js";
 
@@ -17,14 +19,17 @@ import { profileUrls, type DeploymentProfile } from "./profile.js";
 // nothing in this file imports node:*.
 //
 // Authorization: the bearer must be an entry of the bot's own
-// `SWITCHBOARD_INGRESS_TOKENS` map whose identity carries `deploy:write` — the
-// very scope the `deploy.restart` command declares, so the Worker route is
+// `SWITCHBOARD_INGRESS_TOKENS` map whose `http:<subject>` actor holds
+// `deploy:write` in the bot's config (`grants`, authorization.md item 9) — the
+// very action the `deploy.restart` command declares, so the Worker route is
 // authorized exactly as `/api/deploy.restart` would be if the bot served it.
-// Reused rather than minted: the Worker already holds and parses that map (it
-// fires scheduled runs with the `cron` entry), the resident precedent for a
-// privileged deploy operation is likewise a bearer in the operator's env
-// (`RESIDENT_ADMIN_TOKEN`), and an Access JWT cannot be checked here — the
-// operator rule lives in the container's config.yaml, not in the Worker.
+// Two halves, because the two sides hold different things: the Worker holds the
+// token map (it fires scheduled runs with the `cron` entry) and can tell WHO a
+// bearer is — `authenticateRestart`, 401/503 without touching the container —
+// but the grants live in the container's config, so it asks the bot
+// (`POST /admin/restart/authorize`, src/channels/adminRestartAuthorize.ts) whether
+// that subject holds the action and relays the answer (`parseRestartAuthorization`).
+// The bot's own `/admin/crash` runs the whole check in one place (`authorizeRestart`).
 //
 // The route's URL is the installation's: the deployment profile names the
 // bot's hostname, `planRestart` derives `https://<bot>/admin/restart` from it.
@@ -108,12 +113,17 @@ export function lookupConstantTime<T>(tokens: Record<string, T>, presented: stri
 }
 
 export type RestartAuth = { ok: true; subject: string } | { ok: false; status: 401 | 403 | 503; reason: string };
+export type RestartAuthn = { ok: true; identity: IngressIdentity } | { ok: false; status: 401 | 503; reason: string };
 
-/** Check `Authorization: Bearer <token>` against the raw `SWITCHBOARD_INGRESS_TOKENS`
- *  value. No usable map → 503 (the route is disabled, never open); no/unknown
- *  bearer → 401; a known identity without `deploy:write` → 403. Never echoes
- *  token material. */
-export function authorizeRestart(authorization: string | undefined, tokensRaw: string | undefined): RestartAuth {
+/** The bot route the Worker asks before stopping the container: 200 `{ ok, subject }`
+ *  when the bearer's actor holds `deploy:write`, else `authorizeRestart`'s 401/403/503. */
+export const RESTART_AUTHORIZE_PATH = "/admin/restart/authorize";
+
+/** WHO the bearer is — the Worker's half. Check `Authorization: Bearer <token>`
+ *  against the raw `SWITCHBOARD_INGRESS_TOKENS` value: no usable map → 503 (the
+ *  route is disabled, never open); no/unknown bearer → 401. Says nothing about
+ *  what the identity may do. Never echoes token material. */
+export function authenticateRestart(authorization: string | undefined, tokensRaw: string | undefined): RestartAuthn {
   const parsed = parseIngressTokenMap(tokensRaw);
   if (!parsed.ok || Object.keys(parsed.tokens).length === 0) {
     return {
@@ -130,13 +140,51 @@ export function authorizeRestart(authorization: string | undefined, tokensRaw: s
       status: 401,
       reason: "unauthorized: a Bearer token from SWITCHBOARD_INGRESS_TOKENS is required",
     };
-  if (!identity.scopes.includes(RESTART_SCOPE))
+  return { ok: true, identity };
+}
+
+/** WHO and WHETHER — the whole check, where the grants are (the bot). The
+ *  bearer's `http:<subject>` actor must hold `deploy:write` (`grantsFor` —
+ *  config's entry for the token's subject); a known identity without it → 403. */
+export function authorizeRestart(
+  authorization: string | undefined,
+  tokensRaw: string | undefined,
+  grantsFor: GrantsLookup,
+): RestartAuth {
+  const authn = authenticateRestart(authorization, tokensRaw);
+  if (!authn.ok) return authn;
+  const { identity } = authn;
+  if (!hasAction(grantsFor(`http:${identity.subject}`).actions, RESTART_SCOPE))
     return {
       ok: false,
       status: 403,
-      reason: `forbidden: identity "${identity.subject}" lacks the ${RESTART_SCOPE} scope`,
+      reason: `forbidden: identity "${identity.subject}" holds no ${RESTART_SCOPE} grant (grants["http:${identity.subject}"] in config.yaml)`,
     };
   return { ok: true, subject: identity.subject };
+}
+
+/** The bot's `POST /admin/restart/authorize` answer, as the Worker reads it: 200
+ *  `{ ok: true, subject }` → allowed; 401 / 403 / 503 `{ ok: false, error }` →
+ *  relayed as they are; anything else (a bot without the route, a non-JSON body,
+ *  an unexpected status) → 503, fail-closed — the Worker never restarts on an
+ *  answer it cannot read. */
+export function parseRestartAuthorization(status: number, text: string): RestartAuth {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = undefined;
+  }
+  const body = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+  if (status === 200 && body?.ok === true && typeof body.subject === "string" && body.subject !== "")
+    return { ok: true, subject: body.subject };
+  if ((status === 401 || status === 403 || status === 503) && body?.ok === false && typeof body.error === "string")
+    return { ok: false, status, reason: body.error };
+  return {
+    ok: false,
+    status: 503,
+    reason: `restart disabled: the bot did not answer the authorization check (HTTP ${status}) — is it running this version?`,
+  };
 }
 
 // ---- wire shapes ----------------------------------------------------------------------------------

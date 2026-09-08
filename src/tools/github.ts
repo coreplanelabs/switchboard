@@ -10,7 +10,7 @@ import type { RunnableTool } from "./workspace.js";
 // Reads are `sideEffectFree` (the runner may run several from one turn
 // concurrently); the issue writes are not, and each one is gated by
 // `ctx.github.canWrite(repo)` — the caller's per-repo permission
-// (`permissions.repos`, KD7 open-when-absent), resolved by the dispatcher for
+// (`restrict.repos` + the `repos` grant, open unless restricted), resolved by the dispatcher for
 // the requesting user, so a tool can never write to a repo the user may not use.
 // Tools return strings for errors — never throw — so the model can recover in
 // budget; a 404 is worded as what it usually is: a repo outside the App
@@ -19,7 +19,7 @@ import type { RunnableTool } from "./workspace.js";
 /** What the dispatcher injects: the API and the requesting user's write gate. */
 export interface GithubCapability {
   api: GithubApi;
-  /** True when the requesting user may write to `repo` (`permissions.repos`). */
+  /** True when the requesting user may write to `repo` (`canUseRepo`: open unless `restrict.repos` names it). */
   canWrite(repo: string): boolean;
 }
 
@@ -280,7 +280,7 @@ export const githubIssueGetTool: RunnableTool = {
 function writeGate(tool: string, ctx: Parameters<RunnableTool["run"]>[1], repo: string): string | undefined {
   if (!ctx.github) return UNAVAILABLE;
   if (!ctx.github.canWrite(repo))
-    return `${tool}: you are not allowed to write to ${repo} (permissions.repos) — say so to the user instead of retrying.`;
+    return `${tool}: you are not allowed to write to ${repo} (it is restricted and you hold no grant for it) — say so to the user instead of retrying.`;
   return undefined;
 }
 

@@ -129,8 +129,8 @@ defaults:
   agent: general
   models:
     general: anthropic/general-model
-permissions:
-  admins: ["slack:UADMIN"]
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
 `;
 
 const msg = (text: string, userId = "slack:UX") => ({ channelId: "slack:CX", userId, threadKey: "slack:CX:1.0", text });
@@ -353,12 +353,12 @@ describe("chatCallerFor", () => {
     });
     const plain = chatCallerFor(msg("x", "slack:UX"), config).actor;
     expect(plain).toMatchObject({ kind: "user", id: "slack:UX", grants: { channels: new Set(), repos: new Set() } });
-    // The `open` chat gate as grants, `config:write` (no channelConfig key), and — no agent being restricted in ADMIN_YAML — every registered agent (canRunAgent today).
-    for (const a of [...CHAT_OPEN_ACTIONS, "config:write", "agent:run:general"])
-      expect(plain.grants.actions, a).toContain(a);
+    // The `open` chat gate as grants and — no agent being restricted in ADMIN_YAML — every registered agent (canRunAgent today); never `config:write`.
+    for (const a of [...CHAT_OPEN_ACTIONS, "agent:run:general"]) expect(plain.grants.actions, a).toContain(a);
+    expect(plain.grants.actions).not.toContain("config:write");
     expect(
       [...(plain.grants.actions as Set<string>)].every(
-        (a) => a.startsWith("agent:run:") || a === "config:write" || CHAT_OPEN_ACTIONS.includes(a),
+        (a) => a.startsWith("agent:run:") || CHAT_OPEN_ACTIONS.includes(a),
       ),
     ).toBe(true);
     expect(plain.grants.actions).not.toContain("runs:read");
@@ -470,7 +470,10 @@ describe("handleChatCommand", () => {
   it("every chat caller carries its Actor and no channel pin: a machine credential speaking as text (`http:`/`mcp:`) is a service actor whose grants — not the channel it speaks in — decide what it may run and see (authorization.md item 7)", async () => {
     // A machine identity's text command needs the grant its tool call would (the native `grants` block names it).
     const { commands, config } = setup(
-      `${ADMIN_YAML}grants:\n  "http:ops":\n    actions: [help:read]\n  "mcp:alice":\n    actions: [help:read]\n`,
+      ADMIN_YAML.replace(
+        "grants:\n",
+        'grants:\n  "http:ops":\n    actions: [help:read]\n  "mcp:alice":\n    actions: [help:read]\n',
+      ),
     );
     const parsed = parseChatCommand("demo whoami", commands)!;
     const via = (channelId: string, userId: string) =>
@@ -482,7 +485,9 @@ describe("handleChatCommand", () => {
   });
 
   it("a caller with no admins configured is refused (no admins → nobody holds runs:read; fail-closed)", async () => {
-    const { commands, deps, config } = setup(ADMIN_YAML.replace('  admins: ["slack:UADMIN"]\n', ""));
+    const { commands, deps, config } = setup(
+      ADMIN_YAML.replace('grants:\n  "slack:UADMIN": { actions: all, channels: all, repos: all }\n', ""),
+    );
     const reply = await run(commands, config, "demo echo --status all", "slack:UX");
     expect(reply).toContain("🚫");
     expect(reply).toContain("Ask an admin");

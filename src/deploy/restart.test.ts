@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { LIVE_GATE_DEADLINE_MS } from "./liveGate.js";
+import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 import {
+  authenticateRestart,
   authorizeRestart,
   constantTimeEqual,
   lookupConstantTime,
   classifyRestartResponse,
   decideRestart,
   formatRestartPlan,
+  parseRestartAuthorization,
   parseRestartRequest,
   planRestart,
+  RESTART_AUTHORIZE_PATH,
   RESTART_SCOPE,
   RESTART_TOKEN_ENV,
   restartResponse,
@@ -66,26 +70,33 @@ describe("decideRestart", () => {
 
 describe("authorizeRestart", () => {
   const tokens = JSON.stringify({
-    "tok-deployer": { subject: "ops", scopes: ["dispatch", "deploy:write"] },
-    "tok-reader": { subject: "reader", scopes: ["runs:read"] },
+    "tok-deployer": { subject: "ops" },
+    "tok-reader": { subject: "reader" },
     "tok-cron": { subject: "cron" },
   });
+  // Config's grants for the tokens' `http:<subject>` actors: only ops holds deploy:write.
+  const GRANTS: Record<string, Grants> = {
+    "http:ops": { actions: new Set(["dispatch", "deploy:write"]), channels: new Set(), repos: new Set() },
+    "http:reader": { actions: new Set(["runs:read"]), channels: new Set(), repos: new Set() },
+    "http:cron": { actions: new Set(["dispatch"]), channels: new Set(), repos: new Set() },
+  };
+  const grantsFor = (id: string) => GRANTS[id] ?? NO_GRANTS;
 
-  it("a bearer whose identity carries deploy:write is allowed and named by subject", () => {
-    expect(authorizeRestart("Bearer tok-deployer", tokens)).toEqual({ ok: true, subject: "ops" });
+  it("a bearer whose http:<subject> actor is granted deploy:write is allowed and named by subject", () => {
+    expect(authorizeRestart("Bearer tok-deployer", tokens, grantsFor)).toEqual({ ok: true, subject: "ops" });
     expect(RESTART_SCOPE).toBe("deploy:write");
   });
 
-  it("no bearer → 401; an unknown bearer → 401; a known bearer without the scope (incl. the default `dispatch`-only cron) → 403", () => {
-    expect(authorizeRestart(undefined, tokens)).toMatchObject({ ok: false, status: 401 });
-    expect(authorizeRestart("Basic abc", tokens)).toMatchObject({ ok: false, status: 401 });
-    expect(authorizeRestart("Bearer nope", tokens)).toMatchObject({ ok: false, status: 401 });
-    expect(authorizeRestart("Bearer tok-reader", tokens)).toMatchObject({
+  it("no bearer → 401; an unknown bearer → 401; a known bearer whose actor lacks the grant (incl. the dispatch-only cron) → 403", () => {
+    expect(authorizeRestart(undefined, tokens, grantsFor)).toMatchObject({ ok: false, status: 401 });
+    expect(authorizeRestart("Basic abc", tokens, grantsFor)).toMatchObject({ ok: false, status: 401 });
+    expect(authorizeRestart("Bearer nope", tokens, grantsFor)).toMatchObject({ ok: false, status: 401 });
+    expect(authorizeRestart("Bearer tok-reader", tokens, grantsFor)).toMatchObject({
       ok: false,
       status: 403,
       reason: expect.stringContaining("deploy:write"),
     });
-    expect(authorizeRestart("Bearer tok-cron", tokens)).toMatchObject({ ok: false, status: 403 });
+    expect(authorizeRestart("Bearer tok-cron", tokens, grantsFor)).toMatchObject({ ok: false, status: 403 });
   });
 
   it("the bearer lookup compares against every configured token with fixed work (no early exit on the first mismatch)", () => {
@@ -100,10 +111,43 @@ describe("authorizeRestart", () => {
   });
 
   it("fails closed without a token map (503 — the route is disabled, never open) and never echoes token material", () => {
-    expect(authorizeRestart("Bearer tok-deployer", undefined)).toMatchObject({ ok: false, status: 503 });
-    expect(authorizeRestart("Bearer tok-deployer", "not json")).toMatchObject({ ok: false, status: 503 });
-    const r = authorizeRestart("Bearer tok-secret-value", tokens);
+    expect(authorizeRestart("Bearer tok-deployer", undefined, grantsFor)).toMatchObject({ ok: false, status: 503 });
+    expect(authorizeRestart("Bearer tok-deployer", "not json", grantsFor)).toMatchObject({ ok: false, status: 503 });
+    const r = authorizeRestart("Bearer tok-secret-value", tokens, grantsFor);
     expect(JSON.stringify(r)).not.toContain("tok-secret-value");
+  });
+
+  it("authenticateRestart (the Worker's half) says WHO without deciding: the identity for a known bearer, 401 unknown/absent, 503 no map — never the grant, never the token", () => {
+    expect(authenticateRestart("Bearer tok-reader", tokens)).toEqual({ ok: true, identity: { subject: "reader" } });
+    expect(authenticateRestart("Bearer tok-cron", tokens)).toEqual({ ok: true, identity: { subject: "cron" } });
+    expect(authenticateRestart(undefined, tokens)).toMatchObject({ ok: false, status: 401 });
+    expect(authenticateRestart("Bearer nope", tokens)).toMatchObject({ ok: false, status: 401 });
+    expect(authenticateRestart("Bearer tok-deployer", undefined)).toMatchObject({ ok: false, status: 503 });
+    expect(authenticateRestart("Bearer tok-deployer", "[]")).toMatchObject({ ok: false, status: 503 });
+    expect(JSON.stringify(authenticateRestart("Bearer tok-secret-value", tokens))).not.toContain("tok-secret-value");
+  });
+
+  it("parseRestartAuthorization (the Worker reading the bot's /admin/restart/authorize): 200 ok+subject → allowed; 401/403/503 with an error → relayed as they are; anything else → 503, fail-closed", () => {
+    expect(RESTART_AUTHORIZE_PATH).toBe("/admin/restart/authorize");
+    expect(parseRestartAuthorization(200, JSON.stringify({ ok: true, subject: "ops" }))).toEqual({
+      ok: true,
+      subject: "ops",
+    });
+    for (const status of [401, 403, 503] as const)
+      expect(parseRestartAuthorization(status, JSON.stringify({ ok: false, error: "nope" }))).toEqual({
+        ok: false,
+        status,
+        reason: "nope",
+      });
+    // A bot without the route (404), an HTML 500, a 200 without a subject, or a non-JSON body never restarts anything.
+    for (const [status, text] of [
+      [404, "not found"],
+      [500, "<html>"],
+      [200, JSON.stringify({ ok: true })],
+      [200, JSON.stringify({ ok: false, error: "x" })],
+      [403, "forbidden"],
+    ] as const)
+      expect(parseRestartAuthorization(status, text), `${status} ${text}`).toMatchObject({ ok: false, status: 503 });
   });
 });
 

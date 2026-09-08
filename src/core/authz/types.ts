@@ -14,7 +14,7 @@ export type ActorKind = "user" | "service" | "schedule" | "agent";
 /** A set of names, or everything. `"all"` is explicit, never a default. */
 export type GrantSet = ReadonlySet<string> | "all";
 
-/** What an actor may do (R8). One shape for humans (`permissions.*`), ingress
+/** What an actor may do (R8). One shape for humans, ingress
  *  tokens, Access identities, schedule actors, and agents. */
 export interface Grants {
   /** Action ids: `runs:read`, `friction:write`, `repo:exec`, `agent:run:<name>`, `memory:write`, … */

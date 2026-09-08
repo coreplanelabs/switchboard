@@ -27,7 +27,7 @@ import { parseIngressTokenMap, tokenForSubject } from "./ingressTokens.js";
  *  in SWITCHBOARD_INGRESS_TOKENS as `{"<token>": {"subject": "cron", "channel":
  *  "cron"}}` — the same map every ingress caller uses, no extra secret. The
  *  dispatcher sees `http:cron`; whatever a scheduled command requires (e.g.
- *  `friction propose` → `permissions.repoManagement`) must be granted to it. */
+ *  `friction propose` → `friction:write`) must be granted to it. */
 export const CRON_IDENTITY = "cron";
 
 /** The Workers that run crons: `bot` = deploy/cloudflare (the shim in front of

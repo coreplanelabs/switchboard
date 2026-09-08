@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { AGENTS } from "../../agents/registry.js";
 import { authorize } from "../authz/authorize.js";
-import { grantsFor, type GrantsSource } from "../authz/grants.js";
+import { grantsFor, parseGrantsConfig, type GrantsConfig, type GrantsSource } from "../authz/grants.js";
+import type { IngressTokenMap } from "../ingressTokens.js";
 import { POLICY, ruleTarget } from "../authz/policy.js";
 import { targetOfResource } from "../authz/resource.js";
 import type { Actor } from "../authz/types.js";
@@ -651,9 +652,9 @@ export interface ConformanceMatrix {
 // Every gate is a policy row (features/authorization.md). The suite derives
 // the expected admission of each command for each actor here — `authorize` over
 // the resource the command names for its happy-path input — and drives the real
-// adapters as those identities to check they agree. The roles are a legacy
-// `permissions.*` + ingress-token deployment (`AUTHZ_SOURCE`), translated by the
-// same `grantsFor` config uses; the suite's AUTHZ config.yaml mirrors it.
+// adapters as those identities to check they agree. The roles are one `grants`
+// deployment (`AUTHZ_GRANTS`, resolved through the same `grantsFor` config
+// uses); the suite's AUTHZ config.yaml spells the same block.
 
 export interface AuthzRole {
   /** Platform-namespaced actor id; its prefix says which surface carries it (`carriedBy`). */
@@ -669,8 +670,8 @@ export const AUTHZ_WRITES: readonly string[] = coreCommandGroups().map((g) => `$
 export const AUTHZ_ROLES: readonly AuthzRole[] = [
   { id: "slack:UADMIN", column: "Slack admin" },
   { id: "slack:UPLAIN", column: "Slack user" },
-  { id: "slack:UREPO", column: "Slack repoManagement" },
-  { id: "slack:UCHAN", column: "Slack channelConfig" },
+  { id: "slack:UREPO", column: "Slack repo:write" },
+  { id: "slack:UCHAN", column: "Slack config:write" },
   { id: "mcp:dispatch", column: "token: dispatch only" },
   { id: "mcp:reader", column: "token: every read" },
   { id: "mcp:writer", column: "token: every write" },
@@ -680,25 +681,32 @@ export const AUTHZ_ROLES: readonly AuthzRole[] = [
   { id: "cli:local", column: "cli" },
 ];
 
-/** The legacy keys that name the roles — `permissions` as the suite's AUTHZ config.yaml spells them. */
-export const AUTHZ_PERMISSIONS: NonNullable<GrantsSource["permissions"]> = {
-  admins: ["slack:UADMIN"],
-  repoManagement: ["slack:UREPO"],
-  channelConfig: ["slack:UCHAN"],
-  operators: ["access:operator"],
-  serviceTokens: { reader: [...AUTHZ_READS] },
+/** The `grants` block that names the roles — as the suite's AUTHZ config.yaml spells it. An
+ *  operator holds every group's read + write over every channel; the unlisted browser
+ *  visitor holds only the implicit reads; `slack:UPLAIN` only the baseline. */
+export const AUTHZ_GRANTS: GrantsConfig = {
+  "slack:UADMIN": { actions: "all", channels: "all", repos: "all" },
+  "slack:UREPO": { actions: ["repo:write", "friction:write"] },
+  "slack:UCHAN": { actions: ["config:write"] },
+  "mcp:dispatch": { actions: ["dispatch"] },
+  "mcp:reader": { actions: [...AUTHZ_READS] },
+  "mcp:writer": { actions: [...AUTHZ_WRITES] },
+  "access:svc:reader": { actions: [...AUTHZ_READS], channels: "all" },
+  "access:operator": { actions: [...AUTHZ_READS, ...AUTHZ_WRITES], channels: "all" },
 };
 
 /** `SWITCHBOARD_INGRESS_TOKENS` for the token roles (the bearer is the role's subject). */
-export const AUTHZ_INGRESS_TOKENS: NonNullable<GrantsSource["ingressTokens"]> = {
-  dispatch: { subject: "dispatch", scopes: ["dispatch"] },
-  reader: { subject: "reader", scopes: [...AUTHZ_READS] },
-  writer: { subject: "writer", scopes: [...AUTHZ_WRITES] },
+export const AUTHZ_INGRESS_TOKENS: IngressTokenMap = {
+  dispatch: { subject: "dispatch" },
+  reader: { subject: "reader" },
+  writer: { subject: "writer" },
 };
 
+const authzGrants = parseGrantsConfig(AUTHZ_GRANTS);
+if (!authzGrants.ok) throw new Error(authzGrants.errors.join("; "));
+
 export const AUTHZ_SOURCE: GrantsSource = {
-  permissions: AUTHZ_PERMISSIONS,
-  ingressTokens: AUTHZ_INGRESS_TOKENS,
+  grants: authzGrants.grants,
   agentNames: Object.keys(AGENTS),
   commandGroups: coreCommandGroups(),
 };

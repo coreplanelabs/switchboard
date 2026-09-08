@@ -231,7 +231,7 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.mcpWriter, command("config.set")],
     ],
   },
-  // The channel-config right: `permissions.channelConfig` (absent → everyone), admins, operators, tokens minted with it.
+  // The channel-config right: the `config:write` grant (never a baseline) — its holders, admins, operators, tokens minted with it.
   "config:write config-scope/channel [has-grant(config:write)]": {
     allow: [
       [A.member, channelConfig("slack:C_PUB1")],
