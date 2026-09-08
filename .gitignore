@@ -21,3 +21,5 @@ load-results/
 # Worker's wrangler.jsonc is rendered from its template by `npm run deploy:gen`.
 deploy/profile.json
 deploy/*/wrangler.jsonc
+
+# scratch: live-receipt PR for release 1.6.0 (closed after the receipts land)
