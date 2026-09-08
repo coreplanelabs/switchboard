@@ -1,5 +1,6 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { ResidentAdminClient } from "../core/residentAdmin.js";
+import { startProcessRoot, type RequestTraceDeps } from "../core/requestTrace.js";
 import { RESIDENT_SLUG_RE, residentSlug, type ResidentListing, type ResidentRecordView } from "./residentsModel.js";
 import type { ShellRenderer } from "./webShell.js";
 import { WEB_HTML_HEADERS } from "./webShell.js";
@@ -67,6 +68,11 @@ function plain(res: ServerResponse, status: number, body: string, extra: Record<
 export function createResidentsViewHandler(
   client: ResidentAdminClient,
   shell: ShellRenderer,
+  /** Where each page's root goes (docs/reference/specs/tracing.md item 20): a GET here is a
+   *  browser request that causes a resident Worker call, so it runs under a
+   *  `dashboard.residents` root handed to the client and the Worker's line
+   *  adopts that trace. Absent (tests without tracing) → untraced. */
+  trace?: RequestTraceDeps,
 ): (req: HttpRequest, res: ServerResponse) => boolean {
   return (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -77,7 +83,19 @@ export function createResidentsViewHandler(
       plain(res, 405, "method not allowed", { allow: "GET" });
       return true;
     }
-    client
+    const root = trace ? startProcessRoot(trace, "dashboard.residents", { attrs: { route: route.kind } }) : undefined;
+    const bound = root && client.withSpan ? client.withSpan(root) : client;
+    const finish = (httpStatus: number, err?: unknown) => {
+      if (!root) return;
+      root.setAttrs({ httpStatus });
+      if (err !== undefined) root.fail(err);
+      root.end(httpStatus < 400 && err === undefined ? "ok" : "error");
+    };
+    const plainEnd = (status: number, text: string) => {
+      plain(res, status, text);
+      finish(status);
+    };
+    bound
       .residents()
       .then((r) => {
         if (r.status !== 200) {
@@ -91,10 +109,10 @@ export function createResidentsViewHandler(
           // `NullResidentAdminClient` of a process without residents, or a
           // Worker that is down: it passes through with its reason.
           if (r.status === 503) {
-            plain(res, 503, reason);
+            plainEnd(503, reason);
             return;
           }
-          plain(res, 502, `resident Worker answered ${r.status} to /residents: ${reason}`);
+          plainEnd(502, `resident Worker answered ${r.status} to /residents: ${reason}`);
           return;
         }
         const residents = Array.isArray(r.data.residents) ? (r.data.residents as ResidentRecordView[]) : [];
@@ -102,15 +120,17 @@ export function createResidentsViewHandler(
         if (route.kind === "index") {
           res.writeHead(200, WEB_HTML_HEADERS);
           res.end(shell("Resident repos", { page: "residents", cap: listing.cap, count: listing.count, residents }));
+          finish(200);
           return;
         }
         const record = residents.find((x) => residentSlug(x) === route.slug);
         if (!record) {
-          plain(res, 404, `${route.slug} is not onboarded as a resident`);
+          plainEnd(404, `${route.slug} is not onboarded as a resident`);
           return;
         }
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(shell(route.slug, { page: "resident", slug: route.slug, record }));
+        finish(200);
       })
       .catch((err: unknown) => {
         plain(
@@ -118,6 +138,7 @@ export function createResidentsViewHandler(
           502,
           `resident Worker unreachable: ${(err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX)}`,
         );
+        finish(502, err);
       });
     return true;
   };

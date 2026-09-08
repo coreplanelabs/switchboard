@@ -269,13 +269,18 @@ async function main() {
   // the run path, never a constant. Only an admin plane that can answer is
   // watched: none without residents, none when the admin bearer is unset (the
   // null client would answer 503 forever and the cap could never be learned).
-  const fleetWatcher = residentFleetWatcherFor(residentAdminClient, { warn: (m) => console.warn(m) });
-  fleetWatcher?.start();
-  const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;
   // The bot's span log (docs/reference/specs/tracing.md item 26): every root this process
   // starts also writes here, bounded, and `GET /admin/trace/log` reads it for a
   // `trace:read` bearer — the container's stdout, without the container.
   const spanLog = createSpanLog();
+  // Each background read of the listing is a `resident.fleet_refresh` root
+  // (tracing item 20), so the Worker's `/residents` line adopts a trace.
+  const fleetWatcher = residentFleetWatcherFor(residentAdminClient, {
+    warn: (m) => console.warn(m),
+    trace: { config, spanLog },
+  });
+  fleetWatcher?.start();
+  const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;
   const deps: CoreDeps = {
     config,
     providers,
@@ -384,7 +389,7 @@ async function main() {
     // client answers every route 503 with the reason, and so does the page.
     // Access-gated below alongside /runs — it lists every onboarded repo and
     // its build commands, so it must never be exposed without SSO.
-    const residentsView = createResidentsViewHandler(residentAdminClient, shell);
+    const residentsView = createResidentsViewHandler(residentAdminClient, shell, { config, spanLog });
     const residentsState =
       residentAdminClient instanceof NullResidentAdminClient
         ? `GET /residents (503 — ${residentAdminClient.reason})`
