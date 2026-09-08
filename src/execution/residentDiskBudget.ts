@@ -308,7 +308,10 @@ export interface DiskEvictionCandidate {
   sizeKiB: number | null;
 }
 
-export type DiskKeepWhy = "busy" | "default-ref" | "recent" | "dirty" | "requesting";
+/** Why a tree was kept under disk pressure. `other` is the caller's fallback
+ *  for a keep decided outside `orderEvictionCandidates` (a binding that moved
+ *  during the check); free text never becomes a token. */
+export type DiskKeepWhy = "busy" | "default-ref" | "recent" | "dirty" | "requesting" | "other";
 
 /** Order the live trees for eviction under pressure and name every one that is
  *  kept: the requesting thread itself, a busy tree, the default branch (the
@@ -389,10 +392,13 @@ export function formatDiskGauge(sample: Pick<DiskSample, "totalKiB" | "usedKiB">
  *  free space under the cap, the reserve and its two terms, what was evicted
  *  (with the bytes it gave back) and what was kept and why — every number the
  *  decision used, so the card, the log and the operator see the same math. */
+/** The refusal the requesting thread sees. It names sizes, counts and keep
+ *  tokens only (item 62): the trees evicted or kept belong to OTHER threads,
+ *  and their keys and free-text details stay in the Worker log. */
 export function diskPressureReason(input: {
   verdict: Extract<AdmissionVerdict, { fits: false }>;
-  evicted: ReadonlyArray<{ threadKey: string; freedKiB: number | null }>;
-  kept: ReadonlyArray<{ threadKey: string; detail: string }>;
+  evicted: ReadonlyArray<{ freedKiB: number | null }>;
+  kept: ReadonlyArray<{ why: DiskKeepWhy }>;
 }): string {
   const { math } = input.verdict;
   const need =
@@ -406,12 +412,13 @@ export function diskPressureReason(input: {
   ];
   if (input.evicted.length > 0) {
     const freed = input.evicted.reduce((a, e) => a + (e.freedKiB ?? 0), 0);
-    parts.push(
-      `evicted ${input.evicted.length} idle tree(s) (${formatGiB(freed)} back): ${input.evicted.map((e) => e.threadKey).join(", ")}`,
-    );
+    parts.push(`evicted ${input.evicted.length} idle tree(s) (${formatGiB(freed)} back)`);
   } else parts.push("evicted nothing");
-  if (input.kept.length > 0)
-    parts.push(`kept ${input.kept.length}: ${input.kept.map((k) => `${k.threadKey} (${k.detail})`).join(", ")}`);
+  if (input.kept.length > 0) {
+    const counts = new Map<DiskKeepWhy, number>();
+    for (const k of input.kept) counts.set(k.why, (counts.get(k.why) ?? 0) + 1);
+    parts.push(`kept ${input.kept.length} (${[...counts].map(([why, n]) => `${why} ${n}`).join(", ")})`);
+  }
   return parts.join("; ");
 }
 

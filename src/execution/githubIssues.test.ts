@@ -86,6 +86,17 @@ describe("GithubIssueTracker.listOpen", () => {
     expect(calls.every((c) => c.method === "GET")).toBe(true);
   });
 
+  it("redacts a credential in the failure body before slicing it into the error (item 62)", async () => {
+    const { fetch } = fakeFetch(() => ({
+      status: 403,
+      body: { message: "denied GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789" },
+    }));
+    const tracker = new GithubIssueTracker({ fetch, token: tokenOk });
+    const err = await tracker.listOpen("o/r", "x").catch((e: unknown) => e);
+    expect((err as Error).message).toContain("HTTP 403");
+    expect((err as Error).message).not.toContain("ghp_");
+  });
+
   it("throws with the HTTP status on a non-2xx so the caller can report it", async () => {
     const { fetch } = fakeFetch(() => ({ status: 403, body: { message: "Resource not accessible by integration" } }));
     const tracker = new GithubIssueTracker({ fetch, token: tokenOk });

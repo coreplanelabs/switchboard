@@ -344,21 +344,20 @@ describe("diskPressureReason — the refusal names free, reserve, projected, wha
     if (v.fits) throw new Error("fixture must not fit");
     const text = diskPressureReason({
       verdict: v,
-      evicted: [{ threadKey: "slack:C1:old", freedKiB: 450_000 }],
-      kept: [
-        { threadKey: "slack:C1:busy", detail: "1 operation(s) in flight" },
-        { threadKey: "slack:C1:dirty", detail: "dirty: uncommitted changes" },
-      ],
+      evicted: [{ freedKiB: 450_000 }],
+      kept: [{ why: "busy" }, { why: "dirty" }, { why: "other" }],
     });
     // 430 MB + 0.25 × 2100 MB = 955 MB (0.93 GiB) projected; reserve = 0.6 × 2890 MB + 1 GiB = 1734 MB + 1024 MB = 2.69 GiB; 3 − 2.69 = 0.31 left; short 0.63.
     expect(text).toMatch(
       /^disk-pressure: need 0\.93 GiB for a new tree \(reconcile\), but 3\.00 GiB free minus the 2\.69 GiB reserve \(snapshot staging 1\.69 GiB \+ floor 1\.00 GiB\) leaves 0\.31 GiB — short by 0\.63 GiB; /,
     );
     expect(text).not.toContain("cap"); // no diskBudgetMb → no cap named
-    expect(text).toContain("evicted 1 idle tree(s) (0.43 GiB back): slack:C1:old");
-    expect(text).toContain(
-      "kept 2: slack:C1:busy (1 operation(s) in flight), slack:C1:dirty (dirty: uncommitted changes)",
-    );
+    expect(text).toContain("evicted 1 idle tree(s) (0.43 GiB back)");
+    expect(text).toContain("kept 3 (busy 1, dirty 1, other 1)");
+    // Item 62: the refusal reaches the requesting thread's card, so it names
+    // counts and tokens only — never another thread's key or its free text.
+    // The type no longer admits a key or a detail, so the refusal cannot carry one.
+    expect(text).not.toContain("slack:C1:");
     expect(isDiskPressureReason(text)).toBe(true);
     expect(isDiskPressureReason("disk-full: x")).toBe(false);
   });

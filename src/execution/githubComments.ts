@@ -1,4 +1,5 @@
 import { resolveGithubToken } from "./githubApp.js";
+import { redactAndCap } from "../core/redact.js";
 
 // Posting a review back to a PR (issue #69). The bot process posts the comment
 // itself over the GitHub REST API with the App installation token — never a
@@ -59,6 +60,6 @@ export async function postReviewComment(target: ReviewCommentTarget, body: strin
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`PR comment post failed: HTTP ${res.status} ${text.slice(0, 300)}`);
+    throw new Error(`PR comment post failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
   }
 }

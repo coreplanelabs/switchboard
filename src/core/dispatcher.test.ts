@@ -671,6 +671,30 @@ describe("executor provisioning by agent resources", () => {
     expect(replies.some((r) => r.includes("sandbox worker unreachable"))).toBe(true);
   });
 
+  it("a setup failure carrying remote text closes the card with one redacted line and redacts the reply (resident-repos item 62)", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const { io, statuses, replies } = fakeIO();
+    // A bare token with a terminal escape mid-token: only strip-then-redact
+    // catches it (the escape would otherwise split the credential shape).
+    vi.mocked(makeExecutor).mockRejectedValueOnce(
+      new Error(
+        "resident attach failed: ghp_abcdefghijklmnop\x1b[31mqrstuvwxyz0123456789\nsecond line of remote output",
+      ),
+    );
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    const title = statuses[statuses.length - 1].title;
+    expect(title).toContain("❌ setup failed");
+    expect(title).not.toContain("ghp_");
+    expect(title).not.toContain("\n");
+    expect(title).not.toContain("second line");
+    expect(replies.some((r) => r.includes("resident attach failed"))).toBe(true);
+    expect(replies.every((r) => !r.includes("ghp_abcdefghijklmnop"))).toBe(true);
+    expect(replies.every((r) => !r.includes("\x1b"))).toBe(true);
+  });
+
   it("a RUN failure keeps the run loop's ❌ card (label + checklist) — the outer catch does not relabel it as a setup failure", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");

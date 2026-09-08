@@ -206,6 +206,24 @@ describe("makeExecutor resident selection", () => {
     expect(fn).not.toHaveBeenCalled();
   });
 
+  it("a poisoned probe reason reaches the note as one redacted line (item 62)", async () => {
+    stubEnvs();
+    stubFetch({
+      body: {
+        state: "degraded",
+        reason:
+          "\x1b[31mrefresh failed\x1b[0m GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\nkept slack:C0OTHER:1.2",
+      },
+    });
+    const { executor, note } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(note).toBeDefined();
+    expect(note).not.toContain("ghp_");
+    expect(note).not.toContain("\x1b");
+    expect(note).not.toContain("\n");
+    expect(note).toContain("resident degraded");
+  });
+
   it("warm probe → ResidentExecutor, attached on open, with the resident discriminant set", async () => {
     stubEnvs();
     const { calls } = stubFetch(
@@ -411,7 +429,9 @@ describe("makeExecutor resident selection", () => {
   it("item 55: a warm probe then a disk-pressure attach (503, the math in `error`) → per-thread fallback, the note carries the whole refusal", async () => {
     stubEnvs();
     const reason =
-      "disk-pressure: need 2.47 GiB for a new tree (install), but 3.10 GiB free minus the 2.76 GiB reserve (snapshot staging 1.76 GiB + floor 1.00 GiB) leaves 0.34 GiB — short by 2.13 GiB; evicted 1 idle tree(s) (0.52 GiB back): slack:C1:old; kept 1: slack:C1:busy (2 operation(s) in flight)";
+      // The shape `diskPressureReason` emits since item 62: sizes, counts and
+      // keep tokens, never another thread's key.
+      "disk-pressure: need 2.47 GiB for a new tree (install), but 3.10 GiB free minus the 2.76 GiB reserve (snapshot staging 1.76 GiB + floor 1.00 GiB) leaves 0.34 GiB — short by 2.13 GiB; evicted 1 idle tree(s) (0.52 GiB back); kept 1 (busy 1)";
     const { calls } = stubFetch(
       { body: { state: "warm", reason: "" } },
       { status: 503, body: { error: reason, state: "warm", reason: "disk-pressure" } },

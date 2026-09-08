@@ -1,4 +1,5 @@
 import { resolveGithubToken } from "./githubApp.js";
+import { redactAndCap } from "../core/redact.js";
 
 // Filing GitHub issues from the bot process (Area 7b / #84): the IssueTracker
 // seam the friction proposer files its proposals through. GithubIssueTracker
@@ -143,7 +144,7 @@ export class GithubIssueTracker implements IssueTracker {
     });
     if (!res.ok && !tolerate.includes(res.status)) {
       const text = await res.text().catch(() => "");
-      throw new Error(`GitHub ${method} ${path} failed: HTTP ${res.status} ${text.slice(0, 300)}`);
+      throw new Error(`GitHub ${method} ${path} failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
     }
     return res;
   }

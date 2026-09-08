@@ -1,4 +1,6 @@
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
+import { redactSecrets, stripAnsi } from "../core/redact.js";
+import { residentState, sanitizeResidentBody } from "./residentText.js";
 import { repoResourceId } from "../core/residentAdmin.js";
 import { EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 import {
@@ -105,7 +107,9 @@ async function parseResidentBody(res: Response): Promise<Record<string, unknown>
   } catch {
     // non-JSON body (edge error page) — the caller falls back to the status
   }
-  return data;
+  // Item 62: every resident string is made safe here, at the one parse the
+  // operator routes share, so no caller downstream can show it raw.
+  return sanitizeResidentBody(data);
 }
 
 /** Deterministic-ops client (U6, KTD8) for the resident Worker's POST /op:
@@ -147,8 +151,11 @@ export class ResidentOperations implements Operations {
     const ok = data.ok === true;
     const summary =
       typeof data.summary === "string" && data.summary ? data.summary : `${op} ${ok ? "succeeded" : "failed"}`;
+    // Item 62: op output reaches a Slack reply, so it is stripped and redacted
+    // BEFORE the clip (a cut mid-token would defeat the redaction).
     const output = [data.stdout, data.stderr]
       .filter((s): s is string => typeof s === "string" && s.length > 0)
+      .map((s) => redactSecrets(stripAnsi(s)))
       .join("\n--- stderr ---\n");
     return { kind: "result", ok, summary, ...(output ? { output: truncate(output) } : {}) };
   }
@@ -210,11 +217,13 @@ export class ResidentExecutor implements Executor {
       // a definite answer (resource not onboarded), never a service failure
       return { kind: "status", state: "not-onboarded", reason: "" };
     }
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    // Item 62: the probe has its own body read, so it sanitizes on its own,
+    // and `state` is validated against the closed table (never echoed).
+    const data = sanitizeResidentBody((await res.json().catch(() => ({}))) as Record<string, unknown>);
     if (!res.ok) {
       return { kind: "unreachable", error: `probe HTTP ${res.status}: ${String(data.error ?? "")}`, transport: false };
     }
-    return { kind: "status", state: String(data.state ?? "unknown"), reason: String(data.reason ?? "") };
+    return { kind: "status", state: residentState(data.state), reason: String(data.reason ?? "") };
   }
 
   /** POST one route; resource + threadKey ride in every body. Reads the FULL

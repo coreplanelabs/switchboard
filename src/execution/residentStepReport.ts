@@ -1,3 +1,5 @@
+import { redactSecrets, stripAnsi } from "../core/redact.js";
+
 // How a failed resident step describes itself (features/resident-repos.md
 // item 53). Pure, so the shape is a unit test and not a live post-mortem.
 //
@@ -37,7 +39,9 @@ export const STEP_LOG_PER_STREAM = 4000;
 /** The last `budget` chars of `s`, marked with a leading `…` when cut. Empty
  *  (after trimming) yields "" so the caller can drop the label entirely. */
 function tailOf(s: string, budget: number): string {
-  const trimmed = s.trim();
+  // Item 62: the tail lands in a stored reason and on a card — strip and
+  // redact BEFORE cutting, so a cut can never split a credential.
+  const trimmed = redactSecrets(stripAnsi(s)).trim();
   if (trimmed.length <= budget) return trimmed;
   return `…${trimmed.slice(-budget)}`;
 }

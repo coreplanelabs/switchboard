@@ -162,6 +162,21 @@ describe("resolveGithubToken", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("redacts a credential in the mint failure body before slicing it into the error (item 62)", async () => {
+    configureApp();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("bad credentials GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789", { status: 401 }),
+      ),
+    );
+    const mod = await freshModule();
+    const err = await mod.resolveGithubToken().catch((e: unknown) => e);
+    expect((err as Error).message).toContain("HTTP 401");
+    expect((err as Error).message).not.toContain("ghp_");
+  });
+
   it("surfaces mint failures with the HTTP status", async () => {
     configureApp();
     vi.stubGlobal(

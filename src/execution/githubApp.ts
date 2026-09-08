@@ -1,4 +1,5 @@
 import { createSign } from "node:crypto";
+import { redactAndCap } from "../core/redact.js";
 import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 
 // GitHub App authentication: the idiomatic org-owned bot identity.
@@ -174,7 +175,7 @@ async function mintInstallationToken(scope: GithubTokenScope): Promise<string> {
   });
   if (!res.ok) {
     const errBody = await res.text().catch(() => "");
-    throw new Error(`GitHub App token mint failed: HTTP ${res.status} ${errBody.slice(0, 300)}`);
+    throw new Error(`GitHub App token mint failed: HTTP ${res.status} ${redactAndCap(errBody, 300)}`);
   }
   const data = (await res.json()) as { token: string; expires_at: string };
   cache.set(scope, { token: data.token, expiresAtMs: Date.parse(data.expires_at) });

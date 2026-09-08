@@ -132,6 +132,14 @@ describe("githubPulls", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("redacts a credential in the failure body before slicing it into the error (item 62)", async () => {
+    stubToken();
+    stubCreatePath(422, "denied for GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789");
+    const err = await openPullRequest(target).catch((e: unknown) => e);
+    expect((err as Error).message).toContain("HTTP 422");
+    expect((err as Error).message).not.toContain("ghp_");
+  });
+
   it("throws on a non-2xx create with the status and response detail", async () => {
     stubToken();
     stubCreatePath(422, "Validation Failed: field head is invalid");

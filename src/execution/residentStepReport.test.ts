@@ -30,6 +30,20 @@ const ok = { exitCode: 0, timedOut: false } as const;
 const failed = { exitCode: 1, timedOut: false } as const;
 
 describe("describeStepFailure", () => {
+  it("strips terminal control sequences and redacts credentials before keeping the tail (item 62)", () => {
+    const r = {
+      stdout: "",
+      stderr: "\x1b[31mnpm ERR!\x1b[0m fetch failed GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+      exitCode: 1,
+      timedOut: false,
+    };
+    const text = describeStepFailure(r);
+    expect(text).not.toContain("\x1b");
+    expect(text).not.toContain("ghp_");
+    expect(text).toContain("npm ERR!");
+    expect(stepFailureLog("install", r)).not.toContain("ghp_");
+  });
+
   it("keeps the diagnosis when the failing tool reports on stdout and stderr holds only a warning", () => {
     const reason = describeStepFailure({ stdout: PNPM_ERROR, stderr: PNPM_WARN, ...failed });
     expect(reason).toContain("ERR_PNPM_LOCKFILE_CONFIG_MISMATCH");

@@ -792,3 +792,65 @@ describe("ResidentExecutor per-send deadline (#531)", () => {
     expect(err).toBeInstanceOf(ExecInfraError);
   });
 });
+
+// Feature: features/resident-repos.md item 62 — the bot re-sanitizes every
+// resident string at the parse, permanently: a reason stored by an older
+// resident survives that resident's deploy and its rollbacks.
+describe("resident text is made safe at the parse (item 62)", () => {
+  const POISON =
+    "provision-failed at install: \x1b[31mnpm ERR!\x1b[0m GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\nkept slack:C0OTHER:1234.5678 (busy)";
+
+  it("probeStatus: a poisoned /status reason is stripped, redacted and capped; an off-table state reads as unknown", async () => {
+    stubFetch({ body: { state: "down\nGITHUB_TOKEN=ghp_x", reason: POISON } });
+    const probe = await ResidentExecutor.probeStatus("https://resident.example", "tok", "repo:jshttp/vary", 1000);
+    expect(probe.kind).toBe("status");
+    if (probe.kind !== "status") return;
+    expect(probe.state).toBe("unknown");
+    expect(probe.reason).not.toContain("ghp_");
+    expect(probe.reason).not.toContain("\x1b");
+    expect(probe.reason).toContain("«redacted");
+  });
+
+  it("probeStatus: a non-2xx body's error is sanitized before it names the outage", async () => {
+    stubFetch({ status: 500, body: { error: POISON } });
+    const probe = await ResidentExecutor.probeStatus("https://resident.example", "tok", "repo:jshttp/vary", 1000);
+    expect(probe.kind).toBe("unreachable");
+    if (probe.kind === "unreachable") expect(probe.error).not.toContain("ghp_");
+  });
+
+  it("ResidentOperations.run: a poisoned refusal, error and summary never reach the caller raw; stdout/stderr are redacted before the clip", async () => {
+    const OPS = { baseUrl: "https://resident.example", token: "op-token" };
+    stubFetch({ body: { error: `op-refused: ${POISON}` } });
+    const refused = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
+    expect(refused.kind).toBe("refused");
+    if (refused.kind === "refused") {
+      expect(refused.reason.startsWith("op-refused")).toBe(true);
+      expect(refused.reason).not.toContain("ghp_");
+    }
+    stubFetch({
+      body: {
+        ok: false,
+        summary: POISON,
+        stdout: "AWS_SECRET_ACCESS_KEY=abcdefghijklmnop1234\n",
+        stderr: "\x1b[31mfail\x1b[0m",
+      },
+    });
+    const result = await new ResidentOperations(OPS).run("test", { repo: "jshttp/vary" });
+    expect(result.kind).toBe("result");
+    if (result.kind === "result") {
+      expect(result.summary).not.toContain("ghp_");
+      expect(result.output).not.toContain("abcdefghijklmnop1234");
+      expect(result.output).not.toContain("\x1b");
+      expect(result.output).toContain("fail");
+    }
+  });
+
+  it("exec: a poisoned /exec error never reaches the thrown message raw", async () => {
+    stubFetch({ status: 400, body: { error: POISON } });
+    const ex = new ResidentExecutor(OPTS);
+    const err = await ex.exec("true").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).not.toContain("ghp_");
+    expect((err as Error).message).not.toContain("\x1b");
+  });
+});

@@ -1,4 +1,5 @@
 import type { ConfigStore } from "../config.js";
+import { sanitizeResidentBody } from "../execution/residentText.js";
 
 // The resident Worker's admin plane, as the bot sees it (U8): the client for
 // the `/onboard`, `/offboard`, `/reconfigure`, `/rebuild`, `/residents` routes
@@ -51,7 +52,8 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
         { cause: err },
       );
     }
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    // Item 62: these bodies reach Slack replies (`repo list`, `repo rebuild`).
+    const data = sanitizeResidentBody((await res.json().catch(() => ({}))) as Record<string, unknown>);
     return { status: res.status, data };
   };
   return {

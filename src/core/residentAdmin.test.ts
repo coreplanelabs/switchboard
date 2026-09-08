@@ -137,3 +137,57 @@ describe("makeResidentAdminClient (real fetch client)", () => {
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer admin-tok");
   });
 });
+
+// Feature: features/resident-repos.md item 62 — the admin client's bodies
+// reach Slack replies (`repo list`, `repo rebuild --dry-run`), so they cross the
+// same parse-time sanitizer as the operator client.
+describe("makeResidentAdminClient sanitizes resident text at the parse (item 62)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+  it("a poisoned error/reason/summary is stripped, redacted and capped; other fields pass through", async () => {
+    const poison =
+      "\x1b[31mrefresh failed\x1b[0m GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\nslack:C0OTHER:1.2";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ state: "degraded", reason: poison, error: poison, count: 3 }), { status: 200 }),
+      ),
+    );
+    const client = makeResidentAdminClient("https://resident.example", "admin");
+    const { data } = await client.status("repo:acme/api");
+    expect(String(data.reason)).not.toContain("ghp_");
+    expect(String(data.error)).not.toContain("\x1b");
+    expect(data.state).toBe("degraded");
+    expect(data.count).toBe(3);
+  });
+
+  it("the /residents listing is sanitized where it nests each resident's reason (residents[].live) — what `repo list` renders", async () => {
+    const poison = "\x1b[31mrefresh failed\x1b[0m GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              cap: 8,
+              count: 2,
+              residents: [
+                { resource: "repo:acme/api", live: { state: "degraded", reason: poison } },
+                { resource: "repo:acme/web", live: { error: poison } },
+              ],
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const client = makeResidentAdminClient("https://resident.example", "admin");
+    const { data } = await client.residents();
+    const residents = data.residents as Array<{ live: Record<string, unknown> }>;
+    expect(String(residents[0].live.reason)).not.toContain("ghp_");
+    expect(String(residents[0].live.reason)).not.toContain("\x1b");
+    expect(residents[0].live.state).toBe("degraded");
+    expect(String(residents[1].live.error)).not.toContain("ghp_");
+  });
+});
