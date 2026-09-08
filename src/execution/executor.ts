@@ -1,0 +1,313 @@
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import type { OperationResult, Operations, OpName } from "../core/operations.js";
+import { BASH_TIMEOUT_MS, bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
+import type { Span } from "../core/trace/types.js";
+import { systemClock } from "../core/trace/clock.js";
+
+// The timeout policy (default/floor/ceiling + clamp) lives in bashTimeout.ts
+// so the deploy Workers can bundle it; re-exported here for the many callers
+// that know the Executor seam, not the policy module.
+export { BASH_TIMEOUT_MS, BASH_TIMEOUT_MAX_MS, EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
+
+// The Executor is the seam between agents and where their commands actually
+// run. Tools never touch the filesystem or spawn processes directly — they
+// call an Executor, which is either the local host (dev/CLI) or a remote
+// per-thread sandbox (production).
+
+/** The caller's span — the runner's `exec.*` span — so an executor's own
+ *  outbound calls become its `http.client` children (docs/reference/specs/tracing.md item
+ *  21). Absent from a caller with no trace: the call is then a plain fetch. */
+export interface ExecTraceOptions {
+  span?: Span;
+}
+
+export interface Executor {
+  /** Run a shell command; returns combined output (never throws on non-zero
+   *  exit). `opts.signal` is a hard run stop: an implementation that can
+   *  cancel the underlying command does so and returns/throws promptly; one that
+   *  cannot simply ignores it — the runner stops waiting on it either way. */
+  exec(command: string, opts?: ExecOptions): Promise<string>;
+  /** Read a file, path relative to the execution workspace. */
+  readFile(path: string, opts?: ExecTraceOptions): Promise<string>;
+  /** Write a file (creating parent dirs), path relative to the workspace. */
+  writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string>;
+  /** Optional: give back whatever the run held for this thread once it ends
+   *  (a resident's pool user + worktree). "always" — nothing to preserve
+   *  (read-only agents); "if-clean" — keep the workspace if it has uncommitted
+   *  or unpushed work. Best-effort: implementations report, never throw. */
+  release?(mode: ReleaseMode, opts?: ExecTraceOptions): Promise<ReleaseResult>;
+  /** Optional: bring the workspace to `sha` — the PR head that moved while a
+   *  review ran (agent-review.md item 12) — fetching as needed, and answer the
+   *  commit the workspace is now at (which may differ if the ref moved again).
+   *  Absent on executors whose workspace the model manages itself (a sandbox
+   *  clone): the dispatcher then tells the model to check the commit out. */
+  moveTo?(sha: string, opts?: ExecTraceOptions): Promise<{ sha: string }>;
+}
+
+export interface ExecOptions extends ExecTraceOptions {
+  /** Aborted when the run is hard-stopped; cancel the command if you can. */
+  signal?: AbortSignal;
+  /** Per-call command budget in ms (the bash tool's `timeoutMs`), already
+   *  clamped to [1s, BASH_TIMEOUT_MAX_MS] by the tool layer; implementations
+   *  re-clamp defensively (`clampBashTimeout`). Absent → BASH_TIMEOUT_MS, the
+   *  exact pre-timeoutMs behavior. */
+  timeoutMs?: number;
+}
+
+/** The per-call deadline for a remote route, joined with an optional hard-stop
+ *  signal: whichever fires first aborts the fetch — and, because the
+ *  same signal is what `fetch` hands the response body, the body read too.
+ *  A plain timer rather than `AbortSignal.timeout`: Node runs that one on an
+ *  internal timer that neither fake timers nor a test can observe, so a
+ *  deadline built on it could never be proven to fire. The timer is
+ *  unref'd (it never holds the process open) and dropped as soon as the
+ *  hard stop wins the race. */
+export function execDeadline(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  const deadline = new AbortController();
+  const onStop = () => clearTimeout(timer);
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", onStop);
+    deadline.abort(new DOMException(`the ${Math.round(timeoutMs / 1000)}s call deadline passed`, "TimeoutError"));
+  }, timeoutMs);
+  timer.unref?.();
+  if (!signal) return deadline.signal;
+  signal.addEventListener("abort", onStop, { once: true });
+  return AbortSignal.any([deadline.signal, signal]);
+}
+
+export type ReleaseMode = "always" | "if-clean";
+export interface ReleaseResult {
+  released: boolean;
+  /** Why the workspace was kept (or why release failed) — for the log line. */
+  reason?: string;
+}
+
+/** An exec-INFRASTRUCTURE failure: the sandbox/exec transport itself failed —
+ *  unreachable, an HTTP error, an in-body worker error (the sandbox's
+ *  "Command execution failed" / exitCode 127 signal), or a worktree that stays
+ *  unrecoverable after re-attach. This is categorically different from a normal
+ *  nonzero command exit, which every Executor returns as ordinary output text
+ *  and NEVER as a throw. Remote executors throw this (not a bare `Error`) for
+ *  infra failures so the runner can tell a wedged sandbox from a command the
+ *  agent should keep handling, and fail fast instead of toiling commands into a
+ *  dead sandbox. Extends `Error`, so `err.message`/`instanceof Error`
+ *  callers are unaffected. */
+export class ExecInfraError extends Error {
+  readonly infra = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "ExecInfraError";
+  }
+}
+
+/** An exec-CAPACITY failure: the sandbox fleet had no free instance for this
+ *  thread within the executor's bounded wait (docs/reference/specs/execution.md item 14).
+ *  Nothing ran and nothing is broken — the fleet's `max_instances` is reached
+ *  — so this is deliberately NOT an `ExecInfraError`: `ExecHealthTracker`
+ *  neither counts it nor resets on it, and the runner hands it to the model as
+ *  a retry-later outcome instead of aborting the run (two of these in a row,
+ *  read as infra, would abort the run within seconds). `extends Error`
+ *  so message/`instanceof Error` callers are unaffected. */
+export class ExecCapacityError extends Error {
+  readonly capacity = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "ExecCapacityError";
+  }
+}
+
+/** Decorates an Executor to track CONSECUTIVE exec-infrastructure failures
+ *  (`ExecInfraError`) with no successful operation between them — the signal the
+ *  runner uses to detect an unrecoverable sandbox. A successful op resets
+ *  the count to 0 (proves the sandbox is alive, so a one-off blip never aborts);
+ *  an `ExecInfraError` increments it; any OTHER throw (e.g. a path-escape
+ *  rejection, a missing file) is neither a health signal nor a reset and leaves
+ *  the count untouched. A normal nonzero exit returns output (no throw), so it
+ *  too resets the count and can never trip the abort. */
+export class ExecHealthTracker implements Executor {
+  consecutiveInfraFailures = 0;
+  /** Message of the most recent `ExecInfraError` in the current streak — the
+   *  evidence the runner's abort diagnosis quotes instead of guessing a cause.
+   *  Cleared by a successful op along with the count. */
+  lastInfraError: string | undefined;
+
+  constructor(private readonly inner: Executor) {}
+
+  private async track<T>(op: () => Promise<T>): Promise<T> {
+    try {
+      const out = await op();
+      this.consecutiveInfraFailures = 0;
+      this.lastInfraError = undefined;
+      return out;
+    } catch (err) {
+      if (err instanceof ExecInfraError) {
+        this.consecutiveInfraFailures++;
+        this.lastInfraError = err.message;
+      }
+      throw err;
+    }
+  }
+
+  exec(command: string, opts?: ExecOptions): Promise<string> {
+    return this.track(() => this.inner.exec(command, opts));
+  }
+
+  readFile(path: string, opts?: ExecTraceOptions): Promise<string> {
+    return this.track(() => this.inner.readFile(path, opts));
+  }
+
+  writeFile(path: string, content: string, opts?: ExecTraceOptions): Promise<string> {
+    return this.track(() => this.inner.writeFile(path, content, opts));
+  }
+}
+
+const MAX_OUTPUT = 120_000;
+
+export function truncate(s: string): string {
+  return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + `\n...[truncated ${s.length - MAX_OUTPUT} chars]` : s;
+}
+
+/** Runs everything on the local host inside a confined workspace directory. */
+export class LocalExecutor implements Executor {
+  constructor(private workspaceDir: string) {}
+
+  private confine(p: string): string {
+    const abs = resolve(this.workspaceDir, p);
+    if (abs !== this.workspaceDir && !abs.startsWith(this.workspaceDir + "/")) {
+      throw new Error(`Path escapes workspace: ${p}`);
+    }
+    return abs;
+  }
+
+  async exec(command: string, opts?: ExecOptions): Promise<string> {
+    const timeoutMs = clampBashTimeout(opts?.timeoutMs);
+    const r = await runBash(command, this.workspaceDir, opts?.signal, timeoutMs);
+    const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
+    if (r.timedOut) {
+      // Name the limit that fired (not a generic abort) so the model can
+      // self-correct: 124 is the exit code coreutils `timeout` uses too.
+      return truncate(`exit 124: ${bashTimeoutNote(timeoutMs)}\n${parts}`);
+    }
+    if (r.error) {
+      return truncate(`exit ${r.error.code ?? "error"}: ${r.error.message}\n${parts}`);
+    }
+    return truncate(parts || "(no output)");
+  }
+
+  async readFile(path: string): Promise<string> {
+    return truncate(readFileSync(this.confine(path), "utf8"));
+  }
+
+  async writeFile(path: string, content: string): Promise<string> {
+    const abs = this.confine(path);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content);
+    return `Wrote ${path}`;
+  }
+}
+
+/** Dev-only deterministic ops against the thread's LOCAL workspace directory
+ *  — the second Operations implementation (≥2-implementations invariant,
+ *  docs/decisions/0001-seams-with-two-implementations.md) and the CLI-testable one. Honest about its limits: there is no
+ *  onboard-time command table and no refs locally, so ops run fixed Node
+ *  conventions (test → `npm test`, build → `npm run build --if-present`,
+ *  status → workspace existence) against the workspace AS IT STANDS, and a
+ *  requested ref is reported as ignored rather than silently dropped. A
+ *  failing command is a RESULT (ok:false), never an error path. */
+export class LocalOperations implements Operations {
+  constructor(private workspaceDir: string) {}
+
+  async run(op: OpName, req: { repo: string; ref?: string }): Promise<OperationResult> {
+    const refNote = req.ref ? ` — ref \`${req.ref}\` ignored (local mode has no refs)` : "";
+    // Local mode has no onboard-time repo binding, so "for <repo>" is a claim
+    // about intent, not a verified checkout — disclose that the workspace was
+    // not verified to hold req.repo, mirroring the ref-not-verified note.
+    const repoNote = ` — workspace not verified to hold ${req.repo} (local mode)`;
+    const exists = existsSync(this.workspaceDir);
+    if (op === "status") {
+      return {
+        kind: "result",
+        ok: exists,
+        summary: exists
+          ? `status: local workspace for ${req.repo} exists at ${this.workspaceDir} (dev-only — no resident lifecycle locally)${repoNote}`
+          : `status: no local workspace at ${this.workspaceDir} yet (dev-only — no resident lifecycle locally)`,
+      };
+    }
+    if (!exists) {
+      return {
+        kind: "result",
+        ok: false,
+        summary: `${op} failed: no local workspace at ${this.workspaceDir} — nothing checked out yet${refNote}`,
+      };
+    }
+    const command = op === "test" ? "npm test" : "npm run build --if-present";
+    const r = await runLocalCommand(command, this.workspaceDir);
+    return {
+      kind: "result",
+      ok: r.exitCode === 0,
+      summary:
+        `${op} (\`${command}\`) ${r.exitCode === 0 ? "passed" : `failed (exit ${r.exitCode})`} ` +
+        `in the local workspace for ${req.repo}${repoNote}${refNote}`,
+      ...(r.output ? { output: truncate(r.output) } : {}),
+    };
+  }
+}
+
+async function runLocalCommand(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
+  const r = await runBash(command, cwd);
+  const output = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
+  const code = r.error ? (r.error.code ?? 1) : 0;
+  return { exitCode: typeof code === "number" ? code : 1, output };
+}
+
+/** Shared bash spawn-and-collect (`bash -c` under the given budget — the
+ *  standard 5-minute one unless the caller passes a clamped per-call value —
+ *  and the standard buffer). `error` is null on a clean zero-exit run;
+ *  otherwise it carries execFile's raw code (number exit code, string errno,
+ *  or undefined when signal-killed) and message — each caller formats its own
+ *  result. `timedOut` is true only for the budget's own kill: the child died
+ *  from execFile's timeout signal (signal-killed, no error code) at or after
+ *  the deadline — a hard-stop abort, a maxBuffer kill
+ *  (ERR_CHILD_PROCESS_STDIO_MAXBUFFER), and ordinary nonzero exits all keep it
+ *  false. An optional AbortSignal (hard run stop) kills the child; that
+ *  surfaces as an `error` like any other abnormal exit — never a throw. */
+function runBash(
+  command: string,
+  cwd: string,
+  signal?: AbortSignal,
+  timeoutMs: number = BASH_TIMEOUT_MS,
+): Promise<{
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  error: { code?: number | string; message: string } | null;
+}> {
+  const started = systemClock();
+  return new Promise((res) => {
+    execFile(
+      "bash",
+      ["-c", command],
+      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, ...(signal ? { signal } : {}) },
+      (err, stdout, stderr) => {
+        const e = err as (NodeJS.ErrnoException & { code?: number | string; signal?: string | null }) | null;
+        res({
+          stdout,
+          stderr,
+          timedOut:
+            e != null &&
+            // Node marks ITS OWN kill (the `timeout` option) with killed=true;
+            // an external SIGKILL (OOM killer) after the budget elapsed leaves
+            // killed=false and must not masquerade as `exit 124: …timeout`.
+            (e as { killed?: boolean }).killed === true &&
+            e.signal != null &&
+            e.code == null &&
+            !(signal?.aborted ?? false) &&
+            systemClock() - started >= timeoutMs,
+          error: e ? { code: e.code, message: e.message } : null,
+        });
+      },
+    );
+  });
+}
