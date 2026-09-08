@@ -356,6 +356,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private readonly onStop?: (mode: StopMode) => void;
     private readonly onFenced?: () => void;
     private fencedTold = false;
+    /** Detached BY A FENCE (another generation took the row), as opposed to a
+     *  write that failed for good while the run stayed ours. */
+    private fencedOut = false;
     private detached = false;
     private finished = false;
     private seeded = false;
@@ -435,10 +438,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.stopHeartbeat();
       live.delete(this);
       // A fence means another generation owns the run now (it reclaimed the
-      // row): this process must stop driving it, and must not reply (D9).
-      if (reason.includes("(fenced)") && this.onFenced && !this.fencedTold) {
-        this.fencedTold = true;
-        this.onFenced();
+      // row): this process must stop driving it, and must not reply (D9) —
+      // `finishing()` answers `fenced` from here on, not `unavailable`.
+      if (reason.includes("(fenced)")) {
+        this.fencedOut = true;
+        if (this.onFenced && !this.fencedTold) {
+          this.fencedTold = true;
+          this.onFenced();
+        }
       }
     }
 
@@ -542,7 +549,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     async finishing(): Promise<FinishingGate> {
-      if (this.detached) return "unavailable";
+      // Detached by a fence: the run is another generation's now — no reply, no
+      // record from here (item 39), whatever the fenced write was. Detached for
+      // any other reason: the run is still ours and replies as before.
+      if (this.detached) return this.fencedOut ? "fenced" : "unavailable";
       try {
         const result = await ledger.finishing(this.runId, gen);
         if (result.ok) return "ok";

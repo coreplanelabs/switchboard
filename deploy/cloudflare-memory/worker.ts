@@ -1235,7 +1235,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const out: ReclaimedRun[] = [];
     this.ctx.storage.transactionSync(() => {
       const rows = this.sql.exec<LiveRow>(`SELECT * FROM live_runs`).toArray().map(rowToLive);
-      for (const row of selectReclaim(rows, now)) {
+      for (const row of selectReclaim(rows, now, gen)) {
         const phase = reclaimPhase(row.phase);
         this.sql.exec(
           `UPDATE live_runs SET owner_gen = ?, lease_until = ?, phase = ? WHERE run_id = ?`,

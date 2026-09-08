@@ -55,14 +55,20 @@ export function checkFence(row: { ownerGen: string } | undefined, gen: string): 
   return row.ownerGen === gen ? { ok: true } : { ok: false, reason: "fenced" };
 }
 
-/** What a booting generation takes over: every run whose lease has expired
+/** What a reclaiming generation takes over: every run whose lease has expired
  *  (a heartbeat lands strictly before `leaseUntil`, so equal is expired) and
- *  every run the previous generation handed off. */
-export function selectReclaim<T extends { leaseUntil: number; phase: LivePhase }>(
+ *  every run the previous generation handed off — **never a row it owns
+ *  itself**. The reclaim runs on a sweep inside the live process too, and a
+ *  lapsed lease on our own row means a heartbeat that could not land (a state
+ *  Worker blip), not a dead owner: taking it would launch the run a second
+ *  time in the same process, and the fence, which compares generations, would
+ *  never stop the first. */
+export function selectReclaim<T extends { leaseUntil: number; phase: LivePhase; ownerGen: string }>(
   rows: readonly T[],
   now: number,
+  gen: string,
 ): T[] {
-  return rows.filter((r) => r.phase === "handoff" || r.leaseUntil <= now);
+  return rows.filter((r) => r.ownerGen !== gen && (r.phase === "handoff" || r.leaseUntil <= now));
 }
 
 /** The compare-and-swap table for a run's phase. `attaching → live` (the

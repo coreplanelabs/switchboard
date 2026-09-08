@@ -1071,16 +1071,27 @@ export async function refreshForeignLiveCards(warn: (line: string) => void = con
  *  sweep. Best-effort per card; a failure is logged and the rest go on. */
 export async function closeReclaimedCards(
   client: { chat: { update(args: { channel: string; ts: string; text: string; blocks: object[] }): Promise<unknown> } },
-  closures: Iterable<{ status: string; agent?: string; card: { channel: string; ts: string } | null }>,
+  closures: Iterable<{ status: string; agent?: string; card: { channel: string; ts: string } | null; note?: string }>,
   warn: (line: string) => void = console.warn,
 ): Promise<number> {
-  const glyph: Record<string, string> = { completed: "✅", stopped_soft: "⏹", stopped_hard: "⛔", failed: "❌" };
+  const glyph: Record<string, string> = {
+    completed: "✅",
+    stopped_soft: "⏹",
+    stopped_hard: "⛔",
+    failed: "❌",
+    interrupted: "❌",
+  };
   let closed = 0;
   for (const c of closures) {
     if (!c.card || !(c.status in glyph)) continue;
+    // A run that replied: its record is complete. An interrupted run: the
+    // closure's note says what to do next (run-history item 36).
     const frame: StatusUpdate = {
       title: `${glyph[c.status]} ${c.agent ?? "run"} · ${c.status.replace("_", " ")}`,
-      detail: "The bot restarted after this run replied; its record is complete.",
+      detail:
+        c.status === "interrupted"
+          ? (c.note ?? "The bot restarted while this run was in flight and it could not be resumed.")
+          : "The bot restarted after this run replied; its record is complete.",
     };
     try {
       await client.chat.update({ channel: c.card.channel, ts: c.card.ts, ...render(frame) });

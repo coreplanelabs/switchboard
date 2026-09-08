@@ -30,6 +30,7 @@ import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
 import { resolveUserEmail } from "./channels/slack.js";
+import { mdToMrkdwn } from "./channels/mrkdwn.js";
 import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
 import { startProcessMetrics } from "./channels/processMetrics.js";
@@ -703,10 +704,30 @@ async function main() {
     threadsElsewhere.replace([...outcome.liveElsewhere, ...outcome.resumable.map((r) => r.row)]);
     const closedCards = await closeReclaimedCards(
       app.client,
-      outcome.closed.map((c) => ({ status: c.status, agent: c.agent, card: c.card })),
+      outcome.closed.map((c) => ({
+        status: c.status,
+        agent: c.agent,
+        card: c.card,
+        ...(c.note ? { note: c.note } : {}),
+      })),
       (w) => console.warn(w),
     );
-    if (closedCards > 0) console.log(`[reclaim] closed ${closedCards} card(s) of runs that had replied`);
+    if (closedCards > 0) console.log(`[reclaim] closed ${closedCards} card(s) of runs the previous generation left`);
+    // An interrupted ship pipeline's work stands on GitHub with nobody driving
+    // it (run-history item 36): its thread is told, with the re-issue that
+    // continues it — a closed card alone is easy to miss on a two-hour run.
+    for (const c of outcome.closed) {
+      if (c.status !== "interrupted" || c.agent !== "ship" || !c.note) continue;
+      const [platform, channel, threadTs] = c.threadKey.split(":");
+      if (platform !== "slack" || !channel || !threadTs) continue;
+      try {
+        await app.client.chat.postMessage({ channel, thread_ts: threadTs, text: mdToMrkdwn(c.note) });
+      } catch (err) {
+        console.warn(
+          `[reclaim] ${c.runId}: the ship pipeline's thread could not be told: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   };
   const launch = async (outcome: ReclaimOutcome): Promise<void> => {
     if (!ledgerReclaim || outcome.resumable.length === 0) return;

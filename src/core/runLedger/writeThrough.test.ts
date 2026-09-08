@@ -657,7 +657,7 @@ describe("finishing and finish", () => {
     expect(t.heartbeats()).toBe(0);
   });
 
-  it("finishing is the double-answer gate (D9): ok once; a refusal is `fenced` — another generation owns the run, the caller must not reply — and detaches; a detached run answers `unavailable` without asking; an unreachable ledger answers `unavailable`", async () => {
+  it("finishing is the double-answer gate (D9): ok once; a refusal is `fenced` — another generation owns the run, the caller must not reply — and detaches; a run detached by a fence keeps answering `fenced` without asking; an unreachable ledger answers `unavailable`", async () => {
     const { wt, warnings } = harness();
     const run = (await wt.open(openReq()))!;
     expect(await run.finishing()).toBe("ok");
@@ -665,7 +665,7 @@ describe("finishing and finish", () => {
     expect(warnings.some((w) => /finishing refused .* no reply from here/.test(w))).toBe(true);
     expect(run.tracked()).toBe(false);
     warnings.length = 0;
-    expect(await run.finishing()).toBe("unavailable");
+    expect(await run.finishing()).toBe("fenced"); // still theirs: asked again, the answer does not soften
     expect(warnings).toEqual([]);
     const inner = new InMemoryRunLedger(() => 10_000);
     const down = harness({
@@ -689,6 +689,21 @@ describe("finishing and finish", () => {
     expect(fenced).toEqual(["hard"]);
     await run.step(step()); // already detached: a no-op, no second call
     expect(fenced).toEqual(["hard"]);
+    // A run detached BY A FENCE answers `fenced` at finishing too: the other
+    // generation owns it, so this one must not reply or write a record —
+    // `unavailable` (reply as before) is for a detach that was not a fence.
+    expect(await run.finishing()).toBe("fenced");
+    const { ledger: l3, wt: w3 } = harness({
+      ledger: overriding(new InMemoryRunLedger(() => 10_000), {
+        step: async () => {
+          throw new PermanentStoreError("boom");
+        },
+      }),
+    });
+    const r3 = (await w3.open(openReq()))!;
+    await r3.step(step()); // detached for good, but the run is still ours
+    expect(l3.live.has("r1")).toBe(true);
+    expect(await r3.finishing()).toBe("unavailable");
     const { ledger: l2, wt: w2 } = harness();
     const told: string[] = [];
     const r2 = (await w2.open(openReq({ onFenced: () => told.push("hard") })))!;

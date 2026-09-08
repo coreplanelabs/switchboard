@@ -156,6 +156,22 @@ export function shipBranchName(task: string, threadKey: string): string {
   return `ship/${slug}-${hash}`;
 }
 
+/** What a ship pipeline's thread and card say when the bot died under it (run-
+ *  history item 36): the work it did stands on GitHub with nobody driving it,
+ *  so the note names the PR when one was opened and the exact re-issue that
+ *  continues the loop — the same entry the preflight's resume-at-review takes
+ *  (spec item 10). Without a PR the task itself is the re-issue: round 0 runs
+ *  again on the pipeline's own deterministic branch. */
+export function shipInterruptedNote(prUrl?: string): string {
+  const stands = prUrl
+    ? `Its work stands on GitHub: ${prUrl}.`
+    : "Whatever it pushed stands on its pipeline branch; no PR was opened yet.";
+  const reissue = prUrl
+    ? `To continue the review loop, re-issue \`agent:ship\` in this thread with only the PR URL (${prUrl}).`
+    : "To continue, re-issue `agent:ship` in this thread with the task — round 0 runs again on the same branch.";
+  return `⚠️ The bot restarted while this ship pipeline was running, so the pipeline stopped. ${stands} ${reissue}`;
+}
+
 // ---- preflight (spec items 1, 2, 9, 10) --------------------------------------
 
 /** What the preflight decided the pipeline starts FROM. */

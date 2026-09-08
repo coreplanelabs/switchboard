@@ -46,18 +46,30 @@ describe("checkFence — the owner generation on every write", () => {
 
 describe("selectReclaim — expired leases and handed-off runs", () => {
   const rows = [
-    { runId: "expired", leaseUntil: 900, phase: "live" as const },
-    { runId: "alive", leaseUntil: 2_000, phase: "live" as const },
-    { runId: "handoff", leaseUntil: 5_000, phase: "handoff" as const },
-    { runId: "finishing-expired", leaseUntil: 100, phase: "finishing" as const },
+    { runId: "expired", leaseUntil: 900, phase: "live" as const, ownerGen: "g0" },
+    { runId: "alive", leaseUntil: 2_000, phase: "live" as const, ownerGen: "g0" },
+    { runId: "handoff", leaseUntil: 5_000, phase: "handoff" as const, ownerGen: "g0" },
+    { runId: "finishing-expired", leaseUntil: 100, phase: "finishing" as const, ownerGen: "g0" },
   ];
 
   it("takes rows whose lease is past and rows marked handoff, never a live lease", () => {
-    expect(selectReclaim(rows, 1_000).map((r) => r.runId)).toEqual(["expired", "handoff", "finishing-expired"]);
+    expect(selectReclaim(rows, 1_000, "g1").map((r) => r.runId)).toEqual(["expired", "handoff", "finishing-expired"]);
   });
 
   it("a lease that expires exactly now is expired (a heartbeat lands strictly before)", () => {
-    expect(selectReclaim([{ runId: "x", leaseUntil: 1_000, phase: "live" }], 1_000)).toHaveLength(1);
+    expect(selectReclaim([{ runId: "x", leaseUntil: 1_000, phase: "live", ownerGen: "g0" }], 1_000, "g1")).toHaveLength(
+      1,
+    );
+  });
+
+  it("never takes a row the reclaiming generation owns itself, however stale its lease or whatever its phase: a lapsed lease on our own row is a heartbeat that could not land (a state Worker blip), not a dead owner — taking it would run the same run twice in one process", () => {
+    const mine = [
+      { runId: "mine-expired", leaseUntil: 0, phase: "live" as const, ownerGen: "g1" },
+      { runId: "mine-handoff", leaseUntil: 0, phase: "handoff" as const, ownerGen: "g1" },
+      { runId: "mine-attaching", leaseUntil: 0, phase: "attaching" as const, ownerGen: "g1" },
+      { runId: "theirs-expired", leaseUntil: 0, phase: "live" as const, ownerGen: "g0" },
+    ];
+    expect(selectReclaim(mine, 1_000, "g1").map((r) => r.runId)).toEqual(["theirs-expired"]);
   });
 });
 
