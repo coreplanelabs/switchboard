@@ -195,6 +195,7 @@ export interface LiveViewContext {
  *  never wider than `/api/runs.*` for the same identity. */
 const RUNS_LIST: Resource = { type: "command", id: "runs.list" };
 const RUNS_GET: Resource = { type: "command", id: "runs.get" };
+const RUNS_STOP: Resource = { type: "command", id: "runs.stop" };
 const NONE: Predicate = { kind: "none" };
 
 /** What the viewer may list (authorization.md item 6): nothing unless the actor
@@ -209,6 +210,17 @@ function readableRuns(actor: Actor): Predicate {
 function readDecision(actor: Actor, view: RunView): Decision {
   const admitted = authorize(actor, "runs:read", RUNS_GET);
   return admitted.allow ? authorize(actor, "runs:read", runResource(view)) : admitted;
+}
+
+/** The tokenless stop is a WRITE: the same two questions `runs.stop` asks on the
+ *  command surface (authorization.md item 5) — admitted to `runs:write` at all,
+ *  and allowed to write THIS run by its attributes. A viewer who may read the
+ *  run but not stop it gets the read routes' 404, never a 409 that tells them
+ *  the run exists and is over. The capability-token stop is unchanged: the
+ *  token IS the capability (live-view item 10). */
+function stopDecision(actor: Actor, view: RunView): Decision {
+  const admitted = authorize(actor, "runs:write", RUNS_STOP);
+  return admitted.allow ? authorize(actor, "runs:write", runResource(view)) : admitted;
 }
 
 /**
@@ -285,7 +297,7 @@ export function createLiveViewHandler(
    *  is audited here (route, actor, reason — never the run) and the caller
    *  renders it exactly as an unknown id (KTD8). */
   const readable = (actor: Actor, view: RunView, route: HistoryReadRoute): boolean => {
-    const decision = readDecision(actor, view);
+    const decision = route === "stop" ? stopDecision(actor, view) : readDecision(actor, view);
     if (!decision.allow) audit({ route, identity: actor.id, denied: decision.reason });
     return decision.allow;
   };
