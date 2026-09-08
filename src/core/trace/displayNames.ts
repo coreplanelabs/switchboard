@@ -23,6 +23,7 @@ export const DISPLAY_NAMES = {
   "dispatch.memory_read": "recalling memory",
   "dispatch.refuse": "refusing",
   "dispatch.ship_preflight": "checking the ship request",
+  "dispatch.ledger_claim": "claiming the run's row",
   "run.agent": "the agent loop",
   "run.command": "the command",
   "run.reading_diff": "reading the diff (in parallel)",

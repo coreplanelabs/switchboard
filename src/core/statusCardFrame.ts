@@ -25,11 +25,17 @@ export const LIVE_CARD_PREFIXES = [...SPINNER_GLYPHS, "👀"];
  *  `refused` for a preflight that wrote its own reason (`… · reason`), and
  *  `setup_failed` for a throw during setup (`❌ setup failed · reason`, no
  *  label — the failure, not the agent, is the headline). */
-export type CardClose =
+export type CardClose = (
   | { kind: "done"; icon: string; detail?: string }
   | { kind: "not_started"; icon: string; reason: string }
   | { kind: "refused"; icon: string; reason: string }
-  | { kind: "setup_failed"; reason: string };
+  | { kind: "setup_failed"; reason: string }
+) & {
+  /** The request's shape line (features/tracing.md item 5), when informative: the first detail line. */
+  shape?: string;
+  /** The queued caption, when a minute or more: the second detail line. */
+  queued?: string;
+};
 
 export interface LiveFrameParts {
   /** Appended to the title after the elapsed time (the quiet-wait suffix). */
@@ -50,6 +56,9 @@ export interface CardShell {
    *  ends here, so the closed card's total is the run's, not the moment of the
    *  close (features/tracing.md — the card is one of the duration surfaces). */
   freeze(finishedAt: number): void;
+  /** The setup step in flight (the card sink's display label) — shown on live
+   *  frames after the elapsed time until the agent loop starts (undefined). */
+  setSetupLabel(label: string | undefined): void;
   /** The 👀 frame posted before anything is known. */
   ack(): StatusUpdate;
   /** A live frame: the next spinner glyph, the label, the elapsed seconds, the parts. */
@@ -71,8 +80,12 @@ export function createCardShell(opts: CardShellOptions): CardShell {
   let link = opts.link;
   let frame = 0;
   let finishedAt: number | undefined;
+  let setupLabel: string | undefined;
   const elapsed = () => `${Math.round(((finishedAt ?? opts.now()) - opts.startedAt) / 1000)}s`;
   const headline = (icon: string) => `${icon} ${label} · ${elapsed()}`;
+  // Detail order on a close: shape, queued, then the caller's own lines.
+  const closeDetail = (close: CardClose, own?: string) =>
+    [close.shape, close.queued, own].filter(Boolean).join("\n") || undefined;
   return {
     get label() {
       return label;
@@ -86,6 +99,9 @@ export function createCardShell(opts: CardShellOptions): CardShell {
     freeze(at) {
       finishedAt = at;
     },
+    setSetupLabel(next) {
+      setupLabel = next;
+    },
     ack() {
       return { title: `👀 ${label} · preparing workspace…` };
     },
@@ -93,21 +109,28 @@ export function createCardShell(opts: CardShellOptions): CardShell {
       const glyph = SPINNER_GLYPHS[frame++ % SPINNER_GLYPHS.length]!;
       const detail = (parts.detail ?? []).filter(Boolean).join("\n");
       return {
-        title: headline(glyph) + (parts.suffix ?? "") + (parts.notice ? ` · ${parts.notice}` : ""),
+        title:
+          headline(glyph) +
+          (setupLabel ? ` — ${setupLabel}` : "") +
+          (parts.suffix ?? "") +
+          (parts.notice ? ` · ${parts.notice}` : ""),
         detail: detail || undefined,
         link,
       };
     },
     close(close) {
+      // Every close carries how long the request took, from the ack's clock —
+      // a refusal that waited on a slow attach says so (features/tracing.md).
+      const detail = closeDetail(close, close.kind === "done" ? close.detail : undefined);
       switch (close.kind) {
         case "done":
-          return { title: headline(close.icon), detail: close.detail, link };
+          return { title: headline(close.icon), detail, link };
         case "not_started":
-          return { title: `${close.icon} ${label} · not started (${close.reason})` };
+          return { title: `${close.icon} ${label} · not started (${close.reason}) · ${elapsed()}`, detail };
         case "refused":
-          return { title: `${close.icon} ${label} · ${close.reason}` };
+          return { title: `${close.icon} ${label} · ${close.reason} · ${elapsed()}`, detail };
         case "setup_failed":
-          return { title: `❌ setup failed · ${close.reason}` };
+          return { title: `❌ setup failed · ${close.reason} · ${elapsed()}`, detail };
       }
     },
   };

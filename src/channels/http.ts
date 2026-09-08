@@ -1,6 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
+import { dispatch as realDispatch, type CoreDeps, type DispatchOptions } from "../core/dispatcher.js";
+import { startRequestRoot } from "../core/requestTrace.js";
+import { systemClock } from "../core/trace/clock.js";
 import { parseIngressTokenMap, type IngressIdentity } from "../core/ingressTokens.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusHandle, StatusUpdate } from "../core/types.js";
 
@@ -38,7 +40,7 @@ export interface IngressConfig {
 }
 
 /** The dispatch signature; injectable so tests never hit real providers. */
-export type DispatchFn = (deps: CoreDeps, msg: IncomingMessage, io: ChannelIO) => Promise<void>;
+export type DispatchFn = (deps: CoreDeps, msg: IncomingMessage, io: ChannelIO, opts?: DispatchOptions) => Promise<void>;
 
 export interface IngressOptions {
   auth: IngressConfig;
@@ -287,7 +289,11 @@ async function handleAuthorized(
   if ("error" in parsed) {
     return { status: 400, body: { error: parsed.error } };
   }
-  const msg = toIncomingMessage(identity, parsed.body);
+  // The request's root (features/tracing.md): started once the caller's
+  // identity is established and the body parsed; `dispatch()` ends it.
+  const receivedAt = systemClock();
+  const trace = startRequestRoot(deps, { channel: "http", receivedAt });
+  const msg: IncomingMessage = { ...toIncomingMessage(identity, parsed.body), receivedAt };
   const io = new HttpIO(parsed.body.history);
   const dispatchFn = options.dispatch ?? realDispatch;
   if (parsed.body.async) {
@@ -301,7 +307,7 @@ async function handleAuthorized(
     // async runs exactly like synchronous ones. Errors are the dispatcher's
     // own (it catches and records); the catch here is a belt against a
     // transport-level throw escaping as an unhandled rejection.
-    const done = dispatchFn(deps, msg, io).catch((err) => {
+    const done = dispatchFn(deps, msg, io, { trace }).catch((err) => {
       console.error(`[ingress] async dispatch: ${err instanceof Error ? err.message : String(err)}`);
     });
     // Race run creation against completion: a request the core answers WITHOUT
@@ -319,7 +325,7 @@ async function handleAuthorized(
       body: { runId: started.id, runUrl: `${base}/runs/${started.id}`, threadKey: msg.threadKey },
     };
   }
-  await dispatchFn(deps, msg, io);
+  await dispatchFn(deps, msg, io, { trace });
   // `run` is present only when the core created a run for this request (agent
   // runs, inline command runs); a config reply has none. Id + status only —
   // never the view token.

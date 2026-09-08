@@ -40,7 +40,9 @@ export function createAlsContext(): AlsContext {
 
 export interface Tick {
   dep: string;
+  /** The innermost `span(fn)` the fake ran under, by name; `null` is the gap. */
   span: string | null;
+  spanId: string | null;
   at: number;
 }
 
@@ -53,7 +55,8 @@ export function timedFakes(clock: TickingClock, ctx: AlsContext, stepMs = 1000) 
     timed<A extends unknown[], R>(dep: string, fn: (...args: A) => Promise<R> | R): (...args: A) => Promise<R> {
       return async (...args: A) => {
         const result = await fn(...args);
-        ticks.push({ dep, span: ctx.current()?.name ?? null, at: clock.now() });
+        const current = ctx.current();
+        ticks.push({ dep, span: current?.name ?? null, spanId: current?.id ?? null, at: clock.now() });
         clock.tick(stepMs);
         return result;
       };

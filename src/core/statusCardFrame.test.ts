@@ -49,45 +49,85 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(shell.close({ kind: "done", icon: "✅" }).title).toBe(`✅ ${LABEL} · resumed · 3s`);
   });
 
-  // The eight closes, pinned as a table: what each paints today. 2d-ii and 5a
-  // each move this table once, as the duration's anchor and the shape land.
+  // The eight closes, pinned as a table: what each paints today — every close
+  // carries the request's elapsed time from the ack's clock (features/tracing.md).
   const link = { url: "https://sb.example/runs/r1?t=tok", label: "Live run" };
   const CLOSES: Array<[CardClose, { title: string; detail?: string; link?: typeof link }]> = [
     [
       { kind: "not_started", icon: "📦", reason: "repo not onboarded" },
-      { title: `📦 ${LABEL} · not started (repo not onboarded)` },
+      { title: `📦 ${LABEL} · not started (repo not onboarded) · 184s`, detail: undefined },
     ],
     [
       { kind: "not_started", icon: "📦", reason: "repo could not be verified" },
-      { title: `📦 ${LABEL} · not started (repo could not be verified)` },
+      { title: `📦 ${LABEL} · not started (repo could not be verified) · 184s`, detail: undefined },
     ],
-    [{ kind: "not_started", icon: "🚫", reason: "repo access" }, { title: `🚫 ${LABEL} · not started (repo access)` }],
+    [
+      { kind: "not_started", icon: "🚫", reason: "repo access" },
+      { title: `🚫 ${LABEL} · not started (repo access) · 184s`, detail: undefined },
+    ],
     [
       { kind: "not_started", icon: "🔀", reason: "PR head unknown" },
-      { title: `🔀 ${LABEL} · not started (PR head unknown)` },
+      { title: `🔀 ${LABEL} · not started (PR head unknown) · 184s`, detail: undefined },
     ],
     [
       { kind: "not_started", icon: "🌿", reason: "which branch?" },
-      { title: `🌿 ${LABEL} · not started (which branch?)` },
+      { title: `🌿 ${LABEL} · not started (which branch?) · 184s`, detail: undefined },
     ],
     [
       { kind: "not_started", icon: "🔀", reason: "branch moved" },
-      { title: `🔀 ${LABEL} · not started (branch moved)` },
+      { title: `🔀 ${LABEL} · not started (branch moved) · 184s`, detail: undefined },
     ],
     [
       { kind: "refused", icon: "🚫", reason: "not started (no ship target)" },
-      { title: `🚫 ${LABEL} · not started (no ship target)` },
+      { title: `🚫 ${LABEL} · not started (no ship target) · 184s`, detail: undefined },
     ],
     [
       { kind: "setup_failed", reason: "resident attach timed out" },
-      { title: "❌ setup failed · resident attach timed out" },
+      { title: "❌ setup failed · resident attach timed out · 184s", detail: undefined },
     ],
   ];
 
-  it.each(CLOSES)("a close before the run started paints %j with no duration and no link", (close, expected) => {
+  it.each(CLOSES)("a close before the run started paints %j with the elapsed time and no link", (close, expected) => {
     const shell = shellAt(184_000);
     shell.setLink(link);
     expect(shell.close(close)).toEqual(expected);
+  });
+
+  it("a setup label rides live frames after the elapsed time until it is cleared", () => {
+    const shell = shellAt(12_000);
+    shell.setSetupLabel("attaching the workspace…");
+    expect(shell.live().title).toBe(`◐ ${LABEL} · 12s — attaching the workspace…`);
+    expect(shell.live({ suffix: " (slow)" }).title).toBe(`◓ ${LABEL} · 12s — attaching the workspace… (slow)`);
+    shell.setSetupLabel(undefined);
+    expect(shell.live().title).toBe(`◑ ${LABEL} · 12s`);
+  });
+
+  it("a close's shape and queued lines lead its detail, in that order, on runless closes and done closes alike", () => {
+    const shell = shellAt(184_000);
+    expect(
+      shell.close({
+        kind: "setup_failed",
+        reason: "resident attach timed out",
+        shape: "3m 00s getting ready · 4s Switchboard overhead",
+        queued: "queued 6m 00s before we saw it",
+      }),
+    ).toEqual({
+      title: "❌ setup failed · resident attach timed out · 184s",
+      detail: "3m 00s getting ready · 4s Switchboard overhead\nqueued 6m 00s before we saw it",
+    });
+    expect(
+      shell.close({ kind: "done", icon: "✅", detail: "✓ done", shape: "2m 30s thinking · 34s in tools" }),
+    ).toEqual({
+      title: `✅ ${LABEL} · 184s`,
+      detail: "2m 30s thinking · 34s in tools\n✓ done",
+      link: undefined,
+    });
+    expect(
+      shell.close({ kind: "not_started", icon: "📦", reason: "repo access", queued: "queued 1m 00s before we saw it" }),
+    ).toEqual({
+      title: `📦 ${LABEL} · not started (repo access) · 184s`,
+      detail: "queued 1m 00s before we saw it",
+    });
   });
 
   it("a done close carries the icon, the duration, the detail and the link — any outcome", () => {

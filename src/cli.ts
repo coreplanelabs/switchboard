@@ -43,7 +43,9 @@ import {
   type InvokeErrorCode,
 } from "./core/commandRegistry.js";
 import { catalogueText, chatForm, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
-import { dispatch } from "./core/dispatcher.js";
+import { dispatch, type CoreDeps } from "./core/dispatcher.js";
+import { startRequestRoot } from "./core/requestTrace.js";
+import { systemClock } from "./core/trace/clock.js";
 import { createRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
 import { buildRunStore, type RunStore } from "./core/runStore.js";
@@ -384,18 +386,23 @@ async function main(): Promise<void> {
     : undefined;
   // The chat fast path (`runs list`, `friction report`, …) answers from the same
   // catalogue the bot binds — without it those messages would go to the model.
+  const deps: CoreDeps = {
+    config,
+    providers,
+    skills,
+    mcp,
+    mcpRegistryOn: mcpLoadedWiring.service !== undefined,
+    runHistoryWriter,
+    commands,
+  };
+  // The request's root (features/tracing.md): the CLI's receipt is now.
+  const receivedAt = systemClock();
+  const trace = startRequestRoot(deps, { channel: "cli", receivedAt });
   await dispatch(
-    {
-      config,
-      providers,
-      skills,
-      mcp,
-      mcpRegistryOn: mcpLoadedWiring.service !== undefined,
-      runHistoryWriter,
-      commands,
-    },
-    { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text },
+    deps,
+    { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text, receivedAt },
     new ConsoleIO(),
+    { trace },
   );
   // Wait for the record write to settle before exiting rather than dropping it.
   await runHistoryWriter?.settled();

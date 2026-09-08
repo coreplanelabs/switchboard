@@ -105,6 +105,7 @@ describe("handleMcpRequest — tools/call", () => {
       channelId: "mcp:ops",
       threadKey: "mcp:ops:t1",
       text: "hi",
+      receivedAt: expect.any(Number), // stamped at receipt (features/tracing.md)
     });
   });
 

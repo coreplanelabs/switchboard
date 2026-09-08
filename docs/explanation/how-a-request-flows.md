@@ -62,6 +62,10 @@ sequenceDiagram
 
 Nothing above changes if `U` is typing at the CLI instead of Slack, or if `agent:review` runs against a local execution backend instead of a sandbox — the same four boxes, the same order, just different implementations plugged into each seam.
 
+## Every step is measured
+
+The request above is also one span tree ([features/tracing.md](https://github.com/coreplanelabs/switchboard/blob/main/features/tracing.md)). The adapter starts a root the moment the process sees the message; every awaited step the dispatcher takes is a child of it — reading the thread, resolving the repo, attaching the workspace, each model turn, each tool call, posting the reply — and the run's stream carries the streamed ones beside its content. The status card ticks from receipt and names the setup step in flight; when it closes, its detail leads with the request's shape: `32s getting ready · 2m 30s thinking · 55s in tools · 8s finishing up · 7s Switchboard overhead`. Nothing here is a second bookkeeping system: the spans are the timing, and the timeline, the card line and the friction report all read the same set.
+
 ## One run per thread: replying while it works
 
 A thread has one workspace (its sandbox or resident worktree), so it runs one agent at a time. Replying in a thread while its card is still spinning does not start a second run:

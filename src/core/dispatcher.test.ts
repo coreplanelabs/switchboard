@@ -29,8 +29,14 @@ import {
 } from "./dispatcher.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { RunControl, RunRegistry, activityOfEvents } from "./runRegistry.js";
+import { createTracer } from "./trace/tracer.js";
+import { classOf, isStreamed } from "./trace/streamSpans.js";
+import { partition } from "./trace/partition.js";
+import type { SpanRecord } from "./trace/types.js";
+import { recordingSink } from "./testing/recordingSink.js";
+import { createAlsContext, createTickingClock, timedFakes, type Tick } from "./testing/tickingClock.js";
 import { ThreadAdmission } from "./threadAdmission.js";
-import type { RunEvent } from "./runEvents.js";
+import { isHeadMaterial, isSpanRecord, type RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
 import { runAgent } from "../runner.js";
@@ -652,6 +658,34 @@ describe("executor provisioning by agent resources", () => {
     expect(statuses[0].title).toContain("preparing workspace");
     // The same card then carries the run and ends ✅ — no second card is created.
     expect(statuses[statuses.length - 1].title).toContain("✅");
+  });
+
+  // Feature: features/tracing.md item 7 — through a slow setup the card ticks
+  // from the ack and names the step in flight, off the card sink's label.
+  it("a slow attach shows on the card: the setup heartbeat paints `— attaching the workspace…` with the elapsed time, and the run's frames drop it", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, capturingProvider());
+    const { io, statuses } = fakeIO();
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => {
+      await vi.advanceTimersByTimeAsync(11_000); // two heartbeats pass while the workspace attaches
+      return { executor: fake };
+    });
+    try {
+      await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    } finally {
+      vi.useRealTimers();
+    }
+    const setup = statuses.filter((s) => s.title.includes("— attaching the workspace…"));
+    expect(setup.length).toBeGreaterThan(0);
+    expect(setup[0].title).toMatch(/^[◐◓◑◒] \*coding\* on `[^`]+` · \d+s — attaching the workspace…$/u);
+    // Once the run loop owns the card no frame names a setup step.
+    const afterSetup = statuses.slice(statuses.indexOf(setup.at(-1)!) + 1);
+    expect(afterSetup.length).toBeGreaterThan(0);
+    expect(afterSetup.every((s) => !s.title.includes("—"))).toBe(true);
+    expect(statuses.at(-1)!.title).toContain("✅");
   });
 
   it("closes the ack card with a reason when setup stops before the run (ask-once for a branch)", async () => {
@@ -3198,6 +3232,11 @@ describe("coding PR post-step (features/pr-description.md)", () => {
 /** A stream's shape with its span records named: `+name` opens, `-name` closes (features/tracing.md). */
 const shapeOf = (events: readonly RunEvent[]) =>
   events.map((e) => (e.type === "span_start" ? `+${e.name}` : e.type === "span_end" ? `-${e.name}` : e.type));
+/** The shape without the setup steps (`dispatch.*`), whose number and order depend on the fixture's fakes. */
+const runShapeOf = (events: readonly RunEvent[]) => shapeOf(events).filter((x) => !/^[+-]dispatch\./.test(x));
+/** The content events: what a reader of the run's story sees (span records are timing). */
+const contentOf = (events: readonly RunEvent[]) => events.filter((e) => !isSpanRecord(e));
+const answerOf = (events: readonly RunEvent[]) => events.find((e) => e.type === "answer");
 
 describe("live run-view wiring (Area 2)", () => {
   afterEach(() => {
@@ -3256,10 +3295,12 @@ describe("live run-view wiring (Area 2)", () => {
     // the final answer (the run record is the source of truth; Slack is a
     // projection of it), the latter before the run finishes.
     // Spans, not `turn` events, carry the timing (features/tracing.md): the
-    // run's root opens the stream, the loop is `run.agent`, each model call a
-    // `model.turn`, the tool call a `tool.bash` around its pair. This spy never
-    // seals, so the root's close reaches it too; a real registry drops it.
-    expect(shapeOf(events)).toEqual([
+    // run's root opens the stream, the setup steps (`dispatch.*`, filtered
+    // here) precede the request, the loop is `run.agent`, each model call a
+    // `model.turn`, the tool call a `tool.bash` around its pair; after the
+    // answer the card close and the reply are spans too. This spy never seals,
+    // so the root's close reaches it as well; a real registry drops it.
+    expect(runShapeOf(events)).toEqual([
       "+request",
       "input",
       "run_meta",
@@ -3274,8 +3315,29 @@ describe("live run-view wiring (Area 2)", () => {
       "-model.turn",
       "-run.agent",
       "answer",
+      "+post.card_close",
+      "-post.card_close",
+      "+post.reply",
+      "-post.reply",
       "-request",
     ]);
+    // Every setup step ended before the request was published: the stream
+    // opens with the root and the setup, then the content.
+    const inputAt = events.findIndex((e) => e.type === "input");
+    const setup = shapeOf(events.slice(0, inputAt));
+    expect(setup[0]).toBe("+request");
+    expect(setup.slice(1).every((x) => /^[+-]dispatch\./.test(x))).toBe(true);
+    expect(new Set(setup.filter((x) => x.startsWith("-")).map((x) => x.slice(1)))).toEqual(
+      new Set([
+        "dispatch.history",
+        "dispatch.repo_context",
+        "dispatch.memory_read",
+        "dispatch.ack_card",
+        "dispatch.workspace.attach",
+        "dispatch.compose",
+        "dispatch.channel_visibility",
+      ]),
+    );
     expect(replies.some((r) => r.includes("answer"))).toBe(true);
   });
 
@@ -3367,10 +3429,12 @@ describe("live run-view wiring (Area 2)", () => {
       fakeIO().io,
     );
     // Spans, not `turn` events, carry the timing (features/tracing.md): the
-    // run's root opens the stream, the loop is `run.agent`, each model call a
-    // `model.turn`, the tool call a `tool.bash` around its pair. This spy never
-    // seals, so the root's close reaches it too; a real registry drops it.
-    expect(shapeOf(events)).toEqual([
+    // run's root opens the stream, the setup steps (`dispatch.*`, filtered
+    // here) precede the request, the loop is `run.agent`, each model call a
+    // `model.turn`, the tool call a `tool.bash` around its pair; after the
+    // answer the card close and the reply are spans too. This spy never seals,
+    // so the root's close reaches it as well; a real registry drops it.
+    expect(runShapeOf(events)).toEqual([
       "+request",
       "input",
       "run_meta",
@@ -3385,9 +3449,30 @@ describe("live run-view wiring (Area 2)", () => {
       "-model.turn",
       "-run.agent",
       "answer",
+      "+post.card_close",
+      "-post.card_close",
+      "+post.reply",
+      "-post.reply",
       "-request",
     ]);
-    const input = events[1]; // after the root's `span_start`
+    // Every setup step ended before the request was published: the stream
+    // opens with the root and the setup, then the content.
+    const inputAt = events.findIndex((e) => e.type === "input");
+    const setup = shapeOf(events.slice(0, inputAt));
+    expect(setup[0]).toBe("+request");
+    expect(setup.slice(1).every((x) => /^[+-]dispatch\./.test(x))).toBe(true);
+    expect(new Set(setup.filter((x) => x.startsWith("-")).map((x) => x.slice(1)))).toEqual(
+      new Set([
+        "dispatch.history",
+        "dispatch.repo_context",
+        "dispatch.memory_read",
+        "dispatch.ack_card",
+        "dispatch.workspace.attach",
+        "dispatch.compose",
+        "dispatch.channel_visibility",
+      ]),
+    );
+    const input = events.find((e) => e.type === "input")!;
     if (input.type !== "input") throw new Error("unreachable");
     expect(input.text).toBe("please rotate «redacted-github-token» now [+2 images, 1 document]"); // directives stripped, redacted
     expect(input.at).toEqual(expect.any(Number));
@@ -3398,13 +3483,15 @@ describe("live run-view wiring (Area 2)", () => {
       user: "justin",
     });
     // what the run is about, right after the request (live-view item 19): the
-    // resolved agent + model; no repo context for a repo-less general run
-    const meta = events[2];
+    // resolved agent + model; no repo context for a repo-less general run;
+    // the request's trace id (features/tracing.md)
+    const meta = events.find((e) => e.type === "run_meta")!;
     if (meta.type !== "run_meta") throw new Error("unreachable");
     expect(meta).toEqual({
       type: "run_meta",
       agent: "general",
       model: expect.stringContaining("/"),
+      traceId: expect.any(String),
       at: expect.any(Number),
     });
   });
@@ -3426,7 +3513,7 @@ describe("live run-view wiring (Area 2)", () => {
     const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
     deps.runRegistry = spy;
     await dispatch(deps, msg("agent:general hi"), fakeIO().io);
-    const input = events[1]; // after the root's `span_start`
+    const input = events.find((e) => e.type === "input")!;
     if (input.type !== "input") throw new Error("unreachable");
     expect("source" in input).toBe(false);
   });
@@ -4723,7 +4810,11 @@ describe("self-improvement wiring (Area 7b / #84)", () => {
     await dispatch(deps, msg("memory forget mem:user:slack:UX:0"), io);
     expect(replies[1]).toMatch(/^🧹 Forgot `mem:user:slack:UX:0`/);
     expect(receipts).toEqual([{ id: "mem-1", status: "completed" }]);
-    expect(deps.runRegistry.snapshot("mem-1", "tok")!.events.map((e) => e.type)).toEqual(["input", "answer"]);
+    expect(contentOf(deps.runRegistry.snapshot("mem-1", "tok")!.events).map((e) => e.type)).toEqual([
+      "input",
+      "run_meta",
+      "answer",
+    ]);
   });
 
   it("`friction report` is answered inline from the ledger through the registry — no model turn, no executor", async () => {
@@ -5070,9 +5161,21 @@ describe("inline command runs + run receipts (#244)", () => {
 
     const snap = deps.runRegistry.snapshot("fr-1", "tok")!;
     expect(snap.finished).toBe(true);
-    expect(snap.events.map((e) => e.type)).toEqual(["input", "answer"]);
-    expect(snap.events[0]).toMatchObject({ type: "input", text: "friction report" });
-    expect(snap.events[1]).toMatchObject({ type: "answer", text: replies[0] });
+    // A command run's content: the request, its meta (agent `command`, the
+    // trace id, no model), the answer — around `run.command` and the reply's spans.
+    expect(contentOf(snap.events).map((e) => e.type)).toEqual(["input", "run_meta", "answer"]);
+    expect(runShapeOf(snap.events)).toEqual([
+      "+request",
+      "input",
+      "run_meta",
+      "+run.command",
+      "-run.command",
+      "answer",
+      "+post.reply",
+      "-post.reply",
+    ]);
+    expect(contentOf(snap.events)[0]).toMatchObject({ type: "input", text: "friction report" });
+    expect(answerOf(snap.events)).toMatchObject({ type: "answer", text: replies[0] });
     expect(deps.runRegistry.listActive()[0].label).toBe('friction \u00b7 #cron \u00b7 cron \u00b7 "friction report"');
     expect(receipts).toEqual([{ id: "fr-1", status: "completed" }]);
   });
@@ -5087,8 +5190,9 @@ describe("inline command runs + run receipts (#244)", () => {
     expect(invoked).toEqual(["friction.report"]);
     const snap = deps.runRegistry.snapshot("fr-1", "tok")!;
     expect(snap.finished).toBe(true);
-    expect(snap.events).toEqual([
+    expect(contentOf(snap.events)).toEqual([
       expect.objectContaining({ type: "input", text: "friction report --min-runs 2" }),
+      expect.objectContaining({ type: "run_meta", agent: "command" }),
       expect.objectContaining({ type: "answer", text: replies[0] }),
     ]);
     expect(receipts).toEqual([{ id: "fr-1", status: "completed" }]);
@@ -5103,7 +5207,10 @@ describe("inline command runs + run receipts (#244)", () => {
     await dispatch(deps, { ...msg("friction propose"), userId: "http:cron", channelId: "http:cron" }, io);
     expect(replies[0]).toMatch(/^\ud83d\udeab/);
     expect(receipts).toEqual([{ id: "fr-1", status: "failed" }]);
-    expect(deps.runRegistry.snapshot("fr-1", "tok")!.events[1]).toMatchObject({ type: "answer", text: replies[0] });
+    expect(answerOf(deps.runRegistry.snapshot("fr-1", "tok")!.events)).toMatchObject({
+      type: "answer",
+      text: replies[0],
+    });
   });
 
   it("`http:cron` listed in permissions.repoManagement may `friction propose` \u2014 the run completes", async () => {
@@ -5170,8 +5277,8 @@ describe("inline command runs + run receipts (#244)", () => {
     // The record explains the `failed` status: the error reply is its answer,
     // byte-identical to what the channel got (the reply is a projection of it).
     const snap = deps.runRegistry.snapshot("fr-1", "tok")!;
-    expect(snap.events.map((e) => e.type)).toEqual(["input", "answer"]);
-    expect(snap.events[1]).toMatchObject({ type: "answer", text: "⚠️ `friction report`: ledger exploded" });
+    expect(contentOf(snap.events).map((e) => e.type)).toEqual(["input", "run_meta", "answer"]);
+    expect(answerOf(snap.events)).toMatchObject({ type: "answer", text: "⚠️ `friction report`: ledger exploded" });
     expect(replies).toEqual(["⚠️ `friction report`: ledger exploded"]);
   });
 
@@ -5765,13 +5872,15 @@ describe("run history write path (#157 U4)", () => {
       userId: "http:cron",
       threadKey: "http:cron:1",
       status: "completed",
-      eventCount: 2,
+      // the root's start, the channel-visibility pair, input, run_meta, the
+      // run.command pair, answer, the post.reply pair (features/tracing.md)
+      eventCount: 10,
       truncated: false,
     });
     expect(rec!.label).toBe('friction · #cron · cron · "friction report"');
-    expect(rec!.events.map((e) => e.type)).toEqual(["input", "answer"]);
-    expect(rec!.events[0]).toMatchObject({ type: "input", text: "friction report" });
-    expect(rec!.events[1]).toMatchObject({ type: "answer", text: ok.replies[0] });
+    expect(contentOf(rec!.events).map((e) => e.type)).toEqual(["input", "run_meta", "answer"]);
+    expect(contentOf(rec!.events)[0]).toMatchObject({ type: "input", text: "friction report" });
+    expect(answerOf(rec!.events)).toMatchObject({ type: "answer", text: ok.replies[0] });
     expect(registry.getById("cmd-1")).toMatchObject({
       agent: "command",
       channelId: "http:cron",
@@ -5789,7 +5898,7 @@ describe("run history write path (#157 U4)", () => {
     await writer.settled();
     const failed = await store.get("cmd-2");
     expect(failed?.status).toBe("failed");
-    expect(failed?.events[1]).toMatchObject({ type: "answer", text: denied.replies[0] });
+    expect(answerOf(failed!.events)).toMatchObject({ type: "answer", text: denied.replies[0] });
     expect(denied.replies[0]).toMatch(/^\ud83d\udeab/);
   });
 
@@ -5912,8 +6021,10 @@ describe("run history write path (#157 U4)", () => {
   });
 
   it("more published events than the backlog holds: eventCount is the published total, storedEventCount the backlog length, truncated true — and the protected head (input, context, run_meta) is what survives, with the newest events after it", async () => {
-    // 15 head events (the root's span_start, the input, 12 context turns, the run meta) + room for one more: the trim drops from after the head.
-    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", backlogLimit: 16 });
+    // The head — the root's start, the setup spans, the input, 12 context turns,
+    // the run meta — is about 30 events; a 36-event backlog leaves room for a
+    // few of the run's own, so the trim drops from after the head.
+    const registry = new RunRegistry({ genId: () => "run-h", genToken: () => "tok", backlogLimit: 36 });
     const { deps, store, writer } = wired(toolThenAnswer(), { registry });
     const history: HistoryItem[] = Array.from({ length: 12 }, (_, i) => ({
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
@@ -5922,17 +6033,22 @@ describe("run history write path (#157 U4)", () => {
     await dispatch(deps, msg("hello there"), fakeIO(history).io);
     await writer.settled();
     const rec = await store.get("run-h");
-    expect(rec!.eventCount).toBeGreaterThan(16);
+    expect(rec!.eventCount).toBeGreaterThan(rec!.storedEventCount);
     expect(rec!.eventCount).toBe(registry.snapshot("run-h", "tok")!.eventCount);
-    expect(rec!.storedEventCount).toBe(16);
-    expect(rec!.events).toHaveLength(16);
+    expect(rec!.storedEventCount).toBe(rec!.events.length);
     expect(rec!.truncated).toBe(true);
-    expect(shapeOf(rec!.events).slice(0, 2)).toEqual(["+request", "input"]);
-    expect(rec!.events.filter((e) => e.type === "context")).toHaveLength(12);
-    expect(
-      rec!.events.slice(1, 15).every((e) => e.type === "input" || e.type === "context" || e.type === "run_meta"),
-    ).toBe(true);
-    expect(rec!.events.at(-1)!.type).toBe("answer"); // the newest survives; the middle went
+    // The head is intact: the root, the setup spans, the input, the meta, every context turn.
+    const headEnd = rec!.events.findIndex((e) => !isHeadMaterial(e));
+    expect(headEnd).toBeGreaterThan(27);
+    expect(shapeOf(rec!.events)[0]).toBe("+request");
+    const head = rec!.events.slice(0, headEnd);
+    expect(head.filter((e) => e.type === "context")).toHaveLength(12);
+    expect(head.some((e) => e.type === "input")).toBe(true);
+    expect(head.some((e) => e.type === "run_meta")).toBe(true);
+    // The middle went (the loop's opening span), the newest survive (the answer and the post spans).
+    expect(rec!.events.some((e) => e.type === "span_start" && e.name === "run.agent")).toBe(false);
+    expect(rec!.events.some((e) => e.type === "answer")).toBe(true);
+    expect(rec!.events.at(-1)).toMatchObject({ type: "span_end", name: "post.reply" });
   });
 
   it("the record's events equal the registry snapshot taken at finish, even though the record is assembled after the reply", async () => {
@@ -5955,8 +6071,13 @@ describe("run history write path (#157 U4)", () => {
     expect(rec?.status).toBe("completed"); // a throw inside the observing reply would have made it `failed`
     expect(snapAtReply).toBeDefined();
     expect(snapAtReply!.length).toBeGreaterThan(2);
-    expect(rec!.events).toEqual(snapAtReply);
-    expect(rec!.storedEventCount).toBe(snapAtReply!.length);
+    // The record is the snapshot at finish plus the seal delta: the reply's
+    // own span end, which landed after the reply returned (features/tracing.md).
+    expect(rec!.events.slice(0, snapAtReply!.length)).toEqual(snapAtReply);
+    expect(rec!.events.slice(snapAtReply!.length).map((e) => (e.type === "span_end" ? `-${e.name}` : e.type))).toEqual([
+      "-post.reply",
+    ]);
+    expect(rec!.storedEventCount).toBe(rec!.events.length);
   });
 
   it("the finish write happens after the reply: only the provisional tombstone has been put when io.reply runs", async () => {
@@ -6072,7 +6193,7 @@ describe("run history write path (#157 U4)", () => {
       const tomb = puts[0];
       expect(tomb.id).toBe("run-h");
       expect(tomb.finishedAt).toBe(tomb.startedAt); // provisional: nobody knows a crash's real death time
-      expect(shapeOf(tomb.events)).toEqual(["+request", "input", "run_meta", "context"]);
+      expect(runShapeOf(tomb.events)).toEqual(["+request", "input", "run_meta", "context"]);
       expect(tomb).toMatchObject({
         agent: "general",
         model: "anthropic/general-model",
@@ -8906,5 +9027,218 @@ describe("run ledger write-through (features/run-history.md item 35)", () => {
     await writer.settled();
     expect(stateAtSecondCall).toEqual({ verdict: { verdict: "request_changes", summary: "two findings" } });
     expect(ledger.finished.get("run-l")?.status).toBe("completed");
+  });
+});
+
+// Feature: features/tracing.md — the no-gaps test. Every awaited fake runs
+// under a `span(fn)` (a `null` span is a gap), the clock advances only when a
+// fake settles, and the window then partitions into exactly the ticks each
+// bucket's spans spent: overhead is the ticks under uncounted spans that no
+// counted span covers (none on these paths) plus the background-only time.
+describe("no gaps: every awaited step runs inside a span (features/tracing.md)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.mocked(makeExecutor).mockClear();
+  });
+
+  function traced(provider: Provider, fixture = YAML_FIXTURE) {
+    const clock = createTickingClock(1_700_000_000_000);
+    const als = createAlsContext();
+    const { ticks, timed } = timedFakes(clock, als);
+    const log = recordingSink();
+    const deps = makeDeps(fixture, {
+      name: provider.name,
+      complete: timed("provider.complete", (req: CompletionRequest) => provider.complete(req)),
+    });
+    deps.clock = clock.now;
+    deps.tracer = createTracer({ clock: clock.now, context: als.context });
+    deps.sinks = [log];
+    const registry = new RunRegistry({ genId: () => "run-g", genToken: () => "tok", now: clock.now });
+    deps.runRegistry = registry;
+    const replies: string[] = [];
+    const statuses: StatusUpdate[] = [];
+    const io: ChannelIO = {
+      reply: timed("io.reply", async (t: string) => void replies.push(t)),
+      status: timed("io.status", async (initial: StatusUpdate) => {
+        statuses.push(initial);
+        return {
+          update: (f: StatusUpdate) => void statuses.push(f),
+          done: timed("card.done", async (f: StatusUpdate) => void statuses.push(f)),
+        };
+      }),
+      history: timed("io.history", async () => []),
+    };
+    return { clock, ticks, log, deps, registry, io, replies, statuses, timed };
+  }
+
+  /** The bucket a tick's time lands in: its span's class, or its nearest streamed ancestor's. */
+  function bucketOf(tick: Tick, records: readonly SpanRecord[]): string {
+    const byId = new Map(records.map((r) => [r.spanId, r]));
+    let cur = tick.spanId ? byId.get(tick.spanId) : undefined;
+    while (cur && !isStreamed(cur.name)) cur = cur.parentSpanId ? byId.get(cur.parentSpanId) : undefined;
+    if (!cur) return "gap";
+    const c = classOf(cur.name, "agent");
+    return c?.kind === "counted" ? c.bucket : (c?.kind ?? "gap");
+  }
+
+  /** The partition over the request's streamed spans and its window; the ticks
+   *  inside the window, by bucket, are what it must sum to. */
+  function check(log: ReturnType<typeof recordingSink>, ticks: Tick[], window: { start: number; end: number }) {
+    const streamed = log.ends.filter((r) => isStreamed(r.name) && r.name !== "request");
+    const p = partition(streamed, { window, owner: "agent", finished: true, losses: [] });
+    // A tick's second starts at its `at` (the clock advances after the fake settles).
+    const inWindow = ticks.filter((t) => t.at >= window.start && t.at < window.end);
+    const spent = (bucket: string) => inWindow.filter((t) => bucketOf(t, log.ends) === bucket).length * 1000;
+    expect(ticks.every((t) => t.span !== null)).toBe(true); // the load-bearing line: no await outside a span
+    expect(p).toMatchObject({
+      windowMs: window.end - window.start,
+      gettingReadyMs: spent("getting_ready"),
+      thinkingMs: spent("thinking"),
+      toolsMs: spent("tools"),
+      finishingUpMs: spent("finishing_up"),
+      overheadMs: spent("uncounted") + p.backgroundOnlyMs,
+    });
+    return p;
+  }
+
+  it("a general run: history, ack, the model turn, the card close and the reply each under their span; the window is getting ready + thinking, no overhead", async () => {
+    const { ticks, log, deps, registry, io } = traced(capturingProvider("answer"));
+    await dispatch(deps, msg("hello there"), io);
+    expect(ticks.map((t) => [t.dep, t.span])).toEqual([
+      ["io.history", "dispatch.history"],
+      ["io.status", "dispatch.ack_card"],
+      ["provider.complete", "model.turn"],
+      ["card.done", "post.card_close"],
+      ["io.reply", "post.reply"],
+    ]);
+    const root = log.ended("request")!;
+    expect(root.attrs).toEqual({ channel: "slack", runId: "run-g", status: "completed" });
+    const run = registry.getById("run-g")!;
+    expect(run.receivedAt).toBe(root.startedAt);
+    const p = check(log, ticks, { start: root.startedAt, end: run.finishedAt! });
+    expect(p).toMatchObject({ gettingReadyMs: 2000, thinkingMs: 1000, overheadMs: 0 });
+    // The post-finish ticks (the close, the reply) are outside the window by construction.
+    expect(root.endedAt).toBeGreaterThan(run.finishedAt!);
+  });
+
+  it("a coding run with a tool: the attach, the tool's executor call and the workspace probes land in getting ready, tools and finishing up", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    let n = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        if (n++ === 0) {
+          return {
+            content: [{ type: "tool_use", id: "t1", name: "bash", input: { command: "ls" } }],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
+      },
+    };
+    const { ticks, log, deps, registry, io, timed } = traced(provider, REMOTE_YAML_FIXTURE);
+    const executor = {
+      exec: timed("executor.exec", async () => ""),
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    vi.mocked(makeExecutor).mockImplementationOnce(
+      timed("makeExecutor", async () => ({ executor, backend: "sandbox" as const })),
+    );
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    const pairs = new Set(ticks.map((t) => `${t.dep} → ${t.span}`));
+    expect(pairs).toEqual(
+      new Set([
+        "io.history → dispatch.history",
+        "io.status → dispatch.ack_card",
+        "makeExecutor → dispatch.workspace.attach",
+        "provider.complete → model.turn",
+        "executor.exec → exec.exec", // the tool's own call: log-only, under tool.bash
+        "executor.exec → run.observe_workspace", // the post-run probes
+        "card.done → post.card_close",
+        "io.reply → post.reply",
+      ]),
+    );
+    const root = log.ended("request")!;
+    const run = registry.getById("run-g")!;
+    const p = check(log, ticks, { start: root.startedAt, end: run.finishedAt! });
+    expect(p.gettingReadyMs).toBe(3000);
+    expect(p.thinkingMs).toBe(2000);
+    expect(p.toolsMs).toBe(1000);
+    expect(p.finishingUpMs).toBeGreaterThan(0);
+    expect(p.overheadMs).toBe(0);
+    expect(log.ended("dispatch.workspace.attach")!.attrs).toEqual({ backend: "sandbox" });
+  });
+
+  it("a refusal (the agent allowlist): the reply is a dispatch.refuse span, the root ends refused with no run", async () => {
+    const { ticks, log, deps, io } = traced(capturingProvider());
+    await dispatch(deps, msg("agent:coding fix it"), io); // slack:UX may not run coding
+    expect(ticks.map((t) => [t.dep, t.span])).toEqual([
+      ["io.history", "dispatch.history"],
+      ["io.reply", "dispatch.refuse"],
+    ]);
+    const root = log.ended("request")!;
+    expect(root.attrs).toEqual({ channel: "slack", status: "refused" });
+    expect(log.ended("dispatch.refuse")!.attrs).toEqual({ outcome: "agent_allowlist" });
+    const p = check(log, ticks, { start: root.startedAt, end: root.endedAt! });
+    expect(p).toMatchObject({ gettingReadyMs: 2000, overheadMs: 0 });
+  });
+
+  it("a command answered without a run (help): the command body is run.command, the reply post.reply; the root completes with no run", async () => {
+    const { ticks, log, deps, io, replies } = traced(capturingProvider());
+    wireCommands(deps);
+    await dispatch(deps, msg("help"), io);
+    expect(replies).toHaveLength(1);
+    expect(ticks.map((t) => [t.dep, t.span])).toEqual([["io.reply", "post.reply"]]);
+    const root = log.ended("request")!;
+    expect(root.attrs).toEqual({ channel: "slack", status: "completed" });
+    expect(log.ended("run.command")!.attrs).toEqual({ command: "help.show" });
+  });
+
+  it("a fresh turn for unconsumed follow-ups is a request of its own: the first root ended before it started, and it carries how long the follow-up waited", async () => {
+    let calls = 0;
+    let fail!: (err: Error) => void;
+    const first = new Promise<CompletionResult>((_, reject) => (fail = reject));
+    let onFirst!: () => void;
+    const firstStarted = new Promise<void>((r) => (onFirst = r));
+    const provider: Provider = {
+      name: "gated",
+      async complete() {
+        if (calls++ === 0) {
+          onFirst();
+          return first;
+        }
+        return { content: [{ type: "text", text: `answer ${calls}` }], stopReason: "end_turn" };
+      },
+    };
+    const { ticks, log, deps, io, clock } = traced(provider);
+    let ids = 0;
+    deps.runRegistry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t", now: clock.now });
+    deps.admission = new ThreadAdmission();
+    const run = dispatch(deps, msg("write the report"), io);
+    await firstStarted;
+    const { io: second } = traced(capturingProvider()); // the follow-up's own channel handle
+    // The follow-up carries its platform stamp (a Slack `ts`): the fresh turn
+    // must not turn that into a `queued … before we saw it`.
+    await dispatch(deps, { ...msg("and also the numbers", "slack:UY"), originAt: clock.now() - 5_000 }, second);
+    clock.tick(250_000); // the follow-up waits behind the run
+    fail(new Error("provider exploded"));
+    await run;
+    // Three requests: the first run's, the steered follow-up's own (no run), the fresh turn's.
+    const roots = log.ends.filter((r) => r.name === "request");
+    expect(roots.map((r) => r.attrs)).toEqual([
+      { channel: "slack", status: "completed", queuedBeforeMs: 5_000 }, // the follow-up's own dispatch: steered; its platform delay is its own
+      { channel: "slack", runId: "r1", status: "failed" },
+      { channel: "slack", runId: "r2", status: "completed", queuedBehindMs: expect.any(Number) },
+    ]);
+    const [, firstRoot, fresh] = roots;
+    expect(firstRoot!.endedAt).toBeLessThanOrEqual(fresh!.startedAt);
+    expect(fresh!.attrs.queuedBehindMs).toBeGreaterThanOrEqual(250_000);
+    expect(ticks.every((t) => t.span !== null)).toBe(true);
+    // The steered follow-up's ack was an admission span on the first request.
+    expect(log.ends.filter((r) => r.name === "dispatch.admission").map((r) => r.attrs)).toEqual([
+      { outcome: "steered" },
+    ]);
   });
 });

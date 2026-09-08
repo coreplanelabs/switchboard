@@ -127,7 +127,8 @@ export interface CatchUpClient {
   };
 }
 
-const tsMs = (ts: string): number => Number(ts) * 1000;
+/** A Slack `ts` as epoch ms — the platform's stamp on a message. */
+export const tsMs = (ts: string): number => Number(ts) * 1000;
 const tsNum = (ts: string | undefined): number => Number(ts ?? 0);
 
 /** Does the message carry the bot's own acceptance reaction? */

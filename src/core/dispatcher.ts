@@ -9,9 +9,11 @@ import { TOOLSETS } from "../tools/workspace.js";
 import type { LedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
 import type { AppendableEvent, LiveRunRow, StepRecord } from "./runLedger/types.js";
 import type { ResumePlan } from "./runLedger/resume.js";
-import { createLogSink, createTracer, NULL_SINK, systemClock } from "./trace/index.js";
-import { createRunStreamSink } from "./trace/runStreamSink.js";
-import type { Span } from "./trace/types.js";
+import { systemClock } from "./trace/index.js";
+import type { Clock, Span, SpanSink, Tracer } from "./trace/types.js";
+import type { RunOwner } from "./trace/streamSpans.js";
+import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
+import { cardShapeLine, queuedCaption } from "./runShape.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { makeWebCapability } from "../tools/web.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
@@ -119,6 +121,12 @@ import type {
 export interface CoreDeps {
   config: ConfigStore;
   providers: ProviderRegistry;
+  /** The wall clock (features/tracing.md): `systemClock` in production, a ticking clock in tests. */
+  clock?: Clock;
+  /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
+  tracer?: Tracer;
+  /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */
+  sinks?: SpanSink[];
   /** where runtime state (sandboxes.json) lives; default ./data */
   dataDir?: string;
   /**
@@ -389,6 +397,13 @@ export interface ResumeContext {
 
 export interface DispatchOptions {
   resume?: ResumeContext;
+  /** The request's root, started by the channel adapter at receipt
+   *  (features/tracing.md). Absent (tests, a caller without one) → the
+   *  dispatcher starts its own at entry. Ended in the outermost finally. */
+  trace?: RequestTrace;
+  /** A fresh turn's wait behind the run it was parked on (the `queued …
+   *  behind the previous run` caption; a `request` attr; never a duration term). */
+  queuedBehindMs?: number;
 }
 
 /** Close a reclaimed row this dispatch adopted but will never finish (item
@@ -415,6 +430,36 @@ export async function dispatch(
   opts: DispatchOptions = {},
 ): Promise<void> {
   const resume = opts.resume;
+  const clock = deps.clock ?? systemClock;
+  // The request's root (features/tracing.md): the adapter's, started when our
+  // process saw the message, or our own now. Every awaited step below is a
+  // `span(fn)` child of it; the run-stream sink delivers the streamed ones to
+  // the run once it exists; the outermost finally ends it. The window opens at
+  // `receivedAt`; the queued captions are attrs on the root and lines on the
+  // card, never part of a duration.
+  const trace =
+    opts.trace ?? startRequestRoot(deps, { channel: channelOf(msg.channelId), receivedAt: msg.receivedAt ?? clock() });
+  const root = trace.root;
+  const receivedAt = trace.receivedAt;
+  const queuedBeforeMs = msg.originAt !== undefined ? Math.max(0, receivedAt - msg.originAt) : undefined;
+  if (queuedBeforeMs !== undefined) root.setAttrs({ queuedBeforeMs });
+  if (opts.queuedBehindMs !== undefined) root.setAttrs({ queuedBehindMs: opts.queuedBehindMs });
+  // A fresh turn's wait is the one behind the run; a platform delay is only
+  // named when no such wait exists.
+  const queued = queuedCaption("behind", opts.queuedBehindMs) ?? queuedCaption("before", queuedBeforeMs);
+  // A refusal — a close and a reply that end the request without a run — is
+  // one `dispatch.refuse` span naming why.
+  let refused = false;
+  const refuse = <T>(outcome: string, fn: () => Promise<T>) => {
+    refused = true;
+    return root.span("dispatch.refuse", fn, { attrs: { outcome } });
+  };
+  // The card's shape and queued lines at a close (features/tracing.md item 5):
+  // a runless close reads the root's children so far over a live window; a
+  // done close the whole window to the finish.
+  const closeLines = (end: number, finished: boolean, owner: RunOwner = "agent") =>
+    cardLines(trace, { end, finished, owner, queued });
+  let caught = false;
   // Counted in flight from the first line — before history, repo resolution,
   // the setup card and the executor attach — until the post-run steps (reply,
   // review post, memory reflection scheduling) have run; decremented in the
@@ -443,6 +488,10 @@ export async function dispatch(
   // left open — a run failure is closed (with its checklist) by the run loop.
   let setupCard: StatusHandle | undefined;
   let setupShell: CardShell | undefined;
+  // The card ticks from the ack (features/tracing.md): a 5 s heartbeat repaints
+  // it through setup — the elapsed time and the setup step in flight — until
+  // the run loop's own heartbeat takes over (or the request ends without one).
+  let setupHeartbeat: ReturnType<typeof setInterval> | undefined;
   // Thread admission (features/thread-admission.md): the slot this dispatch
   // holds on its thread while its run is in flight, claimed after the agent
   // gate below and released in the outer finally — where whatever follow-ups
@@ -478,19 +527,19 @@ export async function dispatch(
     if (deps.commands) {
       const chatCmd = parseChatCommand(msg.text, deps.commands);
       if (chatCmd) {
-        const res = await runChatCommand(deps, msg, io, chatCmd, ending);
+        const res = await runChatCommand(deps, msg, io, chatCmd, ending, trace);
         // The command run (if the command made one) seals after its reply.
         await ending.sealAfterReply(
           async () => {},
-          () => replyCommandOutput(io, chatCmd, res.text),
+          () => root.span("post.reply", () => replyCommandOutput(io, chatCmd, res.text)),
         );
-        if (res.followUp) postSettledOutcome(res.followUp, io);
+        if (res.followUp) postSettledOutcome(res.followUp, io, root);
         return;
       }
     }
 
     const directives = parseDirectives(msg.text);
-    const history = await io.history();
+    const history = await root.span("dispatch.history", () => io.history());
 
     // Natural-language deterministic ops (U6, KTD8): the few conservative forms
     // `recognizeOperation` admits ("run the tests on main in acme/api") are
@@ -512,11 +561,11 @@ export async function dispatch(
         id: `repo.${opAsk.op}`,
         input: { args: [opAsk.repo, opAsk.ref], options: {} },
       };
-      const res = await runChatCommand(deps, msg, io, translated, ending);
+      const res = await runChatCommand(deps, msg, io, translated, ending, trace);
       if (!(res.error === "not_found" || res.error === "unavailable")) {
         await ending.sealAfterReply(
           async () => {},
-          () => io.reply(res.text),
+          () => root.span("post.reply", () => io.reply(res.text)),
         );
         return;
       }
@@ -546,8 +595,10 @@ export async function dispatch(
     // Authorization gate: checked against the *resolved* agent and invoking
     // user, so no config layer (directives, user or channel scope) bypasses it.
     if (!deps.config.canRunAgent(msg.userId, resolved.agentName)) {
-      await io.reply(
-        `🚫 You're not on the allowlist for the \`${resolved.agentName}\` agent. Ask ${deps.config.adminsHint()} for access.`,
+      await refuse("agent_allowlist", () =>
+        io.reply(
+          `🚫 You're not on the allowlist for the \`${resolved.agentName}\` agent. Ask ${deps.config.adminsHint()} for access.`,
+        ),
       );
       return;
     }
@@ -579,7 +630,11 @@ export async function dispatch(
           lastStep: resume.lastStep.step,
           lastSeq: resume.lastSeq,
         });
-        await closeResumedRow(adopted, resume, "the thread has a newer run in flight");
+        await root.span(
+          "dispatch.admission",
+          () => closeResumedRow(adopted, resume, "the thread has a newer run in flight"),
+          { attrs: { outcome: "resume_superseded" } },
+        );
       }
       console.log(
         `[resume] ${msg.threadKey} run ${resume.row.runId} not resumed: the thread has a newer run in flight — closed interrupted`,
@@ -592,8 +647,10 @@ export async function dispatch(
       // run that one too (invariant 3 — no path runs an agent for a user the
       // allowlist excludes, and "run" includes "is heard by").
       if (!deps.config.canRunAgent(msg.userId, claim.live.agent)) {
-        await io.reply(
-          `🚫 You're not on the allowlist for the \`${claim.live.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
+        await refuse("live_agent_allowlist", () =>
+          io.reply(
+            `🚫 You're not on the allowlist for the \`${claim.live.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
+          ),
         );
         return;
       }
@@ -602,7 +659,7 @@ export async function dispatch(
         console.log(
           `[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${claim.live.agent} run in flight`,
         );
-        await io.reply(refusalReply(claim.live, decision, Date.now()));
+        await refuse("follow_up_refused", () => io.reply(refusalReply(claim.live, decision, clock())));
         return;
       }
       claim.live.inbox.push({
@@ -612,14 +669,16 @@ export async function dispatch(
         ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
         ...(msg.images !== undefined ? { images: msg.images } : {}),
         ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-        at: Date.now(),
+        at: clock(),
         msg,
         io,
       });
       console.log(
         `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending)`,
       );
-      await io.reply(steerAck(claim.live, Date.now()));
+      await root.span("dispatch.admission", () => io.reply(steerAck(claim.live, clock())), {
+        attrs: { outcome: "steered" },
+      });
       return;
     }
     admitted = claim.live;
@@ -655,20 +714,22 @@ export async function dispatch(
     // resolver (tests) is called as before. STARTED here (a promise) so the
     // GitHub round trip overlaps the memory read below; awaited after the ack.
     const needsRepo = agent.resources?.repo === "required";
-    const repoCtxP: Promise<RepoContext> = resume
-      ? Promise.resolve(resume.repoCtx)
-      : needsRepo
-        ? Promise.resolve(
-            deps.resolveRepoContext
-              ? deps.resolveRepoContext(msg, history)
-              : resolveRepoContext(
-                  msg,
-                  history,
-                  residentOnboardedProbe(deps.config.config.execution?.resident),
-                  residentSlugsLister(deps.config.config.execution?.resident),
-                ),
-          ).then((ctx) => ctx ?? {})
-        : Promise.resolve({});
+    const repoCtxP: Promise<RepoContext> = root.span("dispatch.repo_context", () =>
+      resume
+        ? Promise.resolve(resume.repoCtx)
+        : needsRepo
+          ? Promise.resolve(
+              deps.resolveRepoContext
+                ? deps.resolveRepoContext(msg, history)
+                : resolveRepoContext(
+                    msg,
+                    history,
+                    residentOnboardedProbe(deps.config.config.execution?.resident),
+                    residentSlugsLister(deps.config.config.execution?.resident),
+                  ),
+            ).then((ctx) => ctx ?? {})
+          : Promise.resolve({}),
+    );
     repoCtxP.catch(() => {});
 
     // Cross-session memory (Area 7c, #85) — READ path, STARTED here and awaited
@@ -684,13 +745,15 @@ export async function dispatch(
     // catch keeps an early return (repo refusal, ask-once) from leaving the
     // rejection unhandled; the real await below still surfaces a failure where
     // it did.
-    const memoryBlockP = memoryContextBlock(
-      deps.config.config.organization,
-      deps.config.config.memory,
-      deps.memory,
-      directives.text,
-      msg.userId,
-      { channelId: msg.channelId, repo: repoCtxP.then((ctx) => ctx.repo) },
+    const memoryBlockP = root.span("dispatch.memory_read", () =>
+      memoryContextBlock(
+        deps.config.config.organization,
+        deps.config.config.memory,
+        deps.memory,
+        directives.text,
+        msg.userId,
+        { channelId: msg.channelId, repo: repoCtxP.then((ctx) => ctx.repo) },
+      ),
     );
     memoryBlockP.catch(() => {});
 
@@ -703,19 +766,28 @@ export async function dispatch(
     // leaving a spinner behind.
     // A resumed run's clock is the original start (its ledger row's), so the
     // card's elapsed time spans the whole run, not the resume.
-    const startedAt = resume?.row.startedAt ?? systemClock();
+    // The card's clock is the request's: it ticks from receipt (features/tracing.md).
+    const startedAt = resume?.row.startedAt ?? receivedAt;
     // One builder for every paint of this card (statusCardFrame.ts): the ack,
     // the spinner frames, the closes before the run starts, the done frame.
     const shell = createCardShell({
       label: `*${agent.name}* on \`${resolved.modelRef}\``,
       startedAt,
-      now: systemClock,
+      now: clock,
     });
     // Coalesced: the run below refreshes it on every event, the channel sees at
     // most one edit per STATUS_UPDATE_MIN_MS, always the newest frame.
-    const card = coalesceStatus(await io.status(shell.ack()), deps.statusUpdateMinMs ?? STATUS_UPDATE_MIN_MS);
+    const card = coalesceStatus(
+      await root.span("dispatch.ack_card", () => io.status(shell.ack())),
+      deps.statusUpdateMinMs ?? STATUS_UPDATE_MIN_MS,
+    );
     setupCard = card;
     setupShell = shell;
+    // From here the card names the setup step in flight (the card sink's
+    // display label — `attaching the workspace…`) until the agent loop starts;
+    // the setup heartbeat paints it.
+    trace.bindCard({ setupLabel: (label) => shell.setSetupLabel(label) });
+    setupHeartbeat = setInterval(() => card.update(shell.live()), 5000);
 
     // The repo/ref resolution started above (before the ack) lands here; the
     // gate below runs against it exactly as before.
@@ -734,17 +806,21 @@ export async function dispatch(
     if (needsRepo && !repoCtx.repo && repoCtx.rejectedRepo) {
       const slug = repoCtx.rejectedRepo;
       console.log(`[dispatch] ${msg.threadKey} not started: repo not onboarded (${slug})`);
-      await card.done(shell.close({ kind: "not_started", icon: "📦", reason: "repo not onboarded" }));
       // `repo onboard` is admin-gated (canManageRepos, fail-closed): only tell
       // someone to run it if they can; everyone else is pointed at who can.
       const onboardHint = deps.config.canManageRepos(msg.userId)
         ? `Onboard it (\`repo onboard ${slug}\`)`
         : `Ask ${deps.config.adminsHint()} to onboard it (\`repo onboard ${slug}\`)`;
-      await io.reply(
-        `📦 \`${slug}\` is not onboarded as a resident, so I did not start a *${agent.name}* run for it. ` +
-          `${onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
-          `(https://github.com/${slug}) to run in a cold per-thread sandbox.`,
-      );
+      await refuse("repo_not_onboarded", async () => {
+        await card.done(
+          shell.close({ kind: "not_started", icon: "📦", reason: "repo not onboarded", ...closeLines(clock(), false) }),
+        );
+        await io.reply(
+          `📦 \`${slug}\` is not onboarded as a resident, so I did not start a *${agent.name}* run for it. ` +
+            `${onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
+            `(https://github.com/${slug}) to run in a cold per-thread sandbox.`,
+        );
+      });
       return;
     }
 
@@ -759,11 +835,20 @@ export async function dispatch(
       console.log(
         `[dispatch] ${msg.threadKey} not started: repo could not be verified (${slug}: resident registry unreachable)`,
       );
-      await card.done(shell.close({ kind: "not_started", icon: "📦", reason: "repo could not be verified" }));
-      await io.reply(
-        `⚠️ I couldn't verify that \`${slug}\` is an onboarded repo — the resident registry didn't answer — so I did not start a *${agent.name}* run rather than guess which repo you meant. ` +
-          `Try again in a minute, or name the repository by URL (https://github.com/${slug}) to run in a cold per-thread sandbox.`,
-      );
+      await refuse("repo_unverified", async () => {
+        await card.done(
+          shell.close({
+            kind: "not_started",
+            icon: "📦",
+            reason: "repo could not be verified",
+            ...closeLines(clock(), false),
+          }),
+        );
+        await io.reply(
+          `⚠️ I couldn't verify that \`${slug}\` is an onboarded repo — the resident registry didn't answer — so I did not start a *${agent.name}* run rather than guess which repo you meant. ` +
+            `Try again in a minute, or name the repository by URL (https://github.com/${slug}) to run in a cold per-thread sandbox.`,
+        );
+      });
       return;
     }
 
@@ -771,10 +856,15 @@ export async function dispatch(
     // the repo is unlisted; a configured allowlist refuses BY NAME — a
     // refused user must see why, never get a silent per-thread fallback.
     if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(msg.userId, repoCtx.repo)) {
-      await card.done(shell.close({ kind: "not_started", icon: "🚫", reason: "repo access" }));
-      await io.reply(
-        `🚫 You're not on the allowlist for the \`${repoCtx.repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`,
-      );
+      const repo = repoCtx.repo;
+      await refuse("repo_access", async () => {
+        await card.done(
+          shell.close({ kind: "not_started", icon: "🚫", reason: "repo access", ...closeLines(clock(), false) }),
+        );
+        await io.reply(
+          `🚫 You're not on the allowlist for the \`${repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`,
+        );
+      });
       return;
     }
 
@@ -787,6 +877,7 @@ export async function dispatch(
     // its own card and persisted its failed record.
     if (agent.name === "ship") {
       setupCard = undefined; // the ship branch owns the card from here
+      clearInterval(setupHeartbeat);
       await runShipBranch(deps, msg, io, {
         agent,
         modelRef: resolved.modelRef,
@@ -800,6 +891,9 @@ export async function dispatch(
         memoryBlockP,
         live: admitted,
         ending,
+        trace,
+        closeLines,
+        refuse,
       });
       return;
     }
@@ -820,8 +914,12 @@ export async function dispatch(
     const preflight = checkPrHeadPreflight({ agent, requestText: directives.text, repoCtx });
     if (!preflight.ok) {
       console.log(`[review] ${msg.threadKey} not started: PR head unknown (${preflight.where})`);
-      await card.done(shell.close({ kind: "not_started", icon: "🔀", reason: "PR head unknown" }));
-      await io.reply(preflight.reply);
+      await refuse("pr_head_unknown", async () => {
+        await card.done(
+          shell.close({ kind: "not_started", icon: "🔀", reason: "PR head unknown", ...closeLines(clock(), false) }),
+        );
+        await io.reply(preflight.reply);
+      });
       return;
     }
 
@@ -830,14 +928,20 @@ export async function dispatch(
     // release("always"); writable → release("if-clean").
     let round: RoundWorkspace;
     try {
-      round = await attachRoundWorkspace({
-        factory: {
-          execution: deps.config.config.execution,
-          workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
-          dataDir: deps.dataDir ?? "./data",
-        },
-        round: { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
-        logKey: msg.threadKey,
+      // The attach is one `dispatch.workspace.attach` span naming its backend
+      // (features/tracing.md): the setup step that takes minutes on a cold clone.
+      round = await root.span("dispatch.workspace.attach", async (span) => {
+        const attached = await attachRoundWorkspace({
+          factory: {
+            execution: deps.config.config.execution,
+            workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
+            dataDir: deps.dataDir ?? "./data",
+          },
+          round: { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
+          logKey: msg.threadKey,
+        });
+        if (attached.selection.backend) span.setAttrs({ backend: attached.selection.backend });
+        return attached;
       });
     } catch (err) {
       // Ask-once (KTD6): the resident has no ref binding for this thread, the
@@ -849,11 +953,16 @@ export async function dispatch(
       // user's answer in the thread (e.g. "on main") carries the ref on the
       // next message and re-attach binds it.
       if (err instanceof ResidentNeedsRefError) {
-        await card.done(shell.close({ kind: "not_started", icon: "🌿", reason: "which branch?" }));
-        await io.reply(
-          `🌿 Which branch of \`${repoCtx.repo}\` should this thread work on? ` +
-            `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
-        );
+        const repo = repoCtx.repo;
+        await refuse("which_branch", async () => {
+          await card.done(
+            shell.close({ kind: "not_started", icon: "🌿", reason: "which branch?", ...closeLines(clock(), false) }),
+          );
+          await io.reply(
+            `🌿 Which branch of \`${repo}\` should this thread work on? ` +
+              `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
+          );
+        });
         return;
       }
       throw err;
@@ -871,13 +980,18 @@ export async function dispatch(
     // pool user released, no provider call.
     let verifiedAtAttach = false;
     if (!resume && agent.name === "review" && resident && repoCtx.pr !== undefined && repoCtx.repo) {
-      const guard = await guardAttachedHead({
-        pr: { repo: repoCtx.repo, number: repoCtx.pr },
-        expectedHeadSha: repoCtx.headSha,
-        attached: { sha: binding?.sha, ref: binding?.ref },
-        fallbackRef: repoCtx.ref,
-        fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-        logKey: msg.threadKey,
+      const pr = { repo: repoCtx.repo, number: repoCtx.pr };
+      const guard = await root.span("dispatch.gate.attached_head", async (span) => {
+        const g = await guardAttachedHead({
+          pr,
+          expectedHeadSha: repoCtx.headSha,
+          attached: { sha: binding?.sha, ref: binding?.ref },
+          fallbackRef: repoCtx.ref,
+          fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+          logKey: msg.threadKey,
+        });
+        span.setAttrs({ outcome: g.outcome });
+        return g;
       });
       if (guard.outcome === "verified") {
         verifiedAtAttach = true;
@@ -885,9 +999,14 @@ export async function dispatch(
         repoCtx = { ...repoCtx, headSha: guard.headSha };
         verifiedAtAttach = true;
       } else if (guard.outcome === "refused") {
-        if (executor.release) await executor.release("always").catch(() => {});
-        await card.done(shell.close({ kind: "not_started", icon: "🔀", reason: "branch moved" }));
-        await io.reply(guard.reply);
+        const reply = guard.reply;
+        await refuse("branch_moved", async () => {
+          if (executor.release) await executor.release("always").catch(() => {});
+          await card.done(
+            shell.close({ kind: "not_started", icon: "🔀", reason: "branch moved", ...closeLines(clock(), false) }),
+          );
+          await io.reply(reply);
+        });
         return;
       }
     }
@@ -915,8 +1034,11 @@ export async function dispatch(
     // that does not answer contributes no tools and is named in the MCP block
     // (and, once the run is registered, in an `mcp_unavailable` note). No
     // source, or nothing scoped → no tools, no block, request unchanged.
-    const mcpForRun = deps.mcp
-      ? await deps.mcp.toolsFor(agent.name, { userId: msg.userId, channelId: msg.channelId })
+    const mcp = deps.mcp;
+    const mcpForRun = mcp
+      ? await root.span("dispatch.mcp_discovery", () =>
+          mcp.toolsFor(agent.name, { userId: msg.userId, channelId: msg.channelId }),
+        )
       : undefined;
     const mcpBlock = mcpForRun ? mcpGuidanceBlock(mcpForRun.servers) : undefined;
 
@@ -973,7 +1095,9 @@ export async function dispatch(
     // Retrieval was started before the repo resolution and executor selection
     // above; by now it has usually landed. The shared AgentDef is never
     // mutated (concurrent dispatches share it).
-    const memoryBlock = await memoryBlockP;
+    // The prompt waits on the memory read here: `dispatch.compose` is that wait
+    // (the composition itself is synchronous).
+    const memoryBlock = await root.span("dispatch.compose", () => memoryBlockP);
     const composeSystem = makeSystemComposer({
       agent,
       resident: resident === true,
@@ -1006,6 +1130,7 @@ export async function dispatch(
     if (note) shell.setLabel(`${shell.label} · ${oneLine(note)}`);
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
     setupCard = undefined; // from here the run loop owns the card's close
+    clearInterval(setupHeartbeat);
     card.update(shell.live()); // the ack card becomes the run card
     let lastActivityAt = Date.now();
     // Live run view (Area 2 / #43): register the run and mint its capability
@@ -1030,7 +1155,9 @@ export async function dispatch(
     });
     // The registry redacts and caps the label; `run.label` is the one the record
     // and the friction row carry (never `runLabel`, which may hold a pasted secret).
-    const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
+    const channelVisibility = await root.span("dispatch.channel_visibility", () =>
+      channelVisibilityOf(deps, msg.channelId),
+    );
     const run = registry.create(
       runLabel,
       {
@@ -1040,13 +1167,16 @@ export async function dispatch(
         userId: msg.userId,
         threadKey: msg.threadKey,
         channelVisibility,
+        ...(resume ? {} : { receivedAt }), // the window opens at receipt (features/tracing.md); a resume keeps its original stamps
         ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
         ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
         ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       },
       resume ? { id: resume.row.runId, replay: resume.events, startedAt: resume.row.startedAt } : {},
     );
-    const root = startRunRoot(deps, registry, run.id);
+    // The run's stream now carries the request's spans: the setup so far is
+    // backfilled, everything from here is live (features/tracing.md item 6).
+    trace.bindRun(run.id, (e) => registry.publish(run.id, e));
     if (resume) {
       console.log(
         `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger?.gen ?? "no ledger"}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
@@ -1106,6 +1236,7 @@ export async function dispatch(
         type: "run_meta",
         agent: agent.name,
         model: resolved.modelRef,
+        traceId: root.traceId,
         ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
         ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
         ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
@@ -1171,41 +1302,44 @@ export async function dispatch(
     // row on the thread, no routes, a claim that kept failing) runs exactly as
     // before — the write-through warned once.
     if (deps.runLedger && !resume) {
-      const opened = await deps.runLedger.open({
-        runId: run.id,
-        threadKey: msg.threadKey,
-        startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? Date.now(),
-        meta: {
-          agent: agent.name,
-          model: resolved.modelRef,
-          channelId: msg.channelId,
-          userId: msg.userId,
+      const ledger = deps.runLedger;
+      const opened = await root.span("dispatch.ledger_claim", () =>
+        ledger.open({
+          runId: run.id,
           threadKey: msg.threadKey,
-          channelVisibility,
-          ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-          ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-          ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-          ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-          ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
-          ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-          ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
-          readonly: agent.toolset === "readonly",
-          selection: resident === true ? "resident" : "sandbox",
-          ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
-        },
-        card: card.handle ?? null,
-        system,
-        tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
-          ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
-        ),
-        seed: { messages, budgetMs: agent.maxMinutes * 60_000 },
-        // A stop asked of another container (`/runs/stop` there) reaches this
-        // run through its heartbeat and is honored like a local one; a fence
-        // (another generation took the run) is a hard stop — nothing more may
-        // run or reply here (D9).
-        onStop: (mode) => void run.control.requestStop(mode),
-        onFenced: () => void run.control.requestStop("hard"),
-      });
+          startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? Date.now(),
+          meta: {
+            agent: agent.name,
+            model: resolved.modelRef,
+            channelId: msg.channelId,
+            userId: msg.userId,
+            threadKey: msg.threadKey,
+            channelVisibility,
+            ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+            ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+            ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
+            ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
+            ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
+            readonly: agent.toolset === "readonly",
+            selection: resident === true ? "resident" : "sandbox",
+            ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
+          },
+          card: card.handle ?? null,
+          system,
+          tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
+            ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
+          ),
+          seed: { messages, budgetMs: agent.maxMinutes * 60_000 },
+          // A stop asked of another container (`/runs/stop` there) reaches this
+          // run through its heartbeat and is honored like a local one; a fence
+          // (another generation took the run) is a hard stop — nothing more may
+          // run or reply here (D9).
+          onStop: (mode) => void run.control.requestStop(mode),
+          onFenced: () => void run.control.requestStop("hard"),
+        }),
+      );
       if (opened) {
         ledgerRun = opened;
         // Every event published so far (the request, run_meta, context) and
@@ -1341,13 +1475,23 @@ export async function dispatch(
         baseRef: repoCtx.baseRef,
         publish: (e) => registry.publish(run.id, e),
       });
-      readingDiffBaseline = started.baseline.then((published) => {
-        console.log(`[reading-diff] ${msg.threadKey} baseline ${published ? "published" : "none"}`);
-        return published;
-      });
-      void started.upgrade?.then((published) =>
-        console.log(`[reading-diff] ${msg.threadKey} meat ${published ? "published" : "did not land"}`),
+      // Two background spans (features/tracing.md): concurrent with the loop,
+      // structure for the partition, never a counted term.
+      readingDiffBaseline = root.span("run.reading_diff", (span) =>
+        started.baseline.then((published) => {
+          span.setAttrs({ outcome: published ? "published" : "none" });
+          console.log(`[reading-diff] ${msg.threadKey} baseline ${published ? "published" : "none"}`);
+          return published;
+        }),
       );
+      const upgrade = started.upgrade;
+      if (upgrade)
+        void root.span("run.reading_diff.upgrade", (span) =>
+          upgrade.then((published) => {
+            span.setAttrs({ outcome: published ? "published" : "did_not_land" });
+            console.log(`[reading-diff] ${msg.threadKey} meat ${published ? "published" : "did not land"}`);
+          }),
+        );
     }
 
     let answer: string;
@@ -1406,6 +1550,7 @@ export async function dispatch(
     // is told the review was carried forward.
     let carried: { reviewed: string; current: string; commits: number } | undefined;
     let runFailed = false; // the runner threw → terminal status `failed`
+    let runFinishedAt: number | undefined; // the registry's finish stamp, for the done card's window
     // Give the workspace back now rather than at the inactivity sweep: a
     // resident's pool user is a scarce slot (features/resident-repos.md item
     // 16a). The release mode is paired to the round's agent by the attach
@@ -1528,10 +1673,12 @@ export async function dispatch(
       // posted.
       if (isCodingPrRun && run.control.requested !== "hard") {
         const pushedBranch = pushes.branch();
-        const observed = await observeCodingWorkspace(executor, {
-          probeRemote: repoCtx.repo === undefined,
-          ...(pushedBranch !== undefined ? { pushedBranch } : {}),
-        });
+        const observed = await root.span("run.observe_workspace", () =>
+          observeCodingWorkspace(executor, {
+            probeRemote: repoCtx.repo === undefined,
+            ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+          }),
+        );
         observedHead = observed.head;
         observedBranch = observed.branch;
         observedCheckedOut = observed.checkedOut;
@@ -1564,21 +1711,28 @@ export async function dispatch(
       // resident check is needed. The note rides on the final reply below. A
       // hard stop observed nothing above and posts nothing.
       if (isCodingPrRun && run.control.requested !== "hard") {
-        prNote = await runCodingPrPostStep({
-          observed: {
-            head: observedHead,
-            branch: observedBranch,
-            checkedOut: observedCheckedOut,
-            remoteHead: observedRemoteHead,
-            remoteRepo: observedRemoteRepo,
-          },
-          description: prDescription,
-          target: { repo: repoCtx.repo, baseRef: repoCtx.baseRef, bindingRef: binding?.ref, resolvedRef: repoCtx.ref },
-          openPullRequest: deps.openPullRequest ?? openPullRequest,
-          fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
-          publish: (e) => registry.publish(run.id, e),
-          logKey: msg.threadKey,
-        });
+        prNote = await root.span("run.pr_post_step", () =>
+          runCodingPrPostStep({
+            observed: {
+              head: observedHead,
+              branch: observedBranch,
+              checkedOut: observedCheckedOut,
+              remoteHead: observedRemoteHead,
+              remoteRepo: observedRemoteRepo,
+            },
+            description: prDescription,
+            target: {
+              repo: repoCtx.repo,
+              baseRef: repoCtx.baseRef,
+              bindingRef: binding?.ref,
+              resolvedRef: repoCtx.ref,
+            },
+            openPullRequest: deps.openPullRequest ?? openPullRequest,
+            fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
+            publish: (e) => registry.publish(run.id, e),
+            logKey: msg.threadKey,
+          }),
+        );
       }
       // The run record is the source of truth and Slack/GitHub are projections
       // of it: publish the final answer into the stream FIRST (redacted like
@@ -1591,7 +1745,8 @@ export async function dispatch(
       // (which drops later publishes). This is a join on the git command fired
       // at run start, not a timeout: by now it finished minutes ago. The meat
       // upgrade is deliberately NOT awaited — see the comment at the start.
-      if (readingDiffBaseline) await readingDiffBaseline;
+      const baseline = readingDiffBaseline;
+      if (baseline) await root.span("run.reading_diff_join", () => baseline);
       // Typed-output boundary (features/llm-output.md item 5): the answer is
       // canonicalized ONCE here, so the event text, the channel reply, the
       // GitHub post, and memory all read one Markdown dialect; the model's raw
@@ -1602,7 +1757,7 @@ export async function dispatch(
       publishText("answer", answer, undefined, rawAnswer);
     } catch (err) {
       runFailed = true;
-      await releaseWorkspace();
+      await root.span("post.workspace_release", () => releaseWorkspace());
       throw err;
     } finally {
       clearInterval(heartbeat);
@@ -1632,6 +1787,7 @@ export async function dispatch(
       const events = snap?.events ?? [];
       const diagnosis = analyzeRunFriction(events, { finished: true, truncated: snap?.truncated ?? false });
       const finishedAt = snap?.finishedAt ?? Date.now(); // the registry's finish clock: row and record agree
+      runFinishedAt = finishedAt;
       // The channel's receipt (id + terminal status, never the token): a
       // single-shot channel hands it to its caller — the Worker shim records a
       // scheduled firing's run from it (#244).
@@ -1639,7 +1795,7 @@ export async function dispatch(
       // The run finished: it is sealed by the next drain (after the reply), and
       // its record — everything captured now, assembled after the seal — is
       // written by that drain. The card's total stops at the finish stamp.
-      ending.finished(run.id, { afterSeal: () => root.end() }); // the root closes after the stream (features/tracing.md)
+      ending.finished(run.id);
       shell.freeze(finishedAt);
       if (deps.runHistoryWriter) {
         const writer = deps.runHistoryWriter;
@@ -1671,7 +1827,14 @@ export async function dispatch(
       // cross-run proposer reads (#84) is run history, so nothing is written twice.
       // A run whose loop threw closes its card here, after the finish, so the
       // card's total is the run's; the outer catch replies and drains.
-      if (runFailed) await card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail() })).catch(() => {});
+      if (runFailed)
+        await root
+          .span("post.card_close", () =>
+            card.done(
+              shell.close({ kind: "done", icon: "❌", detail: finalDetail(), ...closeLines(finishedAt, true) }),
+            ),
+          )
+          .catch(() => {});
     }
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
@@ -1695,7 +1858,7 @@ export async function dispatch(
       // run while it ran (a handoff, or a lease that lapsed) and is driving it
       // now: nothing more reaches the thread from here — the record is theirs.
       ledgerRun?.setState({ finalStatus: stopped ? `stopped_${stopped}` : "completed" });
-      if ((await ledgerRun?.finishing()) === "fenced") {
+      if ((await root.span("post.ledger_finishing", () => ledgerRun?.finishing())) === "fenced") {
         // Nothing more from here: no reply, no card close, and no record — the
         // run is the other generation's now and its record is theirs to write
         // (a partial record from this process could race the real finish). The
@@ -1725,17 +1888,20 @@ export async function dispatch(
       // reply.
       await ending.sealAfterReply(
         () =>
-          card.done(
-            shell.close({
-              kind: "done",
-              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
-              detail: stopped ? finalDetail() : checkedOffDetail(),
-            }),
+          root.span("post.card_close", () =>
+            card.done(
+              shell.close({
+                kind: "done",
+                icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
+                detail: stopped ? finalDetail() : checkedOffDetail(),
+                ...closeLines(runFinishedAt ?? clock(), true),
+              }),
+            ),
           ),
-        () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer),
+        () => root.span("post.reply", () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer)),
       );
     } finally {
-      await releaseWorkspace();
+      await root.span("post.workspace_release", () => releaseWorkspace());
     }
 
     // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has
@@ -1781,43 +1947,57 @@ export async function dispatch(
     // nothing is posted; a soft stop's "findings so far" finale posts as
     // usual. Deliberately AFTER the workspace release and registry finish
     // above — the plain path's lifecycle position is unchanged.
-    await runReviewPostStep({
-      agent,
-      requestText: directives.text,
-      repoCtx,
-      heads: { reviewHead, observedHead },
-      verdict,
-      answer,
-      carried,
-      hardStopped: stopped === "hard",
-      post: deps.postReviewComment ?? postReviewComment,
-      fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-      reply: (text) => io.reply(text),
-      logKey: msg.threadKey,
-    });
+    await root.span("post.review_post", () =>
+      runReviewPostStep({
+        agent,
+        requestText: directives.text,
+        repoCtx,
+        heads: { reviewHead, observedHead },
+        verdict,
+        answer,
+        carried,
+        hardStopped: stopped === "hard",
+        post: deps.postReviewComment ?? postReviewComment,
+        fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+        reply: (text) => io.reply(text),
+        logKey: msg.threadKey,
+      }),
+    );
   } catch (err) {
+    caught = true;
     const errMsg = err instanceof Error ? err.message : String(err);
     // A card left spinning after a setup failure looks like a hang; close it.
     // Only a card still in setup — a run failure was already closed by the run
     // loop with its checklist, and must not be relabeled here.
     // Item 62: the error may carry remote text (a resident reason, a GitHub
     // body) — one redacted line on the card, a redacted reply in the thread.
-    if (setupCard && setupShell)
-      await setupCard
-        .done(setupShell.close({ kind: "setup_failed", reason: oneLine(redactAndCap(errMsg, 120)) }))
-        .catch(() => {});
+    if (setupCard && setupShell) {
+      const [failedCard, failedShell] = [setupCard, setupShell];
+      await refuse("setup_failed", () =>
+        failedCard.done(
+          failedShell.close({
+            kind: "setup_failed",
+            reason: oneLine(redactAndCap(errMsg, 120)),
+            ...closeLines(clock(), false),
+          }),
+        ),
+      ).catch(() => {});
+    }
     // The error reply seals whatever finished run is still unsealed (a run
     // whose loop threw: `replyOk` says how this reply went) and drains: the
     // `failed` record is written now. A setup failure before any run started
     // has nothing to seal or write. A run whose card close or reply threw was
     // already sealed and written by its own wrap; this is a no-op for it.
+    // A run's failure reply is a `post.reply`; a setup failure's is the refusal.
+    const replyName = root.record().attrs.runId !== undefined ? "post.reply" : "dispatch.refuse";
     await ending
       .sealAfterReply(
         async () => {},
-        () => io.reply(redactSecrets(stripAnsi(errorReply(err)))),
+        () => root.span(replyName, () => io.reply(redactSecrets(stripAnsi(errorReply(err))))),
       )
       .catch(() => {});
   } finally {
+    clearInterval(setupHeartbeat); // a refusal or a setup failure ended the request before the run loop took the card
     // The backstop: a finished run no reply attempt reached (a fenced run, a
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
@@ -1827,7 +2007,10 @@ export async function dispatch(
     // (item 38). Close it `interrupted` here, or the sweep would relaunch it
     // every lease interval forever.
     if (resume && ledgerRun && !liveControl) {
-      await closeResumedRow(ledgerRun, resume, "the resumed dispatch ended before the run started");
+      const adopted = ledgerRun;
+      await root.span("post.history_write", () =>
+        closeResumedRow(adopted, resume, "the resumed dispatch ended before the run started"),
+      );
       console.log(
         `[resume] ${msg.threadKey} run ${resume.row.runId} closed interrupted: the resumed dispatch ended before the run started`,
       );
@@ -1841,32 +2024,51 @@ export async function dispatch(
     // each sender is told their follow-up was not run. The fresh turn is an
     // ordinary dispatch: it claims the thread itself, and a follow-up arriving
     // during it steers into it.
-    if (admitted) {
-      const pending = admission.release(msg.threadKey, admitted);
-      if (pending.length > 0) {
-        const stopMode: StopMode | undefined = liveControl?.requested;
-        if (stopMode) {
-          console.log(`[dispatch] ${msg.threadKey} ${pending.length} follow-up(s) dropped: run stopped (${stopMode})`);
-          for (const p of pending) await p.io.reply(FOLLOW_UP_DROPPED_BY_STOP).catch(() => {});
-        } else {
-          const merged = mergeFollowUps(pending)!;
-          const last = pending[pending.length - 1];
-          console.log(`[dispatch] ${msg.threadKey} ${pending.length} unconsumed follow-up(s) → fresh turn`);
-          // Pinned to the agent the follow-ups were addressed to: they were
-          // admitted as input FOR this run's agent (a different one would have
-          // been refused), so the fresh turn must not fall back to whatever the
-          // thread's history or the channel default resolves to.
-          await dispatch(
-            deps,
-            { ...last.msg, ...merged, text: `agent:${admitted.agent} ${merged.text}` },
-            last.io,
-          ).catch((err: unknown) =>
-            console.error(
-              `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
-            ),
-          );
-        }
-      }
+    const pending = admitted ? admission.release(msg.threadKey, admitted) : [];
+    const stopMode: StopMode | undefined = liveControl?.requested;
+    if (pending.length > 0 && stopMode) {
+      console.log(`[dispatch] ${msg.threadKey} ${pending.length} follow-up(s) dropped: run stopped (${stopMode})`);
+      await root.span("post.followups", async () => {
+        for (const p of pending) await p.io.reply(FOLLOW_UP_DROPPED_BY_STOP).catch(() => {});
+      });
+    }
+    // The request is over: its root ends here, after the seal and the tail,
+    // with how it went — before the fresh turn below starts a root of its own.
+    root.end(caught ? "error" : "ok", {
+      status: caught ? "failed" : refused ? "refused" : stopMode ? "stopped" : "completed",
+    });
+    if (pending.length > 0 && !stopMode && admitted) {
+      const merged = mergeFollowUps(pending)!;
+      const last = pending[pending.length - 1];
+      console.log(`[dispatch] ${msg.threadKey} ${pending.length} unconsumed follow-up(s) → fresh turn`);
+      // The fresh turn is a request of its own (features/tracing.md): it was
+      // received NOW, and it waited behind this run since its earliest
+      // follow-up arrived — the `queued … behind the previous run` caption.
+      const freshAt = clock();
+      const earliestAt = Math.min(...pending.map((p) => p.at));
+      const fresh = startRequestRoot(deps, { channel: channelOf(last.msg.channelId), receivedAt: freshAt });
+      // Pinned to the agent the follow-ups were addressed to: they were
+      // admitted as input FOR this run's agent (a different one would have
+      // been refused), so the fresh turn must not fall back to whatever the
+      // thread's history or the channel default resolves to.
+      await dispatch(
+        deps,
+        // The follow-up's own platform stamp stays behind: the fresh turn's
+        // wait is `queuedBehindMs`, not a `queued … before we saw it`.
+        {
+          ...last.msg,
+          ...merged,
+          text: `agent:${admitted.agent} ${merged.text}`,
+          receivedAt: freshAt,
+          originAt: undefined,
+        },
+        last.io,
+        { trace: fresh, queuedBehindMs: Math.max(0, freshAt - earliestAt) },
+      ).catch((err: unknown) =>
+        console.error(
+          `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
     }
     // The ledger heartbeat stops with the run (the finish write, in flight
     // through the writer, closes the row itself).
@@ -1898,6 +2100,12 @@ interface ShipBranchContext {
   live: LiveThread<DispatchFollowUp>;
   /** The dispatch's run ending: the ship run seals after its reply like any other. */
   ending: RunEnding;
+  /** The request's trace (features/tracing.md): the ship run binds to it, its steps are spans under the root. */
+  trace: RequestTrace;
+  /** The card's shape and queued lines at a close, from the dispatch's window. */
+  closeLines: (end: number, finished: boolean, owner?: RunOwner) => { shape?: string; queued?: string };
+  /** A refusal as one `dispatch.refuse` span. */
+  refuse: <T>(outcome: string, fn: () => Promise<T>) => Promise<T>;
 }
 
 /**
@@ -1915,24 +2123,33 @@ async function runShipBranch(
   io: ChannelIO,
   ctx: ShipBranchContext,
 ): Promise<void> {
-  const { agent, card, directives, history, repoCtx, label, ending } = ctx;
+  // `closeLines` keeps its default owner (`agent`): a ship run's children are
+  // agent runs, so its `run.command` grafts — none today — would count as
+  // getting ready, never as a command's own tools.
+  const { agent, card, directives, history, repoCtx, label, ending, trace, closeLines, refuse } = ctx;
+  const root = trace.root;
+  const clock = deps.clock ?? systemClock;
   // The same one-builder card shell as the main path, on the same label and clock.
-  const shell = createCardShell({ label, startedAt: ctx.startedAt, now: systemClock });
-  const pre = await shipPreflight({
-    channelId: msg.channelId,
-    threadKey: msg.threadKey,
-    requestText: directives.text,
-    repoCtx,
-    gates: { canRunAgent: (a) => deps.config.canRunAgent(msg.userId, a), adminsHint: () => deps.config.adminsHint() },
-    repoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
-    prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
-    selfIdentity: deps.fetchSelfIdentity ?? resolveGithubIdentity,
-    runsBase: process.env.PUBLIC_BASE_URL,
-  });
+  const shell = createCardShell({ label, startedAt: ctx.startedAt, now: clock });
+  const pre = await root.span("dispatch.ship_preflight", () =>
+    shipPreflight({
+      channelId: msg.channelId,
+      threadKey: msg.threadKey,
+      requestText: directives.text,
+      repoCtx,
+      gates: { canRunAgent: (a) => deps.config.canRunAgent(msg.userId, a), adminsHint: () => deps.config.adminsHint() },
+      repoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
+      prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
+      selfIdentity: deps.fetchSelfIdentity ?? resolveGithubIdentity,
+      runsBase: process.env.PUBLIC_BASE_URL,
+    }),
+  );
   if (!pre.ok) {
     console.log(`[ship] ${msg.threadKey} not started: ${pre.where}`);
-    await card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card }));
-    await io.reply(pre.reply);
+    await refuse("ship_preflight", async () => {
+      await card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card, ...closeLines(clock(), false) }));
+      await io.reply(pre.reply);
+    });
     return;
   }
   const entry = pre.entry;
@@ -1940,7 +2157,9 @@ async function runShipBranch(
   // The one run record (KTD2): registered and stamped exactly like the main
   // path — input, run_meta, bounded context, the #375 tombstone.
   const registry = deps.runRegistry ?? defaultRunRegistry;
-  const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
+  const channelVisibility = await root.span("dispatch.channel_visibility", () =>
+    channelVisibilityOf(deps, msg.channelId),
+  );
   const run = registry.create(
     composeRunLabel({
       agent: agent.name,
@@ -1958,6 +2177,7 @@ async function runShipBranch(
       userId: msg.userId,
       threadKey: msg.threadKey,
       channelVisibility,
+      receivedAt: trace.receivedAt,
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
@@ -1990,6 +2210,7 @@ async function runShipBranch(
     type: "run_meta",
     agent: agent.name,
     model: ctx.modelRef,
+    traceId: root.traceId,
     ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
     ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
     at: Date.now(),
@@ -2026,28 +2247,31 @@ async function runShipBranch(
   // pipeline mid-round is not built.
   let ledgerRun: LedgerRun | undefined;
   if (deps.runLedger) {
-    ledgerRun = await deps.runLedger.open({
-      runId: run.id,
-      threadKey: msg.threadKey,
-      startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? Date.now(),
-      meta: {
-        agent: agent.name,
-        model: ctx.modelRef,
-        channelId: msg.channelId,
-        userId: msg.userId,
+    const ledger = deps.runLedger;
+    ledgerRun = await root.span("dispatch.ledger_claim", () =>
+      ledger.open({
+        runId: run.id,
         threadKey: msg.threadKey,
-        channelVisibility,
-        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-        ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
-      },
-      card: card.handle ?? null,
-      system: "",
-      tools: [],
-      onStop: (mode) => void run.control.requestStop(mode),
-      onFenced: () => void run.control.requestStop("hard"),
-    });
+        startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? Date.now(),
+        meta: {
+          agent: agent.name,
+          model: ctx.modelRef,
+          channelId: msg.channelId,
+          userId: msg.userId,
+          threadKey: msg.threadKey,
+          channelVisibility,
+          ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+          ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+          ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+          ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
+        },
+        card: card.handle ?? null,
+        system: "",
+        tools: [],
+        onStop: (mode) => void run.control.requestStop(mode),
+        onFenced: () => void run.control.requestStop("hard"),
+      }),
+    );
     if (ledgerRun) {
       const opened = ledgerRun;
       registry.subscribe(run.id, run.token, {
@@ -2085,7 +2309,7 @@ async function runShipBranch(
     lastActivity = note;
     card.update(currentFrame());
   };
-  const root = startRunRoot(deps, registry, run.id);
+  trace.bindRun(run.id, (e) => registry.publish(run.id, e));
   const reportProgress = (list: string) => {
     const trimmed = list.trim();
     if (!trimmed) return; // never blank the durable progress record
@@ -2117,7 +2341,7 @@ async function runShipBranch(
   };
   const scopes = deps.config.scopes(msg.channelId, msg.userId);
   const instructionsBlock = customInstructionsBlock(scopes);
-  const memoryBlock = await ctx.memoryBlockP;
+  const memoryBlock = await root.span("dispatch.compose", () => ctx.memoryBlockP);
   const blocks = (spec: ShipChildSpec): ShipBlocks => ({
     memory: memoryBlock,
     config: configAwarenessBlock({
@@ -2145,6 +2369,7 @@ async function runShipBranch(
   shell.setLink(liveLink);
   const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
   let outcome: ShipOutcome | undefined;
+  let shipFinishedAt: number | undefined;
   try {
     outcome = await runShipPipeline({
       span: root,
@@ -2216,7 +2441,7 @@ async function runShipBranch(
     const diagnosis = analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false });
     const finishedAt = snap?.finishedAt ?? Date.now();
     io.runFinished?.({ id: run.id, status });
-    ending.finished(run.id, { afterSeal: () => root.end() }); // the root closes after the stream (features/tracing.md)
+    ending.finished(run.id);
     shell.freeze(finishedAt);
     if (deps.runHistoryWriter) {
       const writer = deps.runHistoryWriter;
@@ -2249,7 +2474,12 @@ async function runShipBranch(
     // A pipeline that threw closes its card here, after the finish, so the
     // card's total is the run's.
     if (outcome === undefined)
-      await card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail() })).catch(() => {});
+      await root
+        .span("post.card_close", () =>
+          card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail(), ...closeLines(finishedAt, true) })),
+        )
+        .catch(() => {});
+    shipFinishedAt = finishedAt;
   }
   if (!outcome) return; // unreachable: the catch above rethrew
   console.log(`[done] ${msg.threadKey} ship ${outcome.reply.length} chars (${outcome.status})`);
@@ -2268,7 +2498,7 @@ async function runShipBranch(
   ledgerRun?.setState({
     finalStatus: outcome.status === "stopped_soft" || outcome.status === "stopped_hard" ? outcome.status : "completed",
   });
-  if ((await ledgerRun?.finishing()) === "fenced") {
+  if ((await root.span("post.ledger_finishing", () => ledgerRun?.finishing())) === "fenced") {
     console.log(`[ship] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
     ending.drop(run.id); // the record is the other generation's; the outer finally still seals the stream here
     return;
@@ -2281,14 +2511,17 @@ async function runShipBranch(
   // keeps its terminal status for the TTL, exactly like the main path.
   await ending.sealAfterReply(
     () =>
-      card.done(
-        shell.close({
-          kind: "done",
-          icon,
-          detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
-        }),
+      root.span("post.card_close", () =>
+        card.done(
+          shell.close({
+            kind: "done",
+            icon,
+            detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
+            ...closeLines(shipFinishedAt ?? clock(), true),
+          }),
+        ),
       ),
-    () => io.reply(outcome.reply),
+    () => root.span("post.reply", () => io.reply(outcome.reply)),
   );
 }
 
@@ -2328,6 +2561,7 @@ async function runChatCommand(
   io: ChannelIO,
   parsed: ParsedChatCommand,
   ending: RunEnding,
+  trace: RequestTrace,
 ): Promise<ChatCommandResult> {
   const commands = deps.commands;
   if (!commands) return { ok: false, text: "" };
@@ -2335,8 +2569,10 @@ async function runChatCommand(
     (await resolveRepoForCommand(deps, msg, await io.history())).repo;
   const invoke = () => invokeChatCommand({ commands, parsed, msg, config: deps.config, resolveRepo });
   if (parsed.kind === "invoke" && isInlineRunCommand(parsed.id))
-    return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending);
-  return invoke();
+    return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace);
+  // A config reply, a listing, `help`: no run — the command's own work is the
+  // request's one step, log-only.
+  return trace.root.span("run.command", invoke, { attrs: { command: parsed.kind === "invoke" ? parsed.id : "help" } });
 }
 
 /**
@@ -2368,9 +2604,10 @@ export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatComman
   });
 }
 
-function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined>, io: ChannelIO): void {
-  void followUp()
-    .then((outcome) => (outcome ? io.reply(outcome.text) : undefined))
+function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined>, io: ChannelIO, root: Span): void {
+  // Minutes after the request ended: a late child of its root, log-only.
+  void root
+    .span("post.settled_outcome", () => followUp().then((outcome) => (outcome ? io.reply(outcome.text) : undefined)))
     .catch((err) => console.error("[command] settle follow-up failed:", err));
 }
 
@@ -2395,9 +2632,13 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
   io: ChannelIO,
   execute: () => Promise<T>,
   ending: RunEnding,
+  trace: RequestTrace,
 ): Promise<T> {
   const registry = deps.runRegistry ?? defaultRunRegistry;
-  const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
+  const root = trace.root;
+  const channelVisibility = await root.span("dispatch.channel_visibility", () =>
+    channelVisibilityOf(deps, msg.channelId),
+  );
   const run = registry.create(
     composeRunLabel({
       agent: command,
@@ -2413,13 +2654,21 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean }>(
       userId: msg.userId,
       threadKey: msg.threadKey,
       channelVisibility,
+      receivedAt: trace.receivedAt,
     },
   );
+  // The command run rides the request's trace like an agent run: the setup
+  // spans so far backfill, then `run.command` and the reply follow live. A
+  // natural-language fall-through rebinds the same root to the agent run next.
+  trace.bindRun(run.id, (e) => registry.publish(run.id, e));
   io.runStarted?.({ id: run.id });
   registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: Date.now() });
+  // A command run's meta names no model (features/tracing.md): the agent and the trace.
+  registry.publish(run.id, { type: "run_meta", agent: COMMAND_RUN_AGENT, traceId: root.traceId, at: Date.now() });
   let result: T | undefined;
   try {
-    result = await execute();
+    // The command's deterministic body is the run's one counted step (`tools` for a command run).
+    result = await root.span("run.command", execute, { attrs: { command } });
     registry.publish(run.id, { type: "answer", text: redactSecrets(result.text), at: Date.now() });
     return result;
   } catch (err) {
@@ -3107,17 +3356,18 @@ async function resolveRepoForCommand(
   }
 }
 
-/** The run's root span (features/tracing.md): its streamed children (the
- *  agent loop, model turns, tool calls) land on the run's own stream through
- *  the run-stream sink, and its log line goes to stdout at the configured
- *  verbosity — nothing when `tracing.log` is unset. Until the channel adapters
- *  start the root at receipt (the dispatcher spans PR), the root begins here,
- *  at the run's registration. */
-function startRunRoot(deps: CoreDeps, registry: RunRegistry, runId: string): Span {
-  const stream = createRunStreamSink({ clock: systemClock });
-  const level = deps.config.config.tracing?.log;
-  const log = level ? createLogSink({ level, write: (line) => console.log(line) }) : NULL_SINK;
-  const root = createTracer({ clock: systemClock }).start("request", { sinks: [log, stream], attrs: { runId } });
-  stream.bindRun(runId, (e) => registry.publish(runId, e as RunEvent));
-  return root;
+/** The card's shape and queued lines at a close (features/tracing.md item 5):
+ *  the root's streamed children so far, partitioned over the request's window
+ *  — to the finish for a run that ran, to now for a close before any run. The
+ *  card's own gate (a minute, or 15 s of getting ready) applies. */
+function cardLines(
+  trace: RequestTrace,
+  opts: { end: number; finished: boolean; owner: RunOwner; queued: string | undefined },
+): { shape?: string; queued?: string } {
+  const shape = cardShapeLine(trace.spansSoFar(), {
+    window: { start: trace.receivedAt, end: opts.end },
+    owner: opts.owner,
+    finished: opts.finished,
+  });
+  return { ...(shape ? { shape } : {}), ...(opts.queued ? { queued: opts.queued } : {}) };
 }
