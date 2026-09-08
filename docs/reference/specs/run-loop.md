@@ -3,7 +3,7 @@
 The runner is provider-blind: complete → execute tools → append results → repeat. Budgets guarantee a run always ends with a useful message — never a silent death.
 
 - **Code**: `src/runner.ts`, budgets on `src/agents/registry.ts`
-- **Docs**: [README — Agent loop](../../../README.md#architecture)
+- **Docs**: [The agents and their toolsets](../../explanation/agents-and-toolsets.md), [How a request flows](../../explanation/how-a-request-flows.md)
 - **Tests**: `src/runner.test.ts`
 
 ## Behavior

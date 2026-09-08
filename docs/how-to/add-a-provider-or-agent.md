@@ -22,19 +22,26 @@ A provider with a genuinely different API (not OpenAI-shaped) needs a small adap
 
 ## Add an agent
 
-An agent is data, not code — a prompt, a toolset, and turn/token budgets:
+An agent is data, not code — a prompt, a toolset, and budgets for turns, tokens and wall-clock minutes:
 
 ```ts
 // src/agents/registry.ts
-export const AGENTS = {
+export const AGENTS: Record<string, AgentDef> = {
   // ...
   docs: {
-    systemPrompt: '...',
-    toolset: 'readonly',   // one of the existing named toolsets
+    name: "docs",
+    description: "Answers questions about the repository's documentation. Read-only.",
+    system: "...",
+    toolset: "readonly", // one of the existing named toolsets: full | readonly | web | assistant | none
     maxTurns: 20,
+    maxTokens: 24000,
+    maxMinutes: 10,
+    resources: { repo: "required" }, // a workspace is provisioned; omit for an agent that needs none
   },
 };
 ```
+
+The toolset names decide what the model may ask for — [The agents and their toolsets](../explanation/agents-and-toolsets.md) lists what each contains. `resources` says whether a run needs a repository checkout at all; an agent without it never provisions a workspace or sandbox.
 
 Give it a default model in `config.yaml`:
 
@@ -48,5 +55,5 @@ That's it — it's now reachable as `agent:docs`, subject to the exact same conf
 
 ## See also
 
-- `AGENTS.md`'s Map table for the exact files behind each seam (channel, provider, executor, agent).
+- [Reference: code map](../reference/code-map.md) for the exact files behind each seam (channel, provider, executor, agent).
 - [Explanation: how a request flows](../explanation/how-a-request-flows.md).

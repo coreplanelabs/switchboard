@@ -24,7 +24,7 @@ grants:
     actions: [agent:run:coding]         # … and here is the grant
 ```
 
-The restriction is enforced **at run time, against the resolved agent** — after directives, thread stickiness, and every config layer. Typing `agent:coding` without the grant gets you a run of the agent you were already allowed to use, with a reply naming who to ask. `config set me --agent coding` is always allowed to *set*, harmlessly, because the gate applies when the run actually happens. Agents not listed under `restrict.agents` stay open to everyone.
+The restriction is enforced **at run time, against the resolved agent** — after directives, thread stickiness, and every config layer. Typing `agent:coding` without the grant gets you a run of the agent you were already allowed to use, with a reply naming who to ask. `config set me --agent coding` is always allowed to *set*, harmlessly, because the gate applies when the run actually happens. Agents not listed under `restrict.agents` stay open to everyone, and `config show` tells you what is restricted along with your effective agent, model and effort.
 
 ## Gate who can touch a repo's resident
 

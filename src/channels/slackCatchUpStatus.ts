@@ -14,9 +14,9 @@
 // the truth, not a loss.
 
 /** Bot-token scopes the Slack adapter needs to work as designed. Mirrors the
- *  README's install list minus the `im:*` set (DMs are off in the recommended
- *  rollout). `channels:read`/`groups:read` are what the catch-up's channel
- *  listing needs; without them the scan cannot start. */
+ *  install list in docs/tutorials/run-it-locally.md minus the `im:*` set (DMs
+ *  are off in the recommended rollout). `channels:read`/`groups:read` are what
+ *  the catch-up's channel listing needs; without them the scan cannot start. */
 export const REQUIRED_BOT_SCOPES: readonly string[] = [
   "app_mentions:read",
   "chat:write",

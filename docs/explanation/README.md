@@ -5,6 +5,7 @@
 It is still not the contract: the versioned behavioral contract is [`docs/reference/specs/`](../reference/specs/README.md).
 
 - [How a request flows](how-a-request-flows.md) — channel → dispatcher → provider/executor, the one pipeline everything shares.
+- [The agents and their toolsets](agents-and-toolsets.md) — the five agents, what each may reach, and why the toolset is the boundary but not the wall.
 - [Why config is layered](config-layers.md) — six independent layers, and why effort is one of them.
 - [Execution and trust](execution-and-trust.md) — where `bash` actually runs, and why blast radius is the design constraint.
 - [Worker topology](worker-topology.md) — the bot plus three Cloudflare Workers, what each owns, how they call each other.

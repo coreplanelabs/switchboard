@@ -3,7 +3,7 @@
 Tools never touch the bot host: every `bash`/`read_file`/`write_file` runs through an `Executor`. Production uses per-thread Cloudflare Sandboxes behind the proxy Worker; a thread's follow-ups reuse its workspace.
 
 - **Code**: `src/execution/` (executor, factory, cloudflareSandbox, sandboxErrors, sandboxEnv, e2b, resident, githubApp, sandboxKeepalive), `deploy/cloudflare-sandbox/worker.ts` + `wrangler.jsonc` + `Dockerfile`
-- **Docs**: [README — Trust model](../../../README.md#architecture), [AGENTS.md invariants 5, 6](../../../AGENTS.md)
+- **Docs**: [Execution and trust](../../explanation/execution-and-trust.md), [AGENTS.md invariants 5, 6](../../../AGENTS.md)
 - **Tests**: `src/execution/factory.test.ts` (per-agent provisioning + resident selection), `src/execution/resident.test.ts`, `src/execution/shellQuote.test.ts`, `src/execution/githubApp.test.ts`, `src/execution/githubIdentity.test.ts` (the identity the process acts as), `src/execution/bashTimeout.test.ts`, `src/execution/executor.test.ts`, `src/execution/e2b.test.ts`, `src/execution/cloudflareSandbox.test.ts`, `src/execution/sandboxErrors.test.ts`, `src/execution/sandboxEnv.test.ts` (the body-only env reader the Worker uses), `src/execution/sandboxKeepalive.test.ts` (the exec keepalive + static guards that the sandbox Worker wires it, renders every failure through `thrownText`, heals a legacy-image container, reads the env map through `envFromRequest` from the body alone while the executor sends only the body, and that `wrangler.jsonc` rolls out in one wave); the deeper sandbox behaviors are infrastructure-dominated — the live checks below are their proof.
 
 ## Behavior

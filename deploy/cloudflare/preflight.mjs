@@ -137,7 +137,7 @@ export function catchUpWarnings(payload) {
   }
   if (Array.isArray(c.missingScopes) && c.missingScopes.length > 0) {
     out.push(
-      `bot token is missing required Slack scopes: ${c.missingScopes.join(", ")} — reinstall the app with them (README → Slack app setup)`,
+      `bot token is missing required Slack scopes: ${c.missingScopes.join(", ")} — reinstall the app with them (docs/tutorials/run-it-locally.md → Connect it to Slack)`,
     );
   }
   return out;

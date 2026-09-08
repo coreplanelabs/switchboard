@@ -3,7 +3,7 @@
 Takes a task from Slack, scopes fast, implements the change in its sandbox, pushes the branch, and submits a typed PR description — Switchboard renders the body and opens the PR itself ([pr-description.md](pr-description.md) item 5). Its unit of delivery is a pushed branch plus a validated `PrDescription`, not prose; the PR URL comes from code.
 
 - **Code**: `src/agents/registry.ts` (`CODING_SYSTEM`; resident-path variant `CODING_SYSTEM_RESIDENT`)
-- **Docs**: [README — Agents](../../../README.md#agents)
+- **Docs**: [The agents and their toolsets](../../explanation/agents-and-toolsets.md)
 - **Budgets**: 60 turns / 45 min / 64k tokens · no built-in effort — set it per deployment/channel/user/thread/message through the config layers ([routing-and-config.md](routing-and-config.md) item 2; e.g. `config set channel efforts.coding=medium` — the wall clock is the real budget, and a 31-min live run at the model's default effort spent 97 % of it thinking between one-line greps) · toolset `full`
 
 ## Behavior

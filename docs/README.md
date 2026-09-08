@@ -35,6 +35,7 @@ You can read this tree here on GitHub or as a site — [openswitchboard.dev](htt
 - [Watch a run and check spend](how-to/watch-a-run-and-check-spend.md) — the dashboard: live runs, history, stopping one, costs.
 - [Restrict who can do what](how-to/restrict-who-can-do-what.md) — `grants` and `restrict`, built up from open to locked down.
 - [Add a provider or an agent](how-to/add-a-provider-or-agent.md) — extend Switchboard without touching the dispatcher.
+- [Deploy for the first time](how-to/deploy-for-the-first-time.md) — the profile, the secrets, the first `deploy all`, and what any other host must provide.
 - [Deploy and rotate a secret](how-to/deploy-and-rotate-a-secret.md) — the one command to ship, the runbook to rotate a credential.
 - [Run a load test](how-to/run-a-load-test.md) — a number for how Switchboard behaves with many runs at once, before and after a capacity change.
 - [Turn features on and off](how-to/turn-features-on-and-off.md) — the capability matrix: the config block that turns each feature on, what appears, what disappears, what it costs.
@@ -50,6 +51,7 @@ You can read this tree here on GitHub or as a site — [openswitchboard.dev](htt
 ## Explanation
 
 - [How a request flows](explanation/how-a-request-flows.md) — channel → dispatcher → provider/executor, the one pipeline everything shares.
+- [The agents and their toolsets](explanation/agents-and-toolsets.md) — the five agents, what each may reach, and why the toolset is the boundary but not the wall.
 - [Why config is layered](explanation/config-layers.md) — six independent layers, and why effort is one of them.
 - [Execution and trust](explanation/execution-and-trust.md) — where `bash` actually runs, and why blast radius is the design constraint.
 - [Worker topology](explanation/worker-topology.md) — the bot plus three Cloudflare Workers, what each owns, how they call each other.
@@ -62,4 +64,4 @@ You can read this tree here on GitHub or as a site — [openswitchboard.dev](htt
 
 This tree explains and orients. It is not the contract. [`docs/reference/specs/`](reference/specs/README.md) is the versioned behavioral contract — one file per feature, every criterion backed by a named test or explicit agent-runnable instructions, updated in the same PR as any behavior change. When something here and a feature file disagree, the feature file is right — and that disagreement is a docs bug worth filing.
 
-The root [`README.md`](../README.md) and [`AGENTS.md`](../AGENTS.md) serve a different reader: an engineer or a coding agent working *on* Switchboard's own codebase — architecture internals, the deploy runbook in full, invariants that must not break. Read this tree to understand and use Switchboard; read those to change it.
+The root [`README.md`](../README.md) is the front door — the pitch, what you need, the quick start — and it links here for everything else. [`AGENTS.md`](../AGENTS.md) serves a different reader: an engineer or a coding agent working *on* Switchboard's own codebase — the invariants that must not break and the commands that are the repo's whole interface. Read this tree to understand and use Switchboard; read that to change it.

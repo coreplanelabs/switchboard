@@ -124,10 +124,11 @@ execution:
   # request whose target repo is onboarded and warm runs against the resident
   # Worker; any other resident state falls back to the backend above with a
   # named reason on the status card. Works alongside any per-thread type.
-  # Repos are onboarded from chat: `repo onboard <owner/name>` (see README
-  # Setup; needs the `repo:write` grant — never a baseline, admins only until
-  # granted). `repo list` shows lifecycle; `repo offboard`/`repo rebuild` accept
-  # --dry-run for an itemized plan without executing.
+  # Repos are onboarded from chat: `repo onboard <owner/name>` (see
+  # docs/how-to/onboard-a-repo.md; needs the `repo:write` grant — never a
+  # baseline, admins only until granted). `repo list` shows lifecycle;
+  # `repo offboard`/`repo rebuild` accept --dry-run for an itemized plan
+  # without executing.
   # Deterministic ops (no model turn): `repo test <owner/name> [<ref>]` /
   # `repo build <owner/name> [<ref>]` — and natural asks like "run the tests
   # on main in acme/api" — run the repo's onboarded command in a disposable

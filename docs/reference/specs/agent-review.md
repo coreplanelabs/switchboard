@@ -3,7 +3,7 @@
 Reviews a PR with the full change in context and reports ranked, evidence-anchored findings. Gather once, analyze once — a review takes minutes, not an hour.
 
 - **Code**: `src/agents/registry.ts` (`REVIEW_SYSTEM`; resident-path variant `REVIEW_SYSTEM_RESIDENT`); post-step in `src/core/dispatcher.ts` + `src/core/reviewPost.ts` + `src/core/reviewVerdict.ts` + `src/core/reviewedHead.ts` + `src/core/headMoved.ts` + `src/execution/githubComments.ts`; verdict tool `submit_verdict` in `src/tools/workspace.ts`
-- **Docs**: [README — Agents](../../../README.md#agents)
+- **Docs**: [The agents and their toolsets](../../explanation/agents-and-toolsets.md)
 - **Budgets**: 30 turns (backstop) / 25 min / 64k tokens · built-in effort `medium` (a floor — every config layer overrides it, [routing-and-config.md](routing-and-config.md) item 2) · toolset `readonly` (bash + read; read-only by convention)
 
 ## Behavior
