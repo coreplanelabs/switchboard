@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.2.0](https://github.com/coreplanelabs/switchboard/compare/v1.1.0...v1.2.0) (2026-09-08)
+
+
+### Features
+
+* **capabilities:** one Capabilities value, computed once — surfaces hide what is off, null objects replace presence checks ([#665](https://github.com/coreplanelabs/switchboard/issues/665)) ([d473c6a](https://github.com/coreplanelabs/switchboard/commit/d473c6ae4238159bd6b2a60e80aa12127f356a1c))
+* **dashboard:** nav and tabs follow the capabilities; dashboard auth is a strategy — access, token, or loopback-only none ([#663](https://github.com/coreplanelabs/switchboard/issues/663)) ([1da5b3f](https://github.com/coreplanelabs/switchboard/commit/1da5b3f8d18a211473eea18236e02dd82fb8969d))
+* **run-ledger:** the durable inbox carries a follow-up's attachments when they fit the row, and says what it dropped when they do not ([#670](https://github.com/coreplanelabs/switchboard/issues/670)) ([1a41db5](https://github.com/coreplanelabs/switchboard/commit/1a41db53972a73289e21cec39d512f4553acab3d))
+* **tracing:** every resident step the Worker names has a run-page label, guarded by a source scan, and the Scheduled panel shows a firing's trace id ([#672](https://github.com/coreplanelabs/switchboard/issues/672)) ([e58bf98](https://github.com/coreplanelabs/switchboard/commit/e58bf98762189bc4e2387ca6e61a5911ff55a26b))
+* **tracing:** the resident's watchdog firing and refresh cycle and the state Worker's sweep are roots of their own, and the Slack card's total floors like every other surface ([#658](https://github.com/coreplanelabs/switchboard/issues/658)) ([e270222](https://github.com/coreplanelabs/switchboard/commit/e2702226751a77177fed1f0221ec95044841bd36))
+
+
+### Bug fixes
+
+* **deploy:** deploy secrets renders the Worker config and quotes wrangler's error; the Worker names the restart subject so a token rotation is one put and one restart ([#671](https://github.com/coreplanelabs/switchboard/issues/671)) ([8b56509](https://github.com/coreplanelabs/switchboard/commit/8b565090f05a3876bcf6c5688070149b6b2522a1))
+* **live-view:** the tokenless stop is a write — it asks runs:write like runs.stop on the command surface ([#669](https://github.com/coreplanelabs/switchboard/issues/669)) ([9975312](https://github.com/coreplanelabs/switchboard/commit/99753122a0dbbb5b164acddb90aff0eccafb5533))
+* **resident:** a presigned restore is a mount — extract it onto the disk, unmount, and unmount leftovers before every clean ([#660](https://github.com/coreplanelabs/switchboard/issues/660)) ([1025324](https://github.com/coreplanelabs/switchboard/commit/10253247150f45379d932fcbd49267311c15cf19))
+* **tracing:** a Worker root that adopted the bot's trace prints as a root — the log sink no longer hides every sub-second adopted request ([#668](https://github.com/coreplanelabs/switchboard/issues/668)) ([a4732c2](https://github.com/coreplanelabs/switchboard/commit/a4732c28a9919ebcfb4e74cfdad933b995f4935b))
+* **tracing:** the reading diff's execs, the review settle's head probe and move, and the workspace release carry their span to the executor ([#661](https://github.com/coreplanelabs/switchboard/issues/661)) ([15a85e9](https://github.com/coreplanelabs/switchboard/commit/15a85e9d77a41a397abce115782d9f5b786b056b))
+
 ## [1.1.0](https://github.com/coreplanelabs/switchboard/compare/v1.0.0...v1.1.0) (2026-09-08)
 
 
