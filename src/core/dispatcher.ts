@@ -26,6 +26,7 @@ import {
   type PullRequestTarget,
   type RepoShipInfo,
 } from "../execution/githubPulls.js";
+import { resolveGithubIdentity, type GithubIdentity } from "../execution/githubApp.js";
 import {
   resolveShipCaps,
   runShipPipeline,
@@ -182,6 +183,12 @@ export interface CoreDeps {
    * Default: githubPulls' `fetchPullRequestFacts`. Injectable for tests.
    */
   fetchPrFacts?: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
+  /**
+   * The GitHub identity this process acts as (agent-ship.md item 10): the App's
+   * bot user, or the static token's user — what ship's own PRs are authored by.
+   * Default: githubApp's `resolveGithubIdentity`. Injectable for tests.
+   */
+  fetchSelfIdentity?: () => Promise<GithubIdentity | undefined>;
   /**
    * The commits a PR head carries over its base (agent-review.md item 12):
    * asked once for the reviewed head and once for the current one when the
@@ -591,10 +598,14 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // catch keeps an early return (repo refusal, ask-once) from leaving the
     // rejection unhandled; the real await below still surfaces a failure where
     // it did.
-    const memoryBlockP = memoryContextBlock(deps.config.config.memory, deps.memory, directives.text, msg.userId, {
-      channelId: msg.channelId,
-      repo: repoCtxP.then((ctx) => ctx.repo),
-    });
+    const memoryBlockP = memoryContextBlock(
+      deps.config.config.organization,
+      deps.config.config.memory,
+      deps.memory,
+      directives.text,
+      msg.userId,
+      { channelId: msg.channelId, repo: repoCtxP.then((ctx) => ctx.repo) },
+    );
     memoryBlockP.catch(() => {});
 
     // Acknowledge NOW, before anything slow. Everything between here and the
@@ -849,7 +860,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
     // the live agent registry, on every agent's prompt, so "how does your
     // resident system work?" is answered from fact instead of a public-web
     // 404 on our private repo.
-    const aboutBlock = selfDescriptionBlock(AGENTS);
+    const aboutBlock = selfDescriptionBlock(AGENTS, deps.config.config.organization);
 
     // Custom instructions (#107 phase 2): the requester's user text + this
     // channel's text, as ONE advisory block. Read from the same resolved
@@ -1587,6 +1598,7 @@ export async function dispatch(deps: CoreDeps, msg: IncomingMessage, io: Channel
         // commands resolve, the same stamp the record carries.
         actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)),
         originChannelVisibility: channelVisibility,
+        organization: deps.config.config.organization,
         userId: msg.userId,
         channelId: msg.channelId,
         repo: repoCtx.repo,
@@ -1722,6 +1734,7 @@ async function runShipBranch(
     gates: { canRunAgent: (a) => deps.config.canRunAgent(msg.userId, a), adminsHint: () => deps.config.adminsHint() },
     repoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
     prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
+    selfIdentity: deps.fetchSelfIdentity ?? resolveGithubIdentity,
     runsBase: process.env.PUBLIC_BASE_URL,
   });
   if (!pre.ok) {
@@ -1928,7 +1941,7 @@ async function runShipBranch(
       // roadmap), and a line inviting `mcp add` into a run that could not use
       // the result would mislead. The line arrives with the tools.
     }),
-    about: selfDescriptionBlock(AGENTS),
+    about: selfDescriptionBlock(AGENTS, deps.config.config.organization),
     instructions: instructionsBlock,
     skills: deps.skills ? skillGuidanceBlock(deps.skills, spec.agent.name) : undefined,
   });

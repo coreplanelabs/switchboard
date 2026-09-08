@@ -29,9 +29,37 @@ describe("templateView", () => {
       urls: {
         publicBaseUrl: "https://switchboard.example.test",
         stateWorkerUrl: "https://switchboard-memory.example.test",
+        docsBaseUrl: "https://docs.switchboard.example.test",
       },
       access: undefined,
     });
+  });
+
+  it("carries no docs URL when the profile has no docs Worker — an `{{#if urls.docsBaseUrl}}` block then drops", () => {
+    const { docs: _docs, ...withoutDocs } = TEST_PROFILE.workers;
+    const view = templateView({ ...TEST_PROFILE, workers: withoutDocs }, "bot")!;
+    expect(view.urls.docsBaseUrl).toBeUndefined();
+    const template = [
+      '  "vars": {',
+      "    // {{#if urls.docsBaseUrl}}",
+      '    "DOCS_BASE_URL": "{{urls.docsBaseUrl}}",',
+      "    // {{/if}}",
+      '    "X": "1"',
+      "  }",
+    ].join("\n");
+    const without = renderTemplate(template, view);
+    expect(without.ok && without.text.split("\n").slice(GENERATED_HEADER.length)).toEqual([
+      '  "vars": {',
+      '    "X": "1"',
+      "  }",
+    ]);
+    const withDocs = renderTemplate(template, templateView(TEST_PROFILE, "bot")!);
+    expect(withDocs.ok && withDocs.text.split("\n").slice(GENERATED_HEADER.length)).toEqual([
+      '  "vars": {',
+      '    "DOCS_BASE_URL": "https://docs.switchboard.example.test",',
+      '    "X": "1"',
+      "  }",
+    ]);
   });
 
   it("carries the Access application when the profile has one, and is undefined for a Worker the profile lacks", () => {

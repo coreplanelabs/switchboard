@@ -8,8 +8,8 @@ import { WorkerMemoryStore, MEMORY_WORKER_TIMEOUT_MS } from "./workerStore.js";
 // proven by deploy/cloudflare-memory/worker.test.ts.
 
 const record: MemoryRecord = {
-  id: "mem:org:coreplanelabs:0",
-  scopeKey: "org:coreplanelabs",
+  id: "mem:org:acme:0",
+  scopeKey: "org:acme",
   kind: "fact",
   text: "the deploy command is npm run deploy",
   keywords: ["deploy"],
@@ -48,7 +48,7 @@ function store(fetchImpl: typeof fetch, warnings: string[] = []) {
 describe("WorkerMemoryStore.retrieve", () => {
   it("POSTs /retrieve with the bearer and the query, returns the Worker's ranked records", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ records: [record] }));
-    const out = await store(fetch).retrieve({ scopeKey: "org:coreplanelabs", query: "deploy", limit: 8 });
+    const out = await store(fetch).retrieve({ scopeKey: "org:acme", query: "deploy", limit: 8 });
     expect(out).toEqual([record]);
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://memory.example/retrieve"); // trailing slash normalized
@@ -57,7 +57,7 @@ describe("WorkerMemoryStore.retrieve", () => {
     expect(headers.authorization).toBe("Bearer secret-token");
     expect(headers["content-type"]).toBe("application/json");
     expect(JSON.parse(calls[0].init.body as string)).toEqual({
-      scopeKey: "org:coreplanelabs",
+      scopeKey: "org:acme",
       query: "deploy",
       limit: 8,
     });
@@ -91,14 +91,14 @@ describe("WorkerMemoryStore.retrieve", () => {
 describe("WorkerMemoryStore.write", () => {
   it("POSTs /write with the scope and candidates and resolves on 2xx", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true, inserted: 1, deduped: 0, superseded: 0 }));
-    await expect(store(fetch).write("org:coreplanelabs", [cand])).resolves.toBeUndefined();
+    await expect(store(fetch).write("org:acme", [cand])).resolves.toBeUndefined();
     expect(calls[0].url).toBe("https://memory.example/write");
-    expect(JSON.parse(calls[0].init.body as string)).toEqual({ scopeKey: "org:coreplanelabs", records: [cand] });
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ scopeKey: "org:acme", records: [cand] });
   });
 
   it("skips the round trip entirely for an empty batch", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true }));
-    await store(fetch).write("org:coreplanelabs", []);
+    await store(fetch).write("org:acme", []);
     expect(calls).toHaveLength(0);
   });
 
@@ -116,44 +116,44 @@ describe("WorkerMemoryStore.write", () => {
 describe("WorkerMemoryStore.list / forget (#278)", () => {
   it("list POSTs /list {scopeKey, limit} and returns the Worker's records (malformed ones dropped)", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ records: [record, { junk: true }] }));
-    expect(await store(fetch).list("org:coreplanelabs", 20)).toEqual([record]);
+    expect(await store(fetch).list("org:acme", 20)).toEqual([record]);
     expect(calls[0].url).toBe("https://memory.example/list");
-    expect(JSON.parse(String(calls[0].init.body))).toEqual({ scopeKey: "org:coreplanelabs", limit: 20 });
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ scopeKey: "org:acme", limit: 20 });
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
   });
 
   it("list sends `query` only when a filter is given (#293)", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ records: [] }));
-    await store(fetch).list("org:coreplanelabs", 20, "deploy command");
+    await store(fetch).list("org:acme", 20, "deploy command");
     expect(JSON.parse(String(calls[0].init.body))).toEqual({
-      scopeKey: "org:coreplanelabs",
+      scopeKey: "org:acme",
       limit: 20,
       query: "deploy command",
     });
-    await store(fetch).list("org:coreplanelabs", 20);
-    expect(JSON.parse(String(calls[1].init.body))).toEqual({ scopeKey: "org:coreplanelabs", limit: 20 });
+    await store(fetch).list("org:acme", 20);
+    expect(JSON.parse(String(calls[1].init.body))).toEqual({ scopeKey: "org:acme", limit: 20 });
   });
 
   it("list is a human command, so a failure THROWS (never silently shows an empty list)", async () => {
     const { fetch } = fakeFetch(() => jsonRes({ error: "boom" }, 500));
-    await expect(store(fetch).list("org:coreplanelabs", 20)).rejects.toThrow(/\/list HTTP 500: boom/);
+    await expect(store(fetch).list("org:acme", 20)).rejects.toThrow(/\/list HTTP 500: boom/);
   });
 
   it("forget POSTs /forget {scopeKey, id} and returns the Worker's `forgotten` flag", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true, forgotten: true }));
-    expect(await store(fetch).forget("org:coreplanelabs", "mem:org:coreplanelabs:0")).toBe(true);
+    expect(await store(fetch).forget("org:acme", "mem:org:acme:0")).toBe(true);
     expect(calls[0].url).toBe("https://memory.example/forget");
     expect(JSON.parse(String(calls[0].init.body))).toEqual({
-      scopeKey: "org:coreplanelabs",
-      id: "mem:org:coreplanelabs:0",
+      scopeKey: "org:acme",
+      id: "mem:org:acme:0",
     });
     const miss = fakeFetch(() => jsonRes({ ok: true, forgotten: false }));
-    expect(await store(miss.fetch).forget("org:coreplanelabs", "mem:org:coreplanelabs:99")).toBe(false);
+    expect(await store(miss.fetch).forget("org:acme", "mem:org:acme:99")).toBe(false);
   });
 
   it("forget THROWS on a non-2xx", async () => {
     const { fetch } = fakeFetch(() => jsonRes({ error: "unauthorized" }, 401));
-    await expect(store(fetch).forget("org:coreplanelabs", "x")).rejects.toThrow(/\/forget HTTP 401: unauthorized/);
+    await expect(store(fetch).forget("org:acme", "x")).rejects.toThrow(/\/forget HTTP 401: unauthorized/);
   });
 });
 
@@ -169,17 +169,17 @@ describe("WorkerMemoryStore cap on the wire (#253)", () => {
   it("sends `cap` on /write when configured, and omits it (server default) when not", async () => {
     const capped = fakeFetch(() => jsonRes({ ok: true, inserted: 1, deduped: 0, superseded: 0, evicted: 0 }));
     await new WorkerMemoryStore({ baseUrl: "https://memory.example", token: "t", fetch: capped.fetch, cap: 250 }).write(
-      "org:coreplanelabs",
+      "org:acme",
       [cand],
     );
-    expect(JSON.parse(String(capped.calls[0].init.body))).toMatchObject({ scopeKey: "org:coreplanelabs", cap: 250 });
+    expect(JSON.parse(String(capped.calls[0].init.body))).toMatchObject({ scopeKey: "org:acme", cap: 250 });
     const plain = fakeFetch(() => jsonRes({ ok: true }));
-    await store(plain.fetch).write("org:coreplanelabs", [cand]);
+    await store(plain.fetch).write("org:acme", [cand]);
     expect(JSON.parse(String(plain.calls[0].init.body))).not.toHaveProperty("cap");
   });
 
   it("accepts `evicted` records from the Worker (status is part of the wire contract)", async () => {
     const { fetch } = fakeFetch(() => jsonRes({ records: [{ ...record, status: "evicted" }] }));
-    expect(await store(fetch).list("org:coreplanelabs", 5)).toHaveLength(1);
+    expect(await store(fetch).list("org:acme", 5)).toHaveLength(1);
   });
 });

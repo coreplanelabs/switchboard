@@ -24,14 +24,7 @@ export {
   type ScoreWeights,
   type MemoryBudget,
 } from "./scorer.js";
-export {
-  deriveScopeKey,
-  requestScopeKeys,
-  listScopeKeys,
-  ORG_RESOURCE,
-  type ScopeContext,
-  type RequestScopeKeys,
-} from "./scope.js";
+export { deriveScopeKey, requestScopeKeys, listScopeKeys, type ScopeContext, type RequestScopeKeys } from "./scope.js";
 export { NullMemoryStore, InMemoryMemoryStore, selectMemoryStore } from "./stores.js";
 export {
   normalizeText,
@@ -94,6 +87,8 @@ export function scheduleReflection(input: {
   actor: Actor;
   /** The run's stamped `channelVisibility` (KTD7): the origin of every fact. */
   originChannelVisibility: ChannelVisibility;
+  /** The config's `organization` → the shared org scope (`org:<organization>`). */
+  organization: string;
   /** The requesting user's namespaced id (`slack:U…`) → their memory scope. */
   userId?: string;
   /** The message's namespaced channel id (`slack:C…`) → the channel scope (#253). */
@@ -121,7 +116,7 @@ export function scheduleReflection(input: {
       provider,
       model,
       store: selectMemoryStore(input.cfg, input.store),
-      scopeKeys: requestScopeKeys(input.userId, { channelId: input.channelId, repo: input.repo }),
+      scopeKeys: requestScopeKeys(input.organization, input.userId, { channelId: input.channelId, repo: input.repo }),
       actor: reflectionActor(input.actor, { channelId: input.channelId, repo: input.repo }),
       originChannelVisibility: input.originChannelVisibility,
       history: input.history,
@@ -153,6 +148,8 @@ export interface MemoryScopeInputs {
  * derived from `userId`, so another person's records cannot be returned.
  */
 export async function memoryContextBlock(
+  /** The config's `organization` → the shared org scope every request reads. */
+  organization: string,
   cfg: MemoryConfig | undefined,
   injected: MemoryStore | undefined,
   query: string,
@@ -166,11 +163,11 @@ export async function memoryContextBlock(
   // round trip finishes), so that scope is fetched once the promise settles.
   // A repo resolution failure is the run's problem to report, not memory's:
   // here it just means no repo scope.
-  const immediate = requestScopeKeys(userId, { channelId: scopes.channelId });
+  const immediate = requestScopeKeys(organization, userId, { channelId: scopes.channelId });
   const immediateKeys = listScopeKeys(immediate);
   const immediateP = Promise.all(immediateKeys.map((scopeKey) => store.retrieve({ scopeKey, query, limit })));
   const repo = await Promise.resolve(scopes.repo).catch(() => undefined);
-  const keys = requestScopeKeys(userId, { channelId: scopes.channelId, repo });
+  const keys = requestScopeKeys(organization, userId, { channelId: scopes.channelId, repo });
   const scopeKeys = listScopeKeys(keys);
   const repoRecords = keys.repo ? await store.retrieve({ scopeKey: keys.repo, query, limit }) : [];
   const perScope = [...(await immediateP), repoRecords];

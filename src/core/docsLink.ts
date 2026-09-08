@@ -13,9 +13,12 @@
 //
 // Pure: no fs, no clock, no I/O.
 
-/** The docs site's origin. Deploy-constant, like `PUBLIC_BASE_URL`; the
- *  `DOCS_BASE_URL` env var overrides it for local development. */
-export const DOCS_BASE_URL = "https://docs.switchboard.coreplanelabs.dev";
+/** The project's published documentation — the `docs` fact in project.json,
+ *  where `/docs` sends people when the installation publishes no docs site of
+ *  its own. An installation's own site arrives as the `DOCS_BASE_URL` var the
+ *  bot Worker renders from the deployment profile (`workers.docs`); the same
+ *  env var points a local run at `npm run docs:dev`. */
+export const PROJECT_DOCS_URL = "https://docs.switchboard.coreplanelabs.dev";
 
 /** Where `/docs…` should send the caller, or undefined when the path is not a
  *  docs path at all. The subpath is carried across unchanged, so a deep link
@@ -25,7 +28,7 @@ export const DOCS_BASE_URL = "https://docs.switchboard.coreplanelabs.dev";
  *  path is only ever appended to the configured base, never taken from the
  *  request's own host or from a query parameter — there is nothing here an
  *  open-redirect could steer. */
-export function docsRedirectTarget(path: string, base: string = DOCS_BASE_URL): string | undefined {
+export function docsRedirectTarget(path: string, base: string = PROJECT_DOCS_URL): string | undefined {
   const root = base.replace(/\/+$/, "");
   if (path === "/docs" || path === "/docs/") return `${root}/`;
   if (!path.startsWith("/docs/")) return undefined;

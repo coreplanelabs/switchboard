@@ -26,6 +26,7 @@ const ADMIN = "slack:UADMIN";
 const ALICE = "slack:UALICE";
 const NOBODY = "slack:UNOBODY";
 const YAML = `
+organization: acme
 providers:
   anthropic:
     type: anthropic

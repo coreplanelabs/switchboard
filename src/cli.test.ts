@@ -318,7 +318,7 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     const cfg = join(dir, "config.yaml");
     writeFileSync(
       cfg,
-      "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n",
+      "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n",
     );
     const config = new ConfigStore(cfg, join(dir, "overrides.json"));
     const store = new InMemoryRunStore({ now: () => NOW });
@@ -358,7 +358,7 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     const cfg = join(dir, "config.yaml");
     writeFileSync(
       cfg,
-      "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n",
+      "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n",
     );
     const affectedCalls: { base?: string }[] = [];
     const report: AffectedReport = {
@@ -524,7 +524,7 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
     const dir = mkdtempSync(join(tmpdir(), "swb-cli-config-"));
     writeFileSync(
       join(dir, "config.yaml"),
-      "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n",
+      "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n",
     );
     expect(await loadBotConfig(join(dir, "config.yaml"), join(dir, "overrides.json"))).toBeInstanceOf(ConfigStore);
     expect(missingBotConfig(missing).message).toBe((err as CommandError).message);
@@ -535,7 +535,7 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
     const cfg = join(dir, "config.yaml");
     writeFileSync(
       cfg,
-      "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n",
+      "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n",
     );
     const config = bindBotConfig(cfg, join(dir, "overrides.json"), { env: {}, warn: () => {} });
     const commands = buildCoreCommands(config, () => null, {
@@ -599,7 +599,7 @@ describe("a command that never touches the config never waits for the open (#409
     const cfg = join(dir, "config.yaml");
     writeFileSync(
       cfg,
-      "providers:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n",
+      "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n",
     );
     const hanging: typeof fetch = () => new Promise(() => {}); // the Worker never answers
     let asked = 0;

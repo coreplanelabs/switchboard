@@ -21,8 +21,8 @@ import { MEMORY_OFF_MESSAGE, registerMemoryCommands, scopeKeyOfMemoryId, type Me
 const NOW = 1_700_000_000_000;
 function rec(over: Partial<MemoryRecord>): MemoryRecord {
   return {
-    id: "mem:org:coreplanelabs:0",
-    scopeKey: "org:coreplanelabs",
+    id: "mem:org:acme:0",
+    scopeKey: "org:acme",
     kind: "fact",
     text: "the deploy command is npm run deploy",
     keywords: ["deploy"],
@@ -60,7 +60,9 @@ const seeded = () => new InMemoryMemoryStore([ORG(), MINE(), THEIRS(), REPO(), C
 function bind(store: MemoryStore | undefined = seeded(), cfg: MemoryConfig | undefined | "on" = "on"): CommandInvoker {
   const registry = new CommandRegistry<MemoryCommandDeps>({ audit: () => {} });
   registerMemoryCommands(registry);
-  return bindCommands(registry, { memory: { config: async () => (cfg === "on" ? ON : cfg), store } });
+  return bindCommands(registry, {
+    memory: { config: async () => (cfg === "on" ? ON : cfg), organization: async () => "acme", store },
+  });
 }
 
 /** A Slack person in channel C1; `admin` passes the repo-management gate; `repo` binds the thread's repo lazily. */
@@ -109,18 +111,13 @@ describe("memory.list", () => {
 
   it("shows the caller's own scope, this repo's, this channel's, and the org scope with ids — never another user's", async () => {
     const { value, text } = await list(bind(), chat("slack:U1", { repo: "acme/api" }));
-    expect(value.scopes.map((s) => s.key)).toEqual([
-      "user:slack:U1",
-      "repo:acme/api",
-      "channel:slack:C1",
-      "org:coreplanelabs",
-    ]);
+    expect(value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "repo:acme/api", "channel:slack:C1", "org:acme"]);
     expect(text).toContain(
       "*your records* (`user:slack:U1`)\n• `mem:user:slack:U1:0` [fact, 2023-11-14] this user likes TL;DR lines (source: `slack:C1:1.0`)",
     );
     expect(text).toContain("*this repo's records* (`repo:acme/api`)");
     expect(text).toContain("*this channel's records* (`channel:slack:C1`)");
-    expect(text).toContain("*shared org records* (`org:coreplanelabs`)\n• `mem:org:coreplanelabs:0`");
+    expect(text).toContain("*shared org records* (`org:acme`)\n• `mem:org:acme:0`");
     expect(text).not.toContain("U2");
     expect(text).not.toContain("bullet points");
   });
@@ -137,7 +134,7 @@ describe("memory.list", () => {
       (await list(commands, chat("slack:U1", { channelId: "slack:C9" }), { options: { scope: "channel" } })).text,
     ).toBe("*this channel's records* (`channel:slack:C9`): no active records.");
     const all = await list(commands, chat("slack:U1"));
-    expect(all.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:coreplanelabs"]);
+    expect(all.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:acme"]);
     expect(all.value.missing).toBeUndefined();
     const repo = await list(commands, chat("slack:U1"), { options: { scope: "repo" } });
     expect(repo.value.scopes).toEqual([]);
@@ -162,27 +159,23 @@ describe("memory.list", () => {
   it("consumes a leading bare scope word from the query when --scope is absent (#344)", async () => {
     const commands = bind();
     const narrowed = await list(commands, chat("slack:U1"), { args: ["org deploy"] });
-    expect(narrowed.value.scopes.map((s) => s.key)).toEqual(["org:coreplanelabs"]);
+    expect(narrowed.value.scopes.map((s) => s.key)).toEqual(["org:acme"]);
     expect(narrowed.text).toContain("matching `deploy`");
     expect(narrowed.text).not.toContain("matching `org deploy`");
     const alone = await list(commands, chat("slack:U1"), { args: ["me"] });
     expect(alone.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1"]);
     expect(alone.text).not.toContain("matching");
     const explicitAll = await list(commands, chat("slack:U1"), { args: ["all"] });
-    expect(explicitAll.value.scopes.map((s) => s.key)).toEqual([
-      "user:slack:U1",
-      "channel:slack:C1",
-      "org:coreplanelabs",
-    ]);
+    expect(explicitAll.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:acme"]);
   });
 
   it("a leading scope word stays a filter word when --scope IS given; a non-scope first word is never consumed (#344)", async () => {
     const commands = bind();
     const kept = await list(commands, chat("slack:U1"), { args: ["org deploy"], options: { scope: "all" } });
-    expect(kept.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:coreplanelabs"]);
+    expect(kept.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:acme"]);
     expect(kept.text).toContain("matching `org deploy`");
     const plain = await list(commands, chat("slack:U1"), { args: ["deploy"] });
-    expect(plain.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:coreplanelabs"]);
+    expect(plain.value.scopes.map((s) => s.key)).toEqual(["user:slack:U1", "channel:slack:C1", "org:acme"]);
     expect(plain.text).toContain("matching `deploy`");
   });
 
@@ -199,9 +192,9 @@ describe("memory.list", () => {
     expect(seen).toEqual([
       ["user:slack:U1", 1, "deploy"],
       ["channel:slack:C1", 1, "deploy"],
-      ["org:coreplanelabs", 1, "deploy"],
+      ["org:acme", 1, "deploy"],
     ]);
-    expect(text).toContain("*shared org records* (`org:coreplanelabs`) matching `deploy`\n• `mem:org:coreplanelabs:0`");
+    expect(text).toContain("*shared org records* (`org:acme`) matching `deploy`\n• `mem:org:acme:0`");
     expect(text).toContain("_(limit 1 reached — there may be more; narrow with words or raise `--limit`, max 50)_");
     expect(text).toContain("*your records* (`user:slack:U1`) matching `deploy`: no active records.");
     expect(await commands.invoke("memory.list", { options: { limit: "51" } }, chat("slack:U1"))).toMatchObject({
@@ -226,11 +219,11 @@ describe("memory.list", () => {
       error: "unauthorized",
     });
     const { value } = await list(commands, mcp("memory:read"));
-    expect(value.scopes.map((s) => s.key)).toEqual(["user:mcp:alice", "org:coreplanelabs"]);
+    expect(value.scopes.map((s) => s.key)).toEqual(["user:mcp:alice", "org:acme"]);
     for (const s of value.scopes) for (const r of s.records) expect(r.text).toContain(UNTRUSTED_OPEN);
     expect(JSON.stringify(value)).not.toContain("U1:0");
     const fromCli = await list(commands, cli);
-    expect(fromCli.value.scopes.map((s) => s.key)).toEqual(["user:cli:local", "org:coreplanelabs"]);
+    expect(fromCli.value.scopes.map((s) => s.key)).toEqual(["user:cli:local", "org:acme"]);
   });
 
   it("a store failure is `unavailable` with its message, never a 500", async () => {
@@ -262,7 +255,7 @@ describe("memory.forget", () => {
   });
 
   it("forgetting a SHARED record (org, repo, channel) is admin-gated (fail-closed): refused with a reason for a plain user, allowed for an admin and for the CLI", async () => {
-    for (const id of ["mem:org:coreplanelabs:0", "mem:repo:acme/api:0", "mem:channel:slack:C1:0"]) {
+    for (const id of ["mem:org:acme:0", "mem:repo:acme/api:0", "mem:channel:slack:C1:0"]) {
       const store = seeded();
       const commands = bind(store);
       const refused = await commands.invoke("memory.forget", { args: [id] }, chat("slack:U1"));
@@ -279,7 +272,7 @@ describe("memory.forget", () => {
       ).toBe(true);
     }
     const store = seeded();
-    expect((await bind(store).invoke("memory.forget", { args: ["mem:org:coreplanelabs:0"] }, cli)).ok).toBe(true);
+    expect((await bind(store).invoke("memory.forget", { args: ["mem:org:acme:0"] }, cli)).ok).toBe(true);
   });
 
   it("another user's scope is unreachable — even for an admin, even with memory:write", async () => {

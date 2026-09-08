@@ -26,7 +26,8 @@ export const GENERATED_HEADER: readonly string[] = [
 ];
 
 /** What a template may name: `{{account}}`, `{{zone}}`, `{{script}}`, `{{hostname}}`,
- *  `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}`, and inside an
+ *  `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}`, `{{urls.docsBaseUrl}}` (inside an
+ *  `{{#if urls.docsBaseUrl}}` block — the docs Worker is optional), and inside an
  *  `{{#if access}}` block `{{access.teamDomain}}` / `{{access.aud}}`. */
 export interface TemplateView {
   account: string;
@@ -40,6 +41,9 @@ export interface TemplateView {
     publicBaseUrl: string;
     /** The state Worker other Workers record firings on. */
     stateWorkerUrl: string;
+    /** The installation's docs site (its `/docs` redirect target), when the profile has a docs Worker —
+     *  a template names it inside an `{{#if urls.docsBaseUrl}}` block. */
+    docsBaseUrl?: string;
   };
   /** The Cloudflare Access application in front of the bot, when the installation has one. */
   access: { teamDomain: string; aud: string } | undefined;
@@ -55,7 +59,7 @@ export function templateView(profile: DeploymentProfile, kind: WorkerKind): Temp
     zone: profile.zone,
     script: worker.script,
     hostname: worker.hostname,
-    urls: { publicBaseUrl: urls.publicBaseUrl, stateWorkerUrl: urls.stateWorkerUrl },
+    urls: { publicBaseUrl: urls.publicBaseUrl, stateWorkerUrl: urls.stateWorkerUrl, docsBaseUrl: urls.docsBaseUrl },
     access: profile.access,
   };
 }

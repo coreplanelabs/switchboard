@@ -82,6 +82,71 @@ export async function resolveGithubToken(scope: GithubTokenScope = "write"): Pro
   return process.env.GH_TOKEN ?? null;
 }
 
+/** The GitHub user this process acts as: what its commits, PRs and comments are attributed to. */
+export interface GithubIdentity {
+  /** `<app-slug>[bot]` for a GitHub App; the account's login for a static token. */
+  login: string;
+  /** The immutable numeric user id — matched alongside the login, which can be renamed. */
+  id: number;
+}
+
+let identity: Promise<GithubIdentity | undefined> | undefined;
+
+/**
+ * Resolve the GitHub identity this process acts as — the App's bot user
+ * (`GET /app` for the slug, then the `<slug>[bot]` user) when a GitHub App is
+ * configured, else the static GH_TOKEN's user (`GET /user`), else undefined.
+ * Nothing in the code names an installation's bot: ship compares a PR's author
+ * against THIS (agent-ship.md item 10), so the same image serves every
+ * installation. Resolved once per process (an identity does not change); a
+ * failed lookup answers undefined once and is retried on the next call.
+ */
+export function resolveGithubIdentity(): Promise<GithubIdentity | undefined> {
+  identity ??= lookupIdentity().catch((err) => {
+    console.warn(`[github] identity lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    identity = undefined;
+    return undefined;
+  });
+  return identity;
+}
+
+async function lookupIdentity(): Promise<GithubIdentity | undefined> {
+  if (githubAppConfigured()) {
+    const appId = process.env.GITHUB_APP_ID!;
+    const privateKey = process.env.GITHUB_APP_PRIVATE_KEY!.replace(/\\n/g, "\n");
+    const app = (await githubJson("https://api.github.com/app", appJwt(appId, privateKey))) as { slug?: string };
+    if (typeof app.slug !== "string" || app.slug === "") throw new Error("GET /app answered without a slug");
+    const login = `${app.slug}[bot]`;
+    const user = (await githubJson(
+      `https://api.github.com/users/${encodeURIComponent(login)}`,
+      await mintInstallationToken("read"),
+    )) as { login?: string; id?: number };
+    if (typeof user.id !== "number") throw new Error(`GET /users/${login} answered without an id`);
+    return { login: typeof user.login === "string" ? user.login : login, id: user.id };
+  }
+  if (process.env.GH_TOKEN) {
+    const user = (await githubJson("https://api.github.com/user", process.env.GH_TOKEN)) as {
+      login?: string;
+      id?: number;
+    };
+    if (typeof user.login !== "string" || typeof user.id !== "number")
+      throw new Error("GET /user answered without login and id");
+    return { login: user.login, id: user.id };
+  }
+  return undefined;
+}
+
+async function githubJson(url: string, bearer: string): Promise<unknown> {
+  const res = await fetch(url, {
+    headers: { authorization: `Bearer ${bearer}`, accept: "application/vnd.github+json", "user-agent": "switchboard" },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`${url.replace("https://api.github.com", "")}: HTTP ${res.status} ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
 async function mintInstallationToken(scope: GithubTokenScope): Promise<string> {
   // Reuse only while the token outlives the longest possible command; the
   // executors call this per command, so no run is ever pinned to one token.

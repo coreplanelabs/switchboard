@@ -16,6 +16,7 @@ import { configCommands, registerConfigCommands, type ConfigCommandDeps } from "
 // dotted options (`--models.coding x`) nest; none of it reaches a model.
 
 const YAML = `
+organization: acme
 providers:
   anthropic:
     type: anthropic

@@ -40,6 +40,7 @@ import {
   type RepoShipInfo,
 } from "../execution/githubPulls.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
+import type { GithubIdentity } from "../execution/githubApp.js";
 import type { ToolContext } from "../tools/workspace.js";
 import type { WebCapability } from "../tools/web.js";
 import type { GithubCapability } from "../tools/github.js";
@@ -99,11 +100,12 @@ export const SHIP_ROUND_RESERVE_MS = 3 * 60_000;
 
 // ---- identity + naming -------------------------------------------------------
 
-/** The App bot user ship-driven PRs are authored by, matched by BOTH login and
- *  the immutable numeric user id — mirroring how the org auto-approve workflow
- *  (.github/workflows/auto-approve-claude-lgtm.yml) pins the same identity. A
- *  PR authored by anyone else is not ship's to drive (spec item 10). */
-export const SHIP_PR_AUTHOR = { login: "coreplane-switchboard[bot]", id: 318072483 } as const;
+// Ship-driven PRs are authored by the identity this process acts as — the App's
+// bot user, resolved from GitHub (`ShipPreflightInput.selfIdentity`, backed by
+// githubApp's `resolveGithubIdentity`), matched by BOTH login and the immutable
+// numeric user id. A PR authored by anyone else is not ship's to drive (spec
+// item 10); an identity that cannot be resolved refuses fail-closed. Nothing
+// here names an installation's bot, so one image serves every installation.
 
 /**
  * The request text with the ship scaffolding stripped — the "new task text"
@@ -187,6 +189,9 @@ export interface ShipPreflightInput {
   repoInfo: (repo: string) => Promise<RepoShipInfo | undefined>;
   /** PR facts for the entry checks. Undefined = unknown → refused fail-closed. */
   prFacts: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
+  /** The GitHub identity this process acts as — what ship's own PRs are authored
+   *  by. Undefined = unknown → a PR's authorship cannot be judged → refused fail-closed. */
+  selfIdentity: () => Promise<GithubIdentity | undefined>;
   /** PUBLIC_BASE_URL, for the run-page pointer in the channel refusal. */
   runsBase?: string;
 }
@@ -276,8 +281,20 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       );
     }
     if (facts) {
+      // Whose PR is it? Judged against the identity this process acts as (the App's
+      // bot user, or a static token's user) — resolved from GitHub, never named here. Unknown
+      // identity = the question cannot be answered = refused fail-closed, on
+      // every path that needs the answer (an open PR).
+      const self = facts.state === "open" ? await input.selfIdentity().catch(() => undefined) : undefined;
+      if (facts.state === "open" && !self) {
+        return refuse(
+          "own identity unavailable",
+          "not started (identity unverifiable)",
+          `🚫 Could not resolve the GitHub identity this bot acts as, so whether ${where} is ship's to drive cannot be judged — refusing fail-closed. Retry in a moment.`,
+        );
+      }
       const author = facts.author;
-      const shipAuthored = author?.login === SHIP_PR_AUTHOR.login && author?.id === SHIP_PR_AUTHOR.id;
+      const shipAuthored = self !== undefined && author?.login === self.login && author?.id === self.id;
       if (facts.state === "open" && !(task && !shipAuthored)) {
         // Binding rule (#512): a PR quoted as evidence inside a NEW task is not
         // the PR to drive — with task text present, someone ELSE's PR mention
@@ -298,7 +315,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
           return refuse(
             "human-authored PR",
             "not started (not ship's PR)",
-            `🚫 ${where} was not authored by \`${SHIP_PR_AUTHOR.login}\` — it is not ship's to drive. Use \`agent:review\` for a one-off review, or drive the loop manually.`,
+            `🚫 ${where} was not authored by \`${self!.login}\` (this bot) — it is not ship's to drive. Use \`agent:review\` for a one-off review, or drive the loop manually.`,
           );
         }
         if (!facts.sameRepoHead) {

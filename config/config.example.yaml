@@ -1,6 +1,12 @@
 # Switchboard configuration.
 # Copy to config/config.yaml and adjust. API keys come from env vars only.
 
+# The GitHub organization (or user) this installation serves — the account the
+# GitHub App is installed on. Required. It names the shared memory scope
+# (`org:<organization>`) and the About block every model run carries; nothing
+# in the code assumes a particular organization.
+organization: acme
+
 providers:
   anthropic:
     type: anthropic

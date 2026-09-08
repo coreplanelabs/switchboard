@@ -6,27 +6,32 @@ import type { MemoryScope } from "./types.js";
 // the user scope (#107 PR B) and the repo/channel scopes (#253) were deriver
 // changes, not schema changes — the Memory Worker's per-scope Durable Object
 // needed nothing new.
+//
+// The org scope is the installation's shared resource, named by the config's
+// `organization` (the GitHub org or user the installation serves); nothing here
+// assumes one. It is an input like the others — a caller without it is a
+// programmer error, never a shared anonymous bucket.
 
-/** The org resource — the whole org is the shared memory resource. */
-export const ORG_RESOURCE = "coreplanelabs";
-
-/** Request identity the derivers may need. `userId` and `channelId` are the
- *  channel adapter's already-namespaced keys (`slack:U0123`, `slack:C0123`,
- *  AGENTS.md invariant 4); `repo` is the resolved `owner/name` slug. */
+/** Request identity the derivers may need. `organization` is the config's
+ *  `organization`; `userId` and `channelId` are the channel adapter's
+ *  already-namespaced keys (`slack:U0123`, `slack:C0123`, AGENTS.md invariant
+ *  4); `repo` is the resolved `owner/name` slug. */
 export interface ScopeContext {
+  organization?: string;
   userId?: string;
   repo?: string;
   channelId?: string;
 }
 
-/** Derive one scope key: `org` → `org:coreplanelabs`; `user` → `user:<userId>`;
+/** Derive one scope key: `org` → `org:<organization>`; `user` → `user:<userId>`;
  *  `repo` → `repo:<owner/name>`; `channel` → `channel:<channelId>`. A scope
  *  without its input is a programmer error — never a shared anonymous bucket
- *  that would leak across people, repos, or channels. */
+ *  that would leak across installations, people, repos, or channels. */
 export function deriveScopeKey(scope: MemoryScope, ctx: ScopeContext = {}): string {
   switch (scope) {
     case "org":
-      return `org:${ORG_RESOURCE}`;
+      if (!ctx.organization) throw new Error("memory: the org scope requires the organization");
+      return `org:${ctx.organization}`;
     case "user":
       if (!ctx.userId) throw new Error("memory: the user scope requires a userId");
       return `user:${ctx.userId}`;
@@ -53,10 +58,11 @@ export interface RequestScopeKeys {
 }
 
 export function requestScopeKeys(
+  organization: string,
   userId: string | undefined,
   ctx: Pick<ScopeContext, "repo" | "channelId"> = {},
 ): RequestScopeKeys {
-  const keys: RequestScopeKeys = { org: deriveScopeKey("org") };
+  const keys: RequestScopeKeys = { org: deriveScopeKey("org", { organization }) };
   if (userId) keys.user = deriveScopeKey("user", { userId });
   if (ctx.repo) keys.repo = deriveScopeKey("repo", { repo: ctx.repo });
   if (ctx.channelId) keys.channel = deriveScopeKey("channel", { channelId: ctx.channelId });

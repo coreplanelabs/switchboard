@@ -18,7 +18,7 @@ import { createMcpConnectViewHandler, isConnectPath, parseConnectRoute } from ".
 // server can play several people).
 
 const YAML =
-  "providers:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n";
+  "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\n";
 const alice: McpActor = { id: "slack:U1", orgAdmin: false, channelAdmin: true };
 const ME = { kind: "user" as const, id: alice.id };
 const KEY_ID = "user:slack:U1/vanta";
