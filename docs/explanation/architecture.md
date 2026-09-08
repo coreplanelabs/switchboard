@@ -36,7 +36,7 @@ flowchart LR
 - **A provider** turns "call this model with these messages and tools" into one vendor's request and back.
 - **An executor** runs a tool call somewhere — the bot host, a throwaway container per thread, an always-warm checkout — and returns the result. Tools never touch the host directly; the executor is the only place that does.
 
-Deeper: [How a request flows](how-a-request-flows.md) for what each seam refuses to know about the others; [Add a provider or an agent](../how-to/add-a-provider-or-agent.md) for extending two of them without touching the rest.
+Deeper: [How a request flows](how-a-request-flows.md) for what each seam refuses to know about the others; [Add a model provider](../how-to/add-a-provider.md) or [Add an agent](../how-to/add-an-agent.md) for extending two of them without touching the rest.
 
 ## One request, end to end
 

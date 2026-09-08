@@ -150,6 +150,6 @@ command syntax; the changelog calls out every such change with a migration note.
 | understand the architecture | [How a request flows](docs/explanation/how-a-request-flows.md), then the rest of [docs/explanation/](docs/explanation/) |
 | know the rules a change must keep | [AGENTS.md](AGENTS.md) |
 | find what a feature is supposed to do | the feature's spec, linked from its docs page |
-| add a channel, provider, executor, or agent | [Add a provider or an agent](docs/how-to/add-a-provider-or-agent.md) |
+| add a provider or an agent | [Add a model provider](docs/how-to/add-a-provider.md), [Add an agent](docs/how-to/add-an-agent.md) |
 | run the dashboard against fixtures | `npx tsx scripts/web-preview.ts` |
 | see why something is the way it is | `docs/decisions/` |

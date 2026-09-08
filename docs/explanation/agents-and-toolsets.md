@@ -32,6 +32,6 @@ A coding or review run against a repository an admin has onboarded starts in tha
 
 ## See also
 
-- [How to add a provider or an agent](../how-to/add-a-provider-or-agent.md) — a new agent is one registry entry.
+- [Add an agent](../how-to/add-an-agent.md) — a new agent is one registry entry; why an agent is data and the dispatcher the only orchestrator is [decision 0002](../decisions/0002-dispatcher-is-the-only-orchestrator.md).
 - [How a request flows](how-a-request-flows.md) — the loop every agent runs through.
 - [Reference: Slack commands](../reference/slack-commands.md) — the `agent:` directive and the rest of the grammar.

@@ -1,6 +1,6 @@
-# Why config is layered, not just "settings"
+# Why config is layered
 
-Three different people reasonably want to control the same knob — which agent runs, which model answers, how hard it thinks — at three different scopes, and none of them should have to coordinate with the others to get their way locally. Switchboard resolves each knob independently through six layers, highest-specificity wins:
+Three different people reasonably want to control the same knob — which agent runs, which model answers, how hard it thinks — at three different scopes, and none of them should have to coordinate with the others to get their way locally. Switchboard resolves each knob independently through six layers, the most specific winning:
 
 ```mermaid
 flowchart TD
@@ -8,31 +8,33 @@ flowchart TD
     TH["Thread — sticky, derived from history"] -->|unset?| US
     US["User — your own config set me"] -->|unset?| CH
     CH["Channel — config set channel"] -->|unset?| DF
-    DF["Org defaults — config.yaml"] -->|unset?| AG
+    DF["Installation defaults — config.yaml"] -->|unset?| AG
     AG["Agent's own floor — built into its definition"]
 ```
 
+The commands that set each layer are in [Configure your defaults](../how-to/configure-your-defaults.md). The decision that shaped the ladder, and made effort one of its dimensions, is [decision 0005](../decisions/0005-layered-config-effort-first-class.md).
+
 ## Why "thread" is a layer with no storage
 
-Layer 2 isn't config anyone sets — it's *derived* from what the thread's history already shows. A follow-up with no directive doesn't "inherit a setting"; the dispatcher looks at what the last message in this thread actually used and keeps using it. This means there's nothing to leak, nothing to clean up, and nothing that survives a restart incorrectly: a thread's stickiness is only ever as durable as the channel history it's read from — restart the bot mid-conversation, and the next reply rebuilds the same "sticky" behavior by reading Slack again, not from anything the bot remembered on its own. It's a consequence of [state living where it survives a restart](worker-topology.md), not a special case.
+The thread layer is not config anyone sets; it is derived from what the thread's history already shows. A follow-up with no directive does not inherit a setting: the dispatcher looks at what the last message in this thread used and keeps using it. So there is nothing to leak, nothing to clean up, and nothing that survives a restart incorrectly. A thread's stickiness is only as durable as the channel history it is read from; restart the bot mid-conversation and the next reply rebuilds the same behaviour by reading Slack again, not from anything the bot remembered on its own. That is a consequence of [state living where it survives a restart](worker-topology.md), not a special case.
 
 ## Why agent and model resolve independently
 
-A channel might want every review to run on a specific model without forcing every *other* agent in that channel onto the same model — `config set channel --agent review` and `config set channel --models.coding openai/gpt-5` are two separate decisions, resolved through the same six layers but landing on different agents. Collapsing "agent" and "model" into one setting would force one scope's model preference to leak into agents that scope never meant to touch.
+A channel may want every review to run on a specific model without forcing every other agent in that channel onto the same model. `config set channel --agent review` and `config set channel --models.coding openai/gpt-5` are two separate decisions, resolved through the same six layers, landing on different agents. Collapsing agent and model into one setting would let one scope's model preference leak into agents that scope never meant to touch.
 
 ## Why effort is a first-class layer, not a model detail
 
-`effort` (`low | medium | high`) rides the exact same ladder as model — a request directive, a per-agent override at any scope, org defaults, then the agent's built-in floor. That's a deliberate elevation: wall-clock time is an agent's real budget, and effort is the dial that decides how much of a turn's time goes to *thinking* versus *doing*. Treating it as a first-class, independently-resolved setting (rather than something buried inside a model string) means a channel that wants fast-and-cheap `general` answers but a careful, high-effort `review` can say exactly that, without needing two different model configurations to fake it.
+Effort (`low` through `max`) rides the same ladder as the model: a request directive, a per-agent override at any scope, the installation's defaults, then the agent's built-in floor. That is a deliberate elevation. Wall-clock time is an agent's real budget, and effort is the dial that decides how much of a turn's time goes to thinking rather than doing. Treating it as an independently resolved setting, rather than something buried inside a model string, lets a channel that wants fast, cheap `general` answers and a careful, high-effort `review` say exactly that without two model configurations to fake it.
 
-## Why permission gates check the *resolved* agent, not the request
+## Why the gate checks the resolved agent, not the request
 
-None of the layering above is a security boundary — it's a convenience ladder for picking a default. The gate that actually matters (`restrict.agents` against the caller's `agent:run:<name>` grant) runs **after** all six layers have already produced a final agent, against that final answer, every single time an agent is about to run. This is why setting your own default to a restricted agent is harmless: `config set me --agent coding` always succeeds as a *write*, because the gate that matters isn't at write time — it's at run time, against whatever agent actually ends up resolved, checked again on the very next message. See [reference: authorization](../reference/authorization.md) for the gates themselves.
+None of the layering above is a security boundary; it is a convenience ladder for picking a default. The gate that matters — `restrict.agents` against the caller's `agent:run:<name>` grant — runs after all six layers have produced a final agent, against that answer, every time an agent is about to run. That is why setting your own default to a restricted agent is harmless: `config set me --agent coding` always succeeds as a write, because the check is not at write time but at run time, against whatever agent actually resolved, and it is asked again on the very next message. The gates themselves are in the [Authorization](../reference/authorization.md) reference; why authorization is one table asked once is [decision 0007](../decisions/0007-authorization-policy-table.md).
 
 ## Custom instructions are not a seventh layer
 
-`config instructions me/channel` looks like config — it's set the same way, scoped the same way — but it's not part of this resolution ladder at all. It's free text folded into the system prompt as a clearly labeled advisory block, and it never changes which agent, model, or effort gets resolved, and never affects a permission gate. The two systems are kept separate on purpose: a user's phrasing preference shouldn't be able to accidentally reroute which agent runs, and a permission decision shouldn't have to account for prompt text as an input.
+`config instructions me` and `config instructions channel` look like config — set the same way, scoped the same way — but they are not part of this ladder at all. They are free text folded into the system prompt as a labelled advisory block; they never change which agent, model or effort resolves, and never affect a gate. The two systems are kept apart on purpose: a phrasing preference should not be able to reroute which agent runs, and an authorization decision should not have to account for prompt text as an input.
 
 ## See also
 
-- [How-to: configure your defaults](../how-to/configure-your-defaults.md) — the commands, not the reasoning.
-- [Explanation: how a request flows](how-a-request-flows.md) — where resolution sits in the overall pipeline.
+- [Configure your defaults](../how-to/configure-your-defaults.md) — the commands, not the reasoning.
+- [How a request flows](how-a-request-flows.md) — where resolution sits in the pipeline.

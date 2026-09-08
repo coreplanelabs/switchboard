@@ -1,72 +1,70 @@
-# Onboard a repo (make it warm)
+# Onboard a repo
 
-Goal: a coding or review request against `acme/api` should start instantly — checkout already there, dependencies already installed — instead of cloning cold every time.
+Make coding and review requests against one repository start warm — the checkout already there, the dependencies already installed — instead of cloning cold for every thread.
 
-By default, every repo runs cold: a fresh workspace directory per thread, cloned on first use. **Onboarding** a repo gives it its own always-warm environment (a "resident") so requests skip that setup entirely.
+By default every repository runs cold: a new workspace per thread, cloned on first use. Onboarding gives a repository a **resident**, an always-warm environment of its own, and every later request that names the repository runs in it.
 
 ## Before you start
 
-Residents live on the resident Worker, so the installation needs one deployed ([Deploy](deploy.md)) and the bot's config pointed at it:
+- A resident Worker deployed ([Deploy](deploy.md)) and the bot's config pointed at it:
 
-```yaml
-execution:
-  resident:
-    baseUrl: https://switchboard-resident.example.com
+  ```yaml
+  execution:
+    resident:
+      baseUrl: https://switchboard-resident.example.com
+  ```
+
+  with `RESIDENT_OPERATOR_TOKEN` (runtime tool calls) and `RESIDENT_ADMIN_TOKEN` (the `repo …` commands) in the bot's environment. Without them the `repo` commands do not exist ([Turn features on and off](turn-features-on-and-off.md)).
+- The `repo:write` grant. Onboarding provisions billable, always-on compute and binds a GitHub credential, so nobody holds it by default: admins only, until granted ([Restrict who can do what](restrict-who-can-do-what.md)).
+- The repository is in the GitHub App installation the resident Worker authenticates with. A repository outside it is refused by name and nothing is created.
+
+## 1. Onboard
+
+```
+@switchboard repo onboard acme/api --ref main --install "npm ci" --test "npm test" --build "npm run build"
 ```
 
-with `RESIDENT_OPERATOR_TOKEN` (runtime tool calls) and `RESIDENT_ADMIN_TOKEN` (the `repo …` commands) in the bot's environment. The resident Worker holds its own copy of the GitHub App credential, so private repositories can be cloned and resident threads can push; when the App is configured, a repository must already be in the App's installation to be onboarded, and the reply says so when it is not.
+Omit `--install`, `--test` or `--build` and Switchboard inspects the repository root — the lockfile for the package manager, `package.json` for the scripts — picks the commands, and tells you what it chose and why. The command returns at once; provisioning continues in the background.
 
-## Onboard one
-
-Onboarding provisions billable, always-on compute and binds GitHub credentials, so it needs the `repo:write` grant — **never a baseline**: unless an admin has granted it to someone, only admins can run these commands.
-
-```
-@switchboard repo onboard acme/api --ref main --test "npm test" --build "npm run build" --install "npm ci"
-```
-
-Omit any of `--test`/`--build`/`--install` and Switchboard inspects the repo root to guess them (lockfile → package manager, `package.json` scripts → commands) and tells you what it picked and why.
-
-## Watch it come up
+## 2. Watch it come up
 
 ```
 @switchboard repo list
 ```
 
+The lifecycle runs `onboarding → warm`. You get a second reply the moment the resident reaches `warm`, or a reason if it did not. The dashboard shows the same list with more detail per repository ([Dashboard routes](../reference/dashboard-routes.md)).
+
 <img src="../images/residents-index.jpg" alt="Residents index in the dashboard, showing repo, lifecycle state, and last activity" width="720">
 
-Lifecycle runs `onboarding → warm`. You'll get a second Slack reply the moment it reaches `warm` (or a reason if it didn't). The same list, with more detail per repo, is on the dashboard — [reference: dashboard routes](../reference/dashboard-routes.md).
+## 3. Use it
 
-<img src="../images/resident-detail.jpg" alt="A single resident's detail page, showing its mirror, warm checkout, and thread worktrees" width="720">
+Nothing changes in how you ask. Any coding or review request that names the repository — by `owner/name`, by GitHub URL, or by a pull request link — runs in the resident. The status card says which repository the run bound (`resident · acme/api · main@…`), so check it if an answer looks like it came from the wrong place.
 
-## Once it's warm
-
-Any coding/review request that names the repo — by slug, GitHub URL, or PR link — runs in its resident automatically. Nothing to type differently; you'll just notice it starts faster and doesn't re-clone.
-
-## Managing it later
+## 4. Change or remove it later
 
 ```
-@switchboard repo reconfigure acme/api test="npm run test:unit"
-@switchboard repo offboard acme/api --dry-run     # itemized plan, nothing executed yet
-@switchboard repo offboard acme/api               # actually tear it down
-@switchboard repo rebuild acme/api                # discard and reprovision from scratch
+@switchboard repo reconfigure acme/api --test "npm run test:unit"
+@switchboard repo offboard acme/api --dry-run     # the itemized plan, nothing executed
+@switchboard repo offboard acme/api               # tear it down
+@switchboard repo rebuild acme/api                # discard the snapshot and reprovision from scratch
 ```
 
-`--dry-run` is worth using before any destructive change — it prints exactly what would happen without doing it.
+Run `--dry-run` before anything destructive; it prints exactly what would happen.
 
-## Disk
+## If the resident runs out of disk
 
-Each resident has a fixed disk (20 GB today), and it is a budget, not a surprise: the resident measures it on every refresh and after every attach, and the numbers are wherever you look — `repo list` appends `· disk 4.06 GiB/14.4 GiB (28%)` to each line, the residents index shows the same gauge per row, and the detail page has a **Disk** section: used/total, free, the **reserve** the resident always keeps back (room to stage its snapshot plus a 1 GiB floor), the **headroom** expressed as "room for N more hardlinked trees, M more deps-installing" (a thread whose branch shares the warm checkout's lockfile costs ~0.5 GB; one whose lockfile differs installs its own dependencies and costs the whole `node_modules` on top), and every component — mirror, dependencies, checkout, each live thread tree, leftover caches per pool user, everything else. `diskBudgetMb` on the record (`repo onboard … `, `repo reconfigure …`) caps what the resident may use below the physical disk.
+A resident's disk is a budget it measures on every refresh and attach, and the gauge is on every surface: `repo list` appends `· disk 4.06 GiB/14.4 GiB (28%)` to the line, the residents index shows it per row, and the detail page has a **Disk** section — used, free, the reserve the resident keeps back, headroom in "more trees", and every component. Two states you may see:
 
-When a new thread would not fit under `free − reserve`, the resident first evicts its coldest idle worktrees (never one with a command running, never one attached in the last 10 minutes, never the default branch, never one with uncommitted work), and if that is still not enough it refuses the attach with `disk-pressure`. Nothing breaks: the request runs in a cold sandbox instead, and the status card shows the whole arithmetic — `resident attach failed (… disk-pressure: need 2.47 GiB for a new tree (install), but 3.10 GiB free minus the 2.76 GiB reserve (snapshot staging 1.76 GiB + floor 1.00 GiB) leaves 0.34 GiB — short by 2.13 GiB; evicted 1 idle tree(s) (0.52 GiB back): …; kept 1: … (2 operation(s) in flight)) — using fresh sandbox`. Existing threads keep working; the resident stays `warm`. If you see this often, the detail page tells you which trees are holding the space; the remedy is fewer concurrent branches with divergent lockfiles, or a larger instance.
+- **`disk-pressure` on a status card.** A new thread would not fit, the resident evicted the idle trees it safely could, and the request ran in a cold sandbox instead. The card shows the arithmetic. Nothing is broken and the resident stays `warm`; the detail page shows which trees hold the space. The remedy is fewer concurrent branches with divergent lockfiles, or a larger instance.
+- **`degraded` with `disk-full: …` on the dashboard.** The container disk filled anyway. Requests run cold until it recovers, which it does on its own by restarting the container and restoring the snapshot, once nothing is in flight and no thread has uncommitted work. If it fills again within the hour, the detail page's last refresh error says why: the working set no longer fits the instance. Resize it, or offboard a repository.
 
-A resident whose container disk fills up anyway shows `degraded` with a `disk-full: …` reason on the dashboard, and requests for that repo run cold (the status card says so) until it recovers. It recovers on its own: the disk is only a cache, so the resident restarts its container and restores from its snapshot — usually within a couple of minutes — as long as no run is in flight and no thread has uncommitted work on it. If it fills again within the hour, the resident keeps the container and the detail page's last refresh error says why: the repo's working set no longer fits the instance disk, so resize it or offboard a repo.
+The rules of the budget — the reserve, what is evicted first, what is never evicted — are in the [resident contract](../reference/specs/resident-repos.md); why disk decides the instance size is in [Capacity and sizing](../explanation/capacity-and-sizing.md).
 
-## Who can use a warm repo
+## What you did
 
-Onboarding is separate from *using* an onboarded repo. Restrict the latter per repo with `restrict.repos` plus a `repos` grant — see [restrict who can do what](restrict-who-can-do-what.md).
+You gave one repository an always-warm environment, watched it reach `warm`, and learned where its disk gauge lives. Using a resident is separate from onboarding it: restrict who may use the repository with `restrict.repos` and a `repos` grant ([Restrict who can do what](restrict-who-can-do-what.md)).
 
 ## See also
 
-- [Reference: dashboard routes](../reference/dashboard-routes.md) — the residents pages in full.
-- [Reference: authorization](../reference/authorization.md) — `repo:write` vs `restrict.repos`, and why one is never a baseline and the other is open unless listed.
-- [Explanation: Worker topology](../explanation/worker-topology.md) — what a resident actually is, underneath.
+- [Authorization](../reference/authorization.md) — `repo:write` versus `restrict.repos`, and why one is never a baseline while the other is open unless listed.
+- [Worker topology](../explanation/worker-topology.md) — what a resident is underneath.

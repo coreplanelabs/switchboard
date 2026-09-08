@@ -1,6 +1,6 @@
-# Runs: live, then (optionally) remembered
+# Runs: live, then remembered
 
-A run has two distinct lives, backed by two different stores, and the seam between them is deliberate rather than an implementation detail leaking through.
+A run has two lives, backed by two different stores, and the seam between them is deliberate rather than an implementation detail leaking through. That is [decision 0006](../decisions/0006-runs-have-two-lives.md); this page is why.
 
 ```mermaid
 stateDiagram-v2
@@ -13,34 +13,34 @@ stateDiagram-v2
     Retained --> Swept: retention sweep alarm
 ```
 
-## Why "live" is in-memory and cheap
+## Why "live" is in memory and cheap
 
-While a run is active, every tool call, every status edit, every intermediate note is held in an in-memory registry on the bot process — bounded by count and by bytes, evicted on a TTL, capability-token-gated (the token in a run's URL *is* the access control, alongside Access at the edge). A viewer who opens the page mid-run is replayed the newest of what the registry holds, within a budget (2000 events, 1 MiB), and is told the `seq` range it did not get (`replay_elided`); the record keeps everything, so nothing a viewer skipped is lost. This is what makes the live run page and its SSE stream fast and free of any durable-write cost per event: nothing here is designed to survive a restart, because a run *in flight* during a restart is genuinely gone — there's no safe way to resume a half-finished tool call across a process boundary, so the system doesn't pretend to.
+While a run is active, every tool call, status edit and intermediate note is held in an in-memory registry on the bot process: bounded by count and by bytes, evicted on a TTL, opened by a per-run capability token (the token in a run's URL is the access control, alongside whatever gate sits at the edge — [decision 0013](../decisions/0013-capability-tokens-for-live-run-pages.md)). A viewer who opens the page mid-run is replayed the newest of what the registry holds, within a budget, and is told which range it did not get; the record keeps everything, so nothing a viewer skipped is lost. That is what makes the live page and its stream fast and free of any durable write per event.
 
-## Why "finished" is a deliberate, separate write
+## Why "finished" is a separate, deliberate write
 
-The moment a run finishes — answered, stopped, or budget-exhausted — the dispatcher builds one durable record (identity, timing, the redacted event stream, the friction diagnosis) and writes it *after* the reply has already gone out, so a slow or failed history write never delays or breaks the user-visible answer. This write is fire-and-forget with bounded retries; on shutdown, the drain waits for exactly this queue to empty, and nothing else.
+The moment a run finishes — answered, stopped, or out of budget — the dispatcher builds one durable record (identity, timing, the redacted event stream, the friction diagnosis) and writes it after the reply has gone out, so a slow or failed history write never delays or breaks the visible answer. The write is fire-and-forget with bounded retries; on shutdown, the drain waits for exactly this queue to empty.
 
-## Why run history is an on/off switch, not always-on
+## Why run history is a switch, not always on
 
-Without a `runHistory` block in config, this second write never happens at all — runs are **live-only**, evicted from the in-memory registry roughly a minute after they finish, exactly as if the durable-history feature didn't exist. This isn't a degraded fallback; it's a genuine choice: a small deployment with no state Worker configured shouldn't pay for durable storage it never asked for, and the dashboard's `/runs` index reflects that honestly (nothing to show once a run's minute is up) rather than silently pretending history exists. Turn it on — point `runHistory.worker` at the state Worker — and the exact same runs become readable for a real retention window (`retentionDays` / `maxRuns` / `maxBytes`, whichever limit bites first), through the identical `RunsService` merge of "still live" and "already history" rows.
+Without a `runHistory` block, the second write never happens: runs are live-only, evicted from the registry about a minute after they finish, exactly as if durable history did not exist. That is a choice, not a degraded fallback. A small installation with no state Worker should not pay for storage it never asked for, and the dashboard's `/runs` index says so honestly rather than pretending history exists. Turn it on — `store: file` on the host, or `runHistory.worker` pointing at the state Worker — and the same runs become readable for a retention window (`retentionDays`, `maxRuns`, `maxBytes`, whichever bites first), through one read service that merges "still live" and "already history" rows.
 
-## Why a restart loses nothing durable — and exactly what it does lose
+## What a restart loses, and what it no longer does
 
-The bot process restarting (a deploy, a crash, a container recycle) has three different effects depending on what a run was doing at that instant:
+The bot restarting — a deploy, a crash, a container recycle — has three different effects depending on what a run was doing at that instant:
 
-- **A run that already finished and was written to history:** completely unaffected — it's not in the bot's memory to lose.
-- **A conversation's context in an idle thread:** unaffected — it's rebuilt by reading Slack's own thread history on the next message, never held durably by the bot itself.
-- **A run genuinely in flight at the moment of restart:** this is the one real loss. It has no record (the write happens *after* the reply, and there was no reply), so it simply disappears from every surface. The Slack reconnect catch-up exists specifically to paper over the Slack-side consequence of this — a message that arrived while the socket was down gets picked up and re-dispatched on reconnect — but the interrupted run itself is not resumed, it's redone.
+- **A run that already finished and was written to history** is unaffected; it is not in the bot's memory to lose.
+- **A conversation's context in an idle thread** is unaffected; it is rebuilt from Slack's own thread history on the next message, never held by the bot itself ([decision 0012](../decisions/0012-reconnect-catch-up-as-recovery.md)).
+- **A run in flight at the moment of restart** depends on the **run ledger**. With run history on the state Worker, every run has a leased, fenced row there and a write-ahead record of its steps; on SIGTERM the bot marks its resumable runs handed off, and the next container reclaims them within seconds and continues them under the same status card, with a follow-up still steering into them. Without the ledger, the run is the one real loss: it has no record (the write happens after the reply, and there was no reply), so it disappears and its card closes as interrupted. A `ship` pipeline is never resumable and holds the drain until it finishes. Why a lease with a fencing token: [decision 0019](../decisions/0019-durable-run-ledger-resume-after-kill.md).
 
-This is why deploy tooling treats "a run is in flight" as something to wait out rather than plow through: not because the bot can't restart safely, but because the one thing that *doesn't* survive is whatever was mid-flight at the exact moment it goes down.
+This is why deploy tooling no longer waits on runs in flight, and why the one thing it still waits out is a container rollout in progress ([Operate production](../how-to/operate-production.md)).
 
 ## Why every duration is one definition
 
-A run's duration is printed in six places — the run page header, the runs index row, `runs list`, the history seed, the Slack card, and the friction report — and until recently each computed it from whatever stamps it happened to hold: first event to last event here, `startedAt` to `finishedAt` there. Two surfaces could disagree about the same run, and neither could be called wrong. Now one function, `runDurationMs`, defines it: from the moment the bot received the message (falling back to when the run was registered, for records that predate the stamp) to the moment the agent finished, or to now while live. The live run page projects the server's clock forward from the seed rather than subtracting a server stamp from the browser's clock, so clock skew can never show in a tick. The rule and its stamps are specified in [docs/reference/specs/tracing.md](../reference/specs/tracing.md).
+A run's duration is shown in six places — the run page header, the runs index row, `runs list`, the history seed, the Slack card, and the friction report — and if each computed it from whatever stamps it happened to hold, two surfaces could disagree about the same run with neither being wrong. So one function defines it: from the moment the bot received the message to the moment the agent finished, or to now while live. The live page projects the server's clock forward from the seed rather than subtracting a server stamp from the browser's, so clock skew never shows in a tick. Every duration falls out of a span ([decision 0020](../decisions/0020-spans-one-measurement-primitive.md)); the stamps are in the [tracing spec](../reference/specs/tracing.md).
 
 ## See also
 
-- [How-to: watch a run and check spend](../how-to/watch-a-run-and-check-spend.md) — the dashboard surface built on this.
-- [Explanation: Worker topology](worker-topology.md) — where the durable half of this actually lives.
-- [Reference: configuration](../reference/configuration.md) — the `runHistory` block's exact knobs.
+- [Watch a run](../how-to/watch-a-run.md) — the dashboard built on this.
+- [Worker topology](worker-topology.md) — where the durable half lives.
+- [Configuration](../reference/configuration.md) — the `runHistory` block's knobs.

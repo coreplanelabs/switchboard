@@ -1,71 +1,69 @@
 # Configure your defaults
 
-Goal: stop repeating `agent:coding model:openai/gpt-5` on every message. Set it once at the scope where it belongs — yourself, a thread, or a whole channel.
+Set the agent, model and effort once, at the scope where the choice belongs, instead of repeating `agent:coding model:openai/gpt-5` on every message.
 
-## The six layers, highest wins
+## Before you start
 
-Switchboard resolves **agent** and **model** (and **effort** — see below) independently, checking each layer in order and stopping at the first one that has an opinion:
+- Switchboard already answers you, in Slack or on the CLI ([Your first request in Slack](../tutorials/first-request-in-slack.md), [Run it locally](../tutorials/run-it-locally.md)).
+- To change a channel's defaults you need the `config:write` grant. Admins hold it through `all`; nobody else does until granted ([Restrict who can do what](restrict-who-can-do-what.md)). Your own defaults need no grant.
 
-```mermaid
-flowchart TD
-    A["1 · This message<br/><code>agent:review model:openai/gpt-5</code>"] -->|unset?| B
-    B["2 · This thread<br/>(sticky — whatever it last used, no command needed)"] -->|unset?| C
-    C["3 · You<br/><code>config set me …</code>"] -->|unset?| D
-    D["4 · This channel<br/><code>config set channel …</code>"] -->|unset?| E
-    E["5 · Org defaults<br/><code>config.yaml defaults</code>"] -->|unset?| F
-    F["6 · The agent's own floor<br/>(built into its definition)"]
+The examples are chat messages. The same commands work word for word on the CLI (`npm run cli -- config set me --model openai/gpt-5`) and over HTTP and MCP ([One definition, every surface](../explanation/one-command-many-surfaces.md)).
+
+## 1. See what is in force
+
+```
+@switchboard config show
 ```
 
-Why it's shaped this way: [config layers, explained](../explanation/config-layers.md).
+The reply names the effective agent, model and effort for you in this channel, where each value came from, and what is restricted. Every value resolves through six layers, highest first: the message's directives, the thread's own history, your settings, the channel's settings, the installation's `config.yaml` defaults, the agent's built-in floor. Why it is shaped that way: [Why config is layered](../explanation/config-layers.md).
 
-## Set your own defaults
+## 2. Set your own defaults
 
 ```
 @switchboard config set me --model openai/gpt-5
 @switchboard config set me --models.coding openai/gpt-5 --effort medium
 ```
 
-`--model` sets a blanket default; `--models.<agent>` overrides it per agent. `--effort` (`low | medium | high`) controls how hard the model thinks per turn — same per-agent override with `--efforts.<agent>`.
+`--model` sets one model for every agent; `--models.<agent>` overrides it for one agent. `--effort` takes `low`, `medium`, `high`, `xhigh` or `max` and decides how hard the model thinks per turn (lower is much faster); `--efforts.<agent>` is the per-agent form. `--agent` sets the agent that runs when a message names none.
 
-## Set a channel's defaults
-
-Needs the `config:write` grant (admins hold it through `all`; nobody else until granted):
+## 3. Set a channel's defaults
 
 ```
 @switchboard config set channel --agent review
 @switchboard config set channel --efforts.coding medium
 ```
 
-Every message in that channel now defaults to the `review` agent unless a directive or a user's own setting overrides it.
+Every message in that channel now defaults to the `review` agent unless a directive or the sender's own setting says otherwise. From the CLI, or from another channel, add `--channel <id>`.
 
-## Tell it things in plain English
-
-Custom instructions are free text, not routing — they land in the system prompt as an advisory block, they never change which agent/model runs or what permissions apply:
+## 4. Add instructions in plain language
 
 ```
 @switchboard config instructions me "Always reply in bullet points"
 @switchboard config instructions channel "This channel is about billing questions"
 ```
 
-Channel instructions apply to every run in that channel; your own instructions apply only to runs you request; if both exist, yours wins. Clear either with an empty value: `config instructions me ""`.
+Instructions are advisory text in the system prompt. They never change which agent or model runs and never touch a permission. Channel instructions apply to every run in the channel, yours to the runs you request; when both exist, yours win. Omit the text to see what is set; pass an empty value to clear it: `config instructions me ""`.
 
-## One-off, without changing any default
+## 5. Override once, without changing anything
 
-Directives in the message itself always win, and touch nothing persistent:
+Directives in the message itself always win and persist nothing:
 
 ```
 @switchboard agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix issue #42
 ```
 
-## Check and undo
+## 6. Undo
 
 ```
-@switchboard config show               # what's active right now, and why
-@switchboard config clear me            # drop your personal overrides
+@switchboard config clear me            # drop your overrides; config.yaml shows through again
 @switchboard config clear channel       # drop this channel's overrides (needs config:write)
 ```
 
+## What you did
+
+You set defaults at the scope that owns them and confirmed the result with `config show`. Nothing you set can bypass a restriction: `config set me --agent coding` always succeeds as a write, because the gate is applied when a run starts, against the agent that actually resolved.
+
 ## See also
 
-- [Reference: Slack commands](../reference/slack-commands.md) — every flag, every command.
-- [Explanation: config layers](../explanation/config-layers.md) — why resolution works this way, and why effort is a first-class dimension.
+- [Slack commands](../reference/slack-commands.md#config) — every `config` flag.
+- [Why config is layered](../explanation/config-layers.md) — the resolution order and why effort is one of its dimensions.

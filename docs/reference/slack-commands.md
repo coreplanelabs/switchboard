@@ -18,7 +18,7 @@ Placed right after the mention, before the request text:
 |---|---|---|
 | `agent:<name>` | `agent:review` | run this agent for this message only |
 | `model:<provider>/<model>` | `model:openai/gpt-5` | use this model for this message only |
-| `effort:<low\|medium\|high>` | `effort:low` | how hard the model thinks this turn |
+| `effort:<low\|medium\|high\|xhigh\|max>` | `effort:low` | how hard the model thinks this turn |
 
 Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.
 
@@ -107,7 +107,7 @@ One table per group. "Who can run it" is what the authorization policy decides f
 | `config` | [how-to: configure your defaults](../how-to/configure-your-defaults.md), [explanation: config layers](../explanation/config-layers.md) |
 | `mcp` | [how-to: connect an MCP server](../how-to/connect-an-mcp-server.md) |
 | `repo` | [how-to: onboard a repo](../how-to/onboard-a-repo.md) |
-| `runs` | [how-to: watch a run and check spend](../how-to/watch-a-run-and-check-spend.md) |
+| `runs` | [how-to: watch a run](../how-to/watch-a-run.md) |
 | `friction` | [explanation: how Switchboard improves itself](../explanation/how-switchboard-improves-itself.md) |
 
 ## Repo commands run no model turns
