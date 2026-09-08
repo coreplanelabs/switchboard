@@ -61,6 +61,8 @@ import { encodeGithubPathSegments, renderPrDescriptionMarkdown, type PrDescripti
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { parseExitPrefix, type RunEvent } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
+import type { Span } from "./trace/types.js";
+import type { ExecTraceOptions } from "../execution/executor.js";
 
 /** What the PR post-step observed in the run's workspace, all read BEFORE the
  *  workspace is released. Every field is undefined when its probe failed. */
@@ -105,10 +107,13 @@ export interface WorkspaceObservation {
  * leaves its field undefined and the post-step reports honestly.
  */
 export async function observeCodingWorkspace(
-  executor: { exec: (cmd: string) => Promise<string> },
+  executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
   opts: { probeRemote: boolean; pushedBranch?: string },
+  /** The step's span (`run.observe_workspace`, or the ship round): every probe's exec hangs under it (features/tracing.md item 17). */
+  span?: Span,
 ): Promise<WorkspaceObservation> {
-  const probe = (cmd: string) => executor.exec(cmd).catch(() => "");
+  const trace = span ? { span } : undefined;
+  const probe = (cmd: string) => executor.exec(cmd, trace).catch(() => "");
   const pushed = opts.pushedBranch;
   const probesAt = async (git: string): Promise<{ observation: WorkspaceObservation; isRepo: boolean }> => {
     const [headOut, branchOut, upstreamOut, remoteOut, tipOut] = await Promise.all([
