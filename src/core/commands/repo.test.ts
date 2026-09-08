@@ -141,7 +141,7 @@ const PNPM_ROOT = {
 };
 
 /** A Slack person holding `repo:read` like everyone, plus the grants of the named rights:
- *  `repoManager` → `repo:write` (permissions.repoManagement), `agentRun` → `agent:run:coding`. */
+ *  `repoManager` → `repo:write`, `agentRun` → `agent:run:coding`. */
 const chat = (userId: string, gates: Array<"repoManager" | "agentRun"> = []): Caller =>
   callerWith(
     "chat",

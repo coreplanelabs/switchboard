@@ -10,10 +10,20 @@ import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
 import type { ShipConfig } from "./core/shipPipeline.js";
 import { hasAction } from "./core/authz/authorize.js";
-import { grantsIn, grantsTable, parseGrantsConfig, type GrantsConfig, type GrantsTable } from "./core/authz/grants.js";
+import {
+  grantsIn,
+  grantsTable,
+  mayRunAgent,
+  mayUseRepo,
+  parseGrantsConfig,
+  parseRestrictConfig,
+  type GrantsConfig,
+  type GrantsTable,
+  type RestrictConfig,
+  type Restriction,
+} from "./core/authz/grants.js";
 import { ConfigDocumentClient, parseConfigLocation, stateWorkerFromEnv } from "./configDocument.js";
 import type { Grants } from "./core/authz/types.js";
-import type { IngressTokenMap } from "./core/ingressTokens.js";
 import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
 import { AGENTS } from "./agents/registry.js";
 import { assertUrlAllowed } from "./tools/web.js";
@@ -68,50 +78,6 @@ export interface Scope {
 /** Upper bound on one scope's `instructions` text (prepended to every turn). */
 export const MAX_INSTRUCTIONS_LENGTH = 2000;
 
-export interface Permissions {
-  /** Users who bypass all restrictions below. */
-  admins?: string[];
-  /** If an agent is listed, only these users (+ admins) may run it. */
-  agents?: Record<string, string[]>;
-  /**
-   * If present, only these users (+ admins) may run `config set channel` /
-   * `config clear channel`. Empty list = admins only. Absent from a present
-   * `permissions` block = everyone. With no `permissions` block at all the
-   * right is held only where `grants` says so (native deployments, R7).
-   */
-  channelConfig?: string[];
-  /**
-   * Per-repo access for resident environments (repo slug -> allowed user
-   * IDs). Open-when-absent (KD7): no map, or a repo not listed in it, means
-   * every allowed coding-agent user may use that repo. A configured allowlist
-   * refuses non-listed users BY NAME (never a silent per-thread fallback).
-   */
-  repos?: Record<string, string[]>;
-  /**
-   * Who may run repo-management commands (`repo onboard/offboard/reconfigure/
-   * rebuild`). FAIL-CLOSED (KTD9): key absent or empty = ADMINS ONLY —
-   * deliberately diverging from channelConfig's open-when-absent, because
-   * onboarding provisions billable always-on compute and binds GitHub
-   * credentials. `repo list` is never gated.
-   */
-  repoManagement?: string[];
-  /**
-   * Cloudflare Access identities (`access:<sub>`) allowed `*:write` commands
-   * over HTTP (`runs.stop`, …). Browser Access sessions hold every `*:read`
-   * grant implicitly; writes require being listed here (KTD10). Chat
-   * operators are `admins`, not this list. Translated to grants at load
-   * (`src/core/authz/grants.ts`); the policy table decides.
-   */
-  operators?: string[];
-  /**
-   * Cloudflare Access service tokens (the machine credential for `/api/*`),
-   * keyed by the token's `common_name` claim, each mapped to the exact command
-   * actions it holds (`runs:read`, `runs:write`, …). No implicit grants: an
-   * unlisted service token holds nothing (KTD10/KTD13).
-   */
-  serviceTokens?: Record<string, string[]>;
-}
-
 export interface AppConfig {
   /**
    * The GitHub organization (or user) this installation serves — the account
@@ -134,17 +100,26 @@ export interface AppConfig {
   };
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
-  permissions?: Permissions;
   /**
-   * The native grants shape (one authorization model, plan U2 — R8): actor id
-   * (`slack:U…`, `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
-   * `access:svc:<cn>`, `schedule:<name>`) → `{ actions, channels, repos }`,
-   * each a list of names or the explicit word `all`; an absent axis is the
-   * empty set. Accepted alongside `permissions.*` / token `scopes` during the
-   * dual-acceptance release: an actor both shapes name takes THIS entry and is
-   * warned about at load. `ConfigStore.grantsFor` is the one lookup.
+   * The one authorization shape (plan U2 — R8; features/authorization.md item
+   * 9): actor id (`slack:U…`, `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
+   * `access:svc:<cn>`, `schedule:<name>`) → `{ actions, channels, repos }`, each
+   * a list of names or the explicit word `all`; an absent axis is the empty
+   * set. A `slack:` entry adds to the baseline every Slack user holds (the open
+   * chat commands, every unrestricted agent); a browser entry adds to every
+   * group's read; every other entry is exactly what it declares.
+   * `ConfigStore.grantsFor` is the one lookup.
    */
   grants?: GrantsConfig;
+  /**
+   * What is CLOSED unless a grant covers it: agents (run only by a holder of
+   * `agent:run:<name>`) and repos (`owner/name`, used only by a holder whose
+   * `repos` names it). Everything unlisted is open to everyone who can reach
+   * the bot. Repo management (`repo:write`) and channel config (`config:write`)
+   * need no entry here — they are closed by construction (held only where
+   * `grants` say so, admins through `actions: all`).
+   */
+  restrict?: RestrictConfig;
   execution?: import("./execution/factory.js").ExecutionConfig;
   workspaceDir?: string;
   /**
@@ -483,14 +458,12 @@ export async function loadAppConfigFrom(
   return parseAppConfigText(read.document.yaml);
 }
 
-/** What the grants table needs beyond config.yaml: the ingress token map (its
- *  `scopes` / `channel` translate to grants for `http:` / `mcp:` actors) and the
- *  command groups (`permissions.operators` translates to every group's read +
- *  write). Absent = none: a store built without them resolves token actors and
- *  operators to no actions — fail-closed, never widened. The CLI never resolves
- *  either kind of actor; the bot passes both at startup. */
+/** What the grants table needs beyond config.yaml: the registered command
+ *  groups (an Access browser session holds every group's read). Absent = none:
+ *  a store built without them gives a browser session no actions — fail-closed,
+ *  never widened. The CLI never resolves a browser actor; the bot passes the
+ *  groups at startup. */
 export interface ConfigStoreOptions {
-  ingressTokens?: IngressTokenMap;
   commandGroups?: readonly string[];
 }
 
@@ -513,10 +486,7 @@ export async function openConfigStore(
   });
   const backing = overridesBackingFor(config, opts);
   const initial = await backing.load();
-  return new ConfigStore({ validated: config }, { backing, initial }, warn, {
-    ingressTokens: opts.ingressTokens,
-    commandGroups: opts.commandGroups,
-  });
+  return new ConfigStore({ validated: config }, { backing, initial }, { commandGroups: opts.commandGroups });
 }
 
 export class ConfigStore {
@@ -530,30 +500,22 @@ export class ConfigStore {
   /** The first argument is the `config.yaml` path (read + validated here — dev,
    *  tests) or a config `openConfigStore` already validated. The second is a
    *  JSON file path (loaded inline) or a backing whose document was already
-   *  loaded. `warn` receives non-fatal config findings (default: console.warn);
-   *  `options` is what the grants table needs beyond the file (`ConfigStoreOptions`). */
+   *  loaded. `options` is what the grants table needs beyond the file (`ConfigStoreOptions`). */
   constructor(
     config: string | { validated: AppConfig },
     overrides: string | { backing: OverridesBacking; initial: Overrides | undefined },
-    warn: (message: string) => void = (m) => console.warn(m),
     options: ConfigStoreOptions = {},
   ) {
     this.config = typeof config === "string" ? loadAppConfig(config) : config.validated;
-    // The native block already passed `validateConfig` (either path above); this parse just builds the table.
+    // Both blocks already passed `validateConfig` (either path above); these parses just build the table.
     this.grants = grantsTable({
       grants: validateGrants(this.config.grants),
-      permissions: this.config.permissions,
-      ingressTokens: options.ingressTokens,
+      restrict: validateRestrict(this.config.restrict),
       agentNames: Object.keys(AGENTS),
       commandGroups: options.commandGroups,
       // The schedule registry's declared actors (R9): the floor for `schedule:<name>` ids.
       schedules: SCHEDULES.filter(isRunSchedule).map((s) => s.action.actor),
     });
-    if (this.grants.overlapping.length > 0) {
-      warn(
-        `config.yaml: grants and permissions both name ${this.grants.overlapping.map((id) => `"${id}"`).join(", ")} — the grants entry wins; remove the permissions entry (one identity, one shape)`,
-      );
-    }
 
     let initial: Overrides | undefined;
     if (typeof overrides === "string") {
@@ -727,61 +689,52 @@ export class ConfigStore {
     return { agentName, modelRef, ...(effort !== undefined ? { effort } : {}) };
   }
 
-  // ---- permissions ---------------------------------------------------------
-  // The agent and repo allowlists are open when absent. Enforcement happens at
-  // run time against the *resolved* agent, so no config layer (including
-  // "config set me") can bypass an allowlist. Who is an admin, who manages
-  // repos, and who edits channel config are read from the grants table — the
-  // same answer for `permissions.admins` translated and for a native entry —
-  // so a deployment without a `permissions` block (production) keeps them.
+  // ---- authorization gates ----------------------------------------------------
+  // Every gate reads the grants table (authorization.md item 9): what an actor
+  // holds, plus `restrict` for the two resources that are open unless listed.
+  // Enforcement happens at run time against the *resolved* agent and repo, so
+  // no config layer (including "config set me") can bypass a restriction.
 
-  /** Holds everything on every axis: `permissions.admins` translated, or a
-   *  native entry spelling `all` three times. */
-  private isAdmin(userId: string): boolean {
-    return holdsEverything(this.grantsFor(userId));
+  /** Every agent is open unless `restrict.agents` names it; a restricted agent
+   *  runs only for a holder of `agent:run:<name>` (admins through `all`). */
+  canRunAgent(actorId: string, agentName: string): boolean {
+    return mayRunAgent(this.grants, this.grantsFor(actorId), agentName);
   }
 
-  canRunAgent(userId: string, agentName: string): boolean {
-    const allowlist = this.config.permissions?.agents?.[agentName];
-    if (!allowlist) return true; // agent not restricted
-    return this.isAdmin(userId) || allowlist.includes(userId);
-  }
-
-  /** Per-repo access for resident environments (KD7: open-when-absent). */
-  canUseRepo(userId: string, slug: string): boolean {
-    const allowlist = this.config.permissions?.repos?.[slug];
-    if (!allowlist) return true; // repo (or the whole map) not restricted
-    return this.isAdmin(userId) || allowlist.includes(userId);
+  /** Every repo is open unless `restrict.repos` names it; a restricted repo is
+   *  used only by a holder whose `repos` axis names it (admins through `all`).
+   *  A refused actor is refused BY NAME — never a silent per-thread fallback. */
+  canUseRepo(actorId: string, slug: string): boolean {
+    return mayUseRepo(this.grants, this.grantsFor(actorId), slug);
   }
 
   /** The channel-config right, as the policy table's `config:write` row on
-   *  `config-scope { channel }` reads it: `permissions.channelConfig`
-   *  translated (open when a legacy block omits the key), or a native grant. */
+   *  `config-scope { channel }` reads it: held only where `grants` say so. */
   canEditChannelConfig(userId: string): boolean {
     return hasAction(this.grantsFor(userId).actions, "config:write");
   }
 
   /**
    * Repo-management gate (KTD9): FAIL-CLOSED — the `repo:write` grant, which
-   * `permissions.repoManagement` translates to and admins hold through `all`;
-   * no key and no grant means admins only, because `repo onboard`/`rebuild`
-   * provision billable always-on compute and bind GitHub credentials.
+   * admins hold through `all`; no grant means admins only, because `repo
+   * onboard`/`rebuild` provision billable always-on compute and bind GitHub
+   * credentials.
    */
   canManageRepos(userId: string): boolean {
     return hasAction(this.grantsFor(userId).actions, "repo:write");
   }
 
-  /** The one grants lookup (plan U2/U4, R8): what `grants[<actorId>]` declares,
-   *  else the legacy keys translated (`translateLegacyConfig` — `permissions.*`,
-   *  ingress token `scopes`/`channel`, `serviceTokens`, the chat `open`
-   *  baseline, a browser session's implicit reads), else nothing. Attached to
-   *  every `Caller.actor`: the ONLY thing `authorize` reads about a caller. */
+  /** The one grants lookup (plan U2/U4, R8): what `grants[<actorId>]` declares
+   *  on top of its namespace's baseline (the chat `open` commands and every
+   *  unrestricted agent for a Slack user, every group's read for a browser
+   *  session), else that baseline alone, else nothing. Attached to every
+   *  `Caller.actor`: the ONLY thing `authorize` reads about a caller. */
   grantsFor(actorId: string): Grants {
     return grantsIn(this.grants, actorId);
   }
 
   /** Who to ask when denied — for actionable error messages: the Slack users
-   *  who hold everything (`isAdmin`), in the table's order. Slack only because
+   *  who hold everything, in the table's order. Slack only because
    *  the hint is a `<@…>` mention in a chat reply; a credential granted
    *  everything (`access:`, `http:`) is not someone to ask. */
   adminsHint(): string {
@@ -791,10 +744,9 @@ export class ConfigStore {
     return admins.length > 0 ? admins.map((u) => `<@${u}>`).join(", ") : "an admin";
   }
 
-  /** Agents restricted by allowlist that this user cannot run. */
-  restrictedAgentsFor(userId: string): string[] {
-    const agents = this.config.permissions?.agents ?? {};
-    return Object.keys(agents).filter((a) => !this.canRunAgent(userId, a));
+  /** The restricted agents this actor holds no grant for (what `config show` lists as unavailable). */
+  restrictedAgentsFor(actorId: string): string[] {
+    return [...this.grants.restrict.agents].filter((a) => !this.canRunAgent(actorId, a));
   }
 
   /**
@@ -1099,13 +1051,13 @@ function fmtModels(m: Record<string, string>): string {
     .join(" ");
 }
 
-/** `all` on every axis — what `permissions.admins` translates to (`ALL_GRANTS`). */
+/** `all` on every axis — an admin (`ALL_GRANTS`). */
 function holdsEverything(g: Grants): boolean {
   return g.actions === "all" && g.channels === "all" && g.repos === "all";
 }
 
 /** Validates in place: throws on the first fatal finding. The one non-fatal
- *  finding (an identity both `grants` and `permissions` name) is the ConfigStore's to warn about. */
+ *  findings live elsewhere (`loadAppConfigFrom` reports the document source). */
 function validateConfig(cfg: AppConfig): void {
   validateScopeEfforts(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
@@ -1126,21 +1078,21 @@ function validateConfig(cfg: AppConfig): void {
   // Static instructions ride every turn too — hold them to the same cap the
   // chat command enforces, and fail loudly at load rather than silently truncate.
   validateInstructions(cfg, "config.yaml");
-  // Normalize permissions.repos keys to lowercase once at load: every caller
-  // looks the repo up by a lowercased slug (parseSlug/slugOf/repoResourceId),
-  // so a mixed-case allowlist key (e.g. "octocat/Hello-World") would otherwise
-  // never match and silently grant open access instead of restricting.
-  if (cfg.permissions?.repos) {
-    cfg.permissions.repos = Object.fromEntries(
-      Object.entries(cfg.permissions.repos).map(([slug, users]) => [slug.toLowerCase(), users]),
+  // The one authorization shape: `grants` + `restrict`. The retired
+  // `permissions` block is refused with its replacement, never silently ignored
+  // — an ignored allowlist would look like a working restriction.
+  if ("permissions" in (cfg as unknown as Record<string, unknown>)) {
+    throw new Error(
+      "config.yaml: `permissions` is gone — express it as `grants` (who holds what: admins → actions/channels/repos `all`, repoManagement → `repo:write`, channelConfig → `config:write`, operators → every `<group>:read`/`<group>:write`, serviceTokens → an `access:svc:<common_name>` entry) and `restrict` (which agents and repos are closed unless granted); see docs/reference/authorization.md",
     );
   }
+  validateGrants(cfg.grants);
+  validateRestrict(cfg.restrict);
   validateSelfImprovement(cfg.selfImprovement);
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory);
   if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.ship !== undefined) validateShip(cfg.ship);
-  validateGrants(cfg.grants);
 }
 
 /** `grants` (plan U2): every finding names the actor id and axis it is about —
@@ -1151,6 +1103,13 @@ function validateGrants(raw: unknown): ReadonlyMap<string, Grants> {
   const parsed = parseGrantsConfig(raw);
   if (!parsed.ok) throw new Error(`config.yaml: ${parsed.errors.join("; ")}`);
   return parsed.grants;
+}
+
+/** `restrict`: registered agent names and `owner/name` slugs, or a load error naming the offender. */
+function validateRestrict(raw: unknown): Restriction {
+  const parsed = parseRestrictConfig(raw, Object.keys(AGENTS));
+  if (!parsed.ok) throw new Error(`config.yaml: ${parsed.errors.join("; ")}`);
+  return parsed.restrict;
 }
 
 /** `ship` caps (features/agent-ship.md item 8): both bounds enforced at load

@@ -47,12 +47,18 @@ users:
   "slack:UPERAGENT":
     models:
       review: anthropic/user-review-model
-permissions:
-  admins: ["slack:UADMIN"]
-  agents:
-    coding: ["slack:UDEV"]
-  channelConfig: []
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+  "slack:UDEV": { actions: [agent:run:coding] }
+restrict:
+  agents: [coding]
 `;
+
+/** The fixture with more `grants` entries (each line indented under the block). */
+const withGrants = (entries: string) => YAML_FIXTURE.replace("restrict:\n", `${entries}restrict:\n`);
+/** The fixture with UDEV's entry replaced. */
+const devGranted = (entry: string) =>
+  YAML_FIXTURE.replace('"slack:UDEV": { actions: [agent:run:coding] }', `"slack:UDEV": ${entry}`);
 
 function store(yaml: string = YAML_FIXTURE): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
@@ -211,93 +217,99 @@ describe("permission gates", () => {
     expect(s.canRunAgent("slack:URANDOM", "general")).toBe(true);
   });
 
-  it("allowlisted agents admit only listed users and admins", async () => {
+  it("a restricted agent admits only those granted agent:run:<name> (admins through `all`)", async () => {
     expect(s.canRunAgent("slack:URANDOM", "coding")).toBe(false);
     expect(s.canRunAgent("slack:UDEV", "coding")).toBe(true);
     expect(s.canRunAgent("slack:UADMIN", "coding")).toBe(true);
   });
 
-  it("empty channelConfig list means admins only", async () => {
+  it("restrictedAgentsFor names the restricted agents an actor may NOT run", async () => {
+    expect(s.restrictedAgentsFor("slack:URANDOM")).toEqual(["coding"]);
+    expect(s.restrictedAgentsFor("slack:UDEV")).toEqual([]);
+    expect(s.restrictedAgentsFor("slack:UADMIN")).toEqual([]);
+  });
+
+  it("`config:write` is never a baseline: admins and the granted only", async () => {
     expect(s.canEditChannelConfig("slack:URANDOM")).toBe(false);
+    expect(s.canEditChannelConfig("slack:UDEV")).toBe(false);
     expect(s.canEditChannelConfig("slack:UADMIN")).toBe(true);
+    expect(store(devGranted("{ actions: [config:write] }")).canEditChannelConfig("slack:UDEV")).toBe(true);
   });
 });
 
-// Feature: features/resident-repos.md — per-repo access is open-when-absent
-// (KD7): no permissions.repos config → every allowed coding-agent user may
-// use every onboarded repo; a configured allowlist refuses non-listed users.
+// Feature: features/resident-repos.md — per-repo access is open unless the repo
+// is listed under `restrict.repos` (KD7): then only actors whose `repos` grant
+// covers it (or `all`) may use it.
 describe("per-repo access (canUseRepo)", () => {
-  it("absent permissions.repos map → every repo is open (KD7 open-when-absent)", async () => {
-    const s = store(); // YAML_FIXTURE has no repos map
+  it("no restrict.repos → every repo is open (KD7 open-when-absent)", async () => {
+    const s = store(); // YAML_FIXTURE restricts no repo
     expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(true);
   });
 
-  const REPOS_FIXTURE = YAML_FIXTURE + `  repos:\n    "acme/api": ["slack:UDEV"]\n`;
+  const REPOS_FIXTURE = devGranted('{ actions: [agent:run:coding], repos: ["acme/api"] }') + `  repos: ["acme/api"]\n`;
 
-  it("a repo absent from a configured map stays open", async () => {
+  it("a repo absent from the restrict list stays open", async () => {
     const s = store(REPOS_FIXTURE);
     expect(s.canUseRepo("slack:URANDOM", "acme/other")).toBe(true);
   });
 
-  it("a listed repo admits members and admins, refuses everyone else", async () => {
+  it("a restricted repo admits the granted and admins, refuses everyone else", async () => {
     const s = store(REPOS_FIXTURE);
     expect(s.canUseRepo("slack:UDEV", "acme/api")).toBe(true);
     expect(s.canUseRepo("slack:UADMIN", "acme/api")).toBe(true);
     expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(false);
   });
 
-  // validateConfig lowercases every permissions.repos key at load: every
-  // caller looks the repo up by a lowercased slug (parseSlug/slugOf/
-  // repoResourceId), so a mixed-case allowlist key must still match — otherwise
-  // it would silently grant OPEN access instead of restricting.
-  it("mixed-case repos keys are lowercased at load so a lowercased-slug lookup still restricts (case-insensitive)", async () => {
-    const MIXED = YAML_FIXTURE + `  repos:\n    "Acme/API": ["slack:UDEV"]\n`;
+  // Every caller looks a repo up by a lowercased slug (parseSlug/slugOf/
+  // repoResourceId), so a mixed-case restrict entry or grant must still match —
+  // otherwise it would silently grant OPEN access instead of restricting.
+  it("mixed-case slugs in restrict.repos and in a grant compare case-insensitively", async () => {
+    const MIXED = devGranted('{ actions: [agent:run:coding], repos: ["Acme/API"] }') + `  repos: ["Acme/API"]\n`;
     const s = store(MIXED);
     expect(s.canUseRepo("slack:UDEV", "acme/api")).toBe(true);
     expect(s.canUseRepo("slack:UADMIN", "acme/api")).toBe(true);
-    // The key would have failed to match (silently opening access) without the
-    // load-time lowercasing — a refused user proves it restricts.
+    // A refused user proves the restriction matched despite the case.
     expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(false);
+  });
+
+  it("restrict.repos must be owner/name slugs", async () => {
+    expect(() => store(YAML_FIXTURE + `  repos: [notaslug]\n`)).toThrow(
+      /restrict\.repos: "notaslug" is not an owner\/name slug/,
+    );
   });
 });
 
 // Feature: features/resident-repos.md — repo management is FAIL-CLOSED (KTD9):
-// no permissions.repoManagement configured → ADMINS ONLY, deliberately
-// diverging from canEditChannelConfig's open-when-absent, because onboarding
-// provisions billable always-on compute and binds GitHub credentials.
+// `repo:write` is never a baseline, because onboarding provisions billable
+// always-on compute and binds GitHub credentials.
 describe("repo management gate (canManageRepos)", () => {
-  it("absent repoManagement key → non-admins refused, admins allowed (fail-closed)", async () => {
-    const s = store(); // YAML_FIXTURE has no repoManagement key
+  it("nobody granted repo:write → non-admins refused, admins allowed (fail-closed)", async () => {
+    const s = store();
     expect(s.canManageRepos("slack:URANDOM")).toBe(false);
     expect(s.canManageRepos("slack:UDEV")).toBe(false);
     expect(s.canManageRepos("slack:UADMIN")).toBe(true);
   });
 
-  it("a configured allowlist admits listed users and admins only", async () => {
-    const s = store(YAML_FIXTURE + `  repoManagement: ["slack:UDEV"]\n`);
+  it("a repo:write grant admits its holder; nothing else implies it", async () => {
+    const s = store(devGranted("{ actions: [agent:run:coding, repo:write] }"));
     expect(s.canManageRepos("slack:UDEV")).toBe(true);
     expect(s.canManageRepos("slack:UADMIN")).toBe(true);
     expect(s.canManageRepos("slack:URANDOM")).toBe(false);
   });
-
-  it("an empty allowlist stays admins-only", async () => {
-    const s = store(YAML_FIXTURE + `  repoManagement: []\n`);
-    expect(s.canManageRepos("slack:UDEV")).toBe(false);
-    expect(s.canManageRepos("slack:UADMIN")).toBe(true);
-  });
 });
 
 // Feature: features/authorization.md item 9 — `grantsFor` is the ONE lookup the
-// command registry's policy table decides on; the legacy `permissions.*` keys
-// translate to grants at load. FAIL-CLOSED: only `permissions.admins` hold
-// everything, and no admins means nobody does.
-describe("grantsFor — the legacy keys as the grants the policy table decides on", () => {
+// command registry's policy table decides on: a namespace baseline (the open
+// chat commands for slack: users, every group's read for browser sessions,
+// nothing for credentials) plus the actor's `grants` entry. FAIL-CLOSED: only
+// `all` holds everything, and no such entry means nobody does.
+describe("grantsFor — the grants the policy table decides on", () => {
   const holds = (s: ConfigStore, id: string, action: string) => hasAction(s.grantsFor(id).actions, action);
   const storeWith = (yaml: string, options: ConfigStoreOptions) => {
     const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
     const cfg = join(dir, "config.yaml");
     writeFileSync(cfg, yaml);
-    return new ConfigStore(cfg, join(dir, "overrides.json"), () => {}, options);
+    return new ConfigStore(cfg, join(dir, "overrides.json"), options);
   };
 
   it("admins hold every action, channel, and repo; a plain user holds the open chat commands (runs:read is an operator command — admins only)", async () => {
@@ -310,53 +322,51 @@ describe("grantsFor — the legacy keys as the grants the policy table decides o
     }
   });
 
-  it("no admins configured → nobody holds everything (fail-closed)", async () => {
-    const s = store(YAML_FIXTURE.replace(/permissions:[\s\S]*$/, ""));
+  it("no `all` entry → nobody holds everything (fail-closed)", async () => {
+    const s = store(YAML_FIXTURE.replace(/grants:[\s\S]*$/, ""));
     expect(s.grantsFor("slack:UADMIN")).not.toEqual(ALL_GRANTS);
     expect(holds(s, "slack:UADMIN", "runs:read")).toBe(false);
     expect(holds(s, "slack:URANDOM", "runs:read")).toBe(false);
   });
 
-  it("repoManagement → repo:write + friction:write for the listed (admins hold them through `all`), nothing for the rest", async () => {
-    const s = store(YAML_FIXTURE + `  repoManagement: ["slack:UDEV"]\n`);
+  it("a slack: entry ADDS to the chat baseline: UDEV granted repo:write also keeps the open commands; friction:write is not implied", async () => {
+    const s = store(devGranted("{ actions: [repo:write] }"));
     expect([
       holds(s, "slack:UADMIN", "repo:write"),
       holds(s, "slack:UDEV", "repo:write"),
       holds(s, "slack:URANDOM", "repo:write"),
     ]).toEqual([true, true, false]);
-    expect(holds(s, "slack:UDEV", "friction:write")).toBe(true);
+    expect(holds(s, "slack:UDEV", "help:read")).toBe(true);
+    expect(holds(s, "slack:UDEV", "friction:write")).toBe(false);
   });
 
-  it("channelConfig → config:write: absent → every Slack user; present → admins and the listed; agents.coding → agent:run:coding for UDEV and admins, every agent when unrestricted", async () => {
-    const open = store(YAML_FIXTURE.replace("  channelConfig: []\n", ""));
-    expect([holds(open, "slack:UADMIN", "config:write"), holds(open, "slack:URANDOM", "config:write")]).toEqual([
-      true,
-      true,
-    ]);
-    const closed = store(YAML_FIXTURE.replace("  channelConfig: []\n", `  channelConfig: ["slack:UDEV"]\n`));
+  it("config:write only by grant; agent:run:<name> for a restricted agent only by grant, for an unrestricted agent by baseline", async () => {
+    const s = store();
     expect([
-      holds(closed, "slack:UADMIN", "config:write"),
-      holds(closed, "slack:UDEV", "config:write"),
-      holds(closed, "slack:URANDOM", "config:write"),
-    ]).toEqual([true, true, false]);
-    expect(holds(store(), "slack:URANDOM", "config:write")).toBe(false); // the fixture's `channelConfig: []`
-    // the fixture restricts `coding` to UDEV (admins always pass)
+      holds(s, "slack:UADMIN", "config:write"),
+      holds(s, "slack:UDEV", "config:write"),
+      holds(s, "slack:URANDOM", "config:write"),
+    ]).toEqual([true, false, false]);
+    expect(holds(store(devGranted("{ actions: [config:write] }")), "slack:UDEV", "config:write")).toBe(true);
     expect([
-      holds(open, "slack:UADMIN", "agent:run:coding"),
-      holds(open, "slack:UDEV", "agent:run:coding"),
-      holds(open, "slack:URANDOM", "agent:run:coding"),
-    ]).toEqual([true, true, false]);
-    const unrestricted = store(YAML_FIXTURE.replace(`  agents:\n    coding: ["slack:UDEV"]\n`, ""));
-    expect(holds(unrestricted, "slack:URANDOM", "agent:run:coding")).toBe(true); // no allowlist → the agent is open
+      holds(s, "slack:UADMIN", "agent:run:coding"),
+      holds(s, "slack:UDEV", "agent:run:coding"),
+      holds(s, "slack:URANDOM", "agent:run:coding"),
+      holds(s, "slack:URANDOM", "agent:run:general"),
+    ]).toEqual([true, true, false, true]);
+    const unrestricted = store(YAML_FIXTURE.replace("restrict:\n  agents: [coding]\n", ""));
+    expect(holds(unrestricted, "slack:URANDOM", "agent:run:coding")).toBe(true); // nothing restricted → the agent is open
   });
 
-  it("permissions.operators → every registered group's read + write over every channel; an unlisted Access browser session holds the reads; a service token exactly its scopes", async () => {
+  it("an Access browser entry adds to the browser baseline (every registered group's read); an unlisted session holds the reads alone; a service token exactly its entry", async () => {
     const s = storeWith(
-      YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n  serviceTokens:\n    reader-bot: [runs:read]\n`,
+      withGrants(
+        `  "access:alice@example.com": { actions: [runs:write, friction:write], channels: all }\n  "access:svc:reader-bot": { actions: [runs:read], channels: all }\n`,
+      ),
       { commandGroups: ["runs", "friction"] },
     );
     expect(s.grantsFor("access:alice@example.com")).toEqual({
-      actions: new Set(["runs:read", "runs:write", "friction:read", "friction:write"]),
+      actions: new Set(["runs:read", "friction:read", "runs:write", "friction:write"]),
       channels: "all",
       repos: new Set(),
     });
@@ -371,16 +381,12 @@ describe("grantsFor — the legacy keys as the grants the policy table decides o
       repos: new Set(),
     });
     expect(s.grantsFor("access:svc:stranger")).toBe(NO_GRANTS);
-    // Without the catalogue's groups the store cannot spell a group read: an operator holds channels only, a browser nothing.
-    expect(
-      store(YAML_FIXTURE + `  operators: ["access:alice@example.com"]\n`).grantsFor("access:alice@example.com"),
-    ).toEqual({ actions: new Set(), channels: "all", repos: new Set() });
+    // Without the catalogue's groups the store cannot spell a group read: an unlisted browser session holds nothing.
     expect(store().grantsFor("access:stranger")).toBe(NO_GRANTS);
   });
 
-  it("no admins configured at all → nobody may manage repos (still closed)", async () => {
-    const NO_PERMS = YAML_FIXTURE.replace(/permissions:[\s\S]*$/m, "");
-    const s = store(NO_PERMS);
+  it("no admin at all → nobody may manage repos (still closed)", async () => {
+    const s = store(YAML_FIXTURE.replace(/grants:[\s\S]*$/m, ""));
     expect(s.canManageRepos("slack:URANDOM")).toBe(false);
   });
 });
@@ -450,22 +456,20 @@ describe("custom instructions (Scope.instructions)", () => {
 });
 
 // Feature: features/run-history.md — the `runHistory` section (KTD14).
-describe("grants config — the native shape beside the legacy keys (plan U2, R7/R8/KTD6)", () => {
-  const load = (
-    yaml: string,
-    warn: (m: string) => void = () => {},
-    options?: ConstructorParameters<typeof ConfigStore>[3],
-  ) => {
+describe("grants config — the one shape (plan U2, R7/R8/KTD6)", () => {
+  const load = (yaml: string, options?: ConstructorParameters<typeof ConfigStore>[2]) => {
     const dir = mkdtempSync(join(tmpdir(), "swb-config-grants-"));
     const cfg = join(dir, "config.yaml");
     writeFileSync(cfg, yaml);
-    return new ConfigStore(cfg, join(dir, "overrides.json"), warn, options);
+    return new ConfigStore(cfg, join(dir, "overrides.json"), options);
   };
   const set = (...names: string[]) => new Set(names);
 
-  it("a well-formed block validates and grantsFor resolves it: absent axis = empty set, `all` explicit", () => {
+  it("a well-formed block validates and grantsFor resolves it: absent axis = empty set, `all` explicit; a credential holds exactly its entry", () => {
     const s = load(
-      `${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch, runs:read]\n    channels: [http:ops]\n  "schedule:self-improvement":\n    actions: [friction:write]\n    channels: all\n`,
+      withGrants(
+        `  "http:ci":\n    actions: [dispatch, runs:read]\n    channels: [http:ops]\n  "schedule:self-improvement":\n    actions: [friction:write]\n    channels: all\n`,
+      ),
     );
     expect(s.grantsFor("http:ci")).toEqual({
       actions: set("dispatch", "runs:read"),
@@ -477,111 +481,72 @@ describe("grants config — the native shape beside the legacy keys (plan U2, R7
       channels: "all",
       repos: set(),
     });
+    // Credentials hold exactly what names them — no baseline: an unlisted token or schedule holds nothing.
+    expect(s.grantsFor("mcp:ci")).toBe(NO_GRANTS);
+    expect(s.grantsFor("schedule:unlisted")).toEqual({ actions: set(), channels: set(), repos: set() });
   });
 
   it("an unknown actor id prefix fails the load naming the id", () => {
-    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "discord:123":\n    actions: all\n`)).toThrow(
+    expect(() => load(withGrants(`  "discord:123":\n    actions: all\n`))).toThrow(
       /config\.yaml: grants\["discord:123"\].*slack:, http:, mcp:, access:, schedule:/,
     );
   });
 
   it("a misspelled `all`, an unknown axis, and a non-mapping block fail the load naming the id and field", () => {
-    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "slack:U1":\n    actions: ALL\n`)).toThrow(
+    expect(() => load(withGrants(`  "slack:U1":\n    actions: ALL\n`))).toThrow(
       /grants\["slack:U1"\]\.actions: expected "all" or a list/,
     );
-    expect(() => load(`${YAML_FIXTURE}\ngrants:\n  "slack:U1":\n    agents: [coding]\n`)).toThrow(
+    expect(() => load(withGrants(`  "slack:U1":\n    agents: [coding]\n`))).toThrow(
       /grants\["slack:U1"\]: unknown field agents/,
     );
-    expect(() => load(`${YAML_FIXTURE}\ngrants: [a]\n`)).toThrow(/grants must be a mapping/);
+    expect(() => load(YAML_FIXTURE.replace(/grants:[\s\S]*$/, "grants: [a]\n"))).toThrow(/grants must be a mapping/);
   });
 
-  it("the legacy keys translate through the same lookup: admins → everything; an agents-listed user → agent:run:<name> (+ every repo, repos absent); a plain user → the unrestricted agents; ingress tokens and command groups come from the store options", () => {
-    const s = load(YAML_FIXTURE, undefined, {
-      ingressTokens: { tok: { subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] } },
-      commandGroups: ["runs", "friction"],
-    });
-    expect(s.grantsFor("slack:UADMIN")).toEqual({ actions: "all", channels: "all", repos: "all" });
-    const dev = s.grantsFor("slack:UDEV");
-    expect(dev.repos).toBe("all");
-    expect(dev.actions).toContain("agent:run:coding");
-    expect(dev.actions).toContain("agent:run:general");
-    const plain = s.grantsFor("slack:UNOBODY");
-    expect(plain.actions).not.toContain("agent:run:coding");
-    expect(plain.actions).toContain("agent:run:general");
-    // Credentials hold exactly what names them — no everyone baseline.
-    expect(s.grantsFor("http:ci")).toEqual({
-      actions: set("dispatch", "runs:read"),
-      channels: set("http:ops"),
-      repos: set(),
-    });
-    expect(s.grantsFor("schedule:unlisted")).toEqual({ actions: set(), channels: set(), repos: set() });
-    expect(s.grantsFor("mcp:ci").channels).toEqual(set("mcp:ops"));
-    const ops = load(`${YAML_FIXTURE}  operators: ["access:op-1"]\n`, undefined, {
-      commandGroups: ["runs", "friction"],
-    }).grantsFor("access:op-1");
-    expect(ops.channels).toBe("all");
-    for (const a of ["runs:read", "runs:write", "friction:read", "friction:write"]) expect(ops.actions).toContain(a);
-  });
-
-  it("an identity named by BOTH shapes takes the grants entry and is warned about by id", () => {
-    const warnings: string[] = [];
-    const s = load(`${YAML_FIXTURE}\ngrants:\n  "slack:UADMIN":\n    actions: [runs:read]\n`, (m) => warnings.push(m));
-    expect(warnings).toEqual([
-      expect.stringMatching(/config\.yaml: grants and permissions both name "slack:UADMIN" — the grants entry wins/),
-    ]);
-    expect(s.grantsFor("slack:UADMIN")).toEqual({ actions: set("runs:read"), channels: set(), repos: set() });
-    // No overlap → no warning.
-    warnings.length = 0;
-    load(`${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch]\n`, (m) => warnings.push(m));
-    expect(warnings).toEqual([]);
-    // An ingress token's id with a native entry beside it is the intended way to grant it channels (#453) — not a duplicate to warn about.
-    const s2 = load(
-      `${YAML_FIXTURE}\ngrants:\n  "http:ci":\n    actions: [dispatch, runs:read]\n    channels: all\n`,
-      (m) => warnings.push(m),
-      { ingressTokens: { tok: { subject: "ci", channel: "ops", scopes: ["dispatch"] } } },
-    );
-    expect(warnings).toEqual([]);
-    expect(s2.grantsFor("http:ci")).toEqual({ actions: set("dispatch", "runs:read"), channels: "all", repos: set() });
-  });
-
-  it("the permission helpers answer from the grants table, so a native-only config (no `permissions` block) keeps its admin: adminsHint names them, they manage repos and edit channel config, an unlisted user does neither", () => {
-    const NATIVE_ONLY =
-      YAML_FIXTURE.replace(/permissions:[\s\S]*$/, "") +
-      `grants:\n  "slack:UNATIVE":\n    actions: all\n    channels: all\n    repos: all\n  "slack:UMGR":\n    actions: [repo:write]\n`;
-    const s = load(NATIVE_ONLY);
-    expect(s.adminsHint()).toBe("<@slack:UNATIVE>");
+  it("the permission helpers answer from the grants table: adminsHint names the `all` holders, they manage repos and edit channel config, an unlisted user does neither", () => {
+    const s = load(withGrants(`  "slack:UMGR":\n    actions: [repo:write]\n`));
+    expect(s.adminsHint()).toBe("<@slack:UADMIN>");
     expect([
-      s.canManageRepos("slack:UNATIVE"),
+      s.canManageRepos("slack:UADMIN"),
       s.canManageRepos("slack:UMGR"),
       s.canManageRepos("slack:URANDOM"),
     ]).toEqual([true, true, false]);
-    // No legacy block → no open-when-absent: `config:write` is the admin's alone.
-    expect([s.canEditChannelConfig("slack:UNATIVE"), s.canEditChannelConfig("slack:URANDOM")]).toEqual([true, false]);
+    expect([s.canEditChannelConfig("slack:UADMIN"), s.canEditChannelConfig("slack:URANDOM")]).toEqual([true, false]);
     expect(s.grantsFor("slack:URANDOM").actions).not.toContain("config:write");
-    // A native admin bypasses the (still legacy) agent allowlist like a listed one.
-    const restricted = load(NATIVE_ONLY + `permissions:\n  agents:\n    coding: ["slack:UDEV"]\n`);
-    expect([
-      restricted.canRunAgent("slack:UNATIVE", "coding"),
-      restricted.canRunAgent("slack:URANDOM", "coding"),
-    ]).toEqual([true, false]);
-    // The same three answers under the legacy block, so neither shape changes them.
-    const legacy = store();
-    expect(legacy.adminsHint()).toBe("<@slack:UADMIN>");
-    expect([
-      legacy.canManageRepos("slack:UADMIN"),
-      legacy.canEditChannelConfig("slack:UADMIN"),
-      legacy.canEditChannelConfig("slack:URANDOM"),
-    ]).toEqual([true, true, false]);
+  });
+});
+
+describe("restrict — closed unless granted (authorization.md item 11)", () => {
+  it("restrict.agents must name registered agents; restrict.repos owner/name slugs; no other field", () => {
+    expect(() => store(YAML_FIXTURE.replace("agents: [coding]", "agents: [nope]"))).toThrow(
+      /config\.yaml: restrict\.agents: "nope" is not a registered agent/,
+    );
+    expect(() => store(YAML_FIXTURE.replace("agents: [coding]", "agents: coding"))).toThrow(
+      /restrict\.agents: expected a list of non-empty names/,
+    );
+    expect(() => store(YAML_FIXTURE + `  channels: [x]\n`)).toThrow(/restrict: unknown field channels/);
+  });
+
+  it("no restrict block → nothing is restricted: every agent open, every repo open", () => {
+    const s = store(YAML_FIXTURE.replace("restrict:\n  agents: [coding]\n", ""));
+    expect(s.canRunAgent("slack:URANDOM", "coding")).toBe(true);
+    expect(s.canUseRepo("slack:URANDOM", "acme/api")).toBe(true);
+    expect(s.restrictedAgentsFor("slack:URANDOM")).toEqual([]);
+  });
+
+  it("the retired `permissions` block is refused at load, pointing at grants + restrict", () => {
+    expect(() => store(YAML_FIXTURE + `permissions:\n  admins: ["slack:UADMIN"]\n`)).toThrow(
+      /config\.yaml: `permissions` is gone — express it as `grants`.*and `restrict`.*docs\/reference\/authorization\.md/,
+    );
   });
 });
 
 describe("runHistory config", () => {
   const withRunHistory = (block: string, extra = "") => `${YAML_FIXTURE}\n${extra}\nrunHistory:\n${block}\n`;
-  const load = (yaml: string, warn?: (m: string) => void) => {
+  const load = (yaml: string) => {
     const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
     const cfg = join(dir, "config.yaml");
     writeFileSync(cfg, yaml);
-    return new ConfigStore(cfg, join(dir, "overrides.json"), warn);
+    return new ConfigStore(cfg, join(dir, "overrides.json"));
   };
 
   it("accepts a well-formed section and exposes it", async () => {
@@ -824,14 +789,6 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
     const s = await openConfigStore(cfg, { overridesPath: path, env: {} });
     expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).agentName).toBe("review");
     expect(s.overridesLocation()).toBe(`file ${path}`);
-  });
-
-  it("openConfigStore parses and validates config.yaml ONCE — a load-time warning is reported once, not again by the constructor", async () => {
-    // An id named by both `grants` and `permissions` is the one load-time warning (authorization.md item 9).
-    const { dir, cfg } = cfgFile(`${YAML_FIXTURE}\ngrants:\n  "slack:UADMIN":\n    actions: all\n`);
-    const warnings: string[] = [];
-    await openConfigStore(cfg, { overridesPath: join(dir, "overrides.json"), env: {}, warn: (m) => warnings.push(m) });
-    expect(warnings.filter((w) => w.includes("grants and permissions both name"))).toHaveLength(1);
   });
 });
 

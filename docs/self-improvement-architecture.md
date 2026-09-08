@@ -87,7 +87,7 @@ sequenceDiagram
     participant SDO as ScheduleDO
 
     Shim->>Bot: POST /ingress "friction propose" (cron bearer)
-    Note over Bot: Admission: a repo manager (permissions.repoManagement).<br/>Visibility: the authorization policy — the caller's run-read<br/>predicate (channels: all for the cron) is pushed into the store
+    Note over Bot: Admission: the `friction:write` grant (repo managers).<br/>Visibility: the authorization policy — the caller's run-read<br/>predicate (channels: all for the cron) is pushed into the store
     Bot->>Store: list recent runs the caller may read (diagnosis rides the listing)
     Store-->>Bot: run records, oldest first
     Bot->>Core: clusterFriction(records, minRuns=2)
@@ -136,10 +136,10 @@ Notes that matter for reading a filed issue:
 | Surface | Command | Who may run it |
 |---|---|---|
 | Slack (any channel the bot is in) | `@switchboard friction report [--since-ms n] [--limit n] [--min-runs n]` | anyone (read-only, GitHub never consulted) |
-| Slack | `@switchboard friction propose [--dry-run] [--top n] [--min-runs n] [--repo o/n]` | admins and `permissions.repoManagement` |
+| Slack | `@switchboard friction propose [--dry-run] [--top n] [--min-runs n] [--repo o/n]` | actors granted `friction:write` (admins through `all`) |
 | CLI (no bot needed) | `npx tsx src/cli.ts friction propose --dry-run` | local operator; without `--repo` or config it is a pure dry run |
 | HTTP / MCP | `POST /api/friction.propose`, tool `friction_propose` | tokens holding `friction:write` |
-| Schedule | `self-improvement` entry of the schedule registry, `0 14 * * 1` | the `cron` ingress identity, which must be in `permissions.repoManagement` and granted `channels: all` (the native `grants` block) |
+| Schedule | `self-improvement` entry of the schedule registry, `0 14 * * 1` | the `cron` ingress identity, whose `grants` entry (`http:cron`) holds `friction:write` and `channels: all` |
 
 Who may CALL a command is the table above; WHAT it analyzes is the [authorization policy](https://github.com/coreplanelabs/switchboard/blob/main/features/authorization.md): the caller's run-read predicate, pushed into the run store. An admin or the cron sees the fleet; a token granted one channel sees that channel; a caller granted no channel sees only its own runs.
 

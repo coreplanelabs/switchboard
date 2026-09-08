@@ -1,16 +1,13 @@
 import { z } from "zod";
-import type { Permissions } from "../../config.js";
-import type { IngressTokenMap } from "../ingressTokens.js";
+import { hasAction } from "./authorize.js";
 import { NO_GRANTS, type Grants, type GrantSet } from "./types.js";
 
-// Grants (plan U2 — R7, R8, KTD6): WHAT an actor may do, from config. Two
-// shapes are accepted during the dual-acceptance release: the native `grants`
-// block (one entry per platform-namespaced actor id) and the legacy keys
-// (`permissions.*`, ingress token `scopes`/`channel`, Access `serviceTokens`),
-// which `translateLegacyConfig` turns into the same `Grants` by ONE table.
-// Native wins for an actor both shapes name (`mergeGrants` reports the
-// overlap so `validateConfig` can warn). Pure: no I/O, no decisions — nothing
-// here says whether an action is allowed; that is `authorize` (U1).
+// Grants (plan U2 — R7, R8): WHAT an actor may do, from config's one shape —
+// the native `grants` block (one entry per platform-namespaced actor id) — plus
+// `restrict`, which names the agents and repos that are CLOSED unless a grant
+// covers them. Everything not restricted is open to everyone who can reach the
+// bot; a grant only ever adds. Pure: no I/O, no decisions — nothing here says
+// whether an action is allowed; that is `authorize` (U1).
 
 /** Every grant, on every axis. What admins and the local CLI hold. */
 export const ALL_GRANTS: Grants = Object.freeze({ actions: "all", channels: "all", repos: "all" });
@@ -20,7 +17,8 @@ export const ALL_GRANTS: Grants = Object.freeze({ actions: "all", channels: "all
  *  derive their grants from their principal (R2), so neither is listed. */
 export const GRANT_ACTOR_PREFIXES = ["slack", "http", "mcp", "access", "schedule"] as const;
 
-/** The action that lets an actor run agent `<name>` (`canRunAgent` today). */
+/** The action that lets an actor run agent `<name>` — checked only for a
+ *  RESTRICTED agent (`restrict.agents`); every other agent is open. */
 export function agentRunAction(agent: string): string {
   return `agent:run:${agent}`;
 }
@@ -28,11 +26,8 @@ export function agentRunAction(agent: string): string {
 /** The actions of the commands the `open` chat gate admitted before they became
  *  policy rows (plan U4, KTD5): what EVERY Slack user holds. A command group not
  *  listed here is closed to chat users until config grants it (fail-closed, R7).
- *  `config:write` is not here: it is the `permissions.channelConfig` right and
- *  joins the baseline only while a legacy `permissions` block is present WITHOUT
- *  that key (open-when-absent). A deployment with no `permissions` block has
- *  nothing to be absent from: it holds `config:write` where its `grants` say so
- *  and nowhere else (R7 — production since authz U7 step 1). */
+ *  `config:write` is not here: `config set channel` is held where `grants` say
+ *  so (admins through `actions: all`) and nowhere else. */
 export const CHAT_OPEN_ACTIONS: readonly string[] = [
   "help:read",
   "config:read",
@@ -45,7 +40,7 @@ export const CHAT_OPEN_ACTIONS: readonly string[] = [
   "mcp:write",
 ];
 
-/** What an Access browser session holds implicitly (KTD6/KTD10): every registered
+/** What an Access browser session holds implicitly (KTD10): every registered
  *  group's read — never a write, never an exec. */
 export function browserReadActions(commandGroups: readonly string[]): Set<string> {
   return new Set(commandGroups.map((g) => `${g}:read`));
@@ -120,130 +115,167 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
   return errors.length > 0 ? { ok: false, errors } : { ok: true, grants };
 }
 
-// ---- the legacy keys → grants (KTD6) ------------------------------------------
+// ---- `restrict`: what is closed unless granted -------------------------------------
 
-/** The chat-side legacy keys. `serviceTokens` is the Access machine credential
- *  map and travels as its own argument. */
-export type LegacyPermissions = Omit<Permissions, "serviceTokens">;
-
-/** What the legacy keys refer to by name but never list: the registered agents
- *  (`permissions.agents` restricts SOME of them; the rest are open to everyone)
- *  and the command groups (`permissions.operators` grants every group's read
- *  and write). Supplied by the caller — this module knows no registry. */
-export interface LegacyVocabulary {
-  agentNames: readonly string[];
-  /** `<group>` of every registered command's `<group>:<read|write|exec>` scope. */
-  commandGroups: readonly string[];
+/** `restrict:` in config.yaml. An agent listed here runs only for an actor whose
+ *  grants hold `agent:run:<name>` (or `all`); a repo listed here (an `owner/name`
+ *  slug) is used only by an actor whose `repos` axis names it (or `all`).
+ *  Everything unlisted is open to everyone who can reach the bot — the same
+ *  open-when-absent the retired `permissions.agents` / `permissions.repos`
+ *  allowlists had, with the lock and the allowlist kept apart: listing a grant
+ *  never takes anything from anyone else. */
+export interface RestrictConfig {
+  agents?: readonly string[];
+  repos?: readonly string[];
 }
 
-export interface LegacyTranslation {
+/** The parsed block: repo slugs lowercased once, since every lookup is by a
+ *  lowercased slug (`parseSlug`/`slugOf`/`repoResourceId`). */
+export interface Restriction {
+  agents: ReadonlySet<string>;
+  repos: ReadonlySet<string>;
+}
+
+export const NO_RESTRICTION: Restriction = Object.freeze({ agents: new Set<string>(), repos: new Set<string>() });
+
+const REPO_SLUG_RE = /^[\w.-]+\/[\w.-]+$/;
+const restrictSchema = z
+  .object({ agents: z.array(z.string().min(1)).optional(), repos: z.array(z.string().min(1)).optional() })
+  .strict();
+
+export type ParsedRestrictConfig = { ok: true; restrict: Restriction } | { ok: false; errors: string[] };
+
+/** Validate a raw `restrict` block: agents must be registered names (a typo
+ *  would otherwise restrict nothing, silently), repos must be `owner/name`. */
+export function parseRestrictConfig(raw: unknown, agentNames: readonly string[]): ParsedRestrictConfig {
+  if (raw === undefined) return { ok: true, restrict: NO_RESTRICTION };
+  const parsed = restrictSchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      errors: parsed.error.issues.map((issue) =>
+        issue.code === "unrecognized_keys"
+          ? `restrict: unknown field ${issue.keys.join(", ")} (expected agents, repos)`
+          : `restrict${issue.path.length > 0 ? `.${issue.path.map(String).join(".")}` : ""}: expected a list of non-empty names`,
+      ),
+    };
+  }
+  const errors: string[] = [];
+  for (const agent of parsed.data.agents ?? []) {
+    if (!agentNames.includes(agent))
+      errors.push(`restrict.agents: "${agent}" is not a registered agent (${agentNames.join(", ")})`);
+  }
+  for (const repo of parsed.data.repos ?? []) {
+    if (!REPO_SLUG_RE.test(repo)) errors.push(`restrict.repos: "${repo}" is not an owner/name slug`);
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    restrict: {
+      agents: new Set(parsed.data.agents ?? []),
+      repos: new Set((parsed.data.repos ?? []).map((r) => r.toLowerCase())),
+    },
+  };
+}
+
+/** Whether `set` covers `name` — `all`, or the name itself. */
+export function covers(set: GrantSet, name: string): boolean {
+  return set === "all" || set.has(name);
+}
+
+// ---- the table: native entries, registry defaults, baselines -----------------------
+
+/** Everything grants can come from. Every field optional: a deployment may have
+ *  no `grants` block at all (then every actor is `NO_GRANTS` beyond its baseline). */
+export interface GrantsSource {
+  /** The native block, already parsed (`parseGrantsConfig`). */
+  grants?: ReadonlyMap<string, Grants>;
+  /** The parsed `restrict` block; absent = nothing restricted. */
+  restrict?: Restriction;
+  /** The registered agents; absent = none (no agent is open to everyone). */
+  agentNames?: readonly string[];
+  /** The registered command groups; absent = none (a browser session holds nothing). */
+  commandGroups?: readonly string[];
+  /** The schedule registry's declared actors (`RunAction.actor`, R9): each
+   *  schedule's grants as the registry states them. The floor for a
+   *  `schedule:<name>` id — a native `grants` entry for the same id replaces
+   *  them (config decides). */
+  schedules?: readonly { readonly id: string; readonly grants: Grants }[];
+}
+
+export interface GrantsTable {
+  /** Every actor the config or the schedule registry names, with its baseline unioned in. */
   grants: Map<string, Grants>;
-  /** What EVERY Slack user holds under the legacy keys, listed or not: the
-   *  `open` chat commands (`CHAT_OPEN_ACTIONS`), `agent:run:<name>` for each
-   *  agent without an allowlist (`canRunAgent` is true for anyone there), and
-   *  `config:write` while a `permissions` block is present without
-   *  `channelConfig` (`canEditChannelConfig`'s open-when-absent — a rule about
-   *  a legacy block's missing key; no block, no rule). */
+  /** What every `slack:` user holds, listed or not: the open chat commands and `agent:run:<name>` for every unrestricted agent. */
   everyone: Grants;
-  /** `permissions.repos` ABSENT (KD7): every repo is open to every allowed
-   *  coding-agent user. Listed coding users receive `repos: "all"`; the flag
-   *  says the same for users no list names. */
-  reposOpen: boolean;
-  /** The ids a `permissions.*` key names (`serviceTokens` included) — the
-   *  legacy entries an operator can delete from config.yaml once a native
-   *  entry replaces them. Ingress-token ids are NOT here: a token-map entry is
-   *  the credential itself, and a native entry for its `http:`/`mcp:` id is how
-   *  a token is granted channels (#453), not a second copy to remove. */
-  fromPermissions: ReadonlySet<string>;
+  /** What every Access browser session (`access:<sub>`, never `access:svc:`) holds: each registered group's read. */
+  browserReads: Grants;
+  restrict: Restriction;
 }
 
-/**
- * The KTD6 table, plus the two legacy keys it omitted (`repos`, `serviceTokens`):
- *   admins                    → all / all / all
- *   operators                 → every `<group>:read` + `<group>:write` (never `:exec`); channels all
- *   repoManagement            → repo:write, friction:write (absent/empty → nothing; KTD9)
- *   channelConfig             → config:write for the listed; ABSENT from a present `permissions` block → config:write
- *                               for `everyone`; no `permissions` block at all → for nobody by baseline (native only)
- *   (the `open` chat gate)    → CHAT_OPEN_ACTIONS for `everyone`
- *   agents.<name>: [users]    → agent:run:<name> for those users; an agent with
- *                               NO allowlist → agent:run:<name> for `everyone`
- *   repos[slug]: [users]      → repos {slug} per listed user (absent → "all" for coding users, `reposOpen`)
- *   token scopes              → actions of the same names, for BOTH `http:<subject>` and `mcp:<subject>`
- *   token channel             → channels {`http:<channel>`} / {`mcp:<channel>`}; no pin → NO channels (OQ4,
- *                               option a: channels are channels, no machine-channel vocabulary). An unpinned
- *                               token therefore lists nothing and reads no run until a native `grants`
- *                               entry names its channels (or `all`) — R12's fourth deliberate change.
- *   serviceTokens[cn]         → `access:svc:<cn>` actions = scopes; channels all
- * An actor named by several keys holds the union; `all` absorbs a list.
- */
-export function translateLegacyConfig(
-  permissions: LegacyPermissions | undefined,
-  ingressTokens: IngressTokenMap | undefined,
-  accessServiceTokens: Record<string, string[]> | undefined,
-  vocabulary: LegacyVocabulary,
-): LegacyTranslation {
-  const table = new Map<string, Grants>();
-  const fromPermissions = new Set<string>();
-  const union = (actorId: string, g: Partial<Grants>) =>
-    table.set(actorId, unionGrants(table.get(actorId) ?? NO_GRANTS, { ...NO_GRANTS, ...g }));
-  /** A `permissions.*` key naming `actorId`: unioned in AND recorded as deletable. */
-  const add = (actorId: string, g: Partial<Grants>) => {
-    fromPermissions.add(actorId);
-    union(actorId, g);
+/** The baseline an actor id inherits by its namespace, listed or not: a `slack:`
+ *  user holds what `everyone` does; an Access browser session holds every
+ *  `<group>:read`. Every other namespace (`schedule:`, `access:svc:`, `http:`,
+ *  `mcp:`) is a credential or a job that holds exactly what names it — an
+ *  unlisted one is `NO_GRANTS` (R7). */
+export function namespaceBaseline(actorId: string, table: Pick<GrantsTable, "everyone" | "browserReads">): Grants {
+  if (actorId.startsWith("slack:")) return table.everyone;
+  if (actorId.startsWith("access:") && !actorId.startsWith("access:svc:")) return table.browserReads;
+  return NO_GRANTS;
+}
+
+/** The whole table — what `ConfigStore` builds once at load. A native `slack:`
+ *  or browser entry ADDS to its namespace's baseline (a grant never takes the
+ *  open commands away); every other entry is exactly what it declares. A
+ *  schedule's registry-declared grants are its floor, replaced whole by a native
+ *  entry for the same `schedule:<name>` (the registry is a default, not a
+ *  second config shape). */
+export function grantsTable(source: GrantsSource): GrantsTable {
+  const restrict = source.restrict ?? NO_RESTRICTION;
+  const openAgents = (source.agentNames ?? []).filter((a) => !restrict.agents.has(a)).map(agentRunAction);
+  const baselines = {
+    everyone: { ...NO_GRANTS, actions: new Set([...CHAT_OPEN_ACTIONS, ...openAgents]) },
+    browserReads: { ...NO_GRANTS, actions: browserReadActions(source.commandGroups ?? []) },
   };
-  const p = permissions ?? {};
-
-  for (const id of p.admins ?? []) add(id, ALL_GRANTS);
-  const operatorActions = new Set(vocabulary.commandGroups.flatMap((g) => [`${g}:read`, `${g}:write`]));
-  for (const id of p.operators ?? []) add(id, { actions: operatorActions, channels: "all" });
-  for (const id of p.repoManagement ?? []) add(id, { actions: new Set(["repo:write", "friction:write"]) });
-  for (const id of p.channelConfig ?? []) add(id, { actions: new Set(["config:write"]) });
-
-  const restricted = p.agents ?? {};
-  for (const [agent, users] of Object.entries(restricted)) {
-    for (const id of users) add(id, { actions: new Set([agentRunAction(agent)]) });
+  const grants = new Map<string, Grants>();
+  for (const [id, g] of source.grants ?? []) grants.set(id, unionGrants(g, namespaceBaseline(id, baselines)));
+  for (const schedule of source.schedules ?? []) {
+    if (source.grants?.has(schedule.id)) continue;
+    grants.set(schedule.id, schedule.grants);
   }
-  // `config:write` is open-when-absent only for a legacy block that omits the
-  // key; with no `permissions` block there is no legacy rule to apply (R7).
-  const channelConfigOpen = permissions !== undefined && p.channelConfig === undefined;
-  const everyone: Grants = {
-    ...NO_GRANTS,
-    actions: new Set([
-      ...CHAT_OPEN_ACTIONS,
-      ...(channelConfigOpen ? ["config:write"] : []),
-      ...vocabulary.agentNames.filter((a) => restricted[a] === undefined).map(agentRunAction),
-    ]),
-  };
+  return { grants, ...baselines, restrict };
+}
 
-  const reposOpen = p.repos === undefined;
-  if (reposOpen) {
-    for (const id of restricted.coding ?? []) add(id, { repos: "all" });
-  } else {
-    for (const [slug, users] of Object.entries(p.repos ?? {})) {
-      for (const id of users) add(id, { repos: new Set([slug]) });
-    }
-  }
+/** One actor's grants from a built table: its entry (baseline included); else
+ *  the baseline its namespace inherits; else `NO_GRANTS` (R7). */
+export function grantsIn(table: GrantsTable, actorId: string): Grants {
+  const listed = table.grants.get(actorId);
+  if (listed) return listed;
+  const baseline = namespaceBaseline(actorId, table);
+  return isEmpty(baseline) ? NO_GRANTS : baseline;
+}
 
-  for (const entry of Object.values(ingressTokens ?? {})) {
-    for (const ns of ["http", "mcp"] as const) {
-      union(`${ns}:${entry.subject}`, {
-        actions: new Set(entry.scopes),
-        channels: new Set(entry.channel === undefined ? [] : [`${ns}:${entry.channel}`]),
-      });
-    }
-  }
+/** `grantsIn` over a table built on the spot — for callers without a `ConfigStore`. */
+export function grantsFor(actorId: string, source: GrantsSource): Grants {
+  return grantsIn(grantsTable(source), actorId);
+}
 
-  for (const [commonName, scopes] of Object.entries(accessServiceTokens ?? {})) {
-    // A malformed list is no scopes, never a widened one (the same tolerance
-    // `validateConfig` shows the key).
-    if (!Array.isArray(scopes)) continue;
-    add(`access:svc:${commonName}`, {
-      actions: new Set(scopes.filter((s): s is string => typeof s === "string")),
-      channels: "all",
-    });
-  }
+/** Whether `actor` may run `agent`: every agent is open unless `restrict.agents`
+ *  names it, and then only for a holder of `agent:run:<name>` — literally, through
+ *  the `agent:run:*` wildcard, or `all` (the same `hasAction` the policy table reads). */
+export function mayRunAgent(table: Pick<GrantsTable, "restrict">, actorGrants: Grants, agent: string): boolean {
+  return !table.restrict.agents.has(agent) || hasAction(actorGrants.actions, agentRunAction(agent));
+}
 
-  return { grants: table, everyone, reposOpen, fromPermissions };
+/** Whether `actor` may use repo `slug`: every repo is open unless `restrict.repos`
+ *  names it, and then only for a holder whose `repos` axis names it (or `all`).
+ *  Compared lowercased on both sides — slugs are case-insensitive on GitHub. */
+export function mayUseRepo(table: Pick<GrantsTable, "restrict">, actorGrants: Grants, slug: string): boolean {
+  const lower = slug.toLowerCase();
+  if (!table.restrict.repos.has(lower)) return true;
+  if (actorGrants.repos === "all") return true;
+  for (const r of actorGrants.repos) if (r.toLowerCase() === lower) return true;
+  return false;
 }
 
 function unionSet(a: GrantSet, b: GrantSet): GrantSet {
@@ -268,115 +300,4 @@ function isEmpty(g: Grants): boolean {
     g.repos !== "all" &&
     g.repos.size === 0
   );
-}
-
-// ---- merging + lookup -------------------------------------------------------------
-
-export interface MergedGrants {
-  grants: Map<string, Grants>;
-  /** Actor ids named by BOTH shapes — the native entry won; config should warn. */
-  overlapping: string[];
-}
-
-/** Native wins for an id present in both; every other id is carried as is. */
-export function mergeGrants(native: ReadonlyMap<string, Grants>, legacy: ReadonlyMap<string, Grants>): MergedGrants {
-  const grants = new Map<string, Grants>(legacy);
-  const overlapping: string[] = [];
-  for (const [id, g] of native) {
-    if (legacy.has(id)) overlapping.push(id);
-    grants.set(id, g);
-  }
-  return { grants, overlapping };
-}
-
-/** Everything grants can come from. Every field optional: a deployment may
- *  have only one shape, or neither (then every actor is `NO_GRANTS`). */
-export interface GrantsSource {
-  /** The native block, already parsed (`parseGrantsConfig`). */
-  grants?: ReadonlyMap<string, Grants>;
-  permissions?: Permissions;
-  /** `SWITCHBOARD_INGRESS_TOKENS`, parsed (`parseIngressTokenMap`). */
-  ingressTokens?: IngressTokenMap;
-  /** The registered agents; absent = none (no agent is open to everyone). */
-  agentNames?: readonly string[];
-  /** The registered command groups; absent = none (operators translate to no actions). */
-  commandGroups?: readonly string[];
-  /** The schedule registry's declared actors (`RunAction.actor`, R9): each
-   *  schedule's grants as the registry states them. The floor for a
-   *  `schedule:<name>` id — a native `grants` entry for the same id replaces
-   *  them (config decides), and the legacy keys never name a schedule. */
-  schedules?: readonly { readonly id: string; readonly grants: Grants }[];
-}
-
-export type GrantsTable = Pick<MergedGrants, "grants"> &
-  Pick<LegacyTranslation, "everyone" | "reposOpen"> & {
-    /** Ids a `permissions.*` key AND the native block both name — the native
-     *  entry won and the legacy one is deletable, so `ConfigStore` warns. An
-     *  ingress token's `http:`/`mcp:` id with a native entry beside it is not
-     *  here (`LegacyTranslation.fromPermissions`): that pairing is the intended
-     *  way to grant a token channels, not a duplicate. */
-    overlapping: string[];
-    /** What every Access browser session holds under the legacy rules: each registered group's read. */
-    browserReads: Grants;
-  };
-
-/** The legacy baseline an actor id inherits, listed or not: a `slack:` user
- *  holds what `everyone` does (the `open` chat commands, the unrestricted
- *  agents); an Access browser session (`access:<sub>`, never `access:svc:`)
- *  holds every `<group>:read`. Every other namespace (`schedule:`,
- *  `access:svc:`, `http:`, `mcp:`) is a credential or a job that holds exactly
- *  what names it — an unlisted one is `NO_GRANTS` (R7). */
-export function legacyBaseline(actorId: string, table: Pick<GrantsTable, "everyone" | "browserReads">): Grants {
-  if (actorId.startsWith("slack:")) return table.everyone;
-  if (actorId.startsWith("access:") && !actorId.startsWith("access:svc:")) return table.browserReads;
-  return NO_GRANTS;
-}
-
-/** The whole merged table plus the legacy baselines — what `ConfigStore`
- *  builds once at load (and warns from). A legacy entry already includes its
- *  baseline; a native entry is exactly what it declares (R7). A schedule's
- *  registry-declared grants are its floor: a legacy key that names the
- *  schedule ADDS to them like every legacy key adds, and a native entry for the
- *  same `schedule:<name>` replaces them whole, without an overlap warning (the
- *  registry is a default, not a second config shape). */
-export function grantsTable(source: GrantsSource): GrantsTable {
-  const { serviceTokens, ...permissions } = source.permissions ?? {};
-  const legacy = translateLegacyConfig(
-    source.permissions ? permissions : undefined,
-    source.ingressTokens,
-    serviceTokens,
-    { agentNames: source.agentNames ?? [], commandGroups: source.commandGroups ?? [] },
-  );
-  const baselines = {
-    everyone: legacy.everyone,
-    browserReads: { ...NO_GRANTS, actions: browserReadActions(source.commandGroups ?? []) },
-  };
-  const withBaseline = new Map(
-    [...legacy.grants].map(([id, g]) => [id, unionGrants(g, legacyBaseline(id, baselines))] as const),
-  );
-  const merged = mergeGrants(source.grants ?? new Map(), withBaseline);
-  for (const schedule of source.schedules ?? []) {
-    if (source.grants?.has(schedule.id)) continue;
-    merged.grants.set(schedule.id, unionGrants(merged.grants.get(schedule.id) ?? NO_GRANTS, schedule.grants));
-  }
-  return {
-    grants: merged.grants,
-    overlapping: merged.overlapping.filter((id) => legacy.fromPermissions.has(id)),
-    ...baselines,
-    reposOpen: legacy.reposOpen,
-  };
-}
-
-/** One actor's grants from a built table: its entry; else the legacy baseline
- *  its namespace inherits (`legacyBaseline`); else `NO_GRANTS` (R7). */
-export function grantsIn(table: GrantsTable, actorId: string): Grants {
-  const listed = table.grants.get(actorId);
-  if (listed) return listed;
-  const baseline = legacyBaseline(actorId, table);
-  return isEmpty(baseline) ? NO_GRANTS : baseline;
-}
-
-/** `grantsIn` over a table built on the spot — for callers without a `ConfigStore`. */
-export function grantsFor(actorId: string, source: GrantsSource): Grants {
-  return grantsIn(grantsTable(source), actorId);
 }

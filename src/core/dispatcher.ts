@@ -861,8 +861,8 @@ export async function dispatch(
       return;
     }
 
-    // Per-repo access gate (KD7): open when permissions.repos is absent or
-    // the repo is unlisted; a configured allowlist refuses BY NAME — a
+    // Per-repo access gate (KD7): open unless `restrict.repos` names the repo;
+    // a restricted repo refuses a user without a `repos` grant BY NAME — a
     // refused user must see why, never get a silent per-thread fallback.
     if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(msg.userId, repoCtx.repo)) {
       const repo = repoCtx.repo;

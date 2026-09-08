@@ -27,7 +27,7 @@ function harness(opts: { rejectTokens?: string[]; email?: string; oauth?: FakeAu
   const dir = mkdtempSync(join(tmpdir(), "swb-connect-"));
   const cfg = join(dir, "config.yaml");
   writeFileSync(cfg, YAML);
-  const config = new ConfigStore(cfg, { backing: new InMemoryOverridesBacking(), initial: undefined }, () => {});
+  const config = new ConfigStore(cfg, { backing: new InMemoryOverridesBacking(), initial: undefined });
   const secrets = new InMemoryMcpSecretStore();
   let n = 0;
   const as = fakeAuthorizationServer(opts.oauth ?? { server: "https://mcp.vanta.com/mcp" });

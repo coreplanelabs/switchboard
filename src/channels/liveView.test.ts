@@ -24,7 +24,7 @@ import {
   type WebSeed,
 } from "./webSeed.js";
 import { accessActor, isLoopbackAddress } from "./commandHttp.js";
-import { grantsFor, type GrantsSource } from "../core/authz/grants.js";
+import { ALL_GRANTS, grantsFor, type GrantsSource } from "../core/authz/grants.js";
 import { NO_GRANTS, predicateFor } from "../core/authz/index.js";
 import { RunRegistry, type RunRegistryOptions } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
@@ -82,7 +82,7 @@ const FINISHED_THEN_END = /event: finished\ndata: \{"finishedAt":\d+\}\n\nevent:
  *  history routes show what they always showed. The authz block passes its own
  *  viewers. */
 const ADMIN: LiveViewContext = {
-  actor: accessActor({ sub: "admin" }, (id) => grantsFor(id, { permissions: { admins: ["access:admin"] } })),
+  actor: accessActor({ sub: "admin" }, (id) => grantsFor(id, { grants: new Map([["access:admin", ALL_GRANTS]]) })),
 };
 
 type Handler = ReturnType<typeof createLiveViewHandler>;
@@ -1673,12 +1673,12 @@ describe("live view on RunsService: history pages + index toggle (#157 U8)", () 
     // unlisted browser session (every group's read, no channel grants), bob is
     // granted the private channel natively, the admin holds everything.
     const SOURCE: GrantsSource = {
-      permissions: { admins: ["access:admin"] },
       grants: new Map([
         [
           "access:bob",
           { actions: new Set(["runs:read"]), channels: new Set(["slack:G_PRIV"]), repos: new Set<string>() },
         ],
+        ["access:admin", ALL_GRANTS],
       ]),
       commandGroups: ["runs"],
     };

@@ -55,65 +55,31 @@ defaults:
 #   slack:U0123456789:
 #     model: openai/gpt-5
 
-# Authorization — the LEGACY keys (translated to grants at load; removed one
-# release after the `grants` block below, features/authorization.md item 9).
-# Absent allowlists are open; `repoManagement` and everything below `grants`
-# are fail-closed. Enforcement is at run time against the resolved agent, so
-# allowlists can't be bypassed via directives or config scopes.
-# permissions:
-#   admins: [slack:U0123ADMIN]            # bypass all restrictions below
-#   agents:
-#     coding: [slack:U0456DEV]            # only these users (+ admins) may run coding
-#   channelConfig: []               # who may run `config set/clear channel`;
-#                                   # empty = admins only; key absent from this
-#                                   # block = everyone; no `permissions` block at
-#                                   # all = only those `grants` gives config:write
-#   repos:                          # per-repo access for resident environments;
-#     acme/api: [slack:U0456DEV]    # map or key absent = open to every allowed
-#                                   # coding-agent user; a listed repo refuses
-#                                   # non-listed users by name (never silently)
-#   repoManagement: []              # who may run `repo onboard/offboard/
-#                                   # reconfigure/rebuild` (`repo list` is open).
-#                                   # FAIL-CLOSED, unlike every gate above: key
-#                                   # absent OR empty = ADMINS ONLY — these
-#                                   # commands provision billable always-on
-#                                   # compute and bind GitHub credentials
-#   # Command registry (features/command-registry.md item 6, features/authorization.md):
-#   # ONE policy table decides every command on every surface from what the caller
-#   # HOLDS. Every Slack user holds the open commands (help/config/repo/friction/
-#   # memory/mcp/schedule reads, memory + mcp writes); `admins` hold everything;
-#   # `repoManagement` adds repo:write + friction:write; `channelConfig` adds
-#   # config:write. These two keys cover the Access surface:
-#   operators: [access:<sub>]       # Cloudflare Access browser identities granted
-#                                   # every group's `read` + `write` action (runs
-#                                   # stop, friction propose) over /api — never an
-#                                   # exec. Every Access browser identity holds
-#                                   # every `*:read` implicitly; absent = nobody
-#                                   # may write from a browser session.
-#   serviceTokens:                  # Access service tokens (their `common_name`
-#     reader-bot: [runs:read]       # claim) → the exact actions they hold; unlisted
-#     ops-bot: [runs:read, runs:write, friction:read]   # = nothing at all.
-#   # MCP / HTTP-ingress bearer tokens live in the SWITCHBOARD_INGRESS_TOKENS env
-#   # var (JSON `{ "<token>": { "subject", "channel"?, "scopes"? } }`); `scopes`
-#   # defaults to ["dispatch"] — the ingress endpoint only, no registry command —
-#   # and are the token's grants on every surface, a text command through
-#   # /ingress included. `channel` is the ONE channel the token may read runs
-#   # from (`http:<channel>` over /ingress, `mcp:<channel>` over MCP). A token
-#   # WITHOUT `channel` may read NO run — not even the channel it speaks in —
-#   # until a `grants` entry below names its channels (or `all`). Channels are
-#   # channels: there is no machine-channel shorthand (features/authorization.md
-#   # item 11, OQ4).
-
-# One authorization model (docs/plans/2026-09-03-001-feat-authorization-model-plan.md):
-# what ANY actor may do, in one shape, keyed by its platform-namespaced id —
-# `slack:U…`, `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
+# Authorization (features/authorization.md item 9, docs/reference/authorization.md):
+# two blocks. `restrict` names what is CLOSED unless granted — an agent listed
+# here runs only for an actor whose grants hold agent:run:<name> (or `all`); a
+# repo listed here is used only by an actor whose `repos` axis names it (or
+# `all`). Everything unlisted is open to everyone who can reach the bot.
+# Enforcement is at run time against the resolved agent/repo, so it can't be
+# bypassed via directives or config scopes. Names must be registered agents /
+# owner/name slugs, or the load fails.
+# restrict:
+#   agents: [coding]
+#   repos: [acme/api]
+#
+# `grants`: what ANY actor holds, in one shape, keyed by its platform-namespaced
+# id — `slack:U…`, `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
 # `access:svc:<common_name>`, `schedule:<name>`. Each entry has up to three
 # axes; every axis is a list of names or the explicit word `all`, and an ABSENT
-# axis is the empty set (fail-closed). Accepted alongside `permissions` above
-# during the changeover: `permissions.*` and token `scopes`/`channel` translate
-# to the same grants at load, an actor named by BOTH shapes takes the `grants`
-# entry (and is warned about at startup), and the legacy keys go away one
-# release later. An unknown id prefix or a misspelled `all` fails the load.
+# axis is the empty set (fail-closed). A `slack:` user holds the open chat
+# commands and every unrestricted agent whether listed or not — an entry ADDS to
+# that; an Access browser session holds every group's read the same way;
+# credentials (`http:`, `mcp:`, `access:svc:`) hold exactly their entry and an
+# unlisted one holds nothing, not even `dispatch`. `config:write` (channel
+# config), `repo:write` (repo onboard/offboard/…, friction propose) and every
+# `runs:*` are never a baseline: nobody holds them until granted, and nobody is
+# an admin without an `all` entry. An unknown id prefix or a misspelled `all`
+# fails the load; so does the retired `permissions` block.
 # grants:
 #   slack:U0123ADMIN:                   # an admin, spelled out
 #     actions: all
@@ -159,15 +125,15 @@ execution:
   # Worker; any other resident state falls back to the backend above with a
   # named reason on the status card. Works alongside any per-thread type.
   # Repos are onboarded from chat: `repo onboard <owner/name>` (see README
-  # Setup; gated by permissions.repoManagement — fail-closed, admins only when
-  # unset). `repo list` shows lifecycle; `repo offboard`/`repo rebuild` accept
+  # Setup; needs the `repo:write` grant — never a baseline, admins only until
+  # granted). `repo list` shows lifecycle; `repo offboard`/`repo rebuild` accept
   # --dry-run for an itemized plan without executing.
   # Deterministic ops (no model turn): `repo test <owner/name> [<ref>]` /
   # `repo build <owner/name> [<ref>]` — and natural asks like "run the tests
   # on main in acme/api" — run the repo's onboarded command in a disposable
   # resident checkout and post the result with zero model calls. Operator-
-  # level: gated by the coding-agent allowlist + permissions.repos (NOT
-  # repoManagement). Anything ambiguous falls through to the agent. With
+  # level: gated like a coding run — `restrict.agents` / `restrict.repos`
+  # against the caller's grants (NOT `repo:write`). Anything ambiguous falls through to the agent. With
   # local execution the same asks run fixed Node commands in the thread's
   # local workspace (dev-only).
   # resident:
@@ -234,11 +200,10 @@ workspaceDir: ./workspaces
 # cron the Cloudflare Worker shim runs; a `run` schedule fires as an ordinary run
 # through /ingress as the `cron` identity — give that identity a token in
 # SWITCHBOARD_INGRESS_TOKENS ({"…": {"subject": "cron", "channel": "cron"}}) and
-# grant it what its command needs (`friction propose` → `friction:write`: list
-# `http:cron` in permissions.repoManagement, or give the token the scope — a text
-# command through /ingress is decided from the token's grants like a tool call —
-# and `grants.http:cron.channels: all` so the pass reads the fleet's runs, not
-# the cron channel's own). The shim records each firing on the state Worker's
+# grant it what its command needs in `grants.http:cron` (`friction propose` →
+# `friction:write`; a text command through /ingress is decided from the actor's
+# grants like a tool call) with `channels: all` so the pass reads the fleet's
+# runs, not the cron channel's own. The shim records each firing on the state Worker's
 # ScheduleDO; this block tells the /runs "Scheduled" panel where to read them.
 # Without it the panel lists the schedules with no firing history.
 # schedules:

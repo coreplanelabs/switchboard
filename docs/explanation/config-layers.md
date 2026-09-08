@@ -26,7 +26,7 @@ A channel might want every review to run on a specific model without forcing eve
 
 ## Why permission gates check the *resolved* agent, not the request
 
-None of the layering above is a security boundary — it's a convenience ladder for picking a default. The gate that actually matters (`permissions.agents`, `permissions.repos`) runs **after** all six layers have already produced a final agent, against that final answer, every single time an agent is about to run. This is why setting your own default to a restricted agent is harmless: `config set me --agent coding` always succeeds as a *write*, because the gate that matters isn't at write time — it's at run time, against whatever agent actually ends up resolved, checked again on the very next message. See [reference: permissions](../reference/permissions.md) for the gates themselves.
+None of the layering above is a security boundary — it's a convenience ladder for picking a default. The gate that actually matters (`restrict.agents` against the caller's `agent:run:<name>` grant) runs **after** all six layers have already produced a final agent, against that final answer, every single time an agent is about to run. This is why setting your own default to a restricted agent is harmless: `config set me --agent coding` always succeeds as a *write*, because the gate that matters isn't at write time — it's at run time, against whatever agent actually ends up resolved, checked again on the very next message. See [reference: authorization](../reference/authorization.md) for the gates themselves.
 
 ## Custom instructions are not a seventh layer
 

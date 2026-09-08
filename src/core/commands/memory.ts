@@ -82,7 +82,7 @@ async function viaStore<T>(fn: () => Promise<T>): Promise<T> {
 
 /** Whether this caller may forget SHARED records (org, repo, channel): the
  *  repo-management right — the policy table's `repo:write` row, fail-closed
- *  (admins, `permissions.repoManagement`, a token minted with it, the local CLI). */
+ *  (admins, its grantees, a token minted with it, the local CLI). */
 function isOrgAdmin(caller: Caller): boolean {
   return authorize(caller.actor, "repo:write", { type: "command", id: "memory.forget" }).allow;
 }

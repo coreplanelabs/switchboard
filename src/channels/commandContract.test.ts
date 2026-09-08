@@ -6,6 +6,7 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:
 import { ConfigStore } from "../config.js";
 import { CLI_CALLER, parseCliArgv, runCommand } from "../cli.js";
 import { grantsFor } from "../core/authz/grants.js";
+import type { Grants } from "../core/authz/types.js";
 import { chatCallerFor, handleChatCommand, parseChatCommand } from "../core/commandChat.js";
 import { coreCommandGroups } from "../core/commands/all.js";
 import { callerWith } from "../core/testing/callers.js";
@@ -67,8 +68,8 @@ defaults:
   agent: general
   models:
     general: anthropic/general-model
-permissions:
-  admins: ["slack:UADMIN"]
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
 `;
 
 function record(id: string, finishedAt: number): RunRecord {
@@ -221,6 +222,12 @@ const httpRow: AdapterRow = {
 };
 
 const MCP_SCOPES = ["runs:read", "friction:read", "repo:read"];
+/** A grants lookup answering `actions` (over every channel) for whoever asks — the fixture token's `mcp:alice`. */
+const grantsOf = (actions: readonly string[]) => (): Grants => ({
+  actions: new Set(actions),
+  channels: "all",
+  repos: new Set(),
+});
 
 const mcpRow: AdapterRow = {
   name: "mcp",
@@ -238,7 +245,7 @@ const mcpRow: AdapterRow = {
         }),
       },
       {} as CoreDeps,
-      { auth: { tokens: { tok: { subject: "alice", scopes: MCP_SCOPES } } }, commands: f.commands },
+      { auth: { tokens: { tok: { subject: "alice" } } }, commands: f.commands, grantsFor: grantsOf(MCP_SCOPES) },
     );
     const body = res.body as { result?: { content: { text: string }[] }; error?: unknown };
     expect(body.error, JSON.stringify(body)).toBeUndefined();
@@ -537,7 +544,7 @@ describe("derived naming across surfaces (KTD2/KTD21)", () => {
   });
 });
 
-describe("migrated commands over MCP — scopes (AE12)", () => {
+describe("migrated commands over MCP — grants (AE12)", () => {
   async function callAs(commands: CommandInvoker, scopes: string[], name: string, args: Record<string, string> = {}) {
     const res = await handleMcpRequest(
       {
@@ -546,7 +553,7 @@ describe("migrated commands over MCP — scopes (AE12)", () => {
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
       },
       {} as CoreDeps,
-      { auth: { tokens: { tok: { subject: "alice", scopes } } }, commands },
+      { auth: { tokens: { tok: { subject: "alice" } } }, commands, grantsFor: grantsOf(scopes) },
     );
     return res.body as { result?: unknown; error?: { code: number; data?: { code: string } } };
   }

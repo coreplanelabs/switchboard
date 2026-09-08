@@ -24,7 +24,7 @@ Remove it: `@switchboard mcp remove linear`.
 | Tier | Who sets it | Reaches | Notes |
 |---|---|---|---|
 | `me` | anyone, self-serve | only your own runs | `mcp add` with no scope flag |
-| `channel` | anyone with `channelConfig` | every run in that channel | same gate as `config set channel` |
+| `channel` | anyone granted `config:write` | every run in that channel | same gate as `config set channel` |
 | `org` | admins only (or `config.yaml` `defaults.mcpServers`) | every run, everywhere | the only tier that may reach `coding`, `review`, or `ship` |
 
 A name set at more than one tier resolves org-first, channel-second, user-last — the opposite order from model/agent precedence, because an org-level server is an admin's decision that a user shouldn't be able to shadow.

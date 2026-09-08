@@ -265,8 +265,8 @@ export async function loadBotConfig(
   // `config set` from the CLI and from Slack write ONE document; the file is
   // the fallback for a config without a state Worker.
   // No ingress tokens: the CLI is `cli:local` (every grant) and never resolves
-  // an `http:`/`mcp:` actor; the command groups keep `permissions.operators`
-  // translating the same way the bot does.
+  // an `http:`/`mcp:` actor; the command groups are what a browser session's
+  // implicit reads span, the same way the bot passes them.
   return openConfigStore(configPath, {
     overridesPath,
     env: opts.env ?? process.env,

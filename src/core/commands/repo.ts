@@ -28,8 +28,8 @@ import type { RepoInspector } from "../../execution/githubRepoInspect.js";
 //   repo onboard <slug> [--ref] [--test] [--build] [--install] [--evict-coldest]
 //   repo offboard <slug> [--dry-run]           — `repo:write`: the repo-management right
 //   repo reconfigure <slug> [--ref] [--test…]    (KTD9 fail-closed: admins ∪
-//   repo rebuild <slug> [--dry-run]              permissions.repoManagement, or a token
-//                                                minted with it)
+//   repo rebuild <slug> [--dry-run]              holders of `repo:write` — admins, or
+//                                                anyone granted it)
 //   repo test <slug> [ref] / repo build <slug> [ref]
 //                                              — deterministic ops (U6/KTD8): `repo:exec`
 //                                                decided on `agent { coding }` (the implicit

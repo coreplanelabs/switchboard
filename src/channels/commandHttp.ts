@@ -38,9 +38,9 @@ import { MAX_BODY_BYTES, readBody } from "./http.js";
 export interface CommandHttpOptions {
   /** Grants by actor id (`ConfigStore.grantsFor`) for the `Caller.actor` every
    *  `/api` call carries — `access:<sub>` (a browser session: every group's
-   *  read implicitly, writes when `permissions.operators` lists it) or
-   *  `access:svc:<common_name>` (exactly its `permissions.serviceTokens`
-   *  scopes). The translation is config's; the adapter only names the id. */
+   *  read implicitly, plus whatever its `grants` entry adds) or
+   *  `access:svc:<common_name>` (exactly its `grants` entry, nothing implicit).
+   *  The table is config's; the adapter only names the id. */
   grantsFor: GrantsLookup;
   /** True when the Access gate is admitting requests WITHOUT a JWT
    *  (`ACCESS_DEV_BYPASS` with no Access config). Enables the loopback rule. */

@@ -1,6 +1,5 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
-import { grantsFor } from "../core/authz/grants.js";
 import {
   CommandRegistry,
   type Caller,
@@ -15,7 +14,7 @@ import { systemClock } from "../core/trace/clock.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
 import {
   authorizeRequest,
-  hasDispatchScope,
+  hasDispatch,
   MAX_BODY_BYTES,
   readBody,
   type DispatchFn,
@@ -42,8 +41,8 @@ import {
 // result text = one header line + the JSON object `invoke` returned, errors as
 // JSON-RPC errors carrying `data.code`. No per-command code lives here; the
 // registry authorizes the `mcp:<subject>` actor over the policy table, whose
-// grants are the token's `scopes` translated (default `dispatch` only — no
-// registry command).
+// grants are config's `grants` entry for that id (a token with no entry holds
+// nothing — not even `dispatch`).
 //
 // Auth is REUSED wholesale from the HTTP ingress adapter (http.ts): the same
 // fail-closed, constant-time bearer-token machinery and the same
@@ -93,9 +92,8 @@ export interface McpOptions {
   /** The command registry (deps bound) whose MCP-exposed commands become tools
    *  beside `dispatch`. Absent → `dispatch` is the only tool. */
   commands?: CommandInvoker;
-  /** Grants by actor id (`ConfigStore.grantsFor`) for the `Caller.actor` a
-   *  tool call carries. Absent → the legacy translation of `auth.tokens` alone
-   *  (what the token entry itself says, nothing from config.yaml). */
+  /** Grants by actor id for the `Caller.actor` a tool call carries and for the
+   *  `dispatch` gate. Absent → `deps.config.grantsFor` (the bot's store). */
   grantsFor?: GrantsLookup;
 }
 
@@ -114,13 +112,11 @@ function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[]
 }
 
 /** R9: the Caller an MCP bearer identity resolves to — the `service` Actor
- *  `mcp:<subject>` with the grants config names for it: the token's scopes as
- *  actions, and its `channel` as its one channel grant (`mcp:<channel>`, the
- *  namespace `toIncomingMessage` gives a dispatch's channelId); an unpinned
- *  token holds no channel and sees no run (authorization.md item 9). Nothing
- *  here decides what it may do (KTD3). */
-export function toCaller(identity: IngressIdentity, options: Pick<McpOptions, "auth" | "grantsFor">): Caller {
-  const lookup: GrantsLookup = options.grantsFor ?? ((id) => grantsFor(id, { ingressTokens: options.auth.tokens }));
+ *  `mcp:<subject>` with the grants config names for it (its `channels` name the
+ *  runs it may read, in the `mcp:<channel>` namespace `toIncomingMessage` gives a
+ *  dispatch's channelId); a token with no entry holds nothing and sees no run
+ *  (authorization.md item 9). Nothing here decides what it may do (KTD3). */
+export function toCaller(identity: IngressIdentity, lookup: GrantsLookup): Caller {
   return {
     kind: "mcp",
     id: `${PLATFORM}:${identity.subject}`,
@@ -250,6 +246,7 @@ async function route(
   identity: IngressIdentity,
   deps: CoreDeps,
   options: McpOptions,
+  lookup: GrantsLookup,
 ): Promise<JsonRpcResultBody | JsonRpcErrorBody> {
   const id = req.id ?? null;
   switch (req.method) {
@@ -274,18 +271,18 @@ async function route(
         // schemas live there), the returned object straight back out.
         const input = namedToInput(command, args, "camel");
         if ("error" in input) return err(id, INVALID_PARAMS, input.error, { code: "invalid_input" });
-        const result = await options.commands!.invoke(command.id, input, toCaller(identity, options));
+        const result = await options.commands!.invoke(command.id, input, toCaller(identity, lookup));
         if (!result.ok) return err(id, RPC_CODE_FOR[result.error], result.message, { code: result.error });
         return ok(id, { content: [{ type: "text", text: `${command.id}: ok\n${JSON.stringify(result.value)}` }] });
       }
       if (name !== DISPATCH_TOOL.name) {
         return err(id, INVALID_PARAMS, `unknown tool: ${typeof name === "string" ? name : "(none)"}`);
       }
-      // `dispatch` starts an agent run: only a token holding the `dispatch`
-      // scope may call it (fail-closed, before the arguments are looked at). A
+      // `dispatch` starts an agent run: only an `mcp:<subject>` actor granted `dispatch`
+      // may call it (fail-closed, before the arguments are looked at). A
       // registry-only token (`runs:read`, …) gets the same `unauthorized` code
       // the registry tools answer with.
-      if (!hasDispatchScope(identity)) {
+      if (!hasDispatch(lookup(`${PLATFORM}:${identity.subject}`))) {
         return err(id, RPC_CODE_FOR.unauthorized, `${PLATFORM}:${identity.subject} is not allowed to call dispatch`, {
           code: "unauthorized",
         });
@@ -361,6 +358,10 @@ async function handleMcpMessage(
   deps: CoreDeps,
   options: McpOptions,
 ): Promise<McpResponse> {
+  // What this token's bearer holds: config's grants for `mcp:<subject>` (the
+  // bot's store, or a test's lookup). Both the `dispatch` gate and every
+  // registry tool's Caller read from it.
+  const lookup: GrantsLookup = options.grantsFor ?? ((id) => deps.config.grantsFor(id));
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawBody);
@@ -394,7 +395,7 @@ async function handleMcpMessage(
       ? (msg.params as Record<string, unknown>)
       : {};
   const request: JsonRpcRequest = { id: readId(msg), method: msg.method, params };
-  const body = await route(request, identity, deps, options);
+  const body = await route(request, identity, deps, options, lookup);
   return { status: 200, body };
 }
 

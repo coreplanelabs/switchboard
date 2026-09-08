@@ -41,9 +41,9 @@ With `execution.type: local` (the default, meant for development), there's no pl
 
 The review agent's toolset has no `write_file` — but it still has `bash`, and `bash` can do anything its executor can reach, including writing files by other means. "Read-only" here is an agreed contract enforced by prompt and toolset design, not a hard capability boundary the way sandboxing is. The actual hard boundary is *which plane* a review run's tools execute in, not which tools are on the list.
 
-## Why this is also why `repoManagement` fails closed
+## Why this is also why `repo:write` is never a baseline
 
-Onboarding a repo (`repo onboard`) is the one action that *creates* a resident-plane credential relationship — it provisions always-on compute and binds a real GitHub identity to a real repo. Every other permission in the system defaults open because getting it wrong mostly costs you an unwanted chat reply. Getting `repoManagement` wrong by default would mean anyone could bind a new repo-scoped credential without anyone deciding to — which is why it's the one gate in [reference: permissions](../reference/permissions.md) that's locked unless an admin explicitly opens it.
+Onboarding a repo (`repo onboard`) is the one action that *creates* a resident-plane credential relationship — it provisions always-on compute and binds a real GitHub identity to a real repo. Running an agent defaults open because getting it wrong mostly costs you an unwanted chat reply. Letting repo management default open would mean anyone could bind a new repo-scoped credential without anyone deciding to — which is why `repo:write` is a grant in [reference: authorization](../reference/authorization.md) that only an entry (or an admin's `all`) confers, never a baseline.
 
 ## See also
 

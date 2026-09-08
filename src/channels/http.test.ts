@@ -13,6 +13,7 @@ import {
   type IngressIdentity,
 } from "./http.js";
 import type { CoreDeps } from "../core/dispatcher.js";
+import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
 
 // Feature: features/http-ingress.md — adapter #3 (HTTP). Auth is fail-closed +
@@ -20,7 +21,8 @@ import type { ChannelIO, IncomingMessage } from "../core/types.js";
 // dispatch() the Slack/CLI adapters use. A fake dispatch keeps these off real
 // providers.
 
-const deps = {} as CoreDeps;
+// The config store as the adapter sees it: grants by actor id, and a `config` with no `tracing` (no span log).
+const deps = { config: { grantsFor: (id: string) => GRANTS.get(id) ?? NO_GRANTS, config: {} } } as unknown as CoreDeps;
 
 /** A dispatch double that records the message and echoes a canned reply. */
 function fakeDispatch(reply = "the answer") {
@@ -32,12 +34,20 @@ function fakeDispatch(reply = "the answer") {
   return { fn, calls };
 }
 
-/** Fixture identities carry the parser's default scopes unless a test says otherwise. */
-const authConfig = (
-  tokens: Record<string, Omit<IngressIdentity, "scopes"> & Partial<Pick<IngressIdentity, "scopes">>>,
-): IngressConfig => ({
+/** What each fixture token's `http:<subject>` actor holds — config's grants, as the
+ *  bot's store answers them. `authConfig` registers `dispatch` for every subject
+ *  unless a test says otherwise (`actions`); `deps.config.grantsFor` reads it. */
+const GRANTS = new Map<string, Grants>();
+const authConfig = (tokens: Record<string, IngressIdentity & { actions?: string[] }>): IngressConfig => ({
   tokens: Object.fromEntries(
-    Object.entries(tokens).map(([t, id]) => [t, { ...id, scopes: id.scopes ?? ["dispatch"] }]),
+    Object.entries(tokens).map(([t, { actions, ...id }]) => {
+      GRANTS.set(`http:${id.subject}`, {
+        actions: new Set(actions ?? ["dispatch"]),
+        channels: new Set(),
+        repos: new Set(),
+      });
+      return [t, id];
+    }),
   ),
 });
 const bearer = (token: string): IncomingHttpHeaders => ({ authorization: `Bearer ${token}` });
@@ -50,7 +60,7 @@ describe("authenticate (bearer auth, constant-time)", () => {
   });
 
   it("maps a valid token to its identity", () => {
-    expect(authenticate(bearer("beta"), config)).toEqual({ subject: "bob", channel: "ops", scopes: ["dispatch"] });
+    expect(authenticate(bearer("beta"), config)).toEqual({ subject: "bob", channel: "ops" });
   });
 
   it("returns the right identity regardless of token position (checks all, no early exit)", () => {
@@ -217,10 +227,10 @@ describe("handleIngressRequest (transport gating + dispatch)", () => {
   });
 });
 
-describe("handleIngressRequest — the dispatch scope (fail-closed)", () => {
-  it("a token without the dispatch scope (runs:read only) → 403, dispatch never called", async () => {
+describe("handleIngressRequest — the dispatch grant (fail-closed)", () => {
+  it("a token whose actor holds no dispatch grant (runs:read only) → 403, dispatch never called", async () => {
     const d = fakeDispatch();
-    const auth = authConfig({ tok: { subject: "reader", scopes: ["runs:read"] } });
+    const auth = authConfig({ tok: { subject: "reader", actions: ["runs:read"] } });
     const res = await handleIngressRequest(
       { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "start a run" }) },
       deps,
@@ -231,9 +241,10 @@ describe("handleIngressRequest — the dispatch scope (fail-closed)", () => {
     expect(d.calls).toHaveLength(0);
   });
 
-  it("a default-scoped token (no scopes in the env → ['dispatch']) still dispatches", async () => {
+  it("a token whose http:<subject> actor is granted dispatch dispatches; the token map itself grants nothing", async () => {
     const d = fakeDispatch("ok");
     const auth = parseIngressTokens({ SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "alice" } }) });
+    GRANTS.set("http:alice", { actions: new Set(["dispatch"]), channels: new Set(), repos: new Set() });
     const res = await handleIngressRequest(
       { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "hi" }) },
       deps,
@@ -243,9 +254,9 @@ describe("handleIngressRequest — the dispatch scope (fail-closed)", () => {
     expect(d.calls).toHaveLength(1);
   });
 
-  it("the node wrapper refuses a dispatch-less token from the headers, without reading the body", async () => {
+  it("the node wrapper refuses a dispatch-less actor from the headers, without reading the body", async () => {
     const d = fakeDispatch();
-    const auth = authConfig({ tok: { subject: "reader", scopes: ["runs:read"] } });
+    const auth = authConfig({ tok: { subject: "reader", actions: ["runs:read"] } });
     const handler = createIngressHandler(deps, { auth, dispatch: d.fn });
     let bodyRead = false;
     const req = {
@@ -396,7 +407,7 @@ describe("authorizeRequest (header-only gate)", () => {
   });
   it("returns the identity for a valid token", () => {
     expect(authorizeRequest("POST", bearer("tok"), opts())).toEqual({
-      identity: { subject: "alice", channel: undefined, scopes: ["dispatch"] },
+      identity: { subject: "alice" },
     });
   });
 });
@@ -410,8 +421,8 @@ describe("parseIngressTokens (env → config, fail-closed)", () => {
       }),
     });
     expect(cfg.tokens).toEqual({
-      s3cr3t: { subject: "alice", channel: "ops", scopes: ["dispatch"] },
-      t2: { subject: "bob", channel: undefined, scopes: ["dispatch"] },
+      s3cr3t: { subject: "alice", channel: "ops" },
+      t2: { subject: "bob" },
     });
   });
 
@@ -433,39 +444,30 @@ describe("parseIngressTokens (env → config, fail-closed)", () => {
         "": { subject: "empty-token" },
       }),
     });
-    expect(cfg.tokens).toEqual({ good: { subject: "alice", channel: undefined, scopes: ["dispatch"] } });
+    expect(cfg.tokens).toEqual({ good: { subject: "alice" } });
   });
 });
 
-// Feature: features/command-registry.md — per-token scopes for the command
-// registry's machine callers. Default `["dispatch"]` keeps every existing token
-// exactly as capable as before: `/ingress` only, no `runs.*`.
-describe("parseIngressTokens (scopes)", () => {
-  it("defaults scopes to ['dispatch'] when absent", () => {
-    const cfg = parseIngressTokens({ SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ t: { subject: "alice" } }) });
-    expect(cfg.tokens.t.scopes).toEqual(["dispatch"]);
+// Feature: features/authorization.md item 9 — a token entry identifies; what the
+// token may do is config's `grants["http:<subject>"]` / `["mcp:<subject>"]`.
+describe("parseIngressTokens — a token is a credential, its rights are config's", () => {
+  it("an entry is subject + optional channel; nothing about what it may do", () => {
+    const cfg = parseIngressTokens({
+      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ t: { subject: "ci", channel: "ops" }, u: { subject: "alice" } }),
+    });
+    expect(cfg.tokens).toEqual({ t: { subject: "ci", channel: "ops" }, u: { subject: "alice" } });
   });
 
-  it("accepts an explicit scopes array of non-empty strings", () => {
+  it("the retired `scopes` field is kept out of the identity and warned about by subject — the entry stays usable, never widened", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const cfg = parseIngressTokens({
-      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({
-        t: { subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] },
-      }),
+      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ legacy: { subject: "ci", scopes: ["dispatch", "runs:read"] } }),
     });
-    expect(cfg.tokens.t).toEqual({ subject: "ci", channel: "ops", scopes: ["dispatch", "runs:read"] });
-  });
-
-  it("skips an entry whose scopes are malformed rather than widening or narrowing it silently", () => {
-    const cfg = parseIngressTokens({
-      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({
-        notArray: { subject: "a", scopes: "runs:read" },
-        nonString: { subject: "b", scopes: ["runs:read", 5] },
-        blank: { subject: "c", scopes: [""] },
-        good: { subject: "d", scopes: [] },
-      }),
-    });
-    expect(Object.keys(cfg.tokens)).toEqual(["good"]);
-    expect(cfg.tokens.good.scopes).toEqual([]);
+    expect(cfg.tokens).toEqual({ legacy: { subject: "ci" } });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('subject "ci"');
+    expect(String(warn.mock.calls[0][0])).not.toContain("legacy");
+    warn.mockRestore();
   });
 });
 
@@ -613,7 +615,7 @@ describe('async mode (`"async": true` → 202 Accepted, run continues in backgro
 
   it("a dispatch-less token is refused on the async path too (403, fail-closed)", async () => {
     const d = fakeDispatch();
-    const auth = authConfig({ tok: { subject: "reader", scopes: ["runs:read"] } });
+    const auth = authConfig({ tok: { subject: "reader", actions: ["runs:read"] } });
     const res = await handleIngressRequest(
       { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "go", async: true }) },
       deps,

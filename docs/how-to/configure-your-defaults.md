@@ -29,7 +29,7 @@ Why it's shaped this way: [config layers, explained](../explanation/config-layer
 
 ## Set a channel's defaults
 
-Needs the `channelConfig` permission (open to everyone unless an admin has restricted it):
+Needs the `config:write` grant (admins hold it through `all`; nobody else until granted):
 
 ```
 @switchboard config set channel --agent review
@@ -62,7 +62,7 @@ Directives in the message itself always win, and touch nothing persistent:
 ```
 @switchboard config show               # what's active right now, and why
 @switchboard config clear me            # drop your personal overrides
-@switchboard config clear channel       # drop this channel's overrides (needs channelConfig)
+@switchboard config clear channel       # drop this channel's overrides (needs config:write)
 ```
 
 ## See also

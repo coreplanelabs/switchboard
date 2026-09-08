@@ -34,9 +34,8 @@ defaults:
   agent: general
   models:
     general: anthropic/general-model
-permissions:
-  admins: ["${ADMIN}"]
-  repoManagement: ["${ADMIN}"]
+grants:
+  "${ADMIN}": { actions: all, channels: all, repos: all }
 `;
 
 function service() {
@@ -44,7 +43,7 @@ function service() {
   const cfg = join(dir, "config.yaml");
   writeFileSync(cfg, YAML);
   const backing = new InMemoryOverridesBacking();
-  const config = new ConfigStore(cfg, { backing, initial: undefined }, () => {});
+  const config = new ConfigStore(cfg, { backing, initial: undefined });
   let n = 0;
   const svc = new McpService({
     config,
@@ -67,15 +66,15 @@ function bind(svc: McpService | { unavailable: string }): CommandInvoker {
   return bindCommands(registry, { mcp: { service: async () => svc } });
 }
 
-/** A Slack person: the open chat commands, `config:write` unless `channelConfig: false` (the
- *  `permissions.channelConfig` key present and not naming them), everything for an admin. */
-const chat = (id: string, opts: { admin?: boolean; channelConfig?: boolean } = {}): Caller =>
+/** A Slack person: the open chat commands plus `config:write` (a grant; `configWrite: false` withholds it),
+ *  everything for an admin. */
+const chat = (id: string, opts: { admin?: boolean; configWrite?: boolean } = {}): Caller =>
   callerWith(
     "chat",
     id,
     opts.admin === true || id === ADMIN
       ? "all"
-      : { actions: new Set(["mcp:read", "mcp:write", ...(opts.channelConfig !== false ? ["config:write"] : [])]) },
+      : { actions: new Set(["mcp:read", "mcp:write", ...(opts.configWrite !== false ? ["config:write"] : [])]) },
     { origin: { channelId: "slack:CX", threadKey: "slack:CX:1" } },
   );
 const machine = (actions: string[]): Caller => callerWith("mcp", "mcp:svc", actions);
@@ -145,7 +144,7 @@ describe("mcp.* commands", () => {
     expect(await text(inv, "mcp.list", {}, chat(NOBODY))).toContain("No MCP servers"); // another user sees nothing of alice's
   });
 
-  it("channel and org scopes are decided by the data: channel needs the channelConfig gate, org an admin / cli / machine mcp:write; refusals name `--scope me`", async () => {
+  it("channel and org scopes are decided by the data: channel needs the config:write grant, org an admin / cli / machine mcp:write; refusals name `--scope me`", async () => {
     const inv = bind(service().svc);
     const url = "https://mcp.linear.app/mcp";
     const deniedOrg = await inv.invoke(
@@ -175,7 +174,7 @@ describe("mcp.* commands", () => {
     const deniedChannel = await inv.invoke(
       "mcp.add",
       { args: ["hubspot"], options: { url: "https://mcp.hubspot.com/mcp", scope: "channel", auth: "none" } },
-      chat(NOBODY, { channelConfig: false }),
+      chat(NOBODY, { configWrite: false }),
     );
     expect(deniedChannel).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "handler" });
     expect(
@@ -194,7 +193,7 @@ describe("mcp.* commands", () => {
       ),
     ).toMatchObject({ ok: false, error: "invalid_input" });
     // Everyone in the channel sees org + channel servers; only the right tier removes them.
-    const listed = await text(inv, "mcp.list", {}, chat(NOBODY, { channelConfig: false }));
+    const listed = await text(inv, "mcp.list", {}, chat(NOBODY, { configWrite: false }));
     expect(listed).toContain("`linear` (org) ✅ connected");
     expect(listed).toContain("`hubspot` (channel) ✅ connected");
     expect(await inv.invoke("mcp.remove", { args: ["linear"], options: { scope: "org" } }, chat(ALICE))).toMatchObject({

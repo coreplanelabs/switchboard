@@ -12,7 +12,7 @@ import { configCommands, registerConfigCommands, type ConfigCommandDeps } from "
 // Feature: features/routing-and-config.md items 5, 9 / features/command-registry.md
 // (phase 4b): `config show|set|clear|instructions` as registry commands. The
 // caller's channel is the default target; `me` is always open; the `channel`
-// scope rides `channelConfig` (open when unconfigured) inside the handler;
+// scope rides `config:write` (never a baseline: admins and the granted) inside the handler;
 // dotted options (`--models.coding x`) nest; none of it reaches a model.
 
 const YAML = `
@@ -27,11 +27,13 @@ defaults:
     general: anthropic/general-model
     review: anthropic/review-model
     coding: anthropic/coding-model
-permissions:
-  admins: ["slack:UADMIN"]
-  agents:
-    coding: ["slack:UADMIN"]
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+restrict:
+  agents: [coding]
 `;
+/** The fixture with UX granted `config:write` — channel-scope writes open to them. */
+const OPEN_YAML = YAML.replace("restrict:\n", '  "slack:UX": { actions: [config:write] }\nrestrict:\n');
 
 function store(yaml = YAML): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-cfgcmd-"));
@@ -88,12 +90,12 @@ describe("config show", () => {
     expect(res.ok && res.value).toMatchObject({
       effective: { agent: "general" },
       restrictedAgents: ["coding"],
-      channelConfigRestricted: false,
+      channelConfigRestricted: true, // config:write is never a baseline
     });
   });
 
   it("channelConfigRestricted is decided for the CALLER's actor (the config:write row `config set channel` asks), not for an id the store looks up: the CLI's `all` is never restricted, a token without config:write is, the admin is not — under a `channelConfig: []` store", async () => {
-    const gated = store(YAML.replace("permissions:\n", "permissions:\n  channelConfig: []\n"));
+    const gated = store();
     const commands = bind(gated);
     const show = (caller: Caller) =>
       commands.invoke("config.show", { args: [], options: { channel: "slack:CX" } }, caller);
@@ -158,8 +160,8 @@ describe("config set", () => {
     });
   });
 
-  it("`channel` targets the caller's channel (or --channel) and rides channelConfig: open when unconfigured, admins + the list when configured", async () => {
-    const open = store();
+  it("`channel` targets the caller's channel (or --channel) and rides config:write: refused unless granted (admins hold it through `all`)", async () => {
+    const open = store(OPEN_YAML);
     const openCmds = bind(open);
     expect((await say(openCmds, "config set channel --model openai/gpt-5", chat(open, "slack:UX"))).text).toBe(
       'Updated channel scope. Now: {"model":"openai/gpt-5"}',
@@ -168,7 +170,7 @@ describe("config set", () => {
     await say(openCmds, "config set channel --agent review --channel slack:COTHER", chat(open, "slack:UX"));
     expect(open.scopes("slack:COTHER", "slack:UX").channel).toEqual({ agent: "review" });
 
-    const gated = store(YAML.replace("permissions:\n", "permissions:\n  channelConfig: []\n"));
+    const gated = store();
     const gatedCmds = bind(gated);
     const refused = await gatedCmds.invoke(
       "config.set",
@@ -293,7 +295,7 @@ describe("config set", () => {
 
 describe("config clear", () => {
   it("clears the user's or the channel's runtime overrides (channel gated), so static config shows through again", async () => {
-    const config = store(`${YAML}users:\n  "slack:UX":\n    model: anthropic/static\n`);
+    const config = store(`${OPEN_YAML}users:\n  "slack:UX":\n    model: anthropic/static\n`);
     const commands = bind(config);
     const me = chat(config, "slack:UX");
     await commands.invoke("config.set", { args: ["me"], options: { model: "anthropic/runtime" } }, me);
@@ -302,7 +304,7 @@ describe("config clear", () => {
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ model: "anthropic/static" });
     expect((await say(commands, "config clear channel", me)).text).toBe("Cleared channel overrides.");
     expect(config.scopes("slack:CX", "slack:UX").channel).toEqual({});
-    const gated = store(YAML.replace("permissions:\n", "permissions:\n  channelConfig: []\n"));
+    const gated = store();
     expect(await bind(gated).invoke("config.clear", { args: ["channel"] }, chat(gated, "slack:UX"))).toMatchObject({
       ok: false,
       error: "unauthorized",
@@ -360,8 +362,8 @@ describe("config instructions", () => {
     expect(JSON.stringify(long)).not.toContain("xxxxxxxxxx");
   });
 
-  it("channel instructions ride the channelConfig gate and target the caller's channel (or --channel); the peek is ungated", async () => {
-    const gated = store(YAML.replace("permissions:\n", "permissions:\n  channelConfig: []\n"));
+  it("channel instructions ride the config:write gate and target the caller's channel (or --channel); the peek is ungated", async () => {
+    const gated = store();
     const commands = bind(gated);
     expect(
       await commands.invoke("config.instructions", { args: ["channel", "Be French."] }, chat(gated, "slack:UX")),

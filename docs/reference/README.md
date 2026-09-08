@@ -7,6 +7,6 @@ The mechanical parts of these pages (every command, every flag, every `/api` rou
 - [Slack commands](slack-commands.md) — every directive and command, by category.
 - [CLI](cli.md) — command form, every group, exit codes.
 - [Configuration](configuration.md) — every `config.yaml` block, what it does, its off-state.
-- [Permissions](permissions.md) — every `permissions` key, its default, open vs. closed.
+- [Authorization](authorization.md) — the `grants` and `restrict` blocks: every axis, every baseline, what fails closed.
 - [Dashboard routes](dashboard-routes.md) — every route, its auth, what it shows.
 - [Code map](code-map.md) — every module, what it owns, and the rule a change there must keep.

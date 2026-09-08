@@ -53,6 +53,8 @@ import {
   setForeignLiveCardsSource,
 } from "./channels/slack.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
+import { handleAdminRestartAuthorize } from "./channels/adminRestartAuthorize.js";
+import { RESTART_AUTHORIZE_PATH } from "./deploy/restart.js";
 import { DRAIN_DEADLINE_MS, HANDOFF_BUDGET_MS } from "./core/drain.js";
 import { startProcessRoot } from "./core/requestTrace.js";
 import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHosts.js";
@@ -111,17 +113,16 @@ async function main() {
   const build = readBuildInfo(process.env.SWITCHBOARD_BUILD_INFO ?? "./build.json");
   console.log(`[build] ${build.commit}${build.builtAt ? ` @ ${build.builtAt}` : ""}`);
   // The ingress token map is read once, here: it authenticates POST /ingress
-  // and POST /mcp below, AND its `scopes`/`channel` translate to grants for the
-  // `http:`/`mcp:` actors (one authorization model, U2), so the config store
-  // needs it — together with the command groups `permissions.operators` spans.
+  // and POST /mcp below. What a token's bearer may do is config's `grants`
+  // entry for `http:<subject>` / `mcp:<subject>` (one authorization model, U2).
   const auth = parseIngressTokens(process.env);
   // Runtime overrides (`config set …`) live where `runtimeOverrides.worker`
   // says — the state Worker's ConfigDO in prod, so a container restart keeps
   // them (features/routing-and-config.md item 12); the JSON file otherwise.
+  // The command groups are what an Access browser session's implicit reads span.
   const config = await openConfigStore(CONFIG_PATH, {
     overridesPath: OVERRIDES_PATH,
     env: process.env,
-    ingressTokens: auth.tokens,
     commandGroups: coreCommandGroups(),
   });
   console.log(`[config] runtime overrides: ${config.overridesLocation()}`);
@@ -474,11 +475,22 @@ async function main() {
         mcp(req, res);
         return;
       }
+      // The Worker shim's question before `deploy restart` stops this container
+      // (deploy/cloudflare/worker.ts): does the bearer's actor hold `deploy:write`?
+      // The Worker holds the token map; the grants are this config's.
+      if (path === RESTART_AUTHORIZE_PATH) {
+        handleAdminRestartAuthorize(req, res, {
+          tokens: process.env.SWITCHBOARD_INGRESS_TOKENS,
+          grantsFor: (id) => config.grantsFor(id),
+        });
+        return;
+      }
       // Kill injection for the durable-runs receipts (run-history item 36):
       // a `deploy:write` bearer SIGKILLs this process after a 202.
       if (path === "/admin/crash") {
         handleAdminCrash(req, res, {
           tokens: process.env.SWITCHBOARD_INGRESS_TOKENS,
+          grantsFor: (id) => config.grantsFor(id),
           generation: runLedger ? generation : undefined,
         });
         return;

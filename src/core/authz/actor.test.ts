@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { CLI_ACTOR, actorIdFor, resolveActor, resolveChatActor } from "./actor.js";
-import { ALL_GRANTS, CHAT_OPEN_ACTIONS, grantsFor, parseGrantsConfig, type GrantsSource } from "./grants.js";
+import {
+  ALL_GRANTS,
+  CHAT_OPEN_ACTIONS,
+  grantsFor,
+  parseGrantsConfig,
+  parseRestrictConfig,
+  type GrantsSource,
+} from "./grants.js";
 import { NO_GRANTS, type Grants } from "./types.js";
 
 // Feature: docs/plans/2026-09-03-001-feat-authorization-model-plan.md — U2 (R2, KTD3).
@@ -11,24 +18,25 @@ const set = (...names: string[]) => new Set(names);
 const grants = (g: Partial<Grants>): Grants => ({ actions: set(), channels: set(), repos: set(), ...g });
 
 const nativeGrants = parseGrantsConfig({
+  "slack:UADMIN": { actions: "all", channels: "all", repos: "all" },
+  "slack:UMGR": { actions: ["repo:write", "friction:write"] },
+  "slack:UDEV": { actions: ["agent:run:coding"] },
+  "access:op-1": { actions: ["runs:read", "runs:write", "friction:read", "friction:write"], channels: "all" },
+  "access:svc:reader-bot": { actions: ["runs:read"], channels: "all" },
+  "http:alice": { actions: ["dispatch", "runs:read"], channels: ["http:ops"] },
+  "mcp:alice": { actions: ["dispatch", "runs:read"], channels: ["mcp:ops"] },
+  "http:ci": { actions: ["dispatch"] },
+  "mcp:ci": { actions: ["dispatch"] },
   "schedule:self-improvement": { actions: ["friction:write"], channels: "all" },
 });
 if (!nativeGrants.ok) throw new Error(nativeGrants.errors.join("; "));
+// Every agent restricted, so no "everyone" agent grant muddies the per-actor assertions.
+const restrict = parseRestrictConfig({ agents: ["general", "coding"] }, ["general", "coding"]);
+if (!restrict.ok) throw new Error(restrict.errors.join("; "));
 
-// Every agent restricted, so no "everyone" baseline muddies the per-actor assertions.
 const source: GrantsSource = {
   grants: nativeGrants.grants,
-  permissions: {
-    admins: ["slack:UADMIN"],
-    operators: ["access:op-1"],
-    repoManagement: ["slack:UMGR"],
-    agents: { general: [], coding: ["slack:UDEV"] },
-    serviceTokens: { "reader-bot": ["runs:read"] },
-  },
-  ingressTokens: {
-    pinned: { subject: "alice", channel: "ops", scopes: ["dispatch", "runs:read"] },
-    free: { subject: "ci", scopes: ["dispatch"] },
-  },
+  restrict: restrict.restrict,
   agentNames: ["general", "coding"],
   commandGroups: ["runs", "friction"],
 };
@@ -60,29 +68,28 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     });
   });
 
-  it("Slack plain user → user holding exactly the chat baseline: the `open` commands and `config:write` (no channelConfig key), no channel, no repo", () => {
+  it("Slack plain user → user holding exactly the chat baseline: the `open` commands (never `config:write`), no channel, no repo", () => {
     const a = resolveActor(
       { surface: "slack", subjectId: "UNOBODY", channelId: "slack:C1", threadKey: "slack:C1:1.0" },
       lookup,
     );
     expect(a.kind).toBe("user");
     expect(a.id).toBe("slack:UNOBODY");
-    expect(a.grants).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS, "config:write") }));
+    expect(a.grants).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS) }));
   });
 
   it("Slack plain user when an agent is unrestricted → agent:run:<name> for it on top of the baseline (canRunAgent today)", () => {
-    const open = (id: string) =>
-      grantsFor(id, { ...source, permissions: { ...source.permissions, agents: { coding: ["slack:UDEV"] } } });
+    const onlyCoding = parseRestrictConfig({ agents: ["coding"] }, ["general", "coding"]);
+    if (!onlyCoding.ok) throw new Error(onlyCoding.errors.join("; "));
+    const open = (id: string) => grantsFor(id, { ...source, restrict: onlyCoding.restrict });
     expect(resolveActor({ surface: "slack", subjectId: "UNOBODY" }, open).grants).toEqual(
-      grants({ actions: set(...CHAT_OPEN_ACTIONS, "config:write", "agent:run:general") }),
+      grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general") }),
     );
   });
 
-  it("Slack repoManagement user → repo:write + friction:write on top of the baseline", () => {
+  it("Slack user granted repo:write → repo:write + friction:write on top of the baseline", () => {
     const a = resolveActor({ surface: "slack", subjectId: "UMGR" }, lookup);
-    expect(a.grants).toEqual(
-      grants({ actions: set(...CHAT_OPEN_ACTIONS, "config:write", "repo:write", "friction:write") }),
-    );
+    expect(a.grants).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS, "repo:write", "friction:write") }));
     expect(a.origin).toBeUndefined();
   });
 
@@ -99,7 +106,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     });
   });
 
-  it("ingress token WITHOUT channel → service with NO channel (OQ4 a: an unpinned token is granted nothing until config names its channels)", () => {
+  it("ingress token whose entry names no channel → service with NO channel (OQ4 a: nothing until config names its channels)", () => {
     const a = resolveActor({ surface: "http", subjectId: "ci" }, lookup);
     expect(a).toEqual({ kind: "service", id: "http:ci", grants: grants({ actions: set("dispatch") }) });
   });
@@ -113,7 +120,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     });
   });
 
-  it("Access browser sub → user; listed in operators → every group's read + write everywhere; unlisted → every group's read, no channel", () => {
+  it("Access browser sub → user; granted every group's read + write everywhere → holds them; unlisted → every group's read, no channel", () => {
     expect(resolveActor({ surface: "access-browser", subjectId: "op-1" }, lookup)).toEqual({
       kind: "user",
       id: "access:op-1",
@@ -126,7 +133,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     });
   });
 
-  it("Access service token cn → service `access:svc:<cn>` with exactly its scopes; unlisted cn → no grants", () => {
+  it("Access service token cn → service `access:svc:<cn>` with exactly its entry; unlisted cn → no grants", () => {
     expect(resolveActor({ surface: "access-service", subjectId: "reader-bot" }, lookup)).toEqual({
       kind: "service",
       id: "access:svc:reader-bot",

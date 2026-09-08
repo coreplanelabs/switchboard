@@ -24,8 +24,8 @@ export { MCP_OFF_MESSAGE };
 //   mcp connect <name> [--scope …] [--channel <id>]   — a fresh one-time credential/sign-in link
 //   mcp show <name> [--scope …] [--channel <id>]      — the entry + a live tools/list probe
 //   mcp remove <name> [--scope …] [--channel <id>]
-// Scope `me` is self-serve; `channel` is the `channelConfig` gate (as `config
-// set channel`); `org` needs admin rights (the fail-closed repo-management set,
+// Scope `me` is self-serve; `channel` is the `config:write` grant (as `config
+// set channel`); `org` needs admin rights (the fail-closed `repo:write` grant,
 // `cli:local`, or a machine token holding `mcp:write`). Both gates are decided
 // by the DATA inside the handler (command-registry.md item 22), so the commands
 // declare `open` and refuse inside. Credentials NEVER travel through a command:

@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders } from "node:http";
 import { createMcpHandler, handleMcpRequest, McpIO, toCaller } from "./mcp.js";
 import { ALL_GRANTS } from "../core/authz/grants.js";
+import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import type { DispatchFn, IngressConfig, IngressIdentity } from "./http.js";
 import type { CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
@@ -20,7 +21,8 @@ import { createRunsService } from "../core/runsService.js";
 // flows into the same dispatch() the Slack/CLI/HTTP adapters use. A fake dispatch
 // keeps these off real providers.
 
-const deps = {} as CoreDeps;
+// The config store as the adapter sees it: grants by actor id, and a `config` with no `tracing` (no span log).
+const deps = { config: { grantsFor: (id: string) => GRANTS.get(id) ?? NO_GRANTS, config: {} } } as unknown as CoreDeps;
 
 /** A dispatch double that records the message and echoes a canned reply. */
 function fakeDispatch(reply = "the answer") {
@@ -32,12 +34,25 @@ function fakeDispatch(reply = "the answer") {
   return { fn, calls };
 }
 
-/** Fixture identities carry the parser's default scopes (`["dispatch"]`). */
-const authConfig = (tokens: Record<string, Omit<IngressIdentity, "scopes">>): IngressConfig => ({
-  tokens: Object.fromEntries(Object.entries(tokens).map(([t, id]) => [t, { ...id, scopes: ["dispatch"] }])),
-});
+/** What each fixture token's `mcp:<subject>` actor holds — config's grants, as
+ *  the bot's store answers them (`deps.config.grantsFor` reads this map).
+ *  `authConfig` grants every subject `dispatch`; `scoped` grants exactly the
+ *  named actions (over `mcp:<channel>` when pinned). */
+const GRANTS = new Map<string, Grants>();
+const grant = (subject: string, actions: string[], channel?: string) =>
+  GRANTS.set(`mcp:${subject}`, {
+    actions: new Set(actions),
+    channels: new Set(channel ? [`mcp:${channel}`] : []),
+    repos: new Set(),
+  });
+const authConfig = (tokens: Record<string, IngressIdentity>): IngressConfig => {
+  for (const id of Object.values(tokens)) grant(id.subject, ["dispatch"], id.channel);
+  return { tokens };
+};
 const bearer = (token: string): IncomingHttpHeaders => ({ authorization: `Bearer ${token}` });
 const good = authConfig({ tok: { subject: "alice" } });
+// `scoped` re-grants the same subject; every test starts from `good`'s dispatch-only alice.
+beforeEach(() => grant("alice", ["dispatch"]));
 
 /** Build a POST /mcp request carrying a JSON-RPC message body. */
 function rpc(
@@ -433,9 +448,11 @@ async function commandFixture() {
   return { reg, live, commands };
 }
 
-const scoped = (scopes: string[], channel?: string): IngressConfig => ({
-  tokens: { tok: { subject: "alice", scopes, ...(channel ? { channel } : {}) } },
-});
+/** A token whose `mcp:alice` actor is granted exactly `actions` (over `mcp:<channel>` when pinned). */
+const scoped = (actions: string[], channel?: string): IngressConfig => {
+  grant("alice", actions, channel);
+  return { tokens: { tok: { subject: "alice", ...(channel ? { channel } : {}) } } };
+};
 
 /** The tool result text is `<one-line header>\n<JSON>`; return the parsed JSON. */
 function toolJson(res: { body?: unknown }): unknown {
@@ -446,9 +463,11 @@ function toolJson(res: { body?: unknown }): unknown {
 }
 
 describe("toCaller — the Caller a tool call runs as carries the mcp: Actor (plan U2)", () => {
-  it("a pinned token → service mcp:<subject>, grants = the token's scopes over mcp:<channel> (from the token map when no lookup is wired); neither `scopes` nor a `channel` pin on the caller — the actor's grants ARE the pin", () => {
+  it("the caller is the service actor mcp:<subject> with exactly what the grants lookup says for that id; nothing from the token entry rides on it — no `channel` pin, no scopes", () => {
     const auth = scoped(["runs:read"], "ops");
-    const c = toCaller(auth.tokens.tok, { auth });
+    const asked: string[] = [];
+    const c = toCaller(auth.tokens.tok, (id) => (asked.push(id), GRANTS.get(id) ?? NO_GRANTS));
+    expect(asked).toEqual(["mcp:alice"]);
     expect(c).toEqual({ kind: "mcp", id: "mcp:alice", actor: c.actor });
     expect(c).not.toHaveProperty("channel");
     expect(c).not.toHaveProperty("scopes");
@@ -459,17 +478,14 @@ describe("toCaller — the Caller a tool call runs as carries the mcp: Actor (pl
     });
   });
 
-  it("an unpinned token's actor holds NO channel (OQ4, option a — fail-closed); a wired `grantsFor` (ConfigStore) is consulted by the mcp: id", () => {
+  it("a token with no grants entry holds nothing (OQ4, option a — fail-closed); the lookup decides, never the token map", () => {
     const auth = scoped(["dispatch"]);
-    expect(toCaller(auth.tokens.tok, { auth }).actor).toEqual({
+    expect(toCaller(auth.tokens.tok, () => NO_GRANTS).actor).toEqual({
       kind: "service",
       id: "mcp:alice",
-      grants: { actions: new Set(["dispatch"]), channels: new Set(), repos: new Set() },
+      grants: NO_GRANTS,
     });
-    const asked: string[] = [];
-    const c = toCaller(auth.tokens.tok, { auth, grantsFor: (id) => (asked.push(id), ALL_GRANTS) });
-    expect(asked).toEqual(["mcp:alice"]);
-    expect(c.actor?.grants).toBe(ALL_GRANTS);
+    expect(toCaller(auth.tokens.tok, () => ALL_GRANTS).actor?.grants).toBe(ALL_GRANTS);
   });
 });
 
@@ -531,7 +547,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
     const direct = await commands.invoke(
       "runs.list",
       { options: { status: "all" } },
-      toCaller(scoped(["runs:read"]).tokens.tok, { auth: scoped(["runs:read"]) }),
+      toCaller(scoped(["runs:read"]).tokens.tok, (id) => GRANTS.get(id) ?? NO_GRANTS),
     );
     expect(body).toEqual(direct.ok ? direct.value : null);
   });
@@ -616,7 +632,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
     expect((get.body as RpcError & { error: { data?: { code: string } } }).error.data?.code).toBe("not_found");
   });
 
-  it("a token without the dispatch scope (runs:read only) cannot call `dispatch`: -32001 data.code 'unauthorized', dispatch never called", async () => {
+  it("a token whose actor holds no dispatch grant (runs:read only) cannot call `dispatch`: -32001 data.code 'unauthorized', dispatch never called", async () => {
     const { commands } = await commandFixture();
     const d = fakeDispatch("hi");
     const res = await handleMcpRequest(
@@ -628,7 +644,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
     expect(body.error.code).toBe(-32001);
     expect(body.error.data?.code).toBe("unauthorized");
     expect(d.calls).toHaveLength(0);
-    // the same token still reads through the registry tool it IS scoped for
+    // the same token still reads through the registry tool it IS granted
     const list = await handleMcpRequest(rpc("tools/call", { name: "runs_list", arguments: { status: "all" } }), deps, {
       auth: scoped(["runs:read"]),
       commands,
