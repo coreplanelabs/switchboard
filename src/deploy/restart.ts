@@ -29,7 +29,16 @@ import { profileUrls, type DeploymentProfile } from "./profile.js";
 // but the grants live in the container's config, so it asks the bot
 // (`POST /admin/restart/authorize`, src/channels/adminRestartAuthorize.ts) whether
 // that subject holds the action and relays the answer (`parseRestartAuthorization`).
-// The bot's own `/admin/crash` runs the whole check in one place (`authorizeRestart`).
+// The Worker names the subject it authenticated in `RESTART_SUBJECT_HEADER` and
+// the bot decides the grant for THAT subject without re-authenticating the
+// bearer: the two sides can hold different generations of the token map (a
+// `wrangler secret put` reaches the Worker's env at once and the container's
+// only after a restart), so re-authenticating in the container would refuse the
+// very rotation the restart exists to finish. The header is trustworthy because
+// the container is reachable only through the Worker, which strips it from every
+// proxied request (`stripRestartSubject`) and sets it only on its own internal
+// call. The bot's own `/admin/crash` runs the whole check in one place
+// (`authorizeRestart`).
 //
 // The route's URL is the installation's: the deployment profile names the
 // bot's hostname, `planRestart` derives `https://<bot>/admin/restart` from it.
@@ -128,6 +137,30 @@ export type RestartAuthn = { ok: true; identity: IngressIdentity } | { ok: false
 /** The bot route the Worker asks before stopping the container: 200 `{ ok, subject }`
  *  when the bearer's actor holds `deploy:write`, else `authorizeRestart`'s 401/403/503. */
 export const RESTART_AUTHORIZE_PATH = "/admin/restart/authorize";
+/** The header the Worker sets on its internal authorize call, naming the subject it
+ *  authenticated from its own token map; stripped from every proxied request. */
+export const RESTART_SUBJECT_HEADER = "x-switchboard-restart-subject";
+
+/** WHETHER, for a subject the Worker already authenticated: the bot's grants alone. */
+export function authorizeRestartSubject(subject: string, grantsFor: GrantsLookup): RestartAuth {
+  if (subject.trim() === "") return { ok: false, status: 401, reason: "unauthorized: an empty subject" };
+  if (!hasAction(grantsFor(`http:${subject}`).actions, RESTART_SCOPE))
+    return {
+      ok: false,
+      status: 403,
+      reason: `forbidden: identity "${subject}" holds no ${RESTART_SCOPE} grant (grants["http:${subject}"] in config.yaml)`,
+    };
+  return { ok: true, subject };
+}
+
+/** The request without the subject header — what the Worker forwards to the container for
+ *  every route it does not answer itself, so a caller can never assert a subject. */
+export function stripRestartSubject(request: Request): Request {
+  if (!request.headers.has(RESTART_SUBJECT_HEADER)) return request;
+  const headers = new Headers(request.headers);
+  headers.delete(RESTART_SUBJECT_HEADER);
+  return new Request(request, { headers });
+}
 
 /** WHO the bearer is — the Worker's half. Check `Authorization: Bearer <token>`
  *  against the raw `SWITCHBOARD_INGRESS_TOKENS` value: no usable map → 503 (the
@@ -163,14 +196,7 @@ export function authorizeRestart(
 ): RestartAuth {
   const authn = authenticateRestart(authorization, tokensRaw);
   if (!authn.ok) return authn;
-  const { identity } = authn;
-  if (!hasAction(grantsFor(`http:${identity.subject}`).actions, RESTART_SCOPE))
-    return {
-      ok: false,
-      status: 403,
-      reason: `forbidden: identity "${identity.subject}" holds no ${RESTART_SCOPE} grant (grants["http:${identity.subject}"] in config.yaml)`,
-    };
-  return { ok: true, subject: identity.subject };
+  return authorizeRestartSubject(authn.identity.subject, grantsFor);
 }
 
 /** The bot's `POST /admin/restart/authorize` answer, as the Worker reads it: 200

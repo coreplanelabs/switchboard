@@ -19,8 +19,15 @@ import {
   type RestartRunResult,
 } from "../../deploy/run.js";
 import { profileUrls } from "../../deploy/profile.js";
-import { renderWorkerConfigs, workerConfigTargets } from "../../deploy/wranglerTemplate.js";
-import { MANIFEST_PATH, parseManifest, parseSecretsSource, planSecretPuts, secretRef } from "../../deploy/secrets.js";
+import { renderWorkerConfig, renderWorkerConfigs, workerConfigTargets } from "../../deploy/wranglerTemplate.js";
+import {
+  MANIFEST_PATH,
+  parseManifest,
+  parseSecretsSource,
+  planSecretPuts,
+  secretRef,
+  wranglerFailureLine,
+} from "../../deploy/secrets.js";
 import type { SecretsHostIO } from "../../deploy/secretsHost.js";
 import {
   CommandError,
@@ -332,6 +339,23 @@ export const deployInit = defineCommand({
   },
 });
 
+/** Render ONE Worker's wrangler.jsonc from its template and the loaded profile and write it
+ *  when absent or stale — the part of `deploy init` a single-Worker command needs before it
+ *  spawns wrangler in that directory. A template that cannot render is `unavailable`. */
+async function writeWorkerConfig(loaded: LoadedProfile, worker: WorkerName, deps: DeployCommandDeps): Promise<void> {
+  const target = workerConfigTargets(loaded.profile).find((t) => t.kind === worker);
+  if (!target) throw new CommandError("unavailable", `${loaded.path}: the profile has no ${worker} Worker`);
+  const template = await deps.deploy.files.read(target.templatePath);
+  const rendered = renderWorkerConfig(loaded.profile, worker, () => template);
+  if (!rendered.ok)
+    throw new CommandError(
+      "unavailable",
+      `cannot render ${target.outputPath} —\n  - ${rendered.problems.join("\n  - ")}`,
+    );
+  if ((await deps.deploy.files.read(rendered.path)) !== rendered.text)
+    await deps.deploy.files.write(rendered.path, rendered.text);
+}
+
 const configOptions = z.object({
   source: z
     .string()
@@ -457,11 +481,15 @@ export const deploySecrets = defineCommand({
         "unavailable",
         `refusing: no value for required ${worker} secret(s) ${plan.missing.join(", ")} — expected ${where}. Nothing uploaded.`,
       );
+    // wrangler reads the script and account from the Worker dir's wrangler.jsonc, a
+    // generated file that a clean checkout does not have — render it from the profile
+    // first, as `deploy all` does, instead of letting wrangler fail on a missing name.
+    await writeWorkerConfig(loaded, worker, deps);
     for (const [i, name] of plan.puts.entries()) {
       const r = await deps.deploy.secrets.put(source.source, plan.dir, name);
       if (r.code !== 0) {
         const rest = plan.puts.slice(i + 1);
-        const said = r.output.trim().split("\n").at(-1) ?? "";
+        const said = wranglerFailureLine(r.output);
         throw new CommandError(
           "unavailable",
           `wrangler secret put ${name} failed (exit ${r.code}) in ${plan.dir}; stopping — ${rest.length > 0 ? rest.join(", ") : "nothing"} not attempted${said ? `. ${said}` : ""}`,

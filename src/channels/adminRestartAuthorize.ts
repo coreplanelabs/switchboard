@@ -3,12 +3,17 @@
 // item 8). The Worker holds the token map, so it can tell WHO a bearer is, but
 // what that identity may do lives in the bot's config (`grants`, authorization.md
 // item 9) — the Worker has no config store. So before it stops the container it
-// asks the bot: does the bearer's `http:<subject>` actor hold `deploy:write`? The
-// answer is `authorizeRestart`'s, the same check `/admin/crash` runs; nothing here
-// stops or changes anything.
+// asks the bot: does this subject's `http:<subject>` actor hold `deploy:write`? The
+// Worker names the subject it authenticated in `RESTART_SUBJECT_HEADER` (only it
+// can — it strips the header from everything it proxies), and the bot decides the
+// grant for that subject without re-authenticating the bearer against its own,
+// possibly older, token map (a rotation puts the new map in the Worker's env first
+// and in the container's only after this very restart). Without the header the
+// route falls back to the bearer, the same whole check `/admin/crash` runs.
+// Nothing here stops or changes anything.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { authorizeRestart } from "../deploy/restart.js";
+import { authorizeRestart, authorizeRestartSubject, RESTART_SUBJECT_HEADER } from "../deploy/restart.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
 
 export interface AdminRestartAuthorizeDeps {
@@ -19,8 +24,8 @@ export interface AdminRestartAuthorizeDeps {
   log?: (line: string) => void;
 }
 
-/** 200 `{ ok: true, subject }` when the bearer may restart; else `authorizeRestart`'s
- *  401 / 403 / 503 with its reason — never the token. POST only. */
+/** 200 `{ ok: true, subject }` when the subject (the Worker's header, else the bearer) may
+ *  restart; else 401 / 403 / 503 with the reason — never the token. POST only. */
 export function handleAdminRestartAuthorize(
   req: IncomingMessage,
   res: ServerResponse,
@@ -34,7 +39,12 @@ export function handleAdminRestartAuthorize(
     json(405, { ok: false, error: "method not allowed: POST /admin/restart/authorize" });
     return;
   }
-  const auth = authorizeRestart(req.headers.authorization, deps.tokens, deps.grantsFor);
+  const named = req.headers[RESTART_SUBJECT_HEADER];
+  const subject = Array.isArray(named) ? named[0] : named;
+  const auth =
+    subject !== undefined
+      ? authorizeRestartSubject(subject, deps.grantsFor)
+      : authorizeRestart(req.headers.authorization, deps.tokens, deps.grantsFor);
   if (!auth.ok) {
     (deps.log ?? console.warn)(`[admin/restart/authorize] ${auth.status} — ${auth.reason}`);
     json(auth.status, { ok: false, error: auth.reason });

@@ -5,6 +5,9 @@ import { TEST_PROFILE } from "./testing/profile.js";
 import {
   authenticateRestart,
   authorizeRestart,
+  authorizeRestartSubject,
+  RESTART_SUBJECT_HEADER,
+  stripRestartSubject,
   constantTimeEqual,
   lookupConstantTime,
   classifyRestartResponse,
@@ -120,6 +123,31 @@ describe("authorizeRestart", () => {
     expect(authenticateRestart("Bearer tok-deployer", undefined)).toMatchObject({ ok: false, status: 503 });
     expect(authenticateRestart("Bearer tok-deployer", "[]")).toMatchObject({ ok: false, status: 503 });
     expect(JSON.stringify(authenticateRestart("Bearer tok-secret-value", tokens))).not.toContain("tok-secret-value");
+  });
+
+  it("authorizeRestartSubject (the bot's half for a subject the Worker already authenticated) decides on the grants alone — no token map involved, so a rotation in flight cannot refuse it (#667)", () => {
+    expect(authorizeRestartSubject("ops", grantsFor)).toEqual({ ok: true, subject: "ops" });
+    expect(authorizeRestartSubject("reader", grantsFor)).toMatchObject({ ok: false, status: 403 });
+    expect(authorizeRestartSubject("unknown", grantsFor)).toMatchObject({ ok: false, status: 403 });
+    expect(authorizeRestartSubject("", grantsFor)).toMatchObject({ ok: false, status: 401 });
+    // The whole check is authenticate + this.
+    expect(authorizeRestart("Bearer tok-deployer", tokens, grantsFor)).toEqual(
+      authorizeRestartSubject("ops", grantsFor),
+    );
+  });
+
+  it("stripRestartSubject removes only the subject header from what the Worker proxies — a caller can never assert a subject to the container", () => {
+    const req = new Request("https://bot.example/admin/restart/authorize", {
+      method: "POST",
+      headers: { [RESTART_SUBJECT_HEADER]: "ops", authorization: "Bearer x", "x-other": "kept" },
+    });
+    const stripped = stripRestartSubject(req);
+    expect(stripped.headers.has(RESTART_SUBJECT_HEADER)).toBe(false);
+    expect(stripped.headers.get("authorization")).toBe("Bearer x");
+    expect(stripped.headers.get("x-other")).toBe("kept");
+    expect(stripped.method).toBe("POST");
+    const plain = new Request("https://bot.example/healthz");
+    expect(stripRestartSubject(plain)).toBe(plain); // untouched when the header is absent
   });
 
   it("parseRestartAuthorization (the Worker reading the bot's /admin/restart/authorize): 200 ok+subject → allowed; 401/403/503 with an error → relayed as they are; anything else → 503, fail-closed", () => {

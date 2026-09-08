@@ -685,8 +685,12 @@ describe("deploy.secrets", () => {
     };
     return { io, puts, probes };
   }
-  const withSecrets = (io: SecretsHostIO, profile: () => Promise<LoadedProfile> = async () => LOADED) =>
-    bind(neverRunsPlan, () => true, neverRestarts, neverAffected, profile, new Map(), io);
+  /** The templates are on disk (a checkout has them); the rendered wrangler.jsonc is NOT (gitignored) unless `disk` says so. */
+  const withSecrets = (
+    io: SecretsHostIO,
+    profile: () => Promise<LoadedProfile> = async () => LOADED,
+    disk: Map<string, string> = templatesOnDisk(),
+  ) => bind(neverRunsPlan, () => true, neverRestarts, neverAffected, profile, disk, io);
 
   it("is CLI-only, deploy:write, operator-gated — like deploy.all", async () => {
     const { commands } = withSecrets(host([]).io);
@@ -707,7 +711,7 @@ describe("deploy.secrets", () => {
 
   it("puts every manifest secret the Worker holds that the source has, in manifest order, from the profile's source (the default directory when unset); an absent optional one is skipped and said", async () => {
     const h = host(["SLACK_BOT_TOKEN", "MEMORY_TOKEN"]);
-    const { commands } = withSecrets(h.io);
+    const { commands, disk, writes } = withSecrets(h.io);
     const res = await commands.invoke("deploy.secrets", { args: ["bot"] }, cli);
     if (!res.ok) throw new Error(res.message);
     expect(res.value).toEqual({
@@ -718,6 +722,11 @@ describe("deploy.secrets", () => {
       skippedOptional: ["ANTHROPIC_ADMIN_KEY"],
     });
     expect(h.puts).toEqual(["SLACK_BOT_TOKEN → deploy/cloudflare", "MEMORY_TOKEN → deploy/cloudflare"]);
+    // The Worker's wrangler.jsonc (generated, absent from a clean checkout) is rendered from the
+    // profile BEFORE wrangler runs in that dir — the same file `deploy init` writes, and only this
+    // Worker's (#662).
+    expect(writes).toEqual(["deploy/cloudflare/wrangler.jsonc"]);
+    expect(disk.get("deploy/cloudflare/wrangler.jsonc")).toContain(`"name": "switchboard"`);
     // The source was asked once, about the Worker's names only.
     expect(h.probes).toEqual([
       {
@@ -785,12 +794,37 @@ describe("deploy.secrets", () => {
     });
   });
 
-  it("a failed put stops the run naming what was not attempted and wrangler's last line; a missing or invalid manifest, an unreadable source, and a bad secretsSource are `unavailable`", async () => {
+  it("renders only the target Worker's wrangler.jsonc and leaves a current one alone; a template that cannot render is `unavailable` naming it, with nothing put (#662)", async () => {
+    const h = host(["MEMORY_TOKEN"]);
+    const current = templatesOnDisk();
+    const first = withSecrets(h.io, undefined, current);
+    const one = await first.commands.invoke("deploy.secrets", { args: ["memory"] }, cli);
+    if (!one.ok) throw new Error(one.message);
+    expect(first.writes).toEqual(["deploy/cloudflare-memory/wrangler.jsonc"]);
+    // Rendered already (by `deploy init` or a previous put): nothing rewritten, the put still happens.
+    const second = withSecrets(host(["MEMORY_TOKEN"]).io, undefined, current);
+    const two = await second.commands.invoke("deploy.secrets", { args: ["memory"] }, cli);
+    if (!two.ok) throw new Error(two.message);
+    expect(second.writes).toEqual([]);
+    // No template on disk: refused before any put, naming the template.
+    const bare = host(["MEMORY_TOKEN"]);
+    const none = await withSecrets(bare.io, undefined, new Map()).commands.invoke(
+      "deploy.secrets",
+      { args: ["memory"] },
+      cli,
+    );
+    expect(none).toMatchObject({ ok: false, error: "unavailable" });
+    expect(none.ok ? "" : none.message).toContain(`cannot render deploy/cloudflare-memory/wrangler.jsonc`);
+    expect(none.ok ? "" : none.message).toContain(`deploy/cloudflare-memory/${TEMPLATE_FILE}: no such file`);
+    expect(bare.puts).toEqual([]);
+  });
+
+  it("a failed put stops the run naming what was not attempted and wrangler's [ERROR] line; a missing or invalid manifest, an unreadable source, and a bad secretsSource are `unavailable`", async () => {
     const failing = host(["SLACK_BOT_TOKEN", "MEMORY_TOKEN"], { putCode: (n) => (n === "SLACK_BOT_TOKEN" ? 1 : 0) });
     const res = await withSecrets(failing.io).commands.invoke("deploy.secrets", { args: ["bot"] }, cli);
     expect(res).toMatchObject({ ok: false, error: "unavailable" });
     expect(res.ok ? "" : res.message).toBe(
-      "wrangler secret put SLACK_BOT_TOKEN failed (exit 1) in deploy/cloudflare; stopping — MEMORY_TOKEN not attempted. ✘ [ERROR] boom",
+      "wrangler secret put SLACK_BOT_TOKEN failed (exit 1) in deploy/cloudflare; stopping — MEMORY_TOKEN not attempted. [ERROR] boom",
     );
     expect(failing.puts).toEqual(["SLACK_BOT_TOKEN → deploy/cloudflare"]);
 

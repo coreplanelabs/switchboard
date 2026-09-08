@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleAdminRestartAuthorize } from "./adminRestartAuthorize.js";
+import { RESTART_SUBJECT_HEADER } from "../deploy/restart.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 
 // `POST /admin/restart/authorize` (features/slack-channel.md item 8): the Worker
@@ -14,9 +15,15 @@ const GRANTS: Record<string, Grants> = {
   "http:reader": { actions: new Set(["runs:read"]), channels: new Set(), repos: new Set() },
 };
 
-function request(method: string, authorization?: string) {
+function request(method: string, authorization?: string, subject?: string) {
   const writes: { status?: number; body?: string } = {};
-  const req = { method, headers: authorization ? { authorization } : {} } as unknown as IncomingMessage;
+  const req = {
+    method,
+    headers: {
+      ...(authorization ? { authorization } : {}),
+      ...(subject !== undefined ? { [RESTART_SUBJECT_HEADER]: subject } : {}),
+    },
+  } as unknown as IncomingMessage;
   const res = {
     writeHead: (status: number) => void (writes.status = status),
     end: (body: string) => void (writes.body = body),
@@ -65,6 +72,21 @@ describe("POST /admin/restart/authorize", () => {
     const { req, res, writes } = request("POST", "Bearer tok-deployer");
     handleAdminRestartAuthorize(req, res, off.deps);
     expect(writes.status).toBe(503);
+  });
+
+  it("the Worker's subject header decides on the grants alone, bearer or no bearer — the container's own token map may be a generation behind during a rotation (#667)", () => {
+    const h = harness({ tokens: undefined }); // no map in the container at all: the bearer path would be 503
+    const { req, res, writes } = request("POST", undefined, "ops");
+    handleAdminRestartAuthorize(req, res, h.deps);
+    expect(writes.status).toBe(200);
+    expect(JSON.parse(writes.body!)).toEqual({ ok: true, subject: "ops" });
+    // A subject without the grant → 403; an unknown bearer beside a granted subject changes nothing.
+    const denied = request("POST", "Bearer nope", "reader");
+    handleAdminRestartAuthorize(denied.req, denied.res, harness().deps);
+    expect(denied.writes.status).toBe(403);
+    const empty = request("POST", undefined, "");
+    handleAdminRestartAuthorize(empty.req, empty.res, harness().deps);
+    expect(empty.writes.status).toBe(401);
   });
 
   it("only POST", () => {

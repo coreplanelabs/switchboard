@@ -170,3 +170,23 @@ export function renderWorkerConfigs(
   }
   return problems.length > 0 ? { ok: false, problems } : { ok: true, files };
 }
+
+export type RenderedConfig = { ok: true; path: string; text: string } | { ok: false; problems: string[] };
+
+/** ONE Worker's rendered config — for a command that spawns wrangler in that Worker's directory
+ *  alone (`deploy secrets`) and must not depend on every other template being present. */
+export function renderWorkerConfig(
+  profile: DeploymentProfile,
+  kind: WorkerKind,
+  readTemplate: (path: string) => string | undefined,
+): RenderedConfig {
+  const target = workerConfigTargets(profile).find((t) => t.kind === kind);
+  const view = templateView(profile, kind);
+  if (!target || !view) return { ok: false, problems: [`the profile has no ${kind} Worker`] };
+  const template = readTemplate(target.templatePath);
+  if (template === undefined) return { ok: false, problems: [`${target.templatePath}: no such file`] };
+  const r = renderTemplate(template, view);
+  return r.ok
+    ? { ok: true, path: target.outputPath, text: r.text }
+    : { ok: false, problems: r.problems.map((p) => `${target.templatePath} ${p}`) };
+}

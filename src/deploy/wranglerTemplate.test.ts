@@ -6,6 +6,7 @@ import {
   GENERATED_HEADER,
   RENDERED_FILE,
   renderTemplate,
+  renderWorkerConfig,
   renderWorkerConfigs,
   TEMPLATE_FILE,
   templateView,
@@ -200,6 +201,30 @@ describe("workerConfigTargets / renderWorkerConfigs", () => {
       expect(bad.problems[0]).toBe(
         `deploy/cloudflare-memory/${TEMPLATE_FILE} line 1: {{access.aud}} has no value in the deployment profile`,
       );
+  });
+
+  it("renderWorkerConfig renders ONE Worker from its own template alone — other templates may be absent; its problems name that template; an unknown Worker is a problem", () => {
+    const only = renderWorkerConfig(TEST_PROFILE, "memory", (path) =>
+      path === `deploy/cloudflare-memory/${TEMPLATE_FILE}` ? '{ "name": "{{script}}" }\n' : undefined,
+    );
+    expect(only).toEqual({
+      ok: true,
+      path: `deploy/cloudflare-memory/${RENDERED_FILE}`,
+      text: `${GENERATED_HEADER.join("\n")}\n{ "name": "switchboard-memory" }\n`,
+    });
+    expect(renderWorkerConfig(TEST_PROFILE, "bot", () => undefined)).toEqual({
+      ok: false,
+      problems: [`deploy/cloudflare/${TEMPLATE_FILE}: no such file`],
+    });
+    expect(renderWorkerConfig(TEST_PROFILE, "bot", () => '"{{access.aud}}"')).toEqual({
+      ok: false,
+      problems: [`deploy/cloudflare/${TEMPLATE_FILE} line 1: {{access.aud}} has no value in the deployment profile`],
+    });
+    const { docs: _docs, ...withoutDocs } = TEST_PROFILE.workers;
+    expect(renderWorkerConfig({ ...TEST_PROFILE, workers: withoutDocs }, "docs", () => "{}")).toEqual({
+      ok: false,
+      problems: ["the profile has no docs Worker"],
+    });
   });
 });
 

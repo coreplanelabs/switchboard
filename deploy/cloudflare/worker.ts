@@ -17,7 +17,9 @@ import {
   parseRestartAuthorization,
   parseRestartRequest,
   RESTART_AUTHORIZE_PATH,
+  RESTART_SUBJECT_HEADER,
   restartResponse,
+  stripRestartSubject,
   type RestartAuth,
   type RestartOutcome,
 } from "../../src/deploy/restart.ts";
@@ -163,20 +165,25 @@ export class SwitchboardServer extends Container<Env> {
    * `deploy restart`, authorized: the Worker knows WHO the bearer is (the token
    * map); WHETHER that identity may restart is the bot's config (`grants` —
    * authorization.md item 9), which only the container holds. So ask it —
-   * `POST /admin/restart/authorize` — and stop only on a 200. A container that
+   * `POST /admin/restart/authorize` with the authenticated subject in
+   * `RESTART_SUBJECT_HEADER` (never the bearer: the container may still hold the
+   * token map from before a rotation) — and stop only on a 200. A container that
    * is not running is started first (the bot must answer): if the bearer is
    * allowed, that start already put the current env live, so nothing is
    * stopped and the outcome is `not-running`, exactly as before; if not, the
    * refusal is relayed and the started container simply keeps serving.
    */
   async restartAuthorized(
-    authorization: string,
+    subject: string,
     opts: { force: boolean },
   ): Promise<{ auth: RestartAuth; outcome?: RestartOutcome }> {
     const wasRunning = this.ctx.container?.running === true;
     await this.startBot();
     const answer = await this.containerFetch(
-      new Request(`${INTERNAL}${RESTART_AUTHORIZE_PATH}`, { method: "POST", headers: { authorization } }),
+      new Request(`${INTERNAL}${RESTART_AUTHORIZE_PATH}`, {
+        method: "POST",
+        headers: { [RESTART_SUBJECT_HEADER]: subject },
+      }),
       this.defaultPort,
     );
     const auth = parseRestartAuthorization(answer.status, await answer.text().catch(() => ""));
@@ -230,7 +237,7 @@ async function handleAdminRestart(request: Request, env: Env): Promise<Response>
   let auth: RestartAuth;
   let outcome: RestartOutcome | undefined;
   try {
-    ({ auth, outcome } = await getContainer(env.SWITCHBOARD, INSTANCE).restartAuthorized(authorization!, {
+    ({ auth, outcome } = await getContainer(env.SWITCHBOARD, INSTANCE).restartAuthorized(authn.identity.subject, {
       force: parsed.force,
     }));
   } catch (err) {
@@ -268,7 +275,9 @@ export default {
     // caller sent is stripped, and what the container sees carries this
     // Worker's own root. A static asset or the live view's SSE stream gets no
     // root; a refusal's line is dropped by the sink's filter.
-    const inbound = stripTraceContext(request);
+    // The restart-subject header is the Worker's own word to the container (the
+    // authorize call below); a caller cannot be allowed to speak it.
+    const inbound = stripRestartSubject(stripTraceContext(request));
     const route = shimRoute(pathname);
     if (route === undefined) return getContainer(env.SWITCHBOARD, INSTANCE).fetch(inbound);
     const root = tracer.start("bot-shim.fetch", { sinks: traceSinks, attrs: { route } });
