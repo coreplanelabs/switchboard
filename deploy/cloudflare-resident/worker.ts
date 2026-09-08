@@ -178,6 +178,7 @@ import {
   type StepResult,
 } from "../../src/execution/residentStepReport.js";
 import { createStepTrace, type ResidentStep, type StepTrace } from "../../src/execution/residentStepTrace.js";
+import type { ResidentStepLabelKey, ResidentStepName } from "../../src/execution/residentSteps.js";
 import { graftResidentSteps } from "../../src/execution/residentTrace.js";
 import type { SpanAttrs } from "../../src/core/trace/attrs.js";
 import type { Span as TraceSpan } from "../../src/core/trace/types.js";
@@ -1309,7 +1310,8 @@ export class ResidentDO extends Sandbox<Env> {
     backup: DirectoryBackup,
     targetDir: string,
     what: string,
-    step: string,
+    /** The extraction's own step name (`<x>-restore-extract`): what the trace and the run page show. */
+    step: ResidentStepName,
     deadlineMs: number,
   ): Promise<void> {
     const attempt = crypto.randomUUID().slice(0, 8);
@@ -1328,7 +1330,7 @@ export class ResidentDO extends Sandbox<Env> {
             targetDir,
           }),
         ],
-        `${step}-extract`,
+        step,
         { timeoutMs: Math.max(60_000, deadlineMs - systemClock()) },
       );
       console.log(`${what}: ${r.trim() || "extracted"} in ${Math.round((systemClock() - t0) / 1000)} s`);
@@ -1542,7 +1544,7 @@ export class ResidentDO extends Sandbox<Env> {
 
   private async runOk(
     argv: readonly string[],
-    step: string,
+    step: ResidentStepName,
     opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
   ): Promise<string> {
     const startedAt = systemClock();
@@ -1557,7 +1559,7 @@ export class ResidentDO extends Sandbox<Env> {
   /** Run one command-table entry as the unprivileged build user in the warm
    *  checkout. KTD5: never root. KTD7/KTD12: never a GitHub token — the env
    *  is whatever `su` grants the target user, nothing injected. */
-  private async buildUserRun(command: string, step: string, timeoutMs: number): Promise<string> {
+  private async buildUserRun(command: string, step: ResidentStepLabelKey, timeoutMs: number): Promise<string> {
     // Steps on the checkout are sequential, so a live build-user process
     // INSIDE it here is a leftover (a step whose wait was abandoned, or one
     // orphaned by a Worker-only deploy resetting the DO) — and it is writing
@@ -1579,7 +1581,7 @@ export class ResidentDO extends Sandbox<Env> {
   private async gitWithCred(
     token: string | null,
     gitArgs: readonly string[],
-    step: string,
+    step: ResidentStepName,
     timeoutMs: number,
   ): Promise<string> {
     const injected = { GIT_TERMINAL_PROMPT: "0" }; // fail fast instead of prompting
@@ -2073,8 +2075,14 @@ export class ResidentDO extends Sandbox<Env> {
       // a fixed budget: a slow transfer waits, a stalled one goes down with
       // the bytes and the idle span named instead of stranding `restoring` for
       // the watchdog.
-      await this.restoreExtracted(snap.mirror, MIRROR_DIR, "mirror restore", "mirror-restore", deadlineMs);
-      await this.restoreExtracted(snap.checkout, CHECKOUT_DIR, "checkout restore", "checkout-restore", deadlineMs);
+      await this.restoreExtracted(snap.mirror, MIRROR_DIR, "mirror restore", "mirror-restore-extract", deadlineMs);
+      await this.restoreExtracted(
+        snap.checkout,
+        CHECKOUT_DIR,
+        "checkout restore",
+        "checkout-restore-extract",
+        deadlineMs,
+      );
     } catch (err) {
       // A stalled or capped restore is STILL STREAMING (the SDK call cannot be
       // cancelled); `pendingRestores` keeps the next hydrate off its directory,
@@ -3826,7 +3834,7 @@ export class ResidentDO extends Sandbox<Env> {
         record.backup,
         `${scratch}/node_modules`,
         `deps restore ${key.slice(0, 8)}`,
-        "deps-restore",
+        "deps-restore-extract",
         deadlineMs,
       );
       await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, scratch], "deps-restore-chown");

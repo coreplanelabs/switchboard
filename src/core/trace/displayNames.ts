@@ -1,4 +1,5 @@
 import { STREAMED_SPANS, type StreamedSpanName } from "./streamSpans.js";
+import { residentStepLabel } from "../../execution/residentSteps.js";
 
 // What a reader sees for a span (features/tracing.md): one table over the
 // enumerated streamed names — total by type, unique by test — plus one rule per
@@ -38,66 +39,6 @@ export const DISPLAY_NAMES = {
   "post.reply": "posting the reply",
 } as const satisfies Record<StreamedSpanName, string>;
 
-/** The resident's steps, as the attach and op grafts name them
- *  (`dispatch.workspace.attach.<step>`, `run.command.<step>`): every step name
- *  the resident Worker passes to its command runners, so a run page never
- *  reads `a Switchboard step` for one of them (a source-scan test keeps the
- *  two in step — a step added to the Worker without a label fails it). */
-export const RESIDENT_STEP_NAMES: Readonly<Record<string, string>> = {
-  // the repo and its branch
-  clone: "cloning the repo",
-  "checkout-clone": "cloning the checkout",
-  "worktree-clone": "cloning the worktree",
-  "op-clone": "cloning the op tree",
-  fetch: "fetching the branch",
-  "wake-fetch": "fetching the latest commits",
-  "reclaim-fetch": "fetching to reclaim the mirror",
-  "for-each-ref": "listing the branches",
-  checkout: "checking out the branch",
-  "rev-parse": "reading the commit",
-  "show-ref": "reading the branch tip",
-  "detect-default-branch": "detecting the default branch",
-  git: "a git command",
-  "git-setup": "configuring git",
-  "stage-perms": "securing the credential stage",
-  // the commands the repo configured
-  install: "installing dependencies",
-  build: "building",
-  test: "running the tests",
-  lint: "linting",
-  typecheck: "typechecking",
-  // the dependency store
-  "lockfile-key": "hashing the lockfile",
-  "deps-store-dir": "preparing the dependency store",
-  "deps-install": "installing the dependency store",
-  "deps-adopt": "adopting the dependency store",
-  "deps-restore-scratch": "restoring dependencies to scratch",
-  "deps-restore-chown": "setting the restored dependencies' owner",
-  "deps-scratch-chown": "setting the dependency scratch owner",
-  "deps-evict": "evicting an old dependency store",
-  "unlink-deps-view": "unlinking the dependency view",
-  "clear-installing-marker": "clearing the install marker",
-  // the trees and their owners
-  chown: "setting the workspace owner",
-  "worktree-chown": "setting the worktree owner",
-  "op-chown": "setting the op tree's owner",
-  "worktree-clean": "cleaning the worktree",
-  "clean-workspace": "cleaning the workspace",
-  "clean-before-restore": "cleaning before the restore",
-  evict: "evicting a stale tree",
-  "thread-dir": "preparing a directory",
-  "threads-dir": "preparing a directory",
-  "op-dir": "preparing a directory",
-  "ops-dir": "preparing a directory",
-  "stage-dir": "preparing a directory",
-  stat: "checking a file",
-  touch: "touching a marker",
-  nproc: "counting CPUs",
-  // the resident's own bookkeeping around a step
-  mutex_wait: "waiting for the workspace",
-  kill: "stopping the previous step",
-};
-
 /** The fallback for a prefixed span whose leaf we cannot name. */
 export const GENERIC_STEP_NAME = "a Switchboard step";
 
@@ -114,7 +55,7 @@ export function displayNameOf(name: string): string {
     return leaf && leaf !== "mcp" ? leaf : GENERIC_STEP_NAME;
   }
   for (const prefix of ["dispatch.workspace.attach.", "run.command."]) {
-    if (name.startsWith(prefix)) return RESIDENT_STEP_NAMES[name.slice(prefix.length)] ?? GENERIC_STEP_NAME;
+    if (name.startsWith(prefix)) return residentStepLabel(name.slice(prefix.length)) ?? GENERIC_STEP_NAME;
   }
   return GENERIC_STEP_NAME;
 }
