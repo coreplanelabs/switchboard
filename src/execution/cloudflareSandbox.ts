@@ -20,10 +20,11 @@ export interface CloudflareSandboxOptions {
   token: string;
   threadKey: string;
   /** Env vars forwarded into the sandbox (e.g. GH_TOKEN), resolved on EVERY
-   *  call — the Worker injects them inline per command, so each command
-   *  carries the credential current at its own start, never one captured
-   *  when the run began (2026-09-07: a run-start token expired under a
-   *  20-minute first command and every later command carried it dead). */
+   *  call and sent as `env` in the request body (plus `x-env-*` headers for
+   *  one release, see `call`) — the Worker applies them to that one command,
+   *  so each command carries the credential current at its own start, never
+   *  one captured when the run began (2026-09-07: a run-start token expired
+   *  under a 20-minute first command and every later command carried it dead). */
   resolveEnvs: () => Promise<Record<string, string>>;
   /** resident repo/ref context — reserved for resident environments (not yet used) */
   repo?: string;
@@ -65,8 +66,9 @@ export class CloudflareSandboxExecutor implements Executor {
 
   /** One request to the Worker, with the transport-level retries, and the
    *  fleet-busy wait around it: a busy answer re-sends the IDENTICAL request
-   *  (same route, body, headers — the envs resolved once here, so the wait
-   *  never mints a new credential mid-command) after 10 s, 20 s, then 30 s,
+   *  (same route, body — env included —, headers; the envs resolved once
+   *  here, so the wait never mints a new credential mid-command) after 10 s,
+   *  20 s, then 30 s,
    *  until the total wait reaches `waitBudgetMs` capped at
    *  FLEET_BUSY_WAIT_MAX_MS; then throws `ExecCapacityError` (never
    *  `ExecInfraError` — a full fleet is not a dead sandbox, item 14). Safe to
@@ -78,17 +80,29 @@ export class CloudflareSandboxExecutor implements Executor {
     signal?: AbortSignal,
     waitBudgetMs: number = BASH_TIMEOUT_MS,
   ): Promise<Record<string, unknown>> {
+    const envs = await this.opts.resolveEnvs();
     const headers: Record<string, string> = {
       "content-type": "application/json",
       authorization: `Bearer ${this.opts.token}`,
       "x-thread-key": this.opts.threadKey,
     };
-    for (const [k, v] of Object.entries(await this.opts.resolveEnvs())) headers[`x-env-${k}`] = v;
+    // The env map rides in the BODY on every route (the Worker uses it only
+    // for /exec, but one shape everywhere) — the authoritative channel:
+    // Workers Logs record an invocation's request headers and redact them by
+    // a name heuristic only — a per-variable header whose name did not look
+    // sensitive was logged in clear (2026-09-07, the #447 receipt) — while
+    // bodies are not recorded. The per-variable headers below are the
+    // COMPATIBILITY path for a sandbox Worker not yet on the body reader:
+    // `deploy all` deploys the bot before the sandbox Worker, so without them
+    // every cold run in that window would run with no GH_TOKEN. They retire
+    // next release (tracked in #447), leaving the body alone.
+    for (const [k, v] of Object.entries(envs)) headers[`x-env-${k}`] = v;
+    const sent: Record<string, unknown> = { ...body, env: envs };
 
     const budget = Math.min(waitBudgetMs, FLEET_BUSY_WAIT_MAX_MS);
     let waited = 0;
     for (let attempt = 0; ; attempt++) {
-      const answer = await this.send(route, body, headers, signal);
+      const answer = await this.send(route, sent, headers, signal);
       if (answer.kind === "ok") return answer.data;
       if (waited >= budget) throw new ExecCapacityError(fleetBusyExhaustedMessage(waited));
       const delay = Math.min(

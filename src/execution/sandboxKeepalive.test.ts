@@ -211,6 +211,26 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).not.toContain("btoa(");
   });
 
+  // #447, the last channel: Workers Logs record an invocation's request
+  // headers (redacted by a name heuristic only — `x-env-PROBE_VAR` was logged
+  // in clear on 2026-09-07), not its body. The Worker reads the env map
+  // through ONE helper that takes the body first and the headers as the
+  // fallback; the executor sends the body (authoritative) AND, for this one
+  // release, the headers — `deploy all` deploys the bot before the sandbox
+  // Worker, so a body-only bot would run every cold run in that window with
+  // no GH_TOKEN. Next release the header side of both guards flips to "gone".
+  it("the Worker reads the env map through envFromRequest and no x-env header loop remains", () => {
+    expect(worker).toMatch(/const envVars\s*=\s*envFromRequest\(/);
+    expect(worker).not.toMatch(/startsWith\(\s*["']x-env-["']\s*\)/);
+  });
+
+  it("the executor sends the env in the body and, for this release, in x-env-* headers from the same map", () => {
+    const executor = readFileSync(resolve(ROOT, "src/execution/cloudflareSandbox.ts"), "utf8");
+    expect(executor).toMatch(/const envs\s*=\s*await this\.opts\.resolveEnvs\(\)/);
+    expect(executor).toMatch(/env:\s*envs\b/);
+    expect(executor).toMatch(/headers\[`x-env-\$\{k\}`\]\s*=\s*v/);
+  });
+
   // #569 (features/execution.md items 3 and 6): a failure text is never
   // empty, and a container on a previous image is named and healed. Both
   // Worker catches go through `thrownText`; the bare `shape.message ??

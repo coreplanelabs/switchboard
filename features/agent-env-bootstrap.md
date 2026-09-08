@@ -95,7 +95,7 @@ set -a; . .agent-env/<name>.uat.env; set +a
 
 ## Integration hook + the open decision
 
-`buildAgentEnv({ manifest, env, service, opReader, processEnv })` is the clean seam: it returns the resolved `NAME→value` map for a service's UAT env, enforcing the allowlist and the fail-closed token check, and writing no file. It is the direct analogue of `githubEnvs()` in `src/execution/factory.ts`, which today returns `{ GH_TOKEN }` for injection into a sandbox's `envs` (E2B `envs`, Cloudflare Sandbox `x-env-*` headers).
+`buildAgentEnv({ manifest, env, service, opReader, processEnv })` is the clean seam: it returns the resolved `NAME→value` map for a service's UAT env, enforcing the allowlist and the fail-closed token check, and writing no file. It is the direct analogue of `githubEnvs()` in `src/execution/factory.ts`, which today returns `{ GH_TOKEN }` for injection into a sandbox's `envs` (E2B `envs`, the Cloudflare Sandbox request body's `env`).
 
 **Open integration decision for the owner (deliberately NOT wired into the deployed executor in v1):** where downstream UAT env should enter a run. Two mechanisms, both supported by this tool:
 

@@ -1,15 +1,17 @@
 // Sandbox proxy Worker: fronts per-thread Cloudflare Sandboxes with a minimal
 // authenticated HTTP API the bot's CloudflareSandboxExecutor calls.
 //
-//   POST /exec   { command, timeoutMs? } -> { stdout, stderr, exitCode }
-//   POST /read   { path }            -> { content }
-//   POST /write  { path, content }   -> { ok: true }
-//   GET  /healthz                    -> { ok: true, build: { commit, builtAt? } }
+//   POST /exec   { command, timeoutMs?, env? } -> { stdout, stderr, exitCode }
+//   POST /read   { path, env? }             -> { content }
+//   POST /write  { path, content, env? }    -> { ok: true }
+//   GET  /healthz                           -> { ok: true, build: { commit, builtAt? } }
 //
 // Every request carries:
 //   Authorization: Bearer <SANDBOX_TOKEN>   (wrangler secret put SANDBOX_TOKEN)
 //   X-Thread-Key: <threadKey>               (one sandbox per conversation thread)
-//   X-Env-GH_TOKEN: <token>                 (optional; forwarded into the sandbox env)
+// and the body's optional `env` ({ NAME: value }) is forwarded into the sandbox
+// for that one command — in the body, never in headers, because Workers Logs
+// record request headers (features/execution.md item 5, #447).
 //
 // The Sandbox SDK only runs inside Workers — that's why this proxy exists.
 // Verify method names against https://developers.cloudflare.com/sandbox/ on
@@ -23,6 +25,7 @@ import {
   recycledMidCommandMessage,
   withActivityKeepalive,
 } from "../../src/execution/sandboxKeepalive.js";
+import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
 import {
   fleetBusyAnswer,
@@ -241,20 +244,26 @@ export default {
     // resetDefaultSession is callable over RPC without a cast.
     const sandbox = getSandbox(env.Sandbox, threadKey);
 
-    // Optional env passthrough (e.g. GH_TOKEN). It rides in the SDK's per-exec
+    const url = new URL(request.url);
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+
+    // Optional env passthrough (e.g. GH_TOKEN), read from the BODY's `env`
+    // (features/execution.md item 5). It then rides in the SDK's per-exec
     // `env` option, which the container applies to that one command and
     // restores afterwards (0.12.x; 0.3.7 ignored it, so the value used to be
     // an inline base64 `export` prefix — which put the live GH_TOKEN into every
     // "Command executed" line the SDK logs, #447). Nothing persists in the
     // sandbox beyond the command's lifetime, and the command text the SDK
     // logs never carries a credential.
-    const envVars: Record<string, string> = {};
-    for (const [k, v] of request.headers.entries()) {
-      if (k.toLowerCase().startsWith("x-env-")) envVars[k.slice(6).toUpperCase()] = v;
-    }
-
-    const url = new URL(request.url);
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    //
+    // Body, not headers: Workers Logs record this invocation's request
+    // headers and redact them by a name heuristic only — the 2026-09-07
+    // receipt probe's `X-Env-PROBE_VAR` was logged in clear. Bodies are not
+    // recorded. The per-variable request headers an OLDER bot sends are still
+    // read as a fallback so either deploy order works during the rollout;
+    // that header path RETIRES with the next release — drop it from
+    // `envFromRequest` once every bot in production sends the body shape.
+    const envVars = envFromRequest({ body, headers: request.headers });
 
     try {
       switch (url.pathname) {
