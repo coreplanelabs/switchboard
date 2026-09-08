@@ -8,6 +8,7 @@ import {
   parseSecretsSource,
   planSecretPuts,
   secretRef,
+  wranglerFailureLine,
   type SecretsManifest,
 } from "./secrets.js";
 
@@ -120,5 +121,29 @@ describe("planSecretPuts", () => {
       ok: false,
       problem: "C, NOPE are not bot secrets (manifest: A, B)",
     });
+  });
+});
+
+describe("wranglerFailureLine — what a failed `wrangler secret put` gets quoted as", () => {
+  it("prefers the [ERROR] line(s), without the ✘ glyph — an authentication error names the API call and the code", () => {
+    const out = [
+      "⛅️ wrangler 4.129.1",
+      "────────────────────",
+      "✘ [ERROR] A request to the Cloudflare API (/accounts/abc/workers/scripts/switchboard/secrets) failed.",
+      "  Authentication error [code: 10000]",
+      "📎 It looks like you are authenticating Wrangler via a custom API token set in an environment variable.",
+      '🪵  Logs were written to "/Users/me/Library/Preferences/.wrangler/logs/wrangler-2026-09-08.log"',
+    ].join("\n");
+    expect(wranglerFailureLine(out)).toBe(
+      "[ERROR] A request to the Cloudflare API (/accounts/abc/workers/scripts/switchboard/secrets) failed.",
+    );
+    expect(wranglerFailureLine("✘ [ERROR] Required Worker name missing. Please specify the Worker name")).toBe(
+      "[ERROR] Required Worker name missing. Please specify the Worker name",
+    );
+  });
+
+  it("falls back to the last non-empty line, and to nothing for empty output", () => {
+    expect(wranglerFailureLine("something\n\nlast words\n\n")).toBe("last words");
+    expect(wranglerFailureLine("")).toBe("");
   });
 });

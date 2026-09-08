@@ -45,7 +45,7 @@ It refuses to run from any ref but `main`. `deploy all` from a checkout still wo
 
 ## Rotate a secret
 
-Putting a new secret value does **not** restart the running container — it keeps the environment it started with. Rotation is two steps:
+Putting a new secret value does **not** restart the running container — it keeps the environment it started with. Rotation is two steps. Both commands read the deployment profile, so on a clean checkout export where it lives first (`SWITCHBOARD_DEPLOY_PROFILE=github://…/profile.json@main` plus `CONFIG_REPO_TOKEN` for a private repository), and run them with no `CLOUDFLARE_API_TOKEN` in the shell — wrangler prefers such a token over your login, and a token scoped for another purpose fails the put with `Authentication error [code: 10000]`. `deploy secrets` renders the Worker's `wrangler.jsonc` itself, so no `deploy init` is needed before it.
 
 ```bash
 # in deploy/cloudflare/ (or wherever the secret lives — check deploy/secrets.manifest.json);
@@ -57,6 +57,8 @@ SWITCHBOARD_DEPLOY_TOKEN=… npm run cli -- deploy restart
 ```
 
 `deploy restart` drains the container gracefully and starts the next request on the new secret — no image build, no release. Runs in flight hand off to the next container the same way a deploy's do; done once `/healthz` reports a later `startedAt` (~30s).
+
+This holds for `SWITCHBOARD_INGRESS_TOKENS` too, the `deployer` entry included: `deploy restart` with the **new** deployer token works right after the put, because the Worker authenticates the token from its own, already-updated environment and tells the bot only the subject it authenticated; the bot decides the grant from config, not from the token map it started with. Keep the subjects unchanged when rotating — the `grants` entries key on them, not on the token values.
 
 A **shared** bearer (`MEMORY_TOKEN`, `SANDBOX_TOKEN`, `RESIDENT_*_TOKEN`) must be the same value on every Worker `deploy/secrets.manifest.json` lists for it — rotating it means putting the new value everywhere it's listed, not just on the Worker where you noticed it. Rotating `RESIDENT_READ_TOKEN` or `SANDBOX_TOKEN` also means updating the repository secret CI deploys with.
 

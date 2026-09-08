@@ -118,3 +118,16 @@ export function planSecretPuts(
   }
   return { ok: true, plan };
 }
+
+/** What to quote from a failed `wrangler secret put`: its `[ERROR]` line(s) — the words an
+ *  operator needs (an authentication error names the token and the API call) — else the last
+ *  non-empty line, which for wrangler is usually only where the log went. */
+export function wranglerFailureLine(output: string): string {
+  const lines = output
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  const errors = lines.filter((l) => l.includes("[ERROR]"));
+  if (errors.length > 0) return errors.map((l) => l.replace(/^✘\s*/, "")).join(" ");
+  return lines.at(-1) ?? "";
+}
