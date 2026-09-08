@@ -100,6 +100,8 @@ jobs:
       SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
       WRANGLER_SEND_METRICS: "false"
       CI: "1"
+      # A stalled npm-cache segment gives up after 1 min, not 10 (see ci.yml).
+      SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
     steps:
       # A dispatch from a branch would deploy that branch's tree. Refuse, loudly.
       - name: only from main
