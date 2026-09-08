@@ -1,3 +1,4 @@
+import "./loadEnv.js";
 import { createServer } from "node:http";
 import { openConfigStore } from "./config.js";
 import { capabilitiesFrom } from "./core/capabilities.js";

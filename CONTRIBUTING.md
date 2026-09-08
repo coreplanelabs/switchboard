@@ -33,7 +33,7 @@ cp .env.example .env            # set ANTHROPIC_API_KEY (or another provider's k
 npx tsx src/cli.ts ask "what can you do?"
 ```
 
-That last command runs the whole pipeline with the terminal as the channel, so
+The process loads `.env` from the directory you run it in (a variable your shell exports wins). That last command runs the whole pipeline with the terminal as the channel, so
 you can work on almost everything without a Slack workspace. The tutorial
 [Run it locally](docs/tutorials/run-it-locally.md) goes further.
 
