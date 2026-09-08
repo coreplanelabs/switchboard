@@ -147,6 +147,9 @@ export function serveEvents(
   sink: SseSink,
   onLive?: () => void,
 ): void {
+  // Unbounded on purpose: the registry already budgeted this replay (count and
+  // bytes), so what lands here is at most that budget. A caller subscribing
+  // with REPLAY_EVERYTHING must not route through here.
   const replay: Array<{ event: RunEvent; seq: number }> = [];
   let live = false;
   let finishedDuringReplay: FinishedFrame | undefined;

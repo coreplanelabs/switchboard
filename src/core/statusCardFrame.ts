@@ -1,4 +1,5 @@
 import type { StatusUpdate } from "./types.js";
+import { formatDuration } from "./time/formatDuration.js";
 
 // The status card's one frame builder (features/run-visibility.md item 2;
 // features/tracing.md). Every paint of the card — the 👀 ack, the spinner
@@ -81,7 +82,10 @@ export function createCardShell(opts: CardShellOptions): CardShell {
   let frame = 0;
   let finishedAt: number | undefined;
   let setupLabel: string | undefined;
-  const elapsed = () => `${Math.round(((finishedAt ?? opts.now()) - opts.startedAt) / 1000)}s`;
+  // The one duration formatter, clock style: floored like every other surface
+  // (features/tracing.md item 5), so the card never reads a second more than
+  // the run page and the index for the same window.
+  const elapsed = () => formatDuration((finishedAt ?? opts.now()) - opts.startedAt, "clock");
   const headline = (icon: string) => `${icon} ${label} · ${elapsed()}`;
   // Detail order on a close: shape, queued, then the caller's own lines.
   const closeDetail = (close: CardClose, own?: string) =>

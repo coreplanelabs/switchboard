@@ -180,6 +180,7 @@ import {
 import { createStepTrace, type ResidentStep, type StepTrace } from "../../src/execution/residentStepTrace.js";
 import { graftResidentSteps } from "../../src/execution/residentTrace.js";
 import type { SpanAttrs } from "../../src/core/trace/attrs.js";
+import type { Span as TraceSpan } from "../../src/core/trace/types.js";
 import { systemClock } from "../../src/core/trace/clock.js";
 import { createTracer } from "../../src/core/trace/tracer.js";
 import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrace.js";
@@ -231,7 +232,7 @@ const STREAMED_ROUTES: ReadonlySet<string> = new Set(["/attach", "/exec", "/op"]
  *  bot's trace when `traceparent` parses, the collector's steps grafted as
  *  `resident.<step>` children, ended with the one outcome word. */
 function emitStepRoot(
-  name: "resident.attach" | "resident.op" | "resident.exec",
+  name: "resident.attach" | "resident.op" | "resident.exec" | "resident.refresh",
   t0: number,
   steps: readonly ResidentStep[],
   traceparent: string | undefined,
@@ -2125,6 +2126,23 @@ export class ResidentDO extends Sandbox<Env> {
    *  objects. Transitions: refreshing → warm, or degraded(reason) with the
    *  last snapshot still serving. */
   async onRefreshAlarm(payload: string): Promise<void> {
+    // The freshness cycle nobody asked for is a root of its own
+    // (features/tracing.md item 25): `resident.refresh`, with every command it
+    // ran as a `resident.<step>` child, exactly like an attach's.
+    const t0 = systemClock();
+    const trace = createStepTrace(t0);
+    let outcome = "ok";
+    try {
+      await this.stepTrace.run(trace, () => this.onRefreshAlarmTraced(payload));
+    } catch (err) {
+      outcome = "error";
+      throw err;
+    } finally {
+      emitStepRoot("resident.refresh", t0, trace.steps(), undefined, outcome);
+    }
+  }
+
+  private async onRefreshAlarmTraced(payload: string): Promise<void> {
     const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
     let refreshCounted = false;
     const before = await this.getStatus();
@@ -5655,14 +5673,24 @@ export default {
       return;
     }
     const firedAt = controller.scheduledTime || systemClock();
+    // One `resident.watchdog` root per firing (features/tracing.md item 25),
+    // each resident's check a `resident.check` child; the firing the state
+    // Worker records carries the root's trace id, like the shim's cron roots.
+    const root = startAdoptedRoot(tracer, "resident.watchdog", { sinks: traceSinks });
     let firing: ScheduleFiring;
     try {
-      const summary = await runWatchdog(env);
+      const summary = await runWatchdog(env, root);
       console.log(`resident-watchdog: ${JSON.stringify(summary)}`);
-      firing = watchdogFiring(schedule, firedAt, summary);
+      firing = { ...watchdogFiring(schedule, firedAt, summary), traceId: root.traceId };
+      root.end(firing.outcome === "completed" ? "ok" : "error", { outcome: firing.outcome, residents: summary.count });
     } catch (err) {
-      firing = watchdogFiring(schedule, firedAt, err instanceof Error ? err : new Error(String(err)));
+      firing = {
+        ...watchdogFiring(schedule, firedAt, err instanceof Error ? err : new Error(String(err))),
+        traceId: root.traceId,
+      };
       console.error(`resident-watchdog: ${firing.detail}`);
+      root.fail(err);
+      root.end("error", { outcome: firing.outcome });
     }
     ctx.waitUntil(
       recordFiring({ url: env.STATE_WORKER_URL, token: env.MEMORY_TOKEN }, firing).then((res) => {
@@ -6428,18 +6456,25 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
  *  handler and the /debug run-watchdog op. Each check targets a different DO,
  *  so they run concurrently; a failing one becomes its own {error} entry
  *  without touching its neighbors, and the results follow the registry list. */
-async function runWatchdog(env: Env): Promise<WatchdogSummary> {
+async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummary> {
   const registry = registryStub(env);
   const residents = await registry.list();
+  // Each check is a `resident.check` child of the firing's root when it has
+  // one (the cron path; the /debug op runs bare), ending with the action taken
+  // — never the resource, which names a repo.
+  const checkOne = async (record: { resource: string }, span?: TraceSpan) => {
+    const check = await residentStub(env, record.resource).watchdogCheck();
+    if (check.action === "provision-timed-out") {
+      // The DO already tried to release its own slot; this is the backstop.
+      await registry.remove(record.resource);
+    }
+    span?.setAttrs({ outcome: check.action });
+    return check;
+  };
   const settled = await Promise.allSettled(
-    residents.map(async (record) => {
-      const check = await residentStub(env, record.resource).watchdogCheck();
-      if (check.action === "provision-timed-out") {
-        // The DO already tried to release its own slot; this is the backstop.
-        await registry.remove(record.resource);
-      }
-      return check;
-    }),
+    residents.map((record) =>
+      parent ? parent.span("resident.check", (span) => checkOne(record, span)) : checkOne(record),
+    ),
   );
   const results: WatchdogSummary["results"][number][] = residents.map((record, i) => {
     const s = settled[i];

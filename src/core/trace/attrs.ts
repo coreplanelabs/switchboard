@@ -86,6 +86,9 @@ export interface AttrDomain {
   handed: number;
   sealed: number;
   abandonedRuns: number;
+  // the Workers' own roots (item 25): resident.watchdog, state.alarm
+  residents: number;
+  swept: number;
 }
 
 export type SpanAttrKey = keyof AttrDomain;
@@ -193,6 +196,8 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   handed: "number",
   sealed: "number",
   abandonedRuns: "number",
+  residents: "number",
+  swept: "number",
 };
 
 export const ATTR_KEYS: readonly SpanAttrKey[] = Object.keys(ATTR_TYPE) as SpanAttrKey[];
