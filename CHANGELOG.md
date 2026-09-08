@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.11.0](https://github.com/coreplanelabs/switchboard/compare/v0.10.0...v0.11.0) (2026-09-08)
+
+
+### Features
+
+* **live-view:** the replay budget lives in the registry — the newest 2000 events within 1 MiB, and one replay_elided frame names what a viewer skipped ([#632](https://github.com/coreplanelabs/switchboard/issues/632)) ([85d91d0](https://github.com/coreplanelabs/switchboard/commit/85d91d0d6b9b223705bff1d4f3c2b76572b92c85))
+* **run-ledger:** the drain hands resumable runs to the next generation instead of waiting, and a fence stops the run ([#631](https://github.com/coreplanelabs/switchboard/issues/631)) ([2e31885](https://github.com/coreplanelabs/switchboard/commit/2e318855ecd6b1bb231804c8da25ea33ee8062c0))
+* **runs:** one duration definition on every surface — stamps threaded, readers tolerate span records ([#628](https://github.com/coreplanelabs/switchboard/issues/628)) ([27338dc](https://github.com/coreplanelabs/switchboard/commit/27338dc5e0efde3a2b23ddf9e7eb85bbeded4322))
+
+
+### Bug fixes
+
+* **resident:** an install that produces no node_modules is an empty deps-store entry when the commit has no lockfile ([#630](https://github.com/coreplanelabs/switchboard/issues/630)) ([8203d85](https://github.com/coreplanelabs/switchboard/commit/8203d85453aed69a701a72cb9d7a26b3107f8f17))
+
 ## [0.10.0](https://github.com/coreplanelabs/switchboard/compare/v0.9.0...v0.10.0) (2026-09-08)
 
 
