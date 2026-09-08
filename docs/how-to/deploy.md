@@ -16,6 +16,13 @@ Cloudflare is the one supported production target: the bot runs as a container b
 
 Deploys run in one order — memory, bot, resident, sandbox — because the state Worker's Durable Object migrations must exist before the bot writes to them. `deploy all` is the only runner; nothing here is deployed by hand in parallel. Why the order: [Worker topology](../explanation/worker-topology.md).
 
+## Before you start
+
+- A Cloudflare account and a domain (a *zone*) in it: every Worker gets a hostname under it. `npx wrangler login` done once for that account, and Docker running — the bot's, resident's and sandbox's images build where `deploy all` runs.
+- No `CLOUDFLARE_API_TOKEN` in your shell unless it is a token for this account: wrangler prefers a token over your login, and a token for another account is refused, never silently swapped.
+- The Slack app and one provider key from [Get started](../tutorials/get-started.md), and the GitHub App if the coding agent should open pull requests ([Set up accounts](set-up-accounts.md)).
+- A `config/config.yaml` whose blocks point at the Workers you are about to deploy — `runtimeOverrides.worker` and `runHistory.worker` at the state Worker's hostname, `memory.worker` if you want memory, `execution.resident.baseUrl` and `execution.type: cloudflare` with `execution.url` for the resident and sandbox Workers.
+
 ## 1. The deployment profile
 
 Every place-specific fact — your account, your zone, each Worker's script name and hostname, where the bot's config comes from — lives in one file, `deploy/profile.json`, which git ignores. `deploy/profile.example.json` is the shape:
@@ -89,26 +96,55 @@ Bearers the run needs in its own environment: `MEMORY_TOKEN` when the bot is a s
 
 Selection flags: `--only bot,resident`, `--skip sandbox`, and `--affected`, which deploys only the Workers whose inputs changed since the commit each one is serving — what the release deploy runs. `--force` bypasses the bot and resident preflights and says what it will interrupt.
 
+Watch the bot connect, then confirm it from the outside:
+
+```bash
+npm run tail -w deploy/cloudflare        # "switchboard running (providers: anthropic…)"
+curl -sS https://<bot hostname>/healthz  # { ok, inFlight, draining, catchUp, build, startedAt, … }
+```
+
+`catchUp` reports the reconnect catch-up's last scan and names any Slack scopes the bot token lacks — the way to see a silently failing scope without container logs.
+
+## 6. Onboard the first repository
+
+Repositories are onboarded at runtime from chat, never at deploy time:
+
+```
+@switchboard repo onboard acme/api
+```
+
+That needs the `repo:write` grant, which only admins hold until granted. What happens next, and how to read the resident's disk and lifecycle: [Onboard a repo](onboard-a-repo.md).
+
 ## What the release workflow does with all this
 
 After the first deployment, nobody deploys routine releases by hand. Every merge to `main` accumulates into one release PR; merging it tags the version, publishes the GitHub release, and a workflow runs `deploy all --affected` on the release commit — the same command, the same checks, the same order. The release PR carries the derived plan as a comment before anyone merges it, and every PR's `deploy targets` check shows what its own diff would deploy.
 
 The workflow needs, as repository secrets: `CLOUDFLARE_DEPLOY_TOKEN` (the scopes in [Set up accounts](set-up-accounts.md#cloudflare-optional-and-what-it-buys)), `MEMORY_TOKEN`, `RESIDENT_READ_TOKEN`, and `SANDBOX_TOKEN` when a sandbox Worker exists. It reads the profile from `SWITCHBOARD_DEPLOY_PROFILE`; the checked-in workflow names the project's own installation's profile in its private infrastructure repository and mints a read-only App token for it, so an installation that wants CI deploys edits that location — and the credential step that mints the token — to point at its own. A manual deploy goes through the same workflow (`gh workflow run deploy-production.yml --ref main -f targets=all`), never from a laptop; it refuses to run from any ref but `main`.
 
-## The local loop: docker compose
+## Running the container somewhere else
 
-For a dev box or a single host you administer yourself, the same image runs under compose with your `.env` and `config/config.yaml` mounted, runtime overrides and workspaces on named volumes, and the health probe on loopback:
+The image the bot Worker builds is an ordinary container, and Socket Mode is outbound-only, so it also runs anywhere that runs a container — without the Workers, every optional capability is simply off. The one shape the tree keeps is the local loop, `docker-compose.yml`: the same image on a dev box, or on one host a single trusted operator administers, with your `.env` and `config/config.yaml` mounted, runtime overrides and workspaces on named volumes, and the health probe on loopback:
 
 ```bash
 docker compose up -d
 docker compose logs -f
 ```
 
-There is no state Worker in this shape: overrides and run history (with `runHistory.store: file`) live on the volume, tools run on the container with `execution.type: local`, and the dashboards serve loopback callers only. It is the shape for one trusted operator, not for a team.
+There is no state Worker in this shape: overrides and run history (with `runHistory.store: file`) live on the volume, tools run on the container with `execution.type: local`, and the dashboards serve loopback callers only. Nothing else is built or tested as a host — the deploy tooling, the secrets path and these pages are Cloudflare's.
+
+Whatever the host, the bot needs:
+
+- **Runtime**: one always-on container, a single instance, no autoscaling. It is mostly idle; a fraction of a vCPU and 1 GiB is the working size ([Capacity and sizing](../explanation/capacity-and-sizing.md)).
+- **Network**: outbound HTTPS only — Slack's API and websocket, the model providers, GitHub, and whatever executes tools. Zero inbound is required; set `PORT` to expose `/healthz` and the dashboard, and `PUBLIC_BASE_URL` so status cards can link to run pages.
+- **Secrets as environment variables**: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, the provider keys the config names, the GitHub App triple or `GH_TOKEN`, and the bearers for whichever Workers the config points at. `.env.example` lists them with a note each.
+- **No cloud credentials on the host**: the bot makes no cloud API calls of its own, and its agents execute model-generated commands, so least privilege matters here specifically.
+- **Storage**: an optional small volume at `/app/data`. Without it the bot degrades gracefully: repositories re-clone, thread context rebuilds from the channel, and only the chat-set overrides and the sandbox map are lost on restart — unless the state Worker holds them.
+- **Health and logs**: `GET /healthz` returns 200 with the JSON above; logs go to stdout, one JSON span line per request when `tracing.log` is on.
 
 ## See also
 
 - [Deploy and rotate a secret](deploy-and-rotate-a-secret.md) — day two: merge the release PR, read what a PR would deploy, rotate a credential.
 - [Operate production](operate-production.md) — the preflights and why a second deploy over a draining container kills a run; reading the bot's span log.
 - [Set up accounts](set-up-accounts.md) — every credential above, and how to create it.
+- [Explanation: Worker topology](../explanation/worker-topology.md) — what each Worker owns and why the order is what it is.
 - [`docs/reference/specs/release-and-deploy.md`](../reference/specs/release-and-deploy.md) — the contract behind every command on this page.
