@@ -32,18 +32,40 @@ export class AnthropicProvider implements Provider {
       // it run to completion in the background.
       req.signal ? { signal: req.signal } : undefined,
     );
-    // The first streamed content (a text delta or a block start) is the time
-    // to first token the model.turn span records; feature-detected, so a
-    // client double without `on` (tests) still completes.
-    if (req.observer?.onFirstToken && typeof (stream as { on?: unknown }).on === "function") {
-      let seen = false;
-      const first = () => {
-        if (seen) return;
-        seen = true;
-        req.observer?.onFirstToken?.();
-      };
-      (stream as unknown as { on(event: string, cb: () => void): unknown }).on("text", first);
-      (stream as unknown as { on(event: string, cb: () => void): unknown }).on("contentBlock", first);
+    // The stream's timing hooks for the model.turn span (features/tracing.md;
+    // live-view item 15): the first streamed content (a text delta or a block
+    // start) is the time to first token, and each raw `content_block_start` /
+    // `content_block_stop` is a block boundary by kind and index. Feature-
+    // detected, so a client double without `on` (tests) still completes.
+    const observer = req.observer;
+    if (observer && typeof (stream as { on?: unknown }).on === "function") {
+      const on = (event: string, cb: (...args: unknown[]) => void) =>
+        (stream as unknown as { on(event: string, cb: (...args: unknown[]) => void): unknown }).on(event, cb);
+      if (observer.onFirstToken) {
+        let seen = false;
+        const first = () => {
+          if (seen) return;
+          seen = true;
+          observer.onFirstToken?.();
+        };
+        on("text", first);
+        on("contentBlock", first);
+      }
+      if (observer.onBlockStart || observer.onBlockEnd) {
+        const kinds = new Map<number, string>();
+        on("streamEvent", (raw) => {
+          const ev = raw as { type?: unknown; index?: unknown; content_block?: { type?: unknown } };
+          if (typeof ev.index !== "number") return;
+          if (ev.type === "content_block_start") {
+            const kind = typeof ev.content_block?.type === "string" ? ev.content_block.type : "other";
+            kinds.set(ev.index, kind);
+            observer.onBlockStart?.(kind, ev.index);
+          } else if (ev.type === "content_block_stop") {
+            observer.onBlockEnd?.(kinds.get(ev.index) ?? "other", ev.index);
+            kinds.delete(ev.index);
+          }
+        });
+      }
     }
     const msg = await stream.finalMessage();
 

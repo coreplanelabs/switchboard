@@ -7,6 +7,7 @@ import {
   type CompletionResult,
   type ContentPart,
   type Provider,
+  type CompletionObserver,
 } from "./providers/types.js";
 import {
   COMMAND_CAP,
@@ -259,13 +260,35 @@ async function runLoop(
     const call = async (turnSpan: Span | undefined) => {
       const startedAt = now();
       let firstTokenAt: number | undefined;
-      const observer = { onFirstToken: () => void (firstTokenAt ??= now()) };
+      // Block boundaries, when the provider streams them: how long the turn
+      // spent thinking and writing, and how many blocks it produced. A block
+      // still open when the call returns ends at the return.
+      const openBlocks = new Map<number, { kind: string; at: number }>();
+      const blockMs: Record<string, number> = {};
+      let blocks = 0;
+      const closeBlock = (index: number, at: number) => {
+        const b = openBlocks.get(index);
+        if (!b) return;
+        openBlocks.delete(index);
+        blockMs[b.kind] = (blockMs[b.kind] ?? 0) + Math.max(0, at - b.at);
+      };
+      const observer: CompletionObserver = {
+        onFirstToken: () => void (firstTokenAt ??= now()),
+        onBlockStart: (kind, index) => {
+          blocks++;
+          openBlocks.set(index, { kind, at: now() });
+        },
+        onBlockEnd: (_kind, index) => closeBlock(index, now()),
+      };
       const result = await raceSignal(
         opts.provider.complete({ ...req, ...(signal ? { signal } : {}), observer }),
         signal,
         () => (hardSignal?.aborted ? new HardStopError() : new FinaleTimeoutError()),
       );
       const at = now();
+      for (const index of [...openBlocks.keys()]) closeBlock(index, at);
+      const thinkingMs = (blockMs.thinking ?? 0) + (blockMs.redacted_thinking ?? 0);
+      const textMs = blockMs.text ?? 0;
       turnSpan?.setAttrs({
         model: `${opts.provider.name}/${opts.model}`, // the same ref `run_meta` carries (live-view item 15)
         stopReason: turnStopReason(result.stopReason),
@@ -280,6 +303,9 @@ async function runLoop(
             }
           : {}),
         ...(firstTokenAt !== undefined ? { ttftMs: firstTokenAt - startedAt } : {}),
+        ...(blocks > 0 ? { blocks } : {}),
+        ...(thinkingMs > 0 ? { thinkingMs } : {}),
+        ...(textMs > 0 ? { textMs } : {}),
       });
       opts.onProgress?.(`💭 thought for ${formatDuration(at - startedAt, "precise")}`);
       return result;

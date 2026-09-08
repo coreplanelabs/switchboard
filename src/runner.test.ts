@@ -1346,6 +1346,56 @@ describe("run control: soft / hard stop (#101)", () => {
 describe("model turn and tool spans (features/tracing.md)", () => {
   const withUsage = (r: CompletionResult, usage: CompletionResult["usage"]): CompletionResult => ({ ...r, usage });
 
+  it("a provider that streams block boundaries gives the turn its block count, thinking and writing time and first token; a block still open at the return ends there (live-view item 15)", async () => {
+    let t = 1_000;
+    const blocky: Provider = {
+      name: "blocky",
+      complete: async (req) => {
+        req.observer?.onBlockStart?.("thinking", 0);
+        t += 3_000;
+        req.observer?.onFirstToken?.();
+        req.observer?.onBlockEnd?.("thinking", 0);
+        req.observer?.onBlockStart?.("text", 1);
+        t += 1_000;
+        req.observer?.onBlockEnd?.("text", 1);
+        req.observer?.onBlockStart?.("tool_use", 2); // never closed by the stream
+        t += 500;
+        return text("done");
+      },
+    };
+    const { root, all, onEvent } = traced(() => t);
+    await runAgent({
+      provider: blocky,
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent,
+      now: () => t,
+      span: root,
+    });
+    const turn = all.find((e) => e.type === "span_end" && e.name === "model.turn");
+    expect(turn).toMatchObject({
+      durationMs: 4_500,
+      attrs: { blocks: 3, thinkingMs: 3_000, textMs: 1_000, ttftMs: 3_000 },
+    });
+    // a provider that streams nothing: no block attrs at all
+    const plain = traced(() => t);
+    await runAgent({
+      provider: scripted([text("done")]),
+      model: "m",
+      agent: agent(),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      onEvent: plain.onEvent,
+      now: () => t,
+      span: plain.root,
+    });
+    const silent = plain.all.find((e) => e.type === "span_end" && e.name === "model.turn");
+    for (const k of ["blocks", "thinkingMs", "textMs", "ttftMs"])
+      expect((silent as { attrs: object }).attrs).not.toHaveProperty(k);
+  });
+
   it("one run.agent span wraps the loop; each model call is a model.turn span ended BEFORE what it produced, timed by the runner clock; each tool call a tool.<name> span whose tool_call/tool_result carry its id", async () => {
     let t = 1_000;
     const provider = scripted([bashUse("t1"), text("done")]);

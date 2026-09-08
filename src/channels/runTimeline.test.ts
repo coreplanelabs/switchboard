@@ -432,14 +432,21 @@ describe("createRunTimeline — span records", () => {
     t.push(call("a", "ls"));
     const changes = t.push(
       end("m1", "model.turn", 1_000, 304_000, {
-        attrs: { inputTokens: 12_345, outputTokens: 800, cacheReadTokens: 11_200 },
+        attrs: {
+          inputTokens: 12_345,
+          outputTokens: 800,
+          cacheReadTokens: 11_200,
+          ttftMs: 800,
+          thinkingMs: 3_200,
+          textMs: 1_100,
+        },
       }),
     );
     expect(changes).toEqual([
       {
         kind: "turn",
         label: "Thought for 5m 04s",
-        facts: ["12.3k in", "800 out", "11.2k cached"],
+        facts: ["12.3k in", "800 out", "11.2k cached", "first token 800ms", "thinking 3.2s", "writing 1.1s"],
         durationMs: 304_000,
         at: 305_000,
       },
