@@ -9,6 +9,8 @@ import {
   startReviewReadingDiff,
 } from "./readingDiff.js";
 import type { RunEvent } from "./runEvents.js";
+import { recordingSink } from "./testing/recordingSink.js";
+import { createTracer } from "./trace/tracer.js";
 
 // Feature: features/reading-diff.md — every PR review run carries a
 // `review_artifact` reading diff. The git BASELINE is guaranteed (the
@@ -325,5 +327,63 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
     await expect(started.baseline).resolves.toBe(false);
     await expect(started.upgrade!).resolves.toBe(false);
     expect(published).toEqual([]);
+  });
+});
+
+describe("reading diff spans (features/tracing.md items 17/18)", () => {
+  it("produceReadingDiff hands its span to the executor's exec, and nothing without one", async () => {
+    const seen: unknown[] = [];
+    const executor = {
+      exec: async (_cmd: string, opts?: { span?: unknown }) => {
+        seen.push(opts?.span);
+        return "diff --git a/f b/f\n+x";
+      },
+    };
+    const span = createTracer({ clock: () => 1 }).start("run.reading_diff", { sinks: [] });
+    await produceReadingDiff(executor, { provider: "git", baseRef: "main" }, span);
+    await produceReadingDiff(executor, { provider: "git", baseRef: "main" });
+    expect(seen).toEqual([span, undefined]);
+  });
+
+  it("under a root, the baseline is a run.reading_diff child and the upgrade a run.reading_diff.upgrade child, each with its outcome and each diff's exec under its own span; without a root the same result and no span", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
+    const execSpans: string[] = [];
+    const executor = {
+      exec: async (cmd: string, opts?: { span?: { name: string } }) => {
+        execSpans.push(opts?.span?.name ?? "none");
+        return cmd.startsWith("git diff") ? "diff --git a/f b/f\n+x" : "exit 127: meat: command not found";
+      },
+    };
+    const published: RunEvent[] = [];
+    const started = startReviewReadingDiff({
+      executor,
+      cfg: { provider: "meat" },
+      env: {},
+      baseRef: "main",
+      publish: (e) => published.push(e),
+      parent: root,
+    });
+    expect(await started.baseline).toBe(true);
+    expect(await started.upgrade).toBe(false);
+    const ends = log.ends
+      .map((e) => [e.name, e.parentSpanId, e.attrs] as const)
+      .sort((a, b) => a[0].localeCompare(b[0]));
+    expect(ends).toEqual([
+      ["run.reading_diff", root.id, { outcome: "published" }],
+      ["run.reading_diff.upgrade", root.id, { outcome: "did_not_land" }],
+    ]);
+    expect([...execSpans].sort()).toEqual(["run.reading_diff", "run.reading_diff.upgrade"]);
+    expect(published.map((e) => e.type)).toEqual(["review_artifact"]);
+    const bare = startReviewReadingDiff({
+      executor,
+      cfg: { provider: "git" },
+      env: {},
+      baseRef: "main",
+      publish: () => {},
+    });
+    expect(await bare.baseline).toBe(true);
+    expect(execSpans.at(-1)).toBe("none");
+    expect(log.ends).toHaveLength(2);
   });
 });

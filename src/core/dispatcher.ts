@@ -1697,30 +1697,26 @@ export async function dispatch(
     // the registry's finished-run rule, and the baseline still stands).
     let readingDiffBaseline: Promise<boolean> | undefined;
     if (agent.name === "review" && repoCtx.pr !== undefined) {
+      // Two background spans (features/tracing.md): concurrent with the loop,
+      // structure for the partition, never a counted term — started under the
+      // root inside `startReviewReadingDiff`, so each diff's exec is a child.
       const started = startReviewReadingDiff({
         executor,
         cfg: deps.config.config.review?.readingDiff,
         env: process.env,
         baseRef: repoCtx.baseRef,
         publish: (e) => registry.publish(run.id, e),
+        parent: root,
       });
-      // Two background spans (features/tracing.md): concurrent with the loop,
-      // structure for the partition, never a counted term.
-      readingDiffBaseline = root.span("run.reading_diff", (span) =>
-        started.baseline.then((published) => {
-          span.setAttrs({ outcome: published ? "published" : "none" });
-          console.log(`[reading-diff] ${msg.threadKey} baseline ${published ? "published" : "none"}`);
-          return published;
-        }),
-      );
+      readingDiffBaseline = started.baseline.then((published) => {
+        console.log(`[reading-diff] ${msg.threadKey} baseline ${published ? "published" : "none"}`);
+        return published;
+      });
       const upgrade = started.upgrade;
       if (upgrade)
-        void root.span("run.reading_diff.upgrade", (span) =>
-          upgrade.then((published) => {
-            span.setAttrs({ outcome: published ? "published" : "did_not_land" });
-            console.log(`[reading-diff] ${msg.threadKey} meat ${published ? "published" : "did not land"}`);
-          }),
-        );
+        void upgrade.then((published) => {
+          console.log(`[reading-diff] ${msg.threadKey} meat ${published ? "published" : "did not land"}`);
+        });
     }
 
     let answer: string;
@@ -1793,7 +1789,9 @@ export async function dispatch(
     // trip is bounded at 10 s on a sick resident, and nothing about the reply
     // depends on it, so it must never sit between "answer ready" and the
     // thread. Hard-stop is read at CALL time — it may land during the run.
-    const releaseWorkspace = () => round.release({ hardStopped: run.control.requested === "hard" });
+    // Under `post.workspace_release`: the release's own call is that span's child.
+    const releaseWorkspace = (span?: Span) =>
+      round.release({ hardStopped: run.control.requested === "hard", ...(span ? { span } : {}) });
     // One tool context for the whole run: the first turn and any re-review
     // turn (settleReviewedHead) share it, so submit_pr_description and the
     // progress checklist keep flowing to the same hooks.
@@ -1987,7 +1985,7 @@ export async function dispatch(
       publishText("answer", answer, undefined, rawAnswer);
     } catch (err) {
       runFailed = true;
-      await root.span("post.workspace_release", () => releaseWorkspace());
+      await root.span("post.workspace_release", (span) => releaseWorkspace(span));
       throw err;
     } finally {
       clearInterval(heartbeat);
@@ -2137,7 +2135,7 @@ export async function dispatch(
         () => root.span("post.reply", () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer)),
       );
     } finally {
-      await root.span("post.workspace_release", () => releaseWorkspace());
+      await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     }
 
     // Cross-session memory (Area 7c, #85) — WRITE path. AFTER the reply has

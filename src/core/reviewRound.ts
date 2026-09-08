@@ -70,7 +70,11 @@ export interface RoundWorkspace {
    * (`releaseModeFor`). Best-effort: a failed release is a log line, never a
    * failed run. No-op when the executor holds nothing releasable.
    */
-  release(opts: { hardStopped: boolean }): Promise<void>;
+  release(opts: {
+    hardStopped: boolean;
+    /** The `post.workspace_release` span: the executor's release becomes its child. */
+    span?: Span;
+  }): Promise<void>;
 }
 
 /**
@@ -100,12 +104,12 @@ export async function attachRoundWorkspace(input: {
     },
     input.span,
   );
-  const release = async (opts: { hardStopped: boolean }): Promise<void> => {
+  const release = async (opts: { hardStopped: boolean; span?: Span }): Promise<void> => {
     const { executor } = selection;
     if (!executor.release) return;
     const mode = releaseModeFor(agent, opts);
     try {
-      const r = await executor.release(mode);
+      const r = await executor.release(mode, opts.span ? { span: opts.span } : undefined);
       console.log(`[release] ${input.logKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}`);
     } catch (err) {
       console.warn(`[release] ${input.logKey} failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -382,7 +386,10 @@ export interface SettleReviewedHeadInput {
 
 async function settle(input: SettleReviewedHeadInput, span: Span | undefined): Promise<SettledReviewHead> {
   const { pr, executor, turn, logKey } = input;
-  const probeHead = async () => parseRevParseOutput(await executor.exec("git rev-parse HEAD").catch(() => ""));
+  // The probe and the move are the settle's own work: their `exec.*` spans hang
+  // under `run.settle_reviewed_head` (features/tracing.md item 17).
+  const trace = span ? { span } : undefined;
+  const probeHead = async () => parseRevParseOutput(await executor.exec("git rev-parse HEAD", trace).catch(() => ""));
   let answer = input.answer;
   let verdict = input.verdict;
   let reviewHead = input.reviewHead;
@@ -424,7 +431,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         let worktreeMoved = false;
         if (executor.moveTo) {
           try {
-            const at = normalizeHead((await executor.moveTo(current)).sha);
+            const at = normalizeHead((await executor.moveTo(current, trace)).sha);
             worktreeMoved = at !== undefined && sameCommit(at, current);
             console.log(
               `[review] ${logKey} worktree moved to ${at?.slice(0, 7) ?? "?"}${worktreeMoved ? "" : " (not the expected head)"}`,

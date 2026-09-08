@@ -511,12 +511,16 @@ describe("executor provisioning by agent resources", () => {
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(release).toHaveBeenCalledTimes(1);
-    expect(release).toHaveBeenCalledWith("if-clean");
+    expect(release).toHaveBeenCalledWith("if-clean", {
+      span: expect.objectContaining({ name: "post.workspace_release" }),
+    });
 
     release.mockClear();
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
     await dispatch(deps, msg("agent:review look at it", "slack:UADMIN"), io);
-    expect(release).toHaveBeenCalledWith("always");
+    expect(release).toHaveBeenCalledWith("always", {
+      span: expect.objectContaining({ name: "post.workspace_release" }),
+    });
   });
 
   it("the answer reaches the thread BEFORE the workspace release round trip (a slow /detach never delays the reply)", async () => {
@@ -587,7 +591,9 @@ describe("executor provisioning by agent resources", () => {
     while (!hardSignal) await new Promise((r) => setTimeout(r, 5));
     expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
     await run;
-    expect(release).toHaveBeenCalledWith("always"); // coding run, but hard stop → tear down
+    expect(release).toHaveBeenCalledWith("always", {
+      span: expect.objectContaining({ name: "post.workspace_release" }),
+    }); // coding run, but hard stop → tear down
     expect(replies.some((r) => r.includes("aborted"))).toBe(true);
     expect(replies.some((r) => r.includes("late"))).toBe(false);
     expect(statuses.at(-1)?.title).toContain("⛔");
@@ -620,7 +626,9 @@ describe("executor provisioning by agent resources", () => {
     const fake = { exec: async () => "ok", readFile: async () => "", writeFile: async () => "", release };
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(release).toHaveBeenCalledWith("if-clean");
+    expect(release).toHaveBeenCalledWith("if-clean", {
+      span: expect.objectContaining({ name: "post.workspace_release" }),
+    });
     expect(replies.some((r) => r.includes("summary so far") && r.includes("Stopped early"))).toBe(true);
     expect(statuses.at(-1)?.title).toContain("⏹");
   });
@@ -2139,9 +2147,20 @@ describe("review post-step (issue #69)", () => {
 
     /** An executor whose HEAD is a mutable cell; `moveTo` (when present) sets it. */
     function movableExecutor(initial: string, opts: { moveTo?: boolean; moveLandsAt?: string } = { moveTo: true }) {
-      const state = { head: initial, moves: [] as string[], released: 0 };
+      const state = {
+        head: initial,
+        moves: [] as string[],
+        released: 0,
+        probeSpans: [] as string[],
+        moveSpans: [] as string[],
+      };
       const executor: Record<string, unknown> = {
-        exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${state.head}\n` : ""),
+        // The settle's probe and move carry their span (features/tracing.md item 17): recorded by name.
+        exec: async (cmd: string, opts?: { span?: { name: string } }) => {
+          if (!/git rev-parse HEAD/.test(cmd)) return "";
+          state.probeSpans.push(opts?.span?.name ?? "none");
+          return `${state.head}\n`;
+        },
         readFile: async () => "",
         writeFile: async () => "",
         release: async () => {
@@ -2150,8 +2169,9 @@ describe("review post-step (issue #69)", () => {
         },
       };
       if (opts.moveTo) {
-        executor.moveTo = async (sha: string) => {
+        executor.moveTo = async (sha: string, o?: { span?: { name: string } }) => {
           state.moves.push(sha);
+          state.moveSpans.push(o?.span?.name ?? "none");
           state.head = opts.moveLandsAt ?? sha;
           return { sha: state.head };
         };
@@ -2192,6 +2212,8 @@ describe("review post-step (issue #69)", () => {
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(reviewTurns(provider)).toHaveLength(1); // no re-review
       expect(ex.moves).toEqual([]);
+      expect(ex.probeSpans.length).toBeGreaterThan(0);
+      expect(new Set(ex.probeSpans)).toEqual(new Set(["run.settle_reviewed_head"]));
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
       expect(spy.calls[0].body).toMatch(
@@ -2220,6 +2242,7 @@ describe("review post-step (issue #69)", () => {
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       // Two review turns (each: verdict call + answer) in ONE run.
       expect(ex.moves).toEqual([OTHER_HEAD]);
+      expect(ex.moveSpans).toEqual(["run.settle_reviewed_head"]);
       const userTurns = reviewTurns(provider);
       expect(userTurns).toHaveLength(2);
       const second = userTurns[1];
