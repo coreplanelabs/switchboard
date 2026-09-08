@@ -67,9 +67,3 @@ Rename a test and the build is red until the spec changes with it. Adopting the 
 | [release-and-deploy.md](release-and-deploy.md) | Production follows the release PR: release-please tags and publishes, CI runs `deploy all --affected` on the release commit — only the Workers whose inputs changed since the commit each one serves (import closure of its `worker.ts`, its dir, its production dependencies, the bot's image sources; tests/docs/CI inert; an unclassified path → the whole fleet, loudly); the release PR carries the plan as a sticky comment, every PR's CI shows what its diff would deploy; manual deploys are the same workflow dispatched from `main` |
 | [tracing.md](tracing.md) | One measurement primitive (a span) for every unit of work from message receipt to the first reply, the partition that turns spans into a seven-term timeline that always sums to the window, the clock ratchet, the one duration formatter, and the span log |
 | [docs-site.md](docs-site.md) | The `docs/` tree compiled and hosted: one markdown source that renders on GitHub and builds to a searchable static site (relative `.md` links rewritten, `README.md` as each directory's index, `plans/` unpublished, dead links fail the build, mermaid on both surfaces); the mechanical reference tables generated from the command registry into marked regions with `docs:check` as the drift gate; the public `/docs` redirect and the dashboard header's docs link; the assets-only docs Worker behind Access, deployed by CI on docs changes and unable to disturb a run |
-
-## Milestones
-
-| # | Goal | Status |
-|---|---|---|
-| 1 | [Review, general, and coding agents work as designed and are obviously better than Claude Tag](milestone-1-vs-claude-tag.md) | in progress |

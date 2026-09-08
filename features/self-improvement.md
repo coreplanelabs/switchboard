@@ -1,6 +1,6 @@
 # Self-improvement proposals
 
-> Human overview with architecture diagrams: [docs/self-improvement-architecture.md](../docs/self-improvement-architecture.md). "Proposals" is literal: the shipped system files labeled issues for a person to triage; it does not open PRs (the R19 wording in the golden plan was narrowed on purpose).
+> Human overview with architecture diagrams: [docs/explanation/how-switchboard-improves-itself.md](../docs/explanation/how-switchboard-improves-itself.md). "Proposals" is literal: the shipped system files labeled issues for a person to triage; it does not open PRs (the R19 wording in the golden plan was narrowed on purpose).
 
 Switchboard turns the run-friction **analysis** ([run-friction.md](run-friction.md), #105) into **action**: it keeps every finished run's diagnosis in a ledger, clusters the friction that recurs *across* recent runs, and files the top recurring patterns as labeled GitHub issues — each with the evidence (the friction data, the affected runs) and a concrete suggested fix — deduped against the proposals already open. This is the second piece of Area 7b ([#84](https://github.com/coreplanelabs/switchboard/issues/84)): *observe → diagnose → **propose***. It is **human-gated by construction**: the only side effect is opening a labeled issue for a person to triage. It never opens PRs and never merges anything.
 
