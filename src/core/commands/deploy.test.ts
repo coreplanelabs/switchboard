@@ -7,7 +7,8 @@ import { CommandRegistry, bindCommands, renderText, type Caller } from "../comma
 import { callerWith } from "../testing/callers.js";
 import { parseInvocation } from "../commandSurface.js";
 import { RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
-import { TEST_PROFILE } from "../../deploy/testing/profile.js";
+import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "../../deploy/testing/profile.js";
+import type { ImagesHostIO } from "../../deploy/imagesHost.js";
 import type { RestartRunResult } from "../../deploy/run.js";
 import {
   GENERATED_HEADER,
@@ -24,6 +25,7 @@ import {
   deployPlan,
   deployRestart,
   deployConfig,
+  deployImages,
   deploySecrets,
   registerDeployCommands,
   type DeployCommandDeps,
@@ -87,10 +89,12 @@ function bind(
   restart: (plan: RestartPlan) => Promise<RestartRunResult> = neverRestarts,
   affected: (opts: { base?: string }) => Promise<AffectedReport> = neverAffected,
   profile: () => Promise<LoadedProfile> = async () => LOADED,
-  disk: Map<string, string> = new Map(),
+  // project.json is on every disk: the Workers' images and the site's name come from it.
+  disk: Map<string, string> = new Map([[PROJECT_FACTS_FILE, FACTS]]),
   secrets: SecretsHostIO = noSecrets,
   pushConfig: DeployCommandDeps["deploy"]["pushConfig"] = neverPushes,
   root: DeployHost["root"] = CHECKOUT_ROOT,
+  images: ImagesHostIO = noImages,
 ) {
   const registry = new CommandRegistry<DeployCommandDeps>({ audit: () => {} });
   registerDeployCommands(registry);
@@ -116,6 +120,8 @@ function bind(
       profile,
       secrets,
       pushConfig,
+      images,
+      cliVersion: () => TEST_PUBLISHED_IMAGES.version,
       files: {
         read: async (path) => disk.get(path),
         write: async (path, text) => {
@@ -127,6 +133,19 @@ function bind(
   });
   return { commands, plans, restartPlans, affectedCalls, disk, writes };
 }
+
+/** An images host that must never be reached — every test but `deploy.images`'s (and registry-mode plans) binds it. */
+const noImages: ImagesHostIO = {
+  registry: async () => {
+    throw new Error("must not read the registry");
+  },
+  docker: async () => {
+    throw new Error("must not probe docker");
+  },
+  copy: async () => {
+    throw new Error("must not copy");
+  },
+};
 
 /** A config push that must never happen — every test but `deploy.config`'s binds it. */
 const neverPushes: DeployCommandDeps["deploy"]["pushConfig"] = async () => {
@@ -148,7 +167,11 @@ const noSecrets: SecretsHostIO = {
 /** A one-line template per Worker dir (and the site's): enough to see the profile and the facts land in the render. */
 const TEMPLATE = '{ "name": "{{script}}", "account_id": "{{account}}", "routes": [{ "pattern": "{{hostname}}" }] }\n';
 /** The project facts the site's config renders from — a made-up project, so no test pins the real host. */
-const FACTS = JSON.stringify({ name: "switchboard", docs: "https://docs.example.test" });
+const FACTS = JSON.stringify({
+  name: "switchboard",
+  docs: "https://docs.example.test",
+  images: TEST_PUBLISHED_IMAGES.names,
+});
 const templatesOnDisk = () =>
   new Map<string, string>([
     ...workerConfigTargets(TEST_PROFILE).map((t): [string, string] => [t.templatePath, TEMPLATE]),
@@ -929,7 +952,7 @@ describe("deploy.secrets", () => {
     expect(second.writes).toEqual([]);
     // No template on disk: refused before any put, naming the template.
     const bare = host(["MEMORY_TOKEN"]);
-    const none = await withSecrets(bare.io, undefined, new Map()).commands.invoke(
+    const none = await withSecrets(bare.io, undefined, new Map([[PROJECT_FACTS_FILE, FACTS]])).commands.invoke(
       "deploy.secrets",
       { args: ["memory"] },
       cli,
@@ -1085,5 +1108,466 @@ describe("deploy.config", () => {
     expect(res.ok ? "" : res.message).toBe(
       "configSource config/nope.yaml: the config does not validate — No model configured",
     );
+  });
+});
+
+// Feature: docs/reference/specs/release-and-deploy.md items 25–26 — `deploy images`
+// copies the release's images into the account registry once per version, and in
+// `registry` mode `deploy plan` / `deploy all` refuse a step whose image is not
+// there. The host half is injected; nothing here runs Docker or wrangler.
+describe("deploy.images", () => {
+  const ACCOUNT = TEST_PROFILE.account;
+  const REGISTRY: LoadedProfile = { profile: TEST_REGISTRY_PROFILE, origin: "profile", path: "deploy/profile.json" };
+  const target = (name: string, version = "1.2.3") => `registry.cloudflare.com/${ACCOUNT}/${name}:${version}`;
+
+  /** An images host over an in-memory registry: `copy` records the call and lands the tag; `docker` answers as told. */
+  function imagesHost(
+    present: Record<string, string[]>,
+    docker: { ok: true } | { ok: false; problem: string } = { ok: true },
+  ) {
+    const registry = new Map(Object.entries(present).map(([name, tags]) => [name, new Set(tags)]));
+    const copies: string[] = [];
+    const accounts: string[] = [];
+    let listed = 0;
+    const io: ImagesHostIO = {
+      registry: async (account) => {
+        accounts.push(account);
+        listed++;
+        return { value: [...registry.entries()].map(([name, tags]) => ({ name, tags: [...tags] })) };
+      },
+      docker: async () => docker,
+      copy: async (copy, account) => {
+        copies.push(`${copy.source} → ${copy.target}`);
+        accounts.push(account);
+        registry.set(copy.name, new Set([...(registry.get(copy.name) ?? []), copy.version]));
+        return { code: 0, output: `Pushed image: ${copy.target}\n` };
+      },
+    };
+    return {
+      io,
+      copies,
+      accounts,
+      listings: () => listed,
+      forget: (name: string) => registry.delete(name),
+    };
+  }
+  const withImages = (h: ReturnType<typeof imagesHost>, profile: LoadedProfile = REGISTRY) =>
+    bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => profile,
+      undefined,
+      noSecrets,
+      neverPushes,
+      CHECKOUT_ROOT,
+      h.io,
+    );
+
+  it("is CLI-only, deploy:write, operator-gated — like deploy.all", async () => {
+    const { commands } = withImages(imagesHost({}));
+    expect(deployImages).toMatchObject({
+      action: "deploy:write",
+      effect: "write",
+      surfaces: { chat: false, mcp: false, http: false },
+    });
+    expect(await commands.invoke("deploy.images", {}, admin)).toMatchObject({ ok: false, error: "not_found" });
+    expect(await commands.invoke("deploy.images", {}, mcp("deploy:write"))).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+  });
+
+  it("copies the images the account registry lacks at the CLI's version — pull from where the release published them, push under the account — skips the ones present, confirms each landed, and says so", async () => {
+    const h = imagesHost({ switchboard: ["1.2.3", "1.2.2"] });
+    const { commands } = withImages(h);
+    const res = await commands.invoke("deploy.images", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.value).toEqual({
+      version: "1.2.3",
+      account: ACCOUNT,
+      images: [
+        { kind: "bot", source: "ghcr.io/example/switchboard:1.2.3", target: target("switchboard"), status: "present" },
+        {
+          kind: "resident",
+          source: "ghcr.io/example/switchboard-resident:1.2.3",
+          target: target("switchboard-resident"),
+          status: "copied",
+        },
+        {
+          kind: "sandbox",
+          source: "ghcr.io/example/switchboard-sandbox:1.2.3",
+          target: target("switchboard-sandbox"),
+          status: "copied",
+        },
+      ],
+    });
+    expect(h.copies).toEqual([
+      `ghcr.io/example/switchboard-resident:1.2.3 → ${target("switchboard-resident")}`,
+      `ghcr.io/example/switchboard-sandbox:1.2.3 → ${target("switchboard-sandbox")}`,
+    ]);
+    // Read before (the plan) and after (the proof); every call carries the profile's account.
+    expect(h.listings()).toBe(2);
+    expect(new Set(h.accounts)).toEqual(new Set([ACCOUNT]));
+    expect(renderText(commands.get("deploy.images")!, res.value)).toBe(
+      [
+        `present    bot      ${target("switchboard")}`,
+        `copied     resident ${target("switchboard-resident")} ← ghcr.io/example/switchboard-resident:1.2.3`,
+        `copied     sandbox  ${target("switchboard-sandbox")} ← ghcr.io/example/switchboard-sandbox:1.2.3`,
+        `version 1.2.3 on account ${ACCOUNT}: 1 present, 2 copied`,
+      ].join("\n"),
+    );
+    // Idempotent: a second run finds everything present, copies nothing, never asks for Docker.
+    const again = withImages(
+      imagesHost(
+        { switchboard: ["1.2.3"], "switchboard-resident": ["1.2.3"], "switchboard-sandbox": ["1.2.3"] },
+        { ok: false, problem: "no docker" },
+      ),
+    );
+    const twice = await again.commands.invoke("deploy.images", {}, cli);
+    if (!twice.ok) throw new Error(twice.message);
+    expect((twice.value as { images: { status: string }[] }).images.every((i) => i.status === "present")).toBe(true);
+    expect(renderText(commands.get("deploy.images")!, twice.value)).toContain("3 present, 0 copied");
+  });
+
+  it("--dry-run only says what would be copied and touches nothing; the version is always this CLI's own — there is no --version, since the rendered configs reference nothing else", async () => {
+    const h = imagesHost({ switchboard: ["1.2.2"] });
+    const { commands } = withImages(h);
+    const res = await commands.invoke("deploy.images", { options: { dryRun: true } }, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.value).toMatchObject({
+      version: "1.2.3",
+      images: [
+        { kind: "bot", target: target("switchboard"), status: "would copy" },
+        { kind: "resident", status: "would copy" },
+        { kind: "sandbox", status: "would copy" },
+      ],
+    });
+    expect(h.copies).toEqual([]);
+    expect(h.listings()).toBe(1);
+    expect(renderText(commands.get("deploy.images")!, res.value)).toContain(
+      "0 present, 3 to copy (dry run — nothing pulled or pushed)",
+    );
+    expect(Object.keys(deployImages.options!.shape)).toEqual(["dryRun"]);
+    const skew = await commands.invoke("deploy.images", { options: { version: "2.0.0" } }, cli);
+    expect(skew).toMatchObject({ ok: false, error: "invalid_input" });
+  });
+
+  it("refuses the example profile, a registry that cannot be read, and — before anything is pulled — a host without Docker, naming where Docker is", async () => {
+    const example: LoadedProfile = { ...REGISTRY, origin: "example", path: "deploy/profile.example.json" };
+    const onExample = await withImages(imagesHost({}), example).commands.invoke("deploy.images", {}, cli);
+    expect(onExample).toMatchObject({ ok: false, error: "unavailable" });
+    expect(onExample.ok ? "" : onExample.message).toContain("deploy/profile.example.json is the example profile");
+    const unreadable: ImagesHostIO = {
+      ...imagesHost({}).io,
+      registry: async () => ({
+        error: "wrangler containers images list --json failed: ✘ [ERROR] Authentication error",
+      }),
+    };
+    const denied = await bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => REGISTRY,
+      undefined,
+      noSecrets,
+      neverPushes,
+      CHECKOUT_ROOT,
+      unreadable,
+    ).commands.invoke("deploy.images", {}, cli);
+    expect(denied).toMatchObject({ ok: false, error: "unavailable" });
+    expect(denied.ok ? "" : denied.message).toBe(
+      "cannot read the account registry — wrangler containers images list --json failed: ✘ [ERROR] Authentication error",
+    );
+    const noDocker = imagesHost(
+      {},
+      { ok: false, problem: "docker is not available here — run it in .github/workflows/deploy-production.yml" },
+    );
+    const refused = await withImages(noDocker).commands.invoke("deploy.images", {}, cli);
+    expect(refused).toMatchObject({ ok: false, error: "unavailable" });
+    expect(refused.ok ? "" : refused.message).toBe(
+      "docker is not available here — run it in .github/workflows/deploy-production.yml",
+    );
+    expect(noDocker.copies).toEqual([]);
+  });
+
+  it("a failed copy stops the run naming the image, what was not attempted and wrangler's [ERROR] line; a push the registry does not list afterwards is a failure too", async () => {
+    const failing = imagesHost({ switchboard: ["1.2.3"] });
+    failing.io.copy = async (copy) => {
+      failing.copies.push(copy.kind);
+      return {
+        code: 1,
+        output:
+          "npx wrangler containers push switchboard-resident:1.2.3 exited 1\n✘ [ERROR] Unsupported platform: Image platform (linux/arm64)\n",
+      };
+    };
+    const res = await withImages(failing).commands.invoke("deploy.images", {}, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
+    expect(res.ok ? "" : res.message).toBe(
+      `copying the resident image (ghcr.io/example/switchboard-resident:1.2.3 → ${target("switchboard-resident")}) failed (exit 1); stopping — sandbox not attempted. [ERROR] Unsupported platform: Image platform (linux/arm64)`,
+    );
+    expect(failing.copies).toEqual(["resident"]);
+    const silent = imagesHost({ switchboard: ["1.2.3"], "switchboard-resident": ["1.2.3"] });
+    const landsNowhere = silent.io.copy;
+    silent.io.copy = async (copy, account) => {
+      const r = await landsNowhere(copy, account);
+      silent.forget(copy.name);
+      return r;
+    };
+    const unlisted = await withImages(silent).commands.invoke("deploy.images", {}, cli);
+    expect(unlisted).toMatchObject({ ok: false, error: "unavailable" });
+    expect(unlisted.ok ? "" : unlisted.message).toBe(
+      `pushed ${target("switchboard-sandbox")}, but the account registry does not list ${target("switchboard-sandbox")} afterwards`,
+    );
+  });
+
+  it("without `images` in project.json the command (and every render) is `unavailable` naming the file", async () => {
+    const disk = new Map([
+      [PROJECT_FACTS_FILE, JSON.stringify({ name: "switchboard", docs: "https://docs.example.test" })],
+    ]);
+    const { commands } = bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => REGISTRY,
+      disk,
+      noSecrets,
+      neverPushes,
+      CHECKOUT_ROOT,
+      imagesHost({}).io,
+    );
+    const res = await commands.invoke("deploy.images", {}, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
+    expect(res.ok ? "" : res.message).toBe("project.json: `images` is missing");
+  });
+
+  it("a `build`-mode plan never reads the published images: project.json without `images` still plans, its Images line from the Dockerfiles alone; the same facts in `registry` mode are `unavailable`", async () => {
+    const noImages = () =>
+      new Map([[PROJECT_FACTS_FILE, JSON.stringify({ name: "switchboard", docs: "https://docs.example.test" })]]);
+    const build = bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => LOADED,
+      noImages(),
+    );
+    const res = await build.commands.invoke("deploy.plan", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect((res.value as unknown as DeployPlan).images).toEqual({
+      mode: "build",
+      images: [
+        { kind: "bot", dockerfile: "../../Dockerfile" },
+        { kind: "resident", dockerfile: "./Dockerfile" },
+        { kind: "sandbox", dockerfile: "./Dockerfile" },
+      ],
+    });
+    const registry = bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => REGISTRY,
+      noImages(),
+    );
+    const refused = await registry.commands.invoke("deploy.plan", {}, cli);
+    expect(refused).toMatchObject({ ok: false, error: "unavailable" });
+    expect(refused.ok ? "" : refused.message).toBe("project.json: `images` is missing");
+  });
+});
+
+describe("deploy.plan / deploy.all in registry mode", () => {
+  const ACCOUNT = TEST_PROFILE.account;
+  const REGISTRY: LoadedProfile = { profile: TEST_REGISTRY_PROFILE, origin: "profile", path: "deploy/profile.json" };
+  const listing = (names: string[]): ImagesHostIO => ({
+    registry: async () => ({ value: names.map((name) => ({ name, tags: ["1.2.3"] })) }),
+    docker: async () => {
+      throw new Error("must not probe docker");
+    },
+    copy: async () => {
+      throw new Error("must not copy");
+    },
+  });
+  const planWith = (
+    io: ImagesHostIO,
+    profile: LoadedProfile = REGISTRY,
+    run: (plan: DeployPlan) => Promise<DeployRunResult> = neverRunsPlan,
+  ) =>
+    bind(
+      run,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => profile,
+      undefined,
+      noSecrets,
+      neverPushes,
+      CHECKOUT_ROOT,
+      io,
+    );
+
+  it("probes the account registry once and plans with every step's image present — the plan says so and `deploy all` runs it", async () => {
+    let probes = 0;
+    const io = listing(["switchboard", "switchboard-resident", "switchboard-sandbox"]);
+    const counted: ImagesHostIO = { ...io, registry: async (a) => (probes++, io.registry(a)) };
+    const { commands, plans } = planWith(counted, REGISTRY, async (plan) => ({
+      kind: "ran",
+      ok: true,
+      results: plan.steps.map((s) => ({ name: s.name, script: s.script, live: "n/a", status: "deployed" })),
+      notAttempted: [],
+    }));
+    const res = await commands.invoke("deploy.plan", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    const plan = res.value as unknown as DeployPlan;
+    expect(plan.images).toEqual({
+      mode: "registry",
+      version: "1.2.3",
+      images: [
+        { kind: "bot", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`, present: true },
+        { kind: "resident", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3`, present: true },
+        { kind: "sandbox", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:1.2.3`, present: true },
+      ],
+    });
+    expect(probes).toBe(1);
+    expect(renderText(commands.get("deploy.plan")!, res.value)).toContain("Images: registry (version 1.2.3)");
+    const all = await commands.invoke("deploy.all", {}, cli);
+    expect(all.ok).toBe(true);
+    expect(plans).toHaveLength(1);
+  });
+
+  it("from the package root the same registry-mode plan probes the same listing and plans the same references — the images are registry copies, nothing is built from the package's directories", async () => {
+    const io = listing(["switchboard", "switchboard-resident", "switchboard-sandbox"]);
+    const { commands } = bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => REGISTRY,
+      undefined,
+      noSecrets,
+      neverPushes,
+      PACKAGE_ROOT_AT,
+      io,
+    );
+    const res = await commands.invoke("deploy.plan", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    const plan = res.value as unknown as DeployPlan;
+    expect(plan.root).toEqual(PACKAGE_ROOT_AT);
+    expect(plan.images).toMatchObject({
+      mode: "registry",
+      images: [
+        { kind: "bot", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`, present: true },
+        { kind: "resident", present: true },
+        { kind: "sandbox", present: true },
+      ],
+    });
+    const text = renderText(commands.get("deploy.plan")!, res.value);
+    expect(text.split("\n")[0]).toBe("Root: /srv/switchboard (the published package 1.12.0)");
+    expect(text).toContain("Images: registry (version 1.2.3)");
+    expect(text).not.toContain("Dockerfile");
+  });
+
+  it("refuses — plan and all alike, nothing run — when a planned step's image is missing, naming the image and `deploy images`; a step without a container needs no image", async () => {
+    const io = listing(["switchboard"]);
+    const { commands, plans } = planWith(io);
+    for (const id of ["deploy.plan", "deploy.all"]) {
+      const res = await commands.invoke(id, {}, cli);
+      expect(res, id).toMatchObject({ ok: false, error: "unavailable" });
+      expect(res.ok ? "" : res.message).toBe(
+        `refusing — the account registry has no image for resident (registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3), sandbox (registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:1.2.3); run \`deploy images\` first: it copies the release's images at version 1.2.3 into the account registry`,
+      );
+    }
+    expect(plans).toEqual([]);
+    const memoryOnly = await commands.invoke("deploy.plan", { options: { only: "memory" } }, cli);
+    expect(memoryOnly.ok).toBe(true);
+    const botOnly = await commands.invoke("deploy.plan", { options: { only: "bot" } }, cli);
+    expect(botOnly.ok).toBe(true);
+  });
+
+  it("a registry that cannot be read is `unavailable` with wrangler's words; the example profile is never probed and its plan reads `not probed`", async () => {
+    const denied: ImagesHostIO = {
+      ...listing([]),
+      registry: async () => ({
+        error: "wrangler containers images list --json failed: ✘ [ERROR] Authentication error",
+      }),
+    };
+    const res = await planWith(denied).commands.invoke("deploy.plan", {}, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
+    expect(res.ok ? "" : res.message).toBe(
+      "cannot read the account registry — wrangler containers images list --json failed: ✘ [ERROR] Authentication error",
+    );
+    const example: LoadedProfile = { ...REGISTRY, origin: "example", path: "deploy/profile.example.json" };
+    const onExample = planWith(denied, example);
+    const fromExample = await onExample.commands.invoke("deploy.plan", {}, cli);
+    if (!fromExample.ok) throw new Error(fromExample.message);
+    expect((fromExample.value as unknown as DeployPlan).images).toMatchObject({
+      mode: "registry",
+      images: [
+        { kind: "bot", present: undefined },
+        { kind: "resident", present: undefined },
+        { kind: "sandbox", present: undefined },
+      ],
+    });
+    expect(renderText(onExample.commands.get("deploy.plan")!, fromExample.value)).toContain("(not probed)");
+  });
+
+  it("build mode (the default, this project's own) never probes the registry and plans each Dockerfile", async () => {
+    const res = await neverRuns().commands.invoke("deploy.plan", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect((res.value as unknown as DeployPlan).images).toEqual({
+      mode: "build",
+      images: [
+        { kind: "bot", dockerfile: "../../Dockerfile" },
+        { kind: "resident", dockerfile: "./Dockerfile" },
+        { kind: "sandbox", dockerfile: "./Dockerfile" },
+      ],
+    });
+  });
+
+  it("`deploy init` in registry mode renders each container's image as the account registry reference at the CLI's version", async () => {
+    const disk = new Map<string, string>([
+      ...workerConfigTargets(TEST_PROFILE).map((t): [string, string] => [t.templatePath, '{ "image": "{{image}}" }\n']),
+      [`deploy/cloudflare-memory/${TEMPLATE_FILE}`, '{ "name": "{{script}}" }\n'],
+      [SITE_CONFIG_TARGET.templatePath, '{ "name": "{{script}}" }\n'],
+      [PROJECT_FACTS_FILE, FACTS],
+    ]);
+    const { commands } = bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => REGISTRY,
+      disk,
+      noSecrets,
+      neverPushes,
+      CHECKOUT_ROOT,
+      noImages,
+    );
+    const res = await commands.invoke("deploy.init", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(disk.get("deploy/cloudflare/wrangler.jsonc")).toContain(
+      `{ "image": "registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3" }`,
+    );
+    expect(disk.get("deploy/cloudflare-sandbox/wrangler.jsonc")).toContain(
+      `{ "image": "registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:1.2.3" }`,
+    );
+    // The same templates under the default profile render the Dockerfiles.
+    const build = bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => LOADED,
+      new Map(disk),
+      noSecrets,
+      neverPushes,
+      CHECKOUT_ROOT,
+      noImages,
+    );
+    await build.commands.invoke("deploy.init", {}, cli);
+    expect(build.disk.get("deploy/cloudflare/wrangler.jsonc")).toContain('{ "image": "../../Dockerfile" }');
   });
 });

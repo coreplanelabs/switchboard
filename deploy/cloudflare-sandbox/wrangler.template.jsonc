@@ -17,9 +17,11 @@
   "containers": [
     {
       "class_name": "SwitchboardSandbox",
-      // @cloudflare/sandbox ships its own container image; see the Sandbox
-      // docs for the current image reference if this needs pinning.
-      "image": "./Dockerfile",
+      // The profile's image mode decides (src/deploy/images.ts): `build` renders
+      // ./Dockerfile (on the @cloudflare/sandbox base image), built by wrangler
+      // at deploy time; `registry` renders the release's published image as
+      // copied into this account's registry by `deploy images`.
+      "image": "{{image}}",
       // standard-4 = 4 vCPU / 12 GiB RAM / 20 GB disk — the largest predefined
       // type; a custom type tops out at the same 4 vCPU / 12 GiB / 20 GB. The
       // cold path clones + installs + checks a whole repo per thread with

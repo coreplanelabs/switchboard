@@ -8,6 +8,7 @@ import {
   decideAccount,
   DEPLOY_ORDER,
   formatPlan,
+  formatPlanImages,
   planDeploy,
   RESIDENT_BEARER_ENVS,
   RESIDENT_WAIT_MAX_MS,
@@ -18,9 +19,10 @@ import {
   type DeployHost,
   type DeployOptions,
   type DeployPlan,
+  type ImagesInput,
 } from "./plan.js";
 import { EXAMPLE_ACCOUNT, profileUrls, type LoadedProfile } from "./profile.js";
-import { TEST_PROFILE } from "./testing/profile.js";
+import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "./testing/profile.js";
 
 // The one production deploy order, as a pure plan (README "Deploying on
 // Cloudflare Containers", AGENTS.md "Deploy order"). The runner
@@ -48,8 +50,14 @@ const DEFAULTS: DeployOptions = {
 };
 const HOST_ROOT = { mode: "checkout" as const, path: "/work/switchboard" };
 const installed: DeployHost = { root: HOST_ROOT, hasNodeModules: () => true };
-const plan = (opts: Partial<DeployOptions> = {}, host: DeployHost = installed, loaded: LoadedProfile = LOADED) =>
-  planDeploy({ ...DEFAULTS, ...opts }, host, loaded);
+/** The release's images, as the planner is told them; `build`-mode plans (the fixture's) name their Dockerfiles instead. */
+const IMAGES: ImagesInput = { mode: "build" };
+const plan = (
+  opts: Partial<DeployOptions> = {},
+  host: DeployHost = installed,
+  loaded: LoadedProfile = LOADED,
+  images: ImagesInput = IMAGES,
+) => planDeploy({ ...DEFAULTS, ...opts }, host, loaded, images);
 
 describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
   it("is state Worker → bot → resident → sandbox, each once, each with its dir and command", () => {
@@ -645,5 +653,80 @@ describe("classifyDeployOutput", () => {
       kind: "failed",
       reason: "npm ERR! code ELIFECYCLE",
     });
+  });
+});
+
+// Feature: docs/reference/specs/release-and-deploy.md items 25–26 — the plan says where
+// each step's container image comes from. `build`: the Dockerfile wrangler builds.
+// `registry`: the account registry reference at the version, and whether the
+// registry holds it — the commands refuse a missing one — or `undefined` when it
+// was not probed (the example profile, which nothing deploys).
+describe("the plan's images", () => {
+  const REGISTRY: LoadedProfile = { profile: TEST_REGISTRY_PROFILE, origin: "profile", path: "deploy/profile.json" };
+  const account = TEST_PROFILE.account;
+
+  it("in build mode names each image step's Dockerfile — the memory step has none — and formatPlan says wrangler builds them", () => {
+    const p = plan();
+    expect(p.images).toEqual({
+      mode: "build",
+      images: [
+        { kind: "bot", dockerfile: "../../Dockerfile" },
+        { kind: "resident", dockerfile: "./Dockerfile" },
+        { kind: "sandbox", dockerfile: "./Dockerfile" },
+      ],
+    });
+    expect(formatPlan(p)).toContain(
+      "Images: build — wrangler builds bot: ../../Dockerfile, resident: ./Dockerfile, sandbox: ./Dockerfile at deploy time",
+    );
+    expect(plan({ only: ["memory"] }).images).toEqual({ mode: "build", images: [] });
+    expect(formatPlanImages(plan({ only: ["memory"] }).images)).toBe("Images: build — no step has a container");
+  });
+
+  it("in registry mode names each image step's account-registry reference at the version and whether the listing holds it; a missing one reads MISSING and names `deploy images`", () => {
+    const listing = [
+      { name: "switchboard", tags: ["1.2.3"] },
+      { name: "switchboard-resident", tags: ["1.2.2"] },
+    ];
+    const p = plan({}, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES, registry: listing });
+    expect(p.images).toEqual({
+      mode: "registry",
+      version: "1.2.3",
+      images: [
+        { kind: "bot", ref: `registry.cloudflare.com/${account}/switchboard:1.2.3`, present: true },
+        { kind: "resident", ref: `registry.cloudflare.com/${account}/switchboard-resident:1.2.3`, present: false },
+        { kind: "sandbox", ref: `registry.cloudflare.com/${account}/switchboard-sandbox:1.2.3`, present: false },
+      ],
+    });
+    const text = formatPlan(p);
+    expect(text).toContain("Images: registry (version 1.2.3) —");
+    expect(text).toContain(`bot: registry.cloudflare.com/${account}/switchboard:1.2.3 (present)`);
+    expect(text).toContain(
+      `resident: registry.cloudflare.com/${account}/switchboard-resident:1.2.3 (MISSING — run \`deploy images\`)`,
+    );
+    // Only the planned steps' images are judged: `--only memory` needs none.
+    expect(
+      plan({ only: ["memory"] }, installed, REGISTRY, {
+        mode: "registry",
+        published: TEST_PUBLISHED_IMAGES,
+        registry: [],
+      }).images,
+    ).toEqual({
+      mode: "registry",
+      version: "1.2.3",
+      images: [],
+    });
+    expect(formatPlanImages({ mode: "registry", version: "1.2.3", images: [] })).toBe(
+      "Images: registry (version 1.2.3) — no step has a container",
+    );
+  });
+
+  it("without a listing (the example profile is never probed) every image is `not probed`, said as such", () => {
+    const p = plan({ only: ["bot"] }, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES });
+    expect(p.images).toEqual({
+      mode: "registry",
+      version: "1.2.3",
+      images: [{ kind: "bot", ref: `registry.cloudflare.com/${account}/switchboard:1.2.3`, present: undefined }],
+    });
+    expect(formatPlan(p)).toContain(`bot: registry.cloudflare.com/${account}/switchboard:1.2.3 (not probed)`);
   });
 });

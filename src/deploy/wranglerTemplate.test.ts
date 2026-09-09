@@ -1,8 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { stripJsonc } from "../agentEnv/bootstrap.js";
+import { DOCKERFILES, registryName } from "./images.js";
+import { publishedImagesOnHost } from "./run.js";
 import { parseProfile, PROFILE_ENV, PROFILE_EXAMPLE_PATH, PROFILE_PATH, type DeploymentProfile } from "./profile.js";
-import { TEST_PROFILE } from "./testing/profile.js";
+import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "./testing/profile.js";
 import {
   GENERATED_HEADER,
   RENDERED_FILE,
@@ -26,12 +28,13 @@ import {
 
 describe("templateView", () => {
   it("binds a Worker's script and hostname, the account and zone, and the URLs the other Workers are reached at", () => {
-    const view = templateView(TEST_PROFILE, "resident");
+    const view = templateView(TEST_PROFILE, "resident", TEST_PUBLISHED_IMAGES);
     expect(view).toEqual({
       account: TEST_PROFILE.account,
       zone: "example.test",
       script: "switchboard-resident",
       hostname: "switchboard-resident.example.test",
+      image: "./Dockerfile",
       urls: {
         publicBaseUrl: "https://switchboard.example.test",
         stateWorkerUrl: "https://switchboard-memory.example.test",
@@ -45,12 +48,14 @@ describe("templateView", () => {
       ...TEST_PROFILE,
       access: { teamDomain: "acme.cloudflareaccess.com", aud: "a".repeat(64) },
     };
-    expect(templateView(withAccess, "bot")?.access).toEqual({
+    expect(templateView(withAccess, "bot", TEST_PUBLISHED_IMAGES)?.access).toEqual({
       teamDomain: "acme.cloudflareaccess.com",
       aud: "a".repeat(64),
     });
     const { sandbox: _sandbox, ...withoutSandbox } = TEST_PROFILE.workers;
-    expect(templateView({ ...TEST_PROFILE, workers: withoutSandbox }, "sandbox")).toBeUndefined();
+    expect(
+      templateView({ ...TEST_PROFILE, workers: withoutSandbox }, "sandbox", TEST_PUBLISHED_IMAGES),
+    ).toBeUndefined();
   });
 });
 
@@ -110,7 +115,7 @@ describe("siteView / renderSiteConfig", () => {
   });
 });
 
-const VIEW = templateView(TEST_PROFILE, "bot")!;
+const VIEW = templateView(TEST_PROFILE, "bot", TEST_PUBLISHED_IMAGES)!;
 
 describe("renderTemplate", () => {
   it("substitutes every placeholder, keeps everything else byte for byte, and prefixes the generated header", () => {
@@ -205,22 +210,23 @@ describe("templateView / renderTemplate for a bot-only profile", () => {
   const botOnly = { ...TEST_PROFILE, workers: { bot: TEST_PROFILE.workers.bot } };
 
   it("the bot's view carries no state Worker URL; the Workers the profile lacks have no view", () => {
-    const view = templateView(botOnly, "bot")!;
+    const view = templateView(botOnly, "bot", TEST_PUBLISHED_IMAGES)!;
     expect(view.urls).toEqual({
       publicBaseUrl: "https://switchboard.example.test",
       stateWorkerUrl: undefined,
     });
-    for (const kind of ["memory", "resident", "sandbox"] as const) expect(templateView(botOnly, kind)).toBeUndefined();
+    for (const kind of ["memory", "resident", "sandbox"] as const)
+      expect(templateView(botOnly, kind, TEST_PUBLISHED_IMAGES)).toBeUndefined();
     expect(workerConfigTargets(botOnly).map((t) => t.kind)).toEqual(["bot"]);
   });
 
   it("the committed bot template renders against a bot-only profile with nothing left unfilled — its STATE_WORKER_URL line drops; the full profile keeps it", () => {
     const template = readFileSync(new URL(`../../deploy/cloudflare/${TEMPLATE_FILE}`, import.meta.url), "utf8");
-    const without = renderTemplate(template, templateView(botOnly, "bot")!);
+    const without = renderTemplate(template, templateView(botOnly, "bot", TEST_PUBLISHED_IMAGES)!);
     expect(without.ok ? "" : without.problems.join("\n")).toBe("");
     expect(without.ok && without.text).not.toContain("STATE_WORKER_URL");
     expect(without.ok && without.text).toContain('"PUBLIC_BASE_URL": "https://switchboard.example.test"');
-    const withState = renderTemplate(template, templateView(TEST_PROFILE, "bot")!);
+    const withState = renderTemplate(template, templateView(TEST_PROFILE, "bot", TEST_PUBLISHED_IMAGES)!);
     expect(withState.ok && withState.text).toContain('"STATE_WORKER_URL": "https://switchboard-memory.example.test"');
   });
 });
@@ -233,7 +239,7 @@ describe("templateView / renderTemplate for a bot-only profile", () => {
 describe("the sandbox Worker's container", () => {
   it("the cold per-thread sandbox runs on standard-4 — 4 vCPU / 12 GiB / 20 GB, the largest predefined type — so one thread can typecheck a large monorepo", () => {
     const template = readFileSync(new URL(`../../deploy/cloudflare-sandbox/${TEMPLATE_FILE}`, import.meta.url), "utf8");
-    const rendered = renderTemplate(template, templateView(TEST_PROFILE, "sandbox")!);
+    const rendered = renderTemplate(template, templateView(TEST_PROFILE, "sandbox", TEST_PUBLISHED_IMAGES)!);
     expect(rendered.ok ? "" : rendered.problems.join("\n")).toBe("");
     if (!rendered.ok) return;
     const config = JSON.parse(stripJsonc(rendered.text)) as { containers: Array<{ instance_type: unknown }> };
@@ -259,7 +265,11 @@ describe("workerConfigTargets / renderWorkerConfigs", () => {
   });
 
   it("renders every target from its template; a missing template or an unresolved placeholder is a problem naming the file", () => {
-    const ok = renderWorkerConfigs(TEST_PROFILE, (path) => `{ "name": "{{script}}" } // ${path}\n`);
+    const ok = renderWorkerConfigs(
+      TEST_PROFILE,
+      (path) => `{ "name": "{{script}}" } // ${path}\n`,
+      TEST_PUBLISHED_IMAGES,
+    );
     expect(ok.ok).toBe(true);
     if (ok.ok) {
       expect(ok.files.map((f) => f.path)).toEqual(workerConfigTargets(TEST_PROFILE).map((t) => t.outputPath));
@@ -267,9 +277,13 @@ describe("workerConfigTargets / renderWorkerConfigs", () => {
         `${GENERATED_HEADER.join("\n")}\n{ "name": "switchboard" } // deploy/cloudflare/${TEMPLATE_FILE}\n`,
       );
     }
-    const missing = renderWorkerConfigs(TEST_PROFILE, (path) => (path.includes("memory") ? undefined : "{}"));
+    const missing = renderWorkerConfigs(
+      TEST_PROFILE,
+      (path) => (path.includes("memory") ? undefined : "{}"),
+      TEST_PUBLISHED_IMAGES,
+    );
     expect(missing).toEqual({ ok: false, problems: [`deploy/cloudflare-memory/${TEMPLATE_FILE}: no such file`] });
-    const bad = renderWorkerConfigs(TEST_PROFILE, () => '"{{access.aud}}"');
+    const bad = renderWorkerConfigs(TEST_PROFILE, () => '"{{access.aud}}"', TEST_PUBLISHED_IMAGES);
     expect(bad.ok).toBe(false);
     if (!bad.ok)
       expect(bad.problems[0]).toBe(
@@ -278,24 +292,29 @@ describe("workerConfigTargets / renderWorkerConfigs", () => {
   });
 
   it("renderWorkerConfig renders ONE Worker from its own template alone — other templates may be absent; its problems name that template; an unknown Worker is a problem", () => {
-    const only = renderWorkerConfig(TEST_PROFILE, "memory", (path) =>
-      path === `deploy/cloudflare-memory/${TEMPLATE_FILE}` ? '{ "name": "{{script}}" }\n' : undefined,
+    const only = renderWorkerConfig(
+      TEST_PROFILE,
+      "memory",
+      (path) => (path === `deploy/cloudflare-memory/${TEMPLATE_FILE}` ? '{ "name": "{{script}}" }\n' : undefined),
+      TEST_PUBLISHED_IMAGES,
     );
     expect(only).toEqual({
       ok: true,
       path: `deploy/cloudflare-memory/${RENDERED_FILE}`,
       text: `${GENERATED_HEADER.join("\n")}\n{ "name": "switchboard-memory" }\n`,
     });
-    expect(renderWorkerConfig(TEST_PROFILE, "bot", () => undefined)).toEqual({
+    expect(renderWorkerConfig(TEST_PROFILE, "bot", () => undefined, TEST_PUBLISHED_IMAGES)).toEqual({
       ok: false,
       problems: [`deploy/cloudflare/${TEMPLATE_FILE}: no such file`],
     });
-    expect(renderWorkerConfig(TEST_PROFILE, "bot", () => '"{{access.aud}}"')).toEqual({
+    expect(renderWorkerConfig(TEST_PROFILE, "bot", () => '"{{access.aud}}"', TEST_PUBLISHED_IMAGES)).toEqual({
       ok: false,
       problems: [`deploy/cloudflare/${TEMPLATE_FILE} line 1: {{access.aud}} has no value in the deployment profile`],
     });
     const { sandbox: _sandbox, ...withoutSandbox } = TEST_PROFILE.workers;
-    expect(renderWorkerConfig({ ...TEST_PROFILE, workers: withoutSandbox }, "sandbox", () => "{}")).toEqual({
+    expect(
+      renderWorkerConfig({ ...TEST_PROFILE, workers: withoutSandbox }, "sandbox", () => "{}", TEST_PUBLISHED_IMAGES),
+    ).toEqual({
       ok: false,
       problems: ["the profile has no sandbox Worker"],
     });
@@ -324,7 +343,7 @@ describe("the rendered wrangler.jsonc files", () => {
 
   it("the four Workers' templates render against the committed example with nothing left unfilled", () => {
     if (!example.ok) throw new Error(example.problems.join("; "));
-    const rendered = renderWorkerConfigs(example.profile, readDisk);
+    const rendered = renderWorkerConfigs(example.profile, readDisk, TEST_PUBLISHED_IMAGES);
     expect(rendered.ok, JSON.stringify(rendered)).toBe(true);
     if (!rendered.ok) return;
     expect(rendered.files).toHaveLength(4);
@@ -346,7 +365,10 @@ describe("the rendered wrangler.jsonc files", () => {
   it.skipIf(!generated)(
     "each generated file equals the render of its template with the profile in force, byte for byte",
     () => {
-      const rendered = renderWorkerConfigs(profile!, readDisk);
+      // The files on disk were rendered by `deploy:gen` with THIS checkout's images (project.json at its version).
+      const published = publishedImagesOnHost();
+      if (!published.ok) throw new Error(published.problem);
+      const rendered = renderWorkerConfigs(profile!, readDisk, published.images);
       expect(rendered.ok, JSON.stringify(rendered)).toBe(true);
       if (!rendered.ok) return;
       for (const f of rendered.files) expect(readFileSync(f.path, "utf8"), f.path).toBe(f.text);
@@ -355,4 +377,52 @@ describe("the rendered wrangler.jsonc files", () => {
       if (site.ok) expect(readFileSync(site.path, "utf8")).toBe(site.text);
     },
   );
+});
+
+// Feature: docs/reference/specs/release-and-deploy.md item 25 — a Worker's `image` is
+// rendered from the profile's image mode: its Dockerfile in `build` mode, the
+// release's image in the account registry in `registry` mode. The committed
+// templates carry `{{image}}` for exactly the Workers with a container.
+describe("the image mode in the committed templates", () => {
+  const template = (dir: string) => readFileSync(new URL(`../../${dir}/${TEMPLATE_FILE}`, import.meta.url), "utf8");
+  const imageOf = (text: string) => {
+    const config = JSON.parse(stripJsonc(text)) as { containers?: Array<{ image: string }> };
+    return config.containers?.map((c) => c.image);
+  };
+  const dirs = {
+    bot: "deploy/cloudflare",
+    resident: "deploy/cloudflare-resident",
+    sandbox: "deploy/cloudflare-sandbox",
+  } as const;
+
+  it("the bot, resident and sandbox templates name `{{image}}`; the memory template has no container", () => {
+    for (const dir of Object.values(dirs)) expect(template(dir), dir).toMatch(/"image": "\{\{image\}\}"/);
+    expect(template("deploy/cloudflare-memory")).not.toContain("{{image}}");
+    expect(templateView(TEST_PROFILE, "memory", TEST_PUBLISHED_IMAGES)).not.toHaveProperty("image");
+  });
+
+  it("`build` renders each Worker's Dockerfile — the bot's at the repository root — and `registry` the account registry's copy at the version", () => {
+    for (const [kind, dir] of Object.entries(dirs) as [keyof typeof dirs, string][]) {
+      const build = renderTemplate(template(dir), templateView(TEST_PROFILE, kind, TEST_PUBLISHED_IMAGES)!);
+      expect(build.ok ? imageOf(build.text) : build.problems).toEqual([DOCKERFILES[kind]]);
+      const registry = renderTemplate(template(dir), templateView(TEST_REGISTRY_PROFILE, kind, TEST_PUBLISHED_IMAGES)!);
+      expect(registry.ok ? imageOf(registry.text) : registry.problems).toEqual([
+        `registry.cloudflare.com/${TEST_PROFILE.account}/${registryName(TEST_PUBLISHED_IMAGES.names[kind])}:1.2.3`,
+      ]);
+    }
+  });
+
+  it("renderWorkerConfigs in registry mode leaves nothing unfilled and never names a Dockerfile", () => {
+    const rendered = renderWorkerConfigs(
+      TEST_REGISTRY_PROFILE,
+      (path) => (existsSync(path) ? readFileSync(path, "utf8") : undefined),
+      TEST_PUBLISHED_IMAGES,
+    );
+    expect(rendered.ok, JSON.stringify(rendered)).toBe(true);
+    if (!rendered.ok) return;
+    for (const f of rendered.files) {
+      expect(f.text, f.path).not.toMatch(/\{\{|\}\}/);
+      expect(f.text, f.path).not.toContain('Dockerfile"');
+    }
+  });
 });

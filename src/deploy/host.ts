@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { PACKAGE_ROOT, PACKAGE_SOURCE_FILE, parsePackageSource, RUNS_FROM_PUBLISHED_PACKAGE } from "../packageRoot.js";
+import {
+  PACKAGE_ROOT,
+  PACKAGE_SOURCE_FILE,
+  packageVersion,
+  parsePackageSource,
+  RUNS_FROM_PUBLISHED_PACKAGE,
+} from "../packageRoot.js";
 import { assetPath, resolveOperatorRoot, type OperatorRoot } from "./operatorRoot.js";
 import { ensureWorkArea, type WorkAreaOutcome } from "./workArea.js";
 
@@ -25,6 +31,12 @@ export function packageSourceOnHost(at: Pick<OperatorRoot, "assets"> = OPERATOR_
   const parsed = parsePackageSource(existsSync(path) ? readFileSync(path, "utf8") : undefined);
   if (!parsed.ok) throw new Error(`${parsed.problem} (${path})`);
   return parsed.source;
+}
+
+/** The version this CLI runs as — what the release published its images under (src/deploy/images.ts):
+ *  from the package, its own `source.json`; in a checkout or the image, the root `package.json`'s. */
+export function cliVersionOnHost(at: OperatorRoot = OPERATOR_ROOT): string {
+  return at.mode === "package" ? packageSourceOnHost(at).version : packageVersion();
 }
 
 /** `npm ci --workspace <w>…` in `cwd`, output collected; never throws. */

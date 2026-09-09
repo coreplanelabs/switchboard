@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { TEST_PROFILE } from "../../deploy/testing/profile.js";
+import { TEST_PROFILE, TEST_PUBLISHED_IMAGES } from "../../deploy/testing/profile.js";
 import { PROJECT_FACTS_FILE, TEMPLATE_FILE } from "../../deploy/wranglerTemplate.js";
 import { CONFIG_PATH, ENV_PATH, PROFILE_PATH, type PlannedFile } from "../../setup/plan.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
@@ -86,7 +86,11 @@ function bind(world: World = {}) {
           path.endsWith(TEMPLATE_FILE)
             ? '{ "name": "{{script}}" }\n'
             : path === PROJECT_FACTS_FILE
-              ? JSON.stringify({ name: "switchboard", docs: "https://docs.example.test" })
+              ? JSON.stringify({
+                  name: "switchboard",
+                  docs: "https://docs.example.test",
+                  images: TEST_PUBLISHED_IMAGES.names,
+                })
               : undefined,
         write: async (path) => {
           rendered.push(path);
@@ -98,6 +102,12 @@ function bind(world: World = {}) {
         put: async () => ({ code: 0, output: "" }),
       },
       pushConfig: async () => ({ ok: false, problem: "must not push" }),
+      images: {
+        registry: async () => ({ error: "must not read the registry" }),
+        docker: async () => ({ ok: false, problem: "must not probe docker" }),
+        copy: async () => ({ code: 1, output: "must not copy" }),
+      },
+      cliVersion: () => TEST_PUBLISHED_IMAGES.version,
     },
   };
   return { commands: bindCommands(registry, deps), written, rendered, asked };

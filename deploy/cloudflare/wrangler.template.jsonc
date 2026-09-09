@@ -42,8 +42,11 @@
   "containers": [
     {
       "class_name": "SwitchboardServer",
-      // Builds ../../Dockerfile (the same image docker-compose uses)
-      "image": "../../Dockerfile",
+      // The profile's image mode decides (src/deploy/images.ts): `build` renders
+      // ../../Dockerfile (the same image docker-compose uses), built by wrangler
+      // at deploy time; `registry` renders the release's published image as
+      // copied into this account's registry by `deploy images`.
+      "image": "{{image}}",
       "instance_type": "basic",
       "max_instances": 1
     }

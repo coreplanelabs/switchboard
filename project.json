@@ -7,6 +7,11 @@
   "organization": "coreplanelabs",
   "repository": "https://github.com/coreplanelabs/switchboard",
   "image": "ghcr.io/coreplanelabs/switchboard",
+  "images": {
+    "bot": "ghcr.io/coreplanelabs/switchboard",
+    "resident": "ghcr.io/coreplanelabs/switchboard-resident",
+    "sandbox": "ghcr.io/coreplanelabs/switchboard-sandbox"
+  },
   "docs": "https://openswitchboard.dev",
   "topics": [
     "ai-agents",

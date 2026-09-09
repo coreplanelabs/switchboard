@@ -18,6 +18,11 @@ const facts = {
   organization: "acme",
   repository: "https://github.com/acme/switchboard",
   image: "ghcr.io/acme/switchboard",
+  images: {
+    bot: "ghcr.io/acme/switchboard",
+    resident: "ghcr.io/acme/switchboard-resident",
+    sandbox: "ghcr.io/acme/switchboard-sandbox",
+  },
   docs: "https://docs.switchboard.example.com",
   topics: ["ai-agents", "slack-bot"],
   contact: "dev@example.com",
@@ -278,6 +283,28 @@ describe("factsProblems", () => {
       expect(factsProblems({ ...facts, image: "docker.io/acme/switchboard" }, {})[0]?.what).toMatch(
         /the release workflow publishes ghcr\.io\/acme\/switchboard/,
       );
+    });
+
+    // The release publishes three images — the bot's under the fact itself, the
+    // resident's and the sandbox's under the same name with the Worker's suffix
+    // — and `images` records all three so the deploy tooling reads them from the
+    // facts rather than deriving names of its own.
+    it("`images` names the three published images: `image`, `image`-resident, `image`-sandbox — a missing map, a missing kind or another name is named", () => {
+      const what = (images: unknown) =>
+        factsProblems({ ...facts, images: images as (typeof facts)["images"] }, {}).map((p) => p.what);
+      expect(what(facts.images)).toEqual([]);
+      expect(what(undefined)).toEqual([
+        "images is missing — { bot, resident, sandbox }: `image` plus each Worker's suffix",
+      ]);
+      expect(what({ bot: facts.image, sandbox: `${facts.image}-sandbox` })).toEqual([
+        "images.resident is missing, the release workflow publishes ghcr.io/acme/switchboard-resident",
+      ]);
+      expect(what({ ...facts.images, sandbox: "ghcr.io/acme/sandbox" })).toEqual([
+        'images.sandbox is "ghcr.io/acme/sandbox", the release workflow publishes ghcr.io/acme/switchboard-sandbox',
+      ]);
+      expect(what({ ...facts.images, bot: "ghcr.io/someone-else/switchboard" })).toEqual([
+        'images.bot is "ghcr.io/someone-else/switchboard", the release workflow publishes ghcr.io/acme/switchboard',
+      ]);
     });
   });
 

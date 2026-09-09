@@ -100,6 +100,7 @@ commands:
   deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
+  deploy images        — Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so \`registry\`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. Needs Docker where it runs.
   env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
   setup init           — The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run previews with secrets masked."
 `;
@@ -293,6 +294,7 @@ commands:
   deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
+  deploy images        — Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so \`registry\`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. Needs Docker where it runs.
   env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
   setup init           — The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run previews with secrets masked."
 `;
@@ -458,6 +460,7 @@ commands:
   deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
+  deploy images        — Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so \`registry\`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. Needs Docker where it runs.
   env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
   setup init           — The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run previews with secrets masked."
 `;
@@ -570,6 +573,7 @@ exports[`deploy plan — what \`deploy plan\` prints > a bot-only profile is a o
 "Root: /work/switchboard (a checkout)
 Profile: deploy/profile.bot-only.json (example); config: config/config.yaml (no state Worker in the profile — not pushed anywhere)
 Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD == origin/main; node_modules present in every dir
+Images: registry (version 1.2.3) — bot: registry.cloudflare.com/00000000000000000000000000000000/switchboard:1.2.3 (not probed)
 WARNING profile: deploy/profile.bot-only.json is the EXAMPLE — this plan can be read, not deployed; write deploy/profile.json for a real installation
 Steps:
   1. bot (switchboard) — deploy/cloudflare: npm run deploy — preflight (retry every 60s up to 10 min) — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard.example.com/healthz not draining + build.commit == HEAD)
@@ -581,6 +585,7 @@ exports[`deploy plan — what \`deploy plan\` prints > the full example profile:
 "Root: /work/switchboard (a checkout)
 Profile: deploy/profile.example.json (example); config: config/config.yaml → document "base" on https://switchboard-memory.example.com
 Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD == origin/main; node_modules present in every dir
+Images: registry (version 1.2.3) — bot: registry.cloudflare.com/00000000000000000000000000000000/switchboard:1.2.3 (not probed), resident: registry.cloudflare.com/00000000000000000000000000000000/switchboard-resident:1.2.3 (not probed), sandbox: registry.cloudflare.com/00000000000000000000000000000000/switchboard-sandbox:1.2.3 (not probed)
 WARNING profile: deploy/profile.example.json is the EXAMPLE — this plan can be read, not deployed; write deploy/profile.json for a real installation
 Steps:
   1. memory (switchboard-memory) — deploy/cloudflare-memory: npm run deploy

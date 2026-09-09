@@ -13,7 +13,9 @@ import {
   runBotRestart,
   runDeployPlan,
 } from "../deploy/run.js";
+import { imagesHostIO } from "../deploy/imagesHost.js";
 import { hostSecretsIO } from "../deploy/secretsHost.js";
+import { packageVersion } from "../packageRoot.js";
 import { hostSetupIO } from "../setup/host.js";
 import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
@@ -220,6 +222,8 @@ export function buildCoreCommands(
       files: hostDeployFiles,
       secrets: hostSecretsIO,
       pushConfig: pushConfigOnHost,
+      images: imagesHostIO({ stream: (c) => process.stdout.write(c) }),
+      cliVersion: packageVersion,
     },
     env: { bootstrap: bootstrapOnHost },
     // `setup init` writes the operator's working directory — the one the CLI runs in.

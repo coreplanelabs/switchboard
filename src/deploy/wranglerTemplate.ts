@@ -18,6 +18,7 @@
 // the text → text render. Reading and writing files is the command's job
 // (src/core/commands/deploy.ts) through its injected file access.
 
+import { containerImage, IMAGE_KINDS, PROJECT_FACTS_FILE, type ImageKind, type PublishedImages } from "./images.js";
 import { WORKER_DIRS } from "./plan.js";
 import { profileUrls, WORKER_KINDS, type DeploymentProfile, type WorkerKind } from "./profile.js";
 
@@ -25,8 +26,8 @@ export const TEMPLATE_FILE = "wrangler.template.jsonc";
 export const RENDERED_FILE = "wrangler.jsonc";
 /** The project's docs site — the one config under deploy/ that is not a Worker of the installation. */
 export const SITE_DIR = "deploy/cloudflare-docs";
-/** The facts file the site's view reads (project.json), repo-relative — the path `deploy init` asks its file access for. */
-export const PROJECT_FACTS_FILE = "project.json";
+/** The facts file the site's view (and the images) read — project.json, the path `deploy init` asks its file access for. */
+export { PROJECT_FACTS_FILE } from "./images.js";
 
 /** The first lines of every rendered file: what it is and how it changes. */
 export const GENERATED_HEADER: readonly string[] = [
@@ -37,9 +38,9 @@ export const GENERATED_HEADER: readonly string[] = [
 ];
 
 /** What a Worker's template may name: `{{account}}`, `{{zone}}`, `{{script}}`, `{{hostname}}`,
- *  `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}` (inside an `{{#if urls.stateWorkerUrl}}`
- *  block — the state Worker is optional), and inside an `{{#if access}}` block
- *  `{{access.teamDomain}}` / `{{access.aud}}`. */
+ *  `{{image}}` (a Worker with a container), `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}`
+ *  (inside an `{{#if urls.stateWorkerUrl}}` block — the state Worker is optional), and inside an
+ *  `{{#if access}}` block `{{access.teamDomain}}` / `{{access.aud}}`. */
 export interface TemplateView {
   account: string;
   zone: string;
@@ -47,6 +48,10 @@ export interface TemplateView {
   script: string;
   /** This Worker's custom-domain hostname — its route pattern. */
   hostname: string;
+  /** This Worker's container image under the profile's image mode (src/deploy/images.ts
+   *  `containerImage`): its Dockerfile, or the release's image in the account registry.
+   *  Absent for a Worker without a container (the state Worker). */
+  image?: string;
   urls: {
     /** The bot's public origin (live-view links, the dashboards). */
     publicBaseUrl: string;
@@ -58,8 +63,16 @@ export interface TemplateView {
   access: { teamDomain: string; aud: string } | undefined;
 }
 
-/** Pure: the view for one Worker; `undefined` when the profile has no such Worker (an optional one left out). */
-export function templateView(profile: DeploymentProfile, kind: WorkerKind): TemplateView | undefined {
+const hasImage = (kind: WorkerKind): kind is ImageKind => (IMAGE_KINDS as readonly string[]).includes(kind);
+
+/** Pure: the view for one Worker; `undefined` when the profile has no such Worker (an optional one
+ *  left out). `published` — the release's images (project.json `images` at the CLI's version) — is
+ *  what a Worker's `image` renders from in `registry` mode; in `build` mode it is its Dockerfile. */
+export function templateView(
+  profile: DeploymentProfile,
+  kind: WorkerKind,
+  published: PublishedImages,
+): TemplateView | undefined {
   const worker = profile.workers[kind];
   if (!worker) return undefined;
   const urls = profileUrls(profile);
@@ -68,6 +81,7 @@ export function templateView(profile: DeploymentProfile, kind: WorkerKind): Temp
     zone: profile.zone,
     script: worker.script,
     hostname: worker.hostname,
+    ...(hasImage(kind) ? { image: containerImage(kind, profile, published) } : {}),
     urls: { publicBaseUrl: urls.publicBaseUrl, stateWorkerUrl: urls.stateWorkerUrl },
     access: profile.access,
   };
@@ -223,6 +237,7 @@ export type RenderedConfigs =
 export function renderWorkerConfigs(
   profile: DeploymentProfile,
   readTemplate: (path: string) => string | undefined,
+  published: PublishedImages,
 ): RenderedConfigs {
   const files: { kind: WorkerKind; path: string; text: string }[] = [];
   const problems: string[] = [];
@@ -232,7 +247,7 @@ export function renderWorkerConfigs(
       problems.push(`${target.templatePath}: no such file`);
       continue;
     }
-    const view = templateView(profile, target.kind);
+    const view = templateView(profile, target.kind, published);
     if (!view) continue; // unreachable: targets are the Workers the profile has
     const r = renderTemplate(template, view);
     if (!r.ok) problems.push(...r.problems.map((p) => `${target.templatePath} ${p}`));
@@ -247,9 +262,10 @@ export function renderWorkerConfig(
   profile: DeploymentProfile,
   kind: WorkerKind,
   readTemplate: (path: string) => string | undefined,
+  published: PublishedImages,
 ): RenderedConfig {
   const target = workerConfigTargets(profile).find((t) => t.kind === kind);
-  const view = templateView(profile, kind);
+  const view = templateView(profile, kind, published);
   if (!target || !view) return { ok: false, problems: [`the profile has no ${kind} Worker`] };
   const template = readTemplate(target.templatePath);
   if (template === undefined) return { ok: false, problems: [`${target.templatePath}: no such file`] };

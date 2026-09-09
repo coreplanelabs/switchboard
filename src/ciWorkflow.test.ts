@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
+import { DOCKERFILES, IMAGE_KINDS, type ImageKind } from "./deploy/images.js";
+import { WORKER_DIRS } from "./deploy/plan.js";
 
 // CI is a thin caller of the repository's own scripts. Every check a job runs
 // is an `npm run <script>` a contributor or an agent can run locally with the
@@ -306,12 +308,15 @@ describe("the auto-approve workflow names no installation", () => {
 });
 
 describe("the release publishes the bot image", () => {
-  // Every release pushes the root Dockerfile's image to GitHub Container
-  // Registry with build provenance and an SBOM (release-and-deploy.md item
-  // 21). The job runs only on a release, under the least permission that can
-  // push a package — granted to that job, never to the workflow, whose other
-  // jobs act as the release App — and names the image from the repository, so
-  // a fork publishes under its own owner without editing the file.
+  // Every release pushes the three images — the bot's from the root Dockerfile,
+  // the resident's and the sandbox's from their Worker directories — to GitHub
+  // Container Registry with build provenance and an SBOM (release-and-deploy.md
+  // item 21), one matrix leg each. The job runs only on a release, under the
+  // least permission that can push a package — granted to that job, never to the
+  // workflow, whose other jobs act as the release App — and names each image
+  // from the repository plus the Worker's suffix, so a fork publishes under its
+  // own owner without editing the file and project.json's `images` (held to the
+  // same rule by check:project-facts) are the names it pushes.
   const file = ".github/workflows/release-please.yml";
   const text = read(file);
   const workflow = parse(text) as Workflow & { permissions?: Record<string, string> };
@@ -320,11 +325,25 @@ describe("the release publishes the bot image", () => {
   );
   const [id, job] = publish[0] ?? [];
   const step = (prefix: string) => job.steps.find((s) => s.uses?.startsWith(prefix));
+  const facts = JSON.parse(read("project.json")) as { repository: string; images: Record<ImageKind, string> };
+  const matrix = (job.strategy?.matrix?.image ?? []) as { name: string; context: string; suffix: string }[];
 
   it("one job builds and pushes, gated on release-please reporting a release", () => {
     expect(publish.map(([id]) => id)).toEqual(["publish-image"]);
     expect(needsOf(job)).toEqual(["release-please"]);
     expect(job.if).toBe("needs.release-please.outputs.release_created == 'true'");
+  });
+
+  it("one leg per image, each from the context its `check:image` builds, named `ghcr.io/<repository>` plus the suffix project.json records — no leg fails the others", () => {
+    expect(job.strategy).toMatchObject({ "fail-fast": false });
+    expect(matrix.map((m) => m.name)).toEqual([...IMAGE_KINDS]);
+    for (const leg of matrix) {
+      const kind = leg.name as ImageKind;
+      // The Dockerfile's directory, repo-relative — the context `image-each` builds it from.
+      expect(leg.context).toBe(path.normalize(path.join(WORKER_DIRS[kind], path.dirname(DOCKERFILES[kind]))));
+      const repository = new URL(facts.repository).pathname.toLowerCase();
+      expect(`ghcr.io${repository}${leg.suffix}`).toBe(facts.images[kind]);
+    }
   });
 
   it("`packages: write` and the attestation scopes are the job's alone; the workflow stays read-only", () => {
@@ -342,24 +361,24 @@ describe("the release publishes the bot image", () => {
     }
   });
 
-  it("builds the root Dockerfile from the repository root with provenance and an SBOM, and pushes", () => {
+  it("builds each leg's Dockerfile from its matrix context with provenance and an SBOM, and pushes", () => {
     const build = step("docker/build-push-action@")!;
-    expect(build.with?.context).toBe(".");
+    expect(build.with?.context).toBe("${{ matrix.image.context }}");
     expect(build.with?.push).toBe(true);
     expect(build.with?.provenance).toBe("mode=max");
     expect(build.with?.sbom).toBe(true);
-    expect(build.with).not.toHaveProperty("file"); // the root Dockerfile, the one wrangler and compose build
+    expect(build.with).not.toHaveProperty("file"); // the context's own Dockerfile, the one wrangler (and compose) build
   });
 
-  it("names the image from the repository, lowercased, never from a literal owner", () => {
-    // Outside comments, `ghcr.io/` appears only followed by the lowercased repository variable.
+  it("names each image from the repository, lowercased, plus the leg's suffix — never from a literal owner", () => {
+    // Outside comments, `ghcr.io/` appears only followed by the lowercased repository variable and the suffix.
     const code = text
       .split("\n")
       .filter((l) => !l.trim().startsWith("#"))
       .join("\n");
     const names = [...code.matchAll(/ghcr\.io\/([^\s"']+)/g)].map((m) => m[1]);
     expect(names.length).toBeGreaterThan(0);
-    for (const name of names) expect(name).toBe("${GITHUB_REPOSITORY,,}");
+    for (const name of names) expect(name).toBe("${GITHUB_REPOSITORY,,}${SUFFIX}");
     const build = step("docker/build-push-action@")!;
     const tags = String(build.with?.tags)
       .split("\n")
@@ -368,12 +387,13 @@ describe("the release publishes the bot image", () => {
       "${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}",
       "${{ steps.image.outputs.name }}:latest",
     ]);
-    // The version tag is the release tag without its `v`, from release-please's output.
+    // The version tag is the release tag without its `v`, from release-please's output; the suffix is the leg's.
     const name = job.steps.find((s) => (s as Step & { id?: string }).id === "image")!;
     expect(name.run).toContain("version=${TAG#v}");
-    expect((name as Step & { env?: Record<string, string> }).env?.TAG).toBe(
-      "${{ needs.release-please.outputs.tag_name }}",
-    );
+    expect((name as Step & { env?: Record<string, string> }).env).toEqual({
+      TAG: "${{ needs.release-please.outputs.tag_name }}",
+      SUFFIX: "${{ matrix.image.suffix }}",
+    });
   });
 
   it("logs in to ghcr.io with GITHUB_TOKEN and attests the pushed digest into the registry", () => {
@@ -481,38 +501,43 @@ describe("the release publishes the npm package", () => {
 describe("the image check builds every image the deploy builds", () => {
   // A Dockerfile RUN whose last command exits non-zero fails only when the
   // image is built, and if CI builds the bot image alone the first build of any
-  // other Worker's image is the production deploy. The rule: an image
-  // is whatever a Worker's wrangler template points `image` at, and every such
-  // Worker builds it with its own `check:image` (from the context wrangler
-  // uses) and has one leg of the fan-out under the `image` gate. The set is
-  // DERIVED from the templates, so a new Worker with an image fails here until
-  // it has both — and a Worker without an image must not claim the script, or
-  // the root `check:image` (every workspace's, `--if-present`) would run it.
+  // other Worker's image is the production deploy. The rule: a Worker with an
+  // image is one whose wrangler template renders `{{image}}` — in `build` mode
+  // the Dockerfile `DOCKERFILES` names for it (src/deploy/images.ts), the one
+  // wrangler builds — and every such Worker builds it with its own
+  // `check:image` (from the context wrangler uses) and has one leg of the
+  // fan-out under the `image` gate. The set is DERIVED from the templates, so a
+  // new Worker with an image fails here until it has both — and a Worker
+  // without an image must not claim the script, or the root `check:image`
+  // (every workspace's, `--if-present`) would run it.
   const workerDirs = readdirSync(new URL("deploy", `file://${root}`), { withFileTypes: true })
     .filter((d) => d.isDirectory() && existsSync(new URL(`deploy/${d.name}/package.json`, `file://${root}`)))
     .map((d) => `deploy/${d.name}`);
   const scriptsOf = (dir: string) =>
     (JSON.parse(read(`${dir}/package.json`)) as { scripts?: Record<string, string> }).scripts ?? {};
 
-  /** The Workers whose wrangler template names an image, with the Dockerfile's
-   *  directory — what wrangler builds — relative to the Worker's directory. */
+  /** The Workers whose wrangler template renders an image, with the Dockerfile's
+   *  directory — what wrangler builds in `build` mode — relative to the Worker's directory. */
   const images = workerDirs.flatMap((dir) => {
     const template = `${dir}/wrangler.template.jsonc`;
     if (!existsSync(new URL(template, `file://${root}`))) return [];
-    const m = /"image":\s*"([^"]+)"/.exec(read(template));
-    if (!m) return [];
-    const dockerfile = path.normalize(path.join(dir, m[1]));
+    if (!/"image":\s*"\{\{image\}\}"/.test(read(template))) return [];
+    const kind = (Object.keys(WORKER_DIRS) as ImageKind[]).find((k) => WORKER_DIRS[k] === dir);
+    if (kind === undefined || !(IMAGE_KINDS as readonly string[]).includes(kind))
+      throw new Error(`${template} renders {{image}} but ${dir} is not one of IMAGE_KINDS`);
+    const dockerfile = path.normalize(path.join(dir, DOCKERFILES[kind]));
     const context = path.relative(dir, path.dirname(dockerfile)) || ".";
     return [{ dir, context, dockerfile }];
   });
   const withoutImage = workerDirs.filter((dir) => !images.some((i) => i.dir === dir));
 
-  it("finds the Workers with an image: the bot (the root Dockerfile), the resident and the sandbox", () => {
+  it("finds the Workers with an image: the bot (the root Dockerfile), the resident and the sandbox — every IMAGE_KIND, and no other", () => {
     expect(images.map((i) => `${i.dir} ← ${i.context}`).sort()).toEqual([
       "deploy/cloudflare ← ../..",
       "deploy/cloudflare-resident ← .",
       "deploy/cloudflare-sandbox ← .",
     ]);
+    expect(images.map((i) => i.dir).sort()).toEqual(IMAGE_KINDS.map((k) => WORKER_DIRS[k]).sort());
     for (const i of images) expect(existsSync(new URL(i.dockerfile, `file://${root}`)), i.dockerfile).toBe(true);
     expect(withoutImage).toEqual(["deploy/cloudflare-docs", "deploy/cloudflare-memory"]);
   });

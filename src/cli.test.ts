@@ -419,6 +419,7 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
       "deploy all",
       "deploy secrets",
       "deploy config",
+      "deploy images",
       "env bootstrap",
       "setup init",
     ]) {

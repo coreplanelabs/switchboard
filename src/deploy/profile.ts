@@ -51,6 +51,14 @@ const endpoint = z.object({
 /** `path` | `github://owner/repo/path@ref` | `op://Vault/Item/field` — parsed by src/deploy/configSource.ts. */
 const source = z.string().min(1);
 
+/** Where a Worker's container image comes from (src/deploy/images.ts): `build` —
+ *  each Worker's `image` is its Dockerfile and wrangler builds it at deploy time
+ *  (a checkout; this project's own production); `registry` — the release's
+ *  published images, copied into the account registry by `deploy images` and
+ *  referenced as `registry.cloudflare.com/<account>/<name>:<version>`. */
+export const IMAGE_MODES = ["build", "registry"] as const;
+export type ImageMode = (typeof IMAGE_MODES)[number];
+
 export const profileSchema = z.object({
   /** The Cloudflare account every Worker deploys to (32 hex characters). */
   account: z.string().regex(/^[0-9a-f]{32}$/, "a Cloudflare account id: 32 hex characters"),
@@ -74,6 +82,9 @@ export const profileSchema = z.object({
    *  `op://Vault/Item` with the secret's name as the field. Optional: the
    *  secrets tooling has its own default directory. */
   secretsSource: source.optional(),
+  /** How the bot, resident and sandbox images reach wrangler (`IMAGE_MODES`).
+   *  Absent means `build` — the checkout deploys what it builds. */
+  images: z.enum(IMAGE_MODES).default("build"),
   /** The Cloudflare Access application in front of the bot's dashboards, when
    *  there is one: the team domain the JWT is issued by and the app's AUD. */
   access: z.object({ teamDomain: hostname, aud: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),

@@ -30,7 +30,8 @@ import { ALL_GRANTS } from "../authz/grants.js";
 import { callerWith } from "./callers.js";
 import type { DeployPlan } from "../../deploy/plan.js";
 import type { RestartPlan } from "../../deploy/restart.js";
-import { TEST_PROFILE } from "../../deploy/testing/profile.js";
+import { TEST_PROFILE, TEST_PUBLISHED_IMAGES } from "../../deploy/testing/profile.js";
+import type { ImageCopy } from "../../deploy/images.js";
 import {
   PROJECT_FACTS_FILE,
   renderSiteConfig,
@@ -103,9 +104,13 @@ export const NOW = 1_700_000_000_000;
 /** `deploy init`'s world: one template for every Worker dir and the site's, the project facts the site
  *  renders from (a made-up project), and each rendered file already equal to its render. */
 export const FIXTURE_TEMPLATE = '{ "name": "{{script}}", "account_id": "{{account}}" }\n';
-export const FIXTURE_FACTS = JSON.stringify({ name: "switchboard", docs: "https://docs.example.test" });
+export const FIXTURE_FACTS = JSON.stringify({
+  name: "switchboard",
+  docs: "https://docs.example.test",
+  images: TEST_PUBLISHED_IMAGES.names,
+});
 export const FIXTURE_RENDERED: ReadonlyMap<string, string> = (() => {
-  const r = renderWorkerConfigs(TEST_PROFILE, () => FIXTURE_TEMPLATE);
+  const r = renderWorkerConfigs(TEST_PROFILE, () => FIXTURE_TEMPLATE, TEST_PUBLISHED_IMAGES);
   if (!r.ok) throw new Error(r.problems.join("; "));
   const site = renderSiteConfig(TEST_PROFILE, FIXTURE_FACTS, () => FIXTURE_TEMPLATE);
   if (!site.ok) throw new Error(site.problems.join("; "));
@@ -377,6 +382,8 @@ export function fakeMcpService(): McpService {
 }
 
 export function fakeDeps(s: Stubs): CoreCommandDeps {
+  // `deploy images` copied the sandbox image into this fixture's registry (the listing then shows it).
+  let imagesCopied = false;
   const exec = <T>(what: string, value: T): T => {
     s.executed.push(what);
     return value;
@@ -522,6 +529,24 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
           sha256: "ab".repeat(32),
           bytes: 12,
         }),
+      // `deploy images`: the account registry already holds the bot's and the resident's images at the
+      // fixture version and not the sandbox's, so one copy is the effect and is recorded; Docker is
+      // here; a read of the registry is a probe, not an executor.
+      images: {
+        registry: async () => ({
+          value: [
+            { name: "switchboard", tags: [TEST_PUBLISHED_IMAGES.version, "latest"] },
+            { name: "switchboard-resident", tags: [TEST_PUBLISHED_IMAGES.version] },
+            { name: "switchboard-sandbox", tags: [TEST_PUBLISHED_IMAGES.version] },
+          ].filter((r) => r.name !== "switchboard-sandbox" || imagesCopied),
+        }),
+        docker: async () => ({ ok: true }),
+        copy: async (copy: ImageCopy) => {
+          imagesCopied = true;
+          return exec(`deploy.images copy ${copy.source} → ${copy.target}`, { code: 0, output: "" });
+        },
+      },
+      cliVersion: () => TEST_PUBLISHED_IMAGES.version,
       affected: async (opts) => ({
         head: "f".repeat(40),
         workers: [
