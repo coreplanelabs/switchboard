@@ -10,14 +10,9 @@ import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { isSpanRecord } from "../runEvents.js";
 import { fitRecordToBudget, type RunRecord, type RunStatus } from "../runRecord.js";
-import {
-  activityOfEvents,
-  type RunHandle,
-  type RunRegistry,
-  type RunSnapshot,
-  type RunSummary,
-  type SealResult,
-} from "../runRegistry.js";
+import type { RunHandle, RunRegistry } from "../runRegistry.js";
+import { activityOfEvents } from "../runRegistry/activity.js";
+import type { RunSnapshot, RunSummary, SealResult } from "../runRegistry/projections.js";
 import type { RunHistoryWriter } from "../runHistoryWriter.js";
 import type { AppendableEvent, LiveRunRow } from "../runLedger/types.js";
 import type { ResolvedRequest } from "../../config.js";

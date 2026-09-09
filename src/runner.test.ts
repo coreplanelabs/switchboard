@@ -8,7 +8,7 @@ import {
   type ContentPart,
   type Provider,
 } from "./providers/types.js";
-import { RunControl } from "./core/runRegistry.js";
+import { RunControl } from "./core/runRegistry/runControl.js";
 import type { Executor } from "./execution/executor.js";
 import { ExecCapacityError, ExecInfraError } from "./execution/executor.js";
 import type { RunEvent } from "./core/runEvents.js";

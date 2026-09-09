@@ -1,17 +1,37 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import {
-  redactAndCap,
-  sanitizeActor,
-  serializedOnce,
-  type RunActor,
-  type RunEvent,
-  type StopMode,
-  isHeadMaterial,
-  isSpanRecord,
-} from "./runEvents.js";
-import type { ChannelVisibility } from "./authz/types.js";
+import { redactAndCap, sanitizeActor, type RunActor, type RunEvent, type StopMode, isSpanRecord } from "./runEvents.js";
 import type { RunStatus } from "./runRecord.js";
-import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
+import { RunControl } from "./runRegistry/runControl.js";
+import {
+  appendToBacklog,
+  DEFAULT_BACKLOG_BYTES,
+  DEFAULT_BACKLOG_LIMIT,
+  DEFAULT_REPLAY_BYTES,
+  DEFAULT_REPLAY_LIMIT,
+  replayWindow,
+  type BacklogBounds,
+} from "./runRegistry/backlog.js";
+import type {
+  FinishedFrame,
+  RunFinishedListener,
+  RunMeta,
+  RunSealListener,
+  RunState,
+  RunSubscriber,
+  SealedFrame,
+  Subscription,
+  Unsubscribe,
+} from "./runRegistry/state.js";
+import {
+  sealResultOf,
+  sealedFrameOf,
+  snapshotOf,
+  summaryOf,
+  type RunSnapshot,
+  type RunSummary,
+  type SealResult,
+} from "./runRegistry/projections.js";
+import { IndexFeed, type IndexSubscriber } from "./runRegistry/indexFeed.js";
 
 // The run registry is the unit-testable core of the external live-view page
 // (docs/reference/specs/live-view.md) and the ONE per-run event store while a run is live
@@ -35,41 +55,9 @@ import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 // whose callers are authorized ONE LAYER UP (the command registry's policy table
 // plus the Cloudflare Access gate). Nothing in this file decides who
 // an operator is; it only trusts that its token-free callers already did.
-
-/**
- * Per-run stop control. One per run, minted by `RunRegistry.create()` and
- * handed to the runner; `requestStop` is driven through the registry's
- * token-gated `requestStop(id, token, mode)`. Two modes, one direction:
- *   - `soft`: only records the request. The runner polls `requested` between
- *     steps, takes no new step, and wraps up through the guaranteed finale.
- *   - `hard`: records the request AND aborts `hardSignal`, which the runner
- *     threads into the in-flight provider call and tool execution so they are
- *     cancelled now, with no finale.
- * A soft request escalates to hard; a hard request never de-escalates; repeats
- * are idempotent. Everything here is synchronous and never throws.
- */
-export class RunControl {
-  private mode: StopMode | undefined;
-  private readonly hard = new AbortController();
-
-  /** The strongest stop requested so far, or undefined while none has been. */
-  get requested(): StopMode | undefined {
-    return this.mode;
-  }
-
-  /** Aborted iff a HARD stop has been requested. Pass to anything cancellable. */
-  get hardSignal(): AbortSignal {
-    return this.hard.signal;
-  }
-
-  /** Record a stop request; returns the effective mode after it (hard wins). */
-  requestStop(mode: StopMode): StopMode {
-    if (this.mode === "hard") return "hard";
-    this.mode = mode;
-    if (mode === "hard") this.hard.abort(new Error("run stopped (hard) by operator"));
-    return this.mode;
-  }
-}
+//
+// The registry's parts live as sibling modules under `./runRegistry/`; this
+// file is the registry itself and its public contract.
 
 /** The identifiers a freshly created run is addressed by, plus its control. */
 /** `create()` for a run that already has an identity and a past (a resume,
@@ -96,160 +84,10 @@ export interface RunHandle {
   label?: string;
 }
 
-/** What the dispatcher knows about a run at `create()` beyond its label: the
- *  same identity fields the persisted record carries, so a live row projects
- *  like a persisted one (`RunsService.listRuns` filters on them, F8). */
-export interface RunMeta {
-  /** Resolved agent name. */
-  agent?: string;
-  /** `<provider>/<model>` the run resolved to. */
-  model?: string;
-  /** Platform-namespaced ids (AGENTS.md invariant 4). */
-  channelId: string;
-  userId: string;
-  threadKey: string;
-  /** The channel's visibility as the `ChannelDirectory` reported it at dispatch
-   *  (authorization) — what `member-of` reads on a live run. The dispatcher
-   *  always stamps it; a hand-built run without it is `unknown`, never public. */
-  channelVisibility?: ChannelVisibility;
-  /** `owner/name` for repo runs. */
-  repo?: string;
-  /** A link back to the message that started the run (`IncomingMessage.sourceUrl`),
-   *  so the index can offer the thread without opening the run (live-view item 20). */
-  sourceUrl?: string;
-  /** Resolved display name of who started it (`IncomingMessage.userName`) — the
-   *  source mark's hover says `via Slack · alice`, never a raw member id. */
-  userName?: string;
-  /** Our process saw the message that started this run (docs/reference/specs/tracing.md);
-   *  the run's duration opens here, falling back to `startedAt` when absent. */
-  receivedAt?: number;
-}
-
-/** A run's stop status for the index: `stopping` from the request until the run
- *  finishes, then `stopped`. Absent when no stop was ever requested. */
-export interface RunStopStatus {
-  mode: StopMode;
-  state: "stopping" | "stopped";
-}
-
 /** Outcome of `RunRegistry.requestStop`. `not-found` covers BOTH an unknown run
  *  and a wrong token (the caller maps it to 404 — existence is never revealed);
  *  `finished` is a run that already ended (409). */
 export type StopRequestResult = { ok: true; mode: StopMode } | { ok: false; reason: "not-found" | "finished" };
-
-/**
- * A live-only snapshot of one non-evicted run, for the Access-gated runs index
- * (`GET /runs`). It intentionally carries the per-run `token` so the index can
- * render each run's full capability link — the index is the ONE place tokens
- * surface, and it must only ever be exposed behind Cloudflare Access (see
- * docs/reference/specs/live-view.md). `eventCount` is monotonic (total published, not the
- * bounded-backlog length) and `startedAt` is the injectable-clock time at
- * `create()`, so callers can sort/label without reaching into run internals.
- */
-export interface RunSummary {
-  id: string;
-  token: string;
-  /** Short human label set at create() (e.g. "coding · owner/repo"); optional. */
-  label?: string;
-  /** The identity `RunMeta` given at create(); absent fields are omitted. */
-  agent?: string;
-  model?: string;
-  channelId?: string;
-  userId?: string;
-  threadKey?: string;
-  /** `RunMeta.channelVisibility`; absent = `unknown`. */
-  channelVisibility?: ChannelVisibility;
-  repo?: string;
-  finished: boolean;
-  startedAt: number;
-  /** The clock time at `finish()`; absent while the run is live. */
-  finishedAt?: number;
-  /** The terminal status the dispatcher computed and handed to `finish()`;
-   *  absent while live, and for a finish that reported none. */
-  status?: RunStatus;
-  eventCount: number;
-  /** What the run is doing right now, one line (live-view item 20): the latest
-   *  narration's first line, the latest tool call's summary, or `answering`;
-   *  absent until the first such event. The index shows it on the status dot so
-   *  a glance answers "what step is it on" without opening the run. */
-  activity?: string;
-  /** `RunMeta.sourceUrl`: the thread that started the run, for the index's hover link. */
-  sourceUrl?: string;
-  /** `RunMeta.userName`: who started it, resolved. */
-  userName?: string;
-  /** Present only once a stop has been requested. */
-  stop?: RunStopStatus;
-  /** Present (true) once the history writer confirmed the run is in the durable
-   *  store — how an index client learns a row outlives eviction. */
-  persisted?: boolean;
-  /** The seven stamps and the one duration (docs/reference/specs/tracing.md). `receivedAt`:
-   *  our process saw the message, from the adapter's clock (stamped by the
-   *  dispatcher once the adapters carry it; absent until then, so every reader
-   *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
-   *  reply attempt completed or the branch was abandoned; `replyOk` is
-   *  tri-state — `true` a reply was attempted and delivered, `false` attempted
-   *  and threw, absent none was made. `stepCount`: content events only (span
-   *  records excluded). `schema`: the record's stream schema (2 once spans are
-   *  emitted); absent is legacy. All omitted when absent. */
-  receivedAt?: number;
-  sealedAt?: number;
-  replyOk?: boolean;
-  stepCount?: number;
-  schema?: number;
-}
-
-/** What `snapshot`/`snapshotById` return: a COPY of the retained backlog plus the
- *  two record fields not derivable from the events. */
-export interface RunSnapshot {
-  events: RunEvent[];
-  finished: boolean;
-  startedAt: number;
-  /** The clock time at `finish()`; absent while the run is live. The record's
-   *  `finishedAt` is this value, so the registry row and the record agree. */
-  finishedAt?: number;
-  /** `RunMeta.receivedAt`, when the run was created with it (docs/reference/specs/tracing.md). */
-  receivedAt?: number;
-  eventCount: number;
-  /** Content events published — span records excluded (docs/reference/specs/tracing.md). */
-  stepCount: number;
-  /** True when the bounded backlog dropped events (`eventCount > events.length`):
-   *  a consumer analyzing `events` is looking at a head-truncated stream. */
-  truncated: boolean;
-}
-
-/** `seq` is the event's 1-based position in the run's stream (the registry's
- *  `eventCount` at publish) — the SSE `id:` a client resumes from. */
-export type RunSubscriber = (event: RunEvent, seq: number) => void;
-/** The agent stopped (`finish()`): the SSE `finished` frame. Content events
- *  stop here; span records keep flowing until the seal. */
-export interface FinishedFrame {
-  finishedAt: number;
-}
-/** The stream closed (`seal()`): the SSE `end` frame. `replyOk` is tri-state
- *  (docs/reference/specs/tracing.md): `true` a reply was attempted and delivered, `false`
- *  attempted and threw, absent none was measured. */
-export interface SealedFrame {
-  sealedAt: number;
-  replyOk?: boolean;
-}
-/** Called once when the run finishes (immediately, for a run already finished). */
-export type RunFinishedListener = (frame: FinishedFrame) => void;
-/** Called once when the run's stream closes (immediately, for a run already sealed). */
-export type RunSealListener = (frame: SealedFrame) => void;
-/** Tear-down returned by a successful subscribe(); safe to call more than once. */
-export type Unsubscribe = () => void;
-
-/** What `seal()` returns, and what the record writer merges after the reply:
- *  the events published between finish and seal (span records), the published
- *  total, and the two seal stamps. An unknown or evicted run yields the empty
- *  result; a live run yields no stamps; a sealed run yields the same result on
- *  every call. */
-export interface SealResult {
-  events: RunEvent[];
-  eventCount?: number;
-  sealedAt?: number;
-  replyOk?: boolean;
-}
 
 /** How long a finished run may stay unsealed before the sweep seals it (with
  *  no `replyOk`) and evicts it: the reply that would have sealed it never
@@ -257,47 +95,10 @@ export interface SealResult {
  *  its subscribers and its live-view token stay pinned. */
 export const UNSEALED_HOLD_MS = 15 * 60_000;
 
-/**
- * A single change on the Access-gated runs index (`GET /runs`), delivered live to
- * `subscribeIndex` listeners. `upsert` carries the run's current summary — the
- * same shape `listActive()` returns — and covers create, per-event activity, and
- * finish (a finished run is an `upsert` with `finished: true`, not a removal).
- * `removed` fires exactly once, when a finished run is finally evicted by the TTL
- * sweep — the only removal signal (eviction stays lazy/timer-free).
- */
-export type IndexEvent = { type: "upsert"; run: RunSummary } | { type: "removed"; id: string };
-
-/** A live subscriber to the runs-index feed. */
-export type IndexSubscriber = (event: IndexEvent) => void;
-
 /** Longest label kept on a run summary (redacted first — see `create()`). Wider
  *  than the dispatcher's own composed-label cap, so this is a safety net, not
  *  the display truncation. */
 export const RUN_LABEL_MAX = 200;
-
-/** Default per-run backlog bounds: count and bytes. The registry
- *  backlog is the ONLY per-run event store — the friction diagnosis and the run
- *  record are built from it — so it is bounded generously and by both axes. */
-export const DEFAULT_BACKLOG_LIMIT = 8000;
-export const DEFAULT_BACKLOG_BYTES = 4 * 1024 * 1024;
-
-/** The protected head (docs/reference/specs/tracing.md; live-view item 2): the events that
- *  say what a run is — its request, its context, its meta, the setup spans and
- *  the notes about missing tools or dropped setup — are never trimmed by the
- *  count or byte bound, up to this many bytes. Past the budget, or once any
- *  other event has been published, later head material is ordinary. Head
- *  events are capped to `MAX_EVENT_BYTES` at publish so one giant `context`
- *  cannot spend the whole budget. */
-export const HEAD_BUDGET_BYTES = 512 * 1024;
-
-/** The replay budget a late subscriber gets from the retained backlog
- *  (docs/reference/specs/live-view.md item 5): at most this many events and at most
- *  `DEFAULT_REPLAY_BYTES` of UTF-8 JSON, the newest first. The backlog keeps
- *  more than a browser needs to follow a live run, and a page must not stall on
- *  a 4 MiB burst; what the budget leaves out is reported as `elided`, never
- *  silently dropped. */
-export const DEFAULT_REPLAY_LIMIT = 2000;
-export const DEFAULT_REPLAY_BYTES = 1024 * 1024;
 
 /** The budget override for a subscriber that must see every retained event —
  *  the run ledger, which is a store, not a viewer. Viewers take the defaults. */
@@ -356,87 +157,6 @@ export interface RunRegistryOptions {
   now?: () => number;
 }
 
-interface Subscription {
-  onEvent: RunSubscriber;
-  onFinished?: RunFinishedListener;
-  onSealed?: RunSealListener;
-}
-
-interface RunState {
-  id: string;
-  token: string;
-  /** The newest events, each carrying its `seq` (stream position). Bounded by
-   *  count and bytes — see `publish()`. */
-  backlog: RunEvent[];
-  /** UTF-8 JSON size of each backlog entry, index-aligned with `backlog`. */
-  backlogSizes: number[];
-  /** Sum of `backlogSizes`; compared against the byte budget on publish. */
-  backlogBytes: number;
-  subscribers: Set<Subscription>;
-  finished: boolean;
-  /** Wall-clock finish time (the agent stopped). */
-  finishedAt?: number;
-  /** `eventCount` at finish: the seal result's events are the ones after it. */
-  finishSeq?: number;
-  /** Wall-clock seal time (the stream closed); drives TTL eviction. Absent
-   *  between finish and seal — the unsealed hold. */
-  sealedAt?: number;
-  /** The first seal's `replyOk`, when one was given. */
-  replyOk?: boolean;
-  /** Terminal status given to `finish()`, projected onto the summary. */
-  status?: RunStatus;
-  /** Short human label for the runs index; set at create(). */
-  label?: string;
-  /** Identity fields given at create(); projected onto every summary. */
-  meta?: RunMeta;
-  /** Clock time at create() — the index sorts newest-first on this. */
-  startedAt: number;
-  /** Monotonic creation order; a stable tiebreak when two runs share a clock. */
-  seq: number;
-  /** The latest one-line activity (see `RunSummary.activity`); set by `publish()`. */
-  activity?: string;
-  /** Total events published (monotonic; unlike backlog, never trimmed). */
-  eventCount: number;
-  /** Content events published (span records excluded); monotonic like `eventCount`. */
-  stepCount: number;
-  /** The protected head: the first `headLen` backlog entries, never trimmed,
-   *  `headBytes` of them (docs/reference/specs/tracing.md). Grows only while the backlog
-   *  holds nothing but head material and the budget allows. */
-  headLen: number;
-  headBytes: number;
-  /** Stop control handed to the runner at create(); driven by requestStop(). */
-  control: RunControl;
-  /** Set by markPersisted() once the durable store confirmed the record. */
-  persisted: boolean;
-}
-
-/** First line of `text`, whitespace collapsed, cut at `max` with an ellipsis —
- *  the index's one-line activity (events are already redacted upstream). */
-function oneLine(text: string, max: number): string {
-  const line = text.replace(/\s+/g, " ").trim();
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
-}
-
-/** The one-line activity an event contributes (live-view item 20): the newest
- *  narration's first line, a tool call's summary, or the answer's first line —
- *  for a failed inline run that is the `⚠️ <error>` reply, so the index can
- *  say WHAT failed. Other events contribute nothing (`undefined`). One rule for
- *  the live summary (`publish`) and the persisted record (`activityOfEvents`). */
-export function activityOf(event: RunEvent): string | undefined {
-  if (event.type === "assistant" || event.type === "answer") return oneLine(event.text, 120);
-  if (event.type === "tool_call") return oneLine(event.summary, 120);
-  return undefined;
-}
-
-/** The latest activity across a run's events (the record writer's rule). */
-export function activityOfEvents(events: readonly RunEvent[]): string | undefined {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const a = activityOf(events[i]);
-    if (a !== undefined) return a;
-  }
-  return undefined;
-}
-
 /** Equal-length constant-time string compare (mirrors channels/http.ts). Guards
  *  length first — differing lengths can't be timingSafeEqual'd and never match —
  *  and never logs the compared material. */
@@ -449,11 +169,9 @@ function safeEqual(a: string, b: string): boolean {
 
 export class RunRegistry {
   private readonly runs = new Map<string, RunState>();
-  /** Live subscribers to the runs-index feed (see subscribeIndex). Separate from
-   *  per-run `subscribers`: these get every run's lifecycle, not one run's events. */
-  private readonly indexSubscribers = new Set<IndexSubscriber>();
-  private readonly backlogLimit: number;
-  private readonly backlogBytes: number;
+  /** The runs-index feed every lifecycle step below notifies (see subscribeIndex). */
+  private readonly index = new IndexFeed();
+  private readonly bounds: BacklogBounds;
   private readonly ttlMs: number;
   private readonly genId: () => string;
   private readonly genToken: () => string;
@@ -462,8 +180,10 @@ export class RunRegistry {
   private seq = 0;
 
   constructor(opts: RunRegistryOptions = {}) {
-    this.backlogLimit = opts.backlogLimit ?? DEFAULT_BACKLOG_LIMIT;
-    this.backlogBytes = opts.backlogBytes ?? DEFAULT_BACKLOG_BYTES;
+    this.bounds = {
+      limit: opts.backlogLimit ?? DEFAULT_BACKLOG_LIMIT,
+      bytes: opts.backlogBytes ?? DEFAULT_BACKLOG_BYTES,
+    };
     this.ttlMs = opts.ttlMs ?? 60_000;
     this.genId = opts.genId ?? (() => randomUUID());
     this.genToken = opts.genToken ?? (() => randomBytes(32).toString("hex"));
@@ -518,42 +238,10 @@ export class RunRegistry {
       const seq = event.seq ?? run.eventCount + 1;
       run.eventCount = Math.max(run.eventCount, seq);
       if (!isSpanRecord(event)) run.stepCount++;
-      this.appendToBacklog(run, { ...event, seq });
+      appendToBacklog(run, this.bounds, { ...event, seq });
     }
-    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    this.index.notify({ type: "upsert", run: summaryOf(run) });
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
-  }
-
-  /** Append one stamped event to the run's bounded backlog and refresh its
-   *  activity line. Head material published while the backlog holds nothing
-   *  but head joins the protected head (capped per event, bounded in total);
-   *  the trim then drops the oldest event AFTER the head, never the head, and
-   *  always keeps the newest. */
-  private appendToBacklog(run: RunState, published: RunEvent): void {
-    const headEligible =
-      run.backlog.length === run.headLen && isHeadMaterial(published) && run.headBytes < HEAD_BUDGET_BYTES;
-    // A head event is capped at publish (docs/reference/specs/tracing.md): the cap is the
-    // record's per-event cap, so what the head holds is what a record would.
-    const stamped = headEligible ? capEvent(published, MAX_EVENT_BYTES).event : published;
-    const bytes = utf8ByteLength(serializedOnce(stamped)); // memoized: the SSE frame reuses this string
-    run.backlog.push(stamped);
-    run.backlogSizes.push(bytes);
-    run.backlogBytes += bytes;
-    if (headEligible && run.headBytes + bytes <= HEAD_BUDGET_BYTES) {
-      run.headLen++;
-      run.headBytes += bytes;
-    }
-    // The one-line "what is it doing" the index shows (item 20). Narration wins
-    // over the tool call it explains only until the next call arrives.
-    const activity = activityOf(stamped);
-    if (activity !== undefined) run.activity = activity;
-    while (
-      run.backlog.length > run.headLen + 1 &&
-      (run.backlog.length > this.backlogLimit || run.backlogBytes > this.backlogBytes)
-    ) {
-      run.backlog.splice(run.headLen, 1);
-      run.backlogBytes -= run.backlogSizes.splice(run.headLen, 1)[0] ?? 0;
-    }
   }
 
   /**
@@ -617,7 +305,7 @@ export class RunRegistry {
     const seq = ++run.eventCount;
     if (!span) run.stepCount++;
     const stamped: RunEvent = { ...event, seq };
-    this.appendToBacklog(run, stamped);
+    appendToBacklog(run, this.bounds, stamped);
     for (const sub of run.subscribers) {
       try {
         sub.onEvent(stamped, seq);
@@ -630,7 +318,7 @@ export class RunRegistry {
     // events are seconds apart, so one upsert per event is not chatty; the
     // summary is built cheaply from the run we already hold. A span record is
     // timing, not activity: it never repaints the index.
-    if (!span) this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    if (!span) this.index.notify({ type: "upsert", run: summaryOf(run) });
   }
 
   /** Mark a run finished — the agent stopped: stamp `finishedAt`, send every
@@ -657,7 +345,7 @@ export class RunRegistry {
     }
     // A finished run stays on the index (marked finished) until the TTL evicts
     // it — so finish is an upsert, not a removal. Eviction emits the removal.
-    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    this.index.notify({ type: "upsert", run: summaryOf(run) });
   }
 
   /**
@@ -684,7 +372,7 @@ export class RunRegistry {
         // A dead sink must not break the discard for the remaining subscribers.
       }
     }
-    this.notifyIndex({ type: "removed", id });
+    this.index.notify({ type: "removed", id });
   }
 
   /**
@@ -727,7 +415,7 @@ export class RunRegistry {
       if (opts.replyOk !== undefined) run.replyOk = opts.replyOk;
       const subs = [...run.subscribers];
       run.subscribers.clear();
-      const frame = RunRegistry.sealedFrameOf(run);
+      const frame = sealedFrameOf(run);
       for (const sub of subs) {
         try {
           sub.onSealed?.(frame);
@@ -735,23 +423,9 @@ export class RunRegistry {
           // A dead sink must not break the seal for the remaining subscribers.
         }
       }
-      if (opts.upsert) this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+      if (opts.upsert) this.index.notify({ type: "upsert", run: summaryOf(run) });
     }
-    return this.sealResultOf(run);
-  }
-
-  private sealResultOf(run: RunState): SealResult {
-    const since = run.finishSeq ?? run.eventCount;
-    return {
-      events: run.backlog.filter((e) => (e.seq ?? 0) > since),
-      eventCount: run.eventCount,
-      ...(run.sealedAt !== undefined ? { sealedAt: run.sealedAt } : {}),
-      ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
-    };
-  }
-
-  private static sealedFrameOf(run: RunState): SealedFrame {
-    return { sealedAt: run.sealedAt ?? 0, ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}) };
+    return sealResultOf(run);
   }
 
   /**
@@ -766,7 +440,7 @@ export class RunRegistry {
     const run = this.runs.get(id);
     if (!run) return;
     run.persisted = true;
-    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    this.index.notify({ type: "upsert", run: summaryOf(run) });
   }
 
   /** True iff the run exists (not yet evicted) and the token matches — the same
@@ -797,31 +471,8 @@ export class RunRegistry {
     const { onEvent, onFinished, onSealed, afterSeq = 0 } = opts;
     const limit = Math.max(1, Math.floor(opts.limit ?? DEFAULT_REPLAY_LIMIT));
     const byteLimit = opts.byteLimit ?? DEFAULT_REPLAY_BYTES;
-    const { backlog, backlogSizes } = run;
-    // The backlog is `seq`-ascending: the offered events are one suffix, and the
-    // replayed ones a suffix of that. A fresh subscribe (no cursor) always gets
-    // the protected head first (docs/reference/specs/tracing.md), and the budget then buys
-    // the newest of the rest; a resume re-sends nothing from the head. Walk
-    // newest-first, admitting an event while both bounds hold; the newest is
-    // admitted unconditionally.
-    let first = backlog.findIndex((e) => (e.seq ?? 0) > afterSeq);
-    if (first === -1) first = backlog.length;
-    const head = afterSeq === 0 ? Math.min(run.headLen, backlog.length) : 0;
-    let headBytes = 0;
-    for (let i = 0; i < head; i++) headBytes += backlogSizes[i] ?? 0;
-    const restFirst = Math.max(first, head);
-    let start = backlog.length;
-    let bytes = headBytes;
-    while (start > restFirst) {
-      const next = start - 1;
-      const count = head + (backlog.length - next);
-      const size = backlogSizes[next] ?? 0;
-      if (count > head + 1 && (count > limit || bytes + size > byteLimit)) break;
-      bytes += size;
-      start = next;
-    }
-    const elided =
-      start > restFirst ? { fromSeq: backlog[restFirst]!.seq ?? 0, toSeq: backlog[start - 1]!.seq ?? 0 } : undefined;
+    const { backlog } = run;
+    const { head, start, elided } = replayWindow(run, afterSeq, limit, byteLimit);
     for (let i = 0; i < head; i++) onEvent(backlog[i]!, backlog[i]!.seq ?? 0);
     for (let i = start; i < backlog.length; i++) onEvent(backlog[i]!, backlog[i]!.seq ?? 0);
     const replayed = head + (backlog.length - start);
@@ -831,7 +482,7 @@ export class RunRegistry {
     // span records still to come and the `end` frame at the seal.
     if (run.finished) onFinished?.({ finishedAt: run.finishedAt ?? run.startedAt });
     if (run.sealedAt !== undefined) {
-      onSealed?.(RunRegistry.sealedFrameOf(run));
+      onSealed?.(sealedFrameOf(run));
       return { unsubscribe: () => {}, replayed, ...(elided ? { elided } : {}) };
     }
 
@@ -850,14 +501,7 @@ export class RunRegistry {
    * shared lifecycle, so this feed reflects all of them without a dispatcher hook.
    */
   subscribeIndex(onEvent: IndexSubscriber): Unsubscribe {
-    for (const run of this.listActive()) onEvent({ type: "upsert", run });
-    this.indexSubscribers.add(onEvent);
-    let active = true;
-    return () => {
-      if (!active) return;
-      active = false;
-      this.indexSubscribers.delete(onEvent);
-    };
+    return this.index.subscribe(onEvent, this.listActive());
   }
 
   /**
@@ -874,7 +518,7 @@ export class RunRegistry {
     this.sweep();
     const run = this.validate(id, token);
     if (!run) return null;
-    return RunRegistry.snapshotOf(run);
+    return snapshotOf(run);
   }
 
   /** Token-free summary of one non-evicted run for `RunsService`,
@@ -883,7 +527,7 @@ export class RunRegistry {
   getById(id: string): RunSummary | null {
     this.sweep();
     const run = this.runs.get(id);
-    return run ? this.summaryOf(run) : null;
+    return run ? summaryOf(run) : null;
   }
 
   /** Token-free `snapshot` for `RunsService`: the same copied
@@ -892,22 +536,7 @@ export class RunRegistry {
     this.sweep();
     const run = this.runs.get(id);
     if (!run) return null;
-    return RunRegistry.snapshotOf(run);
-  }
-
-  /** The snapshot shape: a COPY of the backlog plus the record fields not
-   *  derivable from it. `truncated` says the bounded backlog dropped events. */
-  private static snapshotOf(run: RunState): RunSnapshot {
-    return {
-      events: [...run.backlog],
-      finished: run.finished,
-      startedAt: run.startedAt,
-      ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
-      ...(run.meta?.receivedAt !== undefined ? { receivedAt: run.meta.receivedAt } : {}),
-      eventCount: run.eventCount,
-      stepCount: run.stepCount,
-      truncated: run.eventCount > run.backlog.length,
-    };
+    return snapshotOf(run);
   }
 
   /** Live + finished-but-unevicted run count (observability / tests). */
@@ -930,54 +559,7 @@ export class RunRegistry {
     this.sweep();
     return [...this.runs.values()]
       .sort((a, b) => b.startedAt - a.startedAt || b.seq - a.seq)
-      .map((run) => this.summaryOf(run));
-  }
-
-  /** Build the index summary for one run. The single source of the run→summary
-   *  mapping, shared by `listActive()` and the `subscribeIndex` feed so the two
-   *  can never drift. `label` is omitted (not set to `undefined`) when absent. */
-  private summaryOf(run: RunState): RunSummary {
-    const m = run.meta;
-    return {
-      id: run.id,
-      token: run.token,
-      ...(run.label !== undefined ? { label: run.label } : {}),
-      ...(m?.agent !== undefined ? { agent: m.agent } : {}),
-      ...(m?.model !== undefined ? { model: m.model } : {}),
-      ...(m ? { channelId: m.channelId, userId: m.userId, threadKey: m.threadKey } : {}),
-      ...(m?.channelVisibility !== undefined ? { channelVisibility: m.channelVisibility } : {}),
-      ...(m?.repo !== undefined ? { repo: m.repo } : {}),
-      ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
-      ...(m?.userName !== undefined ? { userName: m.userName } : {}),
-      finished: run.finished,
-      startedAt: run.startedAt,
-      ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
-      ...(m?.receivedAt !== undefined ? { receivedAt: m.receivedAt } : {}),
-      ...(run.sealedAt !== undefined ? { sealedAt: run.sealedAt } : {}),
-      ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
-      ...(run.status !== undefined ? { status: run.status } : {}),
-      eventCount: run.eventCount,
-      stepCount: run.stepCount,
-      ...(run.activity !== undefined ? { activity: run.activity } : {}),
-      ...(run.control.requested !== undefined
-        ? { stop: { mode: run.control.requested, state: run.finished ? ("stopped" as const) : ("stopping" as const) } }
-        : {}),
-      ...(run.persisted ? { persisted: true } : {}),
-    };
-  }
-
-  /** Fan an index event out to index subscribers. Each callback is isolated: one
-   *  that throws (e.g. a dead SSE sink) is swallowed so it can neither corrupt
-   *  registry state nor throw into the create/publish/finish/sweep caller. */
-  private notifyIndex(ev: IndexEvent): void {
-    for (const onEvent of this.indexSubscribers) {
-      try {
-        onEvent(ev);
-      } catch {
-        // A misbehaving index subscriber must not break the lifecycle call that
-        // triggered this notification, nor stop the other subscribers.
-      }
-    }
+      .map((run) => summaryOf(run));
   }
 
   /** Constant-time token check against a live run. Unknown id → null (fast);
@@ -1006,7 +588,7 @@ export class RunRegistry {
       // Eviction is the ONLY removal signal for the index feed (a finished-but-
       // -unevicted run stays listed). Fires once per run — the delete above
       // ensures a later sweep won't re-emit it.
-      this.notifyIndex({ type: "removed", id });
+      this.index.notify({ type: "removed", id });
     }
   }
 }

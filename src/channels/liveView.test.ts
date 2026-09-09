@@ -36,7 +36,8 @@ import { INDEX_PAGE_SIZE } from "./liveView.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { createRunsService } from "../core/runsService.js";
-import type { IndexEvent, RunSummary } from "../core/runRegistry.js";
+import type { IndexEvent } from "../core/runRegistry/indexFeed.js";
+import type { RunSummary } from "../core/runRegistry/projections.js";
 import { FIXTURE_SCHEDULES } from "./scheduledPanel.test.js";
 import { InMemoryScheduleStore, type ScheduleStore } from "../core/scheduleStore.js";
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { NO_GRANTS } from "../core/authz/types.js";
-import type { RunSummary } from "../core/runRegistry.js";
+import type { RunSummary } from "../core/runRegistry/projections.js";
 import type { ScheduleDef, ScheduleFiring } from "../core/schedules.js";
 
 /** A registry-shaped fixture: the panel tests must not depend on the production

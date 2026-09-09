@@ -13,19 +13,12 @@ import {
   type RunListItem,
   type RunRecord,
 } from "./runRecord.js";
-import type {
-  RunRegistry,
-  RunSnapshot,
-  RunStopStatus,
-  RunSummary,
-  StopRequestResult,
-  SubscribeOptions,
-  Subscribed,
-} from "./runRegistry.js";
+import type { RunRegistry, StopRequestResult, SubscribeOptions, Subscribed } from "./runRegistry.js";
+import type { RunSnapshot, RunStopStatus, RunSummary } from "./runRegistry/projections.js";
 import type { RunStore } from "./runStore.js";
 import type { RunLedger } from "./runLedger/ledger.js";
 import type { LiveRunRow } from "./runLedger/types.js";
-import { activityOfEvents } from "./runRegistry.js";
+import { activityOfEvents } from "./runRegistry/activity.js";
 
 /** How long one ledger listing serves the service's reads (item 41): a page
  *  view is a run read, an events read and a friction read within a second, and

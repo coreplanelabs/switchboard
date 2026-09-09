@@ -19,7 +19,7 @@ import {
   type RunNoteKind,
   type StopMode,
 } from "./core/runEvents.js";
-import type { RunControl } from "./core/runRegistry.js";
+import type { RunControl } from "./core/runRegistry/runControl.js";
 import { followUpPrompt, followUpSnippet, type FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
 import type { Settlement } from "./core/runLedger/resume.js";
 import { ExecCapacityError, ExecHealthTracker, ExecInfraError } from "./execution/executor.js";

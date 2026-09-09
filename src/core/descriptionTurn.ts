@@ -29,7 +29,7 @@ import type { RunnableTool, ToolContext } from "../tools/workspace.js";
 import type { CodingPrTarget, WorkspaceObservation } from "./codingPrPostStep.js";
 import type { PrDescription } from "./prDescription.js";
 import { normalizeHead, sameCommit } from "./reviewedHead.js";
-import type { RunControl } from "./runRegistry.js";
+import type { RunControl } from "./runRegistry/runControl.js";
 import type { RunEvent } from "./runEvents.js";
 import type { Backend } from "./trace/attrs.js";
 import { systemClock } from "./trace/clock.js";

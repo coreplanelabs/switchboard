@@ -40,7 +40,7 @@ import { checkReviewedHead, normalizeHead, parseRevParseOutput, sameCommit } fro
 import { reviewTargetBlock } from "./reviewTarget.js";
 import type { RepoContext } from "./repoContext.js";
 import type { RunEvent } from "./runEvents.js";
-import type { RunControl } from "./runRegistry.js";
+import type { RunControl } from "./runRegistry/runControl.js";
 import { systemClock } from "./trace/clock.js";
 
 /** The PR's current head as GitHub reports it; undefined (or a throw) means

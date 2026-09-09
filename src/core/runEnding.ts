@@ -1,4 +1,5 @@
-import type { RunRegistry, SealResult } from "./runRegistry.js";
+import type { RunRegistry } from "./runRegistry.js";
+import type { SealResult } from "./runRegistry/projections.js";
 
 // How a dispatch ends its runs (docs/reference/specs/tracing.md; live-view item 4). A run
 // FINISHES when the agent stops (`registry.finish`) and is SEALED when the
