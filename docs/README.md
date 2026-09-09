@@ -53,7 +53,7 @@ Extend it:
 
 Run it in production:
 
-- [Deploy](how-to/deploy.md) — Cloudflare, the one supported target: the profile, `deploy init`, `deploy secrets`, `deploy config`, `deploy all`, and what the release workflow does with them.
+- [Deploy](how-to/deploy.md) — Cloudflare, the one supported target: the profile and its image mode, `deploy init`, `deploy secrets`, `deploy config`, `deploy images`, `deploy all`, and what the release workflow does with them.
 - [Ship a release](how-to/ship-a-release.md) — read the release PR's deploy plan, merge it, confirm the new code is live.
 - [Rotate a secret](how-to/rotate-a-secret.md) — a put and a restart, on every Worker that holds the value.
 - [Operate production](how-to/operate-production.md) — deploys outside a release, config changes without one, the preflights, the span log.
