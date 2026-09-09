@@ -352,7 +352,7 @@ export function isInlineRunCommand(id: string): boolean {
 
 /** Floor between two edits of a run's status card (see `coalesceStatus`). Below
  *  the 5 s heartbeat so a heartbeat frame is never held back by it. */
-const STATUS_UPDATE_MIN_MS = 3000;
+const STATUS_UPDATE_MIN_MS = 1000;
 
 /** Bounds on the thread context recorded into a run's stream as `context`
  *  events: the newest turns win, at most this many, within this
