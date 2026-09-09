@@ -1,10 +1,9 @@
-import type { Capabilities } from "./capabilities.js";
 import type { ResidentFleetFacts } from "./residentFleet.js";
 import { configAwarenessBlock } from "./configAwareness.js";
 import { selfDescriptionBlock } from "./selfDescription.js";
 import { customInstructionsBlock } from "./customInstructions.js";
 import { AGENTS, getAgent, type AgentDef } from "../agents/registry.js";
-import { lastThreadDirectives, parseDirectives, type RequestDirectives, type ThreadDirectives } from "../directives.js";
+import type { RequestDirectives, ThreadDirectives } from "../directives.js";
 import { mergeTools, runAgent } from "../runner.js";
 import { TOOLSETS } from "../tools/workspace.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
@@ -19,11 +18,9 @@ import { graftResidentSteps, residentTraceOf } from "../execution/residentTrace.
 import type { ResidentStep } from "../execution/residentStepTrace.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { makeWebCapability } from "../tools/web.js";
-import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
-import type { ProviderRegistry } from "../providers/registry.js";
-import { currentPrHeadSha, prCommitsSince, resolveRepoContext, type RepoContext } from "./repoContext.js";
+import { currentPrHeadSha, prCommitsSince, type RepoContext } from "./repoContext.js";
 import type { PrCommitList } from "./headMoved.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import {
@@ -52,8 +49,6 @@ import { PrDescriptionSchema, type PrDescription } from "./prDescription.js";
 import { parseVerdictInput, type ReviewVerdict } from "./reviewVerdict.js";
 import {
   attachRoundWorkspace,
-  checkPrHeadPreflight,
-  guardAttachedHead,
   makeSystemComposer,
   runReviewPostStep,
   settleReviewedHead,
@@ -94,6 +89,14 @@ import {
   type ResumeContext,
 } from "./dispatch/admission.js";
 import { answerChatCommand, answerOperation, type FastPathDeps } from "./dispatch/fastPath.js";
+import { readRequest, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
+import {
+  authorizeAgent,
+  authorizeAttachedHead,
+  authorizePrHead,
+  authorizeRepo,
+  type AuthorizeDeps,
+} from "./dispatch/authorize.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { startReviewReadingDiff } from "./readingDiff.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -117,13 +120,7 @@ import type {
 // parsing, layered resolution, permission gates, history assembly, executor
 // selection, and the agent run. Channels are pure transports (src/channels/).
 
-export interface CoreDeps extends AdmissionDeps, FastPathDeps, RecordDeps {
-  providers: ProviderRegistry;
-  /** What is on in this process (src/core/capabilities.ts): computed ONCE at
-   *  startup from the config and the environment, read by every surface —
-   *  the prompt blocks, the status card, the command catalogue, the web seed.
-   *  Nothing below re-derives a capability from `config`. */
-  capabilities: Capabilities;
+export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, AuthorizeDeps, RecordDeps {
   /** What the resident Worker last said about the fleet (its cap), read in the
    *  background so the About block names the Worker's number, never a constant
    *  (routing-and-config item 11). `NO_FLEET` without residents. */
@@ -168,14 +165,6 @@ export interface CoreDeps extends AdmissionDeps, FastPathDeps, RecordDeps {
    * success). Injectable so tests assert the call without a network call.
    */
   createBranchRef?: (repo: string, branch: string, fromRef: string) => Promise<void>;
-  /**
-   * The PR's head SHA as GitHub reports it right after a review was posted
-   * (agent-review.md item 10): when it differs from the reviewed head — a push
-   * landed mid-run — the thread gets a head-moved note. Default: one REST GET
-   * via repoContext's `currentPrHeadSha`; undefined (or a throw) → no note.
-   * Injectable so tests assert the note without a network call.
-   */
-  fetchPrHead?: (pr: { repo: string; number: number }) => Promise<string | undefined>;
   /**
    * Repo facts for the agent:ship gate (docs/reference/specs/agent-ship.md item 9): the
    * `allow_auto_merge` flag — ship refuses when it is enabled OR unknown
@@ -443,41 +432,20 @@ export async function dispatch(
     // fetch, so a command costs none.
     if (await answerChatCommand(deps, { msg, io, ending, trace })) return;
 
-    const directives = parseDirectives(msg.text);
-    const history = await root.span("dispatch.history", () => io.history());
+    const { directives, history } = await readRequest({ msg, io, root });
 
     // The natural-language op fast path (dispatch/fastPath.ts): a conservative
     // op form is the registry command it names; an op that cannot serve falls
     // through to the agent.
     if (await answerOperation(deps, { msg, io, ending, trace, directives, history })) return;
 
-    // Thread stickiness: a follow-up without explicit directives runs on the
-    // agent/model this thread already established (last directive in the
-    // thread's history), not the channel/global default — otherwise "continue"
-    // in an agent:coding thread silently lands on the toolless default agent.
-    // Derived from history on every message, never stored: restart-safe, and
-    // consistent with how the Slack adapter re-derives thread participation.
-    const sticky = lastThreadDirectives(history);
-    const resolved = deps.config.resolve({
-      channelId: msg.channelId,
-      userId: msg.userId,
-      request: {
-        agent: directives.agent ?? sticky.agent,
-        model: directives.model ?? sticky.model,
-        effort: directives.effort ?? sticky.effort,
-      },
-    });
+    // The (agent, model, effort) this request resolves to (dispatch/resolve.ts):
+    // a directive, else the thread's sticky one, else the config scopes.
+    const { sticky, resolved } = resolveRun(deps, { msg, directives, history });
 
-    // Authorization gate: checked against the *resolved* agent and invoking
-    // user, so no config layer (directives, user or channel scope) bypasses it.
-    if (!deps.config.canRunAgent(msg.userId, resolved.agentName)) {
-      await refuse("agent_allowlist", () =>
-        io.reply(
-          `🚫 You're not on the allowlist for the \`${resolved.agentName}\` agent. Ask ${deps.config.adminsHint()} for access.`,
-        ),
-      );
-      return;
-    }
+    // The agent gate (dispatch/authorize.ts), against the RESOLVED agent and
+    // before the thread is claimed.
+    if ((await authorizeAgent(deps, { msg, io, refuse, agentName: resolved.agentName })).kind === "refused") return;
 
     const agent = getAgent(resolved.agentName);
 
@@ -517,39 +485,17 @@ export async function dispatch(
     requestRow = taken.requestRow;
     await foldCarriedInbox(deps, admissionCtx, admitted);
 
-    const { provider: providerName, model } = parseModelRef(resolved.modelRef);
-    const provider = deps.providers.get(providerName);
-
-    // Target repo/ref for resident environments, resolved BEFORE the model
-    // turn: explicit signals in the message, else the repo this thread
-    // already established (from history — restart-safe, never stored). The
-    // gate belongs with the resource declaration: an agent that declares no
-    // repo (e.g. the toolless general default) never resolves or gates one, so
-    // a toolless follow-up in a repo-mentioning thread is not wrongly refused
-    // and a PR-URL never triggers a wasted GitHub REST call for it.
-    // The production resolver vets bare `owner/name` tokens against the
-    // resident registry (an onboarded-resource probe from the resident
-    // config) so prose shaped like a slug can never bind a repo; an injected
-    // resolver (tests) is called as before. STARTED here (a promise) so the
-    // GitHub round trip overlaps the memory read below; awaited after the ack.
-    const needsRepo = agent.resources?.repo === "required";
-    const repoCtxP: Promise<RepoContext> = root.span("dispatch.repo_context", () =>
-      resume
-        ? Promise.resolve(resume.repoCtx)
-        : needsRepo
-          ? Promise.resolve(
-              deps.resolveRepoContext
-                ? deps.resolveRepoContext(msg, history)
-                : resolveRepoContext(
-                    msg,
-                    history,
-                    residentOnboardedProbe(deps.config.config.execution?.resident),
-                    residentSlugsLister(deps.config.config.execution?.resident),
-                  ),
-            ).then((ctx) => ctx ?? {})
-          : Promise.resolve({}),
-    );
-    repoCtxP.catch(() => {});
+    // The provider behind the model ref, and the target repo/ref/PR resolution
+    // STARTED here (dispatch/resolve.ts) so the GitHub round trip overlaps the
+    // memory read below; awaited after the ack.
+    const { provider, model, needsRepo, repoCtxP } = resolveTarget(deps, {
+      msg,
+      history,
+      agent,
+      resolved,
+      resume,
+      root,
+    });
 
     // Cross-session memory — READ path, STARTED here and awaited
     // below, so the memory Worker round trip (up to 5 s) overlaps the repo/PR
@@ -615,81 +561,21 @@ export async function dispatch(
     // the branch moved between resolution and attach (item 12).
     let repoCtx: RepoContext = await repoCtxP;
 
-    // Not-onboarded gate: the thread has no repo, and the only reason
-    // is that its bare `owner/name` slug was refused by the resident registry
-    // (item 29's probe). A repo-needing agent would otherwise start with an
-    // EMPTY workspace and report `fatal: not a git repository` — say why
-    // instead, before any
-    // attach or model turn. A thread that already has a repo never reaches
-    // here with `rejectedRepo` (prose slugs there are never probed), so
-    // the silence that fix bought is untouched. Only where residents exist
-    // (`capabilities.residents`): without a fleet there is nothing to onboard,
-    // and a note inviting `repo onboard` would point at a command this
-    // installation does not have.
-    if (deps.capabilities.residents && needsRepo && !repoCtx.repo && repoCtx.rejectedRepo) {
-      const slug = repoCtx.rejectedRepo;
-      console.log(`[dispatch] ${msg.threadKey} not started: repo not onboarded (${slug})`);
-      // `repo onboard` is admin-gated (canManageRepos, fail-closed): only tell
-      // someone to run it if they can; everyone else is pointed at who can.
-      const onboardHint = deps.config.canManageRepos(msg.userId)
-        ? `Onboard it (\`repo onboard ${slug}\`)`
-        : `Ask ${deps.config.adminsHint()} to onboard it (\`repo onboard ${slug}\`)`;
-      await refuse("repo_not_onboarded", async () => {
-        await card.done(
-          shell.close({ kind: "not_started", icon: "📦", reason: "repo not onboarded", ...closeLines(clock(), false) }),
-        );
-        await io.reply(
-          `📦 \`${slug}\` is not onboarded as a resident, so I did not start a *${agent.name}* run for it. ` +
-            `${onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
-            `(https://github.com/${slug}) to run in a cold per-thread sandbox.`,
-        );
-      });
-      return;
-    }
-
-    // Unverified gate (item 29): the registry did not ANSWER
-    // for the repo this message addressed (or, in a fresh thread, for its only
-    // candidate). Running anyway would mean guessing a repo — in a bound
-    // thread, the thread's OLD one: exactly the wrong-repo run addressing
-    // exists to end. Say so and stop; the user retries in a minute or names
-    // the repo by URL.
-    if (needsRepo && !repoCtx.repo && repoCtx.unverifiedRepo) {
-      const slug = repoCtx.unverifiedRepo;
-      console.log(
-        `[dispatch] ${msg.threadKey} not started: repo could not be verified (${slug}: resident registry unreachable)`,
-      );
-      await refuse("repo_unverified", async () => {
-        await card.done(
-          shell.close({
-            kind: "not_started",
-            icon: "📦",
-            reason: "repo could not be verified",
-            ...closeLines(clock(), false),
-          }),
-        );
-        await io.reply(
-          `⚠️ I couldn't verify that \`${slug}\` is an onboarded repo — the resident registry didn't answer — so I did not start a *${agent.name}* run rather than guess which repo you meant. ` +
-            `Try again in a minute, or name the repository by URL (https://github.com/${slug}) to run in a cold per-thread sandbox.`,
-        );
-      });
-      return;
-    }
-
-    // Per-repo access gate: open unless `restrict.repos` names the repo;
-    // a restricted repo refuses a user without a `repos` grant BY NAME — a
-    // refused user must see why, never get a silent per-thread fallback.
-    if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(msg.userId, repoCtx.repo)) {
-      const repo = repoCtx.repo;
-      await refuse("repo_access", async () => {
-        await card.done(
-          shell.close({ kind: "not_started", icon: "🚫", reason: "repo access", ...closeLines(clock(), false) }),
-        );
-        await io.reply(
-          `🚫 You're not on the allowlist for the \`${repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`,
-        );
-      });
-      return;
-    }
+    // The repository gates (dispatch/authorize.ts): not onboarded, unverified,
+    // access — each closes the card and replies by name.
+    const repoGate = await authorizeRepo(deps, {
+      msg,
+      io,
+      refuse,
+      card,
+      shell,
+      closeLines,
+      clock,
+      agent,
+      needsRepo,
+      repoCtx,
+    });
+    if (repoGate.kind === "refused") return;
 
     // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the
     // repo gates above, BEFORE the top-level attach — ship names its own
@@ -730,22 +616,21 @@ export async function dispatch(
     // decide whether anything is provisioned at all (general gets nothing),
     // and repo/ref carry resident-repo inference. A resident fallback comes
     // back with a named note that rides on every status frame below.
-    // Unknown-head check (docs/reference/specs/agent-review.md item 11): a review whose PR
-    // head could not be resolved is a guaranteed refusal downstream — not
-    // started instead, before any attach, one named reply (the decision and
-    // the reply live in `checkPrHeadPreflight`; otherwise a minute and a
-    // model turn are spent on a Slack-only "cannot review").
-    const preflight = checkPrHeadPreflight({ agent, requestText: directives.text, repoCtx });
-    if (!preflight.ok) {
-      console.log(`[review] ${msg.threadKey} not started: PR head unknown (${preflight.where})`);
-      await refuse("pr_head_unknown", async () => {
-        await card.done(
-          shell.close({ kind: "not_started", icon: "🔀", reason: "PR head unknown", ...closeLines(clock(), false) }),
-        );
-        await io.reply(preflight.reply);
-      });
-      return;
-    }
+    // Unknown-head check (dispatch/authorize.ts): a review whose PR head could
+    // not be resolved is not started, before any attach.
+    const headPreflight = await authorizePrHead({
+      msg,
+      io,
+      refuse,
+      card,
+      shell,
+      closeLines,
+      clock,
+      agent,
+      directives,
+      repoCtx,
+    });
+    if (headPreflight.kind === "refused") return;
 
     // The reservation (item 42): the run's row BEFORE the workspace attach —
     // identity, request, card, no prompt — so a kill during a slow attach (a
@@ -1005,50 +890,28 @@ export async function dispatch(
       return;
     }
 
-    // Attach-head check (docs/reference/specs/agent-review.md item 10): for a PR
-    // review on the resident path, the sha the resident ATTACHED the worktree
-    // at is compared with the PR head resolved above — before any model turn
-    // (the comparison, the current-head second lookup and the refusal reply
-    // live in `guardAttachedHead`). "adopted" means a push raced the request
-    // and the worktree sits at the PR's head NOW: RepoContext adopts it and
-    // the block says it was verified. "refused" means the branch moved while
-    // the worktree was being attached: not started — one named reply, the
-    // pool user released, no provider call.
-    let verifiedAtAttach = false;
-    if (!resume && agent.name === "review" && resident && repoCtx.pr !== undefined && repoCtx.repo) {
-      const pr = { repo: repoCtx.repo, number: repoCtx.pr };
-      const guard = await root.span("dispatch.gate.attached_head", async (span) => {
-        const g = await guardAttachedHead({
-          pr,
-          expectedHeadSha: repoCtx.headSha,
-          attached: { sha: binding?.sha, ref: binding?.ref },
-          fallbackRef: repoCtx.ref,
-          fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-          logKey: msg.threadKey,
-        });
-        span.setAttrs({ outcome: g.outcome });
-        return g;
-      });
-      if (guard.outcome === "verified") {
-        verifiedAtAttach = true;
-      } else if (guard.outcome === "adopted") {
-        repoCtx = { ...repoCtx, headSha: guard.headSha };
-        verifiedAtAttach = true;
-        // The run's meta went out at the reservation with the head as resolved
-        // then; the record and the page must name the head actually reviewed.
-        publishRunMeta();
-      } else if (guard.outcome === "refused") {
-        const reply = guard.reply;
-        await refuse("branch_moved", async () => {
-          if (executor.release) await executor.release("always").catch(() => {});
-          await card.done(
-            shell.close({ kind: "not_started", icon: "🔀", reason: "branch moved", ...closeLines(clock(), false) }),
-          );
-          await io.reply(reply);
-        });
-        return;
-      }
-    }
+    // Attach-head check (dispatch/authorize.ts): for a PR review on the resident
+    // path, the attached sha against the resolved PR head, before any model turn.
+    const headGate = await authorizeAttachedHead(deps, {
+      msg,
+      io,
+      refuse,
+      card,
+      shell,
+      closeLines,
+      clock,
+      agent,
+      resume,
+      selection: round.selection,
+      repoCtx,
+      root,
+    });
+    if (headGate.kind === "refused") return;
+    repoCtx = headGate.repoCtx;
+    const verifiedAtAttach = headGate.verifiedAtAttach;
+    // The run's meta went out at the reservation with the head as resolved
+    // then; the record and the page must name the head actually reviewed.
+    if (headGate.headAdopted) publishRunMeta();
 
     // Whether this run reviews a resolved PR (its system prompt carries the
     // REVIEW TARGET block, item 9) — the same predicate the post-step and the
