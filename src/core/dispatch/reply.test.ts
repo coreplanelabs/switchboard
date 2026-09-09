@@ -1,7 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ParsedChatCommand } from "../commandChat.js";
-import { attachmentSuffix, composeRunLabel, LONG_COMMAND_REPLY_CHARS, replyCommandOutput } from "./reply.js";
+import {
+  afterReply,
+  attachmentSuffix,
+  composeRunLabel,
+  deliverAnswer,
+  LONG_COMMAND_REPLY_CHARS,
+  replyCommandOutput,
+  type ReplyDeps,
+} from "./reply.js";
 import type { ChannelIO } from "../types.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ConfigStore, type ResolvedRequest } from "../../config.js";
+import { getAgent } from "../../agents/registry.js";
+import { NullMemoryStore } from "../memory/index.js";
+import { pendingReflectionCount } from "../memory/reflection.js";
+import { channelOf, startRequestRoot } from "../requestTrace.js";
+import { createRunEnding } from "../runEnding.js";
+import type { StopMode } from "../runEvents.js";
+import { RunRegistry } from "../runRegistry.js";
+import type { LedgerRun } from "../runLedger/writeThrough.js";
+import { createCardShell } from "../statusCardFrame.js";
+import type { StatusUpdate } from "../types.js";
 
 // docs/reference/specs/command-registry.md item 27 / mcp-tools.md item 19: a command reply
 // longer than one chat message goes out as an attachment where the channel
@@ -219,5 +241,178 @@ describe("composeRunLabel", () => {
     });
     expect(label.length).toBeLessThanOrEqual(160);
     expect(label.endsWith("…")).toBe(true);
+  });
+});
+
+// The answer's delivery and what follows it (docs/reference/specs/run-history.md
+// items 35–36, docs/reference/specs/agent-review.md item 6, docs/reference/specs/memory.md).
+describe("deliverAnswer — the answer reaches the thread", () => {
+  const NOW = 10_000;
+  const agent = getAgent("review");
+  const msg = { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0", text: "review it" };
+
+  function finishedRun(finishing?: () => Promise<"ok" | "fenced" | "unavailable">) {
+    const registry = new RunRegistry({ genId: () => "run-d", genToken: () => "tok" });
+    const run = registry.create("review", {
+      agent: "review",
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:1.0",
+    });
+    registry.finish(run.id, "completed");
+    const ending = createRunEnding({ registry });
+    ending.finished(run.id);
+    const sealed: string[] = [];
+    ending.register({
+      runId: run.id,
+      flipOnPostFinishFailure: true,
+      write: (seal) => void sealed.push(`replyOk=${seal.replyOk}`),
+    });
+    const replies: string[] = [];
+    const closes: StatusUpdate[] = [];
+    const releases: number[] = [];
+    const states: unknown[] = [];
+    const ledgerRun = finishing
+      ? ({ finishing, setState: (patch: unknown) => void states.push(patch) } as unknown as LedgerRun)
+      : undefined;
+    const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf("slack:CX"), receivedAt: NOW });
+    const shell = createCardShell({ label: "*review* on `m`", startedAt: NOW, now: () => NOW });
+    const io: ChannelIO = {
+      reply: async (t) => void replies.push(t),
+      status: async () => ({ update: () => {}, done: async () => {} }),
+      history: async () => [],
+    };
+    const ctx = {
+      msg,
+      io,
+      agent,
+      run,
+      answer: "the findings",
+      liveUrl: "https://sb.example/runs/run-d?t=tok",
+      prNote: undefined,
+      stopped: undefined,
+      ledgerRun,
+      ending,
+      card: { update: () => {}, done: async (f: StatusUpdate) => void closes.push(f) },
+      shell,
+      finalDetail: () => "○ step",
+      checkedOffDetail: () => "✓ step",
+      doneLines: () => ({}),
+      runDiagnosis: undefined,
+      releaseWorkspace: async () => void releases.push(1),
+      root: trace.root,
+    };
+    return { ctx, replies, closes, releases, sealed, states };
+  }
+
+  it("delivered: the card closes ✅ with the checked-off checklist, the reply carries the answer (a review's with its run link), the run is sealed replyOk, the workspace is released after", async () => {
+    const s = finishedRun();
+    expect(await deliverAnswer(s.ctx)).toBe("delivered");
+    expect(s.closes).toHaveLength(1);
+    expect(JSON.stringify(s.closes[0])).toContain("✅");
+    expect(JSON.stringify(s.closes[0])).toContain("✓ step");
+    expect(s.replies).toEqual(["the findings\n\n[Live run](https://sb.example/runs/run-d?t=tok)"]);
+    expect(s.sealed).toEqual(["replyOk=true"]);
+    expect(s.releases).toEqual([1]);
+  });
+
+  it("a soft stop keeps the honest checklist and the ⏹ icon; a PR note rides after the answer", async () => {
+    const s = finishedRun();
+    expect(await deliverAnswer({ ...s.ctx, stopped: "soft", prNote: "PR #1 opened", agent: getAgent("coding") })).toBe(
+      "delivered",
+    );
+    expect(JSON.stringify(s.closes[0])).toContain("⏹");
+    expect(JSON.stringify(s.closes[0])).toContain("○ step");
+    expect(s.replies).toEqual(["the findings\n\nPR #1 opened"]);
+  });
+
+  it("fenced: another generation owns the run — nothing reaches the thread, the record is dropped, the workspace is still released", async () => {
+    const s = finishedRun(async () => "fenced");
+    expect(await deliverAnswer(s.ctx)).toBe("fenced");
+    expect(s.replies).toEqual([]);
+    expect(s.closes).toEqual([]);
+    expect(s.states).toEqual([{ finalStatus: "completed" }]);
+    expect(s.releases).toEqual([1]);
+    s.ctx.ending.drain(undefined);
+    expect(s.sealed).toEqual([]);
+  });
+});
+
+describe("afterReply — the reflection pass and the review post-step", () => {
+  const NOW = 10_000;
+  const msg = {
+    channelId: "slack:CX",
+    userId: "slack:UX",
+    threadKey: "slack:CX:1.0",
+    text: "review https://github.com/acme/api/pull/41",
+  };
+
+  function setup(agentName: string, stopped: StopMode | undefined) {
+    const dir = mkdtempSync(join(tmpdir(), "swb-after-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n    review: anthropic/review-model\n",
+    );
+    const config = new ConfigStore(path, join(dir, "overrides.json"));
+    const posts: Array<{ target: unknown; body: string }> = [];
+    const deps: ReplyDeps = {
+      config,
+      memory: new NullMemoryStore(),
+      providers: { get: () => ({}) as never } as never,
+      postReviewComment: async (target, body) => void posts.push({ target, body }),
+      fetchPrHead: async () => "a".repeat(40),
+    };
+    const registry = new RunRegistry({ genId: () => "run-a", genToken: () => "tok" });
+    const run = registry.create(agentName, {
+      agent: agentName,
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:1.0",
+    });
+    const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf("slack:CX"), receivedAt: NOW });
+    const replies: string[] = [];
+    const io: ChannelIO = {
+      reply: async (t) => void replies.push(t),
+      status: async () => ({ update: () => {}, done: async () => {} }),
+      history: async () => [],
+    };
+    const ctx = {
+      msg,
+      io,
+      agent: getAgent(agentName),
+      resolved: { agentName, modelRef: `anthropic/${agentName}-model` } as ResolvedRequest,
+      directives: { text: msg.text },
+      history: [],
+      repoCtx: { repo: "acme/api", pr: 41, headSha: "a".repeat(40) },
+      run,
+      channelVisibility: "unknown" as const,
+      stopped,
+      answer: "the findings",
+      toolCalls: 0,
+      reviewHead: "a".repeat(40),
+      observedHead: "a".repeat(40),
+      verdict: undefined,
+      carried: undefined,
+      root: trace.root,
+    };
+    return { deps, ctx, posts, replies };
+  }
+
+  it("a review of a resolved PR posts its findings back, pinned to the reviewed head, with the fail-closed verdict line; memory off reflects nothing", async () => {
+    const s = setup("review", undefined);
+    await afterReply(s.deps, s.ctx);
+    expect(s.posts).toHaveLength(1);
+    expect(s.posts[0].target).toMatchObject({ repo: "acme/api", number: 41 });
+    expect(s.posts[0].body).toMatch(/^No verdict submitted — not approving\./);
+    expect(s.posts[0].body).toContain("the findings");
+    expect(pendingReflectionCount()).toBe(0);
+  });
+
+  it("a hard-stopped review posts nothing and reflects nothing", async () => {
+    const s = setup("review", "hard");
+    await afterReply(s.deps, s.ctx);
+    expect(s.posts).toEqual([]);
+    expect(pendingReflectionCount()).toBe(0);
   });
 });

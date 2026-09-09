@@ -7,6 +7,7 @@ import { getAgent } from "../../agents/registry.js";
 import { parseDirectives } from "../../directives.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { NullMemoryStore } from "../memory/index.js";
+import { NullRunHistoryWriter } from "../runHistoryWriter.js";
 import { NullMcpToolSource } from "../../mcp/source.js";
 import { NO_CAPABILITIES } from "../capabilities.js";
 import { NO_FLEET } from "../residentFleet.js";
@@ -109,6 +110,7 @@ function deps(): ProvisionDeps & { ledger: RecordingLedger } {
     capabilities: NO_CAPABILITIES,
     residentFleet: NO_FLEET,
     runLedger: ledger,
+    runHistoryWriter: new NullRunHistoryWriter(),
     dataDir: dir,
     statusUpdateMinMs: 0,
     ledger,

@@ -12,6 +12,27 @@ import type { RunEvent } from "../runEvents.js";
 import type { RequestTrace } from "../requestTrace.js";
 import type { RunOwner } from "../trace/streamSpans.js";
 import { cardShapeLine } from "../runShape.js";
+import type { ConfigStore, ResolvedRequest } from "../../config.js";
+import type { AgentDef } from "../../agents/registry.js";
+import type { RequestDirectives } from "../../directives.js";
+import { postReviewComment, type ReviewCommentTarget } from "../../execution/githubComments.js";
+import { currentPrHeadSha, type RepoContext } from "../repoContext.js";
+import { runReviewPostStep } from "../reviewRound.js";
+import type { ReviewVerdict } from "../reviewVerdict.js";
+import { scheduleReflection } from "../memory/index.js";
+import { resolveChatActor } from "../authz/actor.js";
+import type { ChannelVisibility } from "../authz/types.js";
+import type { FrictionDiagnosis } from "../runFriction.js";
+import type { StopMode } from "../runEvents.js";
+import type { RunHandle } from "../runRegistry.js";
+import type { LedgerRun } from "../runLedger/writeThrough.js";
+import type { RunEnding } from "../runEnding.js";
+import type { CardShell } from "../statusCardFrame.js";
+import type { Span } from "../trace/types.js";
+import type { HistoryItem, IncomingMessage, StatusHandle } from "../types.js";
+import type { AuthorizeDeps } from "./authorize.js";
+import type { ProvisionDeps } from "./provision.js";
+import type { ResolveDeps } from "./resolve.js";
 
 /** The external live-view capability URL for a run, or undefined when
  *  PUBLIC_BASE_URL is unset/blank — the feature degrades gracefully (no link,
@@ -320,4 +341,246 @@ export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatComman
     text: toMarkdownDocument(text),
     lead: `${lead}\n_(full output attached — ${text.length.toLocaleString("en-US")} chars)_`,
   });
+}
+
+/** What the reply stage's post-run steps read off the dispatcher's
+ *  dependencies: the memory store and providers for the reflection pass, the
+ *  review post and the PR head lookup for the review post-step. `CoreDeps`
+ *  extends this; a caller's shape is unchanged. */
+export interface ReplyDeps
+  extends Pick<ProvisionDeps, "memory">, Pick<ResolveDeps, "providers">, Pick<AuthorizeDeps, "fetchPrHead"> {
+  config: ConfigStore;
+  /**
+   * Posts a review comment back to a PR. Called after a `review`
+   * run against a resolved PR, unless the request opted out. Default: the real
+   * GitHub REST post with the App installation token (App `pull_requests:write`;
+   * no `gh` shell-out — AGENTS.md invariant 5). Injectable so tests assert the
+   * decision without a network call.
+   */
+  postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
+}
+
+/** How the answer's delivery ended: delivered (the card closed, the reply
+ *  sent, the run sealed), or fenced — another generation owns the run now, and
+ *  nothing more reaches the thread from here. */
+export type Delivery = "delivered" | "fenced";
+
+/**
+ * The answer reaches the thread: `finishing` on the ledger first (the
+ * double-answer protection once runs resume), then the card close, the reply
+ * and the seal that writes the record — and the workspace released after,
+ * whatever happened, so a channel failure never holds a pool user.
+ */
+export async function deliverAnswer(ctx: {
+  msg: IncomingMessage;
+  io: ChannelIO;
+  agent: AgentDef;
+  run: RunHandle;
+  answer: string;
+  liveUrl: string | undefined;
+  prNote: string | undefined;
+  stopped: StopMode | undefined;
+  ledgerRun: LedgerRun | undefined;
+  ending: RunEnding;
+  card: StatusHandle;
+  shell: CardShell;
+  finalDetail: () => string | undefined;
+  checkedOffDetail: () => string | undefined;
+  /** The done card's shape and queued lines, from the finish-site diagnosis (the dispatch's `doneLines`). */
+  doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
+  runDiagnosis: FrictionDiagnosis | undefined;
+  releaseWorkspace: (span?: Span) => Promise<void>;
+  root: Span;
+}): Promise<Delivery> {
+  const {
+    msg,
+    io,
+    agent,
+    run,
+    answer,
+    liveUrl,
+    prNote,
+    stopped,
+    ledgerRun,
+    ending,
+    card,
+    shell,
+    finalDetail,
+    checkedOffDetail,
+    doneLines,
+    runDiagnosis,
+    releaseWorkspace,
+    root,
+  } = ctx;
+  // The coding PR post-step ran INSIDE the try above (before the stream
+  // finished — its outcome is the `pr_opened` event); `prNote` carries what
+  // it has to say to the thread.
+  // `finally`, not sequential: a Slack failure in either call (outage, an
+  // unchunkable line) must still give the pool user back, or it is held
+  // until the hourly sweep — the toil 16a exists to avoid.
+  try {
+    // `live → finishing` on the ledger BEFORE anything reaches the thread
+    // (item 35): the double-answer protection once runs resume — a
+    // generation that lost the run is refused here and must not reply.
+    // The status the record will carry rides on the row first, so a reclaim
+    // of a `finishing` row (replied, died before `finish`) closes it
+    // truthfully. A `fenced` answer means another generation reclaimed this
+    // run while it ran (a handoff, or a lease that lapsed) and is driving it
+    // now: nothing more reaches the thread from here — the record is theirs.
+    ledgerRun?.setState({ finalStatus: stopped ? `stopped_${stopped}` : "completed" });
+    if ((await root.span("post.ledger_finishing", () => ledgerRun?.finishing())) === "fenced") {
+      // Nothing more from here: no reply, no card close, and no record — the
+      // run is the other generation's now and its record is theirs to write
+      // (a partial record from this process could race the real finish). The
+      // outer finally still seals the stream here.
+      console.log(`[run] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
+      ending.drop(run.id);
+      return "fenced";
+    }
+    // A review verdict carries its run link (as standard Markdown — each
+    // adapter renders its own dialect): the verdict message is what gets
+    // scanned in the review loop, and the card above scrolls away. Projection
+    // only — the `answer` event published above and the GitHub post body stay
+    // link-free.
+    const channelAnswer = agent.name === "review" && liveUrl ? `${answer}\n\n[Live run](${liveUrl})` : answer;
+    // The PR note (post-step above) is a projection too: the `answer` event
+    // stays the model's own words — the PR facts live in the pr_description
+    // event and the [pr-post] log line.
+    // The card close, the reply, then the drain: the run is sealed with how
+    // the reply went and its record goes to the store — BEFORE the
+    // workspace release below: the record does not depend on it, and on the
+    // ledger the finish is what frees the thread, which must not wait ~90 s on
+    // a sandbox teardown (docs/reference/specs/run-history.md item 36). Fire-and-forget;
+    // the writer's `pending()` is incremented inside the drain, before the
+    // outer finally's `activeRuns--`, so the shutdown drain never observes
+    // "0 runs, 0 writes". A reply that threw still seals (`replyOk: false`)
+    // and writes (`failed`) here, then reaches the outer catch for the error
+    // reply.
+    await ending.sealAfterReply(
+      () =>
+        root.span("post.card_close", () =>
+          card.done(
+            shell.close({
+              kind: "done",
+              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
+              detail: stopped ? finalDetail() : checkedOffDetail(),
+              ...doneLines(runDiagnosis),
+            }),
+          ),
+        ),
+      () => root.span("post.reply", () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer)),
+    );
+  } finally {
+    await root.span("post.workspace_release", (span) => releaseWorkspace(span));
+  }
+  return "delivered";
+}
+
+/**
+ * After the reply has landed: the memory reflection pass (fire-and-forget,
+ * gated on memory being on and the run having done real work) and the
+ * deterministic review post-step (a review of a resolved PR posts its findings
+ * back, behind the reviewed-head guard). Deliberately after the workspace
+ * release and the registry finish, as before.
+ */
+export async function afterReply(
+  deps: ReplyDeps,
+  ctx: {
+    msg: IncomingMessage;
+    io: ChannelIO;
+    agent: AgentDef;
+    resolved: ResolvedRequest;
+    directives: RequestDirectives;
+    history: HistoryItem[];
+    repoCtx: RepoContext;
+    run: RunHandle;
+    channelVisibility: ChannelVisibility;
+    stopped: StopMode | undefined;
+    answer: string;
+    toolCalls: number;
+    reviewHead: string | undefined;
+    observedHead: string | undefined;
+    verdict: ReviewVerdict | undefined;
+    carried: { reviewed: string; current: string; commits: number } | undefined;
+    root: Span;
+  },
+): Promise<void> {
+  const {
+    msg,
+    io,
+    agent,
+    resolved,
+    directives,
+    history,
+    repoCtx,
+    run,
+    channelVisibility,
+    stopped,
+    answer,
+    toolCalls,
+    reviewHead,
+    observedHead,
+    verdict,
+    carried,
+    root,
+  } = ctx;
+  // Cross-session memory — WRITE path. AFTER the reply has
+  // landed, distill this run into memory records: fire-and-forget (tracked
+  // only for the shutdown drain), so its latency/failures never reach the
+  // user; gated on memory.enabled (default off → nothing happens) and on the
+  // run having done real work (tools used, or a long thread) and not being a
+  // `review` run (findings live on the PR; distilling them floods org
+  // memory with per-PR ephemera). Fast paths above returned before this
+  // point and never reflect. A HARD-stopped run has no summary to distill
+  // (its answer is the abort line), so it is skipped too; a soft stop wrote
+  // a real finale and reflects normally.
+  if (stopped !== "hard")
+    scheduleReflection({
+      cfg: deps.config.config.memory,
+      store: deps.memory,
+      providers: deps.providers,
+      runModelRef: resolved.modelRef,
+      gate: { toolCalls, historyTurns: history.length, agentName: resolved.agentName },
+      threadKey: msg.threadKey,
+      runId: run.id,
+      // The writes are the policy's decision for the run's principal under the
+      // run's stamped origin (authorization.md item 8): the same actor the chat
+      // commands resolve, the same stamp the record carries.
+      actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)),
+      originChannelVisibility: channelVisibility,
+      organization: deps.config.config.organization,
+      userId: msg.userId,
+      channelId: msg.channelId,
+      repo: repoCtx.repo,
+      history,
+      request: directives.text,
+      answer,
+    });
+
+  // Deterministic review post-step (runReviewPostStep in
+  // reviewRound.ts): a `review` run against a resolved PR posts its findings
+  // back to that PR by default — no need to ask — behind the reviewed-head
+  // guard (item 8, fail-closed) and pinned to the verified head (or the
+  // carried one, item 12). Best-effort: a post failure is logged and said in
+  // the thread but never fails the dispatch (the review already landed in
+  // Slack). A HARD-stopped review has no findings — only the abort line — so
+  // nothing is posted; a soft stop's "findings so far" finale posts as
+  // usual. Deliberately AFTER the workspace release and registry finish
+  // above — the plain path's lifecycle position is unchanged.
+  await root.span("post.review_post", () =>
+    runReviewPostStep({
+      agent,
+      requestText: directives.text,
+      repoCtx,
+      heads: { reviewHead, observedHead },
+      verdict,
+      answer,
+      carried,
+      hardStopped: stopped === "hard",
+      post: deps.postReviewComment ?? postReviewComment,
+      fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+      reply: (text) => io.reply(text),
+      logKey: msg.threadKey,
+    }),
+  );
 }
