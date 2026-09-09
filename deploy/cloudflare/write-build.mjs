@@ -24,9 +24,22 @@ export function buildInfo({ commit, dirty, now = new Date() }) {
   return { commit: `${commit}${dirty ? "-dirty" : ""}`, builtAt: now.toISOString() };
 }
 
+/** The env var that names the commit when there is no tree to read — a deploy from the published npm
+ *  package (src/deploy/run.ts sets it; `../bin/build-stamp.mjs` reads the same variable). */
+export const COMMIT_ENV = "SWITCHBOARD_BUILD_COMMIT";
+
+/** The identity: the environment's commit when it names one (never `-dirty` — nothing was read from a tree), else git's. */
+export function readBuildInfo(
+  env = process.env,
+  git = (args) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim(),
+) {
+  const given = env[COMMIT_ENV]?.trim();
+  if (given) return buildInfo({ commit: given, dirty: false });
+  return buildInfo({ commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== "" });
+}
+
 export function main() {
-  const git = (args) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-  const info = buildInfo({ commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== "" });
+  const info = readBuildInfo();
   const path = join(REPO_ROOT, "build.json");
   writeFileSync(path, `${JSON.stringify(info)}\n`);
   console.log(`[build] ${path}: ${info.commit} @ ${info.builtAt}`);

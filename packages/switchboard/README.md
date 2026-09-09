@@ -10,4 +10,4 @@ npx @coreplane/switchboard ask "what can you do?"
 
 `init` writes `.env` (mode 600) and `config/config.yaml` into the current directory from the examples this package ships; `ask` runs the whole pipeline with your terminal as the channel. `switchboard help` lists every command; `switchboard <group> <verb> --help` explains one.
 
-The bot itself — the always-on process that connects to Slack — is the published container image, `ghcr.io/coreplanelabs/switchboard`; deploying it on Cloudflare starts from a checkout of the repository. Everything else: <https://openswitchboard.dev>.
+The bot itself — the always-on process that connects to Slack — is the published container image, `ghcr.io/coreplanelabs/switchboard`. The deploy commands (`init --cloudflare`, `deploy plan|init|secrets|config|all`) run from the directory you ran `init` in, no checkout needed; the bot's own image is the one piece still built from a checkout. Everything else: <https://openswitchboard.dev>.

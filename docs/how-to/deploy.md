@@ -21,7 +21,7 @@ Deploys run in one order — memory, bot, resident, sandbox — because the stat
 - No `CLOUDFLARE_API_TOKEN` in your shell unless it is a token for this account: wrangler prefers a token over your login, and a token for another account is refused, never silently swapped.
 - The Slack app and one provider key from [Get started](../tutorials/get-started.md), and the GitHub App if the coding agent should open pull requests ([Set up accounts](set-up-accounts.md)).
 - A `config/config.yaml` whose blocks point at the Workers you are about to deploy — `runtimeOverrides.worker` and `runHistory.worker` at the state Worker's hostname, `memory.worker` if you want memory, `execution.resident.baseUrl` and `execution.type: cloudflare` with `execution.url` for the resident and sandbox Workers.
-- A checkout of the repository at `origin/main` with `npm ci` run. The npm package (`npx @coreplane/switchboard`, [Get started](../tutorials/get-started.md)) carries the Worker templates, sources and Dockerfiles and answers `deploy plan` from them, but a deploy still runs from the tree: `deploy all` builds the bot's image from it, runs wrangler in each Worker's directory with its `node_modules`, and refuses a checkout that is dirty or off `origin/main`. Every `npx tsx src/cli.ts …` below is that checkout's CLI.
+- A directory to deploy from. Two shapes, one set of commands: a **checkout** of the repository at `origin/main` with `npm ci` run — what contributors and the release workflow use — or an **operator directory**: any directory, when the CLI is the published npm package (`npx @coreplane/switchboard`, [Get started](../tutorials/get-started.md)). `init --cloudflare` writes the profile there and `deploy plan|init|secrets|config|all` run from it with no clone; what it holds and what still needs a checkout is [below](#deploying-from-the-package). Every `npx tsx src/cli.ts …` on this page is the checkout's CLI; from an operator directory the same command is `npx @coreplane/switchboard …`.
 
 ## 1. The deployment profile
 
@@ -95,7 +95,7 @@ npx tsx src/cli.ts deploy plan        # what it would do — nothing executed
 MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx tsx src/cli.ts deploy all
 ```
 
-`deploy all` first checks: wrangler's login is the profile's account (or `CLOUDFLARE_API_TOKEN` verifies against it — a token for another account is refused with wrangler's own words, never silently swapped for your login), the tree is clean, `HEAD` is `origin/main` (`--allow-branch` relaxes only that), and the credential can do what the selected Workers need (`wrangler containers list`, `wrangler r2 bucket list`). It reads and validates the config, deploys the state Worker, pushes the config document, deploys the bot and **waits until the bot is live** — `/healthz` answered by a container that is not draining and reports the deployed commit — then the resident and sandbox Workers with their own preflights and live gates. Docker must be running: the bot's image (and the resident's and sandbox's) is built where the command runs.
+`deploy all` first checks: wrangler's login is the profile's account (or `CLOUDFLARE_API_TOKEN` verifies against it — a token for another account is refused with wrangler's own words, never silently swapped for your login), from a checkout that the tree is clean and `HEAD` is `origin/main` (`--allow-branch` relaxes only that; from an operator directory there is no tree — the Worker sources are the package's, at its version), and the credential can do what the selected Workers need (`wrangler containers list`, `wrangler r2 bucket list`). It reads and validates the config, deploys the state Worker, pushes the config document, deploys the bot and **waits until the bot is live** — `/healthz` answered by a container that is not draining and reports the deployed commit — then the resident and sandbox Workers with their own preflights and live gates. Docker must be running: the bot's image (and the resident's and sandbox's) is built where the command runs.
 
 Bearers the run needs in its own environment: `MEMORY_TOKEN` when the bot is a step (the config push); one of `RESIDENT_ADMIN_TOKEN` / `RESIDENT_OPERATOR_TOKEN` / `RESIDENT_READ_TOKEN` when the resident is (its preflight reads the fleet); `SANDBOX_TOKEN` when the sandbox is (its live gate probes `/exec`).
 
@@ -109,6 +109,24 @@ curl -sS https://<bot hostname>/healthz  # { ok, inFlight, draining, catchUp, bu
 ```
 
 `catchUp` reports the reconnect catch-up's last scan and names any Slack scopes the bot token lacks — the way to see a silently failing scope without container logs.
+
+## Deploying from the package
+
+With the CLI from npm, the directory you run `init` in is the installation: `deploy plan`, `deploy init`, `deploy secrets`, `deploy config` and `deploy all` all run from it, and no checkout is involved. `deploy plan` says so on its first line — `Root: <the directory> (the published package <version>)` — and every path in the plan is relative to it.
+
+```bash
+mkdir switchboard && cd switchboard
+npx @coreplane/switchboard init --organization <org> --anthropic-key <key> --cloudflare <account id> --zone example.com
+npx @coreplane/switchboard deploy plan
+```
+
+What is there afterwards:
+
+- **Yours**: `.env` (mode 600), `config/config.yaml`, and `deploy/profile.json` — the same three files `init` writes in a checkout, in the same places. A relative `configSource` or `secretsSource` in the profile is relative to this directory.
+- **`.switchboard/`**: the work area the deploy commands own. It holds a copy of the tree the package shipped — each Worker's directory (its `wrangler.template.jsonc`, `worker.ts`, `package.json`, Dockerfile), the sources under `src/` those Workers import, the deploy scripts, and the repository's `package.json` and `package-lock.json` — plus what the commands produce: each Worker's rendered `wrangler.jsonc` beside its template (`deploy init` prints `written .switchboard/deploy/<worker>/wrangler.jsonc`) and, once `deploy secrets` or `deploy all` has run wrangler for a Worker, its `node_modules`, installed with `npm ci --workspace deploy/<worker>` against the shipped lockfile — the versions the release was tested with, never what your machine resolved that day. A stamp, `.materialised.json`, records the CLI version the copy came from and the Workers installed; a CLI at another version starts the work area over. Nothing is ever written inside the installed package, and a `.switchboard/` the CLI did not stamp is refused, not deleted.
+- **No git.** In a checkout `deploy all` refuses a dirty tree or a `HEAD` off `origin/main`; from the package there is no tree to check, and the commit every Worker is stamped with — what the live gates compare `/healthz` against — is the one the package was built from.
+
+Two things still need more than the package. Docker: the resident's and sandbox's images are built where `deploy all` runs, from the Dockerfiles in their materialised directories, exactly as from a checkout. And the bot: its image is the repository's root `Dockerfile`, built from `src/`, `web/` and the toolchain, which the package does not carry — so from an operator directory `deploy all` refuses the bot step up front, naming this, rather than rolling the state Worker and then failing. Until the profile can point the bot at the image every release already publishes (`ghcr.io/<owner>/<repo>`), deploy the bot from a checkout; the memory, resident and sandbox Workers deploy from the package today.
 
 ## 6. Onboard the first repository
 

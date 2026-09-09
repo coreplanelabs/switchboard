@@ -1,10 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { ConfigSourceIO } from "./configSource.js";
 import { EXAMPLE_ACCOUNT, PROFILE_ENV, PROFILE_EXAMPLE_PATH, PROFILE_PATH } from "./profile.js";
-import { loadProfileOnHost, renderWorkerConfigsOnHost } from "./run.js";
+import { deployFiles, loadProfileOnHost, renderWorkerConfigsOnHost } from "./run.js";
 import { TEST_PROFILE } from "./testing/profile.js";
+import { ensureWorkArea, WORK_AREA_STAMP } from "./workArea.js";
 import { renderWorkerConfigs, workerConfigTargets } from "./wranglerTemplate.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // The host's profile loader: the env var wins — a path, or the `github://` /
 // `op://` forms `configSource` takes, read through the same loaders (a
@@ -80,6 +83,72 @@ describe("loadProfileOnHost", () => {
     await expect(loadProfileOnHost({ [PROFILE_ENV]: ref }, invalid)).rejects.toThrow(
       `${ref}: invalid deployment profile`,
     );
+  });
+});
+
+describe("deployFiles (the file access behind deploy init, over a package-mode root)", () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+  const TEMPLATE = "deploy/cloudflare-memory/wrangler.template.jsonc";
+  const RENDERED = "deploy/cloudflare-memory/wrangler.jsonc";
+
+  /** A package-mode root: a fixture asset tree and an operator directory whose work area a previous CLI version left behind. */
+  function fixture() {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "swb-files-")));
+    const assets = join(dir, "assets");
+    mkdirSync(join(assets, "deploy/cloudflare-memory"), { recursive: true });
+    writeFileSync(join(assets, "project.json"), "{}\n");
+    writeFileSync(join(assets, TEMPLATE), '{ "name": "{{script}}" }\n');
+    const workArea = join(dir, "op", ".switchboard");
+    mkdirSync(join(workArea, "deploy/cloudflare-memory"), { recursive: true });
+    writeFileSync(
+      join(workArea, WORK_AREA_STAMP),
+      JSON.stringify({ version: "1.11.0", installed: ["deploy/cloudflare-memory"] }),
+    );
+    writeFileSync(join(workArea, RENDERED), "a render from 1.11.0\n");
+    const at = { assets, workArea };
+    const installs: string[][] = [];
+    const files = deployFiles(at, () =>
+      ensureWorkArea(at, "1.12.0", [], {
+        install: async (_cwd, ws) => {
+          installs.push([...ws]);
+          return { code: 0, output: "" };
+        },
+        log: () => {},
+      }),
+    );
+    return { at, files, installs, workArea };
+  }
+
+  it("a template is read from the shipped files without touching the work area", async () => {
+    const { files, workArea } = fixture();
+    expect(await files.read(TEMPLATE)).toBe('{ "name": "{{script}}" }\n');
+    expect(readFileSync(join(workArea, RENDERED), "utf8")).toBe("a render from 1.11.0\n");
+  });
+
+  it("reading a rendered file brings the work area to this CLI's version first: the other version's render is gone, so the reader sees nothing current — and writing it lands in the new copy, with no install", async () => {
+    const { files, installs, workArea } = fixture();
+    expect(await files.read(RENDERED)).toBeUndefined();
+    expect(existsSync(join(workArea, RENDERED))).toBe(false);
+    expect(JSON.parse(readFileSync(join(workArea, WORK_AREA_STAMP), "utf8"))).toEqual({
+      version: "1.12.0",
+      installed: [],
+    });
+    await files.write(RENDERED, "a render from 1.12.0\n");
+    expect(await files.read(RENDERED)).toBe("a render from 1.12.0\n");
+    expect(readFileSync(join(workArea, TEMPLATE), "utf8")).toBe('{ "name": "{{script}}" }\n');
+    expect(installs).toEqual([]);
+  });
+
+  it("a work area that cannot be materialised is an error naming the problem, and nothing is read or written", async () => {
+    const { at } = fixture();
+    const files = deployFiles(at, async () => ({ ok: false, problem: "nope: no such stamp" }));
+    await expect(files.read(RENDERED)).rejects.toThrow("nope: no such stamp");
+    await expect(files.write(RENDERED, "x")).rejects.toThrow("nope: no such stamp");
+    expect(readFileSync(join(at.workArea, RENDERED), "utf8")).toBe("a render from 1.11.0\n");
   });
 });
 

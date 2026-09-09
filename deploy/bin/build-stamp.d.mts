@@ -5,6 +5,7 @@ export type Stamp = { commit: string; builtAt: string };
 export const DEFINE_COMMIT: "SWITCHBOARD_BUILD_COMMIT";
 export const DEFINE_BUILT_AT: "SWITCHBOARD_BUILT_AT";
 export function buildStamp(input: { commit: string; dirty: boolean; now?: Date }): Stamp;
+export function stampFromEnv(env: Record<string, string | undefined>, now?: Date): Stamp | undefined;
 export function defineArgs(stamp: Stamp): string[];
 export function spawnOutcome(res: {
   error?: { message: string };

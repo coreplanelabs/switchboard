@@ -42,10 +42,24 @@ export function defineArgs(stamp) {
   ];
 }
 
-/** Read the tree's identity. A git failure (deploying from an export, no git
- *  on PATH) warns and stamps `unknown` rather than blocking the deploy — the
- *  Worker then reports `commit: "unknown"`, which is the honest answer. */
+/** The identity the environment hands a deploy that has no tree to read: a
+ *  deploy from the published npm package runs this script in a materialised
+ *  copy of the Worker's directory, where git knows nothing, and sets
+ *  `SWITCHBOARD_BUILD_COMMIT` to the commit the package was built from
+ *  (src/deploy/run.ts). `builtAt` is still now — each deploy is its own build.
+ *  Undefined when the variable is unset or blank: git decides. Pure. */
+export function stampFromEnv(env, now = new Date()) {
+  const commit = env[DEFINE_COMMIT]?.trim();
+  return commit ? { commit, builtAt: now.toISOString() } : undefined;
+}
+
+/** Read the tree's identity: the environment's when it names one, else git. A
+ *  git failure (deploying from an export, no git on PATH) warns and stamps
+ *  `unknown` rather than blocking the deploy — the Worker then reports
+ *  `commit: "unknown"`, which is the honest answer. */
 function readStamp() {
+  const given = stampFromEnv(process.env);
+  if (given) return given;
   try {
     const git = (args) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
     return buildStamp({ commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== "" });

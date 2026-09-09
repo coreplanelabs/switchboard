@@ -37,6 +37,12 @@ export interface BuildStamp {
  *  tell "built without a stamp" from "built at this commit". */
 export const UNKNOWN_COMMIT = "unknown";
 
+/** The environment variable a deploy with no tree to read (the published package, src/deploy/run.ts) hands
+ *  the stamp scripts the commit through — the same name as the `--define` identifier below, so the two scripts
+ *  (`deploy/bin/build-stamp.mjs`, `deploy/cloudflare/write-build.mjs`) and the runner agree by construction.
+ *  Spelled here, not imported from the scripts: the bot image carries `src/` and not `deploy/`. */
+export const BUILD_COMMIT_ENV = "SWITCHBOARD_BUILD_COMMIT";
+
 // The identifiers `deploy/bin/build-stamp.mjs` substitutes. They are declared,
 // never defined: with no `--define` they do not exist at runtime at all, which
 // is why every read below goes through `typeof` first (see injectedBuildStamp).

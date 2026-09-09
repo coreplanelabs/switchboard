@@ -11,8 +11,9 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { PACKAGE_ROOT, RUNS_FROM_PUBLISHED_PACKAGE } from "../packageRoot.js";
-import { DEFAULT_SECRETS_DIR, MANIFEST_PATH, type SecretsSource } from "./secrets.js";
+import { ensureWorkAreaOnHost, OPERATOR_ROOT } from "./host.js";
+import { assetPath, workPath } from "./operatorRoot.js";
+import { MANIFEST_PATH, type SecretsSource } from "./secrets.js";
 
 /** What the command needs from the host — the manifest, which names have a value, and one put. */
 export interface SecretsHostIO {
@@ -27,31 +28,17 @@ export interface SecretsHostIO {
   put(source: SecretsSource, dir: string, name: string): Promise<{ code: number; output: string }>;
 }
 
-/** Where a relative `secretsSource` directory is looked for: the package root — the checkout, where the profile lives. */
-export interface SecretsDirRoot {
-  root: string;
-  /** True when this process is the published npm package: a relative path would land inside its shipped assets. */
-  published: boolean;
-}
-
-const HOST_ROOT: SecretsDirRoot = { root: PACKAGE_ROOT, published: RUNS_FROM_PUBLISHED_PACKAGE };
-
 /**
  * `~` at the front of a path is the operator's home; an absolute path is as
- * written; a relative path is under the package root — the checkout. From the
- * published package there is no checkout: a relative path would resolve inside
- * the package's own `dist/assets/`, which holds no operator's secrets, so it is
- * refused (thrown) naming the forms that do work, rather than read as "no such
- * directory" somewhere under node_modules.
+ * written; a relative path is under the operator root — the checkout, or the
+ * directory the published package was run in — where the profile that named
+ * it lives (src/deploy/operatorRoot.ts). Never anywhere inside the installed
+ * package.
  */
-export function expandDir(path: string, at: SecretsDirRoot = HOST_ROOT): string {
+export function expandDir(path: string, root: string = OPERATOR_ROOT.root): string {
   if (path === "~" || path.startsWith("~/")) return join(homedir(), path.slice(1));
   if (isAbsolute(path)) return path;
-  if (at.published)
-    throw new Error(
-      `secretsSource ${path}: a relative directory resolves inside the installed package (${at.root}), not an operator's secrets — use an absolute path or ~/<dir> (the default is ${DEFAULT_SECRETS_DIR})`,
-    );
-  return resolve(at.root, path);
+  return resolve(root, path);
 }
 
 interface Spawned {
@@ -102,25 +89,33 @@ async function opFieldLabels(
   }
 }
 
-/** The Worker dir's pinned wrangler when installed; PATH otherwise. */
-function wranglerBin(dir: string): string {
-  const local = join(dir, "node_modules", ".bin", "wrangler");
-  return existsSync(local) ? local : "wrangler";
+/**
+ * Pure over `exists`: the pinned wrangler for a Worker directory — the directory's own
+ * `node_modules/.bin/wrangler` (a nested install), else the workspace root's (npm hoists a shared
+ * version there: the checkout's root, or the work area's after `npm ci --workspace`), else `wrangler`
+ * on PATH. Both placements are real — the memory Worker pins its own vitest and gets a nested
+ * wrangler, the bot Worker's is hoisted — and a miss on the first must never mean "whatever is on PATH".
+ */
+export function wranglerBin(
+  dir: string,
+  workspaceRoot: string,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  for (const base of [dir, workspaceRoot]) {
+    const bin = join(base, "node_modules", ".bin", "wrangler");
+    if (exists(bin)) return bin;
+  }
+  return "wrangler";
 }
 
 export const hostSecretsIO: SecretsHostIO = {
   manifest: async () => {
-    const abs = join(PACKAGE_ROOT, MANIFEST_PATH);
+    const abs = assetPath(OPERATOR_ROOT, MANIFEST_PATH);
     return existsSync(abs) ? (JSON.parse(readFileSync(abs, "utf8")) as unknown) : undefined;
   },
   present: async (source, names) => {
     if (source.kind === "dir") {
-      let dir: string;
-      try {
-        dir = expandDir(source.path);
-      } catch (err) {
-        return { ok: false, problem: err instanceof Error ? err.message : String(err) };
-      }
+      const dir = expandDir(source.path);
       if (!existsSync(dir)) return { ok: false, problem: `secretsSource ${source.path}: no such directory (${dir})` };
       return { ok: true, present: new Set(names.filter((n) => existsSync(join(dir, n)))) };
     }
@@ -138,8 +133,15 @@ export const hostSecretsIO: SecretsHostIO = {
       // op appends one trailing newline; the file form keeps the file as written.
       value = r.stdout.replace(/\n$/, "");
     }
-    const cwd = join(PACKAGE_ROOT, dir);
-    const r = await spawnCollect(wranglerBin(cwd), ["secret", "put", name], { cwd, input: value });
+    // The Worker's directory, installed — from the package, materialised and `npm ci`'d first (a
+    // checkout is its own work area). Without its wrangler the put would reach for whatever is on PATH.
+    const ready = await ensureWorkAreaOnHost([dir], () => {});
+    if (!ready.ok) return { code: 1, output: ready.problem };
+    const cwd = workPath(OPERATOR_ROOT, dir);
+    const r = await spawnCollect(wranglerBin(cwd, OPERATOR_ROOT.workArea), ["secret", "put", name], {
+      cwd,
+      input: value,
+    });
     return { code: r.code, output: `${r.stdout}${r.stderr}` };
   },
 };

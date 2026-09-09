@@ -34,8 +34,10 @@ import {
 } from "./plan.js";
 import { parseAppConfigText } from "../config.js";
 import { baseConfigDocument, ConfigDocumentClient, STATE_WORKER_TOKEN_ENV } from "../configDocument.js";
-import { OPERATOR_ROOT } from "./host.js";
-import { assetPath, installationPath, workPath } from "./operatorRoot.js";
+import { BUILD_COMMIT_ENV } from "./buildStamp.js";
+import { ensureWorkAreaOnHost, OPERATOR_ROOT, packageSourceOnHost } from "./host.js";
+import { assetPath, installationPath, workPath, type OperatorRoot } from "./operatorRoot.js";
+import { imageBuiltOutsideDir, readWorkAreaState, type WorkAreaOutcome } from "./workArea.js";
 import { RENDERED_FILE } from "./wranglerTemplate.js";
 import { parseConfigSource, readConfigSource, type ConfigSourceIO } from "./configSource.js";
 import {
@@ -74,7 +76,12 @@ import {
 // (src/deploy/plan.ts), after checking the wrangler account, a clean checkout
 // at origin/main, required env, and node_modules per dir. Every path is
 // resolved through the operator root (src/deploy/operatorRoot.ts): in a
-// checkout that is the repository root, exactly as before. A step whose
+// checkout that is the repository root, exactly as before; from the published
+// package the profile and config are the operator's directory, the templates
+// and manifests the package's assets, and the Worker directories a work area
+// materialised under `.switchboard/` before anything runs in them
+// (src/deploy/workArea.ts) — where the git checks give way to the package's own
+// version and commit, since there is no tree to check. A step whose
 // preflight refuses (runs in flight) is waited out and retried — never forced
 // unless the plan says so — and the wait is never silent: every poll prints a
 // heartbeat with the in-flight count. The bot step is done only when it is
@@ -217,6 +224,7 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
         `HEAD ${head.slice(0, 7)} != origin/main ${main.slice(0, 7)} — \`git checkout --detach origin/main\`, or pass --allow-branch deliberately`,
       );
   }
+  if (plan.root.mode === "package") problems.push(...packageModeProblems(plan));
   for (const s of plan.steps) {
     for (const req of s.requiredEnv) {
       if (!req.anyOf.some((v) => process.env[v]))
@@ -226,15 +234,57 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
   return problems;
 }
 
-/** The plan's `DeployHost.hasNodeModules`: `<root>/<dir>/node_modules` exists. */
-export function hasNodeModules(dir: string): boolean {
-  return existsSync(join(OPERATOR_ROOT.root, dir, "node_modules"));
+/**
+ * The package-mode equivalents of the tree checks, after the work area is
+ * materialised: the Worker sources are the package's version (the stamp says
+ * so — `ensureWorkAreaOnHost` refused otherwise), and a step whose image is a
+ * Dockerfile OUTSIDE its own directory cannot build here — the bot's is the
+ * repository's root `Dockerfile`, whose build context (`src/`, `web/`, the
+ * toolchain) the package does not carry. Said up front, before the memory
+ * Worker rolls and leaves the fleet half-deployed.
+ */
+function packageModeProblems(plan: DeployPlan): string[] {
+  const problems: string[] = [];
+  const state = readWorkAreaState(OPERATOR_ROOT.workArea);
+  if (state.kind !== "stamped" || state.stamp.version !== plan.root.version)
+    problems.push(
+      `${OPERATOR_ROOT.workArea} does not hold the package's version ${plan.root.version ?? "?"} — re-run; the work area is materialised before the checks`,
+    );
+  for (const step of plan.steps) {
+    const rendered = workerDir(`${step.dir}/${RENDERED_FILE}`);
+    const image = existsSync(rendered) ? imageBuiltOutsideDir(readFileSync(rendered, "utf8")) : undefined;
+    if (image)
+      problems.push(
+        `${step.name}: its image builds from ${image} — outside ${step.dir}, from the repository's own sources, which the package does not carry; deploy the ${step.name} Worker from a checkout`,
+      );
+  }
+  return problems;
 }
 
-/** What the plan is computed over on this host: the root and mode this process runs from (`plan.root`)
- *  and the install probe (src/deploy/plan.ts `DeployHost`). */
+/** The plan's `DeployHost.hasNodeModules`: in a checkout `<root>/<dir>/node_modules` exists; from the
+ *  package the work area's stamp lists the Worker as installed (its install is hoisted, never in the dir). */
+export function hasNodeModules(dir: string): boolean {
+  if (OPERATOR_ROOT.mode === "checkout") return existsSync(join(OPERATOR_ROOT.root, dir, "node_modules"));
+  const state = readWorkAreaState(OPERATOR_ROOT.workArea);
+  return state.kind === "stamped" && state.stamp.installed.includes(dir);
+}
+
+/** What the plan is computed over on this host: the root and mode this process runs from, the package's
+ *  version when it is the package (`plan.root`), and the install probe (src/deploy/plan.ts `DeployHost`). */
 export function deployHostOnHost(): DeployHost {
-  return { root: { mode: OPERATOR_ROOT.mode, path: OPERATOR_ROOT.root }, hasNodeModules };
+  let version: string | undefined;
+  if (OPERATOR_ROOT.mode === "package") {
+    // A package without its stamp still plans; the runner refuses it by name before anything deploys.
+    try {
+      version = packageSourceOnHost().version;
+    } catch {
+      version = undefined;
+    }
+  }
+  return {
+    root: { mode: OPERATOR_ROOT.mode, path: OPERATOR_ROOT.root, ...(version !== undefined ? { version } : {}) },
+    hasNodeModules,
+  };
 }
 
 /** Parse + validate profile JSON read from `where` (a path or a source reference — what errors name). */
@@ -327,22 +377,48 @@ function readShipped(path: string): string | undefined {
   return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
 }
 
-/** `deploy init`'s file access on this host, by tree path: a rendered `wrangler.jsonc` lives in the
- *  Worker's directory under the work area (materialised first from the package — the copy alone, no
- *  install), everything else — the templates, `project.json` — is a shipped file. In a checkout the
- *  two are one tree (src/deploy/operatorRoot.ts). */
-export const hostDeployFiles = {
-  read: async (path: string): Promise<string | undefined> => {
-    if (!path.endsWith(`/${RENDERED_FILE}`)) return readShipped(path);
-    const abs = workPath(OPERATOR_ROOT, path);
+/**
+ * `deploy init`'s file access by tree path, over a root and the work area's
+ * materialisation: a rendered `wrangler.jsonc` lives in the Worker's directory
+ * under the work area, everything else — the templates, `project.json` — is a
+ * shipped file. The work area is brought to this CLI's version (the copy alone,
+ * no install) before a rendered file is READ as well as before one is written:
+ * a work area left by another version is replaced, its stale render with it, so
+ * a command that compares the render to what is on disk finds nothing there and
+ * writes — never a `deploy secrets` that judges an old render current and then
+ * has the install sweep it away. In a checkout the two places are one tree and
+ * the materialisation is a no-op (src/deploy/operatorRoot.ts).
+ */
+export function deployFiles(
+  at: Pick<OperatorRoot, "assets" | "workArea">,
+  ensureWorkArea: () => Promise<WorkAreaOutcome>,
+): { read(path: string): Promise<string | undefined>; write(path: string, text: string): Promise<void> } {
+  const shipped = (path: string) => {
+    const abs = assetPath(at, path);
     return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
-  },
-  write: async (path: string, text: string): Promise<void> => {
-    const abs = workPath(OPERATOR_ROOT, path);
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, text);
-  },
-};
+  };
+  const current = async () => {
+    const ready = await ensureWorkArea();
+    if (!ready.ok) throw new Error(ready.problem);
+  };
+  return {
+    read: async (path) => {
+      if (!path.endsWith(`/${RENDERED_FILE}`)) return shipped(path);
+      await current();
+      const abs = workPath(at, path);
+      return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
+    },
+    write: async (path, text) => {
+      await current();
+      const abs = workPath(at, path);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, text);
+    },
+  };
+}
+
+/** `deploy init`'s file access on this host. */
+export const hostDeployFiles = deployFiles(OPERATOR_ROOT, () => ensureWorkAreaOnHost([], () => {}));
 
 /** The config-source loaders' I/O on this host: files under the root (the checkout, or the operator's directory), real fetch, the `op` CLI. */
 function hostConfigSourceIO(): ConfigSourceIO {
@@ -717,9 +793,16 @@ const runStepCommand: StepExec = (step, io) =>
   run(step.command[0], step.command.slice(1), {
     cwd: workerDir(step.dir),
     unset: step.unsetEnv,
-    set: step.setEnv,
+    set: { ...step.setEnv, ...stampEnvOnHost() },
     stream: (c) => io.stream(c),
   });
+
+/** From the package, the commit the step's deploy stamps into its Worker (`deploy/bin/build-stamp.mjs`,
+ *  `deploy/cloudflare/write-build.mjs` read it): the package's — the materialised directory has no
+ *  git to ask. In a checkout nothing is set and the scripts read the tree. */
+function stampEnvOnHost(): Record<string, string> {
+  return OPERATOR_ROOT.mode === "package" ? { [BUILD_COMMIT_ENV]: packageSourceOnHost().commit } : {};
+}
 
 /**
  * One step: its deploy command, then its gate. A sandbox-gated step reads the
@@ -872,9 +955,16 @@ export async function runDeployPlan(
       ],
     };
   }
-  // The Worker configs first: they are rendered from the profile (gitignored, so
-  // the tree stays clean), and everything after — the capability pre-checks,
-  // wrangler — reads the account and names from them.
+  // From the package, the Worker directories first: copied from the shipped tree and installed, so
+  // the pre-checks' wrangler and the steps' have somewhere to run (a checkout is its own work area
+  // and this does nothing). Then the Worker configs: they are rendered from the profile (gitignored,
+  // so the tree stays clean), and everything after — the capability pre-checks, wrangler — reads the
+  // account and names from them.
+  const ready = await ensureWorkAreaOnHost(
+    plan.steps.map((s) => s.dir),
+    (l) => io.log(l),
+  );
+  if (!ready.ok) return { kind: "refused", problems: [ready.problem] };
   const renderProblems = await renderWorkerConfigsOnHost(io);
   if (renderProblems.length > 0) return { kind: "refused", problems: renderProblems };
   const problems = await preChecks(plan, io);
@@ -908,15 +998,23 @@ export async function runDeployPlan(
   for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
 
   // The commit being deployed — what a gated Worker's /healthz must report
-  // before its step counts as live. Read AFTER the origin/main check. If git fails this
-  // is "" and `sameCommit` refuses anything under 7 chars, so the gate fails
-  // closed (never a false "live") — and we say so up front rather than 18 min later.
-  const expectedCommit = (await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root })).output.trim();
+  // before its step counts as live. In a checkout, HEAD, read AFTER the origin/main check;
+  // from the package, the commit it was built from (its `source.json`), which the steps stamp
+  // into their Workers (`stampEnvOnHost`). If git fails this is "" and `sameCommit` refuses
+  // anything under 7 chars, so the gate fails closed (never a false "live") — and we say so up
+  // front rather than 18 min later; a package built from a dirty tree carries `-dirty` and is
+  // refused the same way.
+  const expectedCommit =
+    plan.root.mode === "checkout"
+      ? (await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root })).output.trim()
+      : packageSourceOnHost().commit;
   if (!/^[0-9a-f]{40}$/.test(expectedCommit)) {
     return {
       kind: "refused",
       problems: [
-        `could not read HEAD (\`git rev-parse HEAD\` gave ${JSON.stringify(expectedCommit.slice(0, 40))}); the live gates need the commit being deployed`,
+        plan.root.mode === "checkout"
+          ? `could not read HEAD (\`git rev-parse HEAD\` gave ${JSON.stringify(expectedCommit.slice(0, 40))}); the live gates need the commit being deployed`
+          : `the package was built from ${JSON.stringify(expectedCommit.slice(0, 48))}, not a commit — a release build carries the release commit; the live gates need it`,
       ],
     };
   }
@@ -1050,11 +1148,33 @@ export function hostAffectedProbe(
   };
 }
 
+/**
+ * The `AffectedProbe` from the published package, where there is no tree to
+ * diff: HEAD is the commit the package was built from, and a live Worker is
+ * read as the host probe reads it. A Worker serving that commit has nothing
+ * to deploy (the pure half compares before it asks anything else); every other
+ * Worker is unsure — no ancestry, no release tag, no diff — and deploys with
+ * the reason named. Honest, never narrower than the truth.
+ */
+export function packageAffectedProbe(host: Pick<AffectedProbe, "liveCommit">, commit: string): AffectedProbe {
+  return {
+    head: async () => commit,
+    liveCommit: host.liveCommit,
+    // A commit is its own ancestor — the one ancestry a package can vouch for; every other is unknown.
+    isAncestor: async (c, head) => head.startsWith(c),
+    lastRelease: async () => undefined,
+    changedPaths: async () => undefined,
+    fileAt: async () => undefined,
+  };
+}
+
 /** `deploy plan|all --affected` on the host: the selection over this checkout
- *  and the live fleet — the fleet being the installation the profile names. */
+ *  (or the package's commit) and the live fleet — the fleet being the installation the profile names. */
 export async function computeAffectedOnHost(opts: { base?: string }): Promise<AffectedReport> {
   const { profile } = await loadProfileOnHost();
-  return computeAffected(hostAffectedProbe(workersFor(profile)), opts);
+  const host = hostAffectedProbe(workersFor(profile));
+  const probe = OPERATOR_ROOT.mode === "checkout" ? host : packageAffectedProbe(host, packageSourceOnHost().commit);
+  return computeAffected(probe, opts);
 }
 
 // ---- `deploy restart` (src/deploy/restart.ts is the pure half) -----------------------------------
