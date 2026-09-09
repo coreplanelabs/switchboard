@@ -59,10 +59,15 @@ COPY --from=build /app/web/dist ./web/dist
 # build.json is written by deploy/cloudflare/write-build.mjs (npm run deploy) and
 # served on /healthz as `build`; the glob keeps it optional so a bare
 # `wrangler deploy` / docker compose still builds (the bot then says "unknown").
-COPY package.json build.jso[n] ./
+COPY package.json project.json build.jso[n] ./
 # No config in the image: SWITCHBOARD_CONFIG names a file mounted at run time
 # (docker compose: ./config → /app/config) or `state://base`, the document
 # `deploy config` pushed to the state Worker (what the Cloudflare shim sets).
+# The EXAMPLES are not config: `switchboard init` derives an installation's
+# `.env` and `config.yaml` from them, so the container can install too.
+COPY .env.example ./
+COPY config/config.example.yaml ./config/
+COPY deploy/profile.example.json ./deploy/
 # Bundled skills (#100): loaded at startup by BundledSkillStore from /app/skills.
 COPY skills ./skills
 RUN mkdir -p /app/data /app/workspaces && chown -R switchboard:switchboard /app
@@ -78,4 +83,7 @@ ENV NODE_ENV=production
 # PORT enables the /healthz-style probe endpoint (any path returns 200).
 ENV PORT=8080
 EXPOSE 8080
-CMD ["node", "dist/index.js"]
+# One image, two jobs: no arguments runs the bot (compose, Cloudflare); arguments
+# run the CLI (`init`, `ask`, `<group> <verb>`) — see docker-entrypoint.sh.
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/switchboard
+ENTRYPOINT ["switchboard"]
