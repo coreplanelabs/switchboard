@@ -66,6 +66,10 @@ Three facts about the loop shape everything else. The config a request runs unde
 
 A run has two lives: live in a registry while it happens, streamed to a page anyone with the card's link can watch; then a durable record in history, read by identity ([Runs: live, then remembered](runs-live-and-history.md)).
 
+![The run page on the dashboard: a finished coding run's request, its timeline — getting ready, thinking, in tools, overhead — and the steps below it with their durations](../public/screenshots/run-page-light.png)
+
+*The run page for a finished coding run: the request, the timeline's buckets, then every model turn and tool call in order, each with its own duration. Rendered from the dashboard's fixture preview; the repository and people are made up.*
+
 ## Where it runs
 
 Production is one long-lived process plus Workers that each solve a problem the process structurally cannot: outliving its own restarts, running untrusted commands somewhere that is not the bot, keeping a repository warm, serving docs without a container rollover.

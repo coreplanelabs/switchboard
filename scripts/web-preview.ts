@@ -22,9 +22,11 @@ import { systemClock } from "../src/core/trace/clock.js";
 //
 // SWITCHBOARD_PREVIEW_CAPABILITIES=minimal serves the same fixtures with every
 // optional capability off (the nav shrinks to Runs, no Scheduled tab, no docs).
+// SWITCHBOARD_PREVIEW_NOW=<epoch ms> holds the fixtures' clock still, so two
+// renders of one tree agree (scripts/screenshots.mts).
 
 const PORT = Number(process.env.PORT ?? 8788);
-const NOW = systemClock();
+const NOW = process.env.SWITCHBOARD_PREVIEW_NOW ? Number(process.env.SWITCHBOARD_PREVIEW_NOW) : systemClock();
 
 const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"));
 // The shell stamps the capabilities the nav paints from: every one on by

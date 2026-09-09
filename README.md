@@ -4,6 +4,13 @@ Mention it in Slack and an agent reviews the PR, ships the fix, or answers the q
 
 *A 30-second recording goes here: a Slack mention, the status card ticking through the run, the PR link landing in the thread.*
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/public/screenshots/run-page-dark.png">
+  <img alt="The run page on the dashboard: a finished coding run — the request, a timeline of every model turn and tool call with its duration, and the answer." src="docs/public/screenshots/run-page-light.png" width="100%">
+</picture>
+
+*Every run has a page: the request, each step timed, the reply. Rendered from the dashboard's fixture preview, so the names are made up.*
+
 ## How it is put together
 
 Every request crosses the same four seams, in the same order, whichever way it arrived. Each seam is an interface with more than one implementation, so a new platform, model, sandbox or agent is a new implementation, never a special case.

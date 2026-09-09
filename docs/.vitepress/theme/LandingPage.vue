@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // The landing page: the pitch, the request flow, three doors in, the four
-// seams, and the three pictures the visual pass will fill in. Everything it
-// says about the product is also said, with its proof, on the page each link
-// opens; this page only arranges it. The docs hub (README.md) renders below it.
+// seams, and three pictures of the dashboard. Everything it says about the
+// product is also said, with its proof, on the page each link opens; this page
+// only arranges it. The docs hub (README.md) renders below it.
 import RequestFlow from "./RequestFlow.vue";
 
 const seams = [
@@ -40,18 +40,24 @@ const seams = [
   },
 ];
 
+// The pictures are rendered from the fixture preview by `npm run
+// screenshots:gen` (docs/public/screenshots/, one file per theme); a frame
+// shows the one for the site's appearance.
 const shots = [
   {
-    caption: "A run in Slack: the mention, the status card that ticks while it works, the reply in the thread.",
-    alt: "Screenshot of a Slack thread: a mention of the bot, its status card, and its reply.",
+    name: "runs-index",
+    caption: "The runs index: what is running now, what finished, and what leaves the dashboard next.",
+    alt: "Screenshot of the runs index on the dashboard: live runs with their agent, duration and stop controls, then finished ones.",
   },
   {
+    name: "run-page",
     caption: "The run page: every step timed — the model turns, the tool calls, the reply.",
     alt: "Screenshot of a run page on the dashboard: a timeline of the run's steps with their durations.",
   },
   {
+    name: "residents",
     caption: "Residents: the repositories you onboard, kept warm, with the threads working in each.",
-    alt: "Screenshot of the residents page on the dashboard: one card per onboarded repository.",
+    alt: "Screenshot of the residents page on the dashboard: one row per onboarded repository with its state.",
   },
 ];
 </script>
@@ -96,12 +102,11 @@ const shots = [
     <section class="shots" aria-labelledby="shots-title">
       <h2 id="shots-title" class="section-title">What it looks like</h2>
       <ul class="strip">
-        <li v-for="shot in shots" :key="shot.caption">
+        <li v-for="shot in shots" :key="shot.name">
           <figure class="shot">
-            <div class="frame" role="img" :aria-label="shot.alt">
-              <span class="bar"></span>
-              <span class="bar short"></span>
-              <span class="bar"></span>
+            <div class="frame">
+              <img class="light" :src="`/screenshots/${shot.name}-light.png`" :alt="shot.alt" loading="lazy" />
+              <img class="dark" :src="`/screenshots/${shot.name}-dark.png`" :alt="shot.alt" loading="lazy" />
             </div>
             <figcaption>{{ shot.caption }}</figcaption>
           </figure>
@@ -313,8 +318,9 @@ const shots = [
   text-decoration: underline;
 }
 
-/* The pictures. Each frame keeps its 16:10 box whether or not an image is in
- * it, so the layout is the same before and after the visual pass. */
+/* The pictures. Each frame is a 16:10 box — the pictures' own shape — under a
+ * window bar, so the strip's height is fixed before an image arrives. The two
+ * images are one per appearance; the site's `dark` class on <html> picks. */
 .strip {
   display: grid;
   grid-template-columns: 1fr;
@@ -337,7 +343,7 @@ const shots = [
 .frame {
   position: relative;
   aspect-ratio: 16 / 10;
-  padding: 36px 16px 16px;
+  padding: 24px 0 0;
   border: 1px solid var(--vp-c-divider);
   border-radius: 12px;
   background: var(--vp-c-bg-soft);
@@ -369,17 +375,27 @@ const shots = [
     28px 0 0 var(--vp-c-border);
 }
 
-.bar {
+.frame img {
   display: block;
-  height: 10px;
-  margin-top: 10px;
-  border-radius: 5px;
-  background: var(--vp-c-divider);
-  width: 72%;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
 }
 
-.bar.short {
-  width: 44%;
+.frame img.dark {
+  display: none;
+}
+
+/* Vue scopes a selector as a whole, so the appearance rule — keyed on the
+ * `dark` class VitePress stamps on <html>, outside this component — is written
+ * global and anchored on the landing's own root class. */
+:global(.dark .landing .frame img.light) {
+  display: none;
+}
+
+:global(.dark .landing .frame img.dark) {
+  display: block;
 }
 
 figcaption {
