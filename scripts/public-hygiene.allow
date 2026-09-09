@@ -80,9 +80,6 @@ src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00
 .github/workflows/release-please.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/release-please.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 
-# The review App this installation runs as, matched by login and immutable id; another operator swaps in their App's.
-.github/workflows/auto-approve-claude-lgtm.yml	(github.event.review.user.login == 'coreplane-switchboard[bot]' && github.event.review.user.id == 318072483)
-
 # The project's own home, docs URL, contact address and steward — the facts in project.json, which check:project-facts holds equal everywhere.
 package.json	"homepage": "https://github.com/coreplanelabs/switchboard#readme",
 package.json	"url": "git+https://github.com/coreplanelabs/switchboard.git"

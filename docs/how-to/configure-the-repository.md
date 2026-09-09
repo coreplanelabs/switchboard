@@ -88,7 +88,7 @@ gh api repos/OWNER/REPO/rulesets --jq '.[] | {id, name}'
 gh api -X PUT repos/OWNER/REPO/rulesets/RULESET_ID --input main-ruleset.json
 ```
 
-`required_approving_review_count` is 0 because the review that gates a merge here is the agent review, with a human pressing merge ([How we work](../explanation/how-we-work.md)); raise it if your fork wants a human approval on record.
+`required_approving_review_count` is 0 because the review that gates a merge here is the agent review — turned into an approval by the opt-in workflow in [section 5](#approve-on-the-agents-lgtm) — with a human pressing merge ([How we work](../explanation/how-we-work.md)); raise it if your fork wants a human approval on record.
 
 ### Merge queue (optional)
 
@@ -113,7 +113,7 @@ With the queue on, "Merge" becomes "Add to merge queue" and CI runs once more ag
 
 ## 4. Actions permissions
 
-Two workflows create or approve pull requests with the workflow's own token: `release-please.yml` opens the release PR and `auto-approve-claude-lgtm.yml` approves on a passing agent verdict. GitHub refuses both unless the repository allows it:
+Two workflows create or approve pull requests with the workflow's own token: `release-please.yml` opens the release PR and `auto-approve-review-lgtm.yml` approves on a passing agent verdict once the repository has opted in ([below](#approve-on-the-agents-lgtm)). GitHub refuses both unless the repository allows it:
 
 ```sh
 gh api -X PUT repos/OWNER/REPO/actions/permissions/workflow \
@@ -136,6 +136,18 @@ gh variable set CONFIG_REPO_NAME --body "CONFIG-REPO"
 
 `SWITCHBOARD_DEPLOY_PROFILE` is any form the CLI takes — the `github://` reference to a private configuration repository is the usual one, so the profile and the bot's config stay out of this repository; `CONFIG_REPO_OWNER` and `CONFIG_REPO_NAME` name that repository for the read-only App token the workflows mint to read it. The step that loads that App's client id and private key is the one installation-specific step left in the workflows; it reads this project's secrets manager, and a fork replaces it with its own source. A fork that never deploys from CI sets none of this: the release deploy refuses without a profile, the release PR's deploy-plan job and the docs deploy skip.
 
+### Approve on the agent's LGTM
+
+The review agent never approves a pull request; it posts a COMMENT-state review whose first line is `LGTM: …` only for an explicit approve verdict ([Agent review](../reference/specs/agent-review.md)). `.github/workflows/auto-approve-review-lgtm.yml` turns that line into an approval from the Actions token — but only for the App two repository variables name, matched by login and immutable id:
+
+```sh
+gh api users/YOUR-APP[bot] --jq '{login, id}'       # the App's bot user: its slug plus "[bot]"
+gh variable set REVIEW_BOT_LOGIN --body 'YOUR-APP[bot]'
+gh variable set REVIEW_BOT_ID --body 'THE-ID'
+```
+
+The repository must also let Actions approve pull requests — the `can_approve_pull_request_reviews=true` setting from [section 4](#4-actions-permissions); without it the approval fails with 422. With the variables unset the workflow never runs: it is an inert template, so a checkout that has no review App, or wants a human approval on record, changes nothing.
+
 ## 6. Dependabot
 
 The update policy is `.github/dependabot.yml` in the tree. Two switches are repository settings: vulnerability alerts, and Dependabot's own security-update PRs.
@@ -147,4 +159,4 @@ gh api -X PUT repos/OWNER/REPO/automated-security-fixes
 
 ## What you did
 
-You reproduced the settings that make `main` a changelog: squash-only merges titled by the PR, a ruleset that requires CI's job names, permission for the two workflows that act on PRs, and the secrets the deploy needs. The conventions these settings enforce are in [Contributing](../../CONTRIBUTING.md); the path they protect is [Ship a release](ship-a-release.md).
+You reproduced the settings that make `main` a changelog: squash-only merges titled by the PR, a ruleset that requires CI's job names, permission for the two workflows that act on PRs, the secrets the deploy needs, and the variables that name your installation and, if you want it, your review App. The conventions these settings enforce are in [Contributing](../../CONTRIBUTING.md); the path they protect is [Ship a release](ship-a-release.md).

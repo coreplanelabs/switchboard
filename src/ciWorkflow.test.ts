@@ -272,6 +272,37 @@ describe("the verify scripts", () => {
   });
 });
 
+describe("the auto-approve workflow names no installation", () => {
+  // The workflow that turns a review App's `LGTM:` verdict into an approval
+  // is a working workflow for an installation that opts in and an inert
+  // template for everyone else: which App it trusts comes from two repository
+  // variables, and the job does not run while either is unset. The file
+  // itself carries no bot login and no numeric user id — those are the
+  // installation's, and this test is what keeps them out.
+  const file = ".github/workflows/auto-approve-review-lgtm.yml";
+  const text = read(file);
+  const workflow = parse(text) as Workflow & { permissions?: unknown };
+
+  it("parses, with an empty top-level permissions block and one job", () => {
+    expect(workflow.permissions).toEqual({});
+    expect(Object.keys(workflow.jobs)).toHaveLength(1);
+  });
+
+  it("the job runs only when both repository variables are set and match the reviewer", () => {
+    const [job] = Object.values(workflow.jobs);
+    expect(job.if).toContain("vars.REVIEW_BOT_LOGIN != ''");
+    expect(job.if).toContain("vars.REVIEW_BOT_ID != ''");
+    expect(job.if).toContain("github.event.review.user.login == vars.REVIEW_BOT_LOGIN");
+    expect(job.if).toContain("format('{0}', github.event.review.user.id) == vars.REVIEW_BOT_ID");
+    expect(job.if).toContain("startsWith(github.event.review.body, 'LGTM:')");
+  });
+
+  it("carries no bot login literal and no numeric user id", () => {
+    expect(text).not.toMatch(/\[bot\]/);
+    expect(text).not.toMatch(/\b\d{6,}\b/);
+  });
+});
+
 describe("the image check builds every image the deploy builds", () => {
   // A Dockerfile RUN whose last command exits non-zero fails only when the
   // image is built, and if CI builds the bot image alone the first build of any
