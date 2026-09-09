@@ -32,6 +32,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0020 | [A span is the one measurement primitive; every duration a user sees falls out of it](../decisions/0020-spans-one-measurement-primitive.md) | Execute Around Method | implemented | 2026-09-08 |
 | 0021 | [Records are immutable and specs are checked; documentation drift is prevented by CI, not discipline](../decisions/0021-records-are-immutable-specs-are-checked.md) | Two kinds of document | implemented | 2026-09-08 |
 | 0022 | [The public tree carries no imprint of the company that grew it, and a ratchet holds that line](../decisions/0022-public-tree-carries-no-imprint.md) | Ratchet | accepted | 2026-09-08 |
+| 0023 | [Cloudflare is the one supported production target; docker compose is the local loop](../decisions/0023-one-production-target.md) | One way to do it | accepted | 2026-09-09 |
 
 <!-- /generated:decision-records -->
 
