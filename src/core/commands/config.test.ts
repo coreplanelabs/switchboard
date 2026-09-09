@@ -6,8 +6,9 @@ import { ConfigStore, MAX_INSTRUCTIONS_LENGTH } from "../../config.js";
 import { chatCallerFor } from "../commandChat.js";
 import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
 import { callerWith } from "../testing/callers.js";
-import { parseInvocation, tokenize } from "../commandSurface.js";
-import { configCommands, registerConfigCommands, type ConfigCommandDeps } from "./config.js";
+import { EFFORT_LEVELS } from "../../effort.js";
+import { helpRows, parseInvocation, tokenize } from "../commandSurface.js";
+import { configCommands, configSet, registerConfigCommands, type ConfigCommandDeps } from "./config.js";
 
 // Feature: docs/reference/specs/routing-and-config.md items 5, 9 / docs/reference/specs/command-registry.md
 // (phase 4b): `config show|set|clear|instructions` as registry commands. The
@@ -240,6 +241,19 @@ describe("config set", () => {
       JSON.stringify(await commands.invoke("config.set", { args: ["me"], options: { agent: "wizard" } }, me)),
     ).not.toContain("wizard");
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
+  });
+
+  it("the derived help names every level of the effort ladder on --effort and --efforts.<agent> alike — from EFFORT_LEVELS, never hand-typed", () => {
+    // `--efforts.<agent> low|medium|high` once shipped while the ladder already
+    // had `xhigh` and `max`: help, the MCP tool schema and the HTTP schema all
+    // told users about three levels of five.
+    const options = helpRows(configSet).options;
+    const describes = (flag: string) => options.find((r) => r.form.startsWith(`${flag} `))!.describe;
+    for (const level of EFFORT_LEVELS) {
+      expect(describes("--effort")).toMatch(new RegExp(`\\b${level}\\b`));
+      expect(describes("--efforts")).toMatch(new RegExp(`\\b${level}\\b`));
+    }
+    expect(EFFORT_LEVELS.length).toBeGreaterThan(3);
   });
 
   it("the legacy `key=value` spelling is rejected as `invalid_input` (the grammar is `--key value`), and `instructions` is its own command", async () => {
