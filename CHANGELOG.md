@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.11.0](https://github.com/coreplanelabs/switchboard/compare/v1.10.0...v1.11.0) (2026-09-09)
+
+
+### Features
+
+* **cli:** switchboard init — the one-command installer ([#774](https://github.com/coreplanelabs/switchboard/issues/774)) ([233fdcb](https://github.com/coreplanelabs/switchboard/commit/233fdcbc7b1104e825e097ab14c074ade4d7efb5))
+
+
+### Bug fixes
+
+* **config:** the --efforts option describes the ladder's levels from the ladder, not a hand-typed three ([#777](https://github.com/coreplanelabs/switchboard/issues/777)) ([dd1c0ed](https://github.com/coreplanelabs/switchboard/commit/dd1c0edb1e6192f91e4b9c0d3049004b02712bf8))
+
+
+### Documentation
+
+* **docs-site:** the docs site is public — an installation that gates it uses its own Access application ([#789](https://github.com/coreplanelabs/switchboard/issues/789)) ([b67f36d](https://github.com/coreplanelabs/switchboard/commit/b67f36dd2b6acf219961c66bb76668dffa94381d))
+* **readme:** badges, and the repository's description and topics become project facts ([#779](https://github.com/coreplanelabs/switchboard/issues/779)) ([1924972](https://github.com/coreplanelabs/switchboard/commit/1924972261afbfc77116e28ae0c36ea267a5eabe))
+* **visuals:** render the dashboard's screenshots from the fixture preview and pin their inputs ([#771](https://github.com/coreplanelabs/switchboard/issues/771)) ([d994b51](https://github.com/coreplanelabs/switchboard/commit/d994b515c5911be30d8e1636c4ebd5cf1239f73b))
+* **visuals:** the screenshot manifest pins its own module, viewport and clock; the landing's picture list is data ([#775](https://github.com/coreplanelabs/switchboard/issues/775)) ([ba4055d](https://github.com/coreplanelabs/switchboard/commit/ba4055db1386576e23d2df9bc6ae113f29116f6f))
+
+
+### Refactoring
+
+* **channels:** slack.ts and config.ts give up the concerns that stand apart (Phase 6 tidyings) ([#782](https://github.com/coreplanelabs/switchboard/issues/782)) ([ffc743f](https://github.com/coreplanelabs/switchboard/commit/ffc743f164d3751c71d2e9d4446afbf45761e1fb))
+* **core:** the agent:ship fork leaves dispatch() as dispatch/ship.ts (pipeline split, PR 6 of 6) ([#784](https://github.com/coreplanelabs/switchboard/issues/784)) ([dab2646](https://github.com/coreplanelabs/switchboard/commit/dab26464838f71f5b372de70d5844017f2135ed7))
+* **core:** the dispatcher's admission stage leaves as named functions (pipeline split, PR 2 of 6) ([#772](https://github.com/coreplanelabs/switchboard/issues/772)) ([e8b6715](https://github.com/coreplanelabs/switchboard/commit/e8b6715ba89535d24ac138f2065e5f453c17249a))
+* **core:** the dispatcher's provision stage leaves as named functions (pipeline split, PR 4 of 6) ([#778](https://github.com/coreplanelabs/switchboard/issues/778)) ([0af3248](https://github.com/coreplanelabs/switchboard/commit/0af3248ddb9b180ddc16a86f761a49b86a519fde))
+* **core:** the dispatcher's resolve and authorize stages leave as named functions (pipeline split, PR 3 of 6) ([#776](https://github.com/coreplanelabs/switchboard/issues/776)) ([93ddfed](https://github.com/coreplanelabs/switchboard/commit/93ddfedd7fb3c1f43c60df95fdb17e9aa9282942))
+* **core:** the dispatcher's run stage leaves as named functions (pipeline split, PR 5 of 6) ([#780](https://github.com/coreplanelabs/switchboard/issues/780)) ([87bc6b2](https://github.com/coreplanelabs/switchboard/commit/87bc6b25e4d4bc6ac96a7b0f61c6ea947f732323))
+* **core:** the run registry's parts leave as sibling modules (Tidy First) ([#785](https://github.com/coreplanelabs/switchboard/issues/785)) ([2340c28](https://github.com/coreplanelabs/switchboard/commit/2340c28c00908b5fedd2760d5f4d681c61c0cc6f))
+* **core:** the ship pipeline's stages leave as files under src/core/ship/ (Phase 6) ([#783](https://github.com/coreplanelabs/switchboard/issues/783)) ([231d29e](https://github.com/coreplanelabs/switchboard/commit/231d29e7e35916a09528ce10eefb44210e16e290))
+
 ## [1.10.0](https://github.com/coreplanelabs/switchboard/compare/v1.9.0...v1.10.0) (2026-09-09)
 
 
