@@ -45,7 +45,7 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   { rule: "bot runtime config (pushed to the state Worker, never built into the image)", test: /^config\// },
   {
     rule: "repo metadata",
-    test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|project\.json|switchboard\.png)$/,
+    test: /^(\.gitignore|\.nvmrc|\.env\.example|LICENSE|NOTICE|docker-compose\.yml|fly\.toml|tsconfig\.scripts\.json|release-please-config\.json|\.release-please-manifest\.json|project\.json|switchboard\.png)$/,
   },
   { rule: "lint and format config", test: /^(\.prettierignore|\.prettierrc(\.json)?|eslint\.config\.[cm]?js)$/ },
   // One npm workspace, one lockfile: a per-workspace lockfile in a diff
