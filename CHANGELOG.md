@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.8.0](https://github.com/coreplanelabs/switchboard/compare/v1.7.0...v1.8.0) (2026-09-09)
+
+
+### Features
+
+* **costs:** every Cloudflare meter a deployment is billed on, attributed by Worker script, with the group's share of the whole account ([#736](https://github.com/coreplanelabs/switchboard/issues/736)) ([3048c10](https://github.com/coreplanelabs/switchboard/commit/3048c108acd35e5927b0f6f96b9a795918ecbe0b))
+
+
+### Bug fixes
+
+* **deploy:** fly.toml is an inert path for the deploy selection, as the spec already says — its deletion no longer rolls the whole fleet ([#738](https://github.com/coreplanelabs/switchboard/issues/738)) ([7bf5853](https://github.com/coreplanelabs/switchboard/commit/7bf5853109ca7976169db1563a04ad5b295e69df))
+
 ## [1.7.0](https://github.com/coreplanelabs/switchboard/compare/v1.6.0...v1.7.0) (2026-09-09)
 
 
