@@ -12,6 +12,8 @@
 # (docker-compose.yml) and for anyone who runs the container elsewhere. The
 # Cloudflare deploy does not consume it — wrangler builds the same Dockerfile
 # at deploy time — so a failed publish never blocks a deploy, and vice versa.
+# And it publishes the CLI to npm (publish-npm below), the package an operator
+# runs `init` from without a checkout.
 #
 # release-please acts as our GitHub App, not as GITHUB_TOKEN. A release PR
 # opened with GITHUB_TOKEN gets `pull_request` runs that sit at
@@ -88,6 +90,11 @@ jobs:
         # this step would be skipped exactly when the retry failed too.
         if: always() && steps.release.outcome == 'failure'
         run: echo "::warning title=release-please retried::the first release-please attempt failed (its step above has the message) and the retry ${{ steps.release-retry.outcome }}. GitHub refused the release-branch update once; the retry's outputs drive this run."
+      # A skipped job has no log, so the one line saying why the package was not
+      # published lives here, on the release that would have published it.
+      - name: npm publish is off
+        if: always() && (steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created) == 'true' && vars.SWITCHBOARD_PUBLISH_NPM != 'true'
+        run: echo "::notice title=npm publish is off::this release does not publish the npm package — set the repository variable SWITCHBOARD_PUBLISH_NPM to true (and the NPM_TOKEN secret) to turn the publish-npm job on."
 
   # The release PR carries its deploy plan (docs/reference/specs/release-and-deploy.md
   # item 8). Posted from HERE, on the push to main that opened or updated the
@@ -230,3 +237,38 @@ jobs:
           subject-name: ${{ steps.image.outputs.name }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+  # The same release publishes the CLI to npm (docs/reference/specs/packaging.md
+  # item 5): the package under packages/switchboard, whose version the release
+  # commit already carries (release-please-config.json's extra files), built by
+  # its own script and published with npm's provenance attestation — which is
+  # what `id-token: write` is for, and the only scope this job holds beyond
+  # reading the tree. The token is NPM_TOKEN, a granular access token with
+  # publish rights on the package's scope, set once as a repository secret by a
+  # person; npm reads it as NODE_AUTH_TOKEN for the registry setup-node names.
+  # Independent of `deploy` and `publish-image` like they are of each other.
+  # OFF until the owner turns it on: the job runs only when the repository
+  # variable SWITCHBOARD_PUBLISH_NPM is the string `true` — unset, the job is
+  # skipped and the `npm publish is off` step above says so in one line — so a
+  # release never publishes to the registry before someone decides it should.
+  publish-npm:
+    name: publish the npm package
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true' && vars.SWITCHBOARD_PUBLISH_NPM == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run build -w packages/switchboard
+      - run: npm publish --workspace packages/switchboard --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

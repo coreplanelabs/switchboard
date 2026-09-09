@@ -71,6 +71,7 @@ Save as `main-ruleset.json`:
           { "context": "docs", "integration_id": 15368 },
           { "context": "workers", "integration_id": 15368 },
           { "context": "image", "integration_id": 15368 },
+          { "context": "package", "integration_id": 15368 },
           { "context": "title", "integration_id": 15368 }
         ]
       }
@@ -124,7 +125,14 @@ The default token permission stays `read`; each workflow raises its own `permiss
 
 ## 5. Repository secrets and variables
 
-The deploy workflows need `CLOUDFLARE_DEPLOY_TOKEN` (Workers Scripts, Containers, R2 and Account Settings at the account; Workers Routes and DNS at the zone), `MEMORY_TOKEN` (the config push before the bot step) and `RESIDENT_READ_TOKEN`, and optionally `SANDBOX_TOKEN` for the sandbox's live gate and the release PR's deploy plan; the docs deploy uses `CLOUDFLARE_API_TOKEN`, which is also the fallback while no deploy token is set. What each one is and how to rotate it: [Rotate a secret](rotate-a-secret.md).
+The deploy workflows need `CLOUDFLARE_DEPLOY_TOKEN` (Workers Scripts, Containers, R2 and Account Settings at the account; Workers Routes and DNS at the zone), `MEMORY_TOKEN` (the config push before the bot step) and `RESIDENT_READ_TOKEN`, and optionally `SANDBOX_TOKEN` for the sandbox's live gate and the release PR's deploy plan; the docs deploy uses `CLOUDFLARE_API_TOKEN`, which is also the fallback while no deploy token is set. What each one is and how to rotate it: [Rotate a secret](rotate-a-secret.md). The release can also publish the CLI to npm, and does so only when you say so: the `publish the npm package` job runs when the repository variable `SWITCHBOARD_PUBLISH_NPM` is `true` and is skipped otherwise (the release run carries one `npm publish is off` notice). Turning it on takes the variable and `NPM_TOKEN` — a granular access token on npmjs.com with read-and-write access to the package's scope (the `package` fact in `project.json` names it):
+
+```sh
+gh secret set NPM_TOKEN            # paste the token on stdin
+gh variable set SWITCHBOARD_PUBLISH_NPM --body true
+```
+
+Without the token the job fails on its own; the image and the deploy publish regardless of either. The manifest's `"private": true` is the second lever: npm refuses to publish while it is there, and removing it is a reviewed pull request ([Ship a release](ship-a-release.md#3-merge-the-release-pr)).
 
 Where the installation's deployment profile lives is a repository **variable**, not a line in a workflow, so the tree names no installation:
 
