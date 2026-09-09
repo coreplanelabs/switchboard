@@ -9,6 +9,7 @@ import { registerMemoryCommands, type MemoryCommandDeps } from "./memory.js";
 import { registerRepoCommands, type RepoCommandDeps } from "./repo.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./runs.js";
 import { registerScheduleCommands, type ScheduleCommandDeps } from "./schedule.js";
+import { registerSetupCommands, type SetupCommandDeps } from "./setup.js";
 
 // Every command the bot registers, and the deps object they are bound to.
 // Bound ONCE per process by `buildCoreCommands` (src/core/commandCatalogue.ts)
@@ -27,7 +28,8 @@ export type CoreCommandDeps = HelpCommandDeps &
   McpCommandDeps &
   ScheduleCommandDeps &
   DeployCommandDeps &
-  EnvCommandDeps;
+  EnvCommandDeps &
+  SetupCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
   registerHelpCommands(registry);
@@ -40,6 +42,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerScheduleCommands(registry);
   registerDeployCommands(registry);
   registerEnvCommands(registry);
+  registerSetupCommands(registry);
 }
 
 /** The `<group>` of every registered command's action, once each, sorted — the

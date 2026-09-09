@@ -28,12 +28,11 @@ least one model provider.
 git clone https://github.com/coreplanelabs/switchboard.git
 cd switchboard
 npm ci
-cp config/config.example.yaml config/config.yaml
-cp .env.example .env            # set ANTHROPIC_API_KEY (or another provider's key)
+npx tsx src/cli.ts init --organization <your GitHub org> --anthropic-key <your key>
 npx tsx src/cli.ts ask "what can you do?"
 ```
 
-The process loads `.env` from the directory you run it in (a variable your shell exports wins). That last command runs the whole pipeline with the terminal as the channel, so
+`init` writes the two gitignored files the tree deliberately lacks — `.env` (mode 600, your key on its line) and `config/config.yaml` (every optional block off) — from their checked-in examples; `init --help` lists the flags for another provider, Slack and the GitHub App, and the manual path (`cp config/config.example.yaml config/config.yaml`, `cp .env.example .env`, edit) still works. The process loads `.env` from the directory you run it in (a variable your shell exports wins). That last command runs the whole pipeline with the terminal as the channel, so
 you can work on almost everything without a Slack workspace. The tutorial
 [Run it locally](docs/tutorials/run-it-locally.md) goes further.
 

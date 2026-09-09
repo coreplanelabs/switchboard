@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // The Switchboard CLI — a THIN wrapper over the command registry (see
 // docs/decisions/0008-one-command-definition-every-surface.md): every
 // registered command as `npx tsx src/cli.ts <group> <verb>
@@ -18,6 +19,10 @@
 //   npx tsx src/cli.ts ask "what is 2+2"
 //   npx tsx src/cli.ts ask "agent:coding model:openai/gpt-5 ship a PR that ..."
 //   npx tsx src/cli.ts ask --thread cli:mywork "agent:coding continue where we left off"
+// And ONE spelling shortcut, the front door the docs promise: a bare `init` is
+// the registry's `setup init` — the same command, the same flags, no grammar of
+// its own (`CLI_SHORTHANDS`).
+//   npx tsx src/cli.ts init --organization acme --anthropic-key sk-ant-…
 // Parsing is pure and unit-tested; `main()` only wires in-process deps. Exit
 // codes: 0 ok; 2 the invocation was rejected — `usage` (no `<group> <verb>`,
 // an unknown command, a malformed `ask`) or `invalid_input`, whether the
@@ -29,7 +34,7 @@
 // already read the config and the data directory.
 
 import "./loadEnv.js";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
@@ -46,7 +51,14 @@ import {
   type CommandInvoker,
   type InvokeErrorCode,
 } from "./core/commandRegistry.js";
-import { catalogueText, chatForm, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
+import {
+  catalogueText,
+  chatForm,
+  cliWords,
+  helpText,
+  parseInvocation,
+  type GrammarRejection,
+} from "./core/commandSurface.js";
 import { dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { startRequestRoot } from "./core/requestTrace.js";
 import { systemClock } from "./core/trace/clock.js";
@@ -72,8 +84,14 @@ export const USAGE = [
   "usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]",
   "       npx tsx src/cli.ts <group> <verb> --help",
   '       npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"',
+  "       npx tsx src/cli.ts init [--option value…]          (= setup init: the installer)",
   "       npx tsx src/cli.ts help",
 ].join("\n");
+
+/** One-word spellings of a registry command — `init` for the installer. The
+ *  word is replaced by the command's `<group> <verb>` before parsing, so what
+ *  follows is bound by the shared grammar exactly as the long form is. */
+export const CLI_SHORTHANDS: Readonly<Record<string, string>> = { init: "setup.init" };
 
 export type CliInvocation =
   /** A registry command, bound by the shared grammar. */
@@ -105,6 +123,8 @@ export function parseCliArgv(
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h" || (argv[0] === "help" && argv.length === 1))
     return { kind: "catalogue" };
   if (argv[0] === "ask") return parseAsk(argv.slice(1), now);
+  const shorthand = CLI_SHORTHANDS[argv[0]];
+  if (shorthand !== undefined) argv = [...cliWords(shorthand), ...argv.slice(1)];
   const json = argv.includes("--json");
   const rest = argv.filter((a) => a !== "--json");
   const [group, verb, ...tail] = rest;
@@ -463,9 +483,23 @@ async function main(): Promise<void> {
   await runHistoryWriter.settled();
 }
 
-// Run only when invoked as a script (tsx/node src/cli.ts), never on import
-// (the parsing helpers above are unit-tested).
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/** True when this module is the script Node was started with — through a
+ *  symlink too (the `switchboard` bin npm links to `dist/cli.js`: `argv[1]` is
+ *  the link, `import.meta.url` the target), never when merely imported. */
+function invokedAsScript(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return false;
+  }
+}
+
+// Run only when invoked as a script (tsx/node src/cli.ts, the `switchboard`
+// bin, the container's entrypoint), never on import (the parsing helpers above
+// are unit-tested).
+if (invokedAsScript()) {
   main().catch((err) => {
     // `ask` without a bot config: the same one-line refusal the commands give, not a stack.
     console.error(err instanceof CommandError ? errorLine(err.code, err.message) : err);

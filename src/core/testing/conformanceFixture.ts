@@ -33,6 +33,7 @@ import type { RestartPlan } from "../../deploy/restart.js";
 import { TEST_PROFILE } from "../../deploy/testing/profile.js";
 import { renderWorkerConfigs, TEMPLATE_FILE } from "../../deploy/wranglerTemplate.js";
 import type { DeployRunResult, RestartRunResult } from "../../deploy/run.js";
+import type { PlannedFile } from "../../setup/plan.js";
 import { InMemoryIssueTracker } from "../../execution/githubIssues.js";
 import { invokeChatCommand, parseChatCommand } from "../commandChat.js";
 import {
@@ -112,6 +113,38 @@ export const POWER = "slack:UPOWER";
 export const NOBODY = "slack:UNOBODY";
 /** The channel a chat caller speaks from (its `origin`) — deliberately not the fixture's `--channel`. */
 export const CHAT_CHANNEL = "slack:CX";
+
+/** `setup init`'s `.env.example` stand-in: the lines the installer fills, as the real file spells them. */
+export const SETUP_ENV_TEMPLATE = [
+  "SLACK_BOT_TOKEN=xoxb-...",
+  "SLACK_APP_TOKEN=xapp-...",
+  "ANTHROPIC_API_KEY=sk-ant-...",
+  "OPENAI_API_KEY=sk-...",
+  "# GITHUB_APP_ID=123456",
+  "# GITHUB_APP_INSTALLATION_ID=12345678",
+  '# GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----"',
+  "",
+].join("\n");
+/** `setup init`'s `config.example.yaml` stand-in: both example providers and the three default models. */
+export const SETUP_CONFIG_TEMPLATE = `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+  openai:
+    type: openai-compatible
+    baseUrl: https://api.openai.com/v1
+    apiKeyEnv: OPENAI_API_KEY
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+    coding: anthropic/general-model
+    review: anthropic/general-model
+execution:
+  type: local
+`;
 
 export const BASE_YAML = `
 organization: acme
@@ -493,6 +526,24 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
         deployAll: false,
         markdown: "(md)",
       }),
+    },
+    // `setup init`: the templates are small stand-ins for the checked-in examples (the real ones are
+    // the planner's own tests' fixture); nothing exists yet, the working directory is a checkout, a
+    // private-key file has content, there is no terminal, and a write is the effect and is recorded.
+    setup: {
+      templates: async () => ({
+        env: SETUP_ENV_TEMPLATE,
+        config: SETUP_CONFIG_TEMPLATE,
+        profile: '{ "configSource": "config/config.yaml" }\n',
+      }),
+      exists: async () => false,
+      write: async (file: PlannedFile) => {
+        exec(`setup.init write ${file.path} mode=${file.mode.toString(8)}`, undefined);
+      },
+      readFile: async () => "-----BEGIN RSA PRIVATE KEY-----\nFIXTURE\n-----END RSA PRIVATE KEY-----\n",
+      inCheckout: () => true,
+      image: () => "ghcr.io/example/switchboard",
+      env: {},
     },
     env: {
       bootstrap: async (opts, log): Promise<BootstrapResult> => {

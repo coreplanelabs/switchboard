@@ -62,6 +62,7 @@ exports[`capability surfaces — cloud-full > CLI catalogue 1`] = `
 "usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]
        npx tsx src/cli.ts <group> <verb> --help
        npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"
+       npx tsx src/cli.ts init [--option value…]          (= setup init: the installer)
        npx tsx src/cli.ts help
 
 commands:
@@ -99,7 +100,8 @@ commands:
   deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
-  env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply)."
+  env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
+  setup init           — The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run previews with secrets masked."
 `;
 
 exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
@@ -260,6 +262,7 @@ exports[`capability surfaces — local-full > CLI catalogue 1`] = `
 "usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]
        npx tsx src/cli.ts <group> <verb> --help
        npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"
+       npx tsx src/cli.ts init [--option value…]          (= setup init: the installer)
        npx tsx src/cli.ts help
 
 commands:
@@ -291,7 +294,8 @@ commands:
   deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
-  env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply)."
+  env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
+  setup init           — The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run previews with secrets masked."
 `;
 
 exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
@@ -433,6 +437,7 @@ exports[`capability surfaces — minimal > CLI catalogue 1`] = `
 "usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]
        npx tsx src/cli.ts <group> <verb> --help
        npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"
+       npx tsx src/cli.ts init [--option value…]          (= setup init: the installer)
        npx tsx src/cli.ts help
 
 commands:
@@ -455,7 +460,8 @@ commands:
   deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
-  env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply)."
+  env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
+  setup init           — The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run previews with secrets masked."
 `;
 
 exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `

@@ -14,6 +14,7 @@ import {
   runDeployPlan,
 } from "../deploy/run.js";
 import { hostSecretsIO } from "../deploy/secretsHost.js";
+import { hostSetupIO } from "../setup/host.js";
 import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -221,6 +222,8 @@ export function buildCoreCommands(
       pushConfig: pushConfigOnHost,
     },
     env: { bootstrap: bootstrapOnHost },
+    // `setup init` writes the operator's working directory — the one the CLI runs in.
+    setup: hostSetupIO(),
   };
   return bindCommands(registry, deps);
 }

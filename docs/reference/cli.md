@@ -111,6 +111,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 |---|---|---|
 | `env bootstrap --env <string> --service <string> [--apply] [--out <string>] [--manifest <string>]` | Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply). | CLI only |
 
+### `setup`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `setup init [--organization <string>] [--anthropic-key <string>] [--openai-compatible <string>] [--model <string>] [--model-key <string>] [--slack-app-token <string>] [--slack-bot-token <string>] [--github-app-id <string>] [--github-installation-id <string>] [--github-private-key-file <string>] [--cloudflare <string>] [--zone <string>] [--name <string>] [--force] [--dry-run]` | The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run previews with secrets masked. | CLI only |
+
 <!-- /generated:cli-commands -->
 
 ## Which commands need bot config

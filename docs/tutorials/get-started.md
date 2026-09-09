@@ -14,24 +14,39 @@ cd switchboard
 npm ci
 ```
 
-Make the two local files that the tree deliberately does not carry. Both are ignored by git; the first is every knob of the bot with everything optional left off, the second is where credentials live.
+Now the one command this lesson is built on. `init` writes the two local files the tree deliberately does not carry, from their checked-in examples, with the values you give it; `<org>` is the GitHub organization (or user) this installation will serve, and the key is yours:
 
 ```bash
-cp config/config.example.yaml config/config.yaml
-cp .env.example .env
+npm run cli -- init --organization <org> --anthropic-key <your key>
 ```
 
-Open `.env` and replace the placeholder on the `ANTHROPIC_API_KEY` line with your key. Leave the rest alone — nothing reads a line until you turn its feature on.
+It prints what it did:
 
-Now ask. The CLI is a channel like Slack is: the same dispatcher, the same agents, printing to your terminal instead of a thread.
+```
+wrote:
+  .env                  (mode 600)
+  config/config.yaml
+providers: anthropic
+capabilities: execution local · github off · memory off · run history off · run ledger off · mcp off · costs off · schedules off · ingress off · residents off · dashboard auth none · docs off
+next:
+  npm run cli -- ask "what can you do?"
+  npx tsx src/index.ts
+  docker compose up -d   # the same bot from the published image …
+```
+
+Two things happened. `.env` holds your key on its `ANTHROPIC_API_KEY` line and nothing else that is real — every other placeholder from the example is commented out — and only you can read it (`ls -l .env` shows `-rw-------`). `config/config.yaml` is the example config with your organization, one provider, and every optional block still off; `init` loaded it through the same loader the bot uses and printed the result as the `capabilities` line. Run it on a terminal without the flags and it asks for each answer instead; run it again and it refuses to overwrite either file unless you say `--force`; `init --dry-run` shows both files with the secrets masked; `init --help` lists every flag, including the ones for an OpenAI-compatible endpoint, Slack and the GitHub App.
+
+Now ask, as the output told you to. The CLI is a channel like Slack is: the same dispatcher, the same agents, printing to your terminal instead of a thread.
 
 ```bash
-npx tsx src/cli.ts ask "what can you do?"
+npm run cli -- ask "what can you do?"
 ```
 
 Switchboard reads credentials from the environment and from nowhere else; the process loads `.env` from the directory you run it in — the repo root here — and a variable your shell already exports wins over the file.
 
 You will see a status line tick (`preparing workspace…`, then `thinking…`), and then the answer: the general agent introduces itself and the agents it can hand work to. That took one model call on the default model, `anthropic/claude-haiku-4-5`.
+
+**What `init` did for you, by hand.** The files it wrote are the two copies the manual path makes — `cp config/config.example.yaml config/config.yaml`, `cp .env.example .env`, then editing `organization:` in the first and the `ANTHROPIC_API_KEY` line in the second. Nothing about them is special: open either one, and change it, whenever you like.
 
 Every `ask` is a run, and a run leaves a record when history is on. Turn it on with the smallest possible block — a file store under `data/` — by appending to `config/config.yaml`:
 
@@ -43,15 +58,15 @@ runHistory:
 Ask once more, then list what happened and open the record:
 
 ```bash
-npx tsx src/cli.ts ask "in one sentence, what is a lateral join?"
-npx tsx src/cli.ts runs list --status all
+npm run cli -- ask "in one sentence, what is a lateral join?"
+npm run cli -- runs list --status all
 ```
 
 The list prints one row per run with a short id, the agent, the outcome and the duration. Copy the full id from `runs list --status all --json` and read the record and its event stream — the same data the dashboard's run page shows:
 
 ```bash
-npx tsx src/cli.ts runs get <run id>
-npx tsx src/cli.ts runs events <run id>
+npm run cli -- runs get <run id>
+npm run cli -- runs events <run id>
 ```
 
 That is the whole product in miniature: a message arrives over a channel, a dispatcher routes it to an agent, the agent runs on a model, and the run is recorded. Everything after this is the same pipeline with a different front door and a different place to run.
@@ -67,7 +82,11 @@ Switchboard connects to Slack over Socket Mode: the bot dials out to Slack and h
 1. *Basic Information* → *App-Level Tokens* → *Generate Token and Scopes*: name it anything, add the scope `connections:write`, generate. The value starts with `xapp-`; that is `SLACK_APP_TOKEN`. (A manifest cannot create this token, which is why it is a click.)
 2. *Install App* → *Install to Workspace*, and allow the scopes. The *Bot User OAuth Token* starts with `xoxb-`; that is `SLACK_BOT_TOKEN`.
 
-Put both values on their lines in `.env`.
+Put both values in `.env`: either on their two lines by hand, or by running `init` again with everything it knows plus the two tokens — `--force` lets it replace the files it wrote in Part 1:
+
+```bash
+npm run cli -- init --force --organization <org> --anthropic-key <your key> --slack-app-token xapp-… --slack-bot-token xoxb-…
+```
 
 **Start the bot.** This is the same process the production container runs, from source (`npm run dev` is the same command):
 
@@ -75,7 +94,7 @@ Put both values on their lines in `.env`.
 npx tsx src/index.ts
 ```
 
-The startup log states what it computed: the capabilities that are on, where runtime overrides are stored, the dashboard's auth strategy — and, once the socket is up, `switchboard running (providers: anthropic, openai; default agent: general)`. Leave it running.
+The startup log states what it computed: the capabilities that are on, where runtime overrides are stored, the dashboard's auth strategy — and, once the socket is up, `switchboard running (providers: anthropic; default agent: general)`. Leave it running.
 
 **Say something.** In Slack, invite the bot to a channel (`/invite @<your app's name>`) and mention it:
 
@@ -93,27 +112,31 @@ Production is the bot as a container on Cloudflare, with a **state Worker** besi
 
 **Before you start:** a Cloudflare account, a domain (a *zone*) in it, `npx wrangler login` run once in `deploy/cloudflare` against that account, and Docker running — the bot's image is built on your machine.
 
-**Write the deployment profile.** Copy the example and fill in the account id, the zone, and two hostnames under that zone; delete the `resident`, `sandbox` and `docs` entries so the plan has only the two steps you want:
+**Write the deployment profile and render the Worker configs.** One more `init`, with your account id and your zone. It writes `deploy/profile.json` — the bot as `switchboard.<zone>` and the state Worker as `switchboard-memory.<zone>` (`--name` changes the stem) — and, because the profile is now there, renders every Worker's `wrangler.jsonc` from the template beside it, the way `deploy init` does:
 
 ```bash
-cp deploy/profile.example.json deploy/profile.json
+npm run cli -- init --force --organization <org> --anthropic-key <your key> --slack-app-token xapp-… --slack-bot-token xoxb-… --cloudflare <your Cloudflare account id> --zone example.com
 ```
 
-```json
-{
-  "account": "<your Cloudflare account id>",
-  "zone": "example.com",
-  "workers": {
-    "memory": { "script": "switchboard-memory", "hostname": "switchboard-memory.example.com" },
-    "bot": { "script": "switchboard", "hostname": "switchboard.example.com" }
-  },
-  "configSource": "config/config.yaml"
-}
+```
+wrote:
+  .env                  (mode 600)
+  config/config.yaml
+  deploy/profile.json
+…
+Worker configs from deploy/profile.json:
+  written   deploy/cloudflare-memory/wrangler.jsonc
+  written   deploy/cloudflare/wrangler.jsonc
+next:
+  …
+  npm run cli -- deploy secrets memory
+  npm run cli -- deploy secrets bot
+  MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npm run cli -- deploy all
 ```
 
-The profile is ignored by git: it names your account and your hostnames, and the tree carries neither.
+The profile is ignored by git: it names your account and your hostnames, and the tree carries neither. `init` writes it only from the root of a checkout — the Worker templates and `deploy all` live there — and refuses anywhere else.
 
-**Point the config at the state Worker.** In `config/config.yaml`, replace the `runHistory` block from Part 1 with one that names the state Worker's hostname, and add the block that sends chat-set overrides there too. Both use the same bearer, `MEMORY_TOKEN`, by default:
+**Point the config at the state Worker.** `--force` rewrote `config/config.yaml` from the example, so the `runHistory` block from Part 1 is gone; add the one that names the state Worker's hostname instead, and the block that sends chat-set overrides there too. Both use the same bearer, `MEMORY_TOKEN`, by default:
 
 ```yaml
 runHistory:
@@ -124,16 +147,15 @@ runtimeOverrides:
     baseUrl: https://switchboard-memory.example.com
 ```
 
-**Render the Worker configs and read the plan.** Every Worker's `wrangler.jsonc` is generated from the template beside it and your profile — never edited by hand:
+**Read the plan.** The Worker configs are already rendered; the plan is what `deploy all` will do:
 
 ```bash
-npx tsx src/cli.ts deploy init
-npx tsx src/cli.ts deploy plan
+npm run cli -- deploy plan
 ```
 
 The plan lists two steps in the only supported order — the state Worker, then the bot — with the checks each one runs and the health URL it waits on. Nothing is executed.
 
-**Stage the secrets.** `deploy secrets` reads values from a directory of files named after the secrets, `~/.secrets/switchboard/<NAME>`, one value per file, and pipes each into `wrangler secret put` — no value ever appears in a command line or a log. Create the directory (mode 700) and write four files: your two Slack tokens and your Anthropic key from `.env`, and a bearer you mint for the state Worker:
+**Stage the secrets.** `deploy secrets` reads values from a directory of files named after the secrets, `~/.secrets/switchboard/<NAME>`, one value per file, and pipes each into `wrangler secret put` — no value ever appears in a command line or a log. `init` never writes there: a secret's only file on this machine is `.env`. Create the directory (mode 700) and write four files: your two Slack tokens and your Anthropic key from `.env`, and a bearer you mint for the state Worker:
 
 ```bash
 mkdir -p -m 700 ~/.secrets/switchboard
@@ -143,14 +165,14 @@ openssl rand -hex 32 > ~/.secrets/switchboard/MEMORY_TOKEN
 Then put them. The state Worker holds one secret; the bot holds many, and every one that belongs to a feature you have not turned on is optional — the command skips it by name and says so (the full list, and which are required, is `deploy/secrets.manifest.json`):
 
 ```bash
-npx tsx src/cli.ts deploy secrets memory
-npx tsx src/cli.ts deploy secrets bot
+npm run cli -- deploy secrets memory
+npm run cli -- deploy secrets bot
 ```
 
 **Deploy.** One command runs the plan: it checks that wrangler is logged in to the profile's account and that the tree is clean at `origin/main`, validates your config and pushes it to the state Worker as the document the bot reads at startup, deploys the state Worker, builds and deploys the bot's image, and then waits until the bot's `/healthz` answers from a container running this commit. It needs the state Worker's bearer in its own environment to push the config:
 
 ```bash
-MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx tsx src/cli.ts deploy all
+MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npm run cli -- deploy all
 ```
 
 The command exits 0 only when the new container is live; "deployed" and "live" are different moments on Cloudflare, and it waits for the second one.
@@ -166,5 +188,5 @@ The JSON names the commit the container was built from, whether it is draining, 
 You have Switchboard in your terminal, in Slack, and in production, and every one of those was the same pipeline. What to read next depends on which of the three you care about:
 
 - **Slack**: [Your first request in Slack](first-request-in-slack.md) for what else a thread can do, then [Configure your defaults](../how-to/configure-your-defaults.md).
-- **Production**: [Deploy](../how-to/deploy.md) for the optional Workers, the release workflow that deploys for you, and rotating a secret; [Set up accounts](../how-to/set-up-accounts.md) for the GitHub App that lets the coding agent open pull requests.
+- **Production**: [Deploy](../how-to/deploy.md) for the optional Workers, the release workflow that deploys for you, and rotating a secret; [Set up accounts](../how-to/set-up-accounts.md) for the GitHub App that lets the coding agent open pull requests — `init --github-app-id … --github-installation-id … --github-private-key-file …` puts its three values in `.env`.
 - **The design**: [Architecture](../explanation/architecture.md), then [Security model](../explanation/security-model.md).

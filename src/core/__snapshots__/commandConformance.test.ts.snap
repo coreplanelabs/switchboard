@@ -1108,5 +1108,92 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
       "mcp",
     ],
   },
+  {
+    "action": "setup:write",
+    "args": [],
+    "effect": "write",
+    "id": "setup.init",
+    "options": [
+      {
+        "name": "organization",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "anthropicKey",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "openaiCompatible",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "model",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "modelKey",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "slackAppToken",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "slackBotToken",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "githubAppId",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "githubInstallationId",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "githubPrivateKeyFile",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "cloudflare",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "zone",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "name",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "force",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
 ]
 `;

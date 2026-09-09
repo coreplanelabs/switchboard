@@ -11,6 +11,7 @@ import { acceptsUndefined, resourceOf, type Caller, type CommandDef, type Surfac
 import { camelToKebab, cliFlag, isBooleanSchema, jsonSchemaFor, namedToInput } from "../commandSurface.js";
 import { coreCommandGroups } from "../commands/all.js";
 import { callerWith } from "./callers.js";
+import { TEST_PROFILE } from "../../deploy/testing/profile.js";
 
 // Pure helpers for the registry-driven conformance suite
 // (src/core/commandConformance.test.ts, docs/reference/specs/command-registry.md item 25).
@@ -562,6 +563,21 @@ export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; ba
   "mcp.show": { baseline: { channel: FIXTURE.channel }, why: "as mcp.connect" },
   "mcp.remove": { baseline: { channel: FIXTURE.channel }, why: "as mcp.connect" },
   "mcp.list": { baseline: { channel: FIXTURE.channel }, why: "a machine caller has no origin channel" },
+  "setup.init": {
+    baseline: {
+      organization: "acme",
+      anthropicKey: "sk-ant-fixture-key",
+      openaiCompatible: "https://api.openai.com/v1",
+    },
+    hints: {
+      openaiCompatible: "https://api.openai.com/v1",
+      cloudflare: TEST_PROFILE.account,
+      zone: "example.com",
+      githubAppId: "123456",
+      githubInstallationId: "12345678",
+    },
+    why: "an installation needs an organization and a provider (both example providers here, so `--model`/`--model-key` alone are coherent); the account, zone and GitHub ids are constrained strings the generic sample cannot satisfy; the fixture has no terminal, so the baseline stands in for the prompt",
+  },
 };
 
 /** The suite's variants for one command: `exhaustiveVariants` over the shared

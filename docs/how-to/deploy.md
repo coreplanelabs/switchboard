@@ -25,7 +25,13 @@ Deploys run in one order — memory, bot, resident, sandbox — because the stat
 
 ## 1. The deployment profile
 
-Every place-specific fact — your account, your zone, each Worker's script name and hostname, where the bot's config comes from — lives in one file, `deploy/profile.json`, which git ignores. `deploy/profile.example.json` is the shape:
+Every place-specific fact — your account, your zone, each Worker's script name and hostname, where the bot's config comes from — lives in one file, `deploy/profile.json`, which git ignores. The installer writes the two-Worker shape for you — the bot and the state Worker, named from `--name` under your zone — and renders the Worker configs in the same step:
+
+```bash
+npx tsx src/cli.ts init --organization <org> --anthropic-key <key> --cloudflare <account id> --zone example.com
+```
+
+For any other shape, `deploy/profile.example.json` is the template:
 
 ```bash
 cp deploy/profile.example.json deploy/profile.json
