@@ -72,23 +72,13 @@ src/core/commands/schedule.test.ts	"• `self-improvement` — `0 14 * * 1` · b
 src/core/commands/schedule.test.ts	"• `resident-watchdog` — `*/10 * * * *` · resident · resident watchdog — not a run · next 2026-08-30 12:10 UTC",
 src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00 UTC → completed (run run-abcd)");
 
-# Our production deployment: the release and docs workflows read this installation's profile from our infrastructure repository with our GitHub App, whose credentials the 1Password action loads; one line each to change for another operator.
+# The one credential step the release, release-plan and docs-deploy workflows keep for this installation: the GitHub App's client id and private key come from its secrets manager. The profile location and the repository it names are repository variables; another operator replaces this step with their own source of the App's credentials.
 .github/workflows/ci.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/ci.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
-.github/workflows/ci.yml	owner: coreplanelabs
-.github/workflows/ci.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
 .github/workflows/deploy-production.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/deploy-production.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
-.github/workflows/deploy-production.yml	owner: coreplanelabs
-.github/workflows/deploy-production.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
 .github/workflows/release-please.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/release-please.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
-.github/workflows/release-please.yml	owner: coreplanelabs
-.github/workflows/release-please.yml	SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
-
-# Our production deployment's live receipt reads each Worker's /healthz on our zone; one line each to change for another operator.
-.github/workflows/deploy-production.yml	commit=$(curl -s --max-time 20 "https://$w.coreplanelabs.dev/healthz" | jq -r '.build.commit // "?"' 2>/dev/null || echo "?")
-.github/workflows/deploy-production.yml	commit=$(curl -s --max-time 20 -H "authorization: Bearer $SANDBOX_TOKEN" https://switchboard-sandbox.coreplanelabs.dev/healthz | jq -r '.build.commit // "?"' 2>/dev/null || echo "?")
 
 # The review App this installation runs as, matched by login and immutable id; another operator swaps in their App's.
 .github/workflows/auto-approve-claude-lgtm.yml	(github.event.review.user.login == 'coreplane-switchboard[bot]' && github.event.review.user.id == 318072483)

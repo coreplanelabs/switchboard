@@ -251,11 +251,14 @@ jobs:
       - id: touched
         run: npm run docs:changed
       # The docs Worker's wrangler.jsonc is generated from the deployment
-      # profile (account, hostname), and production's profile lives in our
-      # infrastructure repository — read with a read-only App token minted for
-      # that repository alone, like the release deploy's.
+      # profile (account, hostname), and production's profile lives in the
+      # installation's configuration repository (the SWITCHBOARD_DEPLOY_PROFILE
+      # variable) — read with a read-only App token minted for that repository
+      # alone, like the release deploy's. Without the variable there is no
+      # production to deploy the docs to, and the job skips like it does
+      # without the token.
       - name: load the App's credentials
-        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
         uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: true
@@ -264,18 +267,18 @@ jobs:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           APP_CLIENT_ID: op://CI/coreplane-bot/client-id
           APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
-      - name: mint the App token that reads the infrastructure repository
+      - name: mint the App token that reads the configuration repository
         id: infra-token
-        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ env.APP_CLIENT_ID }}
           private-key: ${{ env.APP_PRIVATE_KEY }}
-          owner: coreplanelabs
-          repositories: infrastructure
+          owner: ${{ vars.CONFIG_REPO_OWNER }}
+          repositories: ${{ vars.CONFIG_REPO_NAME }}
           permission-contents: read
       - name: build + deploy
-        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != ''
+        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
         # `npm run deploy` in the docs Worker renders its wrangler.jsonc from
         # the profile and builds docs/ first, so the upload can never be a
         # stale dist or an example-valued config. CLOUDFLARE_ACCOUNT_ID is
@@ -285,5 +288,5 @@ jobs:
         # repository-secret setup.
         run: npm run deploy -w deploy/cloudflare-docs
         env:
-          SWITCHBOARD_DEPLOY_PROFILE: github://coreplanelabs/infrastructure/switchboard/profile.json@main
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_DEPLOY_PROFILE }}
           CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}

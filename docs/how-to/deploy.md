@@ -2,7 +2,7 @@
 
 Goal: Switchboard running in production on Cloudflare — the first time by hand from your machine, and from then on by the release workflow, with a config change or a rotated secret going live without a rebuild.
 
-Cloudflare is the one supported production target: the bot runs as a container behind a Worker, and up to four more Workers give it durable state, sandboxes, resident repositories and a docs site. `docker-compose.yml` in the tree is the local loop — a laptop or a dev box running the same image against your `.env` — not a second production path. This page is the entry point; the two pages it leads to are the day-two operations: [Ship a release](ship-a-release.md) and [Rotate a secret](rotate-a-secret.md) (shipping a change, what a PR would deploy, rotation) and [Operate production](operate-production.md) (the preflights, the deploy order, the span log).
+Cloudflare is the one supported production target: the bot runs as a container behind a Worker, and up to four more Workers give it durable state, sandboxes, resident repositories and a docs site. `docker-compose.yml` in the tree is the local loop — a laptop or a dev box running the same image against your `.env` — not a second production path. This page is the first deployment, by hand; the day-two pages are [Ship a release](ship-a-release.md) (production deploys on the release, from CI), [Rotate a secret](rotate-a-secret.md) and [Operate production](operate-production.md) (a deploy or a config change outside a release, the preflights, the span log). Why one target: [the decision record](../decisions/0023-one-production-target.md).
 
 ## The pieces
 
@@ -74,14 +74,13 @@ Two rules the manifest's notes state and the commands enforce. A **shared bearer
 
 ## 4. `deploy config` — push the bot's config
 
-The bot's container reads its config at startup from the state Worker, as the document named `base`; the image carries no config file. `deploy all` pushes it for you right before the bot step. To change config without a release, push it alone and restart the container, which otherwise keeps the config it started with:
+The bot's container reads its config at startup from the state Worker, as the document named `base`; the image carries no config file. `deploy all` pushes it for you right before the bot step, so on a first deployment there is nothing to run here — the command exists on its own for later:
 
 ```bash
 MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx tsx src/cli.ts deploy config
-SWITCHBOARD_DEPLOY_TOKEN=… npx tsx src/cli.ts deploy restart
 ```
 
-The config is read from the profile's `configSource` (or `--source <path|github://…|op://…>`) and validated before anything is pushed; an unreadable source, a config that does not validate, or a missing `MEMORY_TOKEN` refuses with the reason. `deploy restart` authenticates with an ingress bearer whose identity holds `deploy:write` — an entry in the `SWITCHBOARD_INGRESS_TOKENS` map ([Rotate a secret](rotate-a-secret.md) has the shape).
+The config is read from the profile's `configSource` (or `--source <path|github://…|op://…>`) and validated before anything is pushed; an unreadable source, a config that does not validate, or a missing `MEMORY_TOKEN` refuses with the reason. A running container keeps the config it started with, so a change pushed on its own goes live on a restart: [Operate production](operate-production.md#3-change-the-config-without-a-release).
 
 ## 5. `deploy all` — the whole plan, in order
 
@@ -115,11 +114,9 @@ Repositories are onboarded at runtime from chat, never at deploy time:
 
 That needs the `repo:write` grant, which only admins hold until granted. What happens next, and how to read the resident's disk and lifecycle: [Onboard a repo](onboard-a-repo.md).
 
-## What the release workflow does with all this
+## After the first time
 
-After the first deployment, nobody deploys routine releases by hand. Every merge to `main` accumulates into one release PR; merging it tags the version, publishes the GitHub release, and a workflow runs `deploy all --affected` on the release commit — the same command, the same checks, the same order. The release PR carries the derived plan as a comment before anyone merges it, and every PR's `deploy targets` check shows what its own diff would deploy.
-
-The workflow needs, as repository secrets: `CLOUDFLARE_DEPLOY_TOKEN` (the scopes in [Set up accounts](set-up-accounts.md#cloudflare-optional-and-what-it-buys)), `MEMORY_TOKEN`, `RESIDENT_READ_TOKEN`, and `SANDBOX_TOKEN` when a sandbox Worker exists. It reads the profile from `SWITCHBOARD_DEPLOY_PROFILE`; the checked-in workflow names the project's own installation's profile in its private infrastructure repository and mints a read-only App token for it, so an installation that wants CI deploys edits that location — and the credential step that mints the token — to point at its own. A manual deploy goes through the same workflow (`gh workflow run deploy-production.yml --ref main -f targets=all`), never from a laptop; it refuses to run from any ref but `main`.
+Nobody deploys routine releases by hand: merging the release PR runs the same `deploy all` from CI, with `--affected` so only the Workers whose inputs changed roll — [Ship a release](ship-a-release.md). For CI to do that it needs the deploy credentials as repository secrets and the profile's location as a repository variable, both set once: [Configure the repository](configure-the-repository.md#5-repository-secrets-and-variables). A deploy outside a release, or a config change without one, is [Operate production](operate-production.md).
 
 ## Running the container somewhere else
 
