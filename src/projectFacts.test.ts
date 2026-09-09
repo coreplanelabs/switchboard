@@ -190,6 +190,18 @@ describe("factsProblems", () => {
       expect(factsProblems(facts, { "docker-compose.yml": compose("ghcr.io/acme/switchboard:latest") })).toEqual([]);
     });
 
+    it("holds every service's image to the fact, and only services' images: an `image:` under an extension field is not a service", () => {
+      const what = (files: Record<string, string>) => factsProblems(facts, files).map((p) => `${p.file}: ${p.what}`);
+      const twoServices =
+        "services:\n  switchboard:\n    image: ghcr.io/acme/switchboard:latest\n  sidecar:\n    image: redis:7\n";
+      expect(what({ "docker-compose.yml": twoServices })).toEqual([
+        'docker-compose.yml: image "redis:7" — project.json says ghcr.io/acme/switchboard:latest',
+      ]);
+      const extensionImage =
+        "x-defaults:\n  image: something-else:1\nservices:\n  switchboard:\n    image: ghcr.io/acme/switchboard:latest\n    build: .\nvolumes:\n  data:\n    image: not-a-service\n";
+      expect(what({ "docker-compose.yml": extensionImage })).toEqual([]);
+    });
+
     it("names a compose image under another owner, another tag, or none at all", () => {
       const what = (files: Record<string, string>) => factsProblems(facts, files).map((p) => `${p.file}: ${p.what}`);
       expect(what({ "docker-compose.yml": compose("ghcr.io/someone-else/switchboard:latest") })).toEqual([

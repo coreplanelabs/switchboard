@@ -454,7 +454,6 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
-    const request = requestRow;
     const reserved = await root.span("dispatch.ledger_reserve", () =>
       deps.runLedger.reserve({
         runId,
@@ -475,7 +474,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
           ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
           readonly: agent.toolset === "readonly",
-          request,
+          request: requestRow,
         },
         card: card.handle ?? null,
         ...hooks,

@@ -88,12 +88,8 @@ export interface RequestContext {
   trace: RequestTrace;
 }
 
-/**
- * Stage A — the one text-only fast path. A message that names a registered,
- * chat-exposed command is answered inline through the registry, never a model
- * turn, BEFORE the history fetch; true when the message was a command and has
- * been answered (the dispatch is over), false when it is prose to hand on.
- */
+/** Stage A: true when the message was a chat command and has been answered (the
+ *  dispatch is over), false when it is prose to hand on. The block inside says why. */
 export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext): Promise<boolean> {
   const { msg, io, ending, trace } = ctx;
   const root = trace.root;
@@ -130,14 +126,9 @@ export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext)
   return false;
 }
 
-/**
- * The natural-language fast path: a conservative op form ("run the tests on
- * main in acme/api") is translated into the registry command it names and
- * answered like one; true when the reply went out (the dispatch is over), false
- * when the message was not an op — or the op could not serve (`not_found`,
- * `unavailable`) and the agent gets the ask, with the command run already
- * sealed as this dispatch's first run.
- */
+/** The natural-language fast path: true when an op form was recognized and its
+ *  reply went out (the dispatch is over), false when the message was not an op
+ *  or the op could not serve and the agent gets the ask. The block inside says why. */
 export async function answerOperation(
   deps: FastPathDeps,
   ctx: RequestContext & { directives: RequestDirectives; history: HistoryItem[] },

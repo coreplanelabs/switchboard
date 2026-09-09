@@ -141,7 +141,7 @@ export interface Subscribed {
 }
 
 export interface RunRegistryOptions {
-  /** Max events retained per run (oldest dropped past it). Default 5000. */
+  /** Max events retained per run (oldest dropped past it). Default `DEFAULT_BACKLOG_LIMIT` (8000). */
   backlogLimit?: number;
   /** Max bytes retained per run, measured as each event's UTF-8 JSON size; the
    *  oldest events are dropped until under budget (the newest always stays).

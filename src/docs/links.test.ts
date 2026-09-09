@@ -98,7 +98,10 @@ describe("site links in the theme's components", () => {
   it("every image a component draws is a file under docs/public", () => {
     // The landing page draws its pictures from the theme's SHOTS list (one
     // file per appearance), a path the dead-link check never sees; any other
-    // component's literal `src="/…"` is held to the same rule.
+    // component's literal `src="/…"` is held to the same rule. A bound `:src`
+    // is not scanned — its path exists only at render time — so a component
+    // that computes a picture path must draw it from a list checked here, as
+    // SHOTS is.
     const wrong: string[] = [];
     const paths = SHOTS.flatMap((s) => [shotSrc(s.name, "light"), shotSrc(s.name, "dark")]);
     for (const rel of components) {

@@ -39,6 +39,23 @@ const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const DESCRIPTION_MAX = 350;
 const TOPICS_MAX = 20;
 const TOPIC = /^[a-z0-9-]{1,50}$/;
+
+/** The `image:` of every service under the compose file's top-level `services:`
+ *  block — `services.<name>.image`, the key two levels in — and nothing else:
+ *  an `image:` under an extension field (`x-…`) or a nested key is not a
+ *  service the file runs. Two-space indentation, as the file is written. */
+export function composeServiceImages(compose) {
+  const images = [];
+  let inServices = false;
+  for (const line of compose.split("\n")) {
+    if (/^\S/.test(line)) inServices = /^services:\s*$/.test(line);
+    else if (inServices) {
+      const m = /^ {4}image:\s*(\S+)/.exec(line);
+      if (m) images.push(m[1]);
+    }
+  }
+  return images;
+}
 /** A docs URL: any `docs.` host (so a stale copy under an old name is caught)
  *  or the configured docs host itself, which need not start with `docs.`. */
 const docsUrlPattern = (docsHost) =>
@@ -94,7 +111,7 @@ export function factsProblems(facts, files) {
 
   const compose = files["docker-compose.yml"];
   if (compose !== undefined) {
-    const images = [...compose.matchAll(/^\s+image:\s*(\S+)/gm)].map((m) => m[1]);
+    const images = composeServiceImages(compose);
     for (const image of images) {
       if (image !== `${facts.image}:latest`)
         say("docker-compose.yml", `image "${image}" — project.json says ${facts.image}:latest`);

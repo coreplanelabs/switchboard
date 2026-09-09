@@ -1,7 +1,7 @@
 export interface ProjectFacts {
   name: string;
   displayName: string;
-  /** The one-sentence pitch: the README's first line, the repository's GitHub description, package.json's `description`. ≤ 350 characters. */
+  /** The one-sentence pitch: the repository's GitHub description and package.json's `description` (both checked against this); the README's opening line says the same thing by hand. ≤ 350 characters. */
   description: string;
   organization: string;
   repository: string;
