@@ -5,7 +5,7 @@ import type { OpenedPullRequest, PullRequestTarget } from "../../execution/githu
 import type { CompletionRequest, CompletionResult, Provider } from "../../providers/types.js";
 import type { PrDescription } from "../prDescription.js";
 import type { RunEvent } from "../runEvents.js";
-import { RunControl } from "../runRegistry.js";
+import { RunControl } from "../runRegistry/runControl.js";
 import {
   runShipCodingChild,
   shipBranchContract,

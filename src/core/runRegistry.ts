@@ -2,7 +2,6 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { redactAndCap, sanitizeActor, type RunActor, type RunEvent, type StopMode, isSpanRecord } from "./runEvents.js";
 import type { RunStatus } from "./runRecord.js";
 import { RunControl } from "./runRegistry/runControl.js";
-import { activityOfEvents } from "./runRegistry/activity.js";
 import {
   appendToBacklog,
   DEFAULT_BACKLOG_BYTES,
@@ -58,13 +57,7 @@ import { IndexFeed, type IndexSubscriber } from "./runRegistry/indexFeed.js";
 // an operator is; it only trusts that its token-free callers already did.
 //
 // The registry's parts live as sibling modules under `./runRegistry/`; this
-// file is the registry itself and its public contract. The dispatcher's stages
-// (`src/core/dispatch/`, `src/core/shipPipeline.ts`) still import a few of the
-// moved names from here while their own split (decision record 0024) is in
-// flight, so those names are re-exported below; once the stages import the
-// sibling modules directly, the re-exports go.
-export { RunControl, activityOfEvents };
-export type { RunSnapshot, RunSummary, SealResult };
+// file is the registry itself and its public contract.
 
 /** The identifiers a freshly created run is addressed by, plus its control. */
 /** `create()` for a run that already has an identity and a past (a resume,

@@ -4,7 +4,7 @@ import { makeExecutor } from "../../execution/factory.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../../providers/types.js";
 import type { Finding } from "../reviewVerdict.js";
-import { RunControl } from "../runRegistry.js";
+import { RunControl } from "../runRegistry/runControl.js";
 import type { ChildRoundContext } from "./childRound.js";
 import { buildShipReviewTurn, runShipReviewChild, type ReviewChildDeps, type ReviewRound } from "./reviewChild.js";
 

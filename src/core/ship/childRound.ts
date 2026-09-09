@@ -13,7 +13,7 @@ import type { WebCapability } from "../../tools/web.js";
 import type { GithubCapability } from "../../tools/github.js";
 import type { SkillStore } from "../../skills/index.js";
 import type { RunEvent } from "../runEvents.js";
-import type { RunControl } from "../runRegistry.js";
+import type { RunControl } from "../runRegistry/runControl.js";
 import type { FollowUpInbox } from "../threadAdmission.js";
 import type { ShipEntry } from "./preflight.js";
 
