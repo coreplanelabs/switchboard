@@ -3,10 +3,13 @@
 // strictly serial child rounds, every GitHub side effect executed by the bot
 // process from typed artifacts. `dispatch()` forks in here (runShipBranch in
 // dispatcher.ts) after agent resolution and the repo gates; this module owns
-// the preflight decisions and the round loop, parameterized on explicit
+// the round loop — its caps, its endings and the `ship_round` boundaries —
+// and runs the pipeline's stages, one file each under ship/: the preflight
+// decisions (ship/preflight.ts), one coding round (ship/codingChild.ts), one
+// review round (ship/reviewChild.ts). Every stage is parameterized on explicit
 // inputs like the reviewRound units, so the dispatcher stays legible.
 //
-// Boundaries this module enforces (spec items 1–2, 9, 11):
+// Boundaries the pipeline enforces (spec items 1–2, 9, 11):
 //   - Slack and the CLI only — single-shot adapters (HTTP /ingress, MCP) are
 //     refused with a pointer to the runs page before anything starts.
 //   - Compound permission gate: ship ∧ coding ∧ review (the repo leg already
@@ -27,26 +30,12 @@
 //     orchestrator itself never reads the inbox — it has no model turn.
 
 import type { AgentDef } from "../agents/registry.js";
-import { runAgent } from "../runner.js";
 import type { ChatMessage } from "../providers/types.js";
 import type { PullRequestFacts } from "../execution/githubPulls.js";
-import type { ReviewCommentTarget } from "../execution/githubComments.js";
-import type { ToolContext } from "../tools/workspace.js";
 import type { Span } from "../core/trace/types.js";
 import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdict } from "./reviewVerdict.js";
 import type { RunEvent, ShipRoundOutcome } from "./runEvents.js";
 import { normalizeHead, sameCommit } from "./reviewedHead.js";
-import {
-  attachRoundWorkspace,
-  checkPrHeadPreflight,
-  guardAttachedHead,
-  makeSystemComposer,
-  runReviewPostStep,
-  settleReviewedHead,
-  type FetchPrCommits,
-  type FetchPrHead,
-  type ReviewPostOutcome,
-} from "./reviewRound.js";
 import type { ShipEntry } from "./ship/preflight.js";
 import {
   buildShipFixTurn,
@@ -54,6 +43,7 @@ import {
   type CodingChildDeps,
   type CodingChildGithub,
 } from "./ship/codingChild.js";
+import { runShipReviewChild, type ReviewChildDeps, type ReviewChildGithub } from "./ship/reviewChild.js";
 
 // The dispatcher's ship branch reaches the preflight and the child-round types
 // through this module; the forwarding goes when that branch moves out of
@@ -124,51 +114,23 @@ export function shipRoundHeader(round: { index: number; agent: string }): string
   return `Round ${round.index} — ${phase}`;
 }
 
-// ---- synthesized child turns (spec items 5, 7) --------------------------------
-
-/** The review child's one user turn. Re-review rounds carry the prior findings
- *  and the fix round's dispositions; the `re-review-delta` skill (scoped to the
- *  review agent) narrows READING only — the verdict still covers the full diff. */
-export function buildShipReviewTurn(input: {
-  where: string;
-  round: number;
-  headSha?: string;
-  prior?: { findings: Finding[]; dispositions: FindingDisposition[] };
-}): string {
-  const at = input.headSha ? ` at head \`${input.headSha}\`` : "";
-  if (input.round <= 1 || !input.prior) {
-    return `Review pull request ${input.where}${at}. Submit your verdict with findings via submit_verdict before your final message.`;
-  }
-  const findings = input.prior.findings.map(formatFinding).join("\n") || "(none recorded)";
-  const dispositions =
-    input.prior.dispositions.map((d) => `${d.findingId}: ${d.disposition}${d.note ? ` — ${d.note}` : ""}`).join("\n") ||
-    "(none recorded)";
-  return (
-    `Re-review pull request ${input.where}${at} — review round ${input.round} of this ship pipeline. ` +
-    `Load the \`re-review-delta\` skill: narrow your READING to the delta since the previously reviewed head and verify each prior finding's disposition, ` +
-    `but your verdict still covers the full diff against base. Carry every unresolved prior finding forward under its existing id.\n\n` +
-    `Previous round's findings:\n${findings}\n\nFix round's dispositions:\n${dispositions}`
-  );
-}
 // ---- the round loop (spec items 3–8) ------------------------------------------
 
-/** Every GitHub seam the pipeline writes through: the coding round's slice,
- *  plus what the orchestrator and the review round use themselves. */
-export interface ShipGithub extends CodingChildGithub {
+/** Every GitHub seam the pipeline writes through: each child round's slice,
+ *  plus what the orchestrator uses itself. */
+export interface ShipGithub extends CodingChildGithub, ReviewChildGithub {
   /** Round 0's pipeline-branch create (`refs/heads/<branch>` at the base
    *  tip): the ref must exist on origin BEFORE the first attach, or the
    *  resident refuses the binding. Idempotent — 422 already-exists is
    *  success inside the implementation. Throws on any real failure. */
   createBranchRef: (repo: string, branch: string, fromRef: string) => Promise<void>;
-  postReviewComment: (target: ReviewCommentTarget, body: string) => Promise<void>;
-  fetchPrHead: FetchPrHead;
-  fetchPrCommits: FetchPrCommits;
+  /** The merge-ready re-check (spec item 9). */
   prFacts: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
 }
 
-/** The pipeline's whole input: the coding round's slice (which carries what
- *  every child round reads), plus what the orchestrator itself uses. */
-export interface ShipPipelineInput extends CodingChildDeps {
+/** The pipeline's whole input: each child round's slice (they share what every
+ *  child reads), plus what the orchestrator itself uses. */
+export interface ShipPipelineInput extends CodingChildDeps, ReviewChildDeps {
   entry: ShipEntry;
   /** Round 0's message list (thread history + the task turn), built by the
    *  dispatcher; unused on a resume. Review/fix rounds synthesize their own. */
@@ -182,8 +144,6 @@ export interface ShipPipelineInput extends CodingChildDeps {
    *  child of it, every child run's `run.agent` a child of its round. Absent
    *  (tests) → no spans. */
   span?: Span;
-  /** Thread reply for mid-pipeline notes (review-post notes, the PR link). */
-  reply: (text: string) => Promise<void>;
   github: ShipGithub;
   now?: () => number;
 }
@@ -201,17 +161,6 @@ export interface ShipOutcome {
   reply: string;
 }
 
-interface ReviewRoundResult {
-  refusal?: string;
-  residentUnavailable?: string;
-  verdict?: ReviewVerdict;
-  answer?: string;
-  reviewHead?: string;
-  /** Whether the round's verdict actually landed on the PR — the merge-ready
-   *  gate consumes it (an approve whose post failed approves nothing). */
-  reviewPost?: ReviewPostOutcome;
-}
-
 /**
  * The strictly serial round loop: round 0 opens the PR
  * through the coding PR gate, then review → fix repeats until an approve
@@ -222,9 +171,6 @@ interface ReviewRoundResult {
 export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOutcome> {
   const now = input.now ?? Date.now;
   const { entry, caps, control, github, logKey } = input;
-  // Read at CALL time behind a function boundary: a stop can land during any
-  // await, and TS's property narrowing must not freeze an earlier read.
-  const hardStopped = () => control.requested === "hard";
   const deadlineAt = now() + caps.maxMinutes * 60_000;
   const remainingMs = () => deadlineAt - now();
   /** Never mutate the shared AgentDef — children run a clipped COPY. */
@@ -355,161 +301,6 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
   const round = <T>(index: number, agentName: "coding" | "review", fn: (span: Span | undefined) => Promise<T>) =>
     input.span ? input.span.span("ship.round", fn, { attrs: { index, agent: agentName } }) : fn(undefined);
 
-  // ---- one review child (pinned head, extracted units) ----------------------
-  const runReviewChild = async (roundIndex: number, roundSpan: Span | undefined): Promise<ReviewRoundResult> => {
-    const spec = input.child("review");
-    const pr = { repo: entry.repo, number: prNumber! };
-    let pinned = normalizeHead(await github.fetchPrHead(pr).catch(() => undefined));
-    // Unknown head is a guaranteed downstream refusal — reuse the extracted
-    // pre-flight so the refusal reply has ONE wording.
-    const pf = checkPrHeadPreflight({
-      agent: spec.agent,
-      requestText: "",
-      repoCtx: { repo: entry.repo, pr: prNumber, headSha: pinned },
-    });
-    if (!pf.ok) return { refusal: pf.reply };
-    const ws = await attachRoundWorkspace({
-      factory: input.factory,
-      round: { threadKey: input.threadKey, agent: spec.agent, repo: entry.repo, ref: entry.branch, headSha: pinned },
-      logKey,
-    });
-    const { executor, resident, binding, note } = ws.selection;
-    if (resident !== true) {
-      await ws.release({ hardStopped: false, ...(roundSpan ? { span: roundSpan } : {}) });
-      return { residentUnavailable: note ?? "no resident worktree attached" };
-    }
-    let settled: Awaited<ReturnType<typeof settleReviewedHead>> | undefined;
-    let verdict: ReviewVerdict | undefined;
-    try {
-      let verified = false;
-      const guard = await guardAttachedHead({
-        pr,
-        expectedHeadSha: pinned,
-        attached: { sha: binding?.sha, ref: binding?.ref },
-        fallbackRef: entry.branch,
-        fetchPrHead: github.fetchPrHead,
-        logKey,
-      });
-      if (guard.outcome === "refused") return { refusal: guard.reply };
-      if (guard.outcome === "adopted") {
-        pinned = guard.headSha;
-        verified = true;
-      } else if (guard.outcome === "verified") {
-        verified = true;
-      }
-      const toolContext: ToolContext = {
-        executor,
-        reportProgress: input.reportProgress,
-        web: input.web,
-        skills: input.skills,
-        github: input.githubTools,
-        agentName: spec.agent.name,
-        onVerdict: (v) => {
-          verdict = v;
-        },
-      };
-      const composeSystem = makeSystemComposer({
-        agent: spec.agent,
-        resident: true,
-        repo: entry.repo,
-        workspace: binding?.workspace,
-        prTarget: { repo: entry.repo, pr: pr.number, ref: entry.branch, baseRef: entry.base },
-        blocks: input.blocks(spec),
-      });
-      const clipped = clip(spec.agent);
-      const messages: ChatMessage[] = [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: buildShipReviewTurn({
-                where: `${entry.repo}#${pr.number}`,
-                round: roundIndex,
-                headSha: pinned,
-                // The PREVIOUS review round's findings with THAT round's
-                // dispositions — never an accumulated flat set, where a
-                // reused finding id would drag an old disposition along.
-                prior:
-                  roundIndex > 1
-                    ? {
-                        findings: findingsByRound.get(roundIndex - 1) ?? [],
-                        dispositions: [...(dispositionsByRound.get(roundIndex - 1)?.values() ?? [])],
-                      }
-                    : undefined,
-              }),
-            },
-          ],
-        },
-      ];
-      const answer = await runAgent({
-        provider: spec.provider,
-        model: spec.model,
-        agent: clipped,
-        messages,
-        ...(roundSpan ? { span: roundSpan } : {}),
-        backend: ws.selection.backend,
-        system: composeSystem({ sha: pinned, verified }),
-        effort: spec.effort,
-        toolContext,
-        onProgress: input.onProgress,
-        onEvent: input.onEvent,
-        control,
-        inbox: input.inbox,
-      });
-      if (control.requested === "hard") return { answer };
-      settled = await settleReviewedHead({
-        ...(roundSpan ? { span: roundSpan } : {}),
-        pr,
-        baseRef: entry.base,
-        reviewHead: pinned,
-        verdict,
-        answer,
-        messages,
-        composeSystem,
-        executor,
-        turn: {
-          provider: spec.provider,
-          model: spec.model,
-          agent: clipped,
-          effort: spec.effort,
-          toolContext,
-          onProgress: input.onProgress,
-          onEvent: input.onEvent,
-          control,
-        },
-        fetchPrHead: github.fetchPrHead,
-        fetchPrCommits: github.fetchPrCommits,
-        notify: { reply: input.reply, headMoved: (suffix) => input.onProgress(`head moved: ${suffix}`) },
-        logKey,
-      });
-    } finally {
-      await ws.release({ hardStopped: control.requested === "hard", ...(roundSpan ? { span: roundSpan } : {}) });
-    }
-    // Unreachable: every path that leaves `settled` unassigned returned above
-    // (guard refusal, hard stop) — this narrows the type for what follows.
-    if (!settled) return {};
-    // The pinned review post (extracted unit): posts only when the reviewed
-    // head IS the pinned head, says every skip out loud, never throws. Its
-    // typed outcome rides back to the loop — the merge-ready gate stands on
-    // a POSTED approval, not on a verdict that never reached the PR.
-    const reviewPost = await runReviewPostStep({
-      agent: spec.agent,
-      requestText: "",
-      repoCtx: { repo: entry.repo, pr: prNumber },
-      heads: { reviewHead: settled.reviewHead, observedHead: settled.observedHead },
-      verdict: settled.verdict,
-      answer: settled.answer,
-      carried: settled.carried,
-      hardStopped: hardStopped(),
-      post: github.postReviewComment,
-      fetchPrHead: github.fetchPrHead,
-      reply: input.reply,
-      logKey,
-    });
-    return { verdict: settled.verdict, answer: settled.answer, reviewHead: settled.reviewHead, reviewPost };
-  };
-
   const mergeReady = async (verdict: ReviewVerdict): Promise<ShipOutcome> => {
     // Re-check the PR (spec item 9) — the LGTM already triggered the org
     // auto-approve workflow, so the report must say what is left. Three
@@ -613,7 +404,27 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
     reviewRounds += 1;
     emitRound(reviewRounds, "review", "started");
-    const rv = await round(reviewRounds, "review", (span) => runReviewChild(reviewRounds, span));
+    const rv = await round(reviewRounds, "review", (span) =>
+      runShipReviewChild(
+        input,
+        childCtx,
+        {
+          index: reviewRounds,
+          pr: prNumber!,
+          // The PREVIOUS review round's findings with THAT round's
+          // dispositions — never an accumulated flat set, where a
+          // reused finding id would drag an old disposition along.
+          prior:
+            reviewRounds > 1
+              ? {
+                  findings: findingsByRound.get(reviewRounds - 1) ?? [],
+                  dispositions: [...(dispositionsByRound.get(reviewRounds - 1)?.values() ?? [])],
+                }
+              : undefined,
+        },
+        span,
+      ),
+    );
     // A stop short-circuits here only when the round settled NO verdict: a
     // verdict that was already posted to the PR is a fact no stop can
     // un-post, so it settles first below and the stop is honored around it.
