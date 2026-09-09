@@ -2,7 +2,7 @@
 
 Goal: Switchboard running in production on Cloudflare — the first time by hand from your machine, and from then on by the release workflow, with a config change or a rotated secret going live without a rebuild.
 
-Cloudflare is the one supported production target: the bot runs as a container behind a Worker, and up to four more Workers give it durable state, sandboxes, resident repositories and a docs site. `docker-compose.yml` in the tree is the local loop — a laptop or a dev box running the same image against your `.env` — not a second production path. This page is the entry point; the two pages it leads to are the day-two operations: [Deploy and rotate a secret](deploy-and-rotate-a-secret.md) (shipping a change, what a PR would deploy, rotation) and [Operate production](operate-production.md) (the preflights, the deploy order, the span log).
+Cloudflare is the one supported production target: the bot runs as a container behind a Worker, and up to four more Workers give it durable state, sandboxes, resident repositories and a docs site. `docker-compose.yml` in the tree is the local loop — a laptop or a dev box running the same image against your `.env` — not a second production path. This page is the entry point; the two pages it leads to are the day-two operations: [Ship a release](ship-a-release.md) and [Rotate a secret](rotate-a-secret.md) (shipping a change, what a PR would deploy, rotation) and [Operate production](operate-production.md) (the preflights, the deploy order, the span log).
 
 ## The pieces
 
@@ -81,7 +81,7 @@ MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx tsx src/cli.ts dep
 SWITCHBOARD_DEPLOY_TOKEN=… npx tsx src/cli.ts deploy restart
 ```
 
-The config is read from the profile's `configSource` (or `--source <path|github://…|op://…>`) and validated before anything is pushed; an unreadable source, a config that does not validate, or a missing `MEMORY_TOKEN` refuses with the reason. `deploy restart` authenticates with an ingress bearer whose identity holds `deploy:write` — an entry in the `SWITCHBOARD_INGRESS_TOKENS` map ([Deploy and rotate a secret](deploy-and-rotate-a-secret.md#rotate-a-secret) has the shape).
+The config is read from the profile's `configSource` (or `--source <path|github://…|op://…>`) and validated before anything is pushed; an unreadable source, a config that does not validate, or a missing `MEMORY_TOKEN` refuses with the reason. `deploy restart` authenticates with an ingress bearer whose identity holds `deploy:write` — an entry in the `SWITCHBOARD_INGRESS_TOKENS` map ([Rotate a secret](rotate-a-secret.md) has the shape).
 
 ## 5. `deploy all` — the whole plan, in order
 
@@ -143,7 +143,7 @@ Whatever the host, the bot needs:
 
 ## See also
 
-- [Deploy and rotate a secret](deploy-and-rotate-a-secret.md) — day two: merge the release PR, read what a PR would deploy, rotate a credential.
+- [Ship a release](ship-a-release.md) and [Rotate a secret](rotate-a-secret.md) — day two: merge the release PR, read what a PR would deploy, rotate a credential.
 - [Operate production](operate-production.md) — the preflights and why a second deploy over a draining container kills a run; reading the bot's span log.
 - [Set up accounts](set-up-accounts.md) — every credential above, and how to create it.
 - [Explanation: Worker topology](../explanation/worker-topology.md) — what each Worker owns and why the order is what it is.

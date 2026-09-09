@@ -115,14 +115,18 @@ export default defineConfig({
     return { title: "Switchboard" };
   },
   themeConfig: {
+    // "Get started" is the first-time reader's path: Home → Get started → a
+    // running `ask`, three clicks. The other four entries are the Diataxis
+    // kinds, each landing on that kind's index page.
     nav: [
-      { text: "Tutorials", link: "/tutorials/get-started" },
-      { text: "How-to", link: "/how-to/set-up-accounts" },
-      { text: "Reference", link: "/reference/slack-commands" },
-      { text: "Explanation", link: "/explanation/architecture" },
+      { text: "Get started", link: "/tutorials/get-started" },
+      { text: "Tutorials", link: "/tutorials/" },
+      { text: "How-to", link: "/how-to/" },
+      { text: "Reference", link: "/reference/" },
+      { text: "Explanation", link: "/explanation/" },
     ],
     // Diataxis, one group per kind — the same four the docs/README.md hub
-    // lists, in the same order.
+    // lists, in the same order and with the same pages. Keep the two in step.
     sidebar: [
       {
         text: "Tutorials",
@@ -138,18 +142,21 @@ export default defineConfig({
         collapsed: false,
         items: [
           { text: "Set up accounts", link: "/how-to/set-up-accounts" },
-          { text: "Deploy", link: "/how-to/deploy" },
+          { text: "Turn features on and off", link: "/how-to/turn-features-on-and-off" },
+          { text: "Restrict who can do what", link: "/how-to/restrict-who-can-do-what" },
           { text: "Configure your defaults", link: "/how-to/configure-your-defaults" },
           { text: "Connect an MCP server", link: "/how-to/connect-an-mcp-server" },
           { text: "Onboard a repo", link: "/how-to/onboard-a-repo" },
-          { text: "Watch a run and check spend", link: "/how-to/watch-a-run-and-check-spend" },
-          { text: "Restrict who can do what", link: "/how-to/restrict-who-can-do-what" },
-          { text: "Add a provider or an agent", link: "/how-to/add-a-provider-or-agent" },
-          { text: "Deploy and rotate a secret", link: "/how-to/deploy-and-rotate-a-secret" },
+          { text: "Watch a run", link: "/how-to/watch-a-run" },
+          { text: "Check spend", link: "/how-to/check-spend" },
+          { text: "Add a model provider", link: "/how-to/add-a-provider" },
+          { text: "Add an agent", link: "/how-to/add-an-agent" },
+          { text: "Deploy", link: "/how-to/deploy" },
+          { text: "Ship a release", link: "/how-to/ship-a-release" },
+          { text: "Rotate a secret", link: "/how-to/rotate-a-secret" },
           { text: "Operate production", link: "/how-to/operate-production" },
           { text: "Configure the repository", link: "/how-to/configure-the-repository" },
           { text: "Run a load test", link: "/how-to/run-a-load-test" },
-          { text: "Turn features on and off", link: "/how-to/turn-features-on-and-off" },
         ],
       },
       {
@@ -170,19 +177,19 @@ export default defineConfig({
         collapsed: false,
         items: [
           { text: "Architecture", link: "/explanation/architecture" },
-          { text: "Security model", link: "/explanation/security-model" },
           { text: "How a request flows", link: "/explanation/how-a-request-flows" },
           { text: "The agents and their toolsets", link: "/explanation/agents-and-toolsets" },
-          { text: "Why config is layered", link: "/explanation/config-layers" },
-          { text: "Execution and trust", link: "/explanation/execution-and-trust" },
           { text: "Worker topology", link: "/explanation/worker-topology" },
           { text: "One definition, every surface", link: "/explanation/one-command-many-surfaces" },
           { text: "Runs: live, then remembered", link: "/explanation/runs-live-and-history" },
-          { text: "How Switchboard improves itself", link: "/explanation/how-switchboard-improves-itself" },
-          { text: "Design decisions", link: "/explanation/design-decisions" },
-          { text: "How we work", link: "/explanation/how-we-work" },
+          { text: "Why config is layered", link: "/explanation/config-layers" },
+          { text: "Security model", link: "/explanation/security-model" },
+          { text: "Execution and trust", link: "/explanation/execution-and-trust" },
           { text: "Capacity and sizing", link: "/explanation/capacity-and-sizing" },
           { text: "Known limits", link: "/explanation/known-limits" },
+          { text: "How Switchboard improves itself", link: "/explanation/how-switchboard-improves-itself" },
+          { text: "How we work", link: "/explanation/how-we-work" },
+          { text: "Design decisions", link: "/explanation/design-decisions" },
         ],
       },
     ],

@@ -1,39 +1,62 @@
 # Connect an MCP server
 
-Goal: give an agent tools from an external service — Linear, Notion, your own internal server — over MCP, without ever pasting a token into chat.
+Give an agent tools from an external service — an issue tracker, a wiki, a server of your own — over the Model Context Protocol, without pasting a token into chat.
 
-## Connect one for yourself
+## Before you start
+
+- The installation has an `mcp` block in `config.yaml` naming the env var that holds the credential key (`credentialKeyEnv`, `MCP_CREDENTIAL_KEY` by default). Without it the `mcp` commands do not exist ([Turn features on and off](turn-features-on-and-off.md)).
+- The server's URL. Switchboard detects whether it uses OAuth or a bearer token; `--auth` overrides the detection.
+- For a channel-wide server, the `config:write` grant; for an org-wide one, admin rights.
+
+## 1. Register the server
 
 ```
 @switchboard mcp add linear --url https://mcp.linear.app/sse
 ```
 
-The bot replies with a **one-time link**, not a prompt for a token in chat. Open it (you'll need to be signed in behind the same access gate as the dashboard), paste the server's token into the form, submit. That's the entire credential path — the token is sealed on the state Worker and the bot decrypts it only for the moment it builds a request to that server.
+With no `--scope`, the server is yours alone. The reply carries a one-time link, not a request for a token in chat.
+
+## 2. Sign in, or paste the token, on the link
+
+Open the link. An OAuth server sends you through its own sign-in; a bearer server shows a form for the token. Only you can complete the link, once, and it expires after ten minutes. If you lose it, `@switchboard mcp connect linear` mints a fresh one. The credential is sealed at rest and decrypted only while a request to that server is being built; no command ever prints it.
+
+## 3. Check what the agent can now call
 
 ```
-@switchboard mcp list             # servers you can currently see
-@switchboard mcp show linear      # its tools
+@switchboard mcp list             # servers your runs in this channel can use
+@switchboard mcp show linear      # a live probe of its tools
 ```
 
-Ask the bot something that needs the tool — the [run page](watch-a-run-and-check-spend.md) shows the `mcp__linear__…` calls it made along the way.
+Then ask for something that needs the tool. The run page lists the `mcp__linear__…` calls the agent made ([Watch a run](watch-a-run.md)).
 
-Remove it: `@switchboard mcp remove linear`.
+## 4. Share it wider, if you mean to
 
-## Three tiers, three audiences
-
-| Tier | Who sets it | Reaches | Notes |
+| Scope | Who may set it | Reaches | Agents that may use it |
 |---|---|---|---|
-| `me` | anyone, self-serve | only your own runs | `mcp add` with no scope flag |
-| `channel` | anyone granted `config:write` | every run in that channel | same gate as `config set channel` |
-| `org` | admins only (or `config.yaml` `defaults.mcpServers`) | every run, everywhere | the only tier that may reach `coding`, `review`, or `ship` |
+| `me` (the default) | anyone | your own runs | `general`, `research` |
+| `channel` | `config:write` holders | every run in that channel | `general`, `research` |
+| `org` | admins, or `mcpServers` in `config.yaml` | every run everywhere | any, including `coding`, `review`, `ship` |
 
-A name set at more than one tier resolves org-first, channel-second, user-last — the opposite order from model/agent precedence, because an org-level server is an admin's decision that a user shouldn't be able to shadow.
+```
+@switchboard mcp add linear --url https://mcp.linear.app/sse --scope channel
+@switchboard mcp add linear --url https://mcp.linear.app/sse --scope org --agents general,research,coding
+```
 
-## Why coding/review/ship are org-only
+`--agents` is a comma-separated list; the default is `general,research`. A name set at more than one scope resolves org first, then channel, then you. Naming `coding`, `review` or `ship` on a `me` or `channel` server is refused, not ignored; why is in [Execution and trust](../explanation/execution-and-trust.md#why-only-an-org-wide-mcp-server-reaches-the-writing-agents).
 
-A remote MCP server's tool descriptions and results are attacker-controlled text as far as Switchboard is concerned — the same untrusted-input treatment as anything else a model reads off the internet. The `coding` and `review`/`ship` agents run with repo write tokens or a trust contract that a channel or personal server shouldn't get to influence, so only an org-approved server can reach them. `general` and `research` — the agents with no write access — can use any tier. Adding a channel/user server naming `coding` is refused outright, not silently ignored.
+## 5. Remove it
+
+```
+@switchboard mcp remove linear
+```
+
+This removes the entry and its stored credential. A channel entry needs `config:write`; an org entry needs admin rights.
+
+## What you did
+
+You registered a server, gave it a credential over a single-use link, confirmed its tools, and chose who else it reaches. The agent now sees the server's tools as `mcp__<server>__<tool>` on every run the scope covers.
 
 ## See also
 
-- [Reference: Slack commands](../reference/slack-commands.md)
-- [Explanation: execution and trust](../explanation/execution-and-trust.md) — the same untrusted-input reasoning applied to tools generally.
+- [Slack commands](../reference/slack-commands.md#mcp) — every `mcp` flag.
+- [MCP tools](../reference/specs/mcp-tools.md) — the contract: scopes, sealing, what a run sees.

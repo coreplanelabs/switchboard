@@ -1,10 +1,10 @@
 # Your first request in Slack
 
-You'll send a message to Switchboard, watch it work, and follow up without repeating yourself. Ten minutes, no setup — if you can see the bot in a channel or DM it, you're ready.
+By the end of this lesson you have sent Switchboard a request, followed up without repeating yourself, and handed a real task to a specialist agent while watching it work. It is for someone in a Slack workspace where Switchboard is already installed; if you can see the bot in a channel, or open a direct message with it, you have everything you need. Ten minutes.
 
-## Say something
+## 1. Say something
 
-Mention the bot anywhere it's present, or DM it directly (DMs never need a mention):
+Mention the bot in a channel it is in, or message it directly (a direct message never needs the mention):
 
 ```
 @switchboard what's the syntax for a postgres lateral join?
@@ -20,37 +20,39 @@ sequenceDiagram
 
     You->>Slack: @switchboard what's a lateral join?
     Slack->>Switchboard: message event
-    Switchboard->>Slack: :eyes: reaction — "got it"
+    Switchboard->>Slack: 👀 reaction — "got it"
     Switchboard->>Slack: status card: "thinking…"
     Note over Switchboard: reads, answers, no tools needed
     Switchboard->>Slack: reply in-thread
 ```
 
-The :eyes: reaction is your receipt that the request landed — if you never see it, the bot didn't get the message (check it's actually in the channel). The status card is a single message that gets edited in place as the agent works, so a long-running request doesn't spam the channel with progress notes.
+The 👀 reaction is your receipt that the request landed. If you never see it, the bot did not get the message; check that it is in the channel. The status card is one message edited in place as the agent works, so a long request never fills the channel with progress notes.
 
-## Follow up without re-mentioning
+## 2. Follow up without the mention
 
-Reply in the same thread — no `@switchboard` needed:
+Reply in the same thread:
 
 ```
 what about a recursive CTE instead?
 ```
 
-Once the bot has replied in a thread (or been mentioned anywhere in it), every reply in that thread reaches it. This also means the thread remembers what agent/model you were using — see [configure your defaults](../how-to/configure-your-defaults.md).
+Once the bot has replied in a thread, or been mentioned anywhere in it, every reply in that thread reaches it. The thread also remembers which agent and model it was using, so a follow-up needs no directive.
 
-## Ask for something bigger
+## 3. Hand off something bigger
 
-The default agent just answers. Point it at a real task and it hands off to a specialist:
+The default agent answers questions. Name a task and a repository and it hands off to a specialist:
 
 ```
 @switchboard agent:coding in acme/api: add a retry to the webhook sender
 ```
 
-`in acme/api` names the target. Any onboarded repo can be addressed by its full `owner/name` anywhere in the request, or by just its name right after the directives (`agent:coding in api: …`) when only one onboarded repo is called that; naming a repo this way also moves a thread that was on another repo. The status card shows which repo the run bound (`resident · acme/api · main@…`), so check it if the answer looks like it came from the wrong place. A name that isn't an onboarded repo is treated as ordinary prose, and if the registry can't be reached to check, Switchboard says so and starts nothing rather than guess.
+`agent:coding` chooses the agent; `in acme/api` names the repository. This request ends in a pull request. While it works, the status card links to a **live run page**: open it and watch the agent's steps — files read, commands run, tests — as they happen, not only the final answer.
 
-This one opens a pull request. While it works, the status card links to a **live run page** — click it to watch the agent's steps (files read, commands run, tests) as they happen, not just the final answer. See [watch a run and check spend](../how-to/watch-a-run-and-check-spend.md).
+## 4. Check what it did
 
-## Try a few more
+When the card closes, its first detail line is the run's shape: how the time split between getting ready, thinking, running tools and finishing up. The run page keeps the whole record ([Watch a run](../how-to/watch-a-run.md)).
+
+## 5. Try a few more
 
 Directives combine, and the operator commands use the same grammar as a message:
 
@@ -61,17 +63,19 @@ Directives combine, and the operator commands use the same grammar as a message:
 @switchboard config instructions me "Always reply in bullet points"
 ```
 
-DMs to the bot work the same way, with no mention needed.
-
-## When you're stuck
+## When you are stuck
 
 ```
 @switchboard help
 ```
 
-lists every command. If a request gets refused, the reply names who to ask — permissions are per-agent and per-repo, and denials always say why.
+lists every agent, directive and command. A refused request says why and names who can grant what it needed.
+
+## What you did
+
+You sent a request, continued it in its thread, and handed a task to the coding agent while watching its run. The same three moves are the whole interface; everything else is a default you can set once.
 
 ## Next
 
-- [Configure your defaults](../how-to/configure-your-defaults.md) — stop typing `agent:coding model:...` every time.
-- [Reference: Slack commands](../reference/slack-commands.md) — the full command grammar.
+- [Configure your defaults](../how-to/configure-your-defaults.md) — stop typing `agent:coding model:…` every time.
+- [Slack commands](../reference/slack-commands.md) — every directive and command.

@@ -19,7 +19,7 @@ const seams = [
     lead: "The model behind the agent.",
     body: "One adapter per vendor's API shape; an OpenAI-compatible endpoint is configuration, not code. A model is a provider/model string, resolved through the same layers as every other setting — per request, thread, person, channel.",
     has: "Anthropic · OpenAI-compatible",
-    link: "/how-to/add-a-provider-or-agent#add-a-provider",
+    link: "/how-to/add-a-provider",
     cta: "Add a provider",
   },
   {
@@ -35,7 +35,7 @@ const seams = [
     lead: "What runs.",
     body: "A system prompt, a toolset and a budget, kept as data in a registry. Five ship, and a new one is a registry entry — the dispatcher that runs them never changes.",
     has: "general · coding · review · ship · research",
-    link: "/how-to/add-a-provider-or-agent#add-an-agent",
+    link: "/how-to/add-an-agent",
     cta: "Add an agent",
   },
 ];

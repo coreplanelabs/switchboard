@@ -14,7 +14,7 @@ load-results/
 
 # The docs site is built in place (docs/.vitepress/dist is covered by dist/
 # above); its dev-server cache is not.
-.vitepress/cache
+docs/.vitepress/cache
 
 # Generated and installation-specific (see docs/how-to/operate-production.md): the deployment
 # profile is the operator's (or the infrastructure repo's, via SWITCHBOARD_DEPLOY_PROFILE) and every
