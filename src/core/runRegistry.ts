@@ -13,6 +13,7 @@ import type { ChannelVisibility } from "./authz/types.js";
 import type { RunStatus } from "./runRecord.js";
 import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 import { RunControl } from "./runRegistry/runControl.js";
+import { activityOf, activityOfEvents } from "./runRegistry/activity.js";
 
 // The run registry is the unit-testable core of the external live-view page
 // (docs/reference/specs/live-view.md) and the ONE per-run event store while a run is live
@@ -43,7 +44,7 @@ import { RunControl } from "./runRegistry/runControl.js";
 // moved names from here while their own split (decision record 0024) is in
 // flight, so those names are re-exported below; once the stages import the
 // sibling modules directly, the re-exports go.
-export { RunControl };
+export { RunControl, activityOfEvents };
 
 /** The identifiers a freshly created run is addressed by, plus its control. */
 /** `create()` for a run that already has an identity and a past (a resume,
@@ -382,33 +383,6 @@ interface RunState {
   control: RunControl;
   /** Set by markPersisted() once the durable store confirmed the record. */
   persisted: boolean;
-}
-
-/** First line of `text`, whitespace collapsed, cut at `max` with an ellipsis —
- *  the index's one-line activity (events are already redacted upstream). */
-function oneLine(text: string, max: number): string {
-  const line = text.replace(/\s+/g, " ").trim();
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
-}
-
-/** The one-line activity an event contributes (live-view item 20): the newest
- *  narration's first line, a tool call's summary, or the answer's first line —
- *  for a failed inline run that is the `⚠️ <error>` reply, so the index can
- *  say WHAT failed. Other events contribute nothing (`undefined`). One rule for
- *  the live summary (`publish`) and the persisted record (`activityOfEvents`). */
-export function activityOf(event: RunEvent): string | undefined {
-  if (event.type === "assistant" || event.type === "answer") return oneLine(event.text, 120);
-  if (event.type === "tool_call") return oneLine(event.summary, 120);
-  return undefined;
-}
-
-/** The latest activity across a run's events (the record writer's rule). */
-export function activityOfEvents(events: readonly RunEvent[]): string | undefined {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const a = activityOf(events[i]);
-    if (a !== undefined) return a;
-  }
-  return undefined;
 }
 
 /** Equal-length constant-time string compare (mirrors channels/http.ts). Guards
