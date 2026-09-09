@@ -4,7 +4,7 @@ import { configAwarenessBlock } from "./configAwareness.js";
 import { selfDescriptionBlock } from "./selfDescription.js";
 import { customInstructionsBlock } from "./customInstructions.js";
 import { AGENTS, getAgent, type AgentDef } from "../agents/registry.js";
-import { lastThreadDirectives, parseDirectives, type RequestDirectives, type ThreadDirectives } from "../directives.js";
+import type { RequestDirectives, ThreadDirectives } from "../directives.js";
 import { mergeTools, runAgent } from "../runner.js";
 import { TOOLSETS } from "../tools/workspace.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
@@ -19,11 +19,9 @@ import { graftResidentSteps, residentTraceOf } from "../execution/residentTrace.
 import type { ResidentStep } from "../execution/residentStepTrace.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { makeWebCapability } from "../tools/web.js";
-import { residentOnboardedProbe, residentSlugsLister } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
-import type { ProviderRegistry } from "../providers/registry.js";
-import { currentPrHeadSha, prCommitsSince, resolveRepoContext, type RepoContext } from "./repoContext.js";
+import { currentPrHeadSha, prCommitsSince, type RepoContext } from "./repoContext.js";
 import type { PrCommitList } from "./headMoved.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
 import {
@@ -94,6 +92,7 @@ import {
   type ResumeContext,
 } from "./dispatch/admission.js";
 import { answerChatCommand, answerOperation, type FastPathDeps } from "./dispatch/fastPath.js";
+import { readRequest, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { startReviewReadingDiff } from "./readingDiff.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -117,8 +116,7 @@ import type {
 // parsing, layered resolution, permission gates, history assembly, executor
 // selection, and the agent run. Channels are pure transports (src/channels/).
 
-export interface CoreDeps extends AdmissionDeps, FastPathDeps, RecordDeps {
-  providers: ProviderRegistry;
+export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, RecordDeps {
   /** What is on in this process (src/core/capabilities.ts): computed ONCE at
    *  startup from the config and the environment, read by every surface —
    *  the prompt blocks, the status card, the command catalogue, the web seed.
@@ -443,30 +441,16 @@ export async function dispatch(
     // fetch, so a command costs none.
     if (await answerChatCommand(deps, { msg, io, ending, trace })) return;
 
-    const directives = parseDirectives(msg.text);
-    const history = await root.span("dispatch.history", () => io.history());
+    const { directives, history } = await readRequest({ msg, io, root });
 
     // The natural-language op fast path (dispatch/fastPath.ts): a conservative
     // op form is the registry command it names; an op that cannot serve falls
     // through to the agent.
     if (await answerOperation(deps, { msg, io, ending, trace, directives, history })) return;
 
-    // Thread stickiness: a follow-up without explicit directives runs on the
-    // agent/model this thread already established (last directive in the
-    // thread's history), not the channel/global default — otherwise "continue"
-    // in an agent:coding thread silently lands on the toolless default agent.
-    // Derived from history on every message, never stored: restart-safe, and
-    // consistent with how the Slack adapter re-derives thread participation.
-    const sticky = lastThreadDirectives(history);
-    const resolved = deps.config.resolve({
-      channelId: msg.channelId,
-      userId: msg.userId,
-      request: {
-        agent: directives.agent ?? sticky.agent,
-        model: directives.model ?? sticky.model,
-        effort: directives.effort ?? sticky.effort,
-      },
-    });
+    // The (agent, model, effort) this request resolves to (dispatch/resolve.ts):
+    // a directive, else the thread's sticky one, else the config scopes.
+    const { sticky, resolved } = resolveRun(deps, { msg, directives, history });
 
     // Authorization gate: checked against the *resolved* agent and invoking
     // user, so no config layer (directives, user or channel scope) bypasses it.
@@ -517,39 +501,17 @@ export async function dispatch(
     requestRow = taken.requestRow;
     await foldCarriedInbox(deps, admissionCtx, admitted);
 
-    const { provider: providerName, model } = parseModelRef(resolved.modelRef);
-    const provider = deps.providers.get(providerName);
-
-    // Target repo/ref for resident environments, resolved BEFORE the model
-    // turn: explicit signals in the message, else the repo this thread
-    // already established (from history — restart-safe, never stored). The
-    // gate belongs with the resource declaration: an agent that declares no
-    // repo (e.g. the toolless general default) never resolves or gates one, so
-    // a toolless follow-up in a repo-mentioning thread is not wrongly refused
-    // and a PR-URL never triggers a wasted GitHub REST call for it.
-    // The production resolver vets bare `owner/name` tokens against the
-    // resident registry (an onboarded-resource probe from the resident
-    // config) so prose shaped like a slug can never bind a repo; an injected
-    // resolver (tests) is called as before. STARTED here (a promise) so the
-    // GitHub round trip overlaps the memory read below; awaited after the ack.
-    const needsRepo = agent.resources?.repo === "required";
-    const repoCtxP: Promise<RepoContext> = root.span("dispatch.repo_context", () =>
-      resume
-        ? Promise.resolve(resume.repoCtx)
-        : needsRepo
-          ? Promise.resolve(
-              deps.resolveRepoContext
-                ? deps.resolveRepoContext(msg, history)
-                : resolveRepoContext(
-                    msg,
-                    history,
-                    residentOnboardedProbe(deps.config.config.execution?.resident),
-                    residentSlugsLister(deps.config.config.execution?.resident),
-                  ),
-            ).then((ctx) => ctx ?? {})
-          : Promise.resolve({}),
-    );
-    repoCtxP.catch(() => {});
+    // The provider behind the model ref, and the target repo/ref/PR resolution
+    // STARTED here (dispatch/resolve.ts) so the GitHub round trip overlaps the
+    // memory read below; awaited after the ack.
+    const { provider, model, needsRepo, repoCtxP } = resolveTarget(deps, {
+      msg,
+      history,
+      agent,
+      resolved,
+      resume,
+      root,
+    });
 
     // Cross-session memory — READ path, STARTED here and awaited
     // below, so the memory Worker round trip (up to 5 s) overlaps the repo/PR

@@ -6,6 +6,7 @@
 // registry command they name. Both run before the request is resolved; a
 // message neither answers goes on to thread admission (admission.ts).
 import type { ConfigStore } from "../../config.js";
+import type { ResolveDeps } from "./resolve.js";
 import type { RequestDirectives } from "../../directives.js";
 import { systemClock } from "../trace/index.js";
 import { COMMAND_RUN_AGENT } from "../runOwner.js";
@@ -37,18 +38,10 @@ import { composeRunLabel, errorReply, replyCommandOutput } from "./reply.js";
 /** What the fast paths read off the dispatcher's dependencies. An inline
  *  command run is recorded like any run, so the record stage's slice comes
  *  with it. `CoreDeps` extends this; a caller's shape is unchanged. */
-export interface FastPathDeps extends RecordDeps {
+export interface FastPathDeps extends RecordDeps, Pick<ResolveDeps, "resolveRepoContext"> {
   config: ConfigStore;
   /** The wall clock (docs/reference/specs/tracing.md): `systemClock` in production, a ticking clock in tests. */
   clock?: Clock;
-  /**
-   * Resolves the target repo/ref for a message (resident environments).
-   * Defaults to the production resolver in repoContext.ts (explicit repo/PR/
-   * branch signals in the message, then the thread-established repo from
-   * history); injectable for tests. No repo signal → {} → the per-thread
-   * executor path with no resident probe (total input contract).
-   */
-  resolveRepoContext?: (msg: IncomingMessage, history: HistoryItem[]) => Promise<RepoContext> | RepoContext;
   /**
    * Live run-view registry: every run is registered here and its
    * events published so the external /runs page can stream them. Optional;
