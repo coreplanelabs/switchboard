@@ -1,0 +1,75 @@
+# Approves a pull request when the repository's review App posts an "LGTM:"
+# verdict.
+#
+# The review agent never approves or merges: it posts its verdict as a
+# COMMENT-state pull-request review whose first line is written by the bot
+# process from a structured verdict (src/core/reviewVerdict.ts) — "LGTM:
+# <summary>" only for an explicit approve, never from the model's prose. This
+# workflow turns that line into a real approval from the Actions token, so the
+# decision to approve belongs to the repository, not to the App's permissions.
+#
+# Off by default. Two repository variables turn it on, and the job does not
+# run while either is unset — for every other checkout this file is an inert
+# template:
+#
+#   REVIEW_BOT_LOGIN   the review App's bot user login
+#   REVIEW_BOT_ID      that user's immutable numeric id
+#
+# How to find both, and the rest of the setup: docs/how-to/configure-the-repository.md,
+# "Approve on the agent's LGTM". The repository must also allow Actions to
+# approve pull requests (`can_approve_pull_request_reviews=true` under
+# Settings -> Actions -> General); without it the approval POST fails with 422.
+#
+# Guards:
+#   * Only fires for a review authored by the configured App, matched by both
+#     login and numeric id, in state "commented", whose body starts with the
+#     exact token "LGTM:" (a mention elsewhere in the body never fires).
+#   * Skips if the review is pinned to a commit that is no longer the PR head
+#     (a push landed after the App reviewed).
+#   * The approval itself is pinned to the reviewed commit via commit_id, so it
+#     cannot silently attach to a newer head.
+#
+# Known residual risk: pull_request_review runs this workflow from the PR's
+# merge ref, so a PR that edits this file runs its edited copy. Branch
+# protection ("Dismiss stale approvals" + a required human review) is the
+# real backstop.
+name: Auto-approve review LGTM
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions: {}
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    if: >-
+      vars.REVIEW_BOT_LOGIN != '' &&
+      vars.REVIEW_BOT_ID != '' &&
+      github.event.review.user.login == vars.REVIEW_BOT_LOGIN &&
+      format('{0}', github.event.review.user.id) == vars.REVIEW_BOT_ID &&
+      github.event.review.state == 'commented' &&
+      startsWith(github.event.review.body, 'LGTM:')
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Approve PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          REVIEWER: ${{ github.event.review.user.login }}
+          REVIEW_COMMIT: ${{ github.event.review.commit_id }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$REVIEW_COMMIT" != "$HEAD_SHA" ]; then
+            echo "Review is pinned to $REVIEW_COMMIT but PR head is $HEAD_SHA; stale review, skipping."
+            exit 0
+          fi
+          body="Auto-approved: $REVIEWER reviewed this PR and posted an LGTM verdict (see its review). This repository opted in through its REVIEW_BOT_LOGIN and REVIEW_BOT_ID variables."
+          gh api "repos/$GH_REPO/pulls/$PR/reviews" \
+            -f event=APPROVE \
+            -f commit_id="$REVIEW_COMMIT" \
+            -f body="$body"

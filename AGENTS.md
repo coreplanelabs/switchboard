@@ -10,7 +10,7 @@ Every agent working here reads this file, as does a person asking how we work: h
 2. **A failing test, then the code.** Unit tests are the default proof. `npx vitest run --changed origin/main` is the loop; `npm test` before pushing.
 3. **`npm run fix`, then `npm run verify`.** `fix` regenerates every generated artifact and repairs lint and formatting. `verify` is the whole gate and exactly what CI runs — nothing lives only in CI; a unit test over the workflow files keeps it so.
 4. **A PR written for the reader.** Conventional title (`feat(scope): …`; a required check refuses anything else). Body: two sentences a stranger can act on, then a Tour of the change in reading order with permalinks at the pushed head, the non-obvious decisions, and the validation with receipts. Docs describing changed behavior change in the same PR.
-5. **Switchboard reviews it, in the open.** The PR is posted to `agent:review`; findings are addressed or declined with a reason on the thread, the branch rewritten into reviewable commits, review re-requested at the new head. `LGTM` auto-approves; a person merges.
+5. **Switchboard reviews it, in the open.** The PR is posted to `agent:review`; findings are addressed or declined with a reason on the thread, the branch rewritten into reviewable commits, review re-requested at the new head. `LGTM:` auto-approves where the repository has opted in; a person merges.
 6. **Squash-merge, release, deploy.** The title is the commit. release-please accumulates a release PR; merging it tags the version and CI deploys only the Workers whose inputs changed. Why this shape: [How we work](docs/explanation/how-we-work.md).
 
 ## Invariants
