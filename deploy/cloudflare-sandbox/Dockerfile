@@ -17,8 +17,14 @@ USER root
 # (src/execution/bashTimeout.ts); changing it requires a container rebuild +
 # redeploy.
 ENV COMMAND_TIMEOUT_MS=1240000
+# docker.io + iptables: a Docker engine for runs whose tests need containers
+# (act's default job mode, testcontainers, compose, image builds). Nothing
+# starts the daemon at boot — the wrapper below does, on the first `docker`
+# call. The sandbox is already root with full capabilities inside its own
+# microVM, so a container a run starts shares that run's blast radius and
+# nothing more; no privileged flag or capability is added anywhere.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git curl ca-certificates \
+  && apt-get install -y --no-install-recommends git curl ca-certificates docker.io iptables \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
@@ -28,6 +34,12 @@ RUN apt-get update \
   && git config --system credential.helper '!gh auth git-credential' \
   && git config --system user.name "switchboard-bot" \
   && git config --system user.email "switchboard-bot@users.noreply.github.com"
+
+# `docker` resolves to this wrapper (/usr/local/bin precedes /usr/bin on PATH):
+# it starts dockerd in its own session on first use — a plain background
+# process would die with the exec's process group — waits for the engine, then
+# execs the real client. src/deploy/sandboxDocker.test.ts holds its shape.
+COPY --chmod=0755 docker-wrapper.sh /usr/local/bin/docker
 
 # Node comes from the base: the published 0.12.9 image ships Node 22.23 (copied
 # from node:22-slim, with npm; no NodeSource deb), so the retarget-and-upgrade
