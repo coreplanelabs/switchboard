@@ -101,8 +101,13 @@ export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOption
   };
 }
 
-/** The roots the bot starts for its own work, outside any request. */
-export type ProcessRootName = "slack.catch_up" | "drain" | `deploy.step.${string}`;
+/** The roots the bot starts for its own work, outside any request: the
+ *  reconnect catch-up pass, the drain, a deploy step, the fleet watcher's
+ *  background read of the resident listing, and a residents dashboard page
+ *  (a browser GET that causes a resident Worker call, so the call has a trace
+ *  to adopt). */
+export type ProcessRootName =
+  "slack.catch_up" | "drain" | `deploy.step.${string}` | "resident.fleet_refresh" | "dashboard.residents";
 
 export interface ProcessRootOptions {
   attrs?: SpanAttrs;

@@ -20,6 +20,8 @@ describe("streamSpans", () => {
       "drain",
       "deploy.step.bot",
       "deploy.wait_live",
+      "resident.fleet_refresh",
+      "dashboard.residents",
     ]) {
       expect(isStreamed(logOnly), logOnly).toBe(false);
       expect(classOf(logOnly, "agent"), logOnly).toBeUndefined();

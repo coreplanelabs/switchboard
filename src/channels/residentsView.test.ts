@@ -13,6 +13,7 @@ import {
 } from "./residentsView.js";
 import { makeShellRenderer } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
+import { recordingSink } from "../core/testing/recordingSink.js";
 import { SEED_ELEMENT_ID, type ResidentDetailSeed, type ResidentsIndexSeed } from "./webSeed.js";
 
 // The residents dash handler: routing, the live-per-request registry read, the
@@ -292,5 +293,74 @@ describe("createResidentsViewHandler", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(b.status).toBe(502);
     expect(b.body()).toContain("ECONNREFUSED");
+  });
+});
+
+describe("createResidentsViewHandler — each page request is a root (docs/reference/specs/tracing.md item 20)", () => {
+  const tracedClient = (residents: () => Promise<ResidentAdminResponse>, bound: string[]): ResidentAdminClient => {
+    const base = fakeClient(residents);
+    const client: ResidentAdminClient = {
+      ...base,
+      withSpan(span) {
+        bound.push(span.name);
+        return client;
+      },
+    };
+    return client;
+  };
+
+  it("each page request runs under a dashboard.residents root handed to the client, with the route and the status; a 200 ends ok, a 404 ends error", async () => {
+    const sink = recordingSink();
+    const bound: string[] = [];
+    const h = createResidentsViewHandler(
+      tracedClient(() => Promise.resolve(ok(LISTING as never)), bound),
+      shell,
+      { sinks: [sink] },
+    );
+    const index = fakeReqRes("GET", "/residents");
+    expect(h(index.req, index.res)).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(index.status).toBe(200);
+    const detail = fakeReqRes("GET", "/residents/acme/unknown");
+    expect(h(detail.req, detail.res)).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(detail.status).toBe(404);
+
+    expect(bound).toEqual(["dashboard.residents", "dashboard.residents"]);
+    const roots = sink.ends.filter((e) => e.name === "dashboard.residents");
+    expect(roots.map((r) => [r.parentSpanId, r.status, r.attrs.route, r.attrs.httpStatus])).toEqual([
+      [undefined, "ok", "index", 200],
+      [undefined, "error", "detail", 404],
+    ]);
+  });
+
+  it("a throwing client ends the root error with the 502 it answered", async () => {
+    const sink = recordingSink();
+    const h = createResidentsViewHandler(
+      tracedClient(() => Promise.reject(new Error("boom")), []),
+      shell,
+      { sinks: [sink] },
+    );
+    const io = fakeReqRes("GET", "/residents");
+    h(io.req, io.res);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(io.status).toBe(502);
+    expect(sink.ended("dashboard.residents")).toMatchObject({
+      status: "error",
+      attrs: { route: "index", httpStatus: 502 },
+    });
+  });
+
+  it("without trace deps a request is untraced and the client is used unbound", async () => {
+    const bound: string[] = [];
+    const h = createResidentsViewHandler(
+      tracedClient(() => Promise.resolve(ok(LISTING as never)), bound),
+      shell,
+    );
+    const io = fakeReqRes("GET", "/residents");
+    h(io.req, io.res);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(io.status).toBe(200);
+    expect(bound).toEqual([]);
   });
 });

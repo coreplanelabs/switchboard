@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { NullResidentAdminClient, type ResidentAdminResponse } from "./residentAdmin.js";
+import { recordingSink } from "./testing/recordingSink.js";
+import type { Span } from "./trace/types.js";
 import { FLEET_REFRESH_MS, NO_FLEET, residentFleetWatcherFor, watchResidentFleet } from "./residentFleet.js";
 
 // Feature: docs/reference/specs/routing-and-config.md item 11 — the resident cap the About
@@ -110,5 +112,52 @@ describe("residentFleetWatcherFor — only an admin plane that can answer is wat
       residentFleetWatcherFor(new NullResidentAdminClient("no fleet"), { warn: (m) => warnings.push(m) }),
     ).toBeUndefined();
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("watchResidentFleet — the read is traced (docs/reference/specs/tracing.md item 20)", () => {
+  it("a refresh runs under a resident.fleet_refresh root handed to the client's withSpan, with the listing's status and count; a failed read ends the root error", async () => {
+    const sink = recordingSink();
+    const bound: string[] = [];
+    let answer: ResidentAdminResponse | Error = { status: 200, data: { cap: 6, count: 2, residents: [] } };
+    const client = {
+      residents: async () => {
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
+      withSpan(span: Span) {
+        bound.push(span.name);
+        return client;
+      },
+    };
+    const fleet = watchResidentFleet(client, { warn: () => {}, trace: { sinks: [sink] } });
+    await fleet.refresh();
+    expect(bound).toEqual(["resident.fleet_refresh"]);
+    const ok = sink.ended("resident.fleet_refresh");
+    expect(ok?.parentSpanId).toBeUndefined();
+    expect(ok?.status).toBe("ok");
+    expect(ok?.attrs).toMatchObject({ httpStatus: 200, residents: 2 });
+    expect(fleet.cap()).toBe(6);
+
+    answer = new Error("resident Worker unreachable");
+    await fleet.refresh();
+    const failed = sink.ends.filter((e) => e.name === "resident.fleet_refresh")[1];
+    expect(failed?.status).toBe("error");
+    expect(fleet.cap()).toBe(6);
+  });
+
+  it("without trace deps the read is untraced and the client is used unbound", async () => {
+    const bound: string[] = [];
+    const client = {
+      residents: async () => ({ status: 200, data: { cap: 3, count: 0, residents: [] } }),
+      withSpan(span: Span) {
+        bound.push(span.name);
+        return client;
+      },
+    };
+    const fleet = watchResidentFleet(client, { warn: () => {} });
+    await fleet.refresh();
+    expect(bound).toEqual([]);
+    expect(fleet.cap()).toBe(3);
   });
 });

@@ -1,4 +1,6 @@
-import { NullResidentAdminClient, type ResidentAdminClient } from "./residentAdmin.js";
+import { NullResidentAdminClient, type ResidentAdminResponse } from "./residentAdmin.js";
+import { startProcessRoot, type RequestTraceDeps } from "./requestTrace.js";
+import type { Span } from "./trace/types.js";
 
 // What the bot knows about its resident fleet without asking on the run path
 // (docs/reference/specs/routing-and-config.md item 11): the cap the resident Worker
@@ -33,23 +35,41 @@ export interface ResidentFleetOptions {
   warn: (message: string) => void;
   setInterval?: (fn: () => void, ms: number) => { unref?(): void };
   clearInterval?: (timer: { unref?(): void }) => void;
+  /** Where a refresh's root goes (docs/reference/specs/tracing.md item 20): each read runs
+   *  under a `resident.fleet_refresh` root handed to the client, so the Worker's
+   *  `/residents` call adopts a trace instead of minting its own. Absent (the
+   *  one-shot CLI, tests without tracing) → the read is untraced. */
+  trace?: RequestTraceDeps;
 }
 
-export function watchResidentFleet(
-  admin: Pick<ResidentAdminClient, "residents">,
-  opts: ResidentFleetOptions,
-): ResidentFleetWatcher {
+/** What the watcher needs of the admin client: the listing, and (optionally) the
+ *  same listing bound to a span — `ResidentAdminClient` satisfies it as is. */
+export interface FleetListingSource {
+  residents(): Promise<ResidentAdminResponse>;
+  withSpan?(span: Span): FleetListingSource;
+}
+
+export function watchResidentFleet(admin: FleetListingSource, opts: ResidentFleetOptions): ResidentFleetWatcher {
   let cap: number | undefined;
   let timer: { unref?(): void } | undefined;
   const refresh = async (): Promise<void> => {
+    const root = opts.trace ? startProcessRoot(opts.trace, "resident.fleet_refresh") : undefined;
+    const client = root && admin.withSpan ? admin.withSpan(root) : admin;
     try {
-      const res = await admin.residents();
+      const res = await client.residents();
+      root?.setAttrs({ httpStatus: res.status });
       if (res.status !== 200) {
         opts.warn(`[residents] fleet facts not refreshed: /residents answered ${res.status}`);
+        root?.end("error");
         return;
       }
       if (typeof res.data.cap === "number" && Number.isFinite(res.data.cap)) cap = res.data.cap;
+      if (typeof res.data.count === "number" && Number.isFinite(res.data.count))
+        root?.setAttrs({ residents: res.data.count });
+      root?.end("ok");
     } catch (err) {
+      root?.fail(err);
+      root?.end("error");
       opts.warn(`[residents] fleet facts not refreshed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
@@ -78,7 +98,7 @@ export function watchResidentFleet(
  * is theirs (the bot `start()`s it, the one-shot CLI awaits one `refresh()`).
  */
 export function residentFleetWatcherFor(
-  admin: Pick<ResidentAdminClient, "residents"> | { unavailable: string },
+  admin: FleetListingSource | { unavailable: string },
   opts: ResidentFleetOptions,
 ): ResidentFleetWatcher | undefined {
   if ("unavailable" in admin || admin instanceof NullResidentAdminClient) return undefined;
