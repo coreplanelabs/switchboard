@@ -162,7 +162,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   const currentFrame = () =>
     shell.live({
       suffix: quietSuffix(clock() - lastActivityAt, inFlightTool),
-      notice: shutdownNotice,
+      notice: shutdownNotice(),
       detail: [checklist, lastActivity],
     });
   // The closed card keeps the run link (the run page outlives the run and

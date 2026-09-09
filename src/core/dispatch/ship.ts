@@ -308,7 +308,7 @@ export async function runShipBranch(
   // `lastActivity` — so a child's update_status (which replaces the checklist
   // outright) can never erase which round the pipeline is in.
   let roundHeader: string | undefined;
-  const currentFrame = () => shell.live({ notice: shutdownNotice, detail: [roundHeader, checklist, lastActivity] });
+  const currentFrame = () => shell.live({ notice: shutdownNotice(), detail: [roundHeader, checklist, lastActivity] });
   const checklistAsLeft = () => checklist;
   const checklistCheckedOff = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
   const onEvent = (e: RunEvent) => {

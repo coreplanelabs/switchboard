@@ -81,7 +81,10 @@ export interface CoreDeps
    * Where `friction propose` files its proposals. Default: the GitHub REST
    * tracker with the App installation token (App `issues:write`; never a `gh`
    * shell-out — AGENTS.md invariant 5). Injectable so tests assert filing
-   * without a network call.
+   * without a network call. No stage reads it: the composition root
+   * (`src/index.ts`) hands it to the command catalogue, and the dispatcher
+   * tests inject an in-memory tracker through this same bag — it stays here
+   * because `CoreDeps` is the one place a process declares what it runs with.
    */
   issueTracker?: IssueTracker;
 }

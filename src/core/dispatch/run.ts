@@ -181,7 +181,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         card: card.handle ?? null,
         // The row reserved before the attach (item 42), promoted in place;
         // its hooks (a stop, a fence) were wired at the reservation and stay.
-        ...(reserved ? { reservation: reserved } : {}),
+        reservation: reserved,
         system,
         tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
           ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
@@ -250,7 +250,11 @@ export const DEPLOY_RESTART_NOTICE = "⏸ deploy in progress — this run contin
  *  before the bot restarts" from a run that is merely slow. `undefined` clears
  *  it (tests). A plain module-level value: the drain is process-wide by nature
  *  and every in-flight run must show it, not only runs started after it. */
-export let shutdownNotice: string | undefined;
-export function setShutdownNotice(notice: string | undefined): void {
-  shutdownNotice = notice;
+let notice: string | undefined;
+/** The notice every live card shows right now, or undefined outside a drain. */
+export function shutdownNotice(): string | undefined {
+  return notice;
+}
+export function setShutdownNotice(next: string | undefined): void {
+  notice = next;
 }
