@@ -16,7 +16,7 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
-import { activeRunCount, dispatch, setShutdownNotice, turnContent, type CoreDeps } from "./dispatcher.js";
+import { activeRunCount, dispatch, setShutdownNotice, type CoreDeps } from "./dispatcher.js";
 import { durableInboxMessage, type DispatchFollowUp } from "./dispatch/admission.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { RunControl, RunRegistry, activityOfEvents, type IndexEvent } from "./runRegistry.js";
@@ -4223,39 +4223,6 @@ describe("skill loading / progressive disclosure", () => {
     expect(replies).toContain("done");
     // The 2nd model call sees the loaded skill body in the tool result.
     expect(JSON.stringify(provider.requests[1].messages)).toContain("REVIEW SKILL BODY");
-  });
-});
-
-describe("turnContent (attachment assembly)", () => {
-  it("emits a PDF as a document part, text files as fenced text, then the user's text", () => {
-    const parts = turnContent("look at these", undefined, [
-      { mediaType: "application/pdf", data: "JVBERi0=", name: "report.pdf" },
-      { mediaType: "text/csv", data: "a,b\n1,2\n", name: "data.csv" },
-    ]);
-    expect(parts[0]).toEqual({
-      type: "document",
-      mediaType: "application/pdf",
-      data: "JVBERi0=",
-      name: "report.pdf",
-    });
-    expect(parts[1]).toEqual({
-      type: "text",
-      text: "\n\n[file: data.csv]\n```\na,b\n1,2\n\n```\n",
-    });
-    expect(parts[2]).toEqual({ type: "text", text: "look at these" });
-  });
-
-  it("orders images before documents before the user's text", () => {
-    const parts = turnContent(
-      "hi",
-      [{ mediaType: "image/png", data: "aGk=" }],
-      [{ mediaType: "application/pdf", data: "JVBERi0=", name: "a.pdf" }],
-    );
-    expect(parts.map((p) => p.type)).toEqual(["image", "document", "text"]);
-  });
-
-  it("falls back to a placeholder when a turn has no content at all", () => {
-    expect(turnContent("")).toEqual([{ type: "text", text: "(empty message)" }]);
   });
 });
 

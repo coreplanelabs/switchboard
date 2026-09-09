@@ -19,7 +19,7 @@ import type { ResidentStep } from "../execution/residentStepTrace.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { makeWebCapability } from "../tools/web.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
-import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
+import { parseModelRef } from "../providers/types.js";
 import { currentPrHeadSha, prCommitsSince, type RepoContext } from "./repoContext.js";
 import type { PrCommitList } from "./headMoved.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
@@ -97,6 +97,7 @@ import {
   authorizeRepo,
   type AuthorizeDeps,
 } from "./dispatch/authorize.js";
+import { buildMessages, contextMessageTexts } from "./dispatch/messages.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { startReviewReadingDiff } from "./readingDiff.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -107,14 +108,7 @@ import { inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 import { createCardShell, type CardShell } from "./statusCardFrame.js";
 import { createRunEnding, type RunEnding } from "./runEnding.js";
 import { coalesceStatus } from "./statusCoalescer.js";
-import type {
-  ChannelIO,
-  DocumentAttachment,
-  HistoryItem,
-  ImageAttachment,
-  IncomingMessage,
-  StatusHandle,
-} from "./types.js";
+import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
 // parsing, layered resolution, permission gates, history assembly, executor
@@ -251,12 +245,6 @@ export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, Auth
 /** Floor between two edits of a run's status card (see `coalesceStatus`). Below
  *  the 5 s heartbeat so a heartbeat frame is never held back by it. */
 const STATUS_UPDATE_MIN_MS = 3000;
-
-/** Bounds on the thread context recorded into a run's stream as `context`
- *  events: the newest turns win, at most this many, within this
- *  many bytes of redacted text in total. */
-const CONTEXT_MAX_ITEMS = 20;
-const CONTEXT_MAX_BYTES = 256 * 1024;
 
 /** The web capability (undici Agent with the SSRF-checking connector + the
  *  search adapter) is built ONCE per process, not per run: the Agent owns the
@@ -2455,112 +2443,4 @@ export const DEPLOY_RESTART_NOTICE = "⏸ deploy in progress — this run contin
 let shutdownNotice: string | undefined;
 export function setShutdownNotice(notice: string | undefined): void {
   shutdownNotice = notice;
-}
-
-function buildMessages(
-  history: HistoryItem[],
-  currentText: string,
-  currentImages?: ImageAttachment[],
-  currentDocuments?: DocumentAttachment[],
-): ChatMessage[] {
-  const messages: ChatMessage[] = history.map((h) => ({
-    role: h.role,
-    content: turnContent(h.text, h.images, h.documents),
-  }));
-  messages.push({ role: "user", content: turnContent(currentText, currentImages, currentDocuments) });
-  return normalizeAlternation(messages);
-}
-
-/**
- * Attachments first (images, then documents), then the user's text — a turn
- * always has at least one part. PDFs become a native `document` part; text/code
- * files are inlined as a fenced text part naming the file (provider-agnostic).
- * Exported for tests.
- */
-export function turnContent(text: string, images?: ImageAttachment[], documents?: DocumentAttachment[]): ContentPart[] {
-  const parts: ContentPart[] = (images ?? []).map((img) => ({
-    type: "image" as const,
-    mediaType: img.mediaType,
-    data: img.data,
-  }));
-  for (const doc of documents ?? []) {
-    if (doc.mediaType === "application/pdf") {
-      parts.push({ type: "document", mediaType: doc.mediaType, data: doc.data, name: doc.name });
-    } else {
-      parts.push({ type: "text", text: fenceFile(doc.name, doc.data) });
-    }
-  }
-  if (text) parts.push({ type: "text", text });
-  if (parts.length === 0) parts.push({ type: "text", text: "(empty message)" });
-  return parts;
-}
-
-/**
- * The text recorded for one turn in the run stream: the turn's text
- * plus one metadata line per attachment — name, media type, decoded size — and
- * NEVER the attachment itself (no base64, no file body). Images and PDFs carry
- * base64 (size = decoded bytes); text/code documents carry their decoded text.
- * The text is humanized (`humanizeMessageText`: Slack link/mention markup
- * unwrapped, entities unescaped) — every caller feeds channel-authored turns.
- * Redaction happens at publish, not here.
- */
-function messageText(
-  text: string,
-  humanize: boolean,
-  images?: ImageAttachment[],
-  documents?: DocumentAttachment[],
-): string {
-  const lines = [(humanize ? humanizeMessageText(text) : text).trim()];
-  for (const img of images ?? [])
-    lines.push(attachmentLine(img.name, img.mediaType, Buffer.byteLength(img.data, "base64")));
-  for (const doc of documents ?? []) {
-    const bytes = Buffer.byteLength(doc.data, doc.mediaType === "application/pdf" ? "base64" : "utf8");
-    lines.push(attachmentLine(doc.name, doc.mediaType, bytes));
-  }
-  return lines.filter((l) => l.length > 0).join("\n");
-}
-
-function attachmentLine(name: string | undefined, mime: string, bytes: number): string {
-  return `[attachment: ${name ?? "attachment"} · ${mime} · ${bytes} bytes]`;
-}
-
-/**
- * The thread-context turns to record as `context` events: the
- * NEWEST turns first, at most `CONTEXT_MAX_ITEMS`, until the redacted texts
- * together exceed `CONTEXT_MAX_BYTES` — then returned in thread order. Each turn is prefixed with its role so a context row reads as
- * the conversation did; attachments are metadata lines (see `messageText`).
- */
-function contextMessageTexts(history: readonly HistoryItem[], humanize: boolean): string[] {
-  const kept: string[] = [];
-  let bytes = 0;
-  for (let i = history.length - 1; i >= 0 && kept.length < CONTEXT_MAX_ITEMS; i--) {
-    const h = history[i];
-    const text = `${h.role}: ${messageText(h.text, humanize, h.images, h.documents)}`;
-    // Budget what will actually be published (publishText redacts).
-    const size = utf8ByteLength(redactSecrets(text));
-    if (bytes + size > CONTEXT_MAX_BYTES) break;
-    bytes += size;
-    kept.push(text);
-  }
-  return kept.reverse();
-}
-
-/** Inline a text/code file's content, fenced and labeled with its name. */
-function fenceFile(name: string | undefined, content: string): string {
-  return `\n\n[file: ${name ?? "attachment"}]\n\`\`\`\n${content}\n\`\`\`\n`;
-}
-
-/** Providers require user-first and behave best with merged consecutive roles. */
-function normalizeAlternation(messages: ChatMessage[]): ChatMessage[] {
-  const out: ChatMessage[] = [];
-  for (const m of messages) {
-    const last = out[out.length - 1];
-    if (last && last.role === m.role) {
-      last.content.push(...m.content);
-    } else {
-      out.push({ role: m.role, content: [...m.content] });
-    }
-  }
-  while (out.length > 0 && out[0].role !== "user") out.shift();
-  return out;
 }
