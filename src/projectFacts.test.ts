@@ -13,10 +13,12 @@ const read = (p: string) => readFileSync(new URL(p, `file://${root}`), "utf8");
 const facts = {
   name: "switchboard",
   displayName: "Switchboard",
+  description: "Mention it and an agent does the work.",
   organization: "acme",
   repository: "https://github.com/acme/switchboard",
   image: "ghcr.io/acme/switchboard",
   docs: "https://docs.switchboard.example.com",
+  topics: ["ai-agents", "slack-bot"],
   contact: "dev@example.com",
   steward: { name: "Acme Labs", url: "https://acme.example" },
   commands: {},
@@ -24,6 +26,7 @@ const facts = {
 
 const goodPkg = JSON.stringify({
   name: "switchboard",
+  description: "Mention it and an agent does the work.",
   homepage: "https://github.com/acme/switchboard#readme",
   repository: { url: "git+https://github.com/acme/switchboard.git" },
   bugs: { url: "https://github.com/acme/switchboard/issues" },
@@ -84,14 +87,92 @@ describe("factsProblems", () => {
     ]);
   });
 
-  it("leaves other repositories under the org alone, and checks package.json's four fields", () => {
+  it("leaves other repositories under the org alone, and checks package.json's five fields", () => {
     const files = {
-      "package.json": JSON.stringify({ name: "other", homepage: "x", repository: { url: "y" }, bugs: { url: "z" } }),
+      "package.json": JSON.stringify({
+        name: "other",
+        description: "something else",
+        homepage: "x",
+        repository: { url: "y" },
+        bugs: { url: "z" },
+      }),
       "README.md": "see https://github.com/acme/infrastructure",
     };
     const problems = factsProblems(facts, files);
     expect(problems.filter((p) => p.file === "README.md")).toEqual([]);
-    expect(problems.filter((p) => p.file === "package.json")).toHaveLength(4);
+    expect(problems.filter((p) => p.file === "package.json")).toHaveLength(5);
+  });
+
+  describe("the README's badges", () => {
+    // The badge row names the repository three ways — a github.com path, a
+    // github.com path inside the Scorecard URL, and the last two segments of a
+    // shields.io GitHub badge — and every one must follow a repository move.
+    it("is silent when every badge names the repository under its owner", () => {
+      const files = {
+        "README.md": [
+          "[![CI](https://github.com/acme/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/acme/switchboard/actions/workflows/ci.yml)",
+          "[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/acme/switchboard/badge)](https://scorecard.dev/viewer/?uri=github.com/acme/switchboard)",
+          "[![Latest release](https://img.shields.io/github/v/release/acme/switchboard)](https://github.com/acme/switchboard/releases/latest)",
+          "[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)",
+        ].join(" "),
+      };
+      expect(factsProblems(facts, files)).toEqual([]);
+    });
+
+    it("names a shields.io GitHub badge under another owner, and leaves one for another repository alone", () => {
+      const files = {
+        "README.md":
+          "![release](https://img.shields.io/github/v/release/someone-else/switchboard) ![other](https://img.shields.io/github/license/acme/infrastructure)",
+      };
+      expect(factsProblems(facts, files).map((p) => `${p.file}: ${p.what}`)).toEqual([
+        'README.md: repository "img.shields.io/github/v/release/someone-else/switchboard" — project.json says https://github.com/acme/switchboard',
+      ]);
+    });
+  });
+
+  describe("the description and topics", () => {
+    // GitHub's repository description is capped at 350 characters and a topic
+    // is 1–50 of [a-z0-9-], at most 20 per repository; `gh repo edit` reads
+    // both from project.json, so the facts must already be what GitHub accepts.
+    const what = (f: Record<string, unknown>, files: Record<string, string> = {}) =>
+      factsProblems({ ...facts, ...f }, files).map((p) => `${p.file}: ${p.what}`);
+
+    it("the fixture's description and topics are silent", () => {
+      expect(what({})).toEqual([]);
+    });
+
+    it("requires a description: present, not blank, within GitHub's 350 characters", () => {
+      expect(what({ description: undefined })).toEqual(["project.json: description is missing or blank"]);
+      expect(what({ description: "   " })).toEqual(["project.json: description is missing or blank"]);
+      expect(what({ description: "x".repeat(350) })).toEqual([]);
+      expect(what({ description: "x".repeat(351) })).toEqual([
+        "project.json: description is 351 characters; GitHub allows 350",
+      ]);
+    });
+
+    it("requires 1–20 topics, each 1–50 lowercase letters, digits and hyphens", () => {
+      expect(what({ topics: undefined })).toEqual(["project.json: topics is missing or empty"]);
+      expect(what({ topics: [] })).toEqual(["project.json: topics is missing or empty"]);
+      expect(what({ topics: Array.from({ length: 21 }, (_, i) => `t${i}`) })).toEqual([
+        "project.json: 21 topics; GitHub allows 20",
+      ]);
+      expect(what({ topics: ["ok-1", "Slack Bot", "a".repeat(51), "under_score", ""] })).toEqual([
+        'project.json: topic "Slack Bot" is not 1–50 lowercase letters, digits and hyphens',
+        `project.json: topic "${"a".repeat(51)}" is not 1–50 lowercase letters, digits and hyphens`,
+        'project.json: topic "under_score" is not 1–50 lowercase letters, digits and hyphens',
+        'project.json: topic "" is not 1–50 lowercase letters, digits and hyphens',
+      ]);
+      expect(what({ topics: ["a".repeat(50), "0", "ai-agents"] })).toEqual([]);
+    });
+
+    it("package.json's description, when it has one, is the same sentence", () => {
+      const pkg = (description?: string) => JSON.stringify({ ...JSON.parse(goodPkg), description });
+      expect(what({}, { "package.json": pkg("Mention it and an agent does the work.") })).toEqual([]);
+      expect(what({}, { "package.json": pkg(undefined) })).toEqual([]);
+      expect(what({}, { "package.json": pkg("An older pitch.") })).toEqual([
+        'package.json: description is "An older pitch.", project.json says "Mention it and an agent does the work."',
+      ]);
+    });
   });
 
   it("requires NOTICE and GOVERNANCE to name the steward", () => {

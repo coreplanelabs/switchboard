@@ -90,6 +90,7 @@ CODE_OF_CONDUCT.md	<dev@coreplane.ai>. All complaints will be reviewed and inves
 SECURITY.md	repository's Security tab, or email <dev@coreplane.ai> with a description, the
 CONTRIBUTING.md	git clone https://github.com/coreplanelabs/switchboard.git
 README.md	git clone https://github.com/coreplanelabs/switchboard.git
+README.md	[![CI](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coreplanelabs/switchboard/badge)](https://scorecard.dev/viewer/?uri=github.com/coreplanelabs/switchboard) [![Latest release](https://img.shields.io/github/v/release/coreplanelabs/switchboard)](https://github.com/coreplanelabs/switchboard/releases/latest) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 SUPPORT.md	[GitHub Discussions](https://github.com/coreplanelabs/switchboard/discussions).
 GOVERNANCE.md	Switchboard is an open-source project stewarded by [Coreplane Labs](https://coreplane.ai).
 

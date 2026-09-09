@@ -2,10 +2,22 @@
   "$comment": "The one place the project says who it is. Everything that names the project, its home, its docs, or its contact reads this file or is checked against it (npm run check:project-facts). Change a value here and the check names every copy that has to follow.",
   "name": "switchboard",
   "displayName": "Switchboard",
+  "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.",
   "organization": "coreplanelabs",
   "repository": "https://github.com/coreplanelabs/switchboard",
   "image": "ghcr.io/coreplanelabs/switchboard",
   "docs": "https://openswitchboard.dev",
+  "topics": [
+    "ai-agents",
+    "coding-agent",
+    "code-review",
+    "slack-bot",
+    "github-app",
+    "mcp-server",
+    "cloudflare-workers",
+    "llm",
+    "typescript"
+  ],
   "contact": "dev@coreplane.ai",
   "steward": {
     "name": "Coreplane Labs",
@@ -98,7 +110,7 @@
       "when": "After touching a Dockerfile; needs Docker. One CI leg per image."
     },
     "check:project-facts": {
-      "does": "Every copy of the project's name, repository, docs URL and contact address equals `project.json`.",
+      "does": "Every copy of the project's name, repository, docs URL and contact address equals `project.json`; its description and topics fit what GitHub accepts.",
       "when": "After editing `project.json` or a community file; part of `check:consistency`."
     },
     "skills:sync": {
