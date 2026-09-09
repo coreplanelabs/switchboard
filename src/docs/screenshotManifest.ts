@@ -30,6 +30,12 @@ export const THEMES = ["light", "dark"] as const;
 /** A laptop viewport at a retina density: 16:10, the landing page's frame shape. */
 export const VIEWPORT = { width: 1440, height: 900, deviceScaleFactor: 2 } as const;
 
+/** The instant every picture is rendered at, on the server and in the browser:
+ *  a weekday afternoon after the fixture's own timestamps, so "4 hours ago"
+ *  reads the same on every machine. Changing it changes every picture — and
+ *  the manifest records it, so the check names a manifest rendered at another. */
+export const FIXED_NOW = 1_788_877_800_000;
+
 export interface Manifest {
   viewport: typeof VIEWPORT;
   /** The epoch millisecond the preview and the browser were both held at. */
@@ -38,13 +44,22 @@ export interface Manifest {
   inputs: Record<string, string>;
 }
 
-/** The files a picture is rendered from: the fixture, the shell, the renderer
- *  and every source file of the dashboard. Tests, test helpers, generated
- *  declarations and builds never reach a pixel. */
+/** The inputs that are not under `web/src/`: the fixture, the shell, the
+ *  renderer, this module (the surfaces, the viewport and the clock live here)
+ *  and the bundler's config. */
+const NAMED_INPUTS = [
+  "scripts/web-preview.ts",
+  "scripts/screenshots.mts",
+  "src/channels/webShell.ts",
+  "src/docs/screenshotManifest.ts",
+  "web/vite.config.ts",
+];
+
+/** The files a picture is rendered from: the named inputs and every source
+ *  file of the dashboard. Tests, test helpers, generated declarations and
+ *  builds never reach a pixel. */
 export function isScreenshotInput(path: string): boolean {
-  if (path === "scripts/web-preview.ts" || path === "scripts/screenshots.mts" || path === "src/channels/webShell.ts")
-    return true;
-  if (path === "web/vite.config.ts") return true;
+  if (NAMED_INPUTS.includes(path)) return true;
   if (!path.startsWith("web/src/")) return false;
   if (path.startsWith("web/src/testing/")) return false;
   return !/\.test\.ts$/.test(path);
@@ -53,10 +68,7 @@ export function isScreenshotInput(path: string): boolean {
 /** Every input present in the tree, repository-relative and sorted. */
 export function listInputs(root: string): string[] {
   const candidates = [
-    "scripts/web-preview.ts",
-    "scripts/screenshots.mts",
-    "src/channels/webShell.ts",
-    "web/vite.config.ts",
+    ...NAMED_INPUTS,
     ...globSync("web/src/**/*", { cwd: root, withFileTypes: true })
       .filter((d) => d.isFile())
       .map((d) => relative(root, join(d.parentPath, d.name)).split("\\").join("/")),
@@ -78,17 +90,27 @@ export function expectedFiles(): string[] {
   return SURFACES.flatMap((s) => THEMES.map((t) => `${s.name}-${t}.png`));
 }
 
-export function renderManifest(inputs: Record<string, string>, now: number): Manifest {
+export function renderManifest(inputs: Record<string, string>, now: number = FIXED_NOW): Manifest {
   return { viewport: VIEWPORT, now, inputs };
 }
 
-/** Pure: what differs between the tree and the recorded manifest — a changed,
- *  new or removed input, a picture missing or unexpected — one line each. */
+/** Pure: what differs between the tree and the recorded manifest — a render
+ *  at another viewport or clock than this module pins, a changed, new or
+ *  removed input, a picture missing or unexpected — one line each. */
 export function manifestProblems(current: Record<string, string>, recorded: Manifest, present: string[]): string[] {
   if (typeof recorded?.now !== "number" || typeof recorded.viewport?.width !== "number" || !recorded.inputs) {
     return ["the manifest does not carry the viewport and the fixed clock the pictures were rendered with"];
   }
   const problems: string[] = [];
+  const viewport = (v: Manifest["viewport"]) => `${v.width}×${v.height} at ${v.deviceScaleFactor}×`;
+  if (viewport(recorded.viewport) !== viewport(VIEWPORT)) {
+    problems.push(
+      `the pictures were rendered at ${viewport(recorded.viewport)}; the viewport is now ${viewport(VIEWPORT)}`,
+    );
+  }
+  if (recorded.now !== FIXED_NOW) {
+    problems.push(`the pictures were rendered at clock ${recorded.now}; the fixed clock is now ${FIXED_NOW}`);
+  }
   const paths = [...new Set([...Object.keys(current), ...Object.keys(recorded.inputs)])].sort();
   for (const path of paths) {
     const now = current[path];

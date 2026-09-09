@@ -2,6 +2,7 @@ import { existsSync, globSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { SHOTS, shotSrc } from "../../docs/.vitepress/theme/screenshots.mjs";
 
 // The docs tree's absolute URLs, linted.
 //
@@ -95,27 +96,19 @@ describe("site links in the theme's components", () => {
   });
 
   it("every image a component draws is a file under docs/public", () => {
-    // The landing page's screenshots are `/screenshots/<name>-<theme>.png`,
-    // built from a template string the dead-link check never sees; the names
-    // it can take are the `name`s in the component's data.
+    // The landing page draws its pictures from the theme's SHOTS list (one
+    // file per appearance), a path the dead-link check never sees; any other
+    // component's literal `src="/…"` is held to the same rule.
     const wrong: string[] = [];
-    const checked: string[] = [];
+    const paths = SHOTS.flatMap((s) => [shotSrc(s.name, "light"), shotSrc(s.name, "dark")]);
     for (const rel of components) {
       const source = readFileSync(`${THEME}/${rel}`, "utf8");
-      const shots = /const shots = \[([\s\S]*?)\n\];/.exec(source)?.[1] ?? "";
-      const names = [...shots.matchAll(/^\s*name: "([^"]+)",$/gm)].map((m) => m[1]);
-      const paths = [
-        ...[...source.matchAll(/:src="`(\/[^`]*)`"/g)].flatMap((m) =>
-          names.map((n) => m[1].replace("${shot.name}", n)),
-        ),
-        ...[...source.matchAll(/\bsrc="(\/[^"]*)"/g)].map((m) => m[1]),
-      ];
-      for (const path of paths) {
-        checked.push(path);
-        if (!existsSync(`${DOCS}/public${path}`)) wrong.push(`${rel}: ${path} — no such file under docs/public`);
-      }
+      for (const m of source.matchAll(/\bsrc="(\/[^"]*)"/g)) paths.push(m[1]);
     }
-    expect(checked).toContain("/screenshots/run-page-light.png");
+    expect(paths).toContain("/screenshots/run-page-light.png");
+    for (const path of paths) {
+      if (!existsSync(`${DOCS}/public${path}`)) wrong.push(`${path} — no such file under docs/public`);
+    }
     expect(wrong).toEqual([]);
   });
 });

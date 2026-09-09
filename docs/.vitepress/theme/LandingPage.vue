@@ -4,6 +4,10 @@
 // product is also said, with its proof, on the page each link opens; this page
 // only arranges it. The docs hub (README.md) renders below it.
 import RequestFlow from "./RequestFlow.vue";
+// The pictures are rendered from the fixture preview by `npm run
+// screenshots:gen` (docs/public/screenshots/, one file per theme); a frame
+// shows the one for the site's appearance.
+import { SHOTS, shotSrc } from "./screenshots.mjs";
 
 const seams = [
   {
@@ -37,27 +41,6 @@ const seams = [
     has: "general · coding · review · ship · research",
     link: "/how-to/add-an-agent",
     cta: "Add an agent",
-  },
-];
-
-// The pictures are rendered from the fixture preview by `npm run
-// screenshots:gen` (docs/public/screenshots/, one file per theme); a frame
-// shows the one for the site's appearance.
-const shots = [
-  {
-    name: "runs-index",
-    caption: "The runs index: what is running now, what finished, and what leaves the dashboard next.",
-    alt: "Screenshot of the runs index on the dashboard: live runs with their agent, duration and stop controls, then finished ones.",
-  },
-  {
-    name: "run-page",
-    caption: "The run page: every step timed — the model turns, the tool calls, the reply.",
-    alt: "Screenshot of a run page on the dashboard: a timeline of the run's steps with their durations.",
-  },
-  {
-    name: "residents",
-    caption: "Residents: the repositories you onboard, kept warm, with the threads working in each.",
-    alt: "Screenshot of the residents page on the dashboard: one row per onboarded repository with its state.",
   },
 ];
 </script>
@@ -102,11 +85,11 @@ const shots = [
     <section class="shots" aria-labelledby="shots-title">
       <h2 id="shots-title" class="section-title">What it looks like</h2>
       <ul class="strip">
-        <li v-for="shot in shots" :key="shot.name">
+        <li v-for="shot in SHOTS" :key="shot.name">
           <figure class="shot">
             <div class="frame">
-              <img class="light" :src="`/screenshots/${shot.name}-light.png`" :alt="shot.alt" loading="lazy" />
-              <img class="dark" :src="`/screenshots/${shot.name}-dark.png`" :alt="shot.alt" loading="lazy" />
+              <img class="light" :src="shotSrc(shot.name, 'light')" :alt="shot.alt" loading="lazy" />
+              <img class="dark" :src="shotSrc(shot.name, 'dark')" :alt="shot.alt" loading="lazy" />
             </div>
             <figcaption>{{ shot.caption }}</figcaption>
           </figure>
