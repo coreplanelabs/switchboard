@@ -55,8 +55,17 @@ export default defineConfig({
   // GitHub renders a directory's README.md when you browse to the directory;
   // the site does the same by serving each README.md as that directory's
   // index. That is what keeps a bare `[Tutorials](tutorials/)` link — the
-  // form GitHub needs — resolvable here too.
-  rewrites: { "README.md": "index.md", ":dir/README.md": ":dir/index.md" },
+  // form GitHub needs — resolvable here too. A `:param` matches one path
+  // segment, so the specs directory (reference/specs/, two levels deep) needs
+  // its own rule — without it the built page is `reference/specs/README.html`
+  // and the sidebar's `/reference/specs/` is a 404 in production while the dev
+  // server, which resolves directories itself, still answers. `check:site`
+  // requires the built index.
+  rewrites: {
+    "README.md": "index.md",
+    ":dir/README.md": ":dir/index.md",
+    ":dir/:sub/README.md": ":dir/:sub/index.md",
+  },
   // Default output (docs/.vitepress/dist) — the content tree stays clean and
   // .gitignore's `dist/` already covers it. deploy/cloudflare-docs/ uploads it.
   cleanUrls: true,
