@@ -47,12 +47,8 @@ import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
 import { getAgent } from "./agents/registry.js";
 import { systemClock } from "./core/trace/index.js";
-import {
-  closeReclaimedCards,
-  markForeignLiveCards,
-  resumeSlackIO,
-  setForeignLiveCardsSource,
-} from "./channels/slack.js";
+import { resumeSlackIO } from "./channels/slack.js";
+import { closeReclaimedCards, markForeignLiveCards, setForeignLiveCardsSource } from "./channels/slack/statusCard.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
 import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js";
 import { createSpanLog } from "./core/trace/spanLog.js";
