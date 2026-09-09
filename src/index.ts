@@ -30,7 +30,7 @@ import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
-import { resolveUserEmail } from "./channels/slack.js";
+import { resolveUserEmail } from "./channels/slack/lookups.js";
 import { mdToMrkdwn } from "./channels/mrkdwn.js";
 import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
