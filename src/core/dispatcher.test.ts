@@ -33,7 +33,7 @@ import { isHeadMaterial, isSpanRecord, type RunEvent } from "./runEvents.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { OpenedPullRequest, PullRequestFacts, PullRequestTarget } from "../execution/githubPulls.js";
 import { runAgent } from "../runner.js";
-import { shipBranchName, shipTaskText } from "./shipPipeline.js";
+import { shipBranchName, shipTaskText } from "./ship/preflight.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import { InMemoryMemoryStore, NullMemoryStore, type MemoryRecord } from "./memory/index.js";
 import { drainReflections, pendingReflectionCount, REFLECT_MIN_TURNS, REFLECTION_SYSTEM } from "./memory/reflection.js";
