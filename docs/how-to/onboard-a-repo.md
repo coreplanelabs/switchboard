@@ -24,7 +24,7 @@ By default every repository runs cold: a new workspace per thread, cloned on fir
 @switchboard repo onboard acme/api --ref main --install "npm ci" --test "npm test" --build "npm run build"
 ```
 
-Omit `--install`, `--test` or `--build` and Switchboard inspects the repository root — the lockfile for the package manager, `package.json` for the scripts — picks the commands, and tells you what it chose and why. The command returns at once; provisioning continues in the background.
+Omit `--install`, `--test` or `--build` and OpenSwitchboard inspects the repository root — the lockfile for the package manager, `package.json` for the scripts — picks the commands, and tells you what it chose and why. The command returns at once; provisioning continues in the background.
 
 ## 2. Watch it come up
 

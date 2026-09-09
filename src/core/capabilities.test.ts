@@ -146,11 +146,6 @@ describe("capabilitiesFrom — every axis, on and off", () => {
     expect(caps({}, { ...access, ACCESS_DEV_BYPASS: "1" }).dashboardAuth).toBe("access");
   });
 
-  it("docs: DOCS_BASE_URL names this installation's docs site", () => {
-    expect(caps({}, { DOCS_BASE_URL: "https://docs.example" }).docs).toBe(true);
-    expect(caps({}, { DOCS_BASE_URL: "" }).docs).toBe(false);
-  });
-
   it("the full configuration reaches ALL_CAPABILITIES — the two fixtures are real states, not shapes", () => {
     const full = caps(
       {
@@ -168,7 +163,6 @@ describe("capabilitiesFrom — every axis, on and off", () => {
         SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "ci" } }),
         ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com",
         ACCESS_AUD: "a".repeat(64),
-        DOCS_BASE_URL: "https://docs.example",
       },
     );
     expect(full).toEqual(ALL_CAPABILITIES);

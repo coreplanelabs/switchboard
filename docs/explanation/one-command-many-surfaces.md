@@ -1,6 +1,6 @@
 # One definition, every surface
 
-Switchboard exposes the same operator commands four ways: type them in Slack, run them on the CLI, call them over HTTP, or expose them as MCP tools. The naive way to build that is to write four things per command — a chat parser branch, an argv parser, an HTTP handler, an MCP tool schema — and watch them drift the moment someone edits one and forgets the other three. Switchboard writes each command once and derives the other three. That is [decision 0008](../decisions/0008-one-command-definition-every-surface.md); this page is why it holds.
+OpenSwitchboard exposes the same operator commands four ways: type them in Slack, run them on the CLI, call them over HTTP, or expose them as MCP tools. The naive way to build that is to write four things per command — a chat parser branch, an argv parser, an HTTP handler, an MCP tool schema — and watch them drift the moment someone edits one and forgets the other three. OpenSwitchboard writes each command once and derives the other three. That is [decision 0008](../decisions/0008-one-command-definition-every-surface.md); this page is why it holds.
 
 ## What "once" looks like
 

@@ -1,6 +1,6 @@
 # Cross-session memory
 
-Switchboard can carry distilled knowledge across threads: before a model turn it retrieves records scoped to the org **and to the requesting user** and injects them as a **dedicated advisory context block**, so a run benefits from what earlier runs learned without re-reading their transcripts. The whole path is flag-gated and **OFF by default** — with memory off the model input is byte-identical to a build without this feature.
+OpenSwitchboard can carry distilled knowledge across threads: before a model turn it retrieves records scoped to the org **and to the requesting user** and injects them as a **dedicated advisory context block**, so a run benefits from what earlier runs learned without re-reading their transcripts. The whole path is flag-gated and **OFF by default** — with memory off the model input is byte-identical to a build without this feature.
 
 This is delivered in stages. **PR1 shipped the seam + the READ path; PR2 the WRITE path** (a post-reply reflection pass that distills a finished run into records); **PR3 the DURABLE store** — a Memory Worker (SQLite Durable Object per scope) behind an HTTPS client, so memory survives bot restarts; **PR B the USER scope** — each person accumulates a personal knowledge base from their own runs that only they ever see. **Then the REPO and CHANNEL scopes** — knowledge specific to a repository or a channel lives with it and is shared by everyone who works there. Human controls (`memory list` / `memory forget`) and the per-scope cap (§27–29) complete it.
 

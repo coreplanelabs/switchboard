@@ -441,10 +441,9 @@ async function main() {
     // `token` strategy the configured actor, under `none` the local operator
     // `access:loopback`, each granted like any other browser session.
     const publicBaseUrl = process.env.PUBLIC_BASE_URL;
-    // Where /docs* sends a caller: this installation's docs site, the DOCS_BASE_URL
-    // var the bot Worker renders from the profile (or a local `npm run docs:dev`);
-    // without one, the project's published docs (src/core/docsLink.ts).
-    const docsBaseUrl = process.env.DOCS_BASE_URL ?? PROJECT_DOCS_URL;
+    // /docs* sends every caller to the project's published docs
+    // (src/core/docsLink.ts): the site is the project's, not a feature an
+    // installation deploys a copy of.
     const liveView = createLiveViewHandler({
       shell,
       service: runsService,
@@ -616,7 +615,7 @@ async function main() {
       // itself sits behind the same Cloudflare Access as the dashboards, so an
       // unauthenticated follower meets the SSO login there. This is the stable
       // in-product path the dashboard header links to — see src/core/docsLink.ts.
-      const docsTarget = docsRedirectTarget(path, docsBaseUrl);
+      const docsTarget = docsRedirectTarget(path);
       if (docsTarget) {
         res.writeHead(302, { location: docsTarget });
         res.end();
@@ -666,7 +665,7 @@ async function main() {
       // (~seconds) for an external prober to land inside the window itself.
       httpListeningAt = systemClock();
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${commandHttpState} + /docs → ${docsBaseUrl}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       );
     });

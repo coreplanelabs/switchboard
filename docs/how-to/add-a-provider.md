@@ -1,6 +1,6 @@
 # Add a model provider
 
-Route models from a new provider — a hosted API or a server on your own machine — through Switchboard, so a `model:` directive and `defaults.models` can name them.
+Route models from a new provider — a hosted API or a server on your own machine — through OpenSwitchboard, so a `model:` directive and `defaults.models` can name them.
 
 ## Before you start
 

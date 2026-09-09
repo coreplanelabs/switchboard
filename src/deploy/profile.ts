@@ -18,9 +18,11 @@
 
 import { z } from "zod";
 
-/** The Workers an installation may run. The four runtime Workers deploy in
- *  this order; the docs Worker is assets only and deploys on its own. */
-export const WORKER_KINDS = ["memory", "bot", "resident", "sandbox", "docs"] as const;
+/** The Workers an installation may run, in deploy order. The project's docs
+ *  site (deploy/cloudflare-docs/) is not one of them: it is the project's
+ *  website, deployed by the project's own CI from project.json's facts, never
+ *  a copy an installation runs (src/deploy/wranglerTemplate.ts `siteView`). */
+export const WORKER_KINDS = ["memory", "bot", "resident", "sandbox"] as const;
 export type WorkerKind = (typeof WORKER_KINDS)[number];
 
 export const PROFILE_PATH = "deploy/profile.json";
@@ -40,9 +42,9 @@ const endpoint = z.object({
   script: z.string().regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, "a Worker script name: lowercase, digits, hyphens"),
   /** The hostname the Worker's custom domain route serves. */
   hostname,
-  /** The zone that hostname lives in, when it is not the profile's `zone` — a
-   *  public docs site on a product domain while the runtime Workers stay on the
-   *  operator's own. Must be a zone in the same account. */
+  /** The zone that hostname lives in, when it is not the profile's `zone` — one
+   *  Worker on a second domain the account also owns. Must be a zone in the
+   *  same account. */
   zone: hostname.optional(),
 });
 
@@ -64,7 +66,6 @@ export const profileSchema = z.object({
     bot: endpoint,
     resident: endpoint.optional(),
     sandbox: endpoint.optional(),
-    docs: endpoint.optional(),
   }),
   /** Where the bot's runtime config comes from at deploy time; `deploy all`
    *  materializes it into the image's build context. */
@@ -138,8 +139,6 @@ export function profileUrls(p: DeploymentProfile) {
     stateWorkerUrl: origin("memory"),
     /** The bot Worker's restart route (`deploy restart`). */
     botAdminRestartUrl: `${bot}/admin/restart`,
-    /** The docs site's origin, when the installation publishes one. */
-    docsBaseUrl: origin("docs"),
   };
 }
 

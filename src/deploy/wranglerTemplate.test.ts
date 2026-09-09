@@ -6,9 +6,13 @@ import { TEST_PROFILE } from "./testing/profile.js";
 import {
   GENERATED_HEADER,
   RENDERED_FILE,
+  renderSiteConfig,
   renderTemplate,
   renderWorkerConfig,
   renderWorkerConfigs,
+  SITE_CONFIG_TARGET,
+  SITE_DIR,
+  siteView,
   TEMPLATE_FILE,
   templateView,
   workerConfigTargets,
@@ -31,37 +35,9 @@ describe("templateView", () => {
       urls: {
         publicBaseUrl: "https://switchboard.example.test",
         stateWorkerUrl: "https://switchboard-memory.example.test",
-        docsBaseUrl: "https://docs.switchboard.example.test",
       },
       access: undefined,
     });
-  });
-
-  it("carries no docs URL when the profile has no docs Worker — an `{{#if urls.docsBaseUrl}}` block then drops", () => {
-    const { docs: _docs, ...withoutDocs } = TEST_PROFILE.workers;
-    const view = templateView({ ...TEST_PROFILE, workers: withoutDocs }, "bot")!;
-    expect(view.urls.docsBaseUrl).toBeUndefined();
-    const template = [
-      '  "vars": {',
-      "    // {{#if urls.docsBaseUrl}}",
-      '    "DOCS_BASE_URL": "{{urls.docsBaseUrl}}",',
-      "    // {{/if}}",
-      '    "X": "1"',
-      "  }",
-    ].join("\n");
-    const without = renderTemplate(template, view);
-    expect(without.ok && without.text.split("\n").slice(GENERATED_HEADER.length)).toEqual([
-      '  "vars": {',
-      '    "X": "1"',
-      "  }",
-    ]);
-    const withDocs = renderTemplate(template, templateView(TEST_PROFILE, "bot")!);
-    expect(withDocs.ok && withDocs.text.split("\n").slice(GENERATED_HEADER.length)).toEqual([
-      '  "vars": {',
-      '    "DOCS_BASE_URL": "https://docs.switchboard.example.test",',
-      '    "X": "1"',
-      "  }",
-    ]);
   });
 
   it("carries the Access application when the profile has one, and is undefined for a Worker the profile lacks", () => {
@@ -73,8 +49,64 @@ describe("templateView", () => {
       teamDomain: "acme.cloudflareaccess.com",
       aud: "a".repeat(64),
     });
-    const { docs: _docs, ...withoutDocs } = TEST_PROFILE.workers;
-    expect(templateView({ ...TEST_PROFILE, workers: withoutDocs }, "docs")).toBeUndefined();
+    const { sandbox: _sandbox, ...withoutSandbox } = TEST_PROFILE.workers;
+    expect(templateView({ ...TEST_PROFILE, workers: withoutSandbox }, "sandbox")).toBeUndefined();
+  });
+});
+
+// Feature: docs/reference/specs/docs-site.md item 12 — the project's docs site is not a Worker of
+// the installation: its script name and hostname are project facts, and the profile contributes
+// only the account the project's own CI deploys it to.
+describe("siteView / renderSiteConfig", () => {
+  const FACTS = { name: "switchboard", docs: "https://docs.example.test/" };
+
+  it("binds `<name>-docs` and the docs host to the profile's account — nothing from the profile's Workers", () => {
+    expect(siteView(TEST_PROFILE, FACTS)).toEqual({
+      ok: true,
+      view: { account: TEST_PROFILE.account, script: "switchboard-docs", hostname: "docs.example.test" },
+    });
+    expect(siteView({ account: "f".repeat(32) }, { name: "gateway", docs: "https://openproduct.example" })).toEqual({
+      ok: true,
+      view: { account: "f".repeat(32), script: "gateway-docs", hostname: "openproduct.example" },
+    });
+  });
+
+  it("names the fact that is missing or malformed, never guessing a host", () => {
+    expect(siteView(TEST_PROFILE, { docs: "https://d.example" })).toEqual({ ok: false, problem: "`name` is missing" });
+    expect(siteView(TEST_PROFILE, { name: "switchboard" })).toEqual({ ok: false, problem: "`docs` is missing" });
+    expect(siteView(TEST_PROFILE, { name: "switchboard", docs: "docs.example.test" })).toEqual({
+      ok: false,
+      problem: '`docs` "docs.example.test" is not a URL',
+    });
+    expect(siteView(TEST_PROFILE, null)).toEqual({ ok: false, problem: "`name` is missing" });
+  });
+
+  it("renders the site's template from the facts file's text; a missing or non-JSON facts file, a bad fact or a missing template is a problem naming its source", () => {
+    const template =
+      '{ "name": "{{script}}", "account_id": "{{account}}", "routes": [{ "pattern": "{{hostname}}" }] }\n';
+    const read = (path: string) => (path === SITE_CONFIG_TARGET.templatePath ? template : undefined);
+    expect(renderSiteConfig(TEST_PROFILE, JSON.stringify(FACTS), read)).toEqual({
+      ok: true,
+      path: `${SITE_DIR}/${RENDERED_FILE}`,
+      text: `${GENERATED_HEADER.join("\n")}\n{ "name": "switchboard-docs", "account_id": "${TEST_PROFILE.account}", "routes": [{ "pattern": "docs.example.test" }] }\n`,
+    });
+    expect(renderSiteConfig(TEST_PROFILE, undefined, read)).toEqual({
+      ok: false,
+      problems: ["project.json: no such file"],
+    });
+    expect(renderSiteConfig(TEST_PROFILE, "{ nope", read)).toEqual({ ok: false, problems: ["project.json: not JSON"] });
+    expect(renderSiteConfig(TEST_PROFILE, JSON.stringify({ name: "switchboard" }), read)).toEqual({
+      ok: false,
+      problems: ["project.json: `docs` is missing"],
+    });
+    expect(renderSiteConfig(TEST_PROFILE, JSON.stringify(FACTS), () => undefined)).toEqual({
+      ok: false,
+      problems: [`${SITE_DIR}/${TEMPLATE_FILE}: no such file`],
+    });
+    expect(renderSiteConfig(TEST_PROFILE, JSON.stringify(FACTS), () => '"{{urls.publicBaseUrl}}"')).toEqual({
+      ok: false,
+      problems: [`${SITE_DIR}/${TEMPLATE_FILE} line 1: {{urls.publicBaseUrl}} has no value in the deployment profile`],
+    });
   });
 });
 
@@ -172,15 +204,13 @@ describe("renderTemplate", () => {
 describe("templateView / renderTemplate for a bot-only profile", () => {
   const botOnly = { ...TEST_PROFILE, workers: { bot: TEST_PROFILE.workers.bot } };
 
-  it("the bot's view carries no state Worker URL and no docs URL; the Workers the profile lacks have no view", () => {
+  it("the bot's view carries no state Worker URL; the Workers the profile lacks have no view", () => {
     const view = templateView(botOnly, "bot")!;
     expect(view.urls).toEqual({
       publicBaseUrl: "https://switchboard.example.test",
       stateWorkerUrl: undefined,
-      docsBaseUrl: undefined,
     });
-    for (const kind of ["memory", "resident", "sandbox", "docs"] as const)
-      expect(templateView(botOnly, kind)).toBeUndefined();
+    for (const kind of ["memory", "resident", "sandbox"] as const) expect(templateView(botOnly, kind)).toBeUndefined();
     expect(workerConfigTargets(botOnly).map((t) => t.kind)).toEqual(["bot"]);
   });
 
@@ -213,20 +243,18 @@ describe("the sandbox Worker's container", () => {
 });
 
 describe("workerConfigTargets / renderWorkerConfigs", () => {
-  it("one template → one wrangler.jsonc per Worker the profile has, the docs Worker included only when present", () => {
+  it("one template → one wrangler.jsonc per Worker the profile has, in deploy order; the docs site is not among them", () => {
     expect(workerConfigTargets(TEST_PROFILE).map((t) => [t.kind, t.templatePath, t.outputPath])).toEqual([
       ["memory", `deploy/cloudflare-memory/${TEMPLATE_FILE}`, `deploy/cloudflare-memory/${RENDERED_FILE}`],
       ["bot", `deploy/cloudflare/${TEMPLATE_FILE}`, `deploy/cloudflare/${RENDERED_FILE}`],
       ["resident", `deploy/cloudflare-resident/${TEMPLATE_FILE}`, `deploy/cloudflare-resident/${RENDERED_FILE}`],
       ["sandbox", `deploy/cloudflare-sandbox/${TEMPLATE_FILE}`, `deploy/cloudflare-sandbox/${RENDERED_FILE}`],
-      ["docs", `deploy/cloudflare-docs/${TEMPLATE_FILE}`, `deploy/cloudflare-docs/${RENDERED_FILE}`],
     ]);
-    const { docs: _docs, ...withoutDocs } = TEST_PROFILE.workers;
-    expect(workerConfigTargets({ ...TEST_PROFILE, workers: withoutDocs }).map((t) => t.kind)).toEqual([
+    const { sandbox: _sandbox, ...withoutSandbox } = TEST_PROFILE.workers;
+    expect(workerConfigTargets({ ...TEST_PROFILE, workers: withoutSandbox }).map((t) => t.kind)).toEqual([
       "memory",
       "bot",
       "resident",
-      "sandbox",
     ]);
   });
 
@@ -266,10 +294,10 @@ describe("workerConfigTargets / renderWorkerConfigs", () => {
       ok: false,
       problems: [`deploy/cloudflare/${TEMPLATE_FILE} line 1: {{access.aud}} has no value in the deployment profile`],
     });
-    const { docs: _docs, ...withoutDocs } = TEST_PROFILE.workers;
-    expect(renderWorkerConfig({ ...TEST_PROFILE, workers: withoutDocs }, "docs", () => "{}")).toEqual({
+    const { sandbox: _sandbox, ...withoutSandbox } = TEST_PROFILE.workers;
+    expect(renderWorkerConfig({ ...TEST_PROFILE, workers: withoutSandbox }, "sandbox", () => "{}")).toEqual({
       ok: false,
-      problems: ["the profile has no docs Worker"],
+      problems: ["the profile has no sandbox Worker"],
     });
   });
 });
@@ -292,15 +320,27 @@ describe("the rendered wrangler.jsonc files", () => {
   const generated =
     profile !== undefined &&
     process.env[PROFILE_ENV] === undefined &&
-    workerConfigTargets(profile).every((t) => existsSync(t.outputPath));
+    [...workerConfigTargets(profile), SITE_CONFIG_TARGET].every((t) => existsSync(t.outputPath));
 
-  it("the five templates render against the committed example with nothing left unfilled", () => {
+  it("the four Workers' templates render against the committed example with nothing left unfilled", () => {
     if (!example.ok) throw new Error(example.problems.join("; "));
     const rendered = renderWorkerConfigs(example.profile, readDisk);
     expect(rendered.ok, JSON.stringify(rendered)).toBe(true);
     if (!rendered.ok) return;
-    expect(rendered.files).toHaveLength(5);
+    expect(rendered.files).toHaveLength(4);
     for (const f of rendered.files) expect(f.text, f.path).not.toMatch(/\{\{|\}\}/);
+  });
+
+  it("the site's template renders against the committed project.json and the example's account: `<name>-docs` on the docs host", () => {
+    if (!example.ok) throw new Error(example.problems.join("; "));
+    const facts = JSON.parse(readFileSync("project.json", "utf8")) as { name: string; docs: string };
+    const rendered = renderSiteConfig(example.profile, readFileSync("project.json", "utf8"), readDisk);
+    expect(rendered.ok, JSON.stringify(rendered)).toBe(true);
+    if (!rendered.ok) return;
+    expect(rendered.text).not.toMatch(/\{\{|\}\}/);
+    expect(rendered.text).toContain(`"name": "${facts.name}-docs"`);
+    expect(rendered.text).toContain(`"account_id": "${example.profile.account}"`);
+    expect(rendered.text).toContain(`"pattern": "${new URL(facts.docs).host}"`);
   });
 
   it.skipIf(!generated)(
@@ -310,6 +350,9 @@ describe("the rendered wrangler.jsonc files", () => {
       expect(rendered.ok, JSON.stringify(rendered)).toBe(true);
       if (!rendered.ok) return;
       for (const f of rendered.files) expect(readFileSync(f.path, "utf8"), f.path).toBe(f.text);
+      const site = renderSiteConfig(profile!, readDisk("project.json"), readDisk);
+      expect(site.ok, JSON.stringify(site)).toBe(true);
+      if (site.ok) expect(readFileSync(site.path, "utf8")).toBe(site.text);
     },
   );
 });

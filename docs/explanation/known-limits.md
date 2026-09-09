@@ -9,7 +9,7 @@ What is deliberately off, deliberately narrow, or not yet proven, so a reader do
 
 ## Narrow on purpose
 
-- **Self-improvement proposes, never fixes.** Its only side effect is a labelled issue ([How Switchboard improves itself](how-switchboard-improves-itself.md)).
+- **Self-improvement proposes, never fixes.** Its only side effect is a labelled issue ([How OpenSwitchboard improves itself](how-switchboard-improves-itself.md)).
 - **No per-run token or cost accounting.** The self-improvement pass uses a long-run outlier (at least twice the median run time) as its cost-spike proxy until there is; `/costs` prices the infrastructure, not individual runs.
 - **`review` is read-only by convention**, held by its toolset and prompt; the hard boundary is the execution plane it runs in ([Execution and trust](execution-and-trust.md)).
 - **Direct messages** to the bot are supported but the Slack app manifest's DM scopes are an installation's choice; a rollout may keep them off.

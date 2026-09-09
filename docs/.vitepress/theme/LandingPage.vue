@@ -3,7 +3,13 @@
 // seams, and three pictures of the dashboard. Everything it says about the
 // product is also said, with its proof, on the page each link opens; this page
 // only arranges it. The docs hub (README.md) renders below it.
+import { useData } from "vitepress";
 import RequestFlow from "./RequestFlow.vue";
+
+// The product's name is the site title, which the config reads from
+// project.json's `displayName` — one fact, no copy here; `check:site` proves
+// the built hero carries it.
+const { site } = useData();
 // The pictures are rendered from the fixture preview by `npm run
 // screenshots:gen` (docs/public/screenshots/, one file per theme); a frame
 // shows the one for the site's appearance.
@@ -49,7 +55,9 @@ const seams = [
   <!-- The page's main landmark: the default theme's home layout has none of its own. -->
   <main class="landing">
     <section class="hero">
-      <p class="eyebrow">Open-source agent gateway</p>
+      <p class="eyebrow">
+        <span class="product">{{ site.title }}</span> · an open-source agent gateway
+      </p>
       <h1 class="title">One gateway for the agents your team runs.</h1>
       <p class="lead">
         A message arrives in Slack, on the CLI, over HTTP or MCP. The dispatcher routes it to an agent, the agent runs
@@ -137,6 +145,12 @@ const seams = [
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--vp-c-brand-1);
+}
+
+/* The product's name keeps its own casing inside the uppercase eyebrow. */
+.eyebrow .product {
+  text-transform: none;
+  font-weight: 600;
 }
 
 .title {

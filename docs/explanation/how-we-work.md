@@ -1,6 +1,6 @@
 # How we work
 
-Switchboard is built by the same kind of agents it runs. This page is the loop a change goes through, from the sentence that says what should be true to the release that makes it so, and why each step is where it is. The agent's half of the contract is [AGENTS.md](../../AGENTS.md); the human's half is [Contributing](../../CONTRIBUTING.md). Both describe this loop. Why records are immutable and specs are checked rather than trusted is [decision 0021](../decisions/0021-records-are-immutable-specs-are-checked.md).
+OpenSwitchboard is built by the same kind of agents it runs. This page is the loop a change goes through, from the sentence that says what should be true to the release that makes it so, and why each step is where it is. The agent's half of the contract is [AGENTS.md](../../AGENTS.md); the human's half is [Contributing](../../CONTRIBUTING.md). Both describe this loop. Why records are immutable and specs are checked rather than trusted is [decision 0021](../decisions/0021-records-are-immutable-specs-are-checked.md).
 
 ## The loop
 
@@ -25,7 +25,7 @@ flowchart LR
 
 **4. The PR is written for the reader.** Its title is a Conventional Commit, because that title becomes the squash commit on `main` and a changelog line; a required check refuses anything else. Its body opens with two sentences a stranger can act on, then a Tour: the change in reading order, each step explained before the code it points at, anchored at the pushed head. Decisions that are not obvious from the diff are written down in the body; the ones that shape the architecture become a record in the tree.
 
-**5. Switchboard reviews it, in the open.** A maintainer posts the PR to the review agent (`agent:review`) in a Slack channel the maintainers watch. The agent reads the whole change in a warm checkout and posts one verdict with labelled findings — never an approval or a merge; it has no such rights. It also reads the specs the change touches — only those, listed by `npm run specs:coverage` — and files a contradiction between the diff and a spec as a finding at `minor` or above, so the same-PR rule from step 1 is enforced, not assumed: the spec is fixed in the PR or there is no `LGTM`. A finding at or above the agreed severity is addressed or declined with a reason on the thread; the branch is rewritten so each commit stays a reviewable unit; the review is re-requested at the new head. In a repository that has opted in — two repository variables name the review App; without them the workflow never runs — an `LGTM:` verdict trips the auto-approve workflow so the human sees green, but a person presses merge.
+**5. OpenSwitchboard reviews it, in the open.** A maintainer posts the PR to the review agent (`agent:review`) in a Slack channel the maintainers watch. The agent reads the whole change in a warm checkout and posts one verdict with labelled findings — never an approval or a merge; it has no such rights. It also reads the specs the change touches — only those, listed by `npm run specs:coverage` — and files a contradiction between the diff and a spec as a finding at `minor` or above, so the same-PR rule from step 1 is enforced, not assumed: the spec is fixed in the PR or there is no `LGTM`. A finding at or above the agreed severity is addressed or declined with a reason on the thread; the branch is rewritten so each commit stays a reviewable unit; the review is re-requested at the new head. In a repository that has opted in — two repository variables name the review App; without them the workflow never runs — an `LGTM:` verdict trips the auto-approve workflow so the human sees green, but a person presses merge.
 
 **6. Merge is a squash whose subject is the title.** The body stays on the PR, where its links render; `main` reads as a changelog. Every required status is a job name in the workflow, and gate jobs stand in for fan-outs, so the matrix can change shape without touching the ruleset ([Configure the repository](../how-to/configure-the-repository.md)).
 
@@ -52,12 +52,12 @@ flowchart LR
 | Squash-only, title as commit | the repository's merge settings and the `main` ruleset ([Configure the repository](../how-to/configure-the-repository.md)) |
 | Only the changed Workers deploy | `deploy plan --affected`, shown on every PR and on the release PR |
 
-## Switchboard develops Switchboard
+## OpenSwitchboard develops OpenSwitchboard
 
 The rules in [AGENTS.md](../../AGENTS.md) are written in terms of the product's own agents, because they are who follows them:
 
 - **`agent:review` reviews every PR.** Read-only, in a warm checkout, one verdict with labelled findings posted at the head it read; it never approves or merges. A repository that opts in lets the auto-approve workflow trust its `LGTM:`; a reviewed-head guard refuses a verdict for a head it did not read.
-- **`agent:coding` implements issues**, with the vendored skills under `skills/` as its house style, pushing a branch and submitting a typed description that Switchboard renders and opens as the PR.
+- **`agent:coding` implements issues**, with the vendored skills under `skills/` as its house style, pushing a branch and submitting a typed description that OpenSwitchboard renders and opens as the PR.
 - **`agent:ship` runs the loop end to end** — coding, review, fixes — to an `LGTM`, in one thread.
 - **Run pages are the audit trail.** Every agent run has a page: what it read, ran and wrote, with timestamps, kept in run history.
-- **`friction propose` files the process's own improvement issues**, from the recurring delay patterns in run history — proposals only, never PRs ([How Switchboard improves itself](how-switchboard-improves-itself.md)).
+- **`friction propose` files the process's own improvement issues**, from the recurring delay patterns in run history — proposals only, never PRs ([How OpenSwitchboard improves itself](how-switchboard-improves-itself.md)).

@@ -1,6 +1,6 @@
-# Switchboard docs
+# OpenSwitchboard docs
 
-Switchboard is an agent gateway: a message arrives over a channel — Slack, the CLI, HTTP, MCP — and an agent answers it, reviews a pull request, or ships code against your repositories, configurable per organization, per channel and per person. This tree is the documentation for whoever *uses*, *watches*, *runs* or *extends* it.
+OpenSwitchboard is an agent gateway: a message arrives over a channel — Slack, the CLI, HTTP, MCP — and an agent answers it, reviews a pull request, or ships code against your repositories, configurable per organization, per channel and per person. This tree is the documentation for whoever *uses*, *watches*, *runs* or *extends* it.
 
 It is organized by [the Diataxis framework](https://diataxis.fr): four kinds of writing, because documentation is four different jobs that should not be mixed on one page.
 
@@ -15,20 +15,20 @@ You can read this tree here on GitHub or as a site — [openswitchboard.dev](htt
 
 ## Start here
 
-New to Switchboard? [Get started](tutorials/get-started.md) takes you from nothing to a running `ask`, then Slack, then production. Then pick your surface:
+New to OpenSwitchboard? [Get started](tutorials/get-started.md) takes you from nothing to a running `ask`, then Slack, then production. Then pick your surface:
 
 | You are… | Start with | Then |
 |---|---|---|
 | talking to the bot in Slack | [Your first request in Slack](tutorials/first-request-in-slack.md) | [Configure your defaults](how-to/configure-your-defaults.md) |
 | watching runs or spend on the dashboard | [Watch a run](how-to/watch-a-run.md) | [Dashboard routes](reference/dashboard-routes.md) |
-| developing or extending Switchboard | [Run it locally](tutorials/run-it-locally.md) | [How a request flows](explanation/how-a-request-flows.md) |
+| developing or extending OpenSwitchboard | [Run it locally](tutorials/run-it-locally.md) | [How a request flows](explanation/how-a-request-flows.md) |
 | operating it in production | [Deploy](how-to/deploy.md) | [Operate production](how-to/operate-production.md) |
 
 ## Tutorials
 
 - [Get started](tutorials/get-started.md) — from nothing to a running `ask`, then Slack, then production, one command each.
 - [Your first request in Slack](tutorials/first-request-in-slack.md) — send a request, follow up in the thread, hand a task to a specialist agent and watch its run.
-- [Run it locally](tutorials/run-it-locally.md) — an answer from Switchboard on your own machine, and the run it recorded, with no Slack workspace.
+- [Run it locally](tutorials/run-it-locally.md) — an answer from OpenSwitchboard on your own machine, and the run it recorded, with no Slack workspace.
 
 ## How-to guides
 
@@ -58,7 +58,7 @@ Run it in production:
 - [Rotate a secret](how-to/rotate-a-secret.md) — a put and a restart, on every Worker that holds the value.
 - [Operate production](how-to/operate-production.md) — deploys outside a release, config changes without one, the preflights, the span log.
 - [Configure the repository](how-to/configure-the-repository.md) — the GitHub settings a fork reproduces: squash-only merges, the required checks, the merge queue.
-- [Run a load test](how-to/run-a-load-test.md) — a number for how Switchboard behaves with many runs at once, before and after a capacity change.
+- [Run a load test](how-to/run-a-load-test.md) — a number for how OpenSwitchboard behaves with many runs at once, before and after a capacity change.
 
 ## Reference
 
@@ -94,7 +94,7 @@ Running it:
 
 The project:
 
-- [How Switchboard improves itself](explanation/how-switchboard-improves-itself.md) — the friction → pattern → issue loop, and where each piece runs.
+- [How OpenSwitchboard improves itself](explanation/how-switchboard-improves-itself.md) — the friction → pattern → issue loop, and where each piece runs.
 - [How we work](explanation/how-we-work.md) — spec, failing test, implementation, a PR with a Tour, an agent review in the open, an automated release.
 - [Design decisions](explanation/design-decisions.md) — the decision records: what was decided, why, what was rejected, and the pattern each one instantiates.
 
@@ -102,4 +102,4 @@ The project:
 
 This tree explains and orients. It is not the contract. [`docs/reference/specs/`](reference/specs/README.md) is the versioned behavioral contract: one file per feature, every criterion backed by a named test or an agent-runnable procedure, updated in the same PR as any behavior change. When something here and a spec disagree, the spec is right, and the disagreement is a docs bug worth filing.
 
-The root [`README.md`](../README.md) is the front door — the pitch, what you need, the quick start — and it links here for everything else. [`AGENTS.md`](../AGENTS.md) serves a different reader: an engineer or a coding agent working *on* Switchboard's own codebase, with the invariants that must not break and the commands that are the repo's whole interface. Read this tree to understand and use Switchboard; read that to change it.
+The root [`README.md`](../README.md) is the front door — the pitch, what you need, the quick start — and it links here for everything else. [`AGENTS.md`](../AGENTS.md) serves a different reader: an engineer or a coding agent working *on* OpenSwitchboard's own codebase, with the invariants that must not break and the commands that are the repo's whole interface. Read this tree to understand and use OpenSwitchboard; read that to change it.

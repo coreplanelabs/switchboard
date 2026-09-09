@@ -1,6 +1,6 @@
 # Why config is layered
 
-Three different people reasonably want to control the same knob — which agent runs, which model answers, how hard it thinks — at three different scopes, and none of them should have to coordinate with the others to get their way locally. Switchboard resolves each knob independently through six layers, the most specific winning:
+Three different people reasonably want to control the same knob — which agent runs, which model answers, how hard it thinks — at three different scopes, and none of them should have to coordinate with the others to get their way locally. OpenSwitchboard resolves each knob independently through six layers, the most specific winning:
 
 ```mermaid
 flowchart TD

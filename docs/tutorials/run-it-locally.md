@@ -1,6 +1,6 @@
 # Run it locally
 
-By the end of this lesson Switchboard has answered a question on your own machine, run an agent with a directive, and shown you the run it recorded — all from the terminal, with no Slack workspace. It is for a developer who has a model provider API key and wants to see the pipeline work before connecting anything else.
+By the end of this lesson OpenSwitchboard has answered a question on your own machine, run an agent with a directive, and shown you the run it recorded — all from the terminal, with no Slack workspace. It is for a developer who has a model provider API key and wants to see the pipeline work before connecting anything else.
 
 ## What you need
 
@@ -63,7 +63,7 @@ The first is the record; the second is its event stream, tool calls and results 
 
 ## What you built
 
-A working Switchboard with one provider and the terminal as its channel, and the habit of reading a run's record after it finishes. Nothing here is undone by adding Slack: the same config and the same runs carry over.
+A working OpenSwitchboard with one provider and the terminal as its channel, and the habit of reading a run's record after it finishes. Nothing here is undone by adding Slack: the same config and the same runs carry over.
 
 ## Next
 

@@ -75,9 +75,9 @@ You read the bot's state before acting, deployed through the one runner with its
 
 ## For this installation
 
-The project's own production is one installation of the product. These facts belong to it, not to Switchboard:
+The project's own production is one installation of the product. These facts belong to it, not to OpenSwitchboard:
 
 - The profile and the bot's config live in a private infrastructure repository. The workflows read its location from the repository variable `SWITCHBOARD_DEPLOY_PROFILE` (a `github://…@main` reference) and mint a read-only App token for it as `CONFIG_REPO_TOKEN` — the App's credentials are the one step in the workflows that is this installation's; from a laptop, export the same two variables.
 - CI holds `CLOUDFLARE_DEPLOY_TOKEN` (Workers Scripts, Containers, R2 and Account Settings at the account; Workers Routes and DNS at the zone), `RESIDENT_READ_TOKEN` and `SANDBOX_TOKEN`; the docs deploy uses `CLOUDFLARE_API_TOKEN`, which is also the fallback while no deploy token is set. Rotation: [Rotate a secret](rotate-a-secret.md).
 - The deployment is mapped into an external infrastructure graph. Cloud resources sync from the provider on their own; the cross-Worker call paths (bot → state Worker, bot → resident Worker, bot → sandbox Worker, all `invokes`) are asserted edges that go stale silently, so a change that adds, removes or repurposes a Worker, a Durable Object or a call path asserts the delta there in the same change cycle.
-- The docs site is public on the project's docs domain. An installation that wants its docs private puts Cloudflare Access in front of the docs Worker; the project's own has none.
+- The docs site is the project's website, public on the project's docs domain, deployed by the project's own CI. An installation deploys no copy of it: the bot's `/docs` sends everyone to the published site.

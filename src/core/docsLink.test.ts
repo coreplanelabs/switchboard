@@ -12,13 +12,6 @@ describe("docsRedirectTarget", () => {
     expect(docsRedirectTarget("/docs/how-to/onboard-a-repo")).toBe(`${PROJECT_DOCS_URL}/how-to/onboard-a-repo`);
   });
 
-  it("honours an overridden base (local development) without doubling the slash", () => {
-    expect(docsRedirectTarget("/docs/reference/cli", "http://localhost:5173")).toBe(
-      "http://localhost:5173/reference/cli",
-    );
-    expect(docsRedirectTarget("/docs", "http://localhost:5173/")).toBe("http://localhost:5173/");
-  });
-
   it("claims no path outside /docs — including one that merely starts with the word", () => {
     for (const path of ["/", "/runs", "/docsomething", "/healthz", "/api/help.show", ""]) {
       expect(docsRedirectTarget(path)).toBeUndefined();

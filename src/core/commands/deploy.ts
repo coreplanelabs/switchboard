@@ -19,7 +19,14 @@ import {
   type RestartRunResult,
 } from "../../deploy/run.js";
 import { profileUrls } from "../../deploy/profile.js";
-import { renderWorkerConfig, renderWorkerConfigs, workerConfigTargets } from "../../deploy/wranglerTemplate.js";
+import {
+  PROJECT_FACTS_FILE,
+  renderSiteConfig,
+  renderWorkerConfig,
+  renderWorkerConfigs,
+  SITE_CONFIG_TARGET,
+  workerConfigTargets,
+} from "../../deploy/wranglerTemplate.js";
 import {
   MANIFEST_PATH,
   parseManifest,
@@ -299,7 +306,7 @@ export const deployInit = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the `deploy:check` gate).",
+    "Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the `deploy:check` gate).",
   render: (output) => {
     const o = output as unknown as InitOutput;
     const from = `${o.profile.path}${o.profile.origin === "example" ? " (the EXAMPLE profile)" : ""}`;
@@ -308,16 +315,19 @@ export const deployInit = defineCommand({
   handler: async ({ options, deps }) => {
     const loaded = await loadProfile(deps);
     const templates = new Map<string, string | undefined>();
-    for (const t of workerConfigTargets(loaded.profile))
+    for (const t of [...workerConfigTargets(loaded.profile), SITE_CONFIG_TARGET])
       templates.set(t.templatePath, await deps.deploy.files.read(t.templatePath));
     const rendered = renderWorkerConfigs(loaded.profile, (path) => templates.get(path));
-    if (!rendered.ok)
-      throw new CommandError(
-        "unavailable",
-        `cannot render the Worker configs —\n  - ${rendered.problems.join("\n  - ")}`,
-      );
+    // The docs site is the project's, not a Worker of the installation: its script name and
+    // hostname come from project.json, and only the account comes from the profile.
+    const site = renderSiteConfig(loaded.profile, await deps.deploy.files.read(PROJECT_FACTS_FILE), (path) =>
+      templates.get(path),
+    );
+    const problems = [...(rendered.ok ? [] : rendered.problems), ...(site.ok ? [] : site.problems)];
+    if (!rendered.ok || !site.ok)
+      throw new CommandError("unavailable", `cannot render the Worker configs —\n  - ${problems.join("\n  - ")}`);
     const files: InitOutput["files"] = [];
-    for (const f of rendered.files) {
+    for (const f of [...rendered.files, site]) {
       const current = await deps.deploy.files.read(f.path);
       let status: InitStatus;
       if (current === f.text) status = "unchanged";

@@ -1,6 +1,6 @@
 # Execution and trust
 
-Every agent's `bash` tool executes commands the model wrote. That is the whole value — an agent that can run tests, install dependencies, push code — and the whole risk: a prompt-injected instruction, a malicious request, or a bad model turn can run anything the tool's environment can reach. Switchboard's answer is not to sandbox the model's judgement (it cannot) but to control the **blast radius** of a tool call, by choosing where it runs. The full threat model is in [Security model](security-model.md); this page is the reasoning behind the execution part of it.
+Every agent's `bash` tool executes commands the model wrote. That is the whole value — an agent that can run tests, install dependencies, push code — and the whole risk: a prompt-injected instruction, a malicious request, or a bad model turn can run anything the tool's environment can reach. OpenSwitchboard's answer is not to sandbox the model's judgement (it cannot) but to control the **blast radius** of a tool call, by choosing where it runs. The full threat model is in [Security model](security-model.md); this page is the reasoning behind the execution part of it.
 
 ## Three planes, three blast radii
 
@@ -43,7 +43,7 @@ The review agent's toolset has no write tool, but it still has `bash`, and `bash
 
 ## Why only an org-wide MCP server reaches the writing agents
 
-A remote MCP server's tool descriptions and results are attacker-controlled text as far as Switchboard is concerned, the same untrusted input as anything else a model reads off the internet. The `coding`, `review` and `ship` agents run with repository-write credentials or a trust contract that a channel's or a person's server must not get to influence, so only a server an admin set at the `org` scope may reach them. `general` and `research`, the agents with no write access, can use a server from any scope. Naming a writing agent on a `me` or `channel` server is refused outright rather than silently ignored, so nobody discovers the rule by a tool that quietly never appears ([Connect an MCP server](../how-to/connect-an-mcp-server.md)).
+A remote MCP server's tool descriptions and results are attacker-controlled text as far as OpenSwitchboard is concerned, the same untrusted input as anything else a model reads off the internet. The `coding`, `review` and `ship` agents run with repository-write credentials or a trust contract that a channel's or a person's server must not get to influence, so only a server an admin set at the `org` scope may reach them. `general` and `research`, the agents with no write access, can use a server from any scope. Naming a writing agent on a `me` or `channel` server is refused outright rather than silently ignored, so nobody discovers the rule by a tool that quietly never appears ([Connect an MCP server](../how-to/connect-an-mcp-server.md)).
 
 ## Why `repo:write` is never a baseline
 

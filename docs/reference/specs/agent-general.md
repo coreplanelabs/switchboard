@@ -1,6 +1,6 @@
 # Agent: general
 
-The default — the plain @-mention. A fast model with a small, workspace-free toolset: it answers directly, reads the org's repositories and acts on their issues through Switchboard's GitHub credential, and reads a linked URL — so the everyday asks are answered here, and only code changes, PR reviews, and web research are handed to the other agents.
+The default — the plain @-mention. A fast model with a small, workspace-free toolset: it answers directly, reads the org's repositories and acts on their issues through OpenSwitchboard's GitHub credential, and reads a linked URL — so the everyday asks are answered here, and only code changes, PR reviews, and web research are handed to the other agents.
 
 - **Code**: `src/agents/registry.ts` (`general`, `GENERAL_SYSTEM`), `src/tools/workspace.ts` (the `assistant` toolset), `src/tools/github.ts`, default model in the deployed config (`config/config.example.yaml` documents the key)
 - **Docs**: [The agents and their toolsets](../../explanation/agents-and-toolsets.md), [github-tools.md](github-tools.md)

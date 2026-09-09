@@ -97,7 +97,7 @@ commands:
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
   deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
-  deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
+  deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
   env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
@@ -232,7 +232,6 @@ exports[`capability surfaces — cloud-full > web seeds: /runs (capabilities, re
   "capabilities": {
     "costs": true,
     "dashboardAuth": "access",
-    "docs": true,
     "execution": "cloudflare",
     "github": true,
     "ingress": true,
@@ -291,7 +290,7 @@ commands:
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
   deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
-  deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
+  deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
   env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
@@ -407,7 +406,6 @@ exports[`capability surfaces — local-full > web seeds: /runs (capabilities, re
   "capabilities": {
     "costs": false,
     "dashboardAuth": "none",
-    "docs": true,
     "execution": "local",
     "github": true,
     "ingress": true,
@@ -457,7 +455,7 @@ commands:
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
   deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
-  deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
+  deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
   env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
@@ -543,7 +541,6 @@ exports[`capability surfaces — minimal > web seeds: /runs (capabilities, reten
   "capabilities": {
     "costs": false,
     "dashboardAuth": "none",
-    "docs": false,
     "execution": "local",
     "github": false,
     "ingress": false,

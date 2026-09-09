@@ -1,6 +1,6 @@
 # Worker topology
 
-Switchboard is not one service. It is one long-lived process — the bot, in a container behind a Worker of its own — plus three more Cloudflare Workers, each earning its place by solving a problem the bot structurally cannot. (A fifth, assets-only Worker serves this documentation and takes no part in a run.)
+OpenSwitchboard is not one service. It is one long-lived process — the bot, in a container behind a Worker of its own — plus three more Cloudflare Workers, each earning its place by solving a problem the bot structurally cannot. (A fifth, assets-only Worker serves this documentation and takes no part in a run.)
 
 The bot is one Node process with no inbound server to speak of. The Slack adapter opens an **outbound websocket** (Socket Mode), so there is no public URL, webhook endpoint or signature verification to host; the one port it listens on serves the health probe, the dashboard and the ingress routes, and a deployment that wants none of those exposed exposes nothing ([decision 0003](../decisions/0003-outbound-only-slack-socket-mode.md)). State lives in three places — the channel's own thread history, the state Worker's Durable Objects, and disk — and only the first two are meant to survive a restart.
 

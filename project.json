@@ -1,7 +1,8 @@
 {
   "$comment": "The one place the project says who it is. Everything that names the project, its home, its docs, or its contact reads this file or is checked against it (npm run check:project-facts). Change a value here and the check names every copy that has to follow.",
   "name": "switchboard",
-  "displayName": "Switchboard",
+  "displayName": "OpenSwitchboard",
+  "npmPackage": "@coreplane/switchboard",
   "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.",
   "organization": "coreplanelabs",
   "repository": "https://github.com/coreplanelabs/switchboard",
@@ -102,7 +103,7 @@
       "when": "Part of `verify:root`."
     },
     "check:site": {
-      "does": "The docs site builds with no dead links and the pages the dashboard links to exist.",
+      "does": "Every page the dashboard links to is in the built site, and its home page reads `displayName`.",
       "when": "After a docs change; part of `verify`."
     },
     "check:image": {
@@ -110,7 +111,7 @@
       "when": "After touching a Dockerfile; needs Docker. One CI leg per image."
     },
     "check:project-facts": {
-      "does": "Every copy of the project's name, repository, docs URL and contact address equals `project.json`; its description and topics fit what GitHub accepts.",
+      "does": "Every copy of the project's names, repository, docs URL and contact address equals `project.json`; its description, topics and npm package fit their rules.",
       "when": "After editing `project.json` or a community file; part of `check:consistency`."
     },
     "skills:sync": {

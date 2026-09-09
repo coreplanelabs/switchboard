@@ -225,7 +225,7 @@ describe("capability fixtures — real configurations", () => {
       schedules: false,
       runLedger: false,
     });
-    expect(local).toMatchObject({ memory: true, runHistory: true, mcp: true, github: true, docs: true });
+    expect(local).toMatchObject({ memory: true, runHistory: true, mcp: true, github: true });
   });
 });
 

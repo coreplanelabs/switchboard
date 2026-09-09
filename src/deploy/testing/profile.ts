@@ -10,7 +10,6 @@ export const TEST_PROFILE: DeploymentProfile = {
     bot: { script: "switchboard", hostname: "switchboard.example.test" },
     resident: { script: "switchboard-resident", hostname: "switchboard-resident.example.test" },
     sandbox: { script: "switchboard-sandbox", hostname: "switchboard-sandbox.example.test" },
-    docs: { script: "switchboard-docs", hostname: "docs.switchboard.example.test" },
   },
   configSource: "config/config.production.yaml",
 };

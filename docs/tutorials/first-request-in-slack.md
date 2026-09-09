@@ -1,6 +1,6 @@
 # Your first request in Slack
 
-By the end of this lesson you have sent Switchboard a request, followed up without repeating yourself, and handed a real task to a specialist agent while watching it work. It is for someone in a Slack workspace where Switchboard is already installed; if you can see the bot in a channel, or open a direct message with it, you have everything you need. Ten minutes.
+By the end of this lesson you have sent OpenSwitchboard a request, followed up without repeating yourself, and handed a real task to a specialist agent while watching it work. It is for someone in a Slack workspace where OpenSwitchboard is already installed; if you can see the bot in a channel, or open a direct message with it, you have everything you need. Ten minutes.
 
 ## 1. Say something
 

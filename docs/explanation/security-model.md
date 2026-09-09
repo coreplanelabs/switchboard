@@ -1,6 +1,6 @@
 # Security model
 
-Switchboard runs commands a model wrote. That is the product — an agent that can run the tests, install the dependencies and push the branch — and it is also the whole threat: a prompt-injected instruction in a diff, a hostile request from someone who can reach the bot, or an ordinary bad turn can run anything the tool's environment can reach. The design does not try to make the model's judgment safe. It decides, for every piece of the system, what a compromise of that piece would yield, and arranges the pieces so the answer is always "less than everything".
+OpenSwitchboard runs commands a model wrote. That is the product — an agent that can run the tests, install the dependencies and push the branch — and it is also the whole threat: a prompt-injected instruction in a diff, a hostile request from someone who can reach the bot, or an ordinary bad turn can run anything the tool's environment can reach. The design does not try to make the model's judgment safe. It decides, for every piece of the system, what a compromise of that piece would yield, and arranges the pieces so the answer is always "less than everything".
 
 ## Three planes
 

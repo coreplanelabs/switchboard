@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { TEST_PROFILE } from "../../deploy/testing/profile.js";
-import { TEMPLATE_FILE } from "../../deploy/wranglerTemplate.js";
+import { PROJECT_FACTS_FILE, TEMPLATE_FILE } from "../../deploy/wranglerTemplate.js";
 import { CONFIG_PATH, ENV_PATH, PROFILE_PATH, type PlannedFile } from "../../setup/plan.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
 import { parseInvocation } from "../commandSurface.js";
@@ -79,7 +79,12 @@ function bind(world: World = {}) {
         return { profile: JSON.parse(profile.text), origin: "profile", path: PROFILE_PATH };
       },
       files: {
-        read: async (path) => (path.endsWith(TEMPLATE_FILE) ? '{ "name": "{{script}}" }\n' : undefined),
+        read: async (path) =>
+          path.endsWith(TEMPLATE_FILE)
+            ? '{ "name": "{{script}}" }\n'
+            : path === PROJECT_FACTS_FILE
+              ? JSON.stringify({ name: "switchboard", docs: "https://docs.example.test" })
+              : undefined,
         write: async (path) => {
           rendered.push(path);
         },
@@ -214,13 +219,18 @@ describe("setup.init — flags", () => {
     ]);
     expect(res.ok, JSON.stringify(res)).toBe(true);
     expect(b.written.map((f) => f.path)).toEqual([ENV_PATH, CONFIG_PATH, PROFILE_PATH]);
-    expect(b.rendered).toEqual(["deploy/cloudflare-memory/wrangler.jsonc", "deploy/cloudflare/wrangler.jsonc"]);
+    expect(b.rendered).toEqual([
+      "deploy/cloudflare-memory/wrangler.jsonc",
+      "deploy/cloudflare/wrangler.jsonc",
+      "deploy/cloudflare-docs/wrangler.jsonc",
+    ]);
     const value = res.ok ? (res.value as Record<string, unknown>) : {};
     expect(value.workerConfigs).toMatchObject({
       profile: { origin: "profile", path: PROFILE_PATH },
       files: [
         { path: "deploy/cloudflare-memory/wrangler.jsonc", status: "written" },
         { path: "deploy/cloudflare/wrangler.jsonc", status: "written" },
+        { path: "deploy/cloudflare-docs/wrangler.jsonc", status: "written" },
       ],
     });
     expect((value.next as string[]).slice(-3)).toEqual([

@@ -1,6 +1,6 @@
 # Get started
 
-By the end of this lesson Switchboard has answered you three times: from a terminal on your own machine, from a Slack channel, and from a production deployment on Cloudflare. Each part builds on the one before it, and nothing is undone along the way — the checkout you make in the first part is the one you deploy in the last.
+By the end of this lesson OpenSwitchboard has answered you three times: from a terminal on your own machine, from a Slack channel, and from a production deployment on Cloudflare. Each part builds on the one before it, and nothing is undone along the way — the checkout you make in the first part is the one you deploy in the last.
 
 **You need:** Node 24 (`.nvmrc` pins it; 22 or newer runs), a terminal, and an Anthropic API key. The second part adds a Slack workspace where you may create an app; the third adds a Cloudflare account with a domain in it and Docker running locally.
 
@@ -42,7 +42,7 @@ Now ask, as the output told you to. The CLI is a channel like Slack is: the same
 npm run cli -- ask "what can you do?"
 ```
 
-Switchboard reads credentials from the environment and from nowhere else; the process loads `.env` from the directory you run it in — the repo root here — and a variable your shell already exports wins over the file.
+OpenSwitchboard reads credentials from the environment and from nowhere else; the process loads `.env` from the directory you run it in — the repo root here — and a variable your shell already exports wins over the file.
 
 You will see a status line tick (`preparing workspace…`, then `thinking…`), and then the answer: the general agent introduces itself and the agents it can hand work to. That took one model call on the default model, `anthropic/claude-haiku-4-5`.
 
@@ -73,7 +73,7 @@ That is the whole product in miniature: a message arrives over a channel, a disp
 
 ## Part 2 — an answer in Slack
 
-Switchboard connects to Slack over Socket Mode: the bot dials out to Slack and holds a websocket, so it needs no public address, no ingress and no TLS to run from your laptop.
+OpenSwitchboard connects to Slack over Socket Mode: the bot dials out to Slack and holds a websocket, so it needs no public address, no ingress and no TLS to run from your laptop.
 
 **Create the app from the manifest.** Go to [api.slack.com/apps](https://api.slack.com/apps), choose *Create New App* → *From a manifest*, pick your workspace, and paste the contents of the checked-in manifest — [`slack-app-manifest.yaml`](https://openswitchboard.dev/slack-app-manifest.yaml), which is `docs/public/slack-app-manifest.yaml` in the tree. It declares every bot scope and event the adapter uses and turns Socket Mode on; [Set up accounts](../how-to/set-up-accounts.md) explains each scope, if you want to know before you click. Create the app.
 
@@ -108,7 +108,7 @@ The same `runs list` from Part 1 now shows this run too, with `slack:` in its ch
 
 ## Part 3 — an answer from production
 
-Production is the bot as a container on Cloudflare, with a **state Worker** beside it so that config, run history and chat-set overrides survive the container's restarts. Those two are the smallest deployment that behaves like production; the sandbox, resident and docs Workers are optional additions described in [Deploy](../how-to/deploy.md).
+Production is the bot as a container on Cloudflare, with a **state Worker** beside it so that config, run history and chat-set overrides survive the container's restarts. Those two are the smallest deployment that behaves like production; the sandbox and resident Workers are optional additions described in [Deploy](../how-to/deploy.md).
 
 **Before you start:** a Cloudflare account, a domain (a *zone*) in it, `npx wrangler login` run once in `deploy/cloudflare` against that account, and Docker running — the bot's image is built on your machine.
 
@@ -185,7 +185,7 @@ curl -sS https://switchboard.example.com/healthz
 
 The JSON names the commit the container was built from, whether it is draining, and how many runs are in flight.
 
-You have Switchboard in your terminal, in Slack, and in production, and every one of those was the same pipeline. What to read next depends on which of the three you care about:
+You have OpenSwitchboard in your terminal, in Slack, and in production, and every one of those was the same pipeline. What to read next depends on which of the three you care about:
 
 - **Slack**: [Your first request in Slack](first-request-in-slack.md) for what else a thread can do, then [Configure your defaults](../how-to/configure-your-defaults.md).
 - **Production**: [Deploy](../how-to/deploy.md) for the optional Workers, the release workflow that deploys for you, and rotating a secret; [Set up accounts](../how-to/set-up-accounts.md) for the GitHub App that lets the coding agent open pull requests — `init --github-app-id … --github-installation-id … --github-private-key-file …` puts its three values in `.env`.

@@ -8,8 +8,9 @@ import { ALL_ON, mountApp } from "../testing/mount";
 
 // Feature: docs/reference/specs/live-view.md — the site nav and the shell follow the
 // installation's capabilities (the seed): Residents needs `residents`, Costs
-// `costs`, the docs link `docs`; Runs is always there, and so is the section
-// the viewer is on.
+// `costs`; Runs is always there, and so is the section the viewer is on. The
+// docs link needs nothing: it opens the project's published site
+// (docs/reference/specs/docs-site.md item 11).
 
 /** A page island whose capabilities are ALL_ON with `over` applied — the page
  *  itself is irrelevant to the chrome, so the smallest seed stands in. */
@@ -18,7 +19,7 @@ const island = (over: Partial<Capabilities> = {}): WebSeed => ({
   retentionDays: null,
   capabilities: { ...ALL_ON, ...over },
 });
-const MINIMAL: Partial<Capabilities> = { residents: false, costs: false, schedules: false, docs: false };
+const MINIMAL: Partial<Capabilities> = { residents: false, costs: false, schedules: false };
 
 describe("navSections — which sections exist", () => {
   it("every capability on → Runs, Residents, Costs in fixed order", () => {
@@ -102,7 +103,7 @@ describe("AppShell", () => {
     expect(wrapper.find('button[aria-label="Menu"]').exists()).toBe(true);
   });
 
-  it("links to the docs at /docs in a new tab when this installation has a docs site, without adding a fourth entry to the section nav", () => {
+  it("links to the docs at /docs in a new tab — the project's published site, on every installation — without adding a fourth entry to the section nav", () => {
     const wrapper = mountApp(AppShell, { props: { title: "Live runs", nav: "runs" }, seed: island() });
     const docs = wrapper.find("a.docs-link");
     expect(docs.exists()).toBe(true);
@@ -130,23 +131,28 @@ describe("AppShell", () => {
     expect(items[2].map((i) => i.label)).toEqual(["Light", "Dark", "System"]);
   });
 
-  it("with docs off there is no docs link and no docs group; the menu's sections follow the nav", () => {
+  it("the docs link and its menu group stay when a section is off; the menu's sections follow the nav", () => {
     const wrapper = mountApp(AppShell, {
       props: { title: "Live runs", nav: "runs" },
-      seed: island({ docs: false, costs: false }),
+      seed: island({ costs: false }),
     });
-    expect(wrapper.find("a.docs-link").exists()).toBe(false);
+    expect(wrapper.find("a.docs-link").exists()).toBe(true);
     expect(wrapper.findAll("nav.site a").map((a) => a.text())).toEqual(["Runs", "Residents"]);
     const items = menuGroups(wrapper);
-    expect(items).toHaveLength(2);
-    expect(items[0].map((i) => i.label)).toEqual(["Runs", "Residents"]);
-    expect(items[1].map((i) => i.label)).toEqual(["Light", "Dark", "System"]);
+    expect(items).toHaveLength(3);
+    expect(items[0].map((i) => i.label)).toEqual(["Docs"]);
+    expect(items[1].map((i) => i.label)).toEqual(["Runs", "Residents"]);
+    expect(items[2].map((i) => i.label)).toEqual(["Light", "Dark", "System"]);
   });
 
-  it("the minimal installation's header is Runs, the theme toggle and the menu — nothing that leads nowhere", () => {
+  it("the minimal installation's header is Runs, the docs link, the theme toggle and the menu — nothing that leads nowhere", () => {
     const wrapper = mountApp(AppShell, { props: { title: "Live runs", nav: "runs" }, seed: island(MINIMAL) });
     expect(wrapper.findAll("nav.site a").map((a) => a.text())).toEqual(["Runs"]);
-    expect(wrapper.find("a.docs-link").exists()).toBe(false);
-    expect(menuGroups(wrapper).map((g) => g.map((i) => i.label))).toEqual([["Runs"], ["Light", "Dark", "System"]]);
+    expect(wrapper.find("a.docs-link").exists()).toBe(true);
+    expect(menuGroups(wrapper).map((g) => g.map((i) => i.label))).toEqual([
+      ["Docs"],
+      ["Runs"],
+      ["Light", "Dark", "System"],
+    ]);
   });
 });

@@ -1,6 +1,6 @@
 # Design decisions
 
-The architecture decision records: one page per decision that shaped Switchboard, with the context it was made in, what was decided, what that costs, the alternatives that were rejected, and the named pattern the decision instantiates so a newcomer can map the code to a concept they already know in one lookup.
+The architecture decision records: one page per decision that shaped OpenSwitchboard, with the context it was made in, what was decided, what that costs, the alternatives that were rejected, and the named pattern the decision instantiates so a newcomer can map the code to a concept they already know in one lookup.
 
 A record is written once and never edited. When a decision stops holding, a new record supersedes it and the old one keeps its reasoning with `status: superseded` and a pointer forward. That is checked, not hoped for: `npm run decisions:check` (part of `verify`) fails the build when a record lacks a status, a superseded record names nothing, or an accepted record's body differs from the copy on `main`. The table below is generated from the records' own frontmatter by `npm run docs:gen`.
 

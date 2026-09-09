@@ -56,7 +56,7 @@ export const MINIMAL: CapabilityFixture = {
 export const LOCAL_FULL: CapabilityFixture = {
   name: "local-full",
   summary:
-    "Everything a laptop can turn on: memory (in-process), run history on disk, GitHub via a personal token, MCP servers, bearer ingress, a local docs site. No Workers, so no residents, costs, schedules or ledger.",
+    "Everything a laptop can turn on: memory (in-process), run history on disk, GitHub via a personal token, MCP servers, bearer ingress. No Workers, so no residents, costs, schedules or ledger.",
   yaml: `${BASE_YAML}execution:
   type: local
 memory:
@@ -72,7 +72,6 @@ mcp:
     GH_TOKEN: "ghp_placeholder",
     MCP_CREDENTIAL_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ "local-token": { subject: "local" } }),
-    DOCS_BASE_URL: "http://localhost:5173",
   },
   capabilities: {
     execution: "local",
@@ -86,14 +85,13 @@ mcp:
     github: true,
     ingress: true,
     dashboardAuth: "none",
-    docs: true,
   },
 };
 
 export const CLOUD_FULL: CapabilityFixture = {
   name: "cloud-full",
   summary:
-    "Everything on: the four Workers, tools in a Cloudflare sandbox, resident repos, memory, run history and the ledger on the state Worker, MCP, costs, schedules, the GitHub App, bearer ingress, Access in front of the dashboards, a docs site.",
+    "Everything on: the four Workers, tools in a Cloudflare sandbox, resident repos, memory, run history and the ledger on the state Worker, MCP, costs, schedules, the GitHub App, bearer ingress, Access in front of the dashboards.",
   yaml: `${BASE_YAML}execution:
   type: cloudflare
   url: https://switchboard-sandbox.example.test
@@ -138,7 +136,6 @@ costs:
     SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ "ci-token": { subject: "ci" }, "cron-token": { subject: "cron" } }),
     ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com",
     ACCESS_AUD: "a".repeat(64),
-    DOCS_BASE_URL: "https://docs.switchboard.example.test",
   },
   capabilities: ALL_CAPABILITIES,
 };
