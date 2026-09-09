@@ -21,6 +21,11 @@ import { onMounted, ref, watch } from "vue";
 const props = defineProps<{ id: string; graph: string; class?: string }>();
 const { isDark } = useData();
 const svg = ref("");
+// Each draw takes a ticket; only the newest draw may publish. Two draws overlap
+// when the appearance toggles twice before the first finishes (the import, the
+// font wait and the render are all async), and without this the slower of the
+// two — in the palette the page has already left — could land last.
+let drawEpoch = 0;
 
 const TOKENS = [
   "bg",
@@ -45,6 +50,7 @@ function palette(): Record<(typeof TOKENS)[number], string> {
 }
 
 async function draw() {
+  const epoch = ++drawEpoch;
   const { default: mermaid } = await import("mermaid");
   await document.fonts.ready;
   const style = getComputedStyle(document.documentElement);
@@ -94,6 +100,7 @@ async function draw() {
     },
   });
   const { svg: drawn } = await mermaid.render(props.id, decodeURIComponent(props.graph));
+  if (epoch !== drawEpoch) return; // a newer draw has started; its result is the current palette's
   svg.value = drawn;
 }
 

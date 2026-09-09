@@ -26,6 +26,16 @@ const { license } = JSON.parse(readFileSync(new URL("../../package.json", import
 };
 const GITHUB_REPO = project.repository;
 
+/** The footer message is HTML; a value read from a file is text until escaped. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // The faces the theme bundles (theme/index.ts), preloaded so the first paint
 // is set in them: the text face and the title face carry everything above the
 // fold, so those two; the code face follows with the stylesheet.
@@ -210,7 +220,7 @@ export default defineConfig({
     },
     outline: { level: [2, 3] },
     footer: {
-      message: `Released under the <a href="${GITHUB_REPO}/blob/main/LICENSE">${license} license</a>. Questions and ideas: <a href="${GITHUB_REPO}/discussions">Discussions</a>. Built from <a href="${GITHUB_REPO}/tree/main/docs">docs/</a> on every push to main; the behavioral contract is the <a href="/reference/specs/">reference specs</a>.`,
+      message: `Released under the <a href="${GITHUB_REPO}/blob/main/LICENSE">${escapeHtml(license)} license</a>. Questions and ideas: <a href="${GITHUB_REPO}/discussions">Discussions</a>. Built from <a href="${GITHUB_REPO}/tree/main/docs">docs/</a> on every push to main; the behavioral contract is the <a href="/reference/specs/">reference specs</a>.`,
       copyright: project.steward.name,
     },
   },

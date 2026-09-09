@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { EFFORT_LEVELS } from "../effort.js";
 import { configAwarenessBlock } from "./configAwareness.js";
 
 // Feature: docs/reference/specs/routing-and-config.md — config awareness (behavior 8): the
@@ -116,8 +117,18 @@ describe("configAwarenessBlock — effort", () => {
     expect(text).toContain("channel override: efforts coding=`medium`");
     expect(text).toContain("user override: effort `low`");
     expect(text).toContain("This message's `effort:low` directive");
-    expect(text).toContain("--effort <low|medium|high>");
-    expect(text).toContain("`effort:<low|medium|high>` directives");
+    expect(text).toContain(`--effort <${EFFORT_LEVELS.join("|")}>`);
+    expect(text).toContain("`effort:<level>` directives");
+  });
+
+  it("names every level of the effort ladder — the list is derived from EFFORT_LEVELS, never hand-typed", () => {
+    // A hand-typed `low|medium|high` once shipped while the ladder already had
+    // `xhigh` and `max`: the bot told users about three levels of five.
+    const text = configAwarenessBlock(base);
+    for (const level of EFFORT_LEVELS) {
+      expect(text).toMatch(new RegExp(`--effort <[^>]*\\b${level}\\b[^>]*>`));
+    }
+    expect(EFFORT_LEVELS.length).toBeGreaterThan(3);
   });
 });
 
