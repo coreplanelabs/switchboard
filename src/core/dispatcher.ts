@@ -3,32 +3,24 @@ import { selfDescriptionBlock } from "./selfDescription.js";
 import { customInstructionsBlock } from "./customInstructions.js";
 import { AGENTS, getAgent, type AgentDef } from "../agents/registry.js";
 import type { RequestDirectives, ThreadDirectives } from "../directives.js";
-import { mergeTools, runAgent } from "../runner.js";
-import { TOOLSETS } from "../tools/workspace.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { systemClock } from "./trace/index.js";
-import type { Span, SpanSink, Tracer } from "./trace/types.js";
+import type { SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
 import { cardShapeLineOf, queuedCaption } from "./runShape.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
-import { makeWebCapability } from "../tools/web.js";
 import { parseModelRef } from "../providers/types.js";
 import { currentPrHeadSha, prCommitsSince, type RepoContext } from "./repoContext.js";
-import type { PrCommitList } from "./headMoved.js";
-import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
+import { postReviewComment } from "../execution/githubComments.js";
 import {
   createBranchRef,
   fetchPullRequestFacts,
   fetchRepoShipInfo,
   findOpenPrByHead,
   openPullRequest,
-  type OpenedPullRequest,
-  type OpenPrRef,
   type PullRequestFacts,
-  type PullRequestTarget,
-  type RepoShipInfo,
 } from "../execution/githubPulls.js";
 import { resolveGithubIdentity, type GithubIdentity } from "../execution/githubApp.js";
 import {
@@ -40,19 +32,11 @@ import {
   type ShipChildSpec,
   type ShipOutcome,
 } from "./shipPipeline.js";
-import { PrDescriptionSchema, type PrDescription } from "./prDescription.js";
-import { parseVerdictInput, type ReviewVerdict } from "./reviewVerdict.js";
-import { runReviewPostStep, settleReviewedHead } from "./reviewRound.js";
-import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "./codingPrPostStep.js";
-import { descriptionTurnTarget, runDescriptionTurn } from "./descriptionTurn.js";
-import { scheduleReflection } from "./memory/index.js";
 import { skillGuidanceBlock } from "../skills/index.js";
 import { isSpanRecord, redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import { mergeFollowUps, type LiveThread } from "./threadAdmission.js";
-import { resolveChatActor } from "./authz/actor.js";
 import { utf8ByteLength, type RunStatus } from "./runRecord.js";
-import { markdownOutput } from "./llmOutput/index.js";
 import { assembleRunRecord, channelVisibilityOf, type RecordDeps } from "./dispatch/record.js";
 import {
   activityLine,
@@ -96,12 +80,12 @@ import {
   type ProvisionDeps,
 } from "./dispatch/provision.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
-import { startReviewReadingDiff } from "./readingDiff.js";
+import { claimRun, githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./dispatch/run.js";
+import { redactPrDescription, runLoop } from "./dispatch/runLoop.js";
+import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
+import { writeTombstone } from "./dispatch/record.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
-import { RestGithubApi, type GithubApi } from "../execution/githubApi.js";
-import type { GithubCapability } from "../tools/github.js";
 import { defaultRunRegistry, type RunHandle, REPLAY_EVERYTHING } from "./runRegistry.js";
-import { inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 import { createCardShell, type CardShell } from "./statusCardFrame.js";
 import { createRunEnding, type RunEnding } from "./runEnding.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle } from "./types.js";
@@ -110,37 +94,14 @@ import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle } from "./ty
 // parsing, layered resolution, permission gates, history assembly, executor
 // selection, and the agent run. Channels are pure transports (src/channels/).
 
-export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, AuthorizeDeps, ProvisionDeps, RecordDeps {
+export interface CoreDeps
+  extends AdmissionDeps, FastPathDeps, ResolveDeps, AuthorizeDeps, ProvisionDeps, RunDeps, ReplyDeps, RecordDeps {
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
   tracer?: Tracer;
   /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */
   sinks?: SpanSink[];
   /** The in-process span log every root also feeds (docs/reference/specs/tracing.md item 26); `GET /admin/trace/log` reads it. */
   spanLog?: SpanLog;
-  /**
-   * Posts a review comment back to a PR. Called after a `review`
-   * run against a resolved PR, unless the request opted out. Default: the real
-   * GitHub REST post with the App installation token (App `pull_requests:write`;
-   * no `gh` shell-out — AGENTS.md invariant 5). Injectable so tests assert the
-   * decision without a network call.
-   */
-  postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
-  /**
-   * Opens the PR for a coding run's pushed branch — or edits the one already
-   * open for it (open-or-edit idempotency) — after the run submitted its typed
-   * `PrDescription` (docs/reference/specs/pr-description.md item 5). Default: the real
-   * GitHub REST call with the App installation token
-   * (src/execution/githubPulls.ts; no `gh` shell-out — AGENTS.md invariant 5).
-   * Injectable so tests assert the typed inputs without a network call.
-   */
-  openPullRequest?: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
-  /**
-   * The open PR heading a branch, or null (githubPulls.findOpenPrByHead): the
-   * post-step asks it when a proven-pushed branch comes with no description,
-   * so a follow-up that repushed an existing PR's branch is reported as that
-   * PR updated, never as "open one manually". Injectable for the same reason.
-   */
-  findOpenPrByHead?: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   /**
    * Ship round 0's pipeline-branch create (docs/reference/specs/agent-ship.md item 3):
    * `refs/heads/<branch>` at the base ref's tip, so the ref exists on
@@ -149,15 +110,6 @@ export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, Auth
    * success). Injectable so tests assert the call without a network call.
    */
   createBranchRef?: (repo: string, branch: string, fromRef: string) => Promise<void>;
-  /**
-   * Repo facts for the agent:ship gate (docs/reference/specs/agent-ship.md item 9): the
-   * `allow_auto_merge` flag — ship refuses when it is enabled OR unknown
-   * (fail-closed: an LGTM into auto-merge would merge with no human) — and
-   * the repo's default branch, the PR base of last resort. Default: one REST
-   * GET via githubPulls' `fetchRepoShipInfo` (App token, never `gh`).
-   * Injectable so tests assert the refusal without a network call.
-   */
-  fetchRepoShipInfo?: (repo: string) => Promise<RepoShipInfo | undefined>;
   /**
    * One PR's entry-check facts for agent:ship (item 10): open/closed, author
    * identity (login + immutable numeric id), same-repo head, head ref/sha —
@@ -172,47 +124,12 @@ export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, Auth
    */
   fetchSelfIdentity?: () => Promise<GithubIdentity | undefined>;
   /**
-   * The commits a PR head carries over its base (agent-review.md item 12):
-   * asked once for the reviewed head and once for the current one when the
-   * head moved during a review run, to tell a rebase of the same commits from
-   * a real change. Default: one REST GET per side via repoContext's
-   * `prCommitsSince`; undefined (or a throw) → the move is unclassified and
-   * the post-step falls back to item 10 (pinned post + note).
-   */
-  fetchPrCommits?: (q: { repo: string; base: string; sha: string }) => Promise<PrCommitList | undefined>;
-  /**
-   * The GitHub API behind the `github_*` tools (docs/reference/specs/github-tools.md).
-   * Absent → the production REST client on the App credential; tests inject an
-   * `InMemoryGithubApi`. The per-run capability adds the requesting user's
-   * `canUseRepo` write gate (`githubCapabilityFor`).
-   */
-  githubApi?: GithubApi;
-  /**
    * Where `friction propose` files its proposals. Default: the GitHub REST
    * tracker with the App installation token (App `issues:write`; never a `gh`
    * shell-out — AGENTS.md invariant 5). Injectable so tests assert filing
    * without a network call.
    */
   issueTracker?: IssueTracker;
-}
-
-/** The web capability (undici Agent with the SSRF-checking connector + the
- *  search adapter) is built ONCE per process, not per run: the Agent owns the
- *  connection pool, so sharing it lets every run reuse warm TLS sockets to the
- *  same hosts instead of paying a fresh DNS+TCP+TLS handshake per fetch — and a
- *  per-run Agent was never closed, so its keep-alive sockets accumulated. */
-let sharedWeb: ReturnType<typeof makeWebCapability> | undefined;
-const webCapability = () => (sharedWeb ??= makeWebCapability(process.env));
-
-/** The `github_*` tools' capability for one run (docs/reference/specs/github-tools.md):
- *  the process-wide REST client on the App credential (or the injected test
- *  double) plus the REQUESTING USER's per-repo write gate — `canUseRepo`, the
- *  same allowlist that admits a user to a repo's resident — so an issue
- *  write from a plain mention is authorized like a coding run on that repo. */
-let sharedGithubApi: GithubApi | undefined;
-function githubCapabilityFor(deps: CoreDeps, userId: string): GithubCapability {
-  const api = deps.githubApi ?? (sharedGithubApi ??= new RestGithubApi());
-  return { api, canWrite: (repo) => deps.config.canUseRepo(userId, repo) };
 }
 
 // In-flight run tracking so the process can drain before exiting (restarts
@@ -596,7 +513,7 @@ export async function dispatch(
     });
     if (attach.kind === "refused") return;
     const { round } = attach;
-    const { executor, note, resident, binding } = round.selection;
+    const { executor, note, resident } = round.selection;
     if (fencedWhileAttaching) {
       // The reservation's lease lapsed during the attach and another generation
       // took the row (item 42): the run is theirs to restart — nothing more
@@ -662,7 +579,7 @@ export async function dispatch(
     const { mcpForRun, composeSystem, system } = prompt;
     // The PR head this run reviews — the resolved head, or the one adopted at
     // attach; the head settle (item 12) advances it after the model turn.
-    let reviewHead = prompt.reviewHead;
+    const reviewHead = prompt.reviewHead;
 
     if (note) shell.setLabel(`${shell.label} · ${oneLine(note)}`);
     // A run that went to a cold sandbox says why on its stream too (resident-
@@ -678,7 +595,7 @@ export async function dispatch(
     setupCard = undefined; // from here the run loop owns the card's close
     clearInterval(setupHeartbeat);
     card.update(shell.live()); // the ack card becomes the run card
-    let lastActivityAt = clock();
+    const activityAt = clock();
     // The run loop owns the run from here: its finally finishes it (the outer
     // finally discards a run that never got this far). Events are fed to the
     // registry in onEvent below; the stream has been live since the reservation.
@@ -688,795 +605,130 @@ export async function dispatch(
         `[resume] ${msg.threadKey} run ${run.id} continues under ${deps.runLedger.gen}: from step ${resume.plan.step}, ${resume.plan.settlements.length} call(s) to settle, ${resume.events.length} event(s) replayed`,
       );
     }
-    // Tombstone-first: a provisional TERMINAL record — status
-    // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
-    // from the events published so far (the setup spans, request, run_meta,
-    // context). Written here, once the run loop owns the run, and not at the
-    // reservation: a dispatch that ends before this point leaves NO record
-    // (item 42 — its row is discarded and its reservation abandoned), and a
-    // crash during the attach is the reservation's to restart, not a record's
-    // to remember. Because it is already terminal, a crash or a
-    // drain-abandonment needs NO store-side
-    // fixup by the next container: the tombstone is already the truth (its
-    // `finishedAt` stays the start time — nobody knows the real death time of a
-    // crash). The finish write below replaces it (same-id upsert) for every run
-    // that ends normally, and the drain deadline upgrades it with the full
-    // transcript for a run it abandons. Fire-and-forget through the same writer
-    // (retry + drain accounting), but `provisional`: `onPersisted`/
-    // `markPersisted` must NOT run — the index's persisted flag means "finished
-    // and durably stored". Synchronous assembly over a handful of bounded
-    // events; the first model call is not delayed.
-    if (!resume) {
-      const startSnap = registry.snapshot(run.id, run.token);
-      if (startSnap) {
-        deps.runHistoryWriter.write(
-          assembleRunRecord({
-            run,
-            snap: startSnap,
-            agent: agent.name,
-            model: resolved.modelRef,
-            msg,
-            channelVisibility,
-            repo: repoCtx.repo,
-            finishedAt: startSnap.startedAt,
-            status: "interrupted",
-            diagnosis: analyzeRunFriction(startSnap.events, {
-              finished: false,
-              truncated: startSnap.truncated,
-              schema: SPAN_SCHEMA,
-            }),
-          }),
-          { provisional: true },
-        );
-      }
-    }
-    // The ledger claim (docs/reference/specs/run-history.md item 35): the run's row on the
-    // state Worker, with everything a resume must hand the model again — the
-    // composed system prompt and the tool definitions verbatim, the card, the
-    // repo context — plus the conversation as its seed. Claimed HERE, once the
-    // prompt exists, not at the in-process admission above: a row without a
-    // prompt could not be resumed. Awaited (one round trip per run) so the
-    // first step's record never precedes its claim. An untracked run (a stale
-    // row on the thread, no routes, a claim that kept failing) runs exactly as
-    // before — the write-through warned once.
-    // Only a reserved run is claimed (item 42): a reservation the ledger refused
-    // — another run's row on the thread, no routes, a claim that kept failing —
-    // already made this run untracked, with the one warning; asking again
-    // would only warn again.
-    if (!resume && reserved) {
-      const ledger = deps.runLedger;
-      const opened = await root.span("dispatch.ledger_claim", () =>
-        ledger.open({
-          runId: run.id,
-          threadKey: msg.threadKey,
-          startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
-          meta: {
-            agent: agent.name,
-            model: resolved.modelRef,
-            channelId: msg.channelId,
-            userId: msg.userId,
-            threadKey: msg.threadKey,
-            channelVisibility,
-            ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-            ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-            ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
-            ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-            ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
-            readonly: agent.toolset === "readonly",
-            selection: resident === true ? "resident" : "sandbox",
-            ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
-            ...(requestRow !== undefined ? { request: requestRow } : {}),
-          },
-          card: card.handle ?? null,
-          // The row reserved before the attach (item 42), promoted in place;
-          // its hooks (a stop, a fence) were wired at the reservation and stay.
-          ...(reserved ? { reservation: reserved } : {}),
-          system,
-          tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
-            ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
-          ),
-          seed: { messages, budgetMs: agent.maxMinutes * 60_000 },
-          // A stop asked of another container (`/runs/stop` there) reaches this
-          // run through its heartbeat and is honored like a local one; a fence
-          // (another generation took the run) is a hard stop — nothing more may
-          // run or reply here (D9).
-          onStop: (mode) => void run.control.requestStop(mode),
-          onFenced: () => void run.control.requestStop("hard"),
-        }),
-      );
-      if (opened) {
-        ledgerRun = opened;
-        // Every event published so far (the request, run_meta, context) and
-        // every one to come, in `seq` order, through the batched flusher. The
-        // ledger is a store: the viewer replay budget never applies to it.
-        registry.subscribe(run.id, run.token, {
-          onEvent: (event, seq) => opened.event(event, seq),
-          ...REPLAY_EVERYTHING,
-        });
-      }
-    }
-    if (resume && ledgerRun) {
-      // The events before the restart are on the ledger already (and in the
-      // registry by replay); only what this generation publishes is appended.
-      const adopted = ledgerRun;
-      registry.subscribe(run.id, run.token, {
-        onEvent: (event, seq) => adopted.event(event, seq),
-        afterSeq: resume.lastSeq,
-        ...REPLAY_EVERYTHING,
-      });
-    }
-    // The card body is the agent's own checklist (via the update_status tool)
-    // plus a live one-line activity trace (current tool call + redacted result
-    // summary) so the card reflects progress per tool event, not only on the
-    // 5s heartbeat. Full command output still goes to stdout for operators.
-    // On a resume the dispatcher-local state comes back from the row (item 38):
-    // the checklist the card shows, the verdict/description already submitted,
-    // the branch already pushed.
-    const restored = resume?.row.state ?? {};
-    let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
-    let lastActivity: string | undefined;
-    // The tool whose call has no result yet — the title says the wait is the
-    // tool's (`running bash (Ns)`), not the model's (`thinking …`).
-    let inFlightTool: string | undefined;
-    // The shutdown notice rides on the LIVE frame only: the closed card is
-    // built from `shell.close` and never mentions the restart.
-    const currentFrame = () =>
-      shell.live({
-        suffix: quietSuffix(clock() - lastActivityAt, inFlightTool),
-        notice: shutdownNotice,
-        detail: [checklist, lastActivity],
-      });
-    // The closed card keeps the run link (the run page outlives the run and
-    // shows the final answer) and the agent's checklist; only the transient
-    // activity trace is dropped. On a clean ✅ finish every item is marked ✓ —
-    // the run completing IS the proof they happened, and the model rarely
-    // re-posts the checklist after its last step; a stop/failure keeps the
-    // honest partial state.
-    const finalDetail = () => checklist;
-    const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
-    // The runner's progress notes carry the 💭 thought line at each model turn
-    // (docs/reference/specs/tracing.md): the card shows it as activity, as it showed the
-    // `turn` event before spans replaced it.
-    const onProgress = (note: string) => {
-      console.log(`[note] ${msg.threadKey} ${note}`);
-      lastActivityAt = clock();
-      lastActivity = note;
-      card.update(currentFrame());
-    };
-    // Live run-visibility (Area 2): each tool call/result refreshes the card
-    // immediately, so activity is visible without waiting for the heartbeat.
-    let toolCalls = 0; // "did real work" signal for the memory reflection gate
-    // The branch the run's own `git push` named, read off its bash calls and
-    // results as they stream by (docs/reference/specs/pr-description.md item 5):
-    // the PR post-step opens from THIS branch, and from the checkout only
-    // when no push was observed — the checkout can move between the push and
-    // the post. The latest push wins.
-    const pushes = trackPushedBranch(typeof restored.pushedBranch === "string" ? restored.pushedBranch : undefined);
-    // The registry backlog is the run's ONE event store: the live
-    // page, the post-run friction diagnosis and the run record all read it back
-    // via `registry.snapshot` — there is no second copy to drift from it.
-    let recordedPushedBranch: string | undefined;
-    const onEvent = (e: RunEvent) => {
-      registry.publish(run.id, e); // feed the external live-view stream
-      if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
-      if (e.type === "tool_call") toolCalls++;
-      if (isCodingPrRun) {
-        pushes.observe(e);
-        const pushedBranch = pushes.branch();
-        if (pushedBranch !== undefined && pushedBranch !== recordedPushedBranch) {
-          recordedPushedBranch = pushedBranch;
-          ledgerRun?.setState({ pushedBranch });
-        }
-      }
-      inFlightTool = inFlightToolAfter(inFlightTool, e);
-      lastActivityAt = clock();
-      lastActivity = activityLine(e);
-      console.log(`[tool] ${msg.threadKey} ${lastActivity}`);
-      card.update(currentFrame());
-    };
-    // A configured MCP server that did not answer discovery is a fact of the
-    // run (docs/reference/specs/mcp-tools.md item 8): one note per server, before the
-    // first tool event, so the run page explains a missing tool.
-    for (const s of mcpForRun?.servers ?? []) {
-      if (s.unavailable !== undefined)
-        onEvent({
-          type: "run_note",
-          kind: "mcp_unavailable",
-          summary: `MCP server ${s.server} unavailable: ${s.unavailable}`,
-        });
-    }
-    const reportProgress = (list: string) => {
-      const trimmed = list.trim();
-      // An empty update never erases the checklist: the closed card is the
-      // run's durable progress record, and an agent "clearing" its status as
-      // it wraps up would blank it (review agents do exactly that).
-      if (!trimmed) return;
-      checklist = trimmed;
-      ledgerRun?.setState({ checklist: trimmed });
-      card.update(currentFrame());
-    };
-    // Heartbeat: the card ticks every 5s no matter what. A ticking timer means
-    // the run is alive; a stopped timer means the process died — the reader
-    // can always tell the difference.
-    const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
-
-    // Reading-diff artifacts (docs/reference/specs/reading-diff.md): a PR review run gets
-    // the change as a reviewer reads it, produced CONCURRENTLY with the review
-    // by the run's own executor (read-only commands; the resident runs execs
-    // beside the model's) and published straight to the registry like the
-    // other dispatcher facts. The git BASELINE is guaranteed: the dispatcher
-    // joins it before the answer publish below (a join on a seconds-long
-    // command started here — never a timeout race). meat, when configured, is
-    // an UPGRADE artifact under its own runtime budget, never awaited: it
-    // lands iff it finishes within the review (a later publish is dropped by
-    // the registry's finished-run rule, and the baseline still stands).
-    let readingDiffBaseline: Promise<boolean> | undefined;
-    if (agent.name === "review" && repoCtx.pr !== undefined) {
-      // Two background spans (docs/reference/specs/tracing.md): concurrent with the loop,
-      // structure for the partition, never a counted term — started under the
-      // root inside `startReviewReadingDiff`, so each diff's exec is a child.
-      const started = startReviewReadingDiff({
-        executor,
-        cfg: deps.config.config.review?.readingDiff,
-        env: process.env,
-        baseRef: repoCtx.baseRef,
-        publish: (e) => registry.publish(run.id, e),
-        parent: root,
-      });
-      readingDiffBaseline = started.baseline.then((published) => {
-        console.log(`[reading-diff] ${msg.threadKey} baseline ${published ? "published" : "none"}`);
-        return published;
-      });
-      const upgrade = started.upgrade;
-      if (upgrade)
-        void upgrade.then((published) => {
-          console.log(`[reading-diff] ${msg.threadKey} meat ${published ? "published" : "did not land"}`);
-        });
-    }
-
-    let answer: string;
-    // Review verdict, set only through the structured submit_verdict tool; the
-    // post-step below turns it into the deterministic first line of the GitHub
-    // body (fail-closed: no call → not approving). See reviewVerdict.ts.
-    // Ledger state is a system boundary: the row's verdict and description are
-    // re-validated through the same parsers the tools use, never trusted as-is.
-    let verdict: ReviewVerdict | undefined =
-      typeof restored.verdict === "object" && restored.verdict !== null
-        ? (parseVerdictInput(restored.verdict as Record<string, unknown>) ?? undefined)
-        : undefined;
-    const onVerdict = (v: ReviewVerdict) => {
-      verdict = v;
-      ledgerRun?.setState({ verdict: v });
-    };
-    // Coding PR description, set only through the structured
-    // submit_pr_description tool (the last valid call wins — a resubmit after
-    // a fix-up push supersedes the earlier one); the post-step below renders
-    // the GitHub body from it at the observed pushed head and opens/edits the
-    // PR. See prDescription.ts.
-    const restoredDescription = PrDescriptionSchema.safeParse(restored.prDescription);
-    let prDescription: PrDescription | undefined = restoredDescription.success ? restoredDescription.data : undefined;
-    const onPrDescription = (d: PrDescription) => {
-      prDescription = d;
-      ledgerRun?.setState({ prDescription: d });
-    };
-    // The commit actually checked out in the run's workspace when the model
-    // finished — read by us, not reported by the model — for the reviewed-head
-    // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
-    let observedHead: string | undefined;
-    // The PR head branch (coding runs), read alongside it for the PR
-    // post-step: the branch the run's push named, else the checked-out branch.
-    // Undefined when unreadable or detached ("HEAD" is not a branch — nothing
-    // a PR could be opened from) with no push observed.
-    let observedBranch: string | undefined;
-    // The branch checked out when the workspace was observed — the same as
-    // observedBranch unless HEAD moved after the push, in which case
-    // observedHead is the PUSHED branch's tip, not HEAD.
-    let observedCheckedOut: string | undefined;
-    // The commit the remote holds for that branch (`git ls-remote origin
-    // refs/heads/<branch>`), the post-step's proof of a push: the branch
-    // counts as pushed only when this matches the observed head. Undefined
-    // when the remote has no such branch or could not be asked.
-    let observedRemoteHead: string | undefined;
-    // `owner/name` parsed from the workspace's origin remote, probed only when
-    // the dispatch resolved no repo (the agent discovered the repo itself) —
-    // the PR-open repo of last resort.
-    let observedRemoteRepo: string | undefined;
-    // The PR post-step's reply note: assembled in the try below — the open
-    // runs BEFORE the stream finishes, so its outcome is a fact of the run —
-    // and appended to the channel reply at the end.
-    let prNote: string | undefined;
-    // Set when the head moved during the run by a rebase of the same commits
-    // (item 12): the post is pinned to `current` with a footer, and the thread
-    // is told the review was carried forward.
-    let carried: { reviewed: string; current: string; commits: number } | undefined;
-    let runFailed = false; // the runner threw → terminal status `failed`
-    let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
-    // Give the workspace back now rather than at the inactivity sweep: a
-    // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
-    // 16a). The release mode is paired to the round's agent by the attach
-    // helper (reviewRound.ts): read-only agents hold nothing worth keeping; a
-    // coding run keeps its worktree only while it has uncommitted/unpushed
-    // work — unless an operator HARD-stopped it, which means "tear it
-    // down now": the abandoned command may still be running in there, and the
-    // whole point of a hard stop is to free the resources. Best-effort — a
-    // failed release is a log line, never a failed run. Called AFTER the
-    // answer has been sent (or the failure card closed): the `/detach` round
-    // trip is bounded at 10 s on a sick resident, and nothing about the reply
-    // depends on it, so it must never sit between "answer ready" and the
-    // thread. Hard-stop is read at CALL time — it may land during the run.
-    // Under `post.workspace_release`: the release's own call is that span's child.
-    const releaseWorkspace = (span?: Span) =>
-      round.release({ hardStopped: run.control.requested === "hard", ...(span ? { span } : {}) });
-    // One tool context for the whole run: the first turn and any re-review
-    // turn (settleReviewedHead) share it, so submit_pr_description and the
-    // progress checklist keep flowing to the same hooks.
-    const toolContext = {
-      executor,
-      reportProgress,
-      web: webCapability(),
-      skills: deps.skills,
-      github: githubCapabilityFor(deps, msg.userId),
-      agentName: agent.name,
-      onVerdict,
-      onPrDescription,
-    };
-    try {
-      answer = await runAgent({
-        provider,
-        model,
-        agent,
-        messages,
-        system,
-        effort: resolved.effort,
-        toolContext,
-        ...(mcpForRun && mcpForRun.tools.length > 0 ? { extraTools: mcpForRun.tools } : {}),
-        onProgress,
-        onEvent,
-        span: root, // the loop is `run.agent` under the run's root (docs/reference/specs/tracing.md)
-        ...(round.selection.backend ? { backend: round.selection.backend } : {}),
-        control: run.control, // operator stop from /runs
-        inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
-        // The step record before each step's tools (run-history item 35).
-        ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
-        // A resume re-enters the loop from the plan (run-history item 37).
-        ...(resume
-          ? {
-              resume: {
-                settlements: resume.plan.settlements,
-                stepRecorded: resume.plan.stepRecorded,
-                inboxConsumedSeq: resume.plan.inboxConsumedSeq,
-                turn: resume.plan.turn,
-                iteration: resume.plan.iteration,
-                remainingMs: resume.plan.remainingMs,
-              },
-            }
-          : {}),
-      });
-      // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
-      // settleReviewedHead in reviewRound.ts): for a PR review, read the
-      // workspace HEAD NOW — after the model is done, BEFORE the finally
-      // below releases the workspace — and reconcile a PR head that moved
-      // during the run: adopt the current head when the run reviewed it,
-      // carry the review across a rebase of the same commits, or void the
-      // verdict and re-review ONCE at the new head (worktree moved, prompt
-      // recomposed, one more model turn). A hard stop observes nothing and
-      // settles nothing.
-      if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && run.control.requested !== "hard") {
-        const settled = await settleReviewedHead({
-          span: root,
-          pr: { repo: repoCtx.repo, number: repoCtx.pr },
-          baseRef: repoCtx.baseRef,
-          reviewHead,
-          verdict,
-          answer,
-          messages,
-          composeSystem,
-          executor,
-          turn: {
-            provider,
-            model,
-            agent,
-            effort: resolved.effort,
-            toolContext,
-            extraTools: mcpForRun?.tools,
-            onProgress,
-            onEvent,
-            control: run.control,
-            ...(round.selection.backend ? { backend: round.selection.backend } : {}),
-          },
-          fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-          fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
-          notify: {
-            reply: (text) => io.reply(text),
-            headMoved: (suffix) => {
-              shell.setLabel(`${shell.label} · ${suffix}`);
-              card.update(currentFrame());
-            },
-          },
-          logKey: msg.threadKey,
-        });
-        answer = settled.answer;
-        verdict = settled.verdict;
-        reviewHead = settled.reviewHead;
-        observedHead = settled.observedHead;
-        carried = settled.carried;
-      }
-      // PR post-step observation (docs/reference/specs/pr-description.md item 5): for a
-      // writable coding run, read the workspace's head branch — the one the
-      // run's `git push` named, else the checkout — its tip, and the remote's
-      // head for that branch NOW — after the model is done, BEFORE the
-      // finally below can release the workspace (a resident re-attach would
-      // show the ref's current tip, not what this run pushed). The cold path
-      // clones into a SUBDIRECTORY of the workspace root, so a failed root
-      // HEAD probe discovers the single clone and re-probes inside it; with
-      // no dispatch-resolved repo the origin remote is read too (an
-      // agent-discovered repo). Best-effort: a failed probe leaves its field
-      // undefined and the post-step reports honestly instead of guessing. A
-      // hard stop tore the work down mid-flight — nothing observed, nothing
-      // posted.
-      const observeWorkspaceNow = async () => {
-        const pushedBranch = pushes.branch();
-        const observed = await root.span("run.observe_workspace", (span) =>
-          observeCodingWorkspace(
-            executor,
-            {
-              probeRemote: repoCtx.repo === undefined,
-              ...(pushedBranch !== undefined ? { pushedBranch } : {}),
-            },
-            span,
-          ),
-        );
-        observedHead = observed.head;
-        observedBranch = observed.branch;
-        observedCheckedOut = observed.checkedOut;
-        observedRemoteHead = observed.remoteHead;
-        observedRemoteRepo = observed.remoteRepo;
-      };
-      // Where the post-step's PR would open (CodingPrTarget): the PR's true
-      // base ref when the thread's context came from a PR, else the resident
-      // binding ref, else the dispatch's resolved ref. Shared by the
-      // description turn's decision and the post-step below.
-      const prTarget = {
-        repo: repoCtx.repo,
-        baseRef: repoCtx.baseRef,
-        bindingRef: binding?.ref,
-        resolvedRef: repoCtx.ref,
-      };
-      if (isCodingPrRun && run.control.requested !== "hard") await observeWorkspaceNow();
-      // The description turn (docs/reference/specs/pr-description.md item 5,
-      // descriptionTurn.ts): the coding prompt requires a resubmitted
-      // description after EVERY push to a PR that already exists (agent-coding.md
-      // item 3), and a prompt rule alone can be rationalized away. So a run
-      // whose loop ended with a proven push onto a branch that already heads
-      // an open PR and NO submit_pr_description call gets ONE bounded extra
-      // model turn asking for it — here, after the model is done and BEFORE
-      // the answer lands or the workspace is released. The description arrives
-      // through the same onPrDescription hook the first turn fed (so
-      // `prDescription` and the ledger row see it); the workspace is observed
-      // again afterwards in case the turn pushed. A hard stop asks nothing.
-      let descriptionTurnRan = false;
-      if (isCodingPrRun && run.control.requested !== "hard" && prDescription === undefined) {
-        const turnTarget = await descriptionTurnTarget({
-          observed: {
-            head: observedHead,
-            branch: observedBranch,
-            checkedOut: observedCheckedOut,
-            remoteHead: observedRemoteHead,
-            remoteRepo: observedRemoteRepo,
-          },
-          description: prDescription,
-          target: prTarget,
-          findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
-          logKey: msg.threadKey,
-        });
-        if (turnTarget) {
-          descriptionTurnRan = true;
-          await root.span("run.description_turn", (span) =>
-            runDescriptionTurn({
-              span,
-              target: turnTarget,
-              answer,
-              messages,
-              system,
-              turn: {
-                provider,
-                model,
-                agent,
-                effort: resolved.effort,
-                toolContext,
-                extraTools: mcpForRun?.tools,
-                onProgress,
-                onEvent,
-                control: run.control,
-                ...(round.selection.backend ? { backend: round.selection.backend } : {}),
-              },
-              logKey: msg.threadKey,
-            }),
-          );
-          // Re-read, not narrowed: a hard stop may have landed during the turn.
-          if (!run.control.hardSignal.aborted) await observeWorkspaceNow();
-        }
-      }
-      // The accepted PrDescription is a fact of the run: publish it as a typed
-      // event BEFORE the finally below finish()es the stream, string fields
-      // redacted like every payload, so the run page's review panel renders
-      // the same object the GitHub body is rendered from.
-      if (prDescription) {
-        registry.publish(run.id, {
-          type: "pr_description",
-          description: redactPrDescription(prDescription),
-          at: clock(),
-        });
-      }
-      // Deterministic coding PR post-step (docs/reference/specs/pr-description.md item 5,
-      // agent-coding.md item 2, runCodingPrPostStep in codingPrPostStep.ts):
-      // a writable coding run that pushed a branch and submitted its typed
-      // PrDescription gets its PR opened — or edited, the open-or-edit
-      // idempotency lives in githubPulls — HERE, in the bot process, BEFORE
-      // the finally below finish()es the stream, so the outcome lands in the
-      // run record as a typed `pr_opened` event and not only in a console
-      // line. The base is the PR's true base ref when the thread's context
-      // came from a PR (a fix round repushes the PR's OWN head branch, so the
-      // binding ref equals the branch and is NOT the merge base), else the
-      // thread's resident binding ref, else the dispatch's resolved ref —
-      // binding is only ever set on the resident path (factory.ts), so no
-      // resident check is needed. The note rides on the final reply below. A
-      // hard stop observed nothing above and posts nothing.
-      if (isCodingPrRun && run.control.requested !== "hard") {
-        prNote = await root.span("run.pr_post_step", () =>
-          runCodingPrPostStep({
-            observed: {
-              head: observedHead,
-              branch: observedBranch,
-              checkedOut: observedCheckedOut,
-              remoteHead: observedRemoteHead,
-              remoteRepo: observedRemoteRepo,
-            },
-            description: prDescription,
-            target: prTarget,
-            openPullRequest: deps.openPullRequest ?? openPullRequest,
-            findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
-            fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
-            descriptionTurnRan,
-            publish: (e) => registry.publish(run.id, e),
-            logKey: msg.threadKey,
-          }),
-        );
-      }
-      // The run record is the source of truth and Slack/GitHub are projections
-      // of it: publish the final answer into the stream FIRST (redacted like
-      // every event, uncapped — a soft stop's "findings so far" included; a
-      // re-review's answer supersedes the first one, which is not the run's
-      // answer). It MUST precede the finally below: `finish()` runs there, and a
-      // publish on a finished run is a silent no-op. Only after that is the
-      // reply sent.
-      // Join the reading-diff BASELINE so it is in the record before finish()
-      // (which drops later publishes). This is a join on the git command fired
-      // at run start, not a timeout: by now it finished minutes ago. The meat
-      // upgrade is deliberately NOT awaited — see the comment at the start.
-      const baseline = readingDiffBaseline;
-      if (baseline) await root.span("run.reading_diff_join", () => baseline);
-      // Typed-output boundary (docs/reference/specs/llm-output.md item 5): the answer is
-      // canonicalized ONCE here, so the event text, the channel reply, the
-      // GitHub post, and memory all read one Markdown dialect; the model's raw
-      // text rides on the event only when normalization changed it.
-      const acceptedAnswer = markdownOutput.parse(answer);
-      const rawAnswer = acceptedAnswer.ok && acceptedAnswer.changed ? answer : undefined;
-      if (acceptedAnswer.ok) answer = acceptedAnswer.value;
-      publishText("answer", answer, undefined, rawAnswer);
-    } catch (err) {
-      runFailed = true;
-      await root.span("post.workspace_release", (span) => releaseWorkspace(span));
-      throw err;
-    } finally {
-      clearInterval(heartbeat);
-      const stopped = run.control.requested;
-      const status: RunStatus = runFailed
-        ? "failed"
-        : stopped === "hard"
-          ? "stopped_hard"
-          : stopped === "soft"
-            ? "stopped_soft"
-            : "completed";
-      // Close the live-view stream and start the TTL, handing the registry the
-      // terminal status so every summary projects it (the index, `runs list`)
-      // instead of re-deriving it. The one status the registry cannot know is
-      // `failedAfterFinish` (a reply that throws AFTER the loop): the record
-      // says `failed`, the registry row keeps `completed` for its TTL.
-      registry.finish(run.id, status);
-      // The registry backlog is read back ONCE here, synchronously at finish
-      // (docs/decisions/0006-runs-have-two-lives.md): it feeds both the friction diagnosis and the run
-      // record. Reading it now, not after the reply, is what makes a slow reply
-      // safe — the registry evicts a finished run after its TTL, and the record
-      // must not depend on winning that race. Skipped entirely when neither
-      // consumer is wired (nothing to diagnose for, nothing to persist). The
-      // backlog is byte-bounded (oldest evicted), so the diagnosis is told when
-      // it is looking at a head-truncated stream. Read with or without a
-      // writer: the closed card's shape line comes from this diagnosis too.
-      const snap = registry.snapshot(run.id, run.token);
-      const events = snap?.events ?? [];
-      const finishedAt = snap?.finishedAt ?? clock(); // the registry's finish clock: row and record agree
-      // The diagnosis over the run's window (docs/reference/specs/tracing.md): its shape is
-      // what the closed card and the record carry.
-      const diagnosis = analyzeRunFriction(events, {
-        finished: true,
-        truncated: snap?.truncated ?? false,
-        schema: SPAN_SCHEMA,
-        window: { start: snap?.receivedAt ?? startedAt, end: finishedAt },
-      });
-      runDiagnosis = diagnosis;
-      // The channel's receipt (id + terminal status, never the token): a
-      // single-shot channel hands it to its caller — the Worker shim records a
-      // scheduled firing's run from it.
-      io.runFinished?.({ id: run.id, status });
-      // The run finished: it is sealed by the next drain (after the reply), and
-      // its record — everything captured now, assembled after the seal — is
-      // written by that drain. The card's total stops at the finish stamp.
-      ending.finished(run.id);
-      shell.freeze(finishedAt);
-      // A tracked run finishes through the ledger: the record replaces its
-      // live rows in one transaction (a refused finish falls back to the store).
-      ending.register({
-        runId: run.id,
-        flipOnPostFinishFailure: true,
-        write: (seal, failedAfterFinish) =>
-          deps.runHistoryWriter.write(
-            assembleRunRecord({
-              run,
-              snap,
-              agent: agent.name,
-              model: resolved.modelRef,
-              msg,
-              channelVisibility,
-              repo: repoCtx.repo,
-              finishedAt,
-              status: failedAfterFinish && status === "completed" ? "failed" : status,
-              diagnosis,
-              seal,
-            }),
-            { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
-          ),
-      });
-      // The diagnosis rides the run record (above): the friction ledger the
-      // cross-run proposer reads is run history, so nothing is written twice.
-      // A run whose loop threw closes its card here, after the finish, so the
-      // card's total is the run's; the outer catch replies and drains.
-      if (runFailed)
-        await root
-          .span("post.card_close", () =>
-            card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail(), ...doneLines(diagnosis) })),
-          )
-          .catch(() => {});
-    }
+    // Tombstone-first (dispatch/record.ts): a provisional interrupted record
+    // the moment the run loop owns the run; the finish write replaces it.
+    writeTombstone(deps, { msg, agent, resolved, repoCtx, channelVisibility, run, registry, resume });
+    // The ledger claim (dispatch/run.ts), once the prompt exists: the reserved
+    // row promoted, or a resume's adopted row re-subscribed.
+    ledgerRun = await claimRun(deps, {
+      msg,
+      agent,
+      resolved,
+      repoCtx,
+      channelVisibility,
+      run,
+      registry,
+      selection: round.selection,
+      requestRow,
+      reserved,
+      system,
+      mcpForRun,
+      messages,
+      resume,
+      ledgerRun,
+      card,
+      clock,
+      root,
+    });
+    // The agent loop (dispatch/runLoop.ts): the model turn, the follow-up inbox,
+    // the settle and the post-steps, the finish. A throw propagates to the
+    // outer catch after the workspace is released.
+    const ran = await runLoop(deps, {
+      msg,
+      io,
+      agent,
+      resolved,
+      provider,
+      model,
+      messages,
+      system,
+      composeSystem,
+      mcpForRun,
+      run,
+      registry,
+      round,
+      admitted,
+      ledgerRun,
+      resume,
+      repoCtx,
+      isPrReview,
+      isCodingPrRun,
+      reviewHead,
+      card,
+      shell,
+      doneLines,
+      clock,
+      root,
+      startedAt,
+      activityAt,
+      channelVisibility,
+      publishText,
+      ending,
+    });
+    const {
+      answer,
+      verdict,
+      observedHead,
+      carried,
+      prNote,
+      toolCalls,
+      runDiagnosis,
+      finalDetail,
+      checkedOffDetail,
+      releaseWorkspace,
+    } = ran;
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
     // (a summary was written), ⛔ hard (aborted, no summary).
     const stopped = run.control.requested;
     console.log(`[done] ${msg.threadKey} ${answer.length} chars${stopped ? ` (stopped: ${stopped})` : ""}`);
 
-    // The coding PR post-step ran INSIDE the try above (before the stream
-    // finished — its outcome is the `pr_opened` event); `prNote` carries what
-    // it has to say to the thread.
-    // `finally`, not sequential: a Slack failure in either call (outage, an
-    // unchunkable line) must still give the pool user back, or it is held
-    // until the hourly sweep — the toil 16a exists to avoid.
-    try {
-      // `live → finishing` on the ledger BEFORE anything reaches the thread
-      // (item 35): the double-answer protection once runs resume — a
-      // generation that lost the run is refused here and must not reply.
-      // The status the record will carry rides on the row first, so a reclaim
-      // of a `finishing` row (replied, died before `finish`) closes it
-      // truthfully. A `fenced` answer means another generation reclaimed this
-      // run while it ran (a handoff, or a lease that lapsed) and is driving it
-      // now: nothing more reaches the thread from here — the record is theirs.
-      ledgerRun?.setState({ finalStatus: stopped ? `stopped_${stopped}` : "completed" });
-      if ((await root.span("post.ledger_finishing", () => ledgerRun?.finishing())) === "fenced") {
-        // Nothing more from here: no reply, no card close, and no record — the
-        // run is the other generation's now and its record is theirs to write
-        // (a partial record from this process could race the real finish). The
-        // outer finally still seals the stream here.
-        console.log(`[run] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
-        ending.drop(run.id);
-        return;
-      }
-      // A review verdict carries its run link (as standard Markdown — each
-      // adapter renders its own dialect): the verdict message is what gets
-      // scanned in the review loop, and the card above scrolls away. Projection
-      // only — the `answer` event published above and the GitHub post body stay
-      // link-free.
-      const channelAnswer = agent.name === "review" && liveUrl ? `${answer}\n\n[Live run](${liveUrl})` : answer;
-      // The PR note (post-step above) is a projection too: the `answer` event
-      // stays the model's own words — the PR facts live in the pr_description
-      // event and the [pr-post] log line.
-      // The card close, the reply, then the drain: the run is sealed with how
-      // the reply went and its record goes to the store — BEFORE the
-      // workspace release below: the record does not depend on it, and on the
-      // ledger the finish is what frees the thread, which must not wait ~90 s on
-      // a sandbox teardown (docs/reference/specs/run-history.md item 36). Fire-and-forget;
-      // the writer's `pending()` is incremented inside the drain, before the
-      // outer finally's `activeRuns--`, so the shutdown drain never observes
-      // "0 runs, 0 writes". A reply that threw still seals (`replyOk: false`)
-      // and writes (`failed`) here, then reaches the outer catch for the error
-      // reply.
-      await ending.sealAfterReply(
-        () =>
-          root.span("post.card_close", () =>
-            card.done(
-              shell.close({
-                kind: "done",
-                icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
-                detail: stopped ? finalDetail() : checkedOffDetail(),
-                ...doneLines(runDiagnosis),
-              }),
-            ),
-          ),
-        () => root.span("post.reply", () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer)),
-      );
-    } finally {
-      await root.span("post.workspace_release", (span) => releaseWorkspace(span));
-    }
+    // The answer reaches the thread (dispatch/reply.ts): finishing on the
+    // ledger, the card close, the reply, the seal — the workspace released
+    // after. A fenced run is another generation's now: nothing more from here.
+    const delivery = await deliverAnswer({
+      msg,
+      io,
+      agent,
+      run,
+      answer,
+      liveUrl,
+      prNote,
+      stopped,
+      ledgerRun,
+      ending,
+      card,
+      shell,
+      finalDetail,
+      checkedOffDetail,
+      doneLines,
+      runDiagnosis,
+      releaseWorkspace,
+      root,
+    });
+    if (delivery === "fenced") return;
 
-    // Cross-session memory — WRITE path. AFTER the reply has
-    // landed, distill this run into memory records: fire-and-forget (tracked
-    // only for the shutdown drain), so its latency/failures never reach the
-    // user; gated on memory.enabled (default off → nothing happens) and on the
-    // run having done real work (tools used, or a long thread) and not being a
-    // `review` run (findings live on the PR; distilling them floods org
-    // memory with per-PR ephemera). Fast paths above returned before this
-    // point and never reflect. A HARD-stopped run has no summary to distill
-    // (its answer is the abort line), so it is skipped too; a soft stop wrote
-    // a real finale and reflects normally.
-    if (stopped !== "hard")
-      scheduleReflection({
-        cfg: deps.config.config.memory,
-        store: deps.memory,
-        providers: deps.providers,
-        runModelRef: resolved.modelRef,
-        gate: { toolCalls, historyTurns: history.length, agentName: resolved.agentName },
-        threadKey: msg.threadKey,
-        runId: run.id,
-        // The writes are the policy's decision for the run's principal under the
-        // run's stamped origin (authorization.md item 8): the same actor the chat
-        // commands resolve, the same stamp the record carries.
-        actor: resolveChatActor(msg, (id) => deps.config.grantsFor(id)),
-        originChannelVisibility: channelVisibility,
-        organization: deps.config.config.organization,
-        userId: msg.userId,
-        channelId: msg.channelId,
-        repo: repoCtx.repo,
-        history,
-        request: directives.text,
-        answer,
-      });
-
-    // Deterministic review post-step (runReviewPostStep in
-    // reviewRound.ts): a `review` run against a resolved PR posts its findings
-    // back to that PR by default — no need to ask — behind the reviewed-head
-    // guard (item 8, fail-closed) and pinned to the verified head (or the
-    // carried one, item 12). Best-effort: a post failure is logged and said in
-    // the thread but never fails the dispatch (the review already landed in
-    // Slack). A HARD-stopped review has no findings — only the abort line — so
-    // nothing is posted; a soft stop's "findings so far" finale posts as
-    // usual. Deliberately AFTER the workspace release and registry finish
-    // above — the plain path's lifecycle position is unchanged.
-    await root.span("post.review_post", () =>
-      runReviewPostStep({
-        agent,
-        requestText: directives.text,
-        repoCtx,
-        heads: { reviewHead, observedHead },
-        verdict,
-        answer,
-        carried,
-        hardStopped: stopped === "hard",
-        post: deps.postReviewComment ?? postReviewComment,
-        fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-        reply: (text) => io.reply(text),
-        logKey: msg.threadKey,
-      }),
-    );
+    // After the reply (dispatch/reply.ts): the memory reflection pass and the
+    // deterministic review post-step.
+    await afterReply(deps, {
+      msg,
+      io,
+      agent,
+      resolved,
+      directives,
+      history,
+      repoCtx,
+      run,
+      channelVisibility,
+      stopped,
+      answer,
+      toolCalls,
+      reviewHead: ran.reviewHead,
+      observedHead,
+      verdict,
+      carried,
+      root,
+    });
   } catch (err) {
     caught = true;
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -2056,39 +1308,4 @@ async function runShipBranch(
       ),
     () => root.span("post.reply", () => io.reply(outcome.reply)),
   );
-}
-
-/** The `pr_description` event's payload: every string LEAF passed through
- *  `redactSecrets` by a generic deep walk — numbers/booleans ride unchanged,
- *  structure preserved — so a field added to the schema (or a secret smuggled
- *  into an anchor path) can never dodge redaction by being missed in a
- *  hand-walk. */
-function redactPrDescription(d: PrDescription): PrDescription {
-  return redactStringLeaves(d) as PrDescription;
-}
-
-function redactStringLeaves(value: unknown): unknown {
-  if (typeof value === "string") return redactSecrets(value);
-  if (Array.isArray(value)) return value.map(redactStringLeaves);
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, redactStringLeaves(v)]));
-  }
-  return value;
-}
-
-/** The notice the drain (src/index.ts) sets on SIGTERM from a deploy rollout.
- *  Exported so the Slack adapter's orphan sweep can strip it from a frozen
- *  card's title — an interrupted card must not keep the stale
- *  "finishing this run" clause. Shared like LIVE_CARD_PREFIXES, so the text
- *  the drain appends and the text the sweep strips cannot drift apart. */
-export const DEPLOY_RESTART_NOTICE = "⏸ deploy in progress — this run continues through the bot restart";
-
-/** Set by the process-wide drain (SIGTERM from a deploy rollout) and appended to
- *  every live card's heartbeat frame, so a reader can tell "finishing this run
- *  before the bot restarts" from a run that is merely slow. `undefined` clears
- *  it (tests). A plain module-level value: the drain is process-wide by nature
- *  and every in-flight run must show it, not only runs started after it. */
-let shutdownNotice: string | undefined;
-export function setShutdownNotice(notice: string | undefined): void {
-  shutdownNotice = notice;
 }

@@ -4,7 +4,7 @@ Every PR review run carries the change **as a reviewer reads it** — a `review_
 
 Shaped on a measurement against the real API over one 357-line PR diff: Opus 4.8 abridged to 45 % kept in 96 s with everything kept load-bearing; Sonnet 5 kept 87 % in 240 s — meat needs an Opus-class model, and its latency is why production runs concurrently with the review.
 
-- **Code**: `src/core/readingDiff.ts` (`resolveReadingDiff`, `readingDiffCommand`, `parseMeatJson`, `capDiff`, `produceReadingDiff`, `startReviewReadingDiff`, `READING_DIFF_CAP`, `MEAT_TIMEOUT_S_DEFAULT`); the `review_artifact` event in `src/core/runEvents.ts`; dispatcher wiring in `src/core/dispatcher.ts`; config `AppConfig.review.readingDiff` (`src/config.ts`).
+- **Code**: `src/core/readingDiff.ts` (`resolveReadingDiff`, `readingDiffCommand`, `parseMeatJson`, `capDiff`, `produceReadingDiff`, `startReviewReadingDiff`, `READING_DIFF_CAP`, `MEAT_TIMEOUT_S_DEFAULT`); the `review_artifact` event in `src/core/runEvents.ts`; dispatcher wiring in `src/core/dispatch/runLoop.ts`; config `AppConfig.review.readingDiff` (`src/config.ts`).
 - **Tests**: `src/core/readingDiff.test.ts`, `src/core/dispatcher.test.ts::reading-diff artifact on review runs`, `src/core/runEventLines.test.ts`, `src/core/runFriction.skillUse.test.ts` (side-fact invisibility), `src/channels/runTimeline.test.ts`.
 
 ## Behavior

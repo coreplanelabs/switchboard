@@ -20,6 +20,13 @@ import {
 } from "../runRegistry.js";
 import type { RunHistoryWriter } from "../runHistoryWriter.js";
 import type { AppendableEvent, LiveRunRow } from "../runLedger/types.js";
+import type { ResolvedRequest } from "../../config.js";
+import type { AgentDef } from "../../agents/registry.js";
+import type { RepoContext } from "../repoContext.js";
+import type { RunEnding } from "../runEnding.js";
+import type { LedgerRun } from "../runLedger/writeThrough.js";
+import type { Span } from "../trace/types.js";
+import type { ResumeContext } from "./admission.js";
 
 /** What the record stage reads off the dispatcher's dependencies: the channel
  *  directory the visibility stamp is asked of, and its wait bound. `CoreDeps`
@@ -40,6 +47,15 @@ export interface RecordDeps {
   /** Bound on one `channelDirectory.info` wait (default `CHANNEL_DIRECTORY_TIMEOUT_MS`).
    *  Tests that exercise the timeout set it low. */
   channelDirectoryTimeoutMs?: number;
+  /**
+   * The write path onto `runStore` (docs/decisions/0006-runs-have-two-lives.md): after every run the dispatcher
+   * builds the `RunRecord` at finish and hands it here AFTER the reply is sent —
+   * fire-and-forget with bounded retries, drain-counted via `pending()`. With
+   * history off it is the `NullRunHistoryWriter` — every write dropped —
+   * so the dispatcher never asks whether there is one. Production wires
+   * `createRunHistoryWriter` over the selected store (src/index.ts, src/cli.ts).
+   */
+  runHistoryWriter: RunHistoryWriter;
 }
 
 /** The longest a reply waits on the channel directory. The Slack directory
@@ -267,4 +283,136 @@ export function assembleRunRecord(input: {
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
+}
+
+/**
+ * Tombstone-first (run-history item 42): a provisional TERMINAL record —
+ * status `interrupted`, `finishedAt` = `startedAt` — written the moment the run
+ * loop owns the run, from the events published so far, so a crash or a drain
+ * abandonment needs no store-side fixup: the tombstone is already the truth.
+ * The finish write replaces it; the drain deadline upgrades it. Nothing for a
+ * resume, whose record the ledger already holds.
+ */
+export function writeTombstone(
+  deps: RecordDeps,
+  ctx: {
+    msg: IncomingMessage;
+    agent: AgentDef;
+    resolved: ResolvedRequest;
+    repoCtx: RepoContext;
+    channelVisibility: ChannelVisibility;
+    run: RunHandle;
+    registry: RunRegistry;
+    resume: ResumeContext | undefined;
+  },
+): void {
+  const { msg, agent, resolved, repoCtx, channelVisibility, run, registry, resume } = ctx;
+  // Tombstone-first: a provisional TERMINAL record — status
+  // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
+  // from the events published so far (the setup spans, request, run_meta,
+  // context). Written here, once the run loop owns the run, and not at the
+  // reservation: a dispatch that ends before this point leaves NO record
+  // (item 42 — its row is discarded and its reservation abandoned), and a
+  // crash during the attach is the reservation's to restart, not a record's
+  // to remember. Because it is already terminal, a crash or a
+  // drain-abandonment needs NO store-side
+  // fixup by the next container: the tombstone is already the truth (its
+  // `finishedAt` stays the start time — nobody knows the real death time of a
+  // crash). The finish write below replaces it (same-id upsert) for every run
+  // that ends normally, and the drain deadline upgrades it with the full
+  // transcript for a run it abandons. Fire-and-forget through the same writer
+  // (retry + drain accounting), but `provisional`: `onPersisted`/
+  // `markPersisted` must NOT run — the index's persisted flag means "finished
+  // and durably stored". Synchronous assembly over a handful of bounded
+  // events; the first model call is not delayed.
+  if (!resume) {
+    const startSnap = registry.snapshot(run.id, run.token);
+    if (startSnap) {
+      deps.runHistoryWriter.write(
+        assembleRunRecord({
+          run,
+          snap: startSnap,
+          agent: agent.name,
+          model: resolved.modelRef,
+          msg,
+          channelVisibility,
+          repo: repoCtx.repo,
+          finishedAt: startSnap.startedAt,
+          status: "interrupted",
+          diagnosis: analyzeRunFriction(startSnap.events, {
+            finished: false,
+            truncated: startSnap.truncated,
+            schema: SPAN_SCHEMA,
+          }),
+        }),
+        { provisional: true },
+      );
+    }
+  }
+}
+
+/**
+ * The finish record, registered for the drain that follows the reply: the
+ * finish-site snapshot and diagnosis assembled after the seal — so the record
+ * carries the seal's stamps — and written through the ledger's finish when the
+ * run is tracked (one transaction replacing its live rows) or the plain store
+ * otherwise. A reply that threw after the loop completed flips a `completed`
+ * run to `failed`: the thread never saw the answer.
+ */
+export function registerFinishRecord(
+  deps: RecordDeps,
+  ctx: {
+    ending: RunEnding;
+    run: RunHandle;
+    snap: RunSnapshot | null;
+    agent: AgentDef;
+    resolved: ResolvedRequest;
+    msg: IncomingMessage;
+    channelVisibility: ChannelVisibility;
+    repoCtx: RepoContext;
+    finishedAt: number;
+    status: RunStatus;
+    diagnosis: FrictionDiagnosis;
+    root: Span;
+    ledgerRun: LedgerRun | undefined;
+  },
+): void {
+  const {
+    ending,
+    run,
+    snap,
+    agent,
+    resolved,
+    msg,
+    channelVisibility,
+    repoCtx,
+    finishedAt,
+    status,
+    diagnosis,
+    root,
+    ledgerRun,
+  } = ctx;
+  // A tracked run finishes through the ledger: the record replaces its
+  // live rows in one transaction (a refused finish falls back to the store).
+  ending.register({
+    runId: run.id,
+    flipOnPostFinishFailure: true,
+    write: (seal, failedAfterFinish) =>
+      deps.runHistoryWriter.write(
+        assembleRunRecord({
+          run,
+          snap,
+          agent: agent.name,
+          model: resolved.modelRef,
+          msg,
+          channelVisibility,
+          repo: repoCtx.repo,
+          finishedAt,
+          status: failedAfterFinish && status === "completed" ? "failed" : status,
+          diagnosis,
+          seal,
+        }),
+        { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
+      ),
+  });
 }

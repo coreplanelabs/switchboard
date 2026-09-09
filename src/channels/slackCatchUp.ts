@@ -1,4 +1,4 @@
-import { DEPLOY_RESTART_NOTICE } from "../core/dispatcher.js";
+import { DEPLOY_RESTART_NOTICE } from "../core/dispatch/run.js";
 import { LIVE_CARD_PREFIXES } from "../core/statusCardFrame.js";
 import { MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
 import { systemClock } from "../core/trace/clock.js";

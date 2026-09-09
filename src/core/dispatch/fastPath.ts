@@ -19,7 +19,6 @@ import { resolveRepoContext, type RepoContext } from "../repoContext.js";
 import { recognizeOperation } from "../operations.js";
 import { redactSecrets } from "../runEvents.js";
 import type { RunStatus } from "../runRecord.js";
-import type { RunHistoryWriter } from "../runHistoryWriter.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import {
   invokeChatCommand,
@@ -49,15 +48,6 @@ export interface FastPathDeps extends RecordDeps, Pick<ResolveDeps, "resolveRepo
    * /runs endpoints (src/index.ts) share one instance. Injectable for tests.
    */
   runRegistry?: RunRegistry;
-  /**
-   * The write path onto `runStore` (docs/decisions/0006-runs-have-two-lives.md): after every run the dispatcher
-   * builds the `RunRecord` at finish and hands it here AFTER the reply is sent —
-   * fire-and-forget with bounded retries, drain-counted via `pending()`. With
-   * history off it is the `NullRunHistoryWriter` — every write dropped —
-   * so the dispatcher never asks whether there is one. Production wires
-   * `createRunHistoryWriter` over the selected store (src/index.ts, src/cli.ts).
-   */
-  runHistoryWriter: RunHistoryWriter;
   /**
    * The command registry bound to its deps (`bindCommands`; docs/decisions/0008-one-command-definition-every-surface.md), for the
    * chat fast path: `<group> <verb> [args…] [--option value…]` messages that
