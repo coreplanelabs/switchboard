@@ -22,6 +22,10 @@ A resident measures its disk on every refresh cycle and after every attach, and 
 
 The same budget decides the sizing question the other way round: when the dashboard shows `disk-pressure` refusals, the next instance step buys a known number of additional concurrent trees, and the load harness measures whether it was needed ([Run a load test](../how-to/run-a-load-test.md)).
 
+## Why the cold sandbox is the largest predefined type
+
+A cold per-thread sandbox is the third shape: one container, one thread, nothing warm. It clones, installs and checks a whole repository from scratch, so it is sized by the largest single command a cold thread must be able to run, not by the typical one — a large monorepo's typecheck alone needs more than 8 GiB, and the 2 vCPU / 8 GiB instance could not run it at all. The sandbox is therefore the platform's largest predefined type (`standard-4`, 4 vCPU / 12 GiB / 20 GB — a custom type can be no larger). Unlike a resident it is not always on: it sleeps after five idle minutes, so its memory is paid per active run and its vCPUs only while they are busy, and the larger instance costs nothing between runs. The template beside the sandbox Worker carries the number and the reasoning; a unit test pins it ([Execution and sandboxes](../reference/specs/execution.md), item 16).
+
 ## Why residents do not accumulate
 
 Each resident has a pool of OS users, one per concurrent thread; a run releases its user when it detaches. An hourly sweep releases clean idle trees, every refresh cycle reclaims worktrees whose branch is gone from the mirror or whose pull request is merged or closed, and an unused resident parks its refresh so the container sleeps and stops paying for memory. The fleet has a cap on warm residents; an admin onboarding over the cap can ask for the coldest eligible resident to be offboarded instead of being refused, per request and never by default.

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { stripJsonc } from "../agentEnv/bootstrap.js";
 import { parseProfile, PROFILE_ENV, PROFILE_EXAMPLE_PATH, PROFILE_PATH, type DeploymentProfile } from "./profile.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 import {
@@ -191,6 +192,23 @@ describe("templateView / renderTemplate for a bot-only profile", () => {
     expect(without.ok && without.text).toContain('"PUBLIC_BASE_URL": "https://switchboard.example.test"');
     const withState = renderTemplate(template, templateView(TEST_PROFILE, "bot")!);
     expect(withState.ok && withState.text).toContain('"STATE_WORKER_URL": "https://switchboard-memory.example.test"');
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 16 — the cold per-thread
+// sandbox is the platform's largest predefined instance type. The template
+// carries the number and its reasoning; this test keeps the two from drifting
+// apart and fails when someone steps the size down again without changing the
+// spec.
+describe("the sandbox Worker's container", () => {
+  it("the cold per-thread sandbox runs on standard-4 — 4 vCPU / 12 GiB / 20 GB, the largest predefined type — so one thread can typecheck a large monorepo", () => {
+    const template = readFileSync(new URL(`../../deploy/cloudflare-sandbox/${TEMPLATE_FILE}`, import.meta.url), "utf8");
+    const rendered = renderTemplate(template, templateView(TEST_PROFILE, "sandbox")!);
+    expect(rendered.ok ? "" : rendered.problems.join("\n")).toBe("");
+    if (!rendered.ok) return;
+    const config = JSON.parse(stripJsonc(rendered.text)) as { containers: Array<{ instance_type: unknown }> };
+    expect(config.containers).toHaveLength(1);
+    expect(config.containers[0].instance_type).toBe("standard-4");
   });
 });
 
