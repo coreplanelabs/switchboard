@@ -30,4 +30,4 @@ If you are new and want a guided first success instead, start with a [tutorial](
 - [Rotate a secret](rotate-a-secret.md) — a put and a restart, on every Worker that holds the value.
 - [Operate production](operate-production.md) — deploys outside a release, config changes without one, the preflights, the span log.
 - [Configure the repository](configure-the-repository.md) — the GitHub settings a fork reproduces: squash-only merges, the required checks, the merge queue.
-- [Run a load test](run-a-load-test.md) — a number for how Switchboard behaves with many runs at once, before and after a capacity change.
+- [Run a load test](run-a-load-test.md) — a number for how OpenSwitchboard behaves with many runs at once, before and after a capacity change.

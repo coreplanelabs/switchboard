@@ -1,6 +1,10 @@
 export interface ProjectFacts {
+  /** The identifier: package names, the CLI, the bot's mention, config keys, Worker script names, the repository. */
   name: string;
+  /** The name a reader sees: the README's first heading, the docs site's title and hero, the GitHub description's subject. */
   displayName: string;
+  /** The package the project publishes: `@scope/<name>` — scoped, its unscoped part `name`; every package a checked file mentions under that scope is this one. */
+  npmPackage: string;
   /** The one-sentence pitch: the repository's GitHub description and package.json's `description` (both checked against this); the README's opening line says the same thing by hand. ≤ 350 characters. */
   description: string;
   organization: string;

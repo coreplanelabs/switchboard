@@ -1,6 +1,6 @@
 # Architecture
 
-Switchboard is an agent gateway. A message arrives over a channel, a dispatcher routes it to an agent, the agent runs on a model provider and executes its tools through an executor it never touches directly. Slack is one channel among several; Cloudflare is one place to run. This page is the three pictures a newcomer needs, in one style; every box links to the page that goes deeper.
+OpenSwitchboard is an agent gateway. A message arrives over a channel, a dispatcher routes it to an agent, the agent runs on a model provider and executes its tools through an executor it never touches directly. Slack is one channel among several; Cloudflare is one place to run. This page is the three pictures a newcomer needs, in one style; every box links to the page that goes deeper.
 
 ## The four seams
 

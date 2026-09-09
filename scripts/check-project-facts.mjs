@@ -1,15 +1,18 @@
 #!/usr/bin/env node
-// The project's identity — its name, where it lives, where its docs are, who
-// to write to, the image it publishes, how it describes itself — is stated
-// once in project.json and copied by hand into the files that need it in
-// prose: the community files, the README and its badges, the docs site's
-// Worker route, the in-product docs redirect, the compose file's `image:`
-// line. This check reads every one of those copies and fails when any of them
-// disagrees with project.json, so changing the docs domain or the contact
-// address is one edit plus the list of places this prints. The description and
-// topics have no copy in the tree — `gh repo edit` reads them from project.json
+// The project's identity — its name and the name a reader sees, where it
+// lives, where its docs are, who to write to, the image and the npm package it
+// publishes, how it describes itself — is stated once in project.json and
+// copied by hand into the files that need it in prose: the community files,
+// the README (its first heading, its badges), the docs site's Worker route, the
+// in-product docs redirect, the compose file's `image:` line. This check reads
+// every one of those copies and fails when any of them disagrees with
+// project.json, so changing the docs domain or the contact address is one edit
+// plus the list of places this prints. The description and topics have no copy
+// in the tree — `gh repo edit` reads them from project.json
 // (docs/how-to/configure-the-repository.md) — so the check holds them to what
-// GitHub accepts.
+// GitHub accepts. The docs site reads project.json at build time rather than
+// copying it, so its title and hero are proven on the built artifact instead
+// (scripts/check-site.mjs).
 //
 //   npm run check:project-facts
 
@@ -39,6 +42,8 @@ const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const DESCRIPTION_MAX = 350;
 const TOPICS_MAX = 20;
 const TOPIC = /^[a-z0-9-]{1,50}$/;
+/** A scoped npm package name — `@scope/name`, each part lowercase and URL-safe, npm's rule for a new package. */
+const SCOPED_PACKAGE = /^@([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)$/;
 
 /** The `image:` of every service under the compose file's top-level `services:`
  *  block — `services.<name>.image`, the key two levels in — and nothing else:
@@ -82,6 +87,29 @@ export function factsProblems(facts, files) {
     if (typeof topic !== "string" || !TOPIC.test(topic))
       say("project.json", `topic "${topic}" is not 1–50 lowercase letters, digits and hyphens`);
   }
+
+  // The name a reader sees: the README's first heading. The site derives its
+  // title and hero from the same fact at build time (checked on the artifact).
+  const displayName = typeof facts.displayName === "string" ? facts.displayName.trim() : "";
+  if (displayName === "") say("project.json", "displayName is missing or blank");
+  const readme = files["README.md"];
+  if (readme !== undefined && displayName !== "") {
+    const h1 = /^# (.+?)\s*$/m.exec(readme);
+    if (!h1) say("README.md", `has no \`# \` heading — the first one must be displayName "${displayName}"`);
+    else if (h1[1] !== displayName)
+      say("README.md", `first heading is "${h1[1]}" — project.json says displayName "${displayName}"`);
+  }
+
+  // The package the project publishes: scoped, its unscoped part the project's
+  // name, so `npm install <npmPackage>` and `name` agree.
+  const npmPackage = typeof facts.npmPackage === "string" ? facts.npmPackage : undefined;
+  const scoped = npmPackage === undefined ? null : SCOPED_PACKAGE.exec(npmPackage);
+  if (npmPackage === undefined) say("project.json", "npmPackage is missing");
+  else if (!scoped) say("project.json", `npmPackage "${npmPackage}" is not a scoped npm name (@scope/name)`);
+  else if (scoped[2] !== facts.name)
+    say("project.json", `npmPackage "${npmPackage}" — its unscoped part must be the project name "${facts.name}"`);
+  /** Every package a checked file mentions under the project's own scope — held to npmPackage; other scopes are other people's packages. */
+  const scopeMention = scoped ? new RegExp(`@${scoped[1].replace(/\./g, "\\.")}/[a-z0-9][a-z0-9._-]*`, "g") : undefined;
 
   const pkgText = files["package.json"];
   if (pkgText !== undefined) {
@@ -127,6 +155,9 @@ export function factsProblems(facts, files) {
     if (file === "package.json") continue;
     for (const m of text.match(EMAIL) ?? []) {
       if (m !== facts.contact) say(file, `contact address "${m}" — project.json says ${facts.contact}`);
+    }
+    for (const m of (scopeMention && text.match(scopeMention)) ?? []) {
+      if (m !== npmPackage) say(file, `package "${m}" — project.json says npmPackage ${npmPackage}`);
     }
     for (const m of text.match(docsUrlPattern(docsHost)) ?? []) {
       const host = new URL(m).host;

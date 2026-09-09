@@ -1,6 +1,6 @@
 # Watch a run
 
-See what Switchboard is doing right now, stop a run that has gone wrong, and read back a run that finished — from the dashboard, without Slack or the CLI.
+See what OpenSwitchboard is doing right now, stop a run that has gone wrong, and read back a run that finished — from the dashboard, without Slack or the CLI.
 
 ## Before you start
 

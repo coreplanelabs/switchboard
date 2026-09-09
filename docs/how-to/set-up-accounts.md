@@ -1,6 +1,6 @@
 # Set up accounts
 
-Goal: every external account Switchboard can use, created with exactly the permissions the code needs — and a clear line between the two you must have and the ones that buy you a feature.
+Goal: every external account OpenSwitchboard can use, created with exactly the permissions the code needs — and a clear line between the two you must have and the ones that buy you a feature.
 
 | Account | Required? | What it unlocks | Where the credential goes |
 |---|---|---|---|
@@ -90,7 +90,7 @@ Three consequences of the installation being the boundary. A repository outside 
 
 ## Cloudflare (optional, and what it buys)
 
-Nothing about Switchboard requires Cloudflare. A laptop or any always-on container runs the bot; `docker-compose.yml` is that shape. Cloudflare is the one supported production target, and each of its pieces turns on a capability the bot cannot have alone ([Turn features on and off](turn-features-on-and-off.md) is the matrix):
+Nothing about OpenSwitchboard requires Cloudflare. A laptop or any always-on container runs the bot; `docker-compose.yml` is that shape. Cloudflare is the one supported production target, and each of its pieces turns on a capability the bot cannot have alone ([Turn features on and off](turn-features-on-and-off.md) is the matrix):
 
 | Piece | What it buys |
 |---|---|

@@ -1,6 +1,6 @@
 # Run a load test
 
-Get a number, not a feeling, for how Switchboard behaves with many runs at once — before and after a capacity change.
+Get a number, not a feeling, for how OpenSwitchboard behaves with many runs at once — before and after a capacity change.
 
 The harness is `npm run load`. Each command writes a JSON result and a markdown receipt under `load-results/` (gitignored), prints the receipt, and exits non-zero when one of its checks fails. It measures infrastructure only: the end-to-end command drives the bot with a scripted model that never calls a real provider.
 

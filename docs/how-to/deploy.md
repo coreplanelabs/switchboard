@@ -1,6 +1,6 @@
 # Deploy
 
-Goal: Switchboard running in production on Cloudflare — the first time by hand from your machine, and from then on by the release workflow, with a config change or a rotated secret going live without a rebuild.
+Goal: OpenSwitchboard running in production on Cloudflare — the first time by hand from your machine, and from then on by the release workflow, with a config change or a rotated secret going live without a rebuild.
 
 Cloudflare is the one supported production target: the bot runs as a container behind a Worker, and up to four more Workers give it durable state, sandboxes, resident repositories and a docs site. `docker-compose.yml` in the tree is the local loop — a laptop or a dev box running the same image against your `.env` — not a second production path. This page is the first deployment, by hand; the day-two pages are [Ship a release](ship-a-release.md) (production deploys on the release, from CI), [Rotate a secret](rotate-a-secret.md) and [Operate production](operate-production.md) (a deploy or a config change outside a release, the preflights, the span log). Why one target: [the decision record](../decisions/0023-one-production-target.md).
 

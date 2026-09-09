@@ -1,6 +1,6 @@
-# How Switchboard improves itself
+# How OpenSwitchboard improves itself
 
-After every agent run Switchboard diagnoses where the time went, keeps that diagnosis with the run, and on a schedule (or on demand) looks for friction that recurs across runs and files each recurring pattern as a labelled GitHub issue with evidence and a suggested fix, for a person to triage. This page is why the loop is shaped that way and where each piece runs. The contract is the [self-improvement spec](../reference/specs/self-improvement.md); the per-run diagnosis it builds on is [run friction](../reference/specs/run-friction.md).
+After every agent run OpenSwitchboard diagnoses where the time went, keeps that diagnosis with the run, and on a schedule (or on demand) looks for friction that recurs across runs and files each recurring pattern as a labelled GitHub issue with evidence and a suggested fix, for a person to triage. This page is why the loop is shaped that way and where each piece runs. The contract is the [self-improvement spec](../reference/specs/self-improvement.md); the per-run diagnosis it builds on is [run friction](../reference/specs/run-friction.md).
 
 ## Why it proposes and never fixes
 
@@ -27,7 +27,7 @@ flowchart TB
     style FIX stroke-dasharray: 5 5
 ```
 
-Everything left of the human gate is automatic. *Fix* is dashed because Switchboard does not perform it; the loop closes only when a person acts on the issue.
+Everything left of the human gate is automatic. *Fix* is dashed because OpenSwitchboard does not perform it; the loop closes only when a person acts on the issue.
 
 ## Where each piece runs
 

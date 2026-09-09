@@ -4,7 +4,7 @@ Set the agent, model and effort once, at the scope where the choice belongs, ins
 
 ## Before you start
 
-- Switchboard already answers you, in Slack or on the CLI ([Your first request in Slack](../tutorials/first-request-in-slack.md), [Run it locally](../tutorials/run-it-locally.md)).
+- OpenSwitchboard already answers you, in Slack or on the CLI ([Your first request in Slack](../tutorials/first-request-in-slack.md), [Run it locally](../tutorials/run-it-locally.md)).
 - To change a channel's defaults you need the `config:write` grant. Admins hold it through `all`; nobody else does until granted ([Restrict who can do what](restrict-who-can-do-what.md)). Your own defaults need no grant.
 
 The examples are chat messages. The same commands work word for word on the CLI (`npm run cli -- config set me --model openai/gpt-5`) and over HTTP and MCP ([One definition, every surface](../explanation/one-command-many-surfaces.md)).

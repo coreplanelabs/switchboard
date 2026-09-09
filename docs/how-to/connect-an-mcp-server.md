@@ -5,7 +5,7 @@ Give an agent tools from an external service — an issue tracker, a wiki, a ser
 ## Before you start
 
 - The installation has an `mcp` block in `config.yaml` naming the env var that holds the credential key (`credentialKeyEnv`, `MCP_CREDENTIAL_KEY` by default). Without it the `mcp` commands do not exist ([Turn features on and off](turn-features-on-and-off.md)).
-- The server's URL. Switchboard detects whether it uses OAuth or a bearer token; `--auth` overrides the detection.
+- The server's URL. OpenSwitchboard detects whether it uses OAuth or a bearer token; `--auth` overrides the detection.
 - For a channel-wide server, the `config:write` grant; for an org-wide one, admin rights.
 
 ## 1. Register the server

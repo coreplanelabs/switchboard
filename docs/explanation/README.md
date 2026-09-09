@@ -26,6 +26,6 @@ It is still not the contract. The versioned behavioral contract is [`docs/refere
 
 ## The project
 
-- [How Switchboard improves itself](how-switchboard-improves-itself.md) — the friction → pattern → issue loop, and where each piece runs.
+- [How OpenSwitchboard improves itself](how-switchboard-improves-itself.md) — the friction → pattern → issue loop, and where each piece runs.
 - [How we work](how-we-work.md) — spec, failing test, implementation, a PR with a Tour, an agent review in the open, an automated release.
 - [Design decisions](design-decisions.md) — the decision records: what was decided, why, what was rejected, and the pattern each one instantiates.

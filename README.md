@@ -1,4 +1,4 @@
-# Switchboard
+# OpenSwitchboard
 
 [![CI](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coreplanelabs/switchboard/badge)](https://scorecard.dev/viewer/?uri=github.com/coreplanelabs/switchboard) [![Latest release](https://img.shields.io/github/v/release/coreplanelabs/switchboard)](https://github.com/coreplanelabs/switchboard/releases/latest) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
@@ -86,6 +86,6 @@ Next steps:
 
 - **Docs**: <https://openswitchboard.dev> — tutorials, how-to guides, reference and explanation, built from [`docs/`](docs/README.md) on every push.
 - **Architecture**: [How a request flows](docs/explanation/how-a-request-flows.md) · [Execution and trust](docs/explanation/execution-and-trust.md) · [Worker topology](docs/explanation/worker-topology.md) · [The agents and their toolsets](docs/explanation/agents-and-toolsets.md) · [Design decisions](docs/explanation/design-decisions.md)
-- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md) for the setup and the one check every change must pass; [AGENTS.md](AGENTS.md) for the invariants and the commands, written for the agents that develop Switchboard and for anyone who wants to work the same way.
+- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md) for the setup and the one check every change must pass; [AGENTS.md](AGENTS.md) for the invariants and the commands, written for the agents that develop OpenSwitchboard and for anyone who wants to work the same way.
 - **Security**: [SECURITY.md](SECURITY.md) — how to report a vulnerability, and what the trust model treats as one.
 - **License**: [Apache-2.0](LICENSE).

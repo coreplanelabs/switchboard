@@ -14,10 +14,14 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
 import { MermaidMarkdown } from "vitepress-plugin-mermaid";
 
-// The project's identity — its repository and steward — is stated once in
-// project.json (npm run check:project-facts); the site reads it, never copies it.
-// The licence the footer names is the one package.json declares, for the same reason.
+// The project's identity — the name a reader sees, its repository and steward —
+// is stated once in project.json (npm run check:project-facts); the site reads
+// it, never copies it: `displayName` is the site title, the tab, and the hero's
+// product name (theme/LandingPage.vue reads it back as `site.title`), and
+// `check:site` proves the built home page carries it. The licence the footer
+// names is the one package.json declares, for the same reason.
 const project = JSON.parse(readFileSync(new URL("../../project.json", import.meta.url), "utf8")) as {
+  displayName: string;
   repository: string;
   steward: { name: string };
 };
@@ -58,8 +62,8 @@ const specItems = readdirSync(SPECS_DIR)
   });
 
 export default defineConfig({
-  title: "Switchboard",
-  description: "Agents in Slack, on the CLI, over HTTP and MCP — docs for whoever uses, watches, or runs Switchboard.",
+  title: project.displayName,
+  description: `Agents in Slack, on the CLI, over HTTP and MCP — docs for whoever uses, watches, or runs ${project.displayName}.`,
   // Dated implementation plans are working documents for the repo, not pages.
   srcExclude: ["plans/**"],
   // GitHub renders a directory's README.md when you browse to the directory;
@@ -131,7 +135,7 @@ export default defineConfig({
   transformPageData(pageData) {
     if (pageData.filePath !== "README.md") return;
     pageData.frontmatter.layout = "home";
-    return { title: "Switchboard" };
+    return { title: project.displayName };
   },
   themeConfig: {
     // "Get started" is the first-time reader's path: Home → Get started → a
@@ -207,7 +211,7 @@ export default defineConfig({
           { text: "Execution and trust", link: "/explanation/execution-and-trust" },
           { text: "Capacity and sizing", link: "/explanation/capacity-and-sizing" },
           { text: "Known limits", link: "/explanation/known-limits" },
-          { text: "How Switchboard improves itself", link: "/explanation/how-switchboard-improves-itself" },
+          { text: `How ${project.displayName} improves itself`, link: "/explanation/how-switchboard-improves-itself" },
           { text: "How we work", link: "/explanation/how-we-work" },
           { text: "Design decisions", link: "/explanation/design-decisions" },
         ],

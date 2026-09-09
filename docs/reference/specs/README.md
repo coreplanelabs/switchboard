@@ -1,6 +1,6 @@
 # Feature specs
 
-The behavioral contract of Switchboard, versioned with the code. Every file in this directory states what a feature is supposed to do, why, and **how to prove it still does** — so at any git SHA, the validation criteria describe exactly the code at that SHA, and an agent (or human) can verify behavior for any moment in history.
+The behavioral contract of OpenSwitchboard, versioned with the code. Every file in this directory states what a feature is supposed to do, why, and **how to prove it still does** — so at any git SHA, the validation criteria describe exactly the code at that SHA, and an agent (or human) can verify behavior for any moment in history.
 
 **Specs, not ledgers.** A feature file holds behavior, criteria, and the *kind* of proof each criterion has. It never holds the proof itself: no receipts, dates, run links, incident narratives, or "validated on …" notes. Those are tracking: they change on every validation of a running installation, and a spec that carried them would conflict with every parallel change. Receipts are not in this repository at all — see rule 6.
 
