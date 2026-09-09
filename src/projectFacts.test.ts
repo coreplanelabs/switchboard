@@ -15,6 +15,7 @@ const facts = {
   displayName: "Switchboard",
   organization: "acme",
   repository: "https://github.com/acme/switchboard",
+  image: "ghcr.io/acme/switchboard",
   docs: "https://docs.switchboard.example.com",
   contact: "dev@example.com",
   steward: { name: "Acme Labs", url: "https://acme.example" },
@@ -95,6 +96,45 @@ describe("factsProblems", () => {
 
   it("requires NOTICE and GOVERNANCE to name the steward", () => {
     expect(factsProblems(facts, { NOTICE: "Copyright 2026 Someone" })[0]?.what).toMatch(/steward/);
+  });
+
+  describe("the published image", () => {
+    // The release workflow derives the image name from the repository
+    // (`ghcr.io/` + the path, lowercased); the fact and the compose file's
+    // `image:` line must both be that name, or `docker compose pull` fetches
+    // an image no release pushed.
+    const compose = (image: string) => `services:\n  switchboard:\n    image: ${image}\n    build: .\n`;
+
+    it("the compose file running `<image>:latest` is silent", () => {
+      expect(factsProblems(facts, { "docker-compose.yml": compose("ghcr.io/acme/switchboard:latest") })).toEqual([]);
+    });
+
+    it("names a compose image under another owner, another tag, or none at all", () => {
+      const what = (files: Record<string, string>) => factsProblems(facts, files).map((p) => `${p.file}: ${p.what}`);
+      expect(what({ "docker-compose.yml": compose("ghcr.io/someone-else/switchboard:latest") })).toEqual([
+        'docker-compose.yml: image "ghcr.io/someone-else/switchboard:latest" — project.json says ghcr.io/acme/switchboard:latest',
+      ]);
+      expect(what({ "docker-compose.yml": compose("ghcr.io/acme/switchboard:0.4.0") })).toEqual([
+        'docker-compose.yml: image "ghcr.io/acme/switchboard:0.4.0" — project.json says ghcr.io/acme/switchboard:latest',
+      ]);
+      expect(what({ "docker-compose.yml": "services:\n  switchboard:\n    build: .\n" })).toEqual([
+        "docker-compose.yml: no service runs the published image ghcr.io/acme/switchboard:latest",
+      ]);
+    });
+
+    it("the fact itself must be the repository path on ghcr.io, lowercased — what the workflow pushes", () => {
+      const mixedCase = { ...facts, repository: "https://github.com/Acme/Switchboard" };
+      expect(factsProblems({ ...mixedCase, image: "ghcr.io/acme/switchboard" }, {})).toEqual([]);
+      expect(factsProblems({ ...mixedCase, image: "ghcr.io/Acme/Switchboard" }, {})).toEqual([
+        {
+          file: "project.json",
+          what: 'image is "ghcr.io/Acme/Switchboard", the release workflow publishes ghcr.io/acme/switchboard',
+        },
+      ]);
+      expect(factsProblems({ ...facts, image: "docker.io/acme/switchboard" }, {})[0]?.what).toMatch(
+        /the release workflow publishes ghcr\.io\/acme\/switchboard/,
+      );
+    });
   });
 });
 

@@ -3,6 +3,8 @@ export interface ProjectFacts {
   displayName: string;
   organization: string;
   repository: string;
+  /** The container image every release publishes: `ghcr.io/<owner>/<repo>`, the repository path lowercased. */
+  image: string;
   docs: string;
   contact: string;
   steward: { name: string; url: string };

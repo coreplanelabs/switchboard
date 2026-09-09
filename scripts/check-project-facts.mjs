@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // The project's identity — its name, where it lives, where its docs are, who
-// to write to — is stated once in project.json and copied by hand into the
-// files that need it in prose: the community files, the README, the docs
-// site's Worker route, the in-product docs redirect. This check reads every
-// one of those copies and fails when any of them disagrees with project.json,
-// so changing the docs domain or the contact address is one edit plus the
-// list of places this prints.
+// to write to, the image it publishes — is stated once in project.json and
+// copied by hand into the files that need it in prose: the community files,
+// the README, the docs site's Worker route, the in-product docs redirect, the
+// compose file's `image:` line. This check reads every one of those copies and
+// fails when any of them disagrees with project.json, so changing the docs
+// domain or the contact address is one edit plus the list of places this
+// prints.
 //
 //   npm run check:project-facts
 
@@ -27,6 +28,7 @@ export const CHECKED_FILES = [
   "docs/README.md",
   "docs/reference/specs/docs-site.md",
   "src/core/docsLink.ts",
+  "docker-compose.yml",
 ];
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
@@ -58,6 +60,24 @@ export function factsProblems(facts, files) {
   const docsHost = new URL(facts.docs).host;
   const repoPath = new URL(facts.repository).pathname; // /org/name
   const repoName = repoPath.split("/")[2];
+
+  // The release workflow names the image it pushes from the repository
+  // (`ghcr.io/` + owner/name, lowercased — GitHub's namespace on its
+  // registry), so the fact must be that name or the compose file would pull
+  // an image no release publishes.
+  const publishedImage = `ghcr.io${repoPath.toLowerCase()}`;
+  if (facts.image !== publishedImage)
+    say("project.json", `image is "${facts.image}", the release workflow publishes ${publishedImage}`);
+
+  const compose = files["docker-compose.yml"];
+  if (compose !== undefined) {
+    const images = [...compose.matchAll(/^\s+image:\s*(\S+)/gm)].map((m) => m[1]);
+    for (const image of images) {
+      if (image !== `${facts.image}:latest`)
+        say("docker-compose.yml", `image "${image}" — project.json says ${facts.image}:latest`);
+    }
+    if (images.length === 0) say("docker-compose.yml", `no service runs the published image ${facts.image}:latest`);
+  }
   // A `docs.` host is one of OURS — and so a stale copy when it differs — when
   // it names the project or the organization (`docs.switchboard.old.example`);
   // a third party's documentation (`docs.github.com`) is left alone.

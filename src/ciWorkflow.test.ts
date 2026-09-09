@@ -303,6 +303,97 @@ describe("the auto-approve workflow names no installation", () => {
   });
 });
 
+describe("the release publishes the bot image", () => {
+  // Every release pushes the root Dockerfile's image to GitHub Container
+  // Registry with build provenance and an SBOM (release-and-deploy.md item
+  // 21). The job runs only on a release, under the least permission that can
+  // push a package — granted to that job, never to the workflow, whose other
+  // jobs act as the release App — and names the image from the repository, so
+  // a fork publishes under its own owner without editing the file.
+  const file = ".github/workflows/release-please.yml";
+  const text = read(file);
+  const workflow = parse(text) as Workflow & { permissions?: Record<string, string> };
+  const publish = Object.entries(workflow.jobs).filter(([, job]) =>
+    job.steps?.some((s) => s.uses?.startsWith("docker/build-push-action@")),
+  );
+  const [id, job] = publish[0] ?? [];
+  const step = (prefix: string) => job.steps.find((s) => s.uses?.startsWith(prefix));
+
+  it("one job builds and pushes, gated on release-please reporting a release", () => {
+    expect(publish.map(([id]) => id)).toEqual(["publish-image"]);
+    expect(needsOf(job)).toEqual(["release-please"]);
+    expect(job.if).toBe("needs.release-please.outputs.release_created == 'true'");
+  });
+
+  it("`packages: write` and the attestation scopes are the job's alone; the workflow stays read-only", () => {
+    expect(workflow.permissions).toEqual({ contents: "read" });
+    expect((job as Job & { permissions?: Record<string, string> }).permissions).toEqual({
+      contents: "read",
+      packages: "write",
+      "id-token": "write",
+      attestations: "write",
+    });
+    for (const [otherId, other] of Object.entries(workflow.jobs)) {
+      if (otherId === id) continue;
+      const perms = (other as Job & { permissions?: Record<string, string> }).permissions ?? {};
+      expect(perms, `${otherId} may write packages`).not.toHaveProperty("packages");
+    }
+  });
+
+  it("builds the root Dockerfile from the repository root with provenance and an SBOM, and pushes", () => {
+    const build = step("docker/build-push-action@")!;
+    expect(build.with?.context).toBe(".");
+    expect(build.with?.push).toBe(true);
+    expect(build.with?.provenance).toBe("mode=max");
+    expect(build.with?.sbom).toBe(true);
+    expect(build.with).not.toHaveProperty("file"); // the root Dockerfile, the one wrangler and compose build
+  });
+
+  it("names the image from the repository, lowercased, never from a literal owner", () => {
+    // Outside comments, `ghcr.io/` appears only followed by the lowercased repository variable.
+    const code = text
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n");
+    const names = [...code.matchAll(/ghcr\.io\/([^\s"']+)/g)].map((m) => m[1]);
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) expect(name).toBe("${GITHUB_REPOSITORY,,}");
+    const build = step("docker/build-push-action@")!;
+    const tags = String(build.with?.tags)
+      .split("\n")
+      .filter((t) => t.trim());
+    expect(tags).toEqual([
+      "${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}",
+      "${{ steps.image.outputs.name }}:latest",
+    ]);
+    // The version tag is the release tag without its `v`, from release-please's output.
+    const name = job.steps.find((s) => (s as Step & { id?: string }).id === "image")!;
+    expect(name.run).toContain("version=${TAG#v}");
+    expect((name as Step & { env?: Record<string, string> }).env?.TAG).toBe(
+      "${{ needs.release-please.outputs.tag_name }}",
+    );
+  });
+
+  it("logs in to ghcr.io with GITHUB_TOKEN and attests the pushed digest into the registry", () => {
+    const login = step("docker/login-action@")!;
+    expect(login.with?.registry).toBe("ghcr.io");
+    expect(login.with?.password).toBe("${{ secrets.GITHUB_TOKEN }}");
+    const attest = step("actions/attest-build-provenance@")!;
+    expect(attest.with?.["subject-name"]).toBe("${{ steps.image.outputs.name }}");
+    expect(attest.with?.["subject-digest"]).toBe("${{ steps.build.outputs.digest }}");
+    expect(attest.with?.["push-to-registry"]).toBe(true);
+  });
+
+  it("every action in the workflow is pinned to a full commit sha", () => {
+    for (const j of Object.values(workflow.jobs)) {
+      for (const s of j.steps ?? []) {
+        if (!s.uses || s.uses.startsWith("./")) continue;
+        expect(s.uses, `unpinned action: ${s.uses}`).toMatch(/@[0-9a-f]{40}( #.*)?$/);
+      }
+    }
+  });
+});
+
 describe("the image check builds every image the deploy builds", () => {
   // A Dockerfile RUN whose last command exits non-zero fails only when the
   // image is built, and if CI builds the bot image alone the first build of any

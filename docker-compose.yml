@@ -1,7 +1,15 @@
 # The local loop: the same image on a dev box, or on one host a single trusted operator
 # administers. Production is Cloudflare (docs/how-to/deploy.md). `docker compose up -d`.
+#
+# `image` + `build`: `up` runs the image under that name if it is present and
+# builds it from the Dockerfile when it is not; `docker compose pull` fetches the
+# one every release publishes (with provenance and an SBOM — docs/how-to/deploy.md
+# says how to verify it); `docker compose build` builds the same Dockerfile
+# locally under the same name. The name is project.json's `image`
+# (check:project-facts holds this line to it).
 services:
   switchboard:
+    image: ghcr.io/coreplanelabs/switchboard:latest
     build: .
     restart: unless-stopped
     env_file: .env # SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ANTHROPIC_API_KEY, GH_TOKEN, ...

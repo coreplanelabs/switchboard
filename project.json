@@ -4,6 +4,7 @@
   "displayName": "Switchboard",
   "organization": "coreplanelabs",
   "repository": "https://github.com/coreplanelabs/switchboard",
+  "image": "ghcr.io/coreplanelabs/switchboard",
   "docs": "https://openswitchboard.dev",
   "contact": "dev@coreplane.ai",
   "steward": {
