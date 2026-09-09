@@ -652,7 +652,9 @@ async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev
   // `slack.receive` span; `dispatch()` ends the root, this finally is the
   // backstop (`end()` is idempotent).
   const receivedAt = systemClock();
-  const trace = startRequestRoot(deps, { channel: "slack", receivedAt });
+  // The platform's stamp rides on the root from its start, so the record's
+  // `request` span_start carries `queuedBeforeMs` (the page's queued caption).
+  const trace = startRequestRoot(deps, { channel: "slack", receivedAt, originAt: tsMs(ev.ts) });
   try {
     const received = await trace.root.span("slack.receive", (span) => receiveSlackMessage(client, ev, span));
     if (!received) {
