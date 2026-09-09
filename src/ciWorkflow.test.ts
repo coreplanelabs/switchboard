@@ -23,8 +23,10 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const read = (p: string) => readFileSync(new URL(p, `file://${root}`), "utf8");
 
 interface Step {
+  name?: string;
   uses?: string;
   run?: string;
+  if?: string;
   with?: Record<string, unknown>;
 }
 interface Job {
@@ -49,7 +51,7 @@ const ci = parse(read(".github/workflows/ci.yml")) as Workflow;
 const rootPkg = JSON.parse(read("package.json")) as { scripts: Record<string, string>; workspaces: string[] };
 
 /** The status checks `main-ci-required` requires (AGENTS.md); each must be a job's name. */
-const REQUIRED_CHECKS = ["bot", "web", "docs", "workers", "image"];
+const REQUIRED_CHECKS = ["bot", "web", "docs", "workers", "image", "package"];
 
 // `npm test -- --shard=i/N` is the one argument a step may pass through: it
 // selects a slice of the same suite, it adds nothing.
@@ -391,6 +393,88 @@ describe("the release publishes the bot image", () => {
         expect(s.uses, `unpinned action: ${s.uses}`).toMatch(/@[0-9a-f]{40}( #.*)?$/);
       }
     }
+  });
+});
+
+describe("the release publishes the npm package", () => {
+  // The same release publishes the CLI to npm under `npmPackage`
+  // (docs/reference/specs/packaging.md item 5): gated on release-please
+  // reporting a release like the image job, `id-token: write` for the
+  // provenance attestation and nothing more, the registry named on setup-node,
+  // the package built by its own script, and `npm publish` given the token as
+  // NODE_AUTH_TOKEN from the one repository secret an operator sets by hand.
+  const file = ".github/workflows/release-please.yml";
+  const workflow = parse(read(file)) as Workflow & { permissions?: Record<string, string> };
+  const publish = Object.entries(workflow.jobs).filter(([, job]) =>
+    job.steps?.some((s) => /^npm publish\b/.test(s.run?.trim() ?? "")),
+  );
+  const [, job] = publish[0] ?? [];
+  const runs = () => job.steps.map((s) => s.run?.trim()).filter((r): r is string => !!r);
+
+  it("one job publishes, gated on release-please reporting a release AND the owner's switch — the repository variable SWITCHBOARD_PUBLISH_NPM set to 'true'", () => {
+    expect(publish.map(([id]) => id)).toEqual(["publish-npm"]);
+    expect(needsOf(job)).toEqual(["release-please"]);
+    expect(job.if).toBe(
+      "needs.release-please.outputs.release_created == 'true' && vars.SWITCHBOARD_PUBLISH_NPM == 'true'",
+    );
+  });
+
+  it("nothing else in any workflow runs `npm publish`, and a release with the switch off says so in one line", () => {
+    // Every `run:` of every job of every workflow, as YAML sees it: a command line that starts
+    // with `npm publish` (a prose mention in a notice or a comment is not a command).
+    const dir = new URL(".github/workflows/", `file://${root}`);
+    const commands = readdirSync(dir)
+      .filter((f) => /\.ya?ml$/.test(f))
+      .flatMap((f) =>
+        Object.entries((parse(read(`.github/workflows/${f}`)) as Workflow).jobs ?? {}).flatMap(([id, j]) =>
+          (j.steps ?? []).flatMap((s) =>
+            (s.run ?? "")
+              .split("\n")
+              .filter((line) => /^\s*npm publish\b/.test(line))
+              .map((line) => ({ f, id, line: line.trim() })),
+          ),
+        ),
+      );
+    expect(commands).toEqual([
+      {
+        f: "release-please.yml",
+        id: "publish-npm",
+        line: "npm publish --workspace packages/switchboard --provenance --access public",
+      },
+    ]);
+    const off = workflow.jobs["release-please"].steps.find((s) => s.name === "npm publish is off")!;
+    expect(off.if).toContain("vars.SWITCHBOARD_PUBLISH_NPM != 'true'");
+    expect(off.if).toContain("release_created");
+    expect(off.run).toContain("::notice");
+    expect(off.run).toContain("SWITCHBOARD_PUBLISH_NPM");
+  });
+
+  it("holds `contents: read` and `id-token: write` alone — provenance needs the OIDC token, nothing else is granted", () => {
+    expect((job as Job & { permissions?: Record<string, string> }).permissions).toEqual({
+      contents: "read",
+      "id-token": "write",
+    });
+  });
+
+  it("installs from the lockfile, builds the package with its own script, and publishes it public with provenance", () => {
+    expect(runs()).toEqual([
+      "npm ci",
+      "npm run build -w packages/switchboard",
+      "npm publish --workspace packages/switchboard --provenance --access public",
+    ]);
+    // Node from .nvmrc, the registry named so npm reads NODE_AUTH_TOKEN for it.
+    const setup = job.steps.find((s) => s.uses?.startsWith("actions/setup-node@"))!;
+    expect(setup.with?.["node-version-file"]).toBe(".nvmrc");
+    expect(setup.with?.["registry-url"]).toBe("https://registry.npmjs.org");
+    const step = job.steps.find((s) => /^npm publish\b/.test(s.run?.trim() ?? "")) as Step & {
+      env?: Record<string, string>;
+    };
+    expect(step.env).toEqual({ NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" });
+  });
+
+  it("the npm token reaches only the publish step", () => {
+    const text = read(file);
+    expect(text.match(/secrets\.NPM_TOKEN/g)).toHaveLength(1);
   });
 });
 

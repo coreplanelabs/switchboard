@@ -21,6 +21,7 @@ Deploys run in one order — memory, bot, resident, sandbox — because the stat
 - No `CLOUDFLARE_API_TOKEN` in your shell unless it is a token for this account: wrangler prefers a token over your login, and a token for another account is refused, never silently swapped.
 - The Slack app and one provider key from [Get started](../tutorials/get-started.md), and the GitHub App if the coding agent should open pull requests ([Set up accounts](set-up-accounts.md)).
 - A `config/config.yaml` whose blocks point at the Workers you are about to deploy — `runtimeOverrides.worker` and `runHistory.worker` at the state Worker's hostname, `memory.worker` if you want memory, `execution.resident.baseUrl` and `execution.type: cloudflare` with `execution.url` for the resident and sandbox Workers.
+- A checkout of the repository at `origin/main` with `npm ci` run. The npm package (`npx @coreplane/switchboard`, [Get started](../tutorials/get-started.md)) carries the Worker templates, sources and Dockerfiles and answers `deploy plan` from them, but a deploy still runs from the tree: `deploy all` builds the bot's image from it, runs wrangler in each Worker's directory with its `node_modules`, and refuses a checkout that is dirty or off `origin/main`. Every `npx tsx src/cli.ts …` below is that checkout's CLI.
 
 ## 1. The deployment profile
 

@@ -19,4 +19,6 @@ export interface ProjectFacts {
   commands: Record<string, { does: string; when: string } | string>;
 }
 export const CHECKED_FILES: string[];
+/** The npm package's manifest, parsed like package.json rather than scanned as prose. */
+export const PACKAGE_MANIFEST: string;
 export function factsProblems(facts: ProjectFacts, files: Record<string, string>): { file: string; what: string }[];

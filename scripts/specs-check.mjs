@@ -427,7 +427,7 @@ function specFiles(root, dir) {
 }
 
 /** Every test file under the source trees, repo-relative, for bare-name resolution. */
-export function listTestFiles(root, dirs = ["src", "web/src", "deploy", "scripts"]) {
+export function listTestFiles(root, dirs = ["src", "web/src", "deploy", "scripts", "packages"]) {
   const out = [];
   const walk = (dir) => {
     if (!existsSync(join(root, dir))) return;

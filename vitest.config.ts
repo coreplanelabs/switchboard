@@ -7,8 +7,11 @@ import { defineConfig } from "vitest/config";
 // `--changed origin/main` runs what a branch's diff reaches). The memory
 // Worker is NOT a project here: it runs inside workerd on
 // @cloudflare/vitest-pool-workers, which pins vitest 4 — `npm test -w
-// deploy/cloudflare-memory` is its entry. src/vitestWorkspace.test.ts holds
-// the list to the workspaces.
+// deploy/cloudflare-memory` is its entry. Nor is the npm package: its tests
+// need the package BUILT (the smoke test installs the packed tarball), which
+// `npm run verify -w packages/switchboard` and CI's `package` job do first and
+// the root shards never would. src/vitestWorkspace.test.ts holds the list to
+// the workspaces.
 // CI runs this same entry as N shards, one job each: `npm test -- --shard=i/N`
 // splits the projects' files across the shards (.github/workflows/ci.yml).
 export default defineConfig({

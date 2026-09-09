@@ -4,11 +4,11 @@
 // publishes, how it describes itself — is stated once in project.json and
 // copied by hand into the files that need it in prose: the community files,
 // the README (its first heading, its badges), the docs site's Worker route, the
-// in-product docs redirect, the compose file's `image:` line. This check reads
-// every one of those copies and fails when any of them disagrees with
-// project.json, so changing the docs domain or the contact address is one edit
-// plus the list of places this prints. The description and topics have no copy
-// in the tree — `gh repo edit` reads them from project.json
+// in-product docs redirect, the compose file's `image:` line, the npm package's
+// manifest. This check reads every one of those copies and fails when any of
+// them disagrees with project.json, so changing the docs domain or the contact
+// address is one edit plus the list of places this prints. The description and
+// topics have no copy in the tree — `gh repo edit` reads them from project.json
 // (docs/how-to/configure-the-repository.md) — so the check holds them to what
 // GitHub accepts. The docs site reads project.json at build time rather than
 // copying it, so its title and hero are proven on the built artifact instead
@@ -36,6 +36,10 @@ export const CHECKED_FILES = [
   "src/core/docsLink.ts",
   "docker-compose.yml",
 ];
+
+/** The npm package's manifest: parsed like package.json, never scanned as prose. */
+export const PACKAGE_MANIFEST = "packages/switchboard/package.json";
+const PACKAGE_DIRECTORY = "packages/switchboard";
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 /** GitHub's limits on what `gh repo edit` sets from these facts. */
@@ -112,8 +116,8 @@ export function factsProblems(facts, files) {
   const scopeMention = scoped ? new RegExp(`@${scoped[1].replace(/\./g, "\\.")}/[a-z0-9][a-z0-9._-]*`, "g") : undefined;
 
   const pkgText = files["package.json"];
-  if (pkgText !== undefined) {
-    const pkg = JSON.parse(pkgText);
+  const pkg = pkgText === undefined ? undefined : JSON.parse(pkgText);
+  if (pkg !== undefined) {
     if (pkg.name !== facts.name) say("package.json", `name is "${pkg.name}", project.json says "${facts.name}"`);
     if (pkg.description !== undefined && pkg.description !== facts.description)
       say("package.json", `description is "${pkg.description}", project.json says "${facts.description}"`);
@@ -123,6 +127,27 @@ export function factsProblems(facts, files) {
       say("package.json", `repository.url should be git+${facts.repository}.git`);
     if (pkg.bugs?.url !== `${facts.repository}/issues`)
       say("package.json", `bugs.url should be ${facts.repository}/issues`);
+  }
+
+  // The package's own manifest is the project's identity under `npmPackage` —
+  // that name, the description, the docs as its homepage, the repository (and
+  // where in it the package lives), the issues, and the root's license.
+  const manifestText = files[PACKAGE_MANIFEST];
+  if (manifestText !== undefined) {
+    const m = JSON.parse(manifestText);
+    if (m.name !== npmPackage)
+      say(PACKAGE_MANIFEST, `name is "${m.name}", project.json says npmPackage "${npmPackage}"`);
+    if (m.description !== facts.description)
+      say(PACKAGE_MANIFEST, `description is "${m.description}", project.json says "${facts.description}"`);
+    if (pkg !== undefined && m.license !== pkg.license)
+      say(PACKAGE_MANIFEST, `license is "${m.license}", the root package.json says "${pkg.license}"`);
+    if (m.homepage !== facts.docs) say(PACKAGE_MANIFEST, `homepage should be ${facts.docs}`);
+    if (m.repository?.url !== `git+${facts.repository}.git`)
+      say(PACKAGE_MANIFEST, `repository.url should be git+${facts.repository}.git`);
+    if (m.repository?.directory !== PACKAGE_DIRECTORY)
+      say(PACKAGE_MANIFEST, `repository.directory should be ${PACKAGE_DIRECTORY}`);
+    if (m.bugs?.url !== `${facts.repository}/issues`)
+      say(PACKAGE_MANIFEST, `bugs.url should be ${facts.repository}/issues`);
   }
 
   const docsHost = new URL(facts.docs).host;
@@ -152,7 +177,7 @@ export function factsProblems(facts, files) {
   const ours = (host) => host.includes(facts.name) || host.includes(facts.organization);
 
   for (const [file, text] of Object.entries(files)) {
-    if (file === "package.json") continue;
+    if (file === "package.json" || file === PACKAGE_MANIFEST) continue;
     for (const m of text.match(EMAIL) ?? []) {
       if (m !== facts.contact) say(file, `contact address "${m}" — project.json says ${facts.contact}`);
     }
@@ -193,11 +218,14 @@ export function factsProblems(facts, files) {
 function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const facts = JSON.parse(readFileSync(join(root, "project.json"), "utf8"));
-  const files = { "package.json": readFileSync(join(root, "package.json"), "utf8") };
+  const files = {
+    "package.json": readFileSync(join(root, "package.json"), "utf8"),
+    [PACKAGE_MANIFEST]: readFileSync(join(root, PACKAGE_MANIFEST), "utf8"),
+  };
   for (const f of CHECKED_FILES) files[f] = readFileSync(join(root, f), "utf8");
   const problems = factsProblems(facts, files);
   if (problems.length === 0) {
-    console.log(`check:project-facts ok — ${CHECKED_FILES.length + 1} file(s) agree with project.json`);
+    console.log(`check:project-facts ok — ${CHECKED_FILES.length + 2} file(s) agree with project.json`);
     return;
   }
   for (const p of problems) console.error(`  ${p.file}: ${p.what}`);

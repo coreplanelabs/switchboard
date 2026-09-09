@@ -84,7 +84,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 
 <!-- /generated:commands -->
 
-Workspaces have their own `verify` (`-w web`, `-w docs`, `-w deploy/<worker>`); the root `verify` runs them all.
+Each workspace has its own `verify` (`-w web|docs|deploy/<worker>|packages/switchboard`); the root one runs them all.
 
 ## Rules for agents
 

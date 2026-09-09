@@ -191,6 +191,8 @@ describe("classifyPath", () => {
       ".github/workflows/ci.yml",
       ".github/CODEOWNERS",
       "scripts/docs-gen.ts",
+      "packages/switchboard/package.json",
+      "packages/switchboard/build.mts",
       "deploy/bin/build-stamp.mjs",
       "deploy/bin/put-secrets.mjs",
       "deploy/cloudflare/preflight.mjs",

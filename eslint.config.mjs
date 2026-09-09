@@ -21,6 +21,7 @@ export default tseslint.config(
     ignores: [
       "**/node_modules/**",
       "dist/**",
+      "packages/*/dist/**",
       "web/dist/**",
       "docs/.vitepress/dist/**",
       "docs/.vitepress/cache/**",
@@ -37,7 +38,7 @@ export default tseslint.config(
   ...vue.configs["flat/recommended"],
   {
     // Node-side TypeScript and scripts.
-    files: ["src/**/*.ts", "src/**/*.mjs", "scripts/**/*.{ts,mjs,mts}", "deploy/**/*.{ts,mjs}"],
+    files: ["src/**/*.ts", "src/**/*.mjs", "scripts/**/*.{ts,mjs,mts}", "deploy/**/*.{ts,mjs}", "packages/**/*.mts"],
     languageOptions: { globals: { ...globals.node } },
   },
   {

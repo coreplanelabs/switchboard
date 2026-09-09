@@ -15,6 +15,7 @@ COPY deploy/cloudflare-memory/package.json ./deploy/cloudflare-memory/
 COPY deploy/cloudflare-resident/package.json ./deploy/cloudflare-resident/
 COPY deploy/cloudflare-sandbox/package.json ./deploy/cloudflare-sandbox/
 COPY deploy/cloudflare-docs/package.json ./deploy/cloudflare-docs/
+COPY packages/switchboard/package.json ./packages/switchboard/
 RUN npm ci --include-workspace-root --workspace web
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
@@ -37,6 +38,7 @@ COPY deploy/cloudflare-memory/package.json ./deploy/cloudflare-memory/
 COPY deploy/cloudflare-resident/package.json ./deploy/cloudflare-resident/
 COPY deploy/cloudflare-sandbox/package.json ./deploy/cloudflare-sandbox/
 COPY deploy/cloudflare-docs/package.json ./deploy/cloudflare-docs/
+COPY packages/switchboard/package.json ./packages/switchboard/
 RUN npm ci --omit=dev --workspaces=false --include-workspace-root
 
 FROM node:24-slim

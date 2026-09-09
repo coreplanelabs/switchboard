@@ -7,12 +7,13 @@ import {
   hostSetupIO,
   isCheckoutRoot,
   modeOf,
-  PACKAGE_ROOT,
   publishedImage,
+  publishedPackage,
   readTemplates,
   ttyPrompter,
   writePlannedFile,
 } from "./host.js";
+import { PACKAGE_ROOT } from "../packageRoot.js";
 import { CONFIG_PATH, ENV_PATH } from "./plan.js";
 
 // Feature: docs/reference/specs/init.md — the host half of `switchboard init`:
@@ -73,11 +74,15 @@ describe("the package and the working directory", () => {
     await expect(readTemplates(tmp())).rejects.toThrow(/\.env\.example: no such file/);
   });
 
-  it("the package root is the repository root; a temp dir is not a checkout; the image fact is project.json's", () => {
+  it("the package root is the repository root; a temp dir is not a checkout; the image and package facts are project.json's", () => {
     expect(isCheckoutRoot(PACKAGE_ROOT)).toBe(true);
     expect(isCheckoutRoot(tmp())).toBe(false);
     expect(isCheckoutRoot(join(PACKAGE_ROOT, "no-such-dir"))).toBe(false);
-    expect(publishedImage()).toBe(JSON.parse(readFileSync(join(PACKAGE_ROOT, "project.json"), "utf8")).image);
+    const facts = JSON.parse(readFileSync(join(PACKAGE_ROOT, "project.json"), "utf8"));
+    expect(publishedImage()).toBe(facts.image);
+    expect(publishedPackage()).toBe(facts.npmPackage);
+    // In a checkout this process is not the published package, so `init` prints the checkout's next commands.
+    expect(hostSetupIO(PACKAGE_ROOT).package()).toBeUndefined();
   });
 
   it("hostSetupIO is scoped to the working directory: exists/readFile/write resolve there, inCheckout says whether it is the root", async () => {

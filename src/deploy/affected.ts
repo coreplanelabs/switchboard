@@ -30,6 +30,9 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   { rule: "markdown", test: /^(?!skills\/).*\.md$/ },
   { rule: "ci", test: /^\.github\// },
   { rule: "scripts", test: /^scripts\// },
+  // The npm package is built and published by the release, never deployed; its
+  // manifest is in the image only so npm can resolve the workspace tree.
+  { rule: "npm package (published by the release, not deployed)", test: /^packages\// },
   { rule: "deploy tooling", test: /^deploy\/bin\// },
   { rule: "deploy tooling", test: /^deploy\/[^/]+\/preflight(\.test)?\.mjs$/ },
   { rule: "deploy tooling", test: /^deploy\/cloudflare\/write-build\.mjs$/ },

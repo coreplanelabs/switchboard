@@ -19,7 +19,15 @@
   "packages": {
     ".": {
       "package-name": "switchboard",
-      "extra-files": ["web/package.json"]
+      "extra-files": [
+        "web/package.json",
+        "packages/switchboard/package.json",
+        {
+          "type": "json",
+          "path": "package-lock.json",
+          "jsonpath": "$.packages['packages/switchboard'].version"
+        }
+      ]
     }
   }
 }

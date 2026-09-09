@@ -31,6 +31,8 @@ const TEMPLATES = {
 interface World {
   existing?: string[];
   inCheckout?: boolean;
+  /** The published npm package the CLI runs from; undefined in a checkout or the image. */
+  package?: string;
   prompt?: (question: string, opts: { secret: boolean }) => Promise<string>;
   files?: Record<string, string>;
 }
@@ -53,6 +55,7 @@ function bind(world: World = {}) {
       readFile: async (path) => world.files?.[path],
       inCheckout: () => world.inCheckout ?? true,
       image: () => "ghcr.io/example/switchboard",
+      package: () => world.package,
       env: {},
       prompt: world.prompt
         ? async (q, o) => {
@@ -158,6 +161,17 @@ describe("setup.init — flags", () => {
     });
     const wire = JSON.stringify(value) + renderText(setupInit, value!);
     expect(wire).not.toContain(KEY);
+    // From the published package the next `ask` is the package's own, and the bot is the image.
+    const fromPackage = await invoke(bind({ inCheckout: false, package: "@example/switchboard" }), [
+      "--organization",
+      "acme",
+      "--anthropic-key",
+      KEY,
+    ]);
+    expect((fromPackage.ok ? (fromPackage.value as { next: string[] }) : undefined)?.next).toEqual([
+      'npx @example/switchboard ask "what can you do?"',
+      'docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/example/switchboard:latest   # the bot, from the published image',
+    ]);
     const text = renderText(setupInit, value!);
     expect(text).toContain("wrote:");
     expect(text).toMatch(/\.env\s+\(mode 600\)/);

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { CHECKED_FILES, factsProblems } from "../scripts/check-project-facts.mjs";
+import { CHECKED_FILES, factsProblems, PACKAGE_MANIFEST } from "../scripts/check-project-facts.mjs";
 
 // project.json is the one statement of who the project is; every hand-written
 // copy of its name, repository, docs URL and contact address is checked
@@ -103,6 +103,54 @@ describe("factsProblems", () => {
     const problems = factsProblems(facts, files);
     expect(problems.filter((p) => p.file === "README.md")).toEqual([]);
     expect(problems.filter((p) => p.file === "package.json")).toHaveLength(5);
+  });
+
+  describe("the npm package's manifest", () => {
+    // The published CLI is the project under another name: its manifest names
+    // the package (`npmPackage`), describes the project in the project's
+    // words, points home at the docs, at the repository and its issues, and
+    // carries the root's license — every one a copy of a fact, checked here.
+    const PATH = "packages/switchboard/package.json";
+    const good = {
+      name: "@acme/switchboard",
+      description: "Mention it and an agent does the work.",
+      license: "Apache-2.0",
+      homepage: "https://docs.switchboard.example.com",
+      repository: {
+        type: "git",
+        url: "git+https://github.com/acme/switchboard.git",
+        directory: "packages/switchboard",
+      },
+      bugs: { url: "https://github.com/acme/switchboard/issues" },
+    };
+    const rootPkg = JSON.stringify({ ...JSON.parse(goodPkg), license: "Apache-2.0" });
+
+    it("is silent when every field is the fact", () => {
+      expect(factsProblems(facts, { "package.json": rootPkg, [PATH]: JSON.stringify(good) })).toEqual([]);
+    });
+
+    it("names each field that strays: the package name, the description, the license, the homepage, the repository URL and directory, the issues URL", () => {
+      const bad = {
+        name: "switchboard-cli",
+        description: "something else",
+        license: "MIT",
+        homepage: "https://github.com/acme/switchboard#readme",
+        repository: { type: "git", url: "git+https://github.com/someone-else/switchboard.git", directory: "cli" },
+        bugs: { url: "https://github.com/acme/switchboard/discussions" },
+      };
+      const what = factsProblems(facts, { "package.json": rootPkg, [PATH]: JSON.stringify(bad) }).map(
+        (p) => `${p.file}: ${p.what}`,
+      );
+      expect(what).toEqual([
+        `${PATH}: name is "switchboard-cli", project.json says npmPackage "@acme/switchboard"`,
+        `${PATH}: description is "something else", project.json says "Mention it and an agent does the work."`,
+        `${PATH}: license is "MIT", the root package.json says "Apache-2.0"`,
+        `${PATH}: homepage should be https://docs.switchboard.example.com`,
+        `${PATH}: repository.url should be git+https://github.com/acme/switchboard.git`,
+        `${PATH}: repository.directory should be packages/switchboard`,
+        `${PATH}: bugs.url should be https://github.com/acme/switchboard/issues`,
+      ]);
+    });
   });
 
   describe("the README's badges", () => {
@@ -294,7 +342,10 @@ describe("factsProblems", () => {
 describe("the repository's own facts", () => {
   it("every checked file exists and agrees with project.json", () => {
     const own = JSON.parse(read("project.json")) as typeof facts;
-    const files: Record<string, string> = { "package.json": read("package.json") };
+    const files: Record<string, string> = {
+      "package.json": read("package.json"),
+      [PACKAGE_MANIFEST]: read(PACKAGE_MANIFEST),
+    };
     for (const f of CHECKED_FILES) files[f] = read(f);
     expect(factsProblems(own, files)).toEqual([]);
   });

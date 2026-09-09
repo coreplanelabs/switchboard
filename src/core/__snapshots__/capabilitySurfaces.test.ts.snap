@@ -59,11 +59,11 @@ exports[`capability axis — a capability turning on changes exactly the command
 `;
 
 exports[`capability surfaces — cloud-full > CLI catalogue 1`] = `
-"usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]
-       npx tsx src/cli.ts <group> <verb> --help
-       npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"
-       npx tsx src/cli.ts init [--option value…]          (= setup init: the installer)
-       npx tsx src/cli.ts help
+"usage: switchboard <group> <verb> [args…] [--option value…] [--json]
+       switchboard <group> <verb> --help
+       switchboard ask [--thread <key>] "[agent:name] [model:provider/model] your request"
+       switchboard init [--option value…]          (= setup init: the installer)
+       switchboard help
 
 commands:
   help show            — What Switchboard can do: agents, per-request directives, and every chat command.
@@ -258,11 +258,11 @@ exports[`capability surfaces — cloud-full > web seeds: /runs (capabilities, re
 `;
 
 exports[`capability surfaces — local-full > CLI catalogue 1`] = `
-"usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]
-       npx tsx src/cli.ts <group> <verb> --help
-       npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"
-       npx tsx src/cli.ts init [--option value…]          (= setup init: the installer)
-       npx tsx src/cli.ts help
+"usage: switchboard <group> <verb> [args…] [--option value…] [--json]
+       switchboard <group> <verb> --help
+       switchboard ask [--thread <key>] "[agent:name] [model:provider/model] your request"
+       switchboard init [--option value…]          (= setup init: the installer)
+       switchboard help
 
 commands:
   help show            — What Switchboard can do: agents, per-request directives, and every chat command.
@@ -432,11 +432,11 @@ exports[`capability surfaces — local-full > web seeds: /runs (capabilities, re
 `;
 
 exports[`capability surfaces — minimal > CLI catalogue 1`] = `
-"usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]
-       npx tsx src/cli.ts <group> <verb> --help
-       npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"
-       npx tsx src/cli.ts init [--option value…]          (= setup init: the installer)
-       npx tsx src/cli.ts help
+"usage: switchboard <group> <verb> [args…] [--option value…] [--json]
+       switchboard <group> <verb> --help
+       switchboard ask [--thread <key>] "[agent:name] [model:provider/model] your request"
+       switchboard init [--option value…]          (= setup init: the installer)
+       switchboard help
 
 commands:
   help show            — What Switchboard can do: agents, per-request directives, and every chat command.

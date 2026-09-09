@@ -1,0 +1,13 @@
+{
+  // Typecheck for the package's own build and tests; the CLI they bundle is
+  // typechecked by the root tsconfig. noEmit-only — esbuild writes dist/.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // The tests import the build by its real extension (`./build.mts`), the way vitest resolves it.
+    "allowImportingTsExtensions": true,
+    "rootDir": "../..",
+    "sourceMap": false
+  },
+  "include": ["*.mts", "../../src/**/*"]
+}
