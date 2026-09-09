@@ -188,6 +188,7 @@ export default defineConfig({
           { text: "Authorization", link: "/reference/authorization" },
           { text: "Dashboard routes", link: "/reference/dashboard-routes" },
           { text: "Code map", link: "/reference/code-map" },
+          { text: "Migration notes", link: "/reference/migrations" },
           { text: "Specs", link: "/reference/specs/", collapsed: true, items: specItems },
         ],
       },

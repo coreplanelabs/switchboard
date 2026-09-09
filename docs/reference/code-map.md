@@ -6,19 +6,21 @@ Where each part of Switchboard lives, what it owns, and the rule that keeps it t
 
 The map at a glance: each area of the product, where it lives, and the spec that states what it must do.
 
-| Area | Path | Spec |
-|---|---|---|
-| Orchestration: directives, resolution, gates, history, the run — one entry point over a pipeline of stages | `src/core/dispatcher.ts`, `src/core/dispatch/` | [`routing-and-config.md`](specs/routing-and-config.md), [`run-loop.md`](specs/run-loop.md) |
-| Commands once, every surface (chat, CLI, HTTP, MCP) | `src/core/commandRegistry.ts`, `commands/`, `commandSurface.ts` | [`command-registry.md`](specs/command-registry.md) |
-| Authorization: actors, grants, the policy table, predicates | `src/core/authz/` | [`authorization.md`](specs/authorization.md) |
-| Runs: live registry, history, tracing, the run page | `src/core/runRegistry.ts`, `runStore.ts`, `runsService.ts`, `trace/`, `src/channels/liveView.ts` | [`run-history.md`](specs/run-history.md), [`live-view.md`](specs/live-view.md), [`tracing.md`](specs/tracing.md) |
-| Channels: Slack (transport only), HTTP, MCP ingress | `src/channels/` | [`slack-channel.md`](specs/slack-channel.md), [`http-ingress.md`](specs/http-ingress.md), [`mcp-ingress.md`](specs/mcp-ingress.md) |
-| Agents (data), providers, executors | `src/agents/`, `src/providers/`, `src/execution/` | [`agent-*.md`](specs/README.md), [`execution.md`](specs/execution.md), [`resident-repos.md`](specs/resident-repos.md) |
-| Memory, skills, MCP tools, GitHub tools | `src/core/memory/`, `src/skills/`, `src/mcp/`, `src/tools/` | [`memory.md`](specs/memory.md), [`skills.md`](specs/skills.md), [`mcp-tools.md`](specs/mcp-tools.md), [`github-tools.md`](specs/github-tools.md) |
-| The dashboard (Vue) served from the bot's seed | `web/` | [`live-view.md`](specs/live-view.md) |
-| The runtime Workers and the docs Worker | `deploy/cloudflare*/` | [`release-and-deploy.md`](specs/release-and-deploy.md), [`docs-site.md`](specs/docs-site.md) |
-| Deploy selection, order, and live gate | `src/deploy/` | [`release-and-deploy.md`](specs/release-and-deploy.md) |
-| Human docs and their generated tables | `docs/`, `src/docs/` | [`docs-site.md`](specs/docs-site.md) |
+| Area | Scope | Path | Spec |
+|---|---|---|---|
+| Orchestration: directives, resolution, gates, history, the run — one entry point over a pipeline of stages | `dispatcher`, `core` | `src/core/dispatcher.ts`, `src/core/dispatch/` | [`routing-and-config.md`](specs/routing-and-config.md), [`run-loop.md`](specs/run-loop.md) |
+| Configuration: the schema, the layers a message resolves through, runtime overrides and their validation | `config` | `src/config.ts`, `src/config/` | [`routing-and-config.md`](specs/routing-and-config.md) |
+| Commands once, every surface (chat, CLI, HTTP, MCP) | `commands`, `cli`, `init`, `setup` | `src/core/commandRegistry.ts`, `commands/`, `commandSurface.ts` | [`command-registry.md`](specs/command-registry.md) |
+| Authorization: actors, grants, the policy table, predicates | `authz` | `src/core/authz/` | [`authorization.md`](specs/authorization.md) |
+| Runs: live registry, history, tracing, the run page | `runs`, `tracing`, `costs` | `src/core/runRegistry.ts`, `runStore.ts`, `runsService.ts`, `trace/`, `src/channels/liveView.ts` | [`run-history.md`](specs/run-history.md), [`live-view.md`](specs/live-view.md), [`tracing.md`](specs/tracing.md) |
+| Channels: Slack (transport only), HTTP, MCP ingress | `slack`, `http`, `mcp` | `src/channels/` | [`slack-channel.md`](specs/slack-channel.md), [`http-ingress.md`](specs/http-ingress.md), [`mcp-ingress.md`](specs/mcp-ingress.md) |
+| Agents (data), providers, executors | `agents`, `review`, `coding`, `ship`, `research`, `general`, `providers`, `resident`, `sandbox` | `src/agents/`, `src/providers/`, `src/execution/` | [`agent-*.md`](specs/README.md), [`execution.md`](specs/execution.md), [`resident-repos.md`](specs/resident-repos.md) |
+| Memory, skills, MCP tools, GitHub tools | `memory`, `skills`, `tools` | `src/core/memory/`, `src/skills/`, `src/mcp/`, `src/tools/` | [`memory.md`](specs/memory.md), [`skills.md`](specs/skills.md), [`mcp-tools.md`](specs/mcp-tools.md), [`github-tools.md`](specs/github-tools.md) |
+| The dashboard (Vue) served from the bot's seed | `web` | `web/` | [`live-view.md`](specs/live-view.md) |
+| The runtime Workers and the docs Worker | `workers` | `deploy/cloudflare*/` | [`release-and-deploy.md`](specs/release-and-deploy.md), [`docs-site.md`](specs/docs-site.md) |
+| Deploy selection, order, and live gate | `deploy` | `src/deploy/` | [`release-and-deploy.md`](specs/release-and-deploy.md) |
+| Human docs and their generated tables | `docs` | `docs/`, `src/docs/` | [`docs-site.md`](specs/docs-site.md) |
+| The repository's own process: CI, the checks, releases, dependency updates — `deps` and `main` are the bots' scopes (Dependabot's `chore(deps)` and `ci(deps)`, release-please's `chore(main): release …`) | `process`, `release`, `deps`, `main` | `.github/`, `scripts/`, `release-please-config.json`, `CONTRIBUTING.md` | [`release-and-deploy.md`](specs/release-and-deploy.md) |
 
 ## Modules
 

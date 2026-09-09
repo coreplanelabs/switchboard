@@ -34,7 +34,7 @@
       "when": "When only the bot changed."
     },
     "check:consistency": {
-      "does": "The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, spec bindings, project facts, this table).",
+      "does": "The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, specs, project facts, this table).",
       "when": "After touching a generated or declared artifact; one CI leg."
     },
     "test": {
@@ -94,7 +94,7 @@
       "when": "After bumping either half of a pair."
     },
     "check:pr-title": {
-      "does": "Judges one PR title against Conventional Commits with the types release-please knows.",
+      "does": "Judges one PR title as the changelog line it becomes: grammar, type, scope, the migration note behind `!`.",
       "when": "`-- \"feat(scope): …\"` before opening a PR; CI's `title` check runs it."
     },
     "check:dist": {
@@ -139,11 +139,11 @@
     },
     "specs:coverage": {
       "does": "Maps a change's paths to the specs whose `Code`/`Tests` headers cover them, then lists changed source paths no spec covers.",
-      "when": "`-- --changed origin/main...HEAD` before review (the review agent runs it); `-- --require` fails on an uncovered path (warn-only today); `-- --json` for machines."
+      "when": "`-- --changed origin/main...HEAD` before review; `-- --require` fails on an uncovered path (warn-only today); `-- --json` for machines."
     },
     "decisions:check": {
       "does": "Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`.",
-      "when": "Part of `check:consistency`; when a record fails it, write a new record and supersede the old one instead of editing it."
+      "when": "Part of `check:consistency`; a failing record is superseded by a new one, never edited."
     },
     "hygiene:check": {
       "does": "The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks.",
@@ -151,7 +151,7 @@
     },
     "hygiene:gen": {
       "does": "Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`.",
-      "when": "Part of `fix`, safe to run blindly: new imprint fails it like `hygiene:check`."
+      "when": "Part of `fix`; new imprint fails it like `hygiene:check`."
     },
     "agents:gen": {
       "does": "Writes the Commands table in AGENTS.md from `package.json` and this file.",
@@ -162,7 +162,7 @@
       "when": "Part of `check:consistency`."
     },
     "clock:gen": {
-      "does": "Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree — empty since the ratchet reached zero, so a regeneration that is not `{}` names a new direct read.",
+      "does": "Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree — empty since the ratchet reached zero; a result that is not `{}` names a new direct read.",
       "when": "Part of `fix`."
     },
     "clock:check": {
@@ -199,7 +199,7 @@
     },
     "screenshots:gen": {
       "does": "Renders the dashboard's screenshots from the fixture preview, both themes, and records their inputs' hashes in `docs/public/screenshots/manifest.json`.",
-      "when": "After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`. Not part of `fix`: it needs a browser."
+      "when": "After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`, so it is not part of `fix`."
     },
     "screenshots:check": {
       "does": "The dashboard's source and fixtures still hash to what the screenshots were rendered from — no browser.",

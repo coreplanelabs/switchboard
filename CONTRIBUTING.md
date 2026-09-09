@@ -122,20 +122,80 @@ retell an incident. The changelog and the decision records carry provenance.
 ## Pull requests
 
 - Keep a PR to one coherent change. Stacked PRs are fine for a series.
-- Use [conventional commits](https://www.conventionalcommits.org) for the PR
-  title: `feat(slack): …`, `fix(runner): …`, `docs: …`, `refactor: …`,
-  `chore: …`. A breaking change carries `!` after the type. The title is the
-  squash commit's subject and a changelog line, so the `title` check requires
-  the grammar on every PR; the allowed types are the ones
-  `release-please-config.json` maps to changelog sections. Try a title locally
-  with `npm run check:pr-title -- "feat(slack): …"`. A revert is
-  `revert: <the original title>` (retitle what GitHub's Revert button opens).
+- Title the PR as the changelog line it becomes:
+  `type(scope): what a reader can now do or expect` — the rule, the vocabulary
+  and the examples are the [next section](#the-pr-title-is-the-changelog-line).
 - Fill in the template: two sentences a stranger can read, what and why, how
   you proved it. Visual changes include before/after screenshots.
 - Rewrite the branch before review so each commit is a reviewable unit; a
   trail of "fix review comment" commits is squashed before merge.
 - A maintainer reviews every PR. Address every comment, or say why not, and
   resolve the thread. Re-request review when the branch is ready again.
+
+## The PR title is the changelog line
+
+The squash commit on `main` carries the PR title and nothing else — the body
+stays on the PR — and release-please writes the changelog and the release
+notes from those subjects, one line per PR, with the PR link appended. So the
+title is not a label for reviewers; it is the one line an operator reads to
+learn what changed. Write it as that line, in
+[Conventional Commits](https://www.conventionalcommits.org) form:
+
+```
+type(scope): what a reader can now do or expect
+```
+
+- **`type`** decides the version bump and where the line lands. `feat`
+  (minor), `fix` (patch), `perf`, `revert` and `docs` appear in the release
+  notes under Features, Bug fixes, Performance, Reverts and Documentation, and
+  `refactor` under Refactoring; `chore`, `ci`, `build`, `style` and `test` are
+  hidden — in the history, not in the notes. `release-please-config.json` is
+  the list.
+- **`scope`** says which part of the product, in the name the docs use: one of
+  the Scope column of the [code map's Areas](docs/reference/code-map.md#areas)
+  — `dispatcher`, `core`, `config`, `commands`, `cli`, `init`, `setup`,
+  `authz`, `runs`, `tracing`, `costs`, `slack`, `http`, `mcp`, `agents`,
+  `review`, `coding`, `ship`, `research`, `general`, `providers`, `resident`,
+  `sandbox`, `memory`, `skills`, `tools`, `web`, `workers`, `deploy`, `docs`,
+  `process`, `release` (`deps` and `main` are Dependabot's and
+  release-please's). A tree-wide change has no scope. A plan, a project phase
+  or a file's name is not a scope (`oss`, `readme`, `site`, `visuals` are
+  `process` or `docs`): the reader does not know them.
+- **The description** is what changed for someone running or reading the
+  product, present tense, in the docs' words. No internal names (a plan, a
+  phase, "PR 3 of 6"), no issue numbers (release-please appends the PR link),
+  no trailing period. One change per title: a title that needs "and" twice is
+  two PRs.
+- **A breaking change** is `!` after the type — the only way to declare one,
+  since a squash commit with no body has no `BREAKING CHANGE:` footer — plus
+  its note in [Migration notes](docs/reference/migrations.md), under the
+  section for the release it cuts: `## <major + 1>.0.0` from `package.json`'s
+  version. The first breaking PR of a cycle creates the section; each later one
+  adds its lines to it. The check asks only that the section exists — the lines
+  are yours to add, in the same PR: what no longer works, what replaces it,
+  and the smallest edit that gets an installation across. The note lives in
+  the tree, not in the PR body, because the body never reaches the reader:
+  release-please regenerates the release PR on every push and builds the notes
+  from titles alone.
+
+The `title` check enforces all of it on every PR — grammar, type list, scope
+list, the migration section behind a `!` — and gives the same verdict locally:
+`npm run check:pr-title -- "feat(slack): …"`. A revert is
+`revert: <the original title>` (retitle what GitHub's Revert button opens).
+
+From the changelog, three lines that do the job:
+
+- `feat(cli): switchboard init — the one-command installer`
+- `feat(review): the review agent reads the touched specs and files a contradiction as a finding`
+- `fix(deploy): fly.toml is an inert path for the deploy selection — its deletion no longer rolls the whole fleet`
+
+And three that made the reader work, with the line they should have been:
+
+| As merged | The problem | As it should read |
+|---|---|---|
+| `refactor(core): the dispatcher's run stage leaves as named functions (pipeline split, PR 5 of 6)` | "PR 5 of 6" is sequencing nobody outside the series can follow, and the area has a name of its own | `refactor(dispatcher): the run stage is named functions under src/core/dispatch/` |
+| `fix(resident): the attach's ref-exists shortcut names its invariant, and a cat-file failure is its own step error — the #NNN review fixes` | two changes, and an issue number standing in for the reason | `fix(resident): a cat-file failure during attach is reported as that step's error, not as a checkout failure` |
+| `fix: the review follow-ups from the Phase 7–9 PRs — effort levels from the ladder, a mermaid draw epoch, an escaped licence, a real workflow warning` | no scope, a phase name, four unrelated fixes under one line | four PRs, each its own line — e.g. `fix(docs): a mermaid diagram redraws when the site's theme changes` |
 
 ## Releases
 
@@ -144,8 +204,9 @@ commits accumulate into a release PR, and merging it tags the version, writes
 the changelog, publishes the release, and deploys production from CI — only the
 Workers the release actually changed, which the release PR lists in a comment
 before anyone merges it (every PR's `deploy targets` check shows the same for
-its own diff). Until 1.0, a minor version may change configuration keys or
-command syntax; the changelog calls out every such change with a migration note.
+its own diff). A change an installation must act on is a major version: its
+title carries `!`, and [Migration notes](docs/reference/migrations.md) carries
+its section, written in the PR that broke it.
 
 ## Where things live
 

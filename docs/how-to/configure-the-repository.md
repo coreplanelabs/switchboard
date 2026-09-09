@@ -24,7 +24,7 @@ Because the body is not part of the commit, a breaking change is declared in the
 
 ## 2. The `title` check
 
-Every PR title must fit `type(scope)!: description` — scope and `!` optional — with a type that `release-please-config.json` maps to a changelog section. The check is `.github/workflows/pr-title.yml`, one job named `title`, which runs `npm run check:pr-title` with the title in `PR_TITLE`. It re-runs when the title is edited, and it passes in the merge queue, where there is no title because it was checked on the PR.
+Every PR title must fit `type(scope)!: description` — scope and `!` optional — with a type that `release-please-config.json` maps to a changelog section and a scope the Scope column of the [code map's Areas](../reference/code-map.md#areas) names; a `!` title also needs its section in [Migration notes](../reference/migrations.md) (the squash commit has no body, so `!` is the only breaking-change marker release-please sees). The check is `.github/workflows/pr-title.yml`, one job named `title`, which runs `npm run check:pr-title` with the title in `PR_TITLE`. It re-runs when the title is edited, and it passes in the merge queue, where there is no title because it was checked on the PR.
 
 Run the same verdict locally:
 
@@ -32,7 +32,7 @@ Run the same verdict locally:
 npm run check:pr-title -- "feat(slack): thread admission"
 ```
 
-To add a commit type, add its section to `release-please-config.json`; the check reads the list from there. Dependabot's titles are made to fit by the `commit-message.prefix` in `.github/dependabot.yml`.
+To add a commit type, add its section to `release-please-config.json`; to add a scope, add it to the code map's Scope column; the check reads both lists from there. Dependabot's titles are made to fit by the `commit-message.prefix` in `.github/dependabot.yml`.
 
 ## 3. The ruleset for `main`
 
