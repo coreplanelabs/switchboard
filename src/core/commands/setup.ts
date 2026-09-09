@@ -49,6 +49,8 @@ export interface SetupCommandDeps {
     inCheckout(): boolean;
     /** `project.json`'s `image` — what the next commands run outside a checkout. */
     image(): string;
+    /** The published npm package this CLI runs from, when it does — the next `ask` is that package's; undefined in a checkout or the image. */
+    package(): string | undefined;
     env: Record<string, string | undefined>;
     /** How to ask for a missing answer; undefined when there is no terminal. */
     prompt?: Prompter;
@@ -156,6 +158,7 @@ export const setupInit = defineCommand({
       inCheckout: deps.setup.inCheckout(),
       env: deps.setup.env,
       image: deps.setup.image(),
+      ...(deps.setup.package() !== undefined ? { package: deps.setup.package() } : {}),
     });
     if (!plan.ok) throw new CommandError(plan.code, plan.problems.join("\n"));
     const dryRun = options.dryRun ?? false;

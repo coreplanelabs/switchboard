@@ -68,6 +68,8 @@ export interface InitWorld {
   env: Record<string, string | undefined>;
   /** `project.json`'s `image` — what the next commands run outside a checkout. */
   image: string;
+  /** The published npm package this CLI runs from, when it does — `project.json`'s `package`; undefined in a checkout or the image. */
+  package?: string;
 }
 
 export interface PlannedFile {
@@ -310,11 +312,12 @@ function profileFile(
 
 function nextCommands(world: InitWorld, profile: boolean): string[] {
   const image = `${world.image}:latest`;
+  const bot = `docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ${image}`;
+  // From the npm package: `ask` is the same package; the bot process is not in it — that is the image.
+  if (world.package !== undefined)
+    return [`npx ${world.package} ask "what can you do?"`, `${bot}   # the bot, from the published image`];
   if (!world.inCheckout)
-    return [
-      `docker run --rm -it --env-file .env -v "$PWD/config:/app/config:ro" ${image} ask "what can you do?"`,
-      `docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ${image}`,
-    ];
+    return [`docker run --rm -it --env-file .env -v "$PWD/config:/app/config:ro" ${image} ask "what can you do?"`, bot];
   const next = [
     'npm run cli -- ask "what can you do?"',
     "npx tsx src/index.ts",

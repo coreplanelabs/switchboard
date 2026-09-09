@@ -105,6 +105,10 @@ describe("the installed CLI", () => {
     expect(r.stdout).toContain("providers: anthropic");
     expect(r.stdout).toContain("ANTHROPIC_API_KEY=••••••••");
     expect(r.stdout).toContain("organization: acme");
+    // The next commands are the package's own ask and the bot from the image — never the checkout's `npm run cli`.
+    expect(r.stdout).toContain(`  npx ${facts.npmPackage} ask "what can you do?"`);
+    expect(r.stdout).toContain("# the bot, from the published image");
+    expect(r.stdout).not.toContain("npm run cli");
     expect(r.stdout).not.toContain("sk-test");
     for (const leak of [REPO_ROOT, tmp, "dist/assets", "node_modules"]) expect(r.stdout).not.toContain(leak);
     expect(existsSync(join(work, ".env"))).toBe(false);

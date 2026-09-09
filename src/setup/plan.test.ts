@@ -220,6 +220,14 @@ describe("planInit — the capability summary and the next commands", () => {
     ]);
   });
 
+  it("from the published npm package the next commands are the package's own ask and the bot from the image", () => {
+    const plan = planned(minimal, { inCheckout: false, package: "@example/switchboard" });
+    expect(plan.next).toEqual([
+      'npx @example/switchboard ask "what can you do?"',
+      'docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/example/switchboard:latest   # the bot, from the published image',
+    ]);
+  });
+
   it("outside a checkout (the container) the next commands run the published image against the written files", () => {
     const plan = planned(minimal, { inCheckout: false });
     expect(plan.next).toEqual([

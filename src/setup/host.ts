@@ -5,7 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { dirname, join, resolve } from "node:path";
 import { PROFILE_EXAMPLE_PATH } from "../deploy/profile.js";
-import { PACKAGE_ROOT } from "../packageRoot.js";
+import { PACKAGE_ROOT, RUNS_FROM_PUBLISHED_PACKAGE } from "../packageRoot.js";
 import type { InitTemplates, PlannedFile } from "./plan.js";
 
 // `switchboard init`, the host half: the templates come from the PACKAGE (the
@@ -104,11 +104,22 @@ export function ttyPrompter(
   };
 }
 
+/** One string fact from `project.json` at the package root; a missing one is an error naming it. */
+function projectFact(name: "image" | "npmPackage", root: string): string {
+  const facts = JSON.parse(readFileSync(join(root, "project.json"), "utf8")) as Record<string, unknown>;
+  const value = facts[name];
+  if (typeof value !== "string") throw new Error(`project.json: no \`${name}\` fact`);
+  return value;
+}
+
 /** `project.json`'s `image` fact, from the package root. */
 export function publishedImage(root: string = PACKAGE_ROOT): string {
-  const facts = JSON.parse(readFileSync(join(root, "project.json"), "utf8")) as { image?: unknown };
-  if (typeof facts.image !== "string") throw new Error("project.json: no `image` fact");
-  return facts.image;
+  return projectFact("image", root);
+}
+
+/** `project.json`'s `npmPackage` — the npm package name — from the package root. */
+export function publishedPackage(root: string = PACKAGE_ROOT): string {
+  return projectFact("npmPackage", root);
 }
 
 /** What `src/core/commands/setup.ts` binds to on a real host (see `SetupCommandDeps`). */
@@ -123,6 +134,8 @@ export function hostSetupIO(cwd: string = process.cwd()) {
     },
     inCheckout: () => isCheckoutRoot(cwd),
     image: () => publishedImage(),
+    // The name to run `ask` as next — only when this process IS the published package.
+    package: () => (RUNS_FROM_PUBLISHED_PACKAGE ? publishedPackage() : undefined),
     env: process.env,
     prompt: ttyPrompter(),
   };
