@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { PACKAGE_ROOT } from "./host.js";
+import { PACKAGE_ROOT } from "../packageRoot.js";
 
 // Feature: docs/reference/specs/init.md — the published image installs too:
 // `docker-entrypoint.sh` runs the bot with no arguments and the CLI with any,

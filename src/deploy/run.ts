@@ -32,6 +32,7 @@ import {
 } from "./plan.js";
 import { parseAppConfigText } from "../config.js";
 import { baseConfigDocument, ConfigDocumentClient, STATE_WORKER_TOKEN_ENV } from "../configDocument.js";
+import { PACKAGE_ROOT } from "../packageRoot.js";
 import { parseConfigSource, readConfigSource, type ConfigSourceIO } from "./configSource.js";
 import {
   isExampleProfile,
@@ -83,8 +84,6 @@ import {
 // touches processes; the plan and the live decisions are pure and unit-tested,
 // and the command (src/core/commands/deploy.ts) maps this result onto the
 // registry's error vocabulary.
-
-const REPO_ROOT = join(import.meta.dirname, "..", "..");
 
 export interface RunResult {
   code: number;
@@ -156,7 +155,10 @@ async function verifyTokenAgainstAccount(account: string, token: string): Promis
 
 async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]> {
   const problems: string[] = [];
-  const who = await run("npx", ["wrangler", "whoami"], { cwd: join(REPO_ROOT, "deploy/cloudflare"), unset: UNSET_ENV });
+  const who = await run("npx", ["wrangler", "whoami"], {
+    cwd: join(PACKAGE_ROOT, "deploy/cloudflare"),
+    unset: UNSET_ENV,
+  });
   const token = process.env.CLOUDFLARE_API_TOKEN;
   const account = decideAccount({
     account: plan.checks.account,
@@ -177,27 +179,27 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
       const key = check.command.join(" ");
       let r = checked.get(key);
       if (!r)
-        checked.set(key, (r = run("npx", [...check.command], { cwd: join(REPO_ROOT, step.dir), unset: UNSET_ENV })));
+        checked.set(key, (r = run("npx", [...check.command], { cwd: join(PACKAGE_ROOT, step.dir), unset: UNSET_ENV })));
       const result = await r;
       const problem = capabilityProblem(step.name, check, result.code, result.output);
       if (problem) problems.push(problem);
       else io.log(`[deploy:all] ${step.name}: credential can \`${key}\` (${check.needs})`);
     }
   }
-  const status = await run("git", ["status", "--porcelain"], { cwd: REPO_ROOT });
+  const status = await run("git", ["status", "--porcelain"], { cwd: PACKAGE_ROOT });
   if (status.output.trim() !== "")
     problems.push(
       "working tree is not clean — commit, stash, or deploy from a fresh checkout (wrangler builds the CURRENT tree)",
     );
   if (plan.checks.atOriginMain) {
     // A failed fetch would let the check pass against a stale origin/main — treat it as a problem, not a warning.
-    const fetch = await run("git", ["fetch", "-q", "origin"], { cwd: REPO_ROOT });
+    const fetch = await run("git", ["fetch", "-q", "origin"], { cwd: PACKAGE_ROOT });
     if (fetch.code !== 0)
       problems.push(
         `git fetch origin failed (exit ${fetch.code}): ${fetch.output.trim().split("\n").pop() ?? ""} — cannot verify HEAD == origin/main`,
       );
-    const head = (await run("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).output.trim();
-    const main = (await run("git", ["rev-parse", "origin/main"], { cwd: REPO_ROOT })).output.trim();
+    const head = (await run("git", ["rev-parse", "HEAD"], { cwd: PACKAGE_ROOT })).output.trim();
+    const main = (await run("git", ["rev-parse", "origin/main"], { cwd: PACKAGE_ROOT })).output.trim();
     if (head !== main)
       problems.push(
         `HEAD ${head.slice(0, 7)} != origin/main ${main.slice(0, 7)} — \`git checkout --detach origin/main\`, or pass --allow-branch deliberately`,
@@ -212,9 +214,9 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
   return problems;
 }
 
-/** The plan's `CheckoutProbe`: `<repo root>/<dir>/node_modules` exists. */
+/** The plan's `CheckoutProbe`: `<package root>/<dir>/node_modules` exists. */
 export function hasNodeModules(dir: string): boolean {
-  return existsSync(join(REPO_ROOT, dir, "node_modules"));
+  return existsSync(join(PACKAGE_ROOT, dir, "node_modules"));
 }
 
 /** Parse + validate profile JSON read from `where` (a path or a source reference — what errors name). */
@@ -263,7 +265,7 @@ export async function loadProfileOnHost(
         { path: PROFILE_EXAMPLE_PATH, origin: "example" },
       ];
   for (const c of candidates) {
-    const abs = c.path.startsWith("/") ? c.path : join(REPO_ROOT, c.path);
+    const abs = c.path.startsWith("/") ? c.path : join(PACKAGE_ROOT, c.path);
     if (!existsSync(abs)) {
       if (c.origin === "profile" && override) throw new Error(`${PROFILE_ENV}=${override}: no such file`);
       continue;
@@ -283,11 +285,11 @@ export async function loadProfileOnHost(
 export async function renderWorkerConfigsOnHost(
   io: Pick<DeployRunnerIO, "log">,
   env: Record<string, string | undefined> = process.env,
-  writeFile: (path: string, text: string) => void = (path, text) => writeFileSync(join(REPO_ROOT, path), text),
+  writeFile: (path: string, text: string) => void = (path, text) => writeFileSync(join(PACKAGE_ROOT, path), text),
 ): Promise<string[]> {
   const loaded = await loadProfileOnHost(env);
   const rendered = renderWorkerConfigs(loaded.profile, (path) => {
-    const abs = join(REPO_ROOT, path);
+    const abs = join(PACKAGE_ROOT, path);
     return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
   });
   if (!rendered.ok) return rendered.problems;
@@ -296,22 +298,22 @@ export async function renderWorkerConfigsOnHost(
   return [];
 }
 
-/** `deploy init`'s file access on this host: repo-relative paths under the checkout. */
+/** `deploy init`'s file access on this host: paths under the package root (src/packageRoot.ts). */
 export const hostDeployFiles = {
   read: async (path: string): Promise<string | undefined> => {
-    const abs = join(REPO_ROOT, path);
+    const abs = join(PACKAGE_ROOT, path);
     return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
   },
   write: async (path: string, text: string): Promise<void> => {
-    writeFileSync(join(REPO_ROOT, path), text);
+    writeFileSync(join(PACKAGE_ROOT, path), text);
   },
 };
 
-/** The config-source loaders' I/O on this host: files under the repo root, real fetch, the `op` CLI. */
+/** The config-source loaders' I/O on this host: files under the package root, real fetch, the `op` CLI. */
 function hostConfigSourceIO(): ConfigSourceIO {
   return {
     readFile: async (path) => {
-      const abs = path.startsWith("/") ? path : join(REPO_ROOT, path);
+      const abs = path.startsWith("/") ? path : join(PACKAGE_ROOT, path);
       return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
     },
     fetch: async (url, init) => {
@@ -319,7 +321,7 @@ function hostConfigSourceIO(): ConfigSourceIO {
       return { status: res.status, text: () => res.text() };
     },
     opRead: async (ref) => {
-      const r = await run("op", ["read", ref], { cwd: REPO_ROOT });
+      const r = await run("op", ["read", ref], { cwd: PACKAGE_ROOT });
       return r.code === 127 ? undefined : r;
     },
     env: process.env,
@@ -411,7 +413,7 @@ export async function pushConfigOnHost(opts: {
 }
 
 async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<boolean> {
-  const dir = join(REPO_ROOT, step.dir);
+  const dir = join(PACKAGE_ROOT, step.dir);
   if (hasNodeModules(step.dir)) return true;
   io.log(`[deploy:all] ${step.name}: node_modules missing — npm ci`);
   const r = await run("npm", ["ci", "--silent"], { cwd: dir });
@@ -515,7 +517,7 @@ export interface SandboxGateDeps {
 /** One read-only wrangler command in a Worker's dir, its `--json` payload parsed;
  *  `CLOUDFLARE_ACCOUNT_ID` stripped like every other wrangler call here. */
 async function wranglerJson(dir: string, args: string[]): Promise<Read<unknown>> {
-  const r = await run("npx", ["wrangler", ...args], { cwd: join(REPO_ROOT, dir), unset: UNSET_ENV });
+  const r = await run("npx", ["wrangler", ...args], { cwd: join(PACKAGE_ROOT, dir), unset: UNSET_ENV });
   if (r.code !== 0)
     return { error: `wrangler ${args.join(" ")} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}` };
   const parsed = parseWranglerJson(r.output);
@@ -678,7 +680,7 @@ async function readAppBeforeUpload(
 export type StepExec = (step: DeployStep, io: DeployRunnerIO) => Promise<RunResult>;
 const runStepCommand: StepExec = (step, io) =>
   run(step.command[0], step.command.slice(1), {
-    cwd: join(REPO_ROOT, step.dir),
+    cwd: join(PACKAGE_ROOT, step.dir),
     unset: step.unsetEnv,
     set: step.setEnv,
     stream: (c) => io.stream(c),
@@ -874,7 +876,7 @@ export async function runDeployPlan(
   // before its step counts as live. Read AFTER the origin/main check. If git fails this
   // is "" and `sameCommit` refuses anything under 7 chars, so the gate fails
   // closed (never a false "live") — and we say so up front rather than 18 min later.
-  const expectedCommit = (await run("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT })).output.trim();
+  const expectedCommit = (await run("git", ["rev-parse", "HEAD"], { cwd: PACKAGE_ROOT })).output.trim();
   if (!/^[0-9a-f]{40}$/.test(expectedCommit)) {
     return {
       kind: "refused",
@@ -946,7 +948,7 @@ export function formatDeployResults(results: readonly DeployStepResult[], notAtt
 
 /** One git command in the repo root; `undefined` on a non-zero exit. */
 async function git(args: string[]): Promise<string | undefined> {
-  const r = await run("git", args, { cwd: REPO_ROOT });
+  const r = await run("git", args, { cwd: PACKAGE_ROOT });
   return r.code === 0 ? r.output : undefined;
 }
 
@@ -995,7 +997,7 @@ export function hostAffectedProbe(
         : { error: `GET ${w.healthUrl} carries no build.commit` };
     },
     isAncestor: async (commit, head) =>
-      (await run("git", ["merge-base", "--is-ancestor", commit, head], { cwd: REPO_ROOT })).code === 0,
+      (await run("git", ["merge-base", "--is-ancestor", commit, head], { cwd: PACKAGE_ROOT })).code === 0,
     lastRelease: async () => {
       const tag = (await git(["describe", "--tags", "--match", "v*", "--abbrev=0", "HEAD^"]))?.trim();
       if (!tag) return undefined;

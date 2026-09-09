@@ -11,9 +11,8 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { PACKAGE_ROOT } from "../packageRoot.js";
 import { MANIFEST_PATH, type SecretsSource } from "./secrets.js";
-
-const REPO_ROOT = join(import.meta.dirname, "..", "..");
 
 /** What the command needs from the host — the manifest, which names have a value, and one put. */
 export interface SecretsHostIO {
@@ -28,10 +27,10 @@ export interface SecretsHostIO {
   put(source: SecretsSource, dir: string, name: string): Promise<{ code: number; output: string }>;
 }
 
-/** `~` at the front of a path is the operator's home; anything else is as written, repo-relative when relative. */
+/** `~` at the front of a path is the operator's home; anything else is as written, package-root-relative when relative. */
 export function expandDir(path: string): string {
   if (path === "~" || path.startsWith("~/")) return join(homedir(), path.slice(1));
-  return resolve(REPO_ROOT, path);
+  return resolve(PACKAGE_ROOT, path);
 }
 
 interface Spawned {
@@ -90,7 +89,7 @@ function wranglerBin(dir: string): string {
 
 export const hostSecretsIO: SecretsHostIO = {
   manifest: async () => {
-    const abs = join(REPO_ROOT, MANIFEST_PATH);
+    const abs = join(PACKAGE_ROOT, MANIFEST_PATH);
     return existsSync(abs) ? (JSON.parse(readFileSync(abs, "utf8")) as unknown) : undefined;
   },
   present: async (source, names) => {
@@ -113,7 +112,7 @@ export const hostSecretsIO: SecretsHostIO = {
       // op appends one trailing newline; the file form keeps the file as written.
       value = r.stdout.replace(/\n$/, "");
     }
-    const cwd = join(REPO_ROOT, dir);
+    const cwd = join(PACKAGE_ROOT, dir);
     const r = await spawnCollect(wranglerBin(cwd), ["secret", "put", name], { cwd, input: value });
     return { code: r.code, output: `${r.stdout}${r.stderr}` };
   },

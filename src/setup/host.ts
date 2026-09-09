@@ -5,18 +5,17 @@ import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { dirname, join, resolve } from "node:path";
 import { PROFILE_EXAMPLE_PATH } from "../deploy/profile.js";
+import { PACKAGE_ROOT } from "../packageRoot.js";
 import type { InitTemplates, PlannedFile } from "./plan.js";
 
 // `switchboard init`, the host half: the templates come from the PACKAGE (the
-// checkout this CLI runs from, or `/app` in the container), the files go to
+// checkout this CLI runs from, `/app` in the container, `dist/assets` in the
+// published package — src/packageRoot.ts), the files go to
 // the WORKING DIRECTORY (what `ask` and the bot read `./config/config.yaml`
 // and `.env` from), and the one file that carries secrets is created — or,
 // under --force, replaced — at mode 600. The prompt exists only on a terminal:
 // a secret is typed with the echo off, and a process without a TTY gets no
 // prompt at all, so a missing flag there is a refusal, never a hang.
-
-/** The root of the package this code runs from: `src/setup/` or `dist/setup/`, two up. */
-export const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
 
 /** Where each template lives under the package root. */
 export const TEMPLATE_PATHS: Readonly<Record<keyof InitTemplates, string>> = {

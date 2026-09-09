@@ -7,12 +7,12 @@ import {
   hostSetupIO,
   isCheckoutRoot,
   modeOf,
-  PACKAGE_ROOT,
   publishedImage,
   readTemplates,
   ttyPrompter,
   writePlannedFile,
 } from "./host.js";
+import { PACKAGE_ROOT } from "../packageRoot.js";
 import { CONFIG_PATH, ENV_PATH } from "./plan.js";
 
 // Feature: docs/reference/specs/init.md — the host half of `switchboard init`:
