@@ -35,6 +35,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0023 | [Cloudflare is the one supported production target; docker compose is the local loop](../decisions/0023-one-production-target.md) | One way to do it | accepted | 2026-09-09 |
 | 0024 | [The dispatcher is a pipeline of stages, split one file move at a time](../decisions/0024-dispatcher-as-a-staged-pipeline.md) | Pipeline (Pipes and Filters) with Interface Segregation, by Tidy First | superseded → [0025-dispatch-pipeline-as-built.md](../decisions/0025-dispatch-pipeline-as-built.md) | 2026-09-09 |
 | 0025 | [The dispatch pipeline as built, and the 800-line cap that keeps it that shape](../decisions/0025-dispatch-pipeline-as-built.md) | Pipeline (Pipes and Filters) with Interface Segregation — the as-built record | accepted | 2026-09-09 |
+| 0026 | [A run is a capability profile over three axes, named agents become presets, and a routing stage picks the profile](../decisions/0026-capability-profiles-and-request-routing.md) | Strategy as data + a routing filter in the pipeline, gated by the policy table | proposed | 2026-09-09 |
 
 <!-- /generated:decision-records -->
 
