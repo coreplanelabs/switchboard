@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.10.0](https://github.com/coreplanelabs/switchboard/compare/v1.9.0...v1.10.0) (2026-09-09)
+
+
+### Features
+
+* **review:** the review agent reads the touched specs and files a contradiction as a finding ([#763](https://github.com/coreplanelabs/switchboard/issues/763)) ([57e55a7](https://github.com/coreplanelabs/switchboard/commit/57e55a773dfc8e9f23409f3674b82e3add6832d2))
+
+
+### Bug fixes
+
+* the review follow-ups from the Phase 7–9 PRs — effort levels from the ladder, a mermaid draw epoch, an escaped licence, a real workflow warning ([#767](https://github.com/coreplanelabs/switchboard/issues/767)) ([08e1280](https://github.com/coreplanelabs/switchboard/commit/08e12805b77a49b94a286a23c0f2c3d9d4bbc8e3))
+
 ## [1.9.0](https://github.com/coreplanelabs/switchboard/compare/v1.8.0...v1.9.0) (2026-09-09)
 
 
