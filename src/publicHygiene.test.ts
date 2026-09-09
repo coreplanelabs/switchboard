@@ -73,9 +73,10 @@ describe("the classes", () => {
 });
 
 describe("scope", () => {
-  it("the public tree: src, deploy, web, scripts, config, docs, .github and the root markdown; not plans, the changelog, generated notices, lockfiles, binaries, or the ratchet's own files", () => {
+  it("the public tree: src, deploy, web, scripts, config, docs, .github, packages and the root markdown; not plans, the changelog, generated notices, lockfiles, binaries, or the ratchet's own files", () => {
     for (const p of [
       "src/core/dispatcher.ts",
+      "packages/switchboard/package.json",
       "deploy/cloudflare/wrangler.template.jsonc",
       "web/src/App.vue",
       "scripts/docs-gen.ts",

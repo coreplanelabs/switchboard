@@ -33,7 +33,7 @@ export const CLASSES = {
   dates: /\b20\d\d-\d\d-\d\d\b/,
 };
 
-const SCOPE_PREFIXES = ["src/", "deploy/", "web/", "scripts/", "config/", "docs/", ".github/"];
+const SCOPE_PREFIXES = ["src/", "deploy/", "web/", "scripts/", "config/", "docs/", ".github/", "packages/"];
 const EXCLUDED_PREFIXES = ["docs/plans/"];
 const EXCLUDED_FILES = new Set([
   "CHANGELOG.md",

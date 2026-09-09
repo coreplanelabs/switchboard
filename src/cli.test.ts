@@ -22,6 +22,7 @@ import {
   loadBotConfig,
   missingBotConfig,
   parseCliArgv,
+  programName,
   runCli,
   runCommand,
   USAGE,
@@ -432,6 +433,11 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     expect(parseCliArgv(["init", "--help"], commands)).toEqual({ kind: "command-help", id: "setup.init" });
     expect(parseCliArgv(["init", "--bogus"], commands)).toMatchObject({ kind: "invalid", code: "invalid_input" });
     expect(USAGE).toContain("init [--option value…]");
+    // The usage text spells the program the way it was started: the checkout's tsx form, else the bin's name.
+    expect(programName("/repo/src/cli.ts")).toBe("npx tsx src/cli.ts");
+    expect(programName("/tmp/x/node_modules/.bin/switchboard")).toBe("switchboard");
+    expect(programName("/app/dist/cli.js")).toBe("switchboard");
+    expect(programName(undefined)).toBe("switchboard");
     // Only a BARE `help` is the catalogue: `help show` is the registered command (the conformance suite found it unreachable).
     expect(parseCliArgv(["help", "show"], commands)).toMatchObject({ kind: "command", id: "help.show" });
     expect(parseCliArgv(["help", "show", "--help"], commands)).toEqual({ kind: "command-help", id: "help.show" });

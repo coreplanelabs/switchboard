@@ -10,9 +10,9 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { PACKAGE_ROOT } from "../packageRoot.js";
-import { MANIFEST_PATH, type SecretsSource } from "./secrets.js";
+import { isAbsolute, join, resolve } from "node:path";
+import { PACKAGE_ROOT, RUNS_FROM_PUBLISHED_PACKAGE } from "../packageRoot.js";
+import { DEFAULT_SECRETS_DIR, MANIFEST_PATH, type SecretsSource } from "./secrets.js";
 
 /** What the command needs from the host — the manifest, which names have a value, and one put. */
 export interface SecretsHostIO {
@@ -27,10 +27,31 @@ export interface SecretsHostIO {
   put(source: SecretsSource, dir: string, name: string): Promise<{ code: number; output: string }>;
 }
 
-/** `~` at the front of a path is the operator's home; anything else is as written, package-root-relative when relative. */
-export function expandDir(path: string): string {
+/** Where a relative `secretsSource` directory is looked for: the package root — the checkout, where the profile lives. */
+export interface SecretsDirRoot {
+  root: string;
+  /** True when this process is the published npm package: a relative path would land inside its shipped assets. */
+  published: boolean;
+}
+
+const HOST_ROOT: SecretsDirRoot = { root: PACKAGE_ROOT, published: RUNS_FROM_PUBLISHED_PACKAGE };
+
+/**
+ * `~` at the front of a path is the operator's home; an absolute path is as
+ * written; a relative path is under the package root — the checkout. From the
+ * published package there is no checkout: a relative path would resolve inside
+ * the package's own `dist/assets/`, which holds no operator's secrets, so it is
+ * refused (thrown) naming the forms that do work, rather than read as "no such
+ * directory" somewhere under node_modules.
+ */
+export function expandDir(path: string, at: SecretsDirRoot = HOST_ROOT): string {
   if (path === "~" || path.startsWith("~/")) return join(homedir(), path.slice(1));
-  return resolve(PACKAGE_ROOT, path);
+  if (isAbsolute(path)) return path;
+  if (at.published)
+    throw new Error(
+      `secretsSource ${path}: a relative directory resolves inside the installed package (${at.root}), not an operator's secrets — use an absolute path or ~/<dir> (the default is ${DEFAULT_SECRETS_DIR})`,
+    );
+  return resolve(at.root, path);
 }
 
 interface Spawned {
@@ -94,7 +115,12 @@ export const hostSecretsIO: SecretsHostIO = {
   },
   present: async (source, names) => {
     if (source.kind === "dir") {
-      const dir = expandDir(source.path);
+      let dir: string;
+      try {
+        dir = expandDir(source.path);
+      } catch (err) {
+        return { ok: false, problem: err instanceof Error ? err.message : String(err) };
+      }
       if (!existsSync(dir)) return { ok: false, problem: `secretsSource ${source.path}: no such directory (${dir})` };
       return { ok: true, present: new Set(names.filter((n) => existsSync(join(dir, n)))) };
     }

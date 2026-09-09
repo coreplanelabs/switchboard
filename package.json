@@ -27,7 +27,8 @@
     "deploy/cloudflare-memory",
     "deploy/cloudflare-resident",
     "deploy/cloudflare-sandbox",
-    "deploy/cloudflare-docs"
+    "deploy/cloudflare-docs",
+    "packages/switchboard"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

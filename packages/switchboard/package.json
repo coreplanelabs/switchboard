@@ -1,0 +1,51 @@
+{
+  "name": "@coreplane/switchboard",
+  "version": "1.11.0",
+  "private": true,
+  "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.",
+  "license": "Apache-2.0",
+  "homepage": "https://openswitchboard.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coreplanelabs/switchboard.git",
+    "directory": "packages/switchboard"
+  },
+  "bugs": {
+    "url": "https://github.com/coreplanelabs/switchboard/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "switchboard": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsx build.mts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "licenses:check": "node ../../scripts/licenses-check.mjs",
+    "verify": "npm run build && npm run typecheck && npm run licenses:check && npm test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
+    "e2b": "^2.46.1",
+    "mdast-util-from-markdown": "^2.0.3",
+    "undici": "^8.10.2",
+    "yaml": "^2.7.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.0"
+  }
+}

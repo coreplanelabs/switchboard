@@ -160,3 +160,16 @@ docs/reference/specs/public-hygiene.md	4. **A legitimate line is allowed by name
 
 # The tutorial's clone command: the project's own repository URL, held equal to project.json by check:project-facts.
 docs/tutorials/get-started.md	git clone https://github.com/coreplanelabs/switchboard.git
+
+# The npm package is the project under its published name — the `package` fact in project.json, held equal here by check:project-facts — and its manifest and README name the repository and the image the same way the root's do.
+packages/switchboard/package.json	"name": "@coreplane/switchboard",
+packages/switchboard/package.json	"url": "git+https://github.com/coreplanelabs/switchboard.git",
+packages/switchboard/package.json	"url": "https://github.com/coreplanelabs/switchboard/issues"
+packages/switchboard/README.md	# @coreplane/switchboard
+packages/switchboard/README.md	The OpenSwitchboard command line: the installer and the operator commands of [Switchboard](https://github.com/coreplanelabs/switchboard), an agent gateway — mention it in Slack and an agent reviews the PR, ships the fix, or answers the question, on the model you choose, with its tools running where you decide.
+packages/switchboard/README.md	npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key <your key>
+packages/switchboard/README.md	npx @coreplane/switchboard ask "what can you do?"
+packages/switchboard/README.md	The bot itself — the always-on process that connects to Slack — is the published container image, `ghcr.io/coreplanelabs/switchboard`; deploying it on Cloudflare starts from a checkout of the repository. Everything else: <https://openswitchboard.dev>.
+
+# The smoke test's --cloudflare refusal needs an account id of the real shape (32 hex characters); this is the documented synthetic one, not an account.
+packages/switchboard/smoke.test.mts	"0123456789abcdef0123456789abcdef",

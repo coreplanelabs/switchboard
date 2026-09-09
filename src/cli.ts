@@ -80,12 +80,21 @@ const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
 export const CLI_CALLER: Caller = { kind: "cli", id: CLI_ACTOR.id, actor: CLI_ACTOR };
 
+/** How the usage text spells this program: the checkout's `npx tsx src/cli.ts`
+ *  when Node was started on a TypeScript file (tsx, `npm run cli`), else
+ *  `switchboard` — the published package's bin and the image's entrypoint. */
+export function programName(entry: string | undefined): string {
+  return entry?.endsWith(".ts") ? "npx tsx src/cli.ts" : "switchboard";
+}
+
+const PROGRAM = programName(process.argv[1]);
+
 export const USAGE = [
-  "usage: npx tsx src/cli.ts <group> <verb> [args…] [--option value…] [--json]",
-  "       npx tsx src/cli.ts <group> <verb> --help",
-  '       npx tsx src/cli.ts ask [--thread <key>] "[agent:name] [model:provider/model] your request"',
-  "       npx tsx src/cli.ts init [--option value…]          (= setup init: the installer)",
-  "       npx tsx src/cli.ts help",
+  `usage: ${PROGRAM} <group> <verb> [args…] [--option value…] [--json]`,
+  `       ${PROGRAM} <group> <verb> --help`,
+  `       ${PROGRAM} ask [--thread <key>] "[agent:name] [model:provider/model] your request"`,
+  `       ${PROGRAM} init [--option value…]          (= setup init: the installer)`,
+  `       ${PROGRAM} help`,
 ].join("\n");
 
 /** One-word spellings of a registry command — `init` for the installer. The
