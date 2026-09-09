@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { formatConfigDescription, MAX_INSTRUCTIONS_LENGTH, type ConfigDescription, type Scope } from "../../config.js";
+import { formatConfigDescription, type ConfigDescription, type Scope } from "../../config.js";
+import { MAX_INSTRUCTIONS_LENGTH } from "../../config/validate.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
 import { authorize } from "../authz/authorize.js";
 import {
