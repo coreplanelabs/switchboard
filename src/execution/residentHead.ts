@@ -56,3 +56,30 @@ export function mirrorNeedsFetch(input: { refExists: boolean; mirrorSha?: string
   if (input.wantSha === null) return false;
   return input.mirrorSha !== input.wantSha;
 }
+
+/** What the attach checks out, once the mirror is as fresh as it will get. */
+export type AttachTarget =
+  /** The bound ref is in the mirror: clone its tip, as always. */
+  | { kind: "ref" }
+  /** The ref is gone but the commit the caller expects is in the mirror — a
+   *  merged PR's branch was deleted while `refs/pull/N/head` (a `--mirror`
+   *  clone carries every ref) still holds its head: check that commit out,
+   *  detached, instead of falling back to a cold sandbox that clones the same
+   *  commit itself. */
+  | { kind: "sha"; sha: string }
+  /** Neither: the attach is refused as `unknown-ref`. */
+  | { kind: "unknown-ref" };
+
+/** The attach target after the fetch (item 51). The ref wins whenever it
+ *  exists — a detached tree is only for a ref that is gone; a caller that
+ *  named no commit, or whose commit the mirror does not hold either, gets the
+ *  refusal it always got. */
+export function attachTarget(input: {
+  refExists: boolean;
+  wantSha: string | null;
+  commitInMirror: boolean;
+}): AttachTarget {
+  if (input.refExists) return { kind: "ref" };
+  if (input.wantSha !== null && input.commitInMirror) return { kind: "sha", sha: input.wantSha };
+  return { kind: "unknown-ref" };
+}

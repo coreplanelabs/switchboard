@@ -170,7 +170,7 @@ import {
   type DiskSample,
   type ThreadCostKind,
 } from "../../src/execution/residentDiskBudget.js";
-import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
+import { attachTarget, mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "../../src/execution/residentHead.js";
 import { residentText, sanitizeResidentBody } from "../../src/execution/residentText.js";
 import {
   abandonedWaitStepResult,
@@ -1647,6 +1647,15 @@ export class ResidentDO extends Sandbox<Env> {
     return (
       await this.runOk(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${ref}`], "rev-parse")
     ).trim();
+  }
+
+  /** Whether the mirror holds `sha` as a commit — reachable from any ref it
+   *  carries (a `--mirror` clone fetches `refs/pull/*` too, so a merged PR's
+   *  head outlives its deleted branch). `sha` is a validated full sha
+   *  (`parseWantSha`) before it reaches this argument. */
+  private async commitInMirror(sha: string): Promise<boolean> {
+    const r = await this.run(["git", "-C", MIRROR_DIR, "cat-file", "-e", `${sha}^{commit}`]);
+    return r.exitCode === 0;
   }
 
   /** Attach's fetch decision (item 51) over the mirror's actual state: the ref
@@ -3418,23 +3427,40 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       locked = await this.withMirrorLock(async () => {
         await this.ensureGitSetup();
-        if (await this.mirrorNeedsFetchFor(binding.ref, want)) {
+        const fetched = await this.mirrorNeedsFetchFor(binding.ref, want);
+        if (fetched) {
           await this.gitWithCred(
             fetchToken,
             ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
             "fetch",
             GIT_NETWORK_TIMEOUT_MS,
           );
-          if (!(await this.refExists(binding.ref))) {
-            throw new StepError(
-              "unknown-ref",
-              `ref ${JSON.stringify(binding.ref)} does not resolve in the mirror (even after a fetch)`,
-            );
-          }
         }
-        const sha = await this.readMirrorSha(binding.ref);
+        // What to check out, now that the mirror is as fresh as it will get
+        // (item 51, the pure `attachTarget`): the ref's tip when the ref is
+        // there; the expected commit, detached, when the ref is gone but the
+        // mirror holds the commit — a merged PR's branch was deleted while
+        // `refs/pull/N/head` still names its head, and the caller told us that
+        // head — so a review of a merged PR stays on the warm resident instead
+        // of falling back to a cold sandbox that clones the same commit itself.
+        const refExists = !fetched || (await this.refExists(binding.ref));
+        const target = attachTarget({
+          refExists,
+          wantSha: want,
+          commitInMirror: !refExists && want !== null && (await this.commitInMirror(want)),
+        });
+        if (target.kind === "unknown-ref") {
+          throw new StepError(
+            "unknown-ref",
+            `ref ${JSON.stringify(binding.ref)} does not resolve in the mirror (even after a fetch)` +
+              (want !== null ? `, and the mirror does not hold the expected commit ${want.slice(0, 7)} either` : ""),
+          );
+        }
+        const sha = target.kind === "sha" ? target.sha : await this.readMirrorSha(binding.ref);
         const threadLockKey = await this.lockfileKey(sha);
-        const recreated = await this.ensureThreadWorktree(binding, sha, mode.originUrl, mode.modeSwitch);
+        const recreated = await this.ensureThreadWorktree(binding, sha, mode.originUrl, mode.modeSwitch, {
+          detached: target.kind === "sha",
+        });
         return { sha, threadLockKey, recreated };
       }, ATTACH_MUTEX_WAIT_MS);
     } catch (err) {
@@ -3548,6 +3574,10 @@ export class ResidentDO extends Sandbox<Env> {
     sha: string,
     originUrl: string,
     modeSwitch: boolean,
+    /** `detached`: the bound ref is gone from the mirror and `sha` is the
+     *  expected commit it still holds (item 51) — the tree is checked out at
+     *  that commit, detached, instead of at a branch. */
+    opts: { detached: boolean } = { detached: false },
   ): Promise<boolean> {
     const wt = binding.worktreePath;
     const threadDir = parentDir(wt);
@@ -3583,9 +3613,23 @@ export class ResidentDO extends Sandbox<Env> {
     }
 
     await this.runOk(["rm", "-rf", wt], "worktree-clean");
-    await this.runOk(["git", "clone", "--no-hardlinks", "--branch", binding.ref, MIRROR_DIR, wt], "worktree-clone", {
-      timeoutMs: GIT_NETWORK_TIMEOUT_MS,
-    });
+    if (opts.detached) {
+      // No branch to clone: clone the mirror without a checkout, then check
+      // the expected commit out detached (`sha` is a validated full sha). A
+      // path clone copies the mirror's whole object store, so the commit is in
+      // the tree even though no branch of the clone names it; the detached
+      // HEAD then keeps it reachable.
+      await this.runOk(["git", "clone", "--no-hardlinks", "--no-checkout", MIRROR_DIR, wt], "worktree-clone", {
+        timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+      });
+      await this.runOk(["git", "-C", wt, "checkout", "--detach", "--quiet", sha], "worktree-detach", {
+        timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+      });
+    } else {
+      await this.runOk(["git", "clone", "--no-hardlinks", "--branch", binding.ref, MIRROR_DIR, wt], "worktree-clone", {
+        timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+      });
+    }
     await this.runOk(["chown", "-R", `${binding.user}:${binding.user}`, wt], "worktree-chown");
     // Writable: origin → GitHub (fetch/push via the per-attach credential file).
     // Read-only: origin stays the local mirror, which thread users cannot

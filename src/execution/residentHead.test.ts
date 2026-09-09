@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "./residentHead.js";
+import { attachTarget, mirrorNeedsFetch, parseWantSha, wantShaForBinding } from "./residentHead.js";
+
+// Feature: docs/reference/specs/resident-repos.md item 51 — the attach target once the
+// mirror is as fresh as it will get: the ref when it exists; the expected commit,
+// detached, when the ref is gone but the mirror holds the commit (a merged PR's
+// deleted branch, its head still under refs/pull/N/head); unknown-ref otherwise.
+describe("attachTarget", () => {
+  const sha = "e".repeat(40);
+  it("the ref exists → clone its tip, whatever was expected (the ref always wins over a detached tree)", () => {
+    expect(attachTarget({ refExists: true, wantSha: sha, commitInMirror: true })).toEqual({ kind: "ref" });
+    expect(attachTarget({ refExists: true, wantSha: null, commitInMirror: false })).toEqual({ kind: "ref" });
+  });
+  it("the ref is gone but the expected commit is in the mirror → check that commit out, detached", () => {
+    expect(attachTarget({ refExists: false, wantSha: sha, commitInMirror: true })).toEqual({ kind: "sha", sha });
+  });
+  it("the ref is gone and no commit was expected, or the mirror does not hold it either → unknown-ref, as before", () => {
+    expect(attachTarget({ refExists: false, wantSha: null, commitInMirror: false })).toEqual({ kind: "unknown-ref" });
+    expect(attachTarget({ refExists: false, wantSha: sha, commitInMirror: false })).toEqual({ kind: "unknown-ref" });
+  });
+});
 
 const TIP = "47c4230692cbc5961682532afb822e9c2f1f40b7";
 const OLD = "b54e38f9473f1578ec796c9495155307535ef51e";
