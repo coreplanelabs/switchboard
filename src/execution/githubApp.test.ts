@@ -115,7 +115,7 @@ describe("resolveGithubToken", () => {
     expect(JSON.stringify(log.ends)).not.toContain("ghs_traced");
   });
 
-  it("mints a READ-scoped token with a least-privilege permissions subset", async () => {
+  it("mints a READ-scoped token whose permissions are exactly contents, pull_requests, issues, actions, checks and metadata — all read", async () => {
     configureApp();
     const fetchMock = mockMint("ghs_read", 60 * 60_000);
     vi.stubGlobal("fetch", fetchMock);
@@ -124,11 +124,33 @@ describe("resolveGithubToken", () => {
     expect(await mod.resolveGithubToken("read")).toBe("ghs_read");
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     // The read token requests read-only permissions — it physically cannot
-    // write (no comment/review/push) even though the sandbox has `gh`.
+    // write (no comment/review/push) even though the sandbox has `gh` — and
+    // actions/checks let it read CI: workflow runs, jobs, logs, the cache list,
+    // check-runs.
     expect(JSON.parse(String(init.body))).toEqual({
-      permissions: { contents: "read", pull_requests: "read", issues: "read", metadata: "read" },
+      permissions: {
+        contents: "read",
+        pull_requests: "read",
+        issues: "read",
+        actions: "read",
+        checks: "read",
+        metadata: "read",
+      },
     });
     expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
+  });
+
+  it("every permission the read scope requests is read — the request never carries write or admin", async () => {
+    configureApp();
+    const fetchMock = mockMint("ghs_read_only", 60 * 60_000);
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+
+    await mod.resolveGithubToken("read");
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const { permissions } = JSON.parse(String(init.body)) as { permissions: Record<string, string> };
+    expect(Object.keys(permissions).length).toBeGreaterThan(0);
+    expect(new Set(Object.values(permissions))).toEqual(new Set(["read"]));
   });
 
   it("the default (write) scope requests NO permissions restriction — the full grant", async () => {
