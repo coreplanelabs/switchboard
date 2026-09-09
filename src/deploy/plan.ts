@@ -28,6 +28,7 @@
 
 import { formatAffectedText, type AffectedReport } from "./affected.js";
 import { BASE_CONFIG_DOCUMENT_KEY } from "../configDocument.js";
+import { WORK_AREA_DIR, type RootMode } from "./operatorRoot.js";
 import { profileUrls, type DeploymentProfile, type LoadedProfile, type WorkerKind } from "./profile.js";
 
 /** Env vars removed from every deploy step's environment. */
@@ -357,11 +358,14 @@ export interface DeployPlan {
   pollMs: number;
   checks: {
     account: string;
-    cleanTree: true;
+    /** The git checks — both false from the published package, where there is no tree and no git (`root.mode`). */
+    cleanTree: boolean;
     atOriginMain: boolean;
-    /** Step dirs (repo-relative) without `node_modules` when the plan was computed — the runner `npm ci`s each before its deploy. */
+    /** Step dirs (tree-relative) without their install when the plan was computed — the runner `npm ci`s each before its deploy. */
     nodeModulesMissing: string[];
   };
+  /** Where the deploy runs from (src/deploy/operatorRoot.ts): a checkout, or the published package in an operator's directory. */
+  root: DeployRoot;
   /** The deployment profile the plan was computed from. `deploy all` refuses a plan from the example. */
   profile: { origin: LoadedProfile["origin"]; path: string };
   /** The bot's runtime config: where it comes from, and the state Worker document the runner pushes it to
@@ -370,16 +374,28 @@ export interface DeployPlan {
   warnings: string[];
 }
 
-/** What the plan reads from the checkout it is computed in. The plan stays
- *  free of node:* imports; the runner (src/deploy/run.ts) supplies the real
- *  probe through the command deps. */
-export interface CheckoutProbe {
-  /** Does `<repo root>/<dir>/node_modules` exist? */
+/** Where a deploy runs from, as the plan carries and prints it: the repository root of a checkout, or the
+ *  operator's directory when the CLI is the published package — then at the package's version, with the
+ *  Worker directories materialised under `.switchboard/` (src/deploy/operatorRoot.ts, src/deploy/workArea.ts). */
+export interface DeployRoot {
+  mode: RootMode;
+  path: string;
+  /** The published package's version — the tree being deployed; absent in a checkout, where the commit is. */
+  version?: string;
+}
+
+/** What the plan reads from the host it is computed on. The plan stays free of
+ *  node:* imports; the runner (src/deploy/run.ts) supplies the real host
+ *  through the command deps. */
+export interface DeployHost {
+  root: DeployRoot;
+  /** Is the Worker directory installed — `<root>/<dir>/node_modules` in a checkout, the work area's stamp from the package? */
   hasNodeModules(dir: string): boolean;
 }
 
-export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe, loaded: LoadedProfile): DeployPlan {
+export function planDeploy(opts: DeployOptions, host: DeployHost, loaded: LoadedProfile): DeployPlan {
   const { profile } = loaded;
+  const checkout = host.root.mode === "checkout";
   // `--affected` selects; `--only` (and `--skip`) can only narrow what it selected.
   const selected = opts.affected
     ? opts.affected.selected.filter((n) => !opts.only || opts.only.includes(n))
@@ -419,10 +435,13 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe, loaded:
     pollMs: opts.pollSeconds * 1000,
     checks: {
       account: profile.account,
-      cleanTree: true,
-      atOriginMain: !opts.allowBranch,
-      nodeModulesMissing: steps.filter((s) => !checkout.hasNodeModules(s.dir)).map((s) => s.dir),
+      // The tree checks are a checkout's: from the package there is no tree — the shipped sources ARE the
+      // package's version, which the runner materialises; nothing is fetched or compared.
+      cleanTree: checkout,
+      atOriginMain: checkout && !opts.allowBranch,
+      nodeModulesMissing: steps.filter((s) => !host.hasNodeModules(s.dir)).map((s) => s.dir),
     },
+    root: host.root,
     profile: { origin: loaded.origin, path: loaded.path },
     config: {
       source: profile.configSource,
@@ -450,18 +469,25 @@ export function planDeploy(opts: DeployOptions, checkout: CheckoutProbe, loaded:
 /** Human rendering of a plan (what `--dry-run` prints). */
 export function formatPlan(plan: DeployPlan): string {
   const missing = plan.checks.nodeModulesMissing;
+  const checkout = plan.root.mode === "checkout";
   const nodeModules =
     missing.length === 0
       ? "node_modules present in every dir"
-      : `node_modules missing in ${missing.join(", ")} — the runner will \`npm ci\` there first`;
+      : checkout
+        ? `node_modules missing in ${missing.join(", ")} — the runner will \`npm ci\` there first`
+        : `${missing.join(", ")} not installed under ${WORK_AREA_DIR}/ — the runner will \`npm ci\` them there first`;
+  const tree = checkout
+    ? `${plan.checks.cleanTree ? "clean tree" : "tree unchecked"}; ${plan.checks.atOriginMain ? "HEAD == origin/main" : "any branch (--allow-branch)"}`
+    : `Worker sources are the package's (version ${plan.root.version ?? "?"}), materialised under ${WORK_AREA_DIR}/ — no git`;
   const lines = [
     ...(plan.affected ? [formatAffectedText(plan.affected)] : []),
+    `Root: ${plan.root.path} (${checkout ? "a checkout" : `the published package${plan.root.version ? ` ${plan.root.version}` : ""}`})`,
     `Profile: ${plan.profile.path}${plan.profile.origin === "example" ? " (example)" : ""}; config: ${plan.config.source}${
       plan.config.stateWorkerUrl
         ? ` → document "${plan.config.document}" on ${plan.config.stateWorkerUrl}`
         : " (no state Worker in the profile — not pushed anywhere)"
     }`,
-    `Checks: wrangler account = ${plan.checks.account}; clean tree; ${plan.checks.atOriginMain ? "HEAD == origin/main" : "any branch (--allow-branch)"}; ${nodeModules}`,
+    `Checks: wrangler account = ${plan.checks.account}; ${tree}; ${nodeModules}`,
     ...plan.warnings.map((w) => `WARNING ${w}`),
     plan.steps.length === 0 ? "Steps: none — nothing to deploy" : "Steps:",
   ];

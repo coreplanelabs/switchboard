@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AffectedReport } from "../../deploy/affected.js";
-import { formatPlan, type DeployPlan } from "../../deploy/plan.js";
+import { formatPlan, type DeployHost, type DeployPlan } from "../../deploy/plan.js";
 import { profileUrls, type LoadedProfile } from "../../deploy/profile.js";
 import type { DeployRunResult } from "../../deploy/run.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
@@ -74,6 +74,9 @@ const NOTHING: AffectedReport = {
 
 /** The installation the tests deploy to: the fixture profile, loaded as a real one. */
 const LOADED: LoadedProfile = { profile: TEST_PROFILE, origin: "profile", path: "deploy/profile.json" };
+/** Where the tests run from: a checkout, unless a test says it is the published package in an operator's directory. */
+const CHECKOUT_ROOT: DeployHost["root"] = { mode: "checkout", path: "/work/switchboard" };
+const PACKAGE_ROOT_AT: DeployHost["root"] = { mode: "package", path: "/srv/switchboard", version: "1.12.0" };
 const URLS = profileUrls(TEST_PROFILE);
 const BOT_HEALTH_URL = URLS.healthUrl("bot");
 const BOT_ADMIN_RESTART_URL = URLS.botAdminRestartUrl;
@@ -87,6 +90,7 @@ function bind(
   disk: Map<string, string> = new Map(),
   secrets: SecretsHostIO = noSecrets,
   pushConfig: DeployCommandDeps["deploy"]["pushConfig"] = neverPushes,
+  root: DeployHost["root"] = CHECKOUT_ROOT,
 ) {
   const registry = new CommandRegistry<DeployCommandDeps>({ audit: () => {} });
   registerDeployCommands(registry);
@@ -104,7 +108,7 @@ function bind(
         restartPlans.push(plan);
         return restart(plan);
       },
-      checkout: { hasNodeModules },
+      host: { root, hasNodeModules },
       affected: (opts) => {
         affectedCalls.push(opts);
         return affected(opts);
@@ -181,6 +185,34 @@ describe("deploy.plan", () => {
     expect(renderText(commands.get("deploy.plan")!, res.value)).toContain("then wait until live");
     // A rotated secret needs no image build: the plan points at `deploy restart`.
     expect(renderText(commands.get("deploy.plan")!, res.value)).toContain("deploy restart");
+  });
+
+  it("carries where it runs from (deps.deploy.host.root) and prints it first: a checkout, or the published package in the operator's directory with the git checks off", async () => {
+    const checkout = await neverRuns().commands.invoke("deploy.plan", {}, cli);
+    if (!checkout.ok) throw new Error(checkout.message);
+    expect((checkout.value as unknown as DeployPlan).root).toEqual(CHECKOUT_ROOT);
+    expect(renderText(deployPlan, checkout.value).split("\n")[0]).toBe("Root: /work/switchboard (a checkout)");
+    const { commands } = bind(
+      async () => {
+        throw new Error("must not run");
+      },
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => LOADED,
+      new Map(),
+      noSecrets,
+      neverPushes,
+      PACKAGE_ROOT_AT,
+    );
+    const pkg = await commands.invoke("deploy.plan", {}, cli);
+    if (!pkg.ok) throw new Error(pkg.message);
+    const plan = pkg.value as unknown as DeployPlan;
+    expect(plan.root).toEqual(PACKAGE_ROOT_AT);
+    expect(plan.checks).toMatchObject({ cleanTree: false, atOriginMain: false });
+    const text = renderText(deployPlan, pkg.value);
+    expect(text.split("\n")[0]).toBe("Root: /srv/switchboard (the published package 1.12.0)");
+    expect(text).not.toContain("origin/main");
   });
 
   it("reads the checkout through its deps: the dirs without node_modules are in checks.nodeModulesMissing and the rendered check line names them", async () => {
@@ -637,6 +669,32 @@ describe("deploy.init", () => {
     expect(writes).toHaveLength(paths.length);
   });
 
+  it("from the published package the files are written by their tree path and the output names where they land: under .switchboard/", async () => {
+    const disk = templatesOnDisk();
+    const { commands, writes } = bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => LOADED,
+      disk,
+      noSecrets,
+      neverPushes,
+      PACKAGE_ROOT_AT,
+    );
+    const res = await commands.invoke("deploy.init", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    const paths = renderedPaths();
+    // The host's file access maps a tree path into the work area; the command hands it tree paths.
+    expect(writes).toEqual(paths);
+    expect((res.value as { files: { path: string }[] }).files.map((f) => f.path)).toEqual(
+      paths.map((p) => `.switchboard/${p}`),
+    );
+    expect(renderText(commands.get("deploy.init")!, res.value)).toContain(
+      "  written   .switchboard/deploy/cloudflare-memory/wrangler.jsonc",
+    );
+  });
+
   it("the site's config needs project.json: without it, or with a `docs` fact that is not a URL, the render is `unavailable` naming the file; nothing is written", async () => {
     const noFacts = templatesOnDisk();
     noFacts.delete(PROJECT_FACTS_FILE);
@@ -778,6 +836,32 @@ describe("deploy.secrets", () => {
         "put   MEMORY_TOKEN → deploy/cloudflare",
         "done: 2 secret(s) on bot from ~/.secrets/switchboard/<NAME>",
       ].join("\n"),
+    );
+  });
+
+  it("from the published package the puts run in the same tree-path directory and the output names it under .switchboard/", async () => {
+    const h = host(["MEMORY_TOKEN"]);
+    const { commands } = bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => LOADED,
+      templatesOnDisk(),
+      h.io,
+      neverPushes,
+      PACKAGE_ROOT_AT,
+    );
+    const res = await commands.invoke("deploy.secrets", { args: ["memory"] }, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.value).toMatchObject({
+      worker: "memory",
+      dir: ".switchboard/deploy/cloudflare-memory",
+      put: ["MEMORY_TOKEN"],
+    });
+    expect(h.puts).toEqual(["MEMORY_TOKEN → deploy/cloudflare-memory"]);
+    expect(renderText(commands.get("deploy.secrets")!, res.value)).toContain(
+      "put   MEMORY_TOKEN → .switchboard/deploy/cloudflare-memory",
     );
   });
 

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { startProcessRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import { createLogSink } from "../core/trace/sinks.js";
@@ -22,7 +22,9 @@ import {
   decideAccount,
   lastErrorLines,
   UNSET_ENV,
+  WORKER_DIRS,
   workersFor,
+  type DeployHost,
   type DeployPlan,
   type DeployStep,
   type SandboxLiveGate,
@@ -32,7 +34,9 @@ import {
 } from "./plan.js";
 import { parseAppConfigText } from "../config.js";
 import { baseConfigDocument, ConfigDocumentClient, STATE_WORKER_TOKEN_ENV } from "../configDocument.js";
-import { PACKAGE_ROOT } from "../packageRoot.js";
+import { OPERATOR_ROOT } from "./host.js";
+import { assetPath, installationPath, workPath } from "./operatorRoot.js";
+import { RENDERED_FILE } from "./wranglerTemplate.js";
 import { parseConfigSource, readConfigSource, type ConfigSourceIO } from "./configSource.js";
 import {
   isExampleProfile,
@@ -68,7 +72,9 @@ import {
 // The production deploy RUNNER behind the registry's `deploy all` (CLI only):
 // runs the four Workers' `npm run deploy` in the plan's canonical order
 // (src/deploy/plan.ts), after checking the wrangler account, a clean checkout
-// at origin/main, required env, and node_modules per dir. A step whose
+// at origin/main, required env, and node_modules per dir. Every path is
+// resolved through the operator root (src/deploy/operatorRoot.ts): in a
+// checkout that is the repository root, exactly as before. A step whose
 // preflight refuses (runs in flight) is waited out and retried — never forced
 // unless the plan says so — and the wait is never silent: every poll prints a
 // heartbeat with the in-flight count. The bot step is done only when it is
@@ -153,10 +159,15 @@ async function verifyTokenAgainstAccount(account: string, token: string): Promis
   }
 }
 
+/** A Worker directory as wrangler runs in it: under the tree in a checkout, under the work area from the package. */
+const workerDir = (dir: string) => workPath(OPERATOR_ROOT, dir);
+
 async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]> {
   const problems: string[] = [];
+  // `whoami` needs a wrangler to run: the first step's directory has one (in a checkout every
+  // directory resolves the root's; from the package each step's was just installed).
   const who = await run("npx", ["wrangler", "whoami"], {
-    cwd: join(PACKAGE_ROOT, "deploy/cloudflare"),
+    cwd: workerDir(plan.steps[0]?.dir ?? WORKER_DIRS.bot),
     unset: UNSET_ENV,
   });
   const token = process.env.CLOUDFLARE_API_TOKEN;
@@ -178,28 +189,29 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
     for (const check of step.capabilities) {
       const key = check.command.join(" ");
       let r = checked.get(key);
-      if (!r)
-        checked.set(key, (r = run("npx", [...check.command], { cwd: join(PACKAGE_ROOT, step.dir), unset: UNSET_ENV })));
+      if (!r) checked.set(key, (r = run("npx", [...check.command], { cwd: workerDir(step.dir), unset: UNSET_ENV })));
       const result = await r;
       const problem = capabilityProblem(step.name, check, result.code, result.output);
       if (problem) problems.push(problem);
       else io.log(`[deploy:all] ${step.name}: credential can \`${key}\` (${check.needs})`);
     }
   }
-  const status = await run("git", ["status", "--porcelain"], { cwd: PACKAGE_ROOT });
-  if (status.output.trim() !== "")
-    problems.push(
-      "working tree is not clean — commit, stash, or deploy from a fresh checkout (wrangler builds the CURRENT tree)",
-    );
+  if (plan.checks.cleanTree) {
+    const status = await run("git", ["status", "--porcelain"], { cwd: OPERATOR_ROOT.root });
+    if (status.output.trim() !== "")
+      problems.push(
+        "working tree is not clean — commit, stash, or deploy from a fresh checkout (wrangler builds the CURRENT tree)",
+      );
+  }
   if (plan.checks.atOriginMain) {
     // A failed fetch would let the check pass against a stale origin/main — treat it as a problem, not a warning.
-    const fetch = await run("git", ["fetch", "-q", "origin"], { cwd: PACKAGE_ROOT });
+    const fetch = await run("git", ["fetch", "-q", "origin"], { cwd: OPERATOR_ROOT.root });
     if (fetch.code !== 0)
       problems.push(
         `git fetch origin failed (exit ${fetch.code}): ${fetch.output.trim().split("\n").pop() ?? ""} — cannot verify HEAD == origin/main`,
       );
-    const head = (await run("git", ["rev-parse", "HEAD"], { cwd: PACKAGE_ROOT })).output.trim();
-    const main = (await run("git", ["rev-parse", "origin/main"], { cwd: PACKAGE_ROOT })).output.trim();
+    const head = (await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root })).output.trim();
+    const main = (await run("git", ["rev-parse", "origin/main"], { cwd: OPERATOR_ROOT.root })).output.trim();
     if (head !== main)
       problems.push(
         `HEAD ${head.slice(0, 7)} != origin/main ${main.slice(0, 7)} — \`git checkout --detach origin/main\`, or pass --allow-branch deliberately`,
@@ -214,9 +226,15 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
   return problems;
 }
 
-/** The plan's `CheckoutProbe`: `<package root>/<dir>/node_modules` exists. */
+/** The plan's `DeployHost.hasNodeModules`: `<root>/<dir>/node_modules` exists. */
 export function hasNodeModules(dir: string): boolean {
-  return existsSync(join(PACKAGE_ROOT, dir, "node_modules"));
+  return existsSync(join(OPERATOR_ROOT.root, dir, "node_modules"));
+}
+
+/** What the plan is computed over on this host: the root and mode this process runs from (`plan.root`)
+ *  and the install probe (src/deploy/plan.ts `DeployHost`). */
+export function deployHostOnHost(): DeployHost {
+  return { root: { mode: OPERATOR_ROOT.mode, path: OPERATOR_ROOT.root }, hasNodeModules };
 }
 
 /** Parse + validate profile JSON read from `where` (a path or a source reference — what errors name). */
@@ -258,14 +276,22 @@ export async function loadProfileOnHost(
       return profileFromJson(read.text, override, "profile");
     }
   }
-  const candidates: { path: string; origin: LoadedProfile["origin"] }[] = override
-    ? [{ path: override, origin: "profile" }]
+  // The installation's own profile (or the path the env var names) is under the root — the checkout,
+  // or the operator's directory; the example is a shipped file.
+  const candidates: { path: string; origin: LoadedProfile["origin"]; abs: string }[] = override
+    ? [
+        {
+          path: override,
+          origin: "profile",
+          abs: isAbsolute(override) ? override : installationPath(OPERATOR_ROOT, override),
+        },
+      ]
     : [
-        { path: PROFILE_PATH, origin: "profile" },
-        { path: PROFILE_EXAMPLE_PATH, origin: "example" },
+        { path: PROFILE_PATH, origin: "profile", abs: installationPath(OPERATOR_ROOT, PROFILE_PATH) },
+        { path: PROFILE_EXAMPLE_PATH, origin: "example", abs: assetPath(OPERATOR_ROOT, PROFILE_EXAMPLE_PATH) },
       ];
   for (const c of candidates) {
-    const abs = c.path.startsWith("/") ? c.path : join(PACKAGE_ROOT, c.path);
+    const abs = c.abs;
     if (!existsSync(abs)) {
       if (c.origin === "profile" && override) throw new Error(`${PROFILE_ENV}=${override}: no such file`);
       continue;
@@ -285,35 +311,44 @@ export async function loadProfileOnHost(
 export async function renderWorkerConfigsOnHost(
   io: Pick<DeployRunnerIO, "log">,
   env: Record<string, string | undefined> = process.env,
-  writeFile: (path: string, text: string) => void = (path, text) => writeFileSync(join(PACKAGE_ROOT, path), text),
+  writeFile: (path: string, text: string) => void | Promise<void> = (path, text) => hostDeployFiles.write(path, text),
 ): Promise<string[]> {
   const loaded = await loadProfileOnHost(env);
-  const rendered = renderWorkerConfigs(loaded.profile, (path) => {
-    const abs = join(PACKAGE_ROOT, path);
-    return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
-  });
+  const rendered = renderWorkerConfigs(loaded.profile, (path) => readShipped(path));
   if (!rendered.ok) return rendered.problems;
-  for (const f of rendered.files) writeFile(f.path, f.text);
+  for (const f of rendered.files) await writeFile(f.path, f.text);
   io.log(`[deploy:all] rendered ${rendered.files.length} Worker config(s) from ${loaded.path}`);
   return [];
 }
 
-/** `deploy init`'s file access on this host: paths under the package root (src/packageRoot.ts). */
+/** A shipped file by its tree path (a template, the manifest, `project.json`); undefined when absent. */
+function readShipped(path: string): string | undefined {
+  const abs = assetPath(OPERATOR_ROOT, path);
+  return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
+}
+
+/** `deploy init`'s file access on this host, by tree path: a rendered `wrangler.jsonc` lives in the
+ *  Worker's directory under the work area (materialised first from the package — the copy alone, no
+ *  install), everything else — the templates, `project.json` — is a shipped file. In a checkout the
+ *  two are one tree (src/deploy/operatorRoot.ts). */
 export const hostDeployFiles = {
   read: async (path: string): Promise<string | undefined> => {
-    const abs = join(PACKAGE_ROOT, path);
+    if (!path.endsWith(`/${RENDERED_FILE}`)) return readShipped(path);
+    const abs = workPath(OPERATOR_ROOT, path);
     return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
   },
   write: async (path: string, text: string): Promise<void> => {
-    writeFileSync(join(PACKAGE_ROOT, path), text);
+    const abs = workPath(OPERATOR_ROOT, path);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, text);
   },
 };
 
-/** The config-source loaders' I/O on this host: files under the package root, real fetch, the `op` CLI. */
+/** The config-source loaders' I/O on this host: files under the root (the checkout, or the operator's directory), real fetch, the `op` CLI. */
 function hostConfigSourceIO(): ConfigSourceIO {
   return {
     readFile: async (path) => {
-      const abs = path.startsWith("/") ? path : join(PACKAGE_ROOT, path);
+      const abs = isAbsolute(path) ? path : installationPath(OPERATOR_ROOT, path);
       return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
     },
     fetch: async (url, init) => {
@@ -321,7 +356,7 @@ function hostConfigSourceIO(): ConfigSourceIO {
       return { status: res.status, text: () => res.text() };
     },
     opRead: async (ref) => {
-      const r = await run("op", ["read", ref], { cwd: PACKAGE_ROOT });
+      const r = await run("op", ["read", ref], { cwd: OPERATOR_ROOT.root });
       return r.code === 127 ? undefined : r;
     },
     env: process.env,
@@ -413,7 +448,7 @@ export async function pushConfigOnHost(opts: {
 }
 
 async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<boolean> {
-  const dir = join(PACKAGE_ROOT, step.dir);
+  const dir = workerDir(step.dir);
   if (hasNodeModules(step.dir)) return true;
   io.log(`[deploy:all] ${step.name}: node_modules missing — npm ci`);
   const r = await run("npm", ["ci", "--silent"], { cwd: dir });
@@ -517,7 +552,7 @@ export interface SandboxGateDeps {
 /** One read-only wrangler command in a Worker's dir, its `--json` payload parsed;
  *  `CLOUDFLARE_ACCOUNT_ID` stripped like every other wrangler call here. */
 async function wranglerJson(dir: string, args: string[]): Promise<Read<unknown>> {
-  const r = await run("npx", ["wrangler", ...args], { cwd: join(PACKAGE_ROOT, dir), unset: UNSET_ENV });
+  const r = await run("npx", ["wrangler", ...args], { cwd: workerDir(dir), unset: UNSET_ENV });
   if (r.code !== 0)
     return { error: `wrangler ${args.join(" ")} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}` };
   const parsed = parseWranglerJson(r.output);
@@ -680,7 +715,7 @@ async function readAppBeforeUpload(
 export type StepExec = (step: DeployStep, io: DeployRunnerIO) => Promise<RunResult>;
 const runStepCommand: StepExec = (step, io) =>
   run(step.command[0], step.command.slice(1), {
-    cwd: join(PACKAGE_ROOT, step.dir),
+    cwd: workerDir(step.dir),
     unset: step.unsetEnv,
     set: step.setEnv,
     stream: (c) => io.stream(c),
@@ -876,7 +911,7 @@ export async function runDeployPlan(
   // before its step counts as live. Read AFTER the origin/main check. If git fails this
   // is "" and `sameCommit` refuses anything under 7 chars, so the gate fails
   // closed (never a false "live") — and we say so up front rather than 18 min later.
-  const expectedCommit = (await run("git", ["rev-parse", "HEAD"], { cwd: PACKAGE_ROOT })).output.trim();
+  const expectedCommit = (await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root })).output.trim();
   if (!/^[0-9a-f]{40}$/.test(expectedCommit)) {
     return {
       kind: "refused",
@@ -948,7 +983,7 @@ export function formatDeployResults(results: readonly DeployStepResult[], notAtt
 
 /** One git command in the repo root; `undefined` on a non-zero exit. */
 async function git(args: string[]): Promise<string | undefined> {
-  const r = await run("git", args, { cwd: PACKAGE_ROOT });
+  const r = await run("git", args, { cwd: OPERATOR_ROOT.root });
   return r.code === 0 ? r.output : undefined;
 }
 
@@ -997,7 +1032,7 @@ export function hostAffectedProbe(
         : { error: `GET ${w.healthUrl} carries no build.commit` };
     },
     isAncestor: async (commit, head) =>
-      (await run("git", ["merge-base", "--is-ancestor", commit, head], { cwd: PACKAGE_ROOT })).code === 0,
+      (await run("git", ["merge-base", "--is-ancestor", commit, head], { cwd: OPERATOR_ROOT.root })).code === 0,
     lastRelease: async () => {
       const tag = (await git(["describe", "--tags", "--match", "v*", "--abbrev=0", "HEAD^"]))?.trim();
       if (!tag) return undefined;

@@ -71,7 +71,7 @@ function bind(world: World = {}) {
       restart: async () => {
         throw new Error("must not restart");
       },
-      checkout: { hasNodeModules: () => true },
+      host: { root: { mode: "checkout", path: "/work/switchboard" }, hasNodeModules: () => true },
       affected: async () => {
         throw new Error("must not compute affected");
       },
