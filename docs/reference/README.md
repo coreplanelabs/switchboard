@@ -9,5 +9,6 @@ The mechanical parts of these pages (every command, every flag, every `/api` rou
 - [Configuration](configuration.md) — every `config.yaml` block, what it does, its off-state.
 - [Authorization](authorization.md) — the `grants` and `restrict` blocks: every axis, every baseline, what fails closed.
 - [Dashboard routes](dashboard-routes.md) — every route, its auth, what it shows.
-- [Code map](code-map.md) — every module, what it owns, and the rule a change there must keep.
+- [Code map](code-map.md) — every module, what it owns, and the rule a change there must keep; its Areas table is the PR-title scope vocabulary.
+- [Migration notes](migrations.md) — what an installation changes at each major version, one section per release.
 - [Specs](specs/README.md) — the behavioral contract: one file per feature, every criterion bound to the test or procedure that proves it.

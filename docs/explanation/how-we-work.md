@@ -29,7 +29,7 @@ flowchart LR
 
 **6. Merge is a squash whose subject is the title.** The body stays on the PR, where its links render; `main` reads as a changelog. Every required status is a job name in the workflow, and gate jobs stand in for fan-outs, so the matrix can change shape without touching the ruleset ([Configure the repository](../how-to/configure-the-repository.md)).
 
-**7. Release and deploy are automatic and reviewable.** release-please keeps one release PR open with the accumulated changes; merging it tags the version, writes the changelog, and CI deploys only the Workers whose inputs changed since the commit each one serves. The release PR carries that plan as a comment before anyone merges it ([Ship a release](../how-to/ship-a-release.md)).
+**7. Release and deploy are automatic and reviewable.** release-please keeps one release PR open with the accumulated changes; merging it tags the version, writes the changelog, and CI deploys only the Workers whose inputs changed since the commit each one serves. The changelog is the PR titles verbatim — so a title is written as the line an operator will read, `type(scope): what they can now do or expect`, and a breaking title's migration note is already in the tree ([the rule](../../CONTRIBUTING.md#the-pr-title-is-the-changelog-line)). The release PR carries the deploy plan as a comment before anyone merges it ([Ship a release](../how-to/ship-a-release.md)).
 
 ## Why this shape
 
@@ -48,7 +48,7 @@ flowchart LR
 | CI runs only repository scripts | a unit test over the workflow files |
 | Generated artifacts are current | `docs:check`, `agents:check`, `skills:check` |
 | Records are never edited, only superseded | `decisions:check` |
-| PR titles are conventional | the required `title` check (`npm run check:pr-title`) |
+| PR titles are changelog lines: conventional, a scope from the code map, a migration note behind `!` | the required `title` check (`npm run check:pr-title`) |
 | Squash-only, title as commit | the repository's merge settings and the `main` ruleset ([Configure the repository](../how-to/configure-the-repository.md)) |
 | Only the changed Workers deploy | `deploy plan --affected`, shown on every PR and on the release PR |
 

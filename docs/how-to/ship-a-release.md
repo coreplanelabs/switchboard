@@ -13,7 +13,7 @@ You do not deploy. Every merge to `main` lands in the one open release PR (`chor
 
 ## 2. Read the plan on the release PR
 
-Before you merge, read the sticky comment on the release PR. It lists each Worker with **deploy** or skip, the commit that Worker is serving right now, and why: the changed files that are its inputs. The release PR's own checks may show "action required"; that is GitHub gating a bot-authored PR's workflows, not a failed plan.
+Before you merge, read the sticky comment on the release PR. If the version is a major, its section in [Migration notes](../reference/migrations.md) is already in the tree — the PR that broke it wrote it — and the release notes' **⚠ BREAKING CHANGES** list is the titles that did. The comment lists each Worker with **deploy** or skip, the commit that Worker is serving right now, and why: the changed files that are its inputs. The release PR's own checks may show "action required"; that is GitHub gating a bot-authored PR's workflows, not a failed plan.
 
 A Worker is deployed when one of its inputs changed since the commit it serves: a file its `worker.ts` imports (transitively — a shared `src/` module deploys every Worker that imports it), anything in its own `deploy/` directory, a production dependency of its workspace moving in the root lockfile, and for the bot anything its Dockerfile copies or installs. A test, a docs page, a CI file or a dev-dependency bump deploys nothing. A path no rule recognises deploys **everything** and says which path; that is the fail-safe. Classify the path in `src/deploy/affected.ts` rather than weaken it.
 
