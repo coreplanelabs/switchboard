@@ -122,9 +122,19 @@ gh api -X PUT repos/OWNER/REPO/actions/permissions/workflow \
 
 The default token permission stays `read`; each workflow raises its own `permissions:` block to exactly what it needs.
 
-## 5. Repository secrets
+## 5. Repository secrets and variables
 
-The deploy workflows need `CLOUDFLARE_DEPLOY_TOKEN` (Workers Scripts, Containers, R2 and Account Settings at the account; Workers Routes and DNS at the zone) and `RESIDENT_READ_TOKEN`, and optionally `SANDBOX_TOKEN` for the release PR's deploy plan; the docs deploy uses `CLOUDFLARE_API_TOKEN`, which is also the fallback while no deploy token is set. What each one is and how to rotate it: [Rotate a secret](rotate-a-secret.md). A fork that never deploys from CI needs none of them; the docs deploy step skips loudly when its token is absent.
+The deploy workflows need `CLOUDFLARE_DEPLOY_TOKEN` (Workers Scripts, Containers, R2 and Account Settings at the account; Workers Routes and DNS at the zone), `MEMORY_TOKEN` (the config push before the bot step) and `RESIDENT_READ_TOKEN`, and optionally `SANDBOX_TOKEN` for the sandbox's live gate and the release PR's deploy plan; the docs deploy uses `CLOUDFLARE_API_TOKEN`, which is also the fallback while no deploy token is set. What each one is and how to rotate it: [Rotate a secret](rotate-a-secret.md).
+
+Where the installation's deployment profile lives is a repository **variable**, not a line in a workflow, so the tree names no installation:
+
+```sh
+gh variable set SWITCHBOARD_DEPLOY_PROFILE --body "github://OWNER/CONFIG-REPO/switchboard/profile.json@main"
+gh variable set CONFIG_REPO_OWNER --body "OWNER"
+gh variable set CONFIG_REPO_NAME --body "CONFIG-REPO"
+```
+
+`SWITCHBOARD_DEPLOY_PROFILE` is any form the CLI takes — the `github://` reference to a private configuration repository is the usual one, so the profile and the bot's config stay out of this repository; `CONFIG_REPO_OWNER` and `CONFIG_REPO_NAME` name that repository for the read-only App token the workflows mint to read it. The step that loads that App's client id and private key is the one installation-specific step left in the workflows; it reads this project's secrets manager, and a fork replaces it with its own source. A fork that never deploys from CI sets none of this: the release deploy refuses without a profile, the release PR's deploy-plan job and the docs deploy skip.
 
 ## 6. Dependabot
 
