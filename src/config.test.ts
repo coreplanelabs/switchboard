@@ -7,7 +7,6 @@ import {
   FileOverridesBacking,
   InMemoryOverridesBacking,
   loadAppConfigFrom,
-  MAX_INSTRUCTIONS_LENGTH,
   openConfigStore,
   OverridesConflictError,
   overridesBackingFor,
@@ -16,6 +15,7 @@ import {
   type ConfigStoreOptions,
   type Overrides,
 } from "./config.js";
+import { MAX_INSTRUCTIONS_LENGTH } from "./config/validate.js";
 import { hasAction } from "./core/authz/authorize.js";
 import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";

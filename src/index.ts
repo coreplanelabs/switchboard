@@ -30,7 +30,7 @@ import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
-import { resolveUserEmail } from "./channels/slack.js";
+import { resolveUserEmail } from "./channels/slack/lookups.js";
 import { mdToMrkdwn } from "./channels/mrkdwn.js";
 import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
@@ -47,12 +47,8 @@ import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
 import { getAgent } from "./agents/registry.js";
 import { systemClock } from "./core/trace/index.js";
-import {
-  closeReclaimedCards,
-  markForeignLiveCards,
-  resumeSlackIO,
-  setForeignLiveCardsSource,
-} from "./channels/slack.js";
+import { resumeSlackIO } from "./channels/slack.js";
+import { closeReclaimedCards, markForeignLiveCards, setForeignLiveCardsSource } from "./channels/slack/statusCard.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
 import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js";
 import { createSpanLog } from "./core/trace/spanLog.js";
