@@ -9,7 +9,7 @@ import { cardShapeLineOf, queuedCaption } from "./runShape.js";
 import type { RepoContext } from "./repoContext.js";
 import { redactSecrets, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
-import { mergeFollowUps, type LiveThread } from "./threadAdmission.js";
+import type { LiveThread } from "./threadAdmission.js";
 import type { RecordDeps } from "./dispatch/record.js";
 import { cardLines, errorReply } from "./dispatch/reply.js";
 import {
@@ -49,6 +49,7 @@ import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
+import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
 import type { CardShell } from "./statusCardFrame.js";
@@ -80,7 +81,10 @@ export interface CoreDeps
    * Where `friction propose` files its proposals. Default: the GitHub REST
    * tracker with the App installation token (App `issues:write`; never a `gh`
    * shell-out — AGENTS.md invariant 5). Injectable so tests assert filing
-   * without a network call.
+   * without a network call. No stage reads it: the composition root
+   * (`src/index.ts`) hands it to the command catalogue, and the dispatcher
+   * tests inject an in-memory tracker through this same bag — it stays here
+   * because `CoreDeps` is the one place a process declares what it runs with.
    */
   issueTracker?: IssueTracker;
 }
@@ -89,10 +93,6 @@ export interface CoreDeps
 // must not kill runs mid-flight — see index.ts signal handling).
 let activeRuns = 0;
 
-/** The note a follow-up's sender gets when the run it was folded into was
- *  stopped by an operator before its next step read it. */
-const FOLLOW_UP_DROPPED_BY_STOP =
-  "⛔ The run this was folded into was stopped before it read this follow-up, so it was not run. Re-send it to run it fresh.";
 export function activeRunCount(): number {
   return activeRuns;
 }
@@ -427,7 +427,7 @@ export async function dispatch(
       shell,
       admitted,
     });
-    const { run, runId, channelVisibility, liveUrl, publishText, publishRunMeta } = registration;
+    const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
     const reservation = await reserveRun(deps, {
       msg,
@@ -499,7 +499,7 @@ export async function dispatch(
     const verifiedAtAttach = headGate.verifiedAtAttach;
     // The run's meta went out at the reservation with the head as resolved
     // then; the record and the page must name the head actually reviewed.
-    if (headGate.headAdopted) publishRunMeta(repoCtx);
+    if (headGate.headAdopted) publishMeta(repoCtx);
 
     // Whether this run reviews a resolved PR (its system prompt carries the
     // REVIEW TARGET block, item 9) — the same predicate the post-step and the
@@ -548,7 +548,7 @@ export async function dispatch(
     setupCard = undefined; // from here the run loop owns the card's close
     clearInterval(setupHeartbeat);
     card.update(shell.live()); // the ack card becomes the run card
-    const activityAt = clock();
+    const loopStartedAt = clock();
     // The run loop owns the run from here: its finally finishes it (the outer
     // finally discards a run that never got this far). Events are fed to the
     // registry in onEvent below; the stream has been live since the reservation.
@@ -613,7 +613,7 @@ export async function dispatch(
       clock,
       root,
       startedAt,
-      activityAt,
+      loopStartedAt,
       channelVisibility,
       publishText,
       ending,
@@ -626,8 +626,8 @@ export async function dispatch(
       prNote,
       toolCalls,
       runDiagnosis,
-      finalDetail,
-      checkedOffDetail,
+      checklistAsLeft,
+      checklistCheckedOff,
       releaseWorkspace,
     } = ran;
 
@@ -652,14 +652,14 @@ export async function dispatch(
       ending,
       card,
       shell,
-      finalDetail,
-      checkedOffDetail,
+      checklistAsLeft,
+      checklistCheckedOff,
       doneLines,
       runDiagnosis,
       releaseWorkspace,
       root,
     });
-    if (delivery === "fenced") return;
+    if (delivery.kind === "fenced") return;
 
     // After the reply (dispatch/reply.ts): the memory reflection pass and the
     // deterministic review post-step.
@@ -734,64 +734,23 @@ export async function dispatch(
         `[resume] ${msg.threadKey} run ${resume.row.runId} closed interrupted: the resumed dispatch ended before the run started`,
       );
     }
-    // Thread admission (docs/reference/specs/thread-admission.md item 4): free the thread,
-    // and settle what the run never consumed. A run that ended by itself (an
-    // answer, a budget, a failure, a dead sandbox) hands its unconsumed
-    // follow-ups on as ONE fresh turn — on the most recent sender's channel
-    // handle, so the reply lands where they asked — never a silent drop. A run
-    // an operator stopped does not: the stop meant "no more work here", and
-    // each sender is told their follow-up was not run. The fresh turn is an
-    // ordinary dispatch: it claims the thread itself, and a follow-up arriving
-    // during it steers into it.
-    const pending = admitted ? admission.release(msg.threadKey, admitted) : [];
-    // A stop counts once the run loop had the run: a stop relayed during an
-    // attach that then refused stopped nothing, and the follow-ups run fresh.
-    const stopMode: StopMode | undefined = runLoopStarted ? registered?.control.requested : undefined;
-    if (pending.length > 0 && stopMode) {
-      console.log(`[dispatch] ${msg.threadKey} ${pending.length} follow-up(s) dropped: run stopped (${stopMode})`);
-      await root.span("post.followups", async () => {
-        for (const p of pending) await p.io.reply(FOLLOW_UP_DROPPED_BY_STOP).catch(() => {});
-      });
-    }
+    // Thread admission (dispatch/settle.ts; docs/reference/specs/thread-admission.md item 4):
+    // free the thread, and settle what the run never consumed — handed on as
+    // ONE fresh turn when the run ended by itself, dropped with a note to each
+    // sender when an operator stopped it. The fresh turn is an ordinary
+    // dispatch: it claims the thread itself, and a follow-up arriving during it
+    // steers into it.
+    const settled = settleThread(deps, { msg, admitted, runLoopStarted, control: registered?.control });
+    if (settled.kind === "dropped") await tellDropped(root, settled.pending);
+    const stopMode = settled.kind === "handed-on" ? undefined : settled.stopMode;
     // The request is over: its root ends here, after the seal and the tail,
     // with how it went — before the fresh turn below starts a root of its own.
     root.end(caught ? "error" : "ok", {
       status: caught ? "failed" : refused ? "refused" : stopMode ? "stopped" : "completed",
     });
-    if (pending.length > 0 && !stopMode && admitted) {
-      const merged = mergeFollowUps(pending)!;
-      const last = pending[pending.length - 1];
-      console.log(`[dispatch] ${msg.threadKey} ${pending.length} unconsumed follow-up(s) → fresh turn`);
-      // The fresh turn is a request of its own (docs/reference/specs/tracing.md): it was
-      // received NOW, and it waited behind this run since its earliest
-      // follow-up arrived — the `queued … behind the previous run` caption.
-      const freshAt = clock();
-      const earliestAt = Math.min(...pending.map((p) => p.at));
-      const queuedBehindMs = Math.max(0, freshAt - earliestAt);
-      // The wait is on the root at start, so the fresh run's record carries it.
-      const fresh = startRequestRoot(deps, {
-        channel: channelOf(last.msg.channelId),
-        receivedAt: freshAt,
-        queuedBehindMs,
-      });
-      // Pinned to the agent the follow-ups were addressed to: they were
-      // admitted as input FOR this run's agent (a different one would have
-      // been refused), so the fresh turn must not fall back to whatever the
-      // thread's history or the channel default resolves to.
-      await dispatch(
-        deps,
-        // The follow-up's own platform stamp stays behind: the fresh turn's
-        // wait is `queuedBehindMs`, not a `queued … before we saw it`.
-        {
-          ...last.msg,
-          ...merged,
-          text: `agent:${admitted.agent} ${merged.text}`,
-          receivedAt: freshAt,
-          originAt: undefined,
-        },
-        last.io,
-        { trace: fresh, queuedBehindMs },
-      ).catch((err: unknown) =>
+    if (settled.kind === "handed-on") {
+      const fresh = prepareFreshTurn(deps, { agent: settled.agent, pending: settled.pending, clock });
+      await dispatch(deps, fresh.msg, fresh.io, fresh.opts).catch((err: unknown) =>
         console.error(
           `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
         ),

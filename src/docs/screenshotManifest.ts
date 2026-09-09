@@ -90,8 +90,9 @@ export function expectedFiles(): string[] {
   return SURFACES.flatMap((s) => THEMES.map((t) => `${s.name}-${t}.png`));
 }
 
-export function renderManifest(inputs: Record<string, string>, now: number = FIXED_NOW): Manifest {
-  return { viewport: VIEWPORT, now, inputs };
+/** The manifest for one render: the inputs, and the viewport and clock this module pins. */
+export function renderManifest(inputs: Record<string, string>): Manifest {
+  return { viewport: VIEWPORT, now: FIXED_NOW, inputs };
 }
 
 /** Pure: what differs between the tree and the recorded manifest — a render

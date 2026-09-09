@@ -1,8 +1,9 @@
 ---
 title: The dispatcher is a pipeline of stages, split one file move at a time
-status: accepted
+status: superseded
 date: 2026-09-09
 pattern: Pipeline (Pipes and Filters) with Interface Segregation, by Tidy First
+superseded_by: 0025-dispatch-pipeline-as-built.md
 ---
 
 # The dispatcher is a pipeline of stages, split one file move at a time

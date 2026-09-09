@@ -146,25 +146,25 @@ export interface AckCard {
   heartbeat: ReturnType<typeof setInterval>;
 }
 
+/** What `openAckCard` reads off the dispatch. */
+export interface AckCardContext {
+  io: ChannelIO;
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  /** The card's clock start: a carried row's, else the request's receipt. */
+  startedAt: number;
+  clock: Clock;
+  root: Span;
+  trace: RequestTrace;
+}
+
 /**
  * Acknowledge NOW, before anything slow — the same handle becomes the run's
  * status card; a refusal or setup failure closes it with a reason. The caller
  * keeps all three: the outer catch closes a card setup left open, the outer
  * finally clears the heartbeat.
  */
-export async function openAckCard(
-  deps: ProvisionDeps,
-  ctx: {
-    io: ChannelIO;
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    /** The card's clock start: a carried row's, else the request's receipt. */
-    startedAt: number;
-    clock: Clock;
-    root: Span;
-    trace: RequestTrace;
-  },
-): Promise<AckCard> {
+export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Promise<AckCard> {
   const { io, agent, resolved, startedAt, clock, root, trace } = ctx;
   // One builder for every paint of this card (statusCardFrame.ts): the ack,
   // the spinner frames, the closes before the run starts, the done frame.
@@ -204,7 +204,28 @@ export interface RegisteredRun {
     raw?: string,
   ) => void;
   /** Publishes the run's meta for the repo context as it stands NOW. */
-  publishRunMeta: (repoCtx: RepoContext) => void;
+  publishMeta: (repoCtx: RepoContext) => void;
+}
+
+/** What `registerRun` reads off the dispatch. */
+export interface RegisterRunContext {
+  msg: IncomingMessage;
+  io: ChannelIO;
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  directives: RequestDirectives;
+  history: HistoryItem[];
+  repoCtx: RepoContext;
+  carriedRow: LiveRunRow | undefined;
+  resume: ResumeContext | undefined;
+  startedAt: number;
+  receivedAt: number;
+  clock: Clock;
+  root: Span;
+  trace: RequestTrace;
+  registry: RunRegistry;
+  shell: CardShell;
+  admitted: LiveThread<DispatchFollowUp>;
 }
 
 /**
@@ -214,28 +235,7 @@ export interface RegisteredRun {
  * caller records `run` the moment this returns — nothing here awaits after the
  * row is created — so a later throw discards it.
  */
-export async function registerRun(
-  deps: ProvisionDeps,
-  ctx: {
-    msg: IncomingMessage;
-    io: ChannelIO;
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    directives: RequestDirectives;
-    history: HistoryItem[];
-    repoCtx: RepoContext;
-    carriedRow: LiveRunRow | undefined;
-    resume: ResumeContext | undefined;
-    startedAt: number;
-    receivedAt: number;
-    clock: Clock;
-    root: Span;
-    trace: RequestTrace;
-    registry: RunRegistry;
-    shell: CardShell;
-    admitted: LiveThread<DispatchFollowUp>;
-  },
-): Promise<RegisteredRun> {
+export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext): Promise<RegisteredRun> {
   const {
     msg,
     io,
@@ -378,7 +378,7 @@ export async function registerRun(
   // context as resolved NOW — so the page can head the record with linked
   // owner/repo · ref · #PR · sha. Straight after the request; published once
   // more if the attach adopts a moved PR head below (readers take the latest).
-  const publishRunMeta = (repoCtx: RepoContext) =>
+  const publishMeta = (repoCtx: RepoContext) =>
     registry.publish(run.id, {
       type: "run_meta",
       agent: agent.name,
@@ -391,14 +391,14 @@ export async function registerRun(
       ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
       at: clock(),
     });
-  if (!resume) publishRunMeta(repoCtx);
+  if (!resume) publishMeta(repoCtx);
   // The thread context fed to the model follows the request as `context`
   // events — text only, attachments as metadata lines, bounded to
   // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
   if (!resume && deps.config.config.runHistory?.includeContext !== false) {
     for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
   }
-  return { run, runId, channelVisibility, liveUrl, publishText, publishRunMeta };
+  return { run, runId, channelVisibility, liveUrl, publishText, publishMeta };
 }
 
 /** A fresh request's reservation on the ledger: the row (undefined when the
@@ -409,6 +409,25 @@ export interface Reservation {
   requestRow: Record<string, unknown>;
 }
 
+/** What `reserveRun` reads off the dispatch. */
+export interface ReserveContext {
+  msg: IncomingMessage;
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  repoCtx: RepoContext;
+  channelVisibility: ChannelVisibility;
+  runId: string;
+  startedAt: number;
+  receivedAt: number;
+  resume: ResumeContext | undefined;
+  restart: RestartContext | undefined;
+  card: StatusHandle;
+  /** The dispatch's reservation hooks: a stop or a fence during the attach reaches the run's control. */
+  hooks: RunHooks;
+  admitted: LiveThread<DispatchFollowUp>;
+  root: Span;
+}
+
 /**
  * The ledger reservation (run-history item 42): a fresh request's row BEFORE
  * the attach, so a kill during a slow attach leaves a row the next generation
@@ -416,26 +435,7 @@ export interface Reservation {
  * admission: nothing to reserve, undefined. The slot is named with the run's id
  * only once the row exists.
  */
-export async function reserveRun(
-  deps: ProvisionDeps,
-  ctx: {
-    msg: IncomingMessage;
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    repoCtx: RepoContext;
-    channelVisibility: ChannelVisibility;
-    runId: string;
-    startedAt: number;
-    receivedAt: number;
-    resume: ResumeContext | undefined;
-    restart: RestartContext | undefined;
-    card: StatusHandle;
-    /** The dispatch's reservation hooks: a stop or a fence during the attach reaches the run's control. */
-    hooks: RunHooks;
-    admitted: LiveThread<DispatchFollowUp>;
-    root: Span;
-  },
-): Promise<Reservation | undefined> {
+export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Promise<Reservation | undefined> {
   const {
     msg,
     agent,
@@ -454,7 +454,6 @@ export async function reserveRun(
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
-    const request = requestRow;
     const reserved = await root.span("dispatch.ledger_reserve", () =>
       deps.runLedger.reserve({
         runId,
@@ -475,7 +474,7 @@ export async function reserveRun(
           ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
           ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
           readonly: agent.toolset === "readonly",
-          request,
+          request: requestRow,
         },
         card: card.handle ?? null,
         ...hooks,
@@ -586,6 +585,23 @@ export interface ComposedPrompt {
   system: string;
 }
 
+/** What `composePrompt` reads off the dispatch. */
+export interface PromptContext {
+  msg: IncomingMessage;
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  directives: RequestDirectives;
+  sticky: ThreadDirectives;
+  repoCtx: RepoContext;
+  /** The attach's answer: the resident flag and the binding's worktree path. */
+  selection: ExecutorSelection;
+  isPrReview: boolean;
+  memoryBlockP: ReturnType<typeof memoryContextBlock>;
+  verifiedAtAttach: boolean;
+  resume: ResumeContext | undefined;
+  root: Span;
+}
+
 /**
  * The effective system prompt, composed AFTER executor resolution: skills
  * (progressive disclosure), MCP discovery for the agent's servers, the config
@@ -594,24 +610,7 @@ export interface ComposedPrompt {
  * pins a PR review to its head. A resume re-sends the prompt the run started
  * with, verbatim.
  */
-export async function composePrompt(
-  deps: ProvisionDeps,
-  ctx: {
-    msg: IncomingMessage;
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    directives: RequestDirectives;
-    sticky: ThreadDirectives;
-    repoCtx: RepoContext;
-    /** The attach's answer: the resident flag and the binding's worktree path. */
-    selection: ExecutorSelection;
-    isPrReview: boolean;
-    memoryBlockP: ReturnType<typeof memoryContextBlock>;
-    verifiedAtAttach: boolean;
-    resume: ResumeContext | undefined;
-    root: Span;
-  },
-): Promise<ComposedPrompt> {
+export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Promise<ComposedPrompt> {
   const {
     msg,
     agent,

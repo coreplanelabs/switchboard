@@ -324,7 +324,7 @@ describe("registerRun — the run's row on every surface before the attach", () 
     );
   });
 
-  it("publishRunMeta publishes the repo context it is handed NOW — the caller re-publishes when the attach adopts a moved head", async () => {
+  it("publishMeta publishes the repo context it is handed NOW — the caller re-publishes when the attach adopts a moved head", async () => {
     const d = deps();
     const r = request(d, "review it", "review");
     const registry = new RunRegistry({ genId: () => "run-p", genToken: () => "tok" });
@@ -347,7 +347,7 @@ describe("registerRun — the run's row on every surface before the attach", () 
       shell: r.shell,
       admitted: r.admitted,
     });
-    out.publishRunMeta({ ...repoCtx, headSha: "b".repeat(40) });
+    out.publishMeta({ ...repoCtx, headSha: "b".repeat(40) });
     const metas = registry.snapshotById("run-p")!.events.filter((e) => e.type === "run_meta");
     expect(metas.map((e) => (e as { headSha?: string }).headSha)).toEqual(["a".repeat(40), "b".repeat(40)]);
   });

@@ -84,6 +84,30 @@ export interface RunDeps
   fetchRepoShipInfo?: (repo: string) => Promise<RepoShipInfo | undefined>;
 }
 
+/** What `claimRun` reads off the dispatch. */
+export interface ClaimContext {
+  msg: IncomingMessage;
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  repoCtx: RepoContext;
+  channelVisibility: ChannelVisibility;
+  run: RunHandle;
+  registry: RunRegistry;
+  selection: ExecutorSelection;
+  /** The request as the reservation's row carries it (a fresh request or a restart). */
+  requestRow: Record<string, unknown> | undefined;
+  reserved: LedgerRun | undefined;
+  system: string;
+  mcpForRun: McpToolsForRun;
+  messages: ChatMessage[];
+  resume: ResumeContext | undefined;
+  /** The handle a resume adopted at admission; undefined for a fresh request. */
+  ledgerRun: LedgerRun | undefined;
+  card: StatusHandle;
+  clock: Clock;
+  root: Span;
+}
+
 /**
  * The ledger claim (docs/reference/specs/run-history.md item 35): the run's row on
  * the state Worker with everything a resume must hand the model again, claimed
@@ -93,31 +117,7 @@ export interface RunDeps
  * undefined for an untracked run. A throw here leaves the caller's handle as it
  * was, exactly as the inline assignment did.
  */
-export async function claimRun(
-  deps: RunDeps,
-  ctx: {
-    msg: IncomingMessage;
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    repoCtx: RepoContext;
-    channelVisibility: ChannelVisibility;
-    run: RunHandle;
-    registry: RunRegistry;
-    selection: ExecutorSelection;
-    /** The request as the reservation's row carries it (a fresh request or a restart). */
-    requestRow: Record<string, unknown> | undefined;
-    reserved: LedgerRun | undefined;
-    system: string;
-    mcpForRun: McpToolsForRun;
-    messages: ChatMessage[];
-    resume: ResumeContext | undefined;
-    /** The handle a resume adopted at admission; undefined for a fresh request. */
-    ledgerRun: LedgerRun | undefined;
-    card: StatusHandle;
-    clock: Clock;
-    root: Span;
-  },
-): Promise<LedgerRun | undefined> {
+export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<LedgerRun | undefined> {
   const {
     msg,
     agent,
@@ -181,7 +181,7 @@ export async function claimRun(
         card: card.handle ?? null,
         // The row reserved before the attach (item 42), promoted in place;
         // its hooks (a stop, a fence) were wired at the reservation and stay.
-        ...(reserved ? { reservation: reserved } : {}),
+        reservation: reserved,
         system,
         tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
           ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
@@ -250,7 +250,11 @@ export const DEPLOY_RESTART_NOTICE = "⏸ deploy in progress — this run contin
  *  before the bot restarts" from a run that is merely slow. `undefined` clears
  *  it (tests). A plain module-level value: the drain is process-wide by nature
  *  and every in-flight run must show it, not only runs started after it. */
-export let shutdownNotice: string | undefined;
-export function setShutdownNotice(notice: string | undefined): void {
-  shutdownNotice = notice;
+let notice: string | undefined;
+/** The notice every live card shows right now, or undefined outside a drain. */
+export function shutdownNotice(): string | undefined {
+  return notice;
+}
+export function setShutdownNotice(next: string | undefined): void {
+  notice = next;
 }

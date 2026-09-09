@@ -206,10 +206,10 @@ describe("the shutdown notice", () => {
   afterEach(() => setShutdownNotice(undefined));
 
   it("is a process-wide value every live frame reads: set by the drain, cleared with undefined", () => {
-    expect(shutdownNotice).toBeUndefined();
+    expect(shutdownNotice()).toBeUndefined();
     setShutdownNotice(DEPLOY_RESTART_NOTICE);
-    expect(shutdownNotice).toBe("⏸ deploy in progress — this run continues through the bot restart");
+    expect(shutdownNotice()).toBe("⏸ deploy in progress — this run continues through the bot restart");
     setShutdownNotice(undefined);
-    expect(shutdownNotice).toBeUndefined();
+    expect(shutdownNotice()).toBeUndefined();
   });
 });

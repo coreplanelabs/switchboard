@@ -363,15 +363,10 @@ export interface ReplyDeps
 /** How the answer's delivery ended: delivered (the card closed, the reply
  *  sent, the run sealed), or fenced — another generation owns the run now, and
  *  nothing more reaches the thread from here. */
-export type Delivery = "delivered" | "fenced";
+export type Delivery = { kind: "delivered" } | { kind: "fenced" };
 
-/**
- * The answer reaches the thread: `finishing` on the ledger first (the
- * double-answer protection once runs resume), then the card close, the reply
- * and the seal that writes the record — and the workspace released after,
- * whatever happened, so a channel failure never holds a pool user.
- */
-export async function deliverAnswer(ctx: {
+/** What `deliverAnswer` reads off the dispatch. */
+export interface DeliveryContext {
   msg: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
@@ -384,14 +379,22 @@ export async function deliverAnswer(ctx: {
   ending: RunEnding;
   card: StatusHandle;
   shell: CardShell;
-  finalDetail: () => string | undefined;
-  checkedOffDetail: () => string | undefined;
+  checklistAsLeft: () => string | undefined;
+  checklistCheckedOff: () => string | undefined;
   /** The done card's shape and queued lines, from the finish-site diagnosis (the dispatch's `doneLines`). */
   doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
   runDiagnosis: FrictionDiagnosis | undefined;
   releaseWorkspace: (span?: Span) => Promise<void>;
   root: Span;
-}): Promise<Delivery> {
+}
+
+/**
+ * The answer reaches the thread: `finishing` on the ledger first (the
+ * double-answer protection once runs resume), then the card close, the reply
+ * and the seal that writes the record — and the workspace released after,
+ * whatever happened, so a channel failure never holds a pool user.
+ */
+export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
   const {
     msg,
     io,
@@ -405,8 +408,8 @@ export async function deliverAnswer(ctx: {
     ending,
     card,
     shell,
-    finalDetail,
-    checkedOffDetail,
+    checklistAsLeft,
+    checklistCheckedOff,
     doneLines,
     runDiagnosis,
     releaseWorkspace,
@@ -435,7 +438,7 @@ export async function deliverAnswer(ctx: {
       // outer finally still seals the stream here.
       console.log(`[run] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
       ending.drop(run.id);
-      return "fenced";
+      return { kind: "fenced" };
     }
     // A review verdict carries its run link (as standard Markdown — each
     // adapter renders its own dialect): the verdict message is what gets
@@ -463,7 +466,7 @@ export async function deliverAnswer(ctx: {
             shell.close({
               kind: "done",
               icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
-              detail: stopped ? finalDetail() : checkedOffDetail(),
+              detail: stopped ? checklistAsLeft() : checklistCheckedOff(),
               ...doneLines(runDiagnosis),
             }),
           ),
@@ -473,7 +476,28 @@ export async function deliverAnswer(ctx: {
   } finally {
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
   }
-  return "delivered";
+  return { kind: "delivered" };
+}
+
+/** What `afterReply` reads off the dispatch. */
+export interface AfterReplyContext {
+  msg: IncomingMessage;
+  io: ChannelIO;
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  directives: RequestDirectives;
+  history: HistoryItem[];
+  repoCtx: RepoContext;
+  run: RunHandle;
+  channelVisibility: ChannelVisibility;
+  stopped: StopMode | undefined;
+  answer: string;
+  toolCalls: number;
+  reviewHead: string | undefined;
+  observedHead: string | undefined;
+  verdict: ReviewVerdict | undefined;
+  carried: { reviewed: string; current: string; commits: number } | undefined;
+  root: Span;
 }
 
 /**
@@ -483,28 +507,7 @@ export async function deliverAnswer(ctx: {
  * back, behind the reviewed-head guard). Deliberately after the workspace
  * release and the registry finish, as before.
  */
-export async function afterReply(
-  deps: ReplyDeps,
-  ctx: {
-    msg: IncomingMessage;
-    io: ChannelIO;
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    directives: RequestDirectives;
-    history: HistoryItem[];
-    repoCtx: RepoContext;
-    run: RunHandle;
-    channelVisibility: ChannelVisibility;
-    stopped: StopMode | undefined;
-    answer: string;
-    toolCalls: number;
-    reviewHead: string | undefined;
-    observedHead: string | undefined;
-    verdict: ReviewVerdict | undefined;
-    carried: { reviewed: string; current: string; commits: number } | undefined;
-    root: Span;
-  },
-): Promise<void> {
+export async function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): Promise<void> {
   const {
     msg,
     io,
