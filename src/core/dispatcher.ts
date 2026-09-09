@@ -19,7 +19,7 @@ import type { Clock, Span, SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
-import { cardShapeLine, cardShapeLineOf, queuedCaption } from "./runShape.js";
+import { cardShapeLineOf, queuedCaption } from "./runShape.js";
 import { graftResidentSteps, residentTraceOf, sanitizeGraftedSteps } from "../execution/residentTrace.js";
 import type { ResidentStep } from "../execution/residentStepTrace.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
@@ -82,11 +82,21 @@ import {
   type LiveThread,
 } from "./threadAdmission.js";
 import { resolveChatActor } from "./authz/actor.js";
-import { STATIC_CHANNEL_DIRECTORY } from "./authz/channelDirectory.js";
-import type { ChannelDirectory, ChannelVisibility } from "./authz/types.js";
-import { fitRecordToBudget, MAX_EVENT_BYTES, utf8ByteLength, type RunRecord, type RunStatus } from "./runRecord.js";
+import { MAX_EVENT_BYTES, utf8ByteLength, type RunStatus } from "./runRecord.js";
 import { markdownOutput } from "./llmOutput/index.js";
 import type { RunHistoryWriter } from "./runHistoryWriter.js";
+import { assembleRunRecord, channelVisibilityOf, reclaimedRunRecord, type RecordDeps } from "./dispatch/record.js";
+import {
+  activityLine,
+  attachmentSuffix,
+  cardLines,
+  composeRunLabel,
+  errorReply,
+  humanizeMessageText,
+  isMrkdwnChannel,
+  liveViewLink,
+  replyCommandOutput,
+} from "./dispatch/reply.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { startReviewReadingDiff } from "./readingDiff.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -99,18 +109,8 @@ import {
   type ChatCommands,
   type ParsedChatCommand,
 } from "./commandChat.js";
-import { toMarkdownDocument } from "./markdownDocument.js";
 import { cliWords } from "./commandSurface.js";
-import {
-  activityOfEvents,
-  defaultRunRegistry,
-  type RunHandle,
-  type RunRegistry,
-  type RunSnapshot,
-  type RunSummary,
-  REPLAY_EVERYTHING,
-  type SealResult,
-} from "./runRegistry.js";
+import { defaultRunRegistry, type RunHandle, type RunRegistry, REPLAY_EVERYTHING } from "./runRegistry.js";
 import { inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 import { createCardShell, type CardShell } from "./statusCardFrame.js";
 import { createRunEnding, type RunEnding } from "./runEnding.js";
@@ -128,7 +128,7 @@ import type {
 // parsing, layered resolution, permission gates, history assembly, executor
 // selection, and the agent run. Channels are pure transports (src/channels/).
 
-export interface CoreDeps {
+export interface CoreDeps extends RecordDeps {
   config: ConfigStore;
   providers: ProviderRegistry;
   /** What is on in this process (src/core/capabilities.ts): computed ONCE at
@@ -310,20 +310,6 @@ export interface CoreDeps {
    *  is steered into that run's durable inbox instead of starting a rival.
    *  Empty in a process without a ledger. */
   threadsElsewhere: Pick<ThreadsElsewhere, "get" | "forget">;
-  /**
-   * Channel facts for the run record (docs/decisions/0007-authorization-policy-table.md): every run is
-   * stamped with its channel's visibility at create, asked of this directory
-   * once per run. Default: the static id-based directory (`http:`/`mcp:` →
-   * machine, `slack:D…` → dm, `slack:G…` → private, anything else → unknown);
-   * the bot wires the Slack one (`SlackChannelDirectory`, `conversations.info`
-   * cached per channel per TTL) when the Slack adapter is up. A directory
-   * failure — or an answer slower than `channelDirectoryTimeoutMs` — stamps
-   * `unknown`, never a guess, so a slow directory cannot delay a reply.
-   */
-  channelDirectory?: ChannelDirectory;
-  /** Bound on one `channelDirectory.info` wait (default `CHANNEL_DIRECTORY_TIMEOUT_MS`).
-   *  Tests that exercise the timeout set it low. */
-  channelDirectoryTimeoutMs?: number;
   /**
    * Where `friction propose` files its proposals. Default: the GitHub REST
    * tracker with the App installation token (App `issues:write`; never a `gh`
@@ -3103,26 +3089,6 @@ async function runChatCommand(
  * state itself is never in doubt (`repo list` / the residents dash read it
  * live), and the acknowledgement says so.
  */
-/** A command reply longer than one chat message can hold (a 100-tool `mcp
- *  show`) goes out as an attachment where the channel has one: the first line
- *  as the message, the whole text as a Markdown document named after the
- *  command (`toMarkdownDocument` — Slack renders a `.md` upload as CommonMark,
- *  which reads the chat dialect differently). Channels without `attach` — and
- *  an attach that fails — reply the text as before. */
-export const LONG_COMMAND_REPLY_CHARS = 3_000;
-
-export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatCommand, text: string): Promise<void> {
-  if (!io.attach || text.length <= LONG_COMMAND_REPLY_CHARS) return io.reply(text);
-  const nl = text.indexOf("\n");
-  const lead = nl === -1 ? text : text.slice(0, nl);
-  const name = parsed.kind === "invoke" ? cliWords(parsed.id).join("-") : "command";
-  await io.attach({
-    name: `${name}.md`,
-    text: toMarkdownDocument(text),
-    lead: `${lead}\n_(full output attached — ${text.length.toLocaleString("en-US")} chars)_`,
-  });
-}
-
 function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined>, io: ChannelIO, root: Span): void {
   // Minutes after the request ended: a late child of its root, log-only.
   void root
@@ -3253,510 +3219,6 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
     });
   }
 }
-
-/** The longest a reply waits on the channel directory. The Slack directory
- *  answers from its cache after the first message per channel per TTL; a cold
- *  `conversations.info` is one round trip, and a Slack outage must cost the
- *  user at most this much — the run is then stamped `unknown` (grants-only). */
-export const CHANNEL_DIRECTORY_TIMEOUT_MS = 1500;
-
-const DIRECTORY_TIMED_OUT = Symbol("channel directory timed out");
-
-/** The visibility stamp for a run in `channelId` (docs/decisions/0007-authorization-policy-table.md): what the
- *  channel directory says, asked once per run and awaited for at most
- *  `channelDirectoryTimeoutMs`; a directory that throws, rejects, or is too slow
- *  yields `unknown` — never public, never a member. */
-async function channelVisibilityOf(deps: CoreDeps, channelId: string): Promise<ChannelVisibility> {
-  const timeoutMs = deps.channelDirectoryTimeoutMs ?? CHANNEL_DIRECTORY_TIMEOUT_MS;
-  const failed = (err: unknown): ChannelVisibility => {
-    console.warn(
-      `[authz] channel directory failed for ${channelId} — stamping unknown: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return "unknown";
-  };
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    // Caught BEFORE the race, so a rejection is `unknown` by the same path
-    // whether it lands before the timeout (stamped at once) or after it (the
-    // run is already stamped; the late failure is logged, never left unhandled).
-    const lookup = (deps.channelDirectory ?? STATIC_CHANNEL_DIRECTORY)
-      .info(channelId)
-      .then((info) => info.visibility, failed);
-    const answer = await Promise.race([
-      lookup,
-      new Promise<typeof DIRECTORY_TIMED_OUT>((resolve) => {
-        timer = setTimeout(() => resolve(DIRECTORY_TIMED_OUT), timeoutMs);
-      }),
-    ]);
-    if (answer === DIRECTORY_TIMED_OUT) {
-      console.warn(`[authz] channel directory timed out after ${timeoutMs} ms for ${channelId} — stamping unknown`);
-      return "unknown";
-    }
-    return answer;
-  } catch (err) {
-    // `info` threw synchronously (a non-async implementation).
-    return failed(err);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** The one shape a dispatch failure is reported in — the outer handler's reply
- *  and a failed inline run's `answer` are built from it, so they cannot drift. */
-function errorReply(err: unknown): string {
-  return `⚠️ ${err instanceof Error ? err.message : String(err)}`;
-}
-
-/**
- * The `interrupted` record for a run the drain deadline abandons: the
- * run's full registry snapshot (every event published so far) with
- * `finishedAt` = the drain's clock — the tombstone upgrade `src/index.ts`
- * writes for each still-active run before `process.exit`. Identity comes from
- * the run's `RunSummary` (the same `RunMeta` the dispatcher gave `create()`;
- * the channel/user/thread fields are always present on a dispatcher-created
- * run — the empty-string fallback only guards a hand-built registry entry).
- * The diagnosis is computed as unfinished: the run never reached `finish`.
- */
-export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, finishedAt: number): RunRecord {
-  return assembleRunRecord({
-    run: { id: summary.id, ...(summary.label !== undefined ? { label: summary.label } : {}) },
-    snap,
-    agent: summary.agent,
-    model: summary.model,
-    msg: {
-      channelId: summary.channelId ?? "",
-      userId: summary.userId ?? "",
-      threadKey: summary.threadKey ?? "",
-      sourceUrl: summary.sourceUrl,
-      userName: summary.userName,
-    },
-    channelVisibility: summary.channelVisibility ?? "unknown",
-    repo: summary.repo,
-    finishedAt,
-    status: "interrupted",
-    diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated, schema: SPAN_SCHEMA }),
-  });
-}
-
-/**
- * The record a booting generation closes a reclaimed run with (docs/reference/specs/
- * run-history.md item 36): the ledger row's identity and meta, the events it
- * appended while it ran (the registry that published them died with the old
- * process, so the ledger's copy is the whole stream — `eventCount` is its
- * last `seq`), the terminal status the reclaim decided, and `finishedAt` =
- * the reclaim's clock (nobody knows when the old process died). No label: the
- * row carries none.
- */
-export function reclaimedRunRecord(input: {
-  row: LiveRunRow;
-  events: AppendableEvent[];
-  status: RunStatus;
-  finishedAt: number;
-}): RunRecord {
-  const { row, events, status, finishedAt } = input;
-  const snap: RunSnapshot = {
-    events,
-    finished: true,
-    startedAt: row.startedAt,
-    finishedAt,
-    eventCount: events.reduce((max, e) => Math.max(max, e.seq), 0),
-    stepCount: events.filter((e) => !isSpanRecord(e)).length,
-    truncated: false,
-  };
-  return assembleRunRecord({
-    run: { id: row.runId },
-    snap,
-    agent: row.meta.agent,
-    model: row.meta.model,
-    msg: {
-      channelId: row.meta.channelId,
-      userId: row.meta.userId,
-      threadKey: row.threadKey,
-      sourceUrl: row.meta.sourceUrl,
-      userName: row.meta.userName,
-    },
-    channelVisibility: row.meta.channelVisibility ?? "unknown",
-    repo: row.meta.repo,
-    finishedAt,
-    status,
-    diagnosis: analyzeRunFriction(events, {
-      finished: status !== "interrupted",
-      truncated: false,
-      schema: SPAN_SCHEMA,
-      // A reclaimed run that did finish has its window: the row's start to the
-      // finish the closing generation stamped.
-      ...(status !== "interrupted" ? { window: { start: row.startedAt, end: finishedAt } } : {}),
-    }),
-  });
-}
-
-/**
- * The drain deadline's abandonment pass, called by `src/index.ts` right
- * before `process.exit`: every registry run still unfinished gets its tombstone
- * upgraded to a full-transcript `interrupted` record (`interruptedRunRecord`
- * over the run's whole snapshot, `finishedAt` = the drain's clock). The writes
- * are `provisional` like the start tombstone: the persisted flag means
- * "finished and durably stored" — these runs never finished (and the registry
- * dies with the process) — and a provisional write stands down in the writer
- * if the run's real finish record shows up inside the drain's write budget, so
- * this pass can never clobber a finish that races it. Synchronous end to end
- * (the writes are fire-and-forget); returns how many were enqueued so the
- * caller knows whether to await the writer under its budget.
- */
-export function writeAbandonedRunRecords(
-  registry: Pick<RunRegistry, "listActive" | "snapshotById">,
-  writer: Pick<RunHistoryWriter, "write">,
-  now: number,
-  log: (line: string) => void = console.log,
-  /** Runs handed to the next generation (run-history item 39): their record is
-   *  the ledger's, not a tombstone from here. */
-  exclude: ReadonlySet<string> = new Set(),
-): number {
-  let written = 0;
-  for (const summary of registry.listActive()) {
-    if (summary.finished || exclude.has(summary.id)) continue;
-    const snap = registry.snapshotById(summary.id);
-    if (!snap) continue;
-    writer.write(interruptedRunRecord(summary, snap, now), { provisional: true });
-    log(`[drain] wrote interrupted record for ${summary.id} (${snap.events.length} events)`);
-    written++;
-  }
-  return written;
-}
-
-/**
- * The persisted `RunRecord` for a finished run — the ONE assembly both an agent
- * run and an inline command run go through: the registry's redacted label and
- * finish-time snapshot, the caller's identity from the message, the terminal
- * status, and the diagnosis; then `fitRecordToBudget`. `repo`/`model` are omitted
- * (not set undefined) when absent, so the record's JSON is exactly what the
- * store measures and `isRunRecord` re-validates. The backlog is bounded (count +
- * bytes) while `eventCount` is the published total: a run that outgrew it is
- * `truncated` before the byte budget is even considered.
- */
-function assembleRunRecord(input: {
-  run: Pick<RunHandle, "id" | "label">;
-  snap: RunSnapshot | null;
-  agent?: string;
-  model?: string;
-  msg: Pick<IncomingMessage, "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName">;
-  /** The stamp taken at create (`channelVisibilityOf`) — the record carries what the run was stamped with. */
-  channelVisibility: ChannelVisibility;
-  repo?: string;
-  finishedAt: number;
-  status: RunStatus;
-  diagnosis: FrictionDiagnosis;
-  /** The run's seal (docs/reference/specs/tracing.md): the events published between finish
-   *  and seal are appended, the published total takes the larger count, and the
-   *  two seal stamps ride the record — omitted when the seal has none. */
-  seal?: SealResult;
-}): RunRecord {
-  const { run, snap, msg, seal } = input;
-  const atFinish = snap?.events ?? [];
-  const events = seal && seal.events.length > 0 ? [...atFinish, ...seal.events] : atFinish;
-  const fitted = fitRecordToBudget({
-    id: run.id,
-    ...(run.label !== undefined ? { label: run.label } : {}),
-    ...(input.agent !== undefined ? { agent: input.agent } : {}),
-    ...(input.model !== undefined ? { model: input.model } : {}),
-    channelId: msg.channelId,
-    userId: msg.userId,
-    threadKey: msg.threadKey,
-    channelVisibility: input.channelVisibility,
-    ...(input.repo !== undefined ? { repo: input.repo } : {}),
-    // The window's opening rides the record (docs/reference/specs/tracing.md): every
-    // duration surface and the diagnosis's window start here, not at create.
-    ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
-    startedAt: snap?.startedAt ?? input.finishedAt,
-    finishedAt: input.finishedAt,
-    ...(seal?.sealedAt !== undefined ? { sealedAt: seal.sealedAt } : {}),
-    ...(seal?.replyOk !== undefined ? { replyOk: seal.replyOk } : {}),
-    ...(snap !== null ? { stepCount: snap.stepCount } : {}),
-    status: input.status,
-    eventCount: Math.max(snap?.eventCount ?? atFinish.length, seal?.eventCount ?? 0),
-    storedEventCount: events.length,
-    truncated: false,
-    schema: SPAN_SCHEMA, // the stream carries spans, never `turn` events (docs/reference/specs/tracing.md)
-    events,
-    diagnosis: input.diagnosis,
-    // What the run was last doing / how it ended, and where it came from — so the
-    // index can say what failed and link the thread without the events (item 20).
-    ...(activityOfEvents(events) !== undefined ? { activity: activityOfEvents(events) } : {}),
-    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-  });
-  return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
-}
-
-/** The external live-view capability URL for a run, or undefined when
- *  PUBLIC_BASE_URL is unset/blank — the feature degrades gracefully (no link,
- *  everything else works). The token is a per-run capability, unguessable and
- *  scoped to one run; it is not a logged credential. */
-function liveViewLink(id: string, token: string): string | undefined {
-  const base = process.env.PUBLIC_BASE_URL?.trim();
-  if (!base) return undefined;
-  return `${base.replace(/\/+$/, "")}/runs/${encodeURIComponent(id)}?t=${encodeURIComponent(token)}`;
-}
-
-// ---- run label (Area 2 / live-view index) -----------------------------------
-
-/** Everything `composeRunLabel` needs to build one human-readable run label.
- *  Channel-agnostic: `channelName`/`userName` are optional display hints (Slack
- *  provides them; HTTP/MCP don't), and `channelId`/`userId` are the always-present
- *  namespaced ids the label falls back to. */
-export interface RunLabelInput {
-  /** Resolved agent name — the label always leads with this. */
-  agent: string;
-  /** Target repo (`owner/name`) for repo runs; absent for chat runs. */
-  repo?: string;
-  /** Namespaced channel id (`slack:C…`), used when no `channelName` resolved. */
-  channelId: string;
-  /** Namespaced user id (`slack:U…`), used when no `userName` resolved. */
-  userId: string;
-  /** Human channel/conversation name, if the adapter resolved one. */
-  channelName?: string;
-  /** Human user display name, if the adapter resolved one. */
-  userName?: string;
-  /** The request text; a short quoted snippet of it is appended to the label. */
-  text: string;
-}
-
-/** Max chars in a snippet before it is cut (at a word boundary) and ellipsized —
- *  a laptop-width index row holds ~100 after the started column, chips and facts
- *  (live-view item 21; was 60, which left half the row empty). */
-const SNIPPET_MAX = 100;
-/** Hard cap on the whole label so one hostile/huge field can't dominate the index
- *  (the registry's own cap is 200). */
-const RUN_LABEL_MAX = 160;
-
-/** Drop the platform prefix from a namespaced id (`slack:U0123` → `U0123`) so an
- *  id fallback reads a little better when no display name is available. */
-function stripPlatformPrefix(id: string): string {
-  const i = id.indexOf(":");
-  return i === -1 ? id : id.slice(i + 1);
-}
-
-/** Rewrite one URL into its shortest useful display form: a GitHub PR/issue
- *  becomes `owner/repo#N` (any trailing `/files`, `#discussion_…` dropped);
- *  anything else loses its scheme and `www.` so the host/path is what shows. */
-function compactUrl(url: string): string {
-  const gh = /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+\/[^/\s]+)\/(?:pull|issues)\/(\d+)/.exec(url);
-  if (gh) return `${gh[1]}#${gh[2]}`;
-  return url.replace(/^https?:\/\/(?:www\.)?/, "");
-}
-
-/** Make request text readable: Slack's `<url|label>` renders as its label,
- *  `<url>` as the url, mentions/channels as `@name`/`#name`. With `compact`
- *  (the run-label snippet) every URL also loses its scheme/`www.` and GitHub
- *  PR/issue URLs become `owner/repo#N` — the raw mrkdwn a Slack review request
- *  carries (`<https://github.com/…/pull/41|…>`) would otherwise be sliced
- *  mid-URL by the snippet budget. Without it (message events) URLs stay whole
- *  so the run page can render them as links. */
-function humanizeLinks(text: string, compact = true): string {
-  const show = (url: string) => (compact ? compactUrl(url) : url);
-  // `<url|label>`: the label alone for the compact snippet. For message text the
-  // url must survive so the run page can link it — Slack's auto-link form (label
-  // = the url, or the url minus scheme/`www.`/trailing slash) becomes the bare
-  // url; a genuine custom label becomes `label (url)`.
-  const labelled = (url: string, label: string) => {
-    if (!label.trim()) return show(url);
-    if (compact) return label;
-    return isAutoLinkLabel(url, label) ? url : `${label} (${url})`;
-  };
-  return (
-    text
-      // Slack mentions: `<@U…|name>` / `<#C…|name>` / `<!subteam^S…|@eng>` keep
-      // their label; label-less ones become a readable stub rather than a raw id.
-      .replace(/<@[^<>|\s]+\|([^<>]*)>/g, (_m, label: string) => `@${label.replace(/^@/, "")}`)
-      .replace(/<@[^<>\s]+>/g, "@user")
-      .replace(/<#[^<>|\s]+\|([^<>]*)>/g, (_m, label: string) => `#${label.replace(/^#/, "")}`)
-      .replace(/<#[^<>\s]+>/g, "#channel")
-      .replace(/<!(?:here|channel|everyone)(?:\|[^<>]*)?>/g, (m) => `@${/here|channel|everyone/.exec(m)![0]}`)
-      .replace(/<!subteam\^[^<>|\s]+\|([^<>]*)>/g, (_m, label: string) => `@${label.replace(/^@/, "")}`)
-      .replace(/<!subteam\^[^<>\s]+>/g, "@group")
-      // Slack links: `<url|label>` → label (or the compacted url when empty), `<url>` → url.
-      .replace(/<([^<>|\s]+)\|([^<>]*)>/g, (_m, url: string, label: string) => labelled(url, label))
-      .replace(/<([a-z][a-z0-9+.-]*:\/\/[^<>\s]+)>/gi, (_m, url: string) => show(url))
-      // Bare URLs: trailing sentence punctuation (`…/pull/12,` / `…/a).`) belongs
-      // to the prose, not the url, so it is left in place.
-      .replace(/\bhttps?:\/\/[^\s<>"']+/gi, (url) => {
-        const trail = /[)\].,;:!?'"]+$/.exec(url)?.[0] ?? "";
-        return show(url.slice(0, url.length - trail.length)) + trail;
-      })
-  );
-}
-
-/** Slack auto-links a pasted URL as `<url|label>` where the label is the url
- *  itself, often without its scheme, `www.` or trailing slash. */
-function isAutoLinkLabel(url: string, label: string): boolean {
-  const strip = (s: string) =>
-    s
-      .trim()
-      .replace(/^https?:\/\//i, "")
-      .replace(/^www\./i, "")
-      .replace(/\/+$/, "");
-  return strip(url) === strip(label);
-}
-
-/** Slack delivers message text with `&`, `<`, `>` as `&amp;`/`&lt;`/`&gt;` (the
- *  mrkdwn structural characters — the inverse of `escapeMrkdwn`). Undo that
- *  ONCE, after the `<…>` markup has been unwrapped so a literal `&lt;` never
- *  becomes structural. Pure string work: the core stays free of Slack imports. */
-function unescapeSlackEntities(text: string): string {
-  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
-}
-
-/** The human-readable form of a Slack-authored turn for the run record: link,
- *  mention and channel markup unwrapped — `<url>` and auto-link `<url|url>` →
- *  the whole url, custom `<url|label>` → `label (url)`, never compacted — and
- *  entities unescaped. Only for text that came in through a channel — model
- *  output is not mrkdwn and must not pass through here. */
-export function humanizeMessageText(text: string): string {
-  return markdownEmphasis(unescapeSlackEntities(humanizeLinks(text, false)));
-}
-
-/** mrkdwn's bold in Markdown terms, so the run page's markdown renderer reads a
- *  Slack-authored turn as the human saw it (live-view item 18): `*bold*` →
- *  `**bold**` when the asterisks delimit a run that starts and ends on non-space
- *  (mrkdwn's rule) and sit on word edges — a glob (`src/*.ts`) or arithmetic
- *  (`2 * 3 * 4`) is left alone. Code spans and fences are left byte-for-byte.
- *  `_italic_` already means the same in both dialects; block-level mrkdwn (`•`
- *  bullets, quotes) cannot survive here — `parseDirectives` has already collapsed
- *  the request to one line. */
-function markdownEmphasis(text: string): string {
-  const parts = text.split(/(```[\s\S]*?```|`[^`\n]*`)/);
-  for (let i = 0; i < parts.length; i += 2) {
-    parts[i] = parts[i].replace(/(^|[\s([{"'>])\*(\S(?:[^*\n]*?\S)?)\*(?=$|[\s)\]}.,!?:;"'<])/gm, "$1**$2**");
-  }
-  return parts.join("");
-}
-
-/** Whether a channel's text is Slack mrkdwn (AGENTS.md invariant 4: the id
- *  prefix names the platform) — the ONE gate on `humanizeMessageText` for the
- *  run record. HTTP, MCP, CLI and cron text is not mrkdwn and is recorded raw,
- *  exactly as the model received it. */
-export function isMrkdwnChannel(channelId: string): boolean {
-  return channelId.startsWith("slack:");
-}
-
-/** A short, quoted snippet of the request text for a run label: links
- *  humanized, whitespace collapsed, cut at the first sentence end or ~SNIPPET_MAX
- *  chars (whichever comes first, on a word boundary), ellipsized when anything
- *  was dropped. Empty/whitespace-only text → undefined (no snippet segment). */
-function textSnippet(text: string): string | undefined {
-  const collapsed = humanizeLinks(text).replace(/\s+/g, " ").trim();
-  if (!collapsed) return undefined;
-  // First sentence, when it ends within the budget AND there is more after it.
-  // `#41` / `example.com/x` must not count as a sentence end, so a period only
-  // ends a sentence when followed by whitespace. (No `$` alternative: it would
-  // match the end of the SLICE, turning a dot at the budget edge inside a token
-  // into a false sentence end. A dot ending the whole text needs no sentence
-  // cut — the "whole thing fits" branch below covers it.)
-  const end = collapsed.slice(0, SNIPPET_MAX + 1).search(/[.!?](?=\s)/);
-  if (end !== -1 && end + 1 < collapsed.length) return `"${collapsed.slice(0, end)}…"`;
-  // Otherwise the whole thing if it fits …
-  if (collapsed.length <= SNIPPET_MAX) return `"${collapsed}"`;
-  // … or a word-boundary cut with an ellipsis (fall back to a hard cut if the
-  // first "word" alone already overflows the budget).
-  const hard = collapsed.slice(0, SNIPPET_MAX);
-  const wordCut = hard.replace(/\s+\S*$/, "").trimEnd();
-  const body = wordCut.length >= SNIPPET_MAX / 2 ? wordCut : hard.trimEnd();
-  return `"${body}…"`;
-}
-
-/** Longest `assistant` excerpt shown as the card's one-line activity trace. */
-const ASSISTANT_TRACE_CAP = 80;
-
-/**
- * The one-line activity trace the status card shows for a run event (the card
- * is a digest; the run page is the record). An `assistant` turn becomes a short
- * `💬` excerpt — one line, replaced by the next event, so the model's prose is
- * visible in-channel without ever growing the card. `input`, `context` and
- * `answer` are published straight to the registry and never arrive here; the
- * fallbacks only keep the switch total.
- */
-function activityLine(e: RunEvent): string {
-  switch (e.type) {
-    case "tool_call":
-      return `→ ${e.summary}`;
-    case "tool_result":
-      return `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`;
-    case "run_note":
-      return `⏱ ${e.summary}`;
-    case "assistant": {
-      const oneLine = e.text.replace(/\s+/g, " ").trim();
-      return `💬 ${oneLine.length > ASSISTANT_TRACE_CAP ? `${oneLine.slice(0, ASSISTANT_TRACE_CAP)}…` : oneLine}`;
-    }
-    case "input":
-      return "request received";
-    case "context":
-      return "context recorded";
-    case "answer":
-      return "answer ready";
-    case "turn":
-      return ""; // legacy stored records only; a live run's thought line rides the runner's progress note
-    case "run_meta":
-      return "run context recorded"; // published straight to the registry too — never arrives here
-    case "skill_use":
-      return `📚 skill ${e.skill} loaded`;
-    case "mcp_tool_use":
-      return `🔌 ${e.server}/${e.tool} ${e.ok ? "ok" : "failed"} (${e.durationMs} ms)`;
-    case "review_artifact":
-      return "reading diff ready"; // published straight to the registry — never arrives here
-    case "pr_description":
-      return "PR description recorded"; // published straight to the registry — never arrives here
-    case "pr_opened":
-      return "PR opened"; // published straight to the registry — never arrives here
-    case "ship_round":
-      return `round ${e.index} (${e.agent}): ${e.outcome}`; // published straight to the registry — never arrives here
-    case "span_start":
-    case "span_end":
-      return ""; // timing, not activity (docs/reference/specs/tracing.md): the card's activity line never shows a span
-  }
-}
-
-/**
- * One-line note of what rode along with the request, for the `input` event
- * (docs/reference/specs/live-view.md item 12): `[+2 images, 1 document]`. Counts only — the
- * payloads never enter the run stream. Empty when nothing was attached.
- */
-export function attachmentSuffix(
-  images: ImageAttachment[] | undefined,
-  documents: DocumentAttachment[] | undefined,
-): string {
-  const parts: string[] = [];
-  if (images && images.length > 0) parts.push(`${images.length} image${images.length === 1 ? "" : "s"}`);
-  if (documents && documents.length > 0) parts.push(`${documents.length} document${documents.length === 1 ? "" : "s"}`);
-  return parts.length > 0 ? `[+${parts.join(", ")}]` : "";
-}
-
-/**
- * Build the human-first run label shown on the Access-gated `/runs` index. Rules:
- * - always lead with the agent name;
- * - a repo run is repo-identified (`coding · owner/repo · "…"`);
- * - a chat run shows channel + user (`review · #<channel> · <user> · "…"`),
- *   preferring display names and falling back to the prefix-stripped ids;
- * - a short quoted snippet of the request is appended when the text is non-empty;
- * - the whole thing is capped to RUN_LABEL_MAX chars.
- * Pure and channel-agnostic (HTTP/MCP have no names → the id fallback applies).
- */
-export function composeRunLabel(input: RunLabelInput): string {
-  const segments: string[] = [input.agent];
-  if (input.repo) {
-    segments.push(input.repo);
-  } else {
-    segments.push(`#${input.channelName ?? stripPlatformPrefix(input.channelId)}`);
-    segments.push(input.userName ?? stripPlatformPrefix(input.userId));
-  }
-  const snippet = textSnippet(input.text);
-  if (snippet) segments.push(snippet);
-  const label = segments.join(" · ");
-  return label.length > RUN_LABEL_MAX ? `${label.slice(0, RUN_LABEL_MAX - 1).trimEnd()}…` : label;
-}
-
-/** Prefixes the core stamps on status text — adapters use this to filter their
- *  own status noise out of history. */
-export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
 
 /** The notice the drain (src/index.ts) sets on SIGTERM from a deploy rollout.
  *  Exported so the Slack adapter's orphan sweep can strip it from a frozen
@@ -3906,20 +3368,4 @@ async function resolveRepoForCommand(
   } catch {
     return {};
   }
-}
-
-/** The card's shape and queued lines at a close (docs/reference/specs/tracing.md item 5):
- *  the root's streamed children so far, partitioned over the request's window
- *  — to the finish for a run that ran, to now for a close before any run. The
- *  card's own gate (a minute, or 15 s of getting ready) applies. */
-function cardLines(
-  trace: RequestTrace,
-  opts: { end: number; finished: boolean; owner: RunOwner; queued: string | undefined },
-): { shape?: string; queued?: string } {
-  const shape = cardShapeLine(trace.spansSoFar(), {
-    window: { start: trace.receivedAt, end: opts.end },
-    owner: opts.owner,
-    finished: opts.finished,
-  });
-  return { ...(shape ? { shape } : {}), ...(opts.queued ? { queued: opts.queued } : {}) };
 }
