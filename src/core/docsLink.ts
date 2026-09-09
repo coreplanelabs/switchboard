@@ -7,9 +7,10 @@
 // paste, and it survives the docs site moving hosts — one constant to change.
 //
 // The redirect itself is public (it is not in the Access-gated set in
-// src/index.ts): the target hostname is all it reveals, and the docs site sits
-// behind the same Cloudflare Access as the dashboards, so an unauthenticated
-// follower lands on the SSO login, not on the docs.
+// src/index.ts): the target hostname is all it reveals. The project's own docs
+// site is public; an installation that gates its docs puts its OWN Cloudflare
+// Access application on the docs host — never a second hostname on the bot's
+// application (Access then routes every dashboard login through the other host).
 //
 // Pure: no fs, no clock, no I/O.
 
