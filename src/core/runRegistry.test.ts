@@ -4,12 +4,11 @@ import {
   REPLAY_EVERYTHING,
   RunRegistry,
   UNSEALED_HOLD_MS,
-  type FinishedFrame,
   type IndexEvent,
-  type SealedFrame,
 } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 import { MAX_EVENT_BYTES } from "./runRecord.js";
+import type { FinishedFrame, SealedFrame } from "./runRegistry/state.js";
 import { call, result, seq, spanEnd, testRegistry } from "./runRegistry/testing.js";
 
 // Feature: docs/reference/specs/live-view.md — the in-memory, live-only run registry that

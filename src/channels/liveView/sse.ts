@@ -1,6 +1,7 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { isSpanRecord, serializedOnce, type RunEvent } from "../../core/runEvents.js";
-import type { FinishedFrame, IndexEvent, SealedFrame, Subscribed, Unsubscribe } from "../../core/runRegistry.js";
+import type { IndexEvent, Subscribed } from "../../core/runRegistry.js";
+import type { FinishedFrame, SealedFrame, Unsubscribe } from "../../core/runRegistry/state.js";
 
 // Server-Sent Events transport for the live view: the per-run stream (the
 // registry's budgeted replay + forward, or the stored history replay), the
