@@ -1,18 +1,17 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import {
-  redactAndCap,
-  sanitizeActor,
-  serializedOnce,
-  type RunActor,
-  type RunEvent,
-  type StopMode,
-  isHeadMaterial,
-  isSpanRecord,
-} from "./runEvents.js";
+import { redactAndCap, sanitizeActor, type RunActor, type RunEvent, type StopMode, isSpanRecord } from "./runEvents.js";
 import type { RunStatus } from "./runRecord.js";
-import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 import { RunControl } from "./runRegistry/runControl.js";
-import { activityOf, activityOfEvents } from "./runRegistry/activity.js";
+import { activityOfEvents } from "./runRegistry/activity.js";
+import {
+  appendToBacklog,
+  DEFAULT_BACKLOG_BYTES,
+  DEFAULT_BACKLOG_LIMIT,
+  DEFAULT_REPLAY_BYTES,
+  DEFAULT_REPLAY_LIMIT,
+  replayWindow,
+  type BacklogBounds,
+} from "./runRegistry/backlog.js";
 import type {
   FinishedFrame,
   RunFinishedListener,
@@ -120,30 +119,6 @@ export type IndexSubscriber = (event: IndexEvent) => void;
  *  the display truncation. */
 export const RUN_LABEL_MAX = 200;
 
-/** Default per-run backlog bounds: count and bytes. The registry
- *  backlog is the ONLY per-run event store — the friction diagnosis and the run
- *  record are built from it — so it is bounded generously and by both axes. */
-export const DEFAULT_BACKLOG_LIMIT = 8000;
-export const DEFAULT_BACKLOG_BYTES = 4 * 1024 * 1024;
-
-/** The protected head (docs/reference/specs/tracing.md; live-view item 2): the events that
- *  say what a run is — its request, its context, its meta, the setup spans and
- *  the notes about missing tools or dropped setup — are never trimmed by the
- *  count or byte bound, up to this many bytes. Past the budget, or once any
- *  other event has been published, later head material is ordinary. Head
- *  events are capped to `MAX_EVENT_BYTES` at publish so one giant `context`
- *  cannot spend the whole budget. */
-export const HEAD_BUDGET_BYTES = 512 * 1024;
-
-/** The replay budget a late subscriber gets from the retained backlog
- *  (docs/reference/specs/live-view.md item 5): at most this many events and at most
- *  `DEFAULT_REPLAY_BYTES` of UTF-8 JSON, the newest first. The backlog keeps
- *  more than a browser needs to follow a live run, and a page must not stall on
- *  a 4 MiB burst; what the budget leaves out is reported as `elided`, never
- *  silently dropped. */
-export const DEFAULT_REPLAY_LIMIT = 2000;
-export const DEFAULT_REPLAY_BYTES = 1024 * 1024;
-
 /** The budget override for a subscriber that must see every retained event —
  *  the run ledger, which is a store, not a viewer. Viewers take the defaults. */
 export const REPLAY_EVERYTHING: Pick<SubscribeOptions, "limit" | "byteLimit"> = {
@@ -216,8 +191,7 @@ export class RunRegistry {
   /** Live subscribers to the runs-index feed (see subscribeIndex). Separate from
    *  per-run `subscribers`: these get every run's lifecycle, not one run's events. */
   private readonly indexSubscribers = new Set<IndexSubscriber>();
-  private readonly backlogLimit: number;
-  private readonly backlogBytes: number;
+  private readonly bounds: BacklogBounds;
   private readonly ttlMs: number;
   private readonly genId: () => string;
   private readonly genToken: () => string;
@@ -226,8 +200,10 @@ export class RunRegistry {
   private seq = 0;
 
   constructor(opts: RunRegistryOptions = {}) {
-    this.backlogLimit = opts.backlogLimit ?? DEFAULT_BACKLOG_LIMIT;
-    this.backlogBytes = opts.backlogBytes ?? DEFAULT_BACKLOG_BYTES;
+    this.bounds = {
+      limit: opts.backlogLimit ?? DEFAULT_BACKLOG_LIMIT,
+      bytes: opts.backlogBytes ?? DEFAULT_BACKLOG_BYTES,
+    };
     this.ttlMs = opts.ttlMs ?? 60_000;
     this.genId = opts.genId ?? (() => randomUUID());
     this.genToken = opts.genToken ?? (() => randomBytes(32).toString("hex"));
@@ -282,42 +258,10 @@ export class RunRegistry {
       const seq = event.seq ?? run.eventCount + 1;
       run.eventCount = Math.max(run.eventCount, seq);
       if (!isSpanRecord(event)) run.stepCount++;
-      this.appendToBacklog(run, { ...event, seq });
+      appendToBacklog(run, this.bounds, { ...event, seq });
     }
     this.notifyIndex({ type: "upsert", run: summaryOf(run) });
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
-  }
-
-  /** Append one stamped event to the run's bounded backlog and refresh its
-   *  activity line. Head material published while the backlog holds nothing
-   *  but head joins the protected head (capped per event, bounded in total);
-   *  the trim then drops the oldest event AFTER the head, never the head, and
-   *  always keeps the newest. */
-  private appendToBacklog(run: RunState, published: RunEvent): void {
-    const headEligible =
-      run.backlog.length === run.headLen && isHeadMaterial(published) && run.headBytes < HEAD_BUDGET_BYTES;
-    // A head event is capped at publish (docs/reference/specs/tracing.md): the cap is the
-    // record's per-event cap, so what the head holds is what a record would.
-    const stamped = headEligible ? capEvent(published, MAX_EVENT_BYTES).event : published;
-    const bytes = utf8ByteLength(serializedOnce(stamped)); // memoized: the SSE frame reuses this string
-    run.backlog.push(stamped);
-    run.backlogSizes.push(bytes);
-    run.backlogBytes += bytes;
-    if (headEligible && run.headBytes + bytes <= HEAD_BUDGET_BYTES) {
-      run.headLen++;
-      run.headBytes += bytes;
-    }
-    // The one-line "what is it doing" the index shows (item 20). Narration wins
-    // over the tool call it explains only until the next call arrives.
-    const activity = activityOf(stamped);
-    if (activity !== undefined) run.activity = activity;
-    while (
-      run.backlog.length > run.headLen + 1 &&
-      (run.backlog.length > this.backlogLimit || run.backlogBytes > this.backlogBytes)
-    ) {
-      run.backlog.splice(run.headLen, 1);
-      run.backlogBytes -= run.backlogSizes.splice(run.headLen, 1)[0] ?? 0;
-    }
   }
 
   /**
@@ -381,7 +325,7 @@ export class RunRegistry {
     const seq = ++run.eventCount;
     if (!span) run.stepCount++;
     const stamped: RunEvent = { ...event, seq };
-    this.appendToBacklog(run, stamped);
+    appendToBacklog(run, this.bounds, stamped);
     for (const sub of run.subscribers) {
       try {
         sub.onEvent(stamped, seq);
@@ -547,31 +491,8 @@ export class RunRegistry {
     const { onEvent, onFinished, onSealed, afterSeq = 0 } = opts;
     const limit = Math.max(1, Math.floor(opts.limit ?? DEFAULT_REPLAY_LIMIT));
     const byteLimit = opts.byteLimit ?? DEFAULT_REPLAY_BYTES;
-    const { backlog, backlogSizes } = run;
-    // The backlog is `seq`-ascending: the offered events are one suffix, and the
-    // replayed ones a suffix of that. A fresh subscribe (no cursor) always gets
-    // the protected head first (docs/reference/specs/tracing.md), and the budget then buys
-    // the newest of the rest; a resume re-sends nothing from the head. Walk
-    // newest-first, admitting an event while both bounds hold; the newest is
-    // admitted unconditionally.
-    let first = backlog.findIndex((e) => (e.seq ?? 0) > afterSeq);
-    if (first === -1) first = backlog.length;
-    const head = afterSeq === 0 ? Math.min(run.headLen, backlog.length) : 0;
-    let headBytes = 0;
-    for (let i = 0; i < head; i++) headBytes += backlogSizes[i] ?? 0;
-    const restFirst = Math.max(first, head);
-    let start = backlog.length;
-    let bytes = headBytes;
-    while (start > restFirst) {
-      const next = start - 1;
-      const count = head + (backlog.length - next);
-      const size = backlogSizes[next] ?? 0;
-      if (count > head + 1 && (count > limit || bytes + size > byteLimit)) break;
-      bytes += size;
-      start = next;
-    }
-    const elided =
-      start > restFirst ? { fromSeq: backlog[restFirst]!.seq ?? 0, toSeq: backlog[start - 1]!.seq ?? 0 } : undefined;
+    const { backlog } = run;
+    const { head, start, elided } = replayWindow(run, afterSeq, limit, byteLimit);
     for (let i = 0; i < head; i++) onEvent(backlog[i]!, backlog[i]!.seq ?? 0);
     for (let i = start; i < backlog.length; i++) onEvent(backlog[i]!, backlog[i]!.seq ?? 0);
     const replayed = head + (backlog.length - start);
