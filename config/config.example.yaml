@@ -229,11 +229,14 @@ workspaceDir: ./workspaces
 #   groups:
 #     myapp:
 #       label: My App
-#       workers: [myapp, myapp-worker]           # Worker script names (their Durable Objects)
-#       containerApps:                            # container application id → label
+#       workers: [myapp, myapp-worker]           # Worker script names — the attribution root: their Durable
+#                                                #   Objects, their requests/CPU, and the R2 buckets named <worker>-cache
+#       containerApps:                            # container application id → label (no dataset ties an app to a Worker)
 #         a0000000-0000-0000-0000-000000000000: server
-#       durableObjectNamespaces:                  # DO namespace id → label (billable duration is per namespace)
-#         <32-hex namespace id>: server DO
+#       durableObjectNamespaces:                  # optional: DO namespace id → label; a namespace hosted by a listed
+#         <32-hex namespace id>: server DO        #   Worker is attributed anyway, labelled by that Worker
+#       r2Buckets:                                # optional: bucket name → label for buckets not named <worker>-cache
+#         some-other-bucket: uploads
 #       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
 
 # Dashboard authentication (docs/reference/specs/access-gate.md). Everything the dashboard

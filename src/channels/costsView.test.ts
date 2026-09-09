@@ -17,11 +17,16 @@ function report(over: Partial<CostReport> = {}): CostReport {
     containers: { bot: { cpu: bot * 0.1, memory: bot * 0.8, disk: bot * 0.1, total: bot } },
     durableObjects: { "bot DO": 0.2 },
     doRequestsUsd: 0.05,
+    doRowsUsd: 0,
+    doStorageUsd: 0,
+    workersUsd: 0,
+    r2Usd: 0,
     cloudUsd: bot + 0.25,
     llmUsd: llm,
     total: bot + 0.25 + llm,
   });
   const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3)];
+  const cloudUsd = days.reduce((s, d) => s + d.cloudUsd, 0);
   return {
     group: "switchboard",
     label: "Switchboard <b>",
@@ -29,11 +34,22 @@ function report(over: Partial<CostReport> = {}): CostReport {
     llmAvailable: true,
     days,
     totals: {
-      cloudUsd: days.reduce((s, d) => s + d.cloudUsd, 0),
+      cloudUsd,
       llmUsd: 19.5,
       total: days.reduce((s, d) => s + d.total, 0),
-      byResource: { cpu: 0.25, memory: 2.0, disk: 0.25, durableObjects: 0.75 },
+      byResource: {
+        cpu: 0.25,
+        memory: 2.0,
+        disk: 0.25,
+        durableObjects: 0.75,
+        workers: 0,
+        doRows: 0,
+        doStorage: 0,
+        r2: 0,
+      },
     },
+    account: { cloudUsd },
+    attribution: { workers: ["switchboard"], containerApps: {}, durableObjectNamespaces: {}, r2Buckets: {} },
     ...over,
   };
 }

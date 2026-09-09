@@ -93,6 +93,13 @@ function monthDay(date: string): string {
           report.llmAvailable ? "of the range total" : "LLM spend not configured"
         }}</span>
       </div>
+      <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
+        <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">Share of account</span>
+        <span class="text-2xl font-medium tabular-nums">{{ tiles.accountShare }}%</span>
+        <span class="text-xs text-muted"
+          >{{ usd(report.totals.cloudUsd) }} of {{ usd(report.account.cloudUsd) }} Cloudflare spend in range</span
+        >
+      </div>
     </section>
 
     <section class="mb-5 grid gap-3 rounded-md border border-default bg-elevated px-5 py-4">
@@ -192,18 +199,29 @@ function monthDay(date: string): string {
             awake. LLM spend is the Anthropic Admin API cost report for this group's workspace (gross, USD).
           </div>
           <div>
-            <b>Method.</b> Cloudflare GraphQL Analytics <code>containersUsageAdaptiveGroups</code> (cpuTimeSec,
-            allocatedMemory, allocatedDisk per app per UTC day), <code>durableObjectsPeriodicGroups</code> (billable
-            <code>duration</code> GB-s per namespace) and <code>durableObjectsInvocationsAdaptiveGroups</code> (requests
-            per Worker). Prices: vCPU $0.000020/s, memory $0.0000025/GiB-s, disk $0.00000007/GB-s, DO duration $12.50
-            per million GB-s, DO requests $0.15/M. Gross list price — plan fees and included allowances are not
-            subtracted.
+            <b>Method.</b> Cloudflare GraphQL Analytics, every meter a Workers deployment is billed on:
+            <code>containersUsageAdaptiveGroups</code> (cpuTimeSec, allocatedMemory, allocatedDisk per app per UTC day),
+            <code>durableObjectsPeriodicGroups</code> (billable <code>duration</code> GB-s and SQLite rows read and
+            written per namespace), <code>durableObjectsInvocationsAdaptiveGroups</code> (requests per namespace),
+            <code>durableObjectsSqlStorageGroups</code> (bytes stored),
+            <code>workersInvocationsAdaptive</code> (requests, CPU time), <code>r2StorageAdaptiveGroups</code> and
+            <code>r2OperationsAdaptiveGroups</code>
+            (bytes stored, class A/B operations). Prices: vCPU $0.000020/s, memory $0.0000025/GiB-s, disk
+            $0.00000007/GB-s, DO duration $12.50 per million GB-s, DO requests $0.15/M, SQLite rows $0.001/M read and
+            $1.00/M written, DO storage $0.20/GB-month, Workers $0.30/M requests and $0.02/M CPU-ms, R2 $0.015/GB-month,
+            $4.50/M class A and $0.36/M class B (deletes free). Storage is the day's peak, prorated over a 30.44-day
+            month. Gross list price — plan fees and included allowances are not subtracted; Workers Logs volume has no
+            analytics dataset and is not priced.
           </div>
           <div>
-            <b>Scope.</b> Only the container apps, DO namespaces and Workers mapped to this group in
-            <code>costs.groups.{{ report.group }}</code
-            >; everything else in the account is excluded. Not included: R2 (resident snapshots), DO SQLite storage,
-            Workers requests, Access — each is cents a month at current volume.
+            <b>Scope.</b> Attributed to this group: the Workers <code>{{ report.attribution.workers.join(", ") }}</code
+            >, every Durable Object namespace they host ({{
+              Object.keys(report.attribution.durableObjectNamespaces).length
+            }}), the R2 buckets named after them ({{ Object.keys(report.attribution.r2Buckets).length }}), and the
+            container apps mapped in <code>costs.groups.{{ report.group }}</code> ({{
+              Object.keys(report.attribution.containerApps).length
+            }}). Everything else in the account is priced the same way into the account total, which is what "share of
+            account" divides by.
           </div>
         </div>
       </details>

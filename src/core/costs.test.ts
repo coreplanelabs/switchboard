@@ -8,10 +8,17 @@ import {
   COSTS_OFF_MESSAGE,
   buildCostReport,
   containerCostUsd,
+  DAYS_PER_MONTH,
   doDurationCostUsd,
   doRequestsCostUsd,
+  doRowsCostUsd,
+  EMPTY_USAGE,
   parseCostsConfig,
+  r2OperationClass,
+  r2OperationsCostUsd,
   resolveRange,
+  storageDayCostUsd,
+  workersCostUsd,
   type CloudflareUsage,
   type CostGroupConfig,
   type LlmCostRow,
@@ -39,10 +46,12 @@ const GROUP: CostGroupConfig = {
     "app-resident": "resident",
     "app-sandbox": "sandbox",
   },
+  // Only the bot's namespace is labelled by hand; the resident's is attributed
+  // through the invocations join (hosted by `switchboard-resident`).
   durableObjectNamespaces: {
     "ns-bot": "bot DO",
-    "ns-resident": "resident DOs",
   },
+  r2Buckets: {},
   anthropicWorkspaceId: "wrkspc_switchboard",
 };
 
@@ -84,18 +93,46 @@ const USAGE: CloudflareUsage = {
       allocatedDiskByteSec: 307420 * GB,
     },
   ],
+  // Rows shaped like durableObjectsInvocationsAdaptiveGroups: requests per
+  // namespace, and the join that says which Worker hosts which namespace.
   durableObjectRequests: [
-    { date: AUG_28, scriptName: "switchboard", requests: 2160 },
-    { date: AUG_28, scriptName: "other-tenant", requests: 994 },
-    { date: AUG_29, scriptName: "switchboard", requests: 2377 },
+    { date: AUG_28, scriptName: "switchboard", namespaceId: "ns-bot", requests: 2160 },
+    { date: AUG_28, scriptName: "switchboard-resident", namespaceId: "ns-resident", requests: 1000 },
+    { date: AUG_28, scriptName: "other-tenant", namespaceId: "ns-other", requests: 994 },
+    { date: AUG_29, scriptName: "switchboard", namespaceId: "ns-bot", requests: 2377 },
   ],
   // Rows shaped like durableObjectsPeriodicGroups: `duration` is Cloudflare's
-  // billable GB-s (128 MB × active seconds), per namespace.
-  durableObjectDuration: [
-    { date: AUG_28, namespaceId: "ns-bot", gbSeconds: 11023.7 },
-    { date: AUG_28, namespaceId: "ns-resident", gbSeconds: 12011.5 },
-    { date: AUG_28, namespaceId: "ns-other", gbSeconds: 11032.6 }, // other-tenant — not ours
-    { date: AUG_29, namespaceId: "ns-bot", gbSeconds: 11002.9 },
+  // billable GB-s (128 MB × active seconds), per namespace, plus SQLite rows.
+  durableObjectDays: [
+    { date: AUG_28, namespaceId: "ns-bot", gbSeconds: 11023.7, rowsRead: 1_000_000, rowsWritten: 100_000 },
+    { date: AUG_28, namespaceId: "ns-resident", gbSeconds: 12011.5, rowsRead: 0, rowsWritten: 0 },
+    { date: AUG_28, namespaceId: "ns-other", gbSeconds: 11032.6, rowsRead: 5_000_000, rowsWritten: 5_000_000 }, // other-tenant — not ours
+    { date: AUG_29, namespaceId: "ns-bot", gbSeconds: 11002.9, rowsRead: 0, rowsWritten: 0 },
+  ],
+  // durableObjectsSqlStorageGroups: the day's peak bytes per namespace.
+  durableObjectStorage: [
+    { date: AUG_28, namespaceId: "ns-bot", storedBytes: 30.4375 * GB }, // exactly one GB-month-day → $0.20 × 1
+    { date: AUG_28, namespaceId: "ns-other", storedBytes: 100 * GB },
+  ],
+  // workersInvocationsAdaptive: requests and CPU per script.
+  workers: [
+    { date: AUG_28, scriptName: "switchboard", requests: 1_000_000, cpuTimeUs: 1_000_000_000 }, // $0.30 + $0.02
+    { date: AUG_28, scriptName: "other-tenant", requests: 9_000_000, cpuTimeUs: 0 },
+  ],
+  // r2StorageAdaptiveGroups / r2OperationsAdaptiveGroups: the resident's cache
+  // bucket is named `<worker>-cache` by the deploy template — attributed by
+  // that exact name, never listed in config; the tfstate bucket is someone else's.
+  r2Storage: [
+    { date: AUG_28, bucketName: "switchboard-resident-cache", bytes: 30.4375 * GB }, // $0.015 × 1
+    { date: AUG_28, bucketName: "other-tenant-tfstate", bytes: 1 * GB },
+    // Shares a Worker's name as a PREFIX but is not the template's `<worker>-cache`: someone else's.
+    { date: AUG_28, bucketName: "switchboard-2-tfstate", bytes: 1 * GB },
+  ],
+  r2Operations: [
+    { date: AUG_28, bucketName: "switchboard-resident-cache", actionType: "PutObject", requests: 1_000_000 }, // class A $4.50
+    { date: AUG_28, bucketName: "switchboard-resident-cache", actionType: "GetObject", requests: 1_000_000 }, // class B $0.36
+    { date: AUG_28, bucketName: "switchboard-resident-cache", actionType: "DeleteObjects", requests: 1_000_000 }, // free
+    { date: AUG_28, bucketName: "other-tenant-tfstate", actionType: "PutObject", requests: 1_000_000 },
   ],
 };
 
@@ -139,18 +176,106 @@ describe("durable object pricing", () => {
 
 // ---- report assembly ----------------------------------------------------------
 
+describe("the other meters Cloudflare bills a Workers deployment on", () => {
+  it("SQLite rows: $0.001 per million read, $1.00 per million written", () => {
+    expect(doRowsCostUsd(1_000_000, 0)).toBeCloseTo(0.001, 9);
+    expect(doRowsCostUsd(0, 1_000_000)).toBeCloseTo(1, 9);
+  });
+  it("storage: a GB-month rate prorated per day over the mean month (30.4375 days) on the day's peak bytes", () => {
+    expect(DAYS_PER_MONTH).toBe(365.25 / 12);
+    expect(storageDayCostUsd(1e9, CLOUDFLARE_PRICES.doStorageGbMonth)).toBeCloseTo(0.2 / 30.4375, 12);
+    expect(storageDayCostUsd(1e9, CLOUDFLARE_PRICES.r2StorageGbMonth)).toBeCloseTo(0.015 / 30.4375, 12);
+    expect(storageDayCostUsd(0, 1)).toBe(0);
+  });
+  it("Workers: $0.30 per million requests plus $0.02 per million CPU-milliseconds (the dataset reports microseconds)", () => {
+    expect(workersCostUsd(1_000_000, 0)).toBeCloseTo(0.3, 9);
+    expect(workersCostUsd(0, 1_000_000_000)).toBeCloseTo(0.02, 9); // 1e9 µs = 1e6 ms
+  });
+  it("R2 operations: class A mutates or lists ($4.50/M), class B reads ($0.36/M), deletes and aborts are free; an unknown action is classed by its verb", () => {
+    for (const a of [
+      "PutObject",
+      "ListObjects",
+      "UploadPart",
+      "CompleteMultipartUpload",
+      "CreateMultipartUpload",
+      "PutBucket",
+    ])
+      expect(r2OperationClass(a)).toBe("A");
+    for (const b of ["GetObject", "HeadObject", "HeadBucket", "GetBucketNotificationConfiguration", "UsageSummary"])
+      expect(r2OperationClass(b)).toBe("B");
+    for (const f of ["DeleteObject", "DeleteObjects", "DeleteBucket", "AbortMultipartUpload"])
+      expect(r2OperationClass(f)).toBe("free");
+    expect(r2OperationClass("PutBucketSomethingNew")).toBe("A");
+    expect(r2OperationClass("GetSomethingNew")).toBe("B");
+    expect(r2OperationClass("Frobnicate")).toBe("A"); // unknown verb: priced, not dropped
+    expect(r2OperationsCostUsd("PutObject", 1_000_000)).toBeCloseTo(4.5, 9);
+    expect(r2OperationsCostUsd("GetObject", 1_000_000)).toBeCloseTo(0.36, 9);
+    expect(r2OperationsCostUsd("DeleteObject", 1_000_000)).toBe(0);
+  });
+});
+
 describe("buildCostReport", () => {
   const range = { from: AUG_28, to: AUG_29, days: 2, partialLastDay: true };
   const report = buildCostReport("switchboard", GROUP, USAGE, LLM, range);
 
-  it("keeps only the group's container apps, DO namespaces and workers, labelled from config", () => {
+  it("keeps only the group's container apps, DO namespaces and workers; a namespace is attributed through the Worker that hosts it, labelled from config when given, else by its Worker", () => {
     const d = report.days.find((x) => x.date === AUG_28)!;
     expect(Object.keys(d.containers).sort()).toEqual(["bot", "resident"]);
-    expect(Object.keys(d.durableObjects).sort()).toEqual(["bot DO", "resident DOs"]);
+    expect(Object.keys(d.durableObjects).sort()).toEqual(["bot DO", "switchboard-resident"]);
     expect(d.durableObjects["bot DO"]).toBeCloseTo(0.1378, 4);
-    expect(d.doRequestsUsd).toBeCloseTo(0.000324, 9); // switchboard only, not other-tenant's 994
-    expect(JSON.stringify(report)).not.toContain("other-tenant");
+    expect(d.doRequestsUsd).toBeCloseTo(0.000474, 9); // bot 2160 + resident 1000, not other-tenant's 994
+    expect(report.attribution.durableObjectNamespaces).toEqual({
+      "ns-bot": "bot DO",
+      "ns-resident": "switchboard-resident",
+    });
+    expect(JSON.stringify(report.days)).not.toContain("other-tenant");
     expect(JSON.stringify(report)).not.toContain("ns-other");
+    expect(JSON.stringify(report)).not.toContain("tfstate");
+  });
+
+  it("attributes an R2 bucket by the exact `<worker>-cache` name the deploy gives it — a foreign bucket that merely shares the prefix is not claimed — and prices storage per GB-month-day plus class A/B operations (deletes free)", () => {
+    const d = report.days.find((x) => x.date === AUG_28)!;
+    expect(report.attribution.r2Buckets).toEqual({ "switchboard-resident-cache": "switchboard-resident-cache" });
+    expect(JSON.stringify(report.attribution)).not.toContain("switchboard-2-tfstate");
+    expect(d.r2Usd).toBeCloseTo(0.015 + 4.5 + 0.36, 9);
+    // An explicit entry attributes a bucket named any other way.
+    const explicit = buildCostReport(
+      "switchboard",
+      { ...GROUP, r2Buckets: { "switchboard-2-tfstate": "state" } },
+      USAGE,
+      LLM,
+      range,
+    );
+    expect(explicit.attribution.r2Buckets).toEqual({
+      "switchboard-2-tfstate": "state",
+      "switchboard-resident-cache": "switchboard-resident-cache",
+    });
+    expect(explicit.days.find((x) => x.date === AUG_28)!.r2Usd).toBeCloseTo(
+      0.015 + 4.5 + 0.36 + (1 / 30.4375) * 0.015,
+      9,
+    );
+  });
+
+  it("prices the group's Workers (requests + CPU), SQLite rows and SQLite storage, and nothing of the other tenant's", () => {
+    const d = report.days.find((x) => x.date === AUG_28)!;
+    expect(d.workersUsd).toBeCloseTo(0.3 + 0.02, 9); // 1M requests + 1e9 µs = 1M CPU-ms
+    expect(d.doRowsUsd).toBeCloseTo(0.001 + 0.1, 9); // 1M reads + 100k writes
+    expect(d.doStorageUsd).toBeCloseTo(0.2, 9); // 30.4375 GB for one day = one GB-month
+  });
+
+  it("prices the whole account the same way so the group's share of it is honest — the other tenant's rows count there and only there", () => {
+    const d = report.days.find((x) => x.date === AUG_28)!;
+    const otherWorkers = 9 * 0.3;
+    const otherRows = 5 * 0.001 + 5 * 1;
+    const otherStorage = (100 / 30.4375) * 0.2;
+    const otherR2 = (1 / 30.4375) * 0.015 + 4.5 + (1 / 30.4375) * 0.015; // tfstate storage + its PutObjects + the prefix-sharing bucket
+    const otherDo = 11032.6 * 12.5e-6 + (994 / 1e6) * 0.15;
+    const otherContainer = containerCostUsd(USAGE.containers[2]).total;
+    expect(report.account.cloudUsd).toBeCloseTo(
+      report.totals.cloudUsd + otherWorkers + otherRows + otherStorage + otherR2 + otherDo + otherContainer,
+      6,
+    );
+    expect(report.account.cloudUsd).toBeGreaterThan(d.cloudUsd);
   });
 
   it("keeps only the group's Anthropic workspace for LLM spend", () => {
@@ -160,13 +285,12 @@ describe("buildCostReport", () => {
   });
 
   it("emits one row per day in range, oldest first, with zero-filled gaps", () => {
-    const r = buildCostReport(
-      "switchboard",
-      GROUP,
-      { containers: [], durableObjectRequests: [], durableObjectDuration: [] },
-      [],
-      { from: AUG_27, to: AUG_29, days: 3, partialLastDay: false },
-    );
+    const r = buildCostReport("switchboard", GROUP, EMPTY_USAGE, [], {
+      from: AUG_27,
+      to: AUG_29,
+      days: 3,
+      partialLastDay: false,
+    });
     expect(r.days.map((d) => d.date)).toEqual([AUG_27, AUG_28, AUG_29]);
     expect(r.days.every((d) => d.total === 0)).toBe(true);
     expect(r.totals.total).toBe(0);
@@ -175,9 +299,10 @@ describe("buildCostReport", () => {
   it("totals per day and across the range, and splits cloud vs LLM", () => {
     const d = report.days.find((x) => x.date === AUG_28)!;
     const containers = d.containers.bot.total + d.containers.resident.total;
-    const dos = d.durableObjects["bot DO"] + d.durableObjects["resident DOs"] + d.doRequestsUsd;
-    expect(d.cloudUsd).toBeCloseTo(containers + dos, 9);
-    expect(d.total).toBeCloseTo(containers + dos + 12.5, 9);
+    const dos = d.durableObjects["bot DO"] + d.durableObjects["switchboard-resident"] + d.doRequestsUsd;
+    const rest = d.doRowsUsd + d.doStorageUsd + d.workersUsd + d.r2Usd;
+    expect(d.cloudUsd).toBeCloseTo(containers + dos + rest, 9);
+    expect(d.total).toBeCloseTo(containers + dos + rest + 12.5, 9);
     expect(report.totals.total).toBeCloseTo(
       report.days.reduce((s, x) => s + x.total, 0),
       9,
@@ -187,7 +312,16 @@ describe("buildCostReport", () => {
 
   it("splits cloud spend by billed resource so the 'what a dollar buys' view is exact", () => {
     const split = report.totals.byResource;
-    expect(split.cpu + split.memory + split.disk + split.durableObjects).toBeCloseTo(report.totals.cloudUsd, 9);
+    expect(
+      split.cpu +
+        split.memory +
+        split.disk +
+        split.durableObjects +
+        split.doRows +
+        split.doStorage +
+        split.workers +
+        split.r2,
+    ).toBeCloseTo(report.totals.cloudUsd, 9);
     expect(split.memory).toBeGreaterThan(split.cpu); // provisioned memory dominates
   });
 
@@ -236,8 +370,23 @@ describe("parseCostsConfig", () => {
     });
     expect(c?.cloudflareTokenEnv).toBe("CF_ANALYTICS_TOKEN");
     expect(c?.groups.switchboard.durableObjectNamespaces).toEqual({ n1: "bot DO" });
+    expect(c?.groups.switchboard.r2Buckets).toEqual({}); // optional: buckets are attributed by name
     expect(c?.anthropicAdminKeyEnv).toBe("ANTHROPIC_ADMIN_KEY");
     expect(c?.groups.switchboard.workers).toEqual(["switchboard"]);
+  });
+  it("accepts a group with only workers — namespaces and buckets are attributed through them", () => {
+    const c = parseCostsConfig({ cloudflareAccountId: "3c7b", groups: { g: { workers: ["w"] } } });
+    expect(c?.groups.g).toEqual({
+      label: undefined,
+      workers: ["w"],
+      containerApps: {},
+      durableObjectNamespaces: {},
+      r2Buckets: {},
+      anthropicWorkspaceId: undefined,
+    });
+    expect(() =>
+      parseCostsConfig({ cloudflareAccountId: "x", groups: { g: { workers: [], r2Buckets: { b: 1 } } } }),
+    ).toThrow(/r2Buckets/);
   });
   it("returns undefined for absent config and throws on a malformed one (never a silent half-config)", () => {
     expect(parseCostsConfig(undefined)).toBeUndefined();
@@ -274,8 +423,31 @@ describe("CloudflareGraphqlUsageSource", () => {
                 sum: { cpuTimeSec: 10, allocatedMemory: 20, allocatedDisk: 30 },
               },
             ],
-            durableObjectRequests: [{ dimensions: { date: AUG_28, scriptName: "switchboard" }, sum: { requests: 5 } }],
-            durableObjectDuration: [{ dimensions: { date: AUG_28, namespaceId: "ns1" }, sum: { duration: 7.5 } }],
+            durableObjectRequests: [
+              { dimensions: { date: AUG_28, scriptName: "switchboard", namespaceId: "ns1" }, sum: { requests: 5 } },
+            ],
+            durableObjectDays: [
+              {
+                dimensions: { date: AUG_28, namespaceId: "ns1" },
+                sum: { duration: 7.5, rowsRead: 40, rowsWritten: 2 },
+              },
+            ],
+            durableObjectStorage: [{ dimensions: { date: AUG_28, namespaceId: "ns1" }, max: { storedBytes: 4096 } }],
+            workers: [
+              { dimensions: { date: AUG_28, scriptName: "switchboard" }, sum: { requests: 9, cpuTimeUs: 1500 } },
+            ],
+            r2Storage: [
+              {
+                dimensions: { date: AUG_28, bucketName: "switchboard-cache" },
+                max: { payloadSize: 1000, metadataSize: 24 },
+              },
+            ],
+            r2Operations: [
+              {
+                dimensions: { date: AUG_28, bucketName: "switchboard-cache", actionType: "GetObject" },
+                sum: { requests: 3 },
+              },
+            ],
           },
         ],
       },
@@ -302,9 +474,29 @@ describe("CloudflareGraphqlUsageSource", () => {
         allocatedDiskByteSec: 30,
       },
     ]);
-    expect(usage.durableObjectRequests).toEqual([{ date: AUG_28, scriptName: "switchboard", requests: 5 }]);
-    expect(usage.durableObjectDuration).toEqual([{ date: AUG_28, namespaceId: "ns1", gbSeconds: 7.5 }]);
-    expect(body.query).toContain("durableObjectsPeriodicGroups"); // the billable-duration dataset, not summed request wall time
+    expect(usage.durableObjectRequests).toEqual([
+      { date: AUG_28, scriptName: "switchboard", namespaceId: "ns1", requests: 5 },
+    ]);
+    expect(usage.durableObjectDays).toEqual([
+      { date: AUG_28, namespaceId: "ns1", gbSeconds: 7.5, rowsRead: 40, rowsWritten: 2 },
+    ]);
+    expect(usage.durableObjectStorage).toEqual([{ date: AUG_28, namespaceId: "ns1", storedBytes: 4096 }]);
+    expect(usage.workers).toEqual([{ date: AUG_28, scriptName: "switchboard", requests: 9, cpuTimeUs: 1500 }]);
+    expect(usage.r2Storage).toEqual([{ date: AUG_28, bucketName: "switchboard-cache", bytes: 1024 }]); // payload + metadata
+    expect(usage.r2Operations).toEqual([
+      { date: AUG_28, bucketName: "switchboard-cache", actionType: "GetObject", requests: 3 },
+    ]);
+    // Every dataset Cloudflare bills a Workers deployment on, in one request.
+    for (const dataset of [
+      "containersUsageAdaptiveGroups",
+      "durableObjectsInvocationsAdaptiveGroups",
+      "durableObjectsPeriodicGroups", // the billable-duration dataset, not summed request wall time
+      "durableObjectsSqlStorageGroups",
+      "workersInvocationsAdaptive",
+      "r2StorageAdaptiveGroups",
+      "r2OperationsAdaptiveGroups",
+    ])
+      expect(body.query).toContain(dataset);
   });
 
   it("throws on a non-200 and on GraphQL-level errors (the API returns 200 for those)", async () => {

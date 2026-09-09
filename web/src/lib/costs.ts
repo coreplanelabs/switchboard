@@ -5,22 +5,30 @@ import type { CostReport, DailyCost } from "@core/core/costs.js";
 // Pure data in, pure data out — the component does layout only.
 
 export const DO_LABEL = "Durable Objects";
+/** Workers requests + CPU, SQLite rows + storage, R2 — the meters that are cents
+ *  a day at today's volume, stacked as one series so the chart stays legible. */
+export const PLATFORM_LABEL = "Workers · storage · R2";
 export const LLM_LABEL = "LLM (Anthropic)";
 
 export const usd = (v: number, digits = 2): string => `$${v.toFixed(digits)}`;
 
+/** The day's Workers + SQLite rows/storage + R2 spend. */
+export const platformUsdOf = (d: DailyCost): number => d.workersUsd + d.doRowsUsd + d.doStorageUsd + d.r2Usd;
+
 /** Every stackable series in a report, in a stable order: containers (order of
- *  first appearance), then DOs as one series, then LLM. */
+ *  first appearance), then DOs as one series, then the platform meters, then LLM. */
 export function seriesOf(report: CostReport): string[] {
   const names: string[] = [];
   for (const d of report.days) for (const k of Object.keys(d.containers)) if (!names.includes(k)) names.push(k);
   if (report.days.some((d) => Object.keys(d.durableObjects).length > 0)) names.push(DO_LABEL);
+  if (report.days.some((d) => platformUsdOf(d) > 0)) names.push(PLATFORM_LABEL);
   if (report.llmAvailable) names.push(LLM_LABEL);
   return names;
 }
 
 export function valueOf(d: DailyCost, series: string): number {
   if (series === DO_LABEL) return Object.values(d.durableObjects).reduce((s, v) => s + v, 0) + d.doRequestsUsd;
+  if (series === PLATFORM_LABEL) return platformUsdOf(d);
   if (series === LLM_LABEL) return d.llmUsd;
   return d.containers[series]?.total ?? 0;
 }
@@ -30,21 +38,26 @@ export interface CostTiles {
   avg7: number;
   projectedMonth: number;
   llmShare: number;
+  /** This group's share of the account's whole Cloudflare spend in range (percent, rounded). */
+  accountShare: number;
 }
 
-/** The four stat tiles, computed over FULL days only (a partial today would
- *  understate every figure). */
+/** The stat tiles, computed over FULL days only (a partial today would
+ *  understate every figure); the shares over the whole range. */
 export function tilesOf(report: CostReport): CostTiles {
   const full = report.range.partialLastDay ? report.days.slice(0, -1) : report.days;
   const yesterday = full[full.length - 1];
   const last7 = full.slice(-7);
   const avg7 = last7.length ? last7.reduce((s, d) => s + d.total, 0) / last7.length : 0;
   const llmShare = report.totals.total > 0 ? Math.round((report.totals.llmUsd / report.totals.total) * 100) : 0;
+  const accountShare =
+    report.account.cloudUsd > 0 ? Math.round((report.totals.cloudUsd / report.account.cloudUsd) * 100) : 0;
   return {
     ...(yesterday ? { yesterday: { date: yesterday.date, total: yesterday.total } } : {}),
     avg7,
     projectedMonth: avg7 * 30.4,
     llmShare,
+    accountShare,
   };
 }
 
@@ -141,6 +154,10 @@ export function resourceSplitOf(report: CostReport): ResourceSplitRow[] {
     ["vCPU (active use only)", b.cpu],
     ["Durable Object duration + requests", b.durableObjects],
     ["Disk (provisioned while awake)", b.disk],
+    ["Workers requests + CPU", b.workers],
+    ["Durable Object SQLite rows", b.doRows],
+    ["Durable Object SQLite storage", b.doStorage],
+    ["R2 storage + operations", b.r2],
   ];
   const tot = parts.reduce((s, p) => s + p[1], 0) || 1;
   return parts.map(([label, v]) => ({ label, usd: v, percent: (v / tot) * 100 }));
