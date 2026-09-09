@@ -2,7 +2,7 @@
 // dispatch's run ending: seal after the reply, records after the seal.
 import { describe, expect, it } from "vitest";
 import { createRunEnding } from "./runEnding.js";
-import type { SealResult } from "./runRegistry.js";
+import type { SealResult } from "./runRegistry/projections.js";
 
 /** A registry double that records every seal and answers like the real one:
  *  the first `replyOk` stands, the result is re-readable. */

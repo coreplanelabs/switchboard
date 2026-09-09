@@ -9,7 +9,6 @@ import {
   isHeadMaterial,
   isSpanRecord,
 } from "./runEvents.js";
-import type { ChannelVisibility } from "./authz/types.js";
 import type { RunStatus } from "./runRecord.js";
 import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 import { RunControl } from "./runRegistry/runControl.js";
@@ -25,6 +24,15 @@ import type {
   Subscription,
   Unsubscribe,
 } from "./runRegistry/state.js";
+import {
+  sealResultOf,
+  sealedFrameOf,
+  snapshotOf,
+  summaryOf,
+  type RunSnapshot,
+  type RunSummary,
+  type SealResult,
+} from "./runRegistry/projections.js";
 
 // The run registry is the unit-testable core of the external live-view page
 // (docs/reference/specs/live-view.md) and the ONE per-run event store while a run is live
@@ -56,6 +64,7 @@ import type {
 // flight, so those names are re-exported below; once the stages import the
 // sibling modules directly, the re-exports go.
 export { RunControl, activityOfEvents };
+export type { RunSnapshot, RunSummary, SealResult };
 
 /** The identifiers a freshly created run is addressed by, plus its control. */
 /** `create()` for a run that already has an identity and a past (a resume,
@@ -82,109 +91,10 @@ export interface RunHandle {
   label?: string;
 }
 
-/** A run's stop status for the index: `stopping` from the request until the run
- *  finishes, then `stopped`. Absent when no stop was ever requested. */
-export interface RunStopStatus {
-  mode: StopMode;
-  state: "stopping" | "stopped";
-}
-
 /** Outcome of `RunRegistry.requestStop`. `not-found` covers BOTH an unknown run
  *  and a wrong token (the caller maps it to 404 — existence is never revealed);
  *  `finished` is a run that already ended (409). */
 export type StopRequestResult = { ok: true; mode: StopMode } | { ok: false; reason: "not-found" | "finished" };
-
-/**
- * A live-only snapshot of one non-evicted run, for the Access-gated runs index
- * (`GET /runs`). It intentionally carries the per-run `token` so the index can
- * render each run's full capability link — the index is the ONE place tokens
- * surface, and it must only ever be exposed behind Cloudflare Access (see
- * docs/reference/specs/live-view.md). `eventCount` is monotonic (total published, not the
- * bounded-backlog length) and `startedAt` is the injectable-clock time at
- * `create()`, so callers can sort/label without reaching into run internals.
- */
-export interface RunSummary {
-  id: string;
-  token: string;
-  /** Short human label set at create() (e.g. "coding · owner/repo"); optional. */
-  label?: string;
-  /** The identity `RunMeta` given at create(); absent fields are omitted. */
-  agent?: string;
-  model?: string;
-  channelId?: string;
-  userId?: string;
-  threadKey?: string;
-  /** `RunMeta.channelVisibility`; absent = `unknown`. */
-  channelVisibility?: ChannelVisibility;
-  repo?: string;
-  finished: boolean;
-  startedAt: number;
-  /** The clock time at `finish()`; absent while the run is live. */
-  finishedAt?: number;
-  /** The terminal status the dispatcher computed and handed to `finish()`;
-   *  absent while live, and for a finish that reported none. */
-  status?: RunStatus;
-  eventCount: number;
-  /** What the run is doing right now, one line (live-view item 20): the latest
-   *  narration's first line, the latest tool call's summary, or `answering`;
-   *  absent until the first such event. The index shows it on the status dot so
-   *  a glance answers "what step is it on" without opening the run. */
-  activity?: string;
-  /** `RunMeta.sourceUrl`: the thread that started the run, for the index's hover link. */
-  sourceUrl?: string;
-  /** `RunMeta.userName`: who started it, resolved. */
-  userName?: string;
-  /** Present only once a stop has been requested. */
-  stop?: RunStopStatus;
-  /** Present (true) once the history writer confirmed the run is in the durable
-   *  store — how an index client learns a row outlives eviction. */
-  persisted?: boolean;
-  /** The seven stamps and the one duration (docs/reference/specs/tracing.md). `receivedAt`:
-   *  our process saw the message, from the adapter's clock (stamped by the
-   *  dispatcher once the adapters carry it; absent until then, so every reader
-   *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
-   *  reply attempt completed or the branch was abandoned; `replyOk` is
-   *  tri-state — `true` a reply was attempted and delivered, `false` attempted
-   *  and threw, absent none was made. `stepCount`: content events only (span
-   *  records excluded). `schema`: the record's stream schema (2 once spans are
-   *  emitted); absent is legacy. All omitted when absent. */
-  receivedAt?: number;
-  sealedAt?: number;
-  replyOk?: boolean;
-  stepCount?: number;
-  schema?: number;
-}
-
-/** What `snapshot`/`snapshotById` return: a COPY of the retained backlog plus the
- *  two record fields not derivable from the events. */
-export interface RunSnapshot {
-  events: RunEvent[];
-  finished: boolean;
-  startedAt: number;
-  /** The clock time at `finish()`; absent while the run is live. The record's
-   *  `finishedAt` is this value, so the registry row and the record agree. */
-  finishedAt?: number;
-  /** `RunMeta.receivedAt`, when the run was created with it (docs/reference/specs/tracing.md). */
-  receivedAt?: number;
-  eventCount: number;
-  /** Content events published — span records excluded (docs/reference/specs/tracing.md). */
-  stepCount: number;
-  /** True when the bounded backlog dropped events (`eventCount > events.length`):
-   *  a consumer analyzing `events` is looking at a head-truncated stream. */
-  truncated: boolean;
-}
-
-/** What `seal()` returns, and what the record writer merges after the reply:
- *  the events published between finish and seal (span records), the published
- *  total, and the two seal stamps. An unknown or evicted run yields the empty
- *  result; a live run yields no stamps; a sealed run yields the same result on
- *  every call. */
-export interface SealResult {
-  events: RunEvent[];
-  eventCount?: number;
-  sealedAt?: number;
-  replyOk?: boolean;
-}
 
 /** How long a finished run may stay unsealed before the sweep seals it (with
  *  no `replyOk`) and evicts it: the reply that would have sealed it never
@@ -374,7 +284,7 @@ export class RunRegistry {
       if (!isSpanRecord(event)) run.stepCount++;
       this.appendToBacklog(run, { ...event, seq });
     }
-    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    this.notifyIndex({ type: "upsert", run: summaryOf(run) });
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
   }
 
@@ -484,7 +394,7 @@ export class RunRegistry {
     // events are seconds apart, so one upsert per event is not chatty; the
     // summary is built cheaply from the run we already hold. A span record is
     // timing, not activity: it never repaints the index.
-    if (!span) this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    if (!span) this.notifyIndex({ type: "upsert", run: summaryOf(run) });
   }
 
   /** Mark a run finished — the agent stopped: stamp `finishedAt`, send every
@@ -511,7 +421,7 @@ export class RunRegistry {
     }
     // A finished run stays on the index (marked finished) until the TTL evicts
     // it — so finish is an upsert, not a removal. Eviction emits the removal.
-    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    this.notifyIndex({ type: "upsert", run: summaryOf(run) });
   }
 
   /**
@@ -581,7 +491,7 @@ export class RunRegistry {
       if (opts.replyOk !== undefined) run.replyOk = opts.replyOk;
       const subs = [...run.subscribers];
       run.subscribers.clear();
-      const frame = RunRegistry.sealedFrameOf(run);
+      const frame = sealedFrameOf(run);
       for (const sub of subs) {
         try {
           sub.onSealed?.(frame);
@@ -589,23 +499,9 @@ export class RunRegistry {
           // A dead sink must not break the seal for the remaining subscribers.
         }
       }
-      if (opts.upsert) this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+      if (opts.upsert) this.notifyIndex({ type: "upsert", run: summaryOf(run) });
     }
-    return this.sealResultOf(run);
-  }
-
-  private sealResultOf(run: RunState): SealResult {
-    const since = run.finishSeq ?? run.eventCount;
-    return {
-      events: run.backlog.filter((e) => (e.seq ?? 0) > since),
-      eventCount: run.eventCount,
-      ...(run.sealedAt !== undefined ? { sealedAt: run.sealedAt } : {}),
-      ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
-    };
-  }
-
-  private static sealedFrameOf(run: RunState): SealedFrame {
-    return { sealedAt: run.sealedAt ?? 0, ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}) };
+    return sealResultOf(run);
   }
 
   /**
@@ -620,7 +516,7 @@ export class RunRegistry {
     const run = this.runs.get(id);
     if (!run) return;
     run.persisted = true;
-    this.notifyIndex({ type: "upsert", run: this.summaryOf(run) });
+    this.notifyIndex({ type: "upsert", run: summaryOf(run) });
   }
 
   /** True iff the run exists (not yet evicted) and the token matches — the same
@@ -685,7 +581,7 @@ export class RunRegistry {
     // span records still to come and the `end` frame at the seal.
     if (run.finished) onFinished?.({ finishedAt: run.finishedAt ?? run.startedAt });
     if (run.sealedAt !== undefined) {
-      onSealed?.(RunRegistry.sealedFrameOf(run));
+      onSealed?.(sealedFrameOf(run));
       return { unsubscribe: () => {}, replayed, ...(elided ? { elided } : {}) };
     }
 
@@ -728,7 +624,7 @@ export class RunRegistry {
     this.sweep();
     const run = this.validate(id, token);
     if (!run) return null;
-    return RunRegistry.snapshotOf(run);
+    return snapshotOf(run);
   }
 
   /** Token-free summary of one non-evicted run for `RunsService`,
@@ -737,7 +633,7 @@ export class RunRegistry {
   getById(id: string): RunSummary | null {
     this.sweep();
     const run = this.runs.get(id);
-    return run ? this.summaryOf(run) : null;
+    return run ? summaryOf(run) : null;
   }
 
   /** Token-free `snapshot` for `RunsService`: the same copied
@@ -746,22 +642,7 @@ export class RunRegistry {
     this.sweep();
     const run = this.runs.get(id);
     if (!run) return null;
-    return RunRegistry.snapshotOf(run);
-  }
-
-  /** The snapshot shape: a COPY of the backlog plus the record fields not
-   *  derivable from it. `truncated` says the bounded backlog dropped events. */
-  private static snapshotOf(run: RunState): RunSnapshot {
-    return {
-      events: [...run.backlog],
-      finished: run.finished,
-      startedAt: run.startedAt,
-      ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
-      ...(run.meta?.receivedAt !== undefined ? { receivedAt: run.meta.receivedAt } : {}),
-      eventCount: run.eventCount,
-      stepCount: run.stepCount,
-      truncated: run.eventCount > run.backlog.length,
-    };
+    return snapshotOf(run);
   }
 
   /** Live + finished-but-unevicted run count (observability / tests). */
@@ -784,40 +665,7 @@ export class RunRegistry {
     this.sweep();
     return [...this.runs.values()]
       .sort((a, b) => b.startedAt - a.startedAt || b.seq - a.seq)
-      .map((run) => this.summaryOf(run));
-  }
-
-  /** Build the index summary for one run. The single source of the run→summary
-   *  mapping, shared by `listActive()` and the `subscribeIndex` feed so the two
-   *  can never drift. `label` is omitted (not set to `undefined`) when absent. */
-  private summaryOf(run: RunState): RunSummary {
-    const m = run.meta;
-    return {
-      id: run.id,
-      token: run.token,
-      ...(run.label !== undefined ? { label: run.label } : {}),
-      ...(m?.agent !== undefined ? { agent: m.agent } : {}),
-      ...(m?.model !== undefined ? { model: m.model } : {}),
-      ...(m ? { channelId: m.channelId, userId: m.userId, threadKey: m.threadKey } : {}),
-      ...(m?.channelVisibility !== undefined ? { channelVisibility: m.channelVisibility } : {}),
-      ...(m?.repo !== undefined ? { repo: m.repo } : {}),
-      ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
-      ...(m?.userName !== undefined ? { userName: m.userName } : {}),
-      finished: run.finished,
-      startedAt: run.startedAt,
-      ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
-      ...(m?.receivedAt !== undefined ? { receivedAt: m.receivedAt } : {}),
-      ...(run.sealedAt !== undefined ? { sealedAt: run.sealedAt } : {}),
-      ...(run.replyOk !== undefined ? { replyOk: run.replyOk } : {}),
-      ...(run.status !== undefined ? { status: run.status } : {}),
-      eventCount: run.eventCount,
-      stepCount: run.stepCount,
-      ...(run.activity !== undefined ? { activity: run.activity } : {}),
-      ...(run.control.requested !== undefined
-        ? { stop: { mode: run.control.requested, state: run.finished ? ("stopped" as const) : ("stopping" as const) } }
-        : {}),
-      ...(run.persisted ? { persisted: true } : {}),
-    };
+      .map((run) => summaryOf(run));
   }
 
   /** Fan an index event out to index subscribers. Each callback is isolated: one

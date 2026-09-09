@@ -13,15 +13,8 @@ import {
   type RunListItem,
   type RunRecord,
 } from "./runRecord.js";
-import type {
-  RunRegistry,
-  RunSnapshot,
-  RunStopStatus,
-  RunSummary,
-  StopRequestResult,
-  SubscribeOptions,
-  Subscribed,
-} from "./runRegistry.js";
+import type { RunRegistry, StopRequestResult, SubscribeOptions, Subscribed } from "./runRegistry.js";
+import type { RunSnapshot, RunStopStatus, RunSummary } from "./runRegistry/projections.js";
 import type { RunStore } from "./runStore.js";
 import type { RunLedger } from "./runLedger/ledger.js";
 import type { LiveRunRow } from "./runLedger/types.js";

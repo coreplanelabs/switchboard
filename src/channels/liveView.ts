@@ -12,7 +12,8 @@ import {
 } from "../core/authz/index.js";
 import type { StopMode } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
-import type { IndexSubscriber, RunRegistry, RunSummary } from "../core/runRegistry.js";
+import type { IndexSubscriber, RunRegistry } from "../core/runRegistry.js";
+import type { RunSummary } from "../core/runRegistry/projections.js";
 import type { Unsubscribe } from "../core/runRegistry/state.js";
 import { runResource, type RunListCursor, type RunsService, type RunView } from "../core/runsService.js";
 import type { ScheduleDef } from "../core/schedules.js";

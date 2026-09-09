@@ -1,4 +1,4 @@
-import type { RunSummary } from "../core/runRegistry.js";
+import type { RunSummary } from "../core/runRegistry/projections.js";
 import {
   nextFire,
   type FiringOutcome,
