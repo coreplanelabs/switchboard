@@ -2,9 +2,9 @@
 
 A thread reply that arrives while a run is already in flight in that thread is folded into the live run or refused with a pointer to it. It never starts a second run in the same thread.
 
-- **Code**: `src/core/threadAdmission.ts` (pure: the live-thread map, the inbox, the steer/refuse decision, the replies), `src/core/runLedger/threadsElsewhere.ts` (the threads live on the ledger but not here, item 5), `src/core/dispatcher.ts` (claim after the agent gate, release in the outer finally), `src/runner.ts` (drains the inbox at step boundaries), `src/core/shipPipeline.ts` (hands the thread's inbox to every child round)
+- **Code**: `src/core/threadAdmission.ts` (pure: the live-thread map, the inbox, the steer/refuse decision, the replies), `src/core/runLedger/threadsElsewhere.ts` (the threads live on the ledger but not here, item 5), `src/core/dispatch/admission.ts` (the stage: `admit` — the claim after the agent gate, the steer, the refusal, the boot-gap steer to a run live on another generation — and its outcome; `adoptCarriedRun` and `foldCarriedInbox` for a resumed or restarted run's row and durable inbox), `src/core/dispatcher.ts` (builds the stage's context after the agent gate, releases the slot in the outer finally), `src/runner.ts` (drains the inbox at step boundaries), `src/core/shipPipeline.ts` (hands the thread's inbox to every child round)
 - **Docs**: [How a request flows](../../explanation/how-a-request-flows.md)
-- **Tests**: `src/core/threadAdmission.test.ts`, `src/core/runLedger/threadsElsewhere.test.ts`, `src/runner.test.ts` (`follow-up inbox`), `src/core/dispatcher.test.ts` (`thread admission`, `run ledger write-through`)
+- **Tests**: `src/core/threadAdmission.test.ts`, `src/core/runLedger/threadsElsewhere.test.ts`, `src/runner.test.ts` (`follow-up inbox`), `src/core/dispatch/admission.test.ts` (one outcome per branch of `admit`; the carried run's row and inbox), `src/core/dispatcher.test.ts` (`thread admission`, `run ledger write-through` — what the thread sees on each branch, end to end)
 
 ## Why
 

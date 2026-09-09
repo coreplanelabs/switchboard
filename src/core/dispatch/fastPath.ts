@@ -6,6 +6,7 @@
 // registry command they name. Both run before the request is resolved; a
 // message neither answers goes on to thread admission (admission.ts).
 import type { ConfigStore } from "../../config.js";
+import type { RequestDirectives } from "../../directives.js";
 import { systemClock } from "../trace/index.js";
 import { COMMAND_RUN_AGENT } from "../runOwner.js";
 import type { Clock, Span } from "../trace/types.js";
@@ -14,12 +15,14 @@ import { graftResidentSteps, sanitizeGraftedSteps } from "../../execution/reside
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../../execution/factory.js";
 import { resolveRepoContext, type RepoContext } from "../repoContext.js";
+import { recognizeOperation } from "../operations.js";
 import { redactSecrets } from "../runEvents.js";
 import type { RunStatus } from "../runRecord.js";
 import type { RunHistoryWriter } from "../runHistoryWriter.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import {
   invokeChatCommand,
+  parseChatCommand,
   type ChatCommandResult,
   type ChatCommands,
   type ParsedChatCommand,
@@ -29,7 +32,7 @@ import { defaultRunRegistry, type RunRegistry } from "../runRegistry.js";
 import type { RunEnding } from "../runEnding.js";
 import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
 import { assembleRunRecord, channelVisibilityOf, type RecordDeps } from "./record.js";
-import { composeRunLabel, errorReply } from "./reply.js";
+import { composeRunLabel, errorReply, replyCommandOutput } from "./reply.js";
 
 /** What the fast paths read off the dispatcher's dependencies. An inline
  *  command run is recorded like any run, so the record stage's slice comes
@@ -92,6 +95,108 @@ export function isInlineRunCommand(id: string): boolean {
   );
 }
 
+/** What the two fast paths need of the request: the message, its channel
+ *  handle, the request's root trace and the run ending that seals a command
+ *  run after its reply. */
+export interface RequestContext {
+  msg: IncomingMessage;
+  io: ChannelIO;
+  ending: RunEnding;
+  trace: RequestTrace;
+}
+
+/**
+ * Stage A — the one text-only fast path. A message that names a registered,
+ * chat-exposed command is answered inline through the registry, never a model
+ * turn, BEFORE the history fetch; true when the message was a command and has
+ * been answered (the dispatch is over), false when it is prose to hand on.
+ */
+export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext): Promise<boolean> {
+  const { msg, io, ending, trace } = ctx;
+  const root = trace.root;
+  // Stage A — the ONE text-only fast path: a
+  // message that names a registered, chat-exposed command (`<group> <verb>
+  // [args…] [--kebab-flag value…]`, or the bare word `help`) is answered
+  // inline through the registry — never a model turn — BEFORE `io.history()`,
+  // so a recognized command costs no history fetch and the natural-language
+  // recognizer below never sees it (the two can never both claim one
+  // message). ONE grammar for every command: config, memory, repo,
+  // friction, runs, schedule, help. Prose falls through unchanged.
+  //
+  // Commands that DO real work — ledger reads and GitHub writes (`friction.*`),
+  // a durable memory mutation, a repo provisioned or torn down, a
+  // deterministic op executed — are runs: a registry record with the
+  // request and the reply, on /runs like any other, and a receipt to the
+  // channel. The weekly cron reaches this path through /ingress as
+  // `http:cron`, so a scheduled firing is a run too. The outcome comes from
+  // the command's `ok`, never from the reply text. Config replies, `help`,
+  // listings, and usage/help replies are answered directly, no run.
+  if (deps.commands) {
+    const chatCmd = parseChatCommand(msg.text, deps.commands);
+    if (chatCmd) {
+      const res = await runChatCommand(deps, msg, io, chatCmd, ending, trace);
+      // The command run (if the command made one) seals after its reply.
+      await ending.sealAfterReply(
+        async () => {},
+        () => root.span("post.reply", () => replyCommandOutput(io, chatCmd, res.text)),
+      );
+      if (res.followUp) postSettledOutcome(res.followUp, io, root);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The natural-language fast path: a conservative op form ("run the tests on
+ * main in acme/api") is translated into the registry command it names and
+ * answered like one; true when the reply went out (the dispatch is over), false
+ * when the message was not an op — or the op could not serve (`not_found`,
+ * `unavailable`) and the agent gets the ask, with the command run already
+ * sealed as this dispatch's first run.
+ */
+export async function answerOperation(
+  deps: FastPathDeps,
+  ctx: RequestContext & { directives: RequestDirectives; history: HistoryItem[] },
+): Promise<boolean> {
+  const { msg, io, ending, trace, directives, history } = ctx;
+  const root = trace.root;
+  // Natural-language deterministic ops: the few conservative forms
+  // `recognizeOperation` admits ("run the tests on main in acme/api") are
+  // TRANSLATED into the registry's `repo.test` / `repo.build` — the very
+  // command `repo test acme/api main` is — so one handler executes, one gate
+  // sequence applies (the policy table on `agent { coding }` — the right to run
+  // the implicit target agent; canUseRepo inside), and zero model turns are
+  // spent. Natural language is an accelerator, not a promise: when the op
+  // cannot serve (`not_found` — the repo has no resident; `unavailable` — no
+  // backend or a backend failure) the agent still gets the ask, while a
+  // refusal or a result is the reply. An explicit agent:/model: directive
+  // disables recognition — the user picked a model path.
+  const opAsk = deps.commands
+    ? recognizeOperation(msg.text, history, { allowNatural: !directives.agent && !directives.model })
+    : null;
+  if (opAsk) {
+    const translated: ParsedChatCommand = {
+      kind: "invoke",
+      id: `repo.${opAsk.op}`,
+      input: { args: [opAsk.repo, opAsk.ref], options: {} },
+    };
+    const res = await runChatCommand(deps, msg, io, translated, ending, trace);
+    if (!(res.error === "not_found" || res.error === "unavailable")) {
+      await ending.sealAfterReply(
+        async () => {},
+        () => root.span("post.reply", () => io.reply(res.text)),
+      );
+      return true;
+    }
+    // A fall-through: the command run answered nothing the agent will not; it
+    // is sealed now with no reply attempted, and the agent run below is a
+    // second run in this dispatch.
+    await ending.sealAfterReply(async () => {});
+  }
+  return false;
+}
+
 /** The agent name an inline (no-model) command run carries in its `RunMeta` and
  *  record — the one value `runs list agent=command` selects on. */
 export { COMMAND_RUN_AGENT };
@@ -104,7 +209,7 @@ export { COMMAND_RUN_AGENT };
  * only when asked. Commands that do work (`isInlineRunCommand`) are recorded as
  * inline runs; help/usage replies and read-only answers are not.
  */
-export async function runChatCommand(
+async function runChatCommand(
   deps: FastPathDeps,
   msg: IncomingMessage,
   io: ChannelIO,
@@ -133,11 +238,7 @@ export async function runChatCommand(
  * state itself is never in doubt (`repo list` / the residents dash read it
  * live), and the acknowledgement says so.
  */
-export function postSettledOutcome(
-  followUp: () => Promise<{ text: string } | undefined>,
-  io: ChannelIO,
-  root: Span,
-): void {
+function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined>, io: ChannelIO, root: Span): void {
   // Minutes after the request ended: a late child of its root, log-only.
   void root
     .span("post.settled_outcome", () => followUp().then((outcome) => (outcome ? io.reply(outcome.text) : undefined)))
