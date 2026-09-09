@@ -20,15 +20,27 @@
       // @cloudflare/sandbox ships its own container image; see the Sandbox
       // docs for the current image reference if this needs pinning.
       "image": "./Dockerfile",
-      // standard-3 = 8 GiB RAM / 16 GB disk. "basic" (1 GiB) died running a
-      // repo's test suite during a cold review (vitest forks per vCPU); the
-      // cold path clones + installs + tests a whole repo per thread.
-      "instance_type": "standard-3",
+      // standard-4 = 4 vCPU / 12 GiB RAM / 20 GB disk — the largest predefined
+      // type; a custom type tops out at the same 4 vCPU / 12 GiB / 20 GB. The
+      // cold path clones + installs + checks a whole repo per thread with
+      // nothing warm, so the size is set by the largest single command a cold
+      // thread must be able to run, not by the typical one: a large monorepo's
+      // typecheck needs more than 8 GiB (its own CI notes put the root program
+      // near 8 GB and each sub-program near 4 GB), and the previous standard-3
+      // (2 vCPU / 8 GiB / 16 GB; a live probe read nproc 2, 8189 MiB, 15 GB on
+      // /) could not run it at all. "basic" (1 GiB) died running a repo's test
+      // suite during a cold review (vitest forks per vCPU). Cost is per AWAKE
+      // instance and a sandbox sleeps after 5 idle minutes (SANDBOX_SLEEP_AFTER),
+      // so the step is paid per active run-hour: 12 GiB against 8 of memory,
+      // and vCPU only while the cores are busy (docs/reference/specs/execution.md
+      // item 16).
+      "instance_type": "standard-4",
       // The fleet's ceiling on AWAKE per-thread sandboxes; the next thread past
       // it waits (docs/reference/specs/execution.md item 14). Billing is per awake
       // instance, so a higher ceiling costs nothing while instances sleep, and
-      // the account has ~150x headroom on the containers limits (6 TiB memory /
-      // 1500 vCPU against 25 × 8 GiB / 25 × 2 vCPU). Seen live: thirteen cold
+      // the account has ~15x headroom on the containers limits (6 TiB memory /
+      // 1500 vCPU against 25 × 12 GiB = 300 GiB, ~20x, and 25 × 4 = 100 vCPU,
+      // 15x — the vCPU line is the tighter one). Seen live: thirteen cold
       // runs in 45 min exhausted the previous ceiling of 10 and a review
       // aborted in 33 s reading the wait as a dead sandbox.
       "max_instances": 25,

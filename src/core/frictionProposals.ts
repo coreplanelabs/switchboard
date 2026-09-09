@@ -625,7 +625,7 @@ function suggestedFix(p: FrictionPattern): string {
         : `Runs exhaust the TIME budget and are cut off mid-work. Raise \`maxMinutes\` for the affected agent (\`src/agents/registry.ts\`), or split the task shape that triggers it — a run that is forced to write up findings is a run whose work was wasted.`;
     case "infra_failure":
       if (p.signature === "sandbox_dead") {
-        return `The sandbox died mid-run in ${p.runIds.length} runs. Check container sizing first (AGENTS.md: the 1 GiB \`basic\` tier died running vitest; thread sandboxes are \`standard-3\`, residents \`standard-1\`), then the memory footprint of the failing command, then the sandbox/resident Worker logs (\`deploy/bin/cf-logs\`) around the affected runs.`;
+        return `The sandbox died mid-run in ${p.runIds.length} runs. Check container sizing first (the \`deploy/cloudflare-*/wrangler.template.jsonc\` comments: the 1 GiB \`basic\` tier died running vitest; thread sandboxes are \`standard-4\` — 4 vCPU / 12 GiB / 20 GB, the platform's largest — and residents a custom type of the same size), then the memory footprint of the failing command, then the sandbox/resident Worker logs (\`deploy/bin/cf-logs\`) around the affected runs.`;
       }
       if (p.signature.startsWith("mid-tool ")) {
         return `Runs ended with \`${p.signature.replace(/^mid-tool /, "")}\` still outstanding — the run (or its transport) was cut while the tool ran. Correlate the affected runs with deploys/drains (\`[drain]\` log lines), the sandbox command timeout (exit 124 / heartbeat streaming, docs/reference/specs/execution.md), and the executor's error surfacing.`;
