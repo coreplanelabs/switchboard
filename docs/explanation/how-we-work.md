@@ -25,7 +25,7 @@ flowchart LR
 
 **4. The PR is written for the reader.** Its title is a Conventional Commit, because that title becomes the squash commit on `main` and a changelog line; a required check refuses anything else. Its body opens with two sentences a stranger can act on, then a Tour: the change in reading order, each step explained before the code it points at, anchored at the pushed head. Decisions that are not obvious from the diff are written down in the body; the ones that shape the architecture become a record in the tree.
 
-**5. Switchboard reviews it, in the open.** A maintainer posts the PR to the review agent (`agent:review`) in a Slack channel the maintainers watch. The agent reads the whole change in a warm checkout and posts one verdict with labelled findings — never an approval or a merge; it has no such rights. A finding at or above the agreed severity is addressed or declined with a reason on the thread; the branch is rewritten so each commit stays a reviewable unit; the review is re-requested at the new head. An `LGTM` verdict trips an auto-approve workflow so the human sees green, but a person presses merge.
+**5. Switchboard reviews it, in the open.** A maintainer posts the PR to the review agent (`agent:review`) in a Slack channel the maintainers watch. The agent reads the whole change in a warm checkout and posts one verdict with labelled findings — never an approval or a merge; it has no such rights. It also reads the specs the change touches — only those, listed by `npm run specs:coverage` — and files a contradiction between the diff and a spec as a finding at `minor` or above, so the same-PR rule from step 1 is enforced, not assumed: the spec is fixed in the PR or there is no `LGTM`. A finding at or above the agreed severity is addressed or declined with a reason on the thread; the branch is rewritten so each commit stays a reviewable unit; the review is re-requested at the new head. An `LGTM` verdict trips an auto-approve workflow so the human sees green, but a person presses merge.
 
 **6. Merge is a squash whose subject is the title.** The body stays on the PR, where its links render; `main` reads as a changelog. Every required status is a job name in the workflow, and gate jobs stand in for fan-outs, so the matrix can change shape without touching the ruleset ([Configure the repository](../how-to/configure-the-repository.md)).
 
@@ -44,6 +44,7 @@ flowchart LR
 | Step | Enforced by |
 |---|---|
 | Spec proofs resolve to real tests | `npm run specs:check` (in `check:consistency`) |
+| A diff agrees with the specs it touches | the review agent's spec contradiction check, over `npm run specs:coverage` |
 | CI runs only repository scripts | a unit test over the workflow files |
 | Generated artifacts are current | `docs:check`, `agents:check`, `skills:check` |
 | Records are never edited, only superseded | `decisions:check` |

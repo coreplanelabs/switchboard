@@ -358,3 +358,55 @@ describe("ship agent (docs/reference/specs/agent-ship.md)", () => {
     expect(AGENTS.ship.residentSystem).toBeUndefined();
   });
 });
+
+// Feature: docs/reference/specs/agent-review.md item 14 — the diff-gated spec
+// review. Both review prompts carry a spec contradiction step: list the specs
+// the change touches (`specs:coverage` when the repo has it, else the specs'
+// own Code/Tests headers), read ONLY those, and file a contradiction with a
+// numbered behavior statement or a validation criterion as a finding of
+// severity minor or higher. A repo without specs skips the step silently.
+describe("review prompts: the spec contradiction check (agent-review item 14)", () => {
+  it("both review prompts name the specs directory, the coverage command and its header-matching fallback", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/SPEC CONTRADICTION CHECK/);
+      expect(sys).toContain("docs/reference/specs/");
+      expect(sys).toContain("npm run --silent specs:coverage -- --changed origin/<base>...HEAD");
+      expect(sys).toMatch(/Code.*Tests.*header/);
+    }
+  });
+
+  it("both review prompts read only the touched specs, never the whole tree", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/read ONLY (those|the touched) specs/);
+      expect(sys).toMatch(/never the whole (specs )?(tree|directory)/i);
+    }
+  });
+
+  it("a contradiction is a finding of severity minor or higher, titled by spec file and item; a spec updated in the same diff is not one", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/severity `?minor`? or higher/i);
+      expect(sys).toContain("Spec contradiction — <spec file> item <n>:");
+      expect(sys).toMatch(/updated in the same diff .* is not a finding/i);
+      expect(sys).toMatch(/numbered behavior statement or a validation criterion/i);
+    }
+  });
+
+  it("when the coverage command fails (no node_modules in a cold checkout) both prompts fall back to the headers and never install or build", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/If the command fails for any reason/);
+      expect(sys).toMatch(/dependencies not installed/);
+      expect(sys).toMatch(/fall back to matching the header lines by hand/);
+      expect(sys).toMatch(/never install dependencies or build to make it run/);
+    }
+  });
+
+  it("a repository without specs skips the step silently, and the step keeps the gather-once discipline", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
+      expect(sys).toMatch(/no `docs\/reference\/specs\/`.*skip this step/i);
+      expect(sys).toMatch(/GATHER ONCE/);
+      // the check is a step between the diff and the verdict, not a second exploration loop
+      expect(sys.indexOf("SPEC CONTRADICTION CHECK")).toBeGreaterThan(sys.indexOf("ANALYZE in a single pass"));
+      expect(sys.indexOf("SPEC CONTRADICTION CHECK")).toBeLessThan(sys.indexOf("VERDICT:"));
+    }
+  });
+});
