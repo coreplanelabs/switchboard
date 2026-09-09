@@ -4,6 +4,7 @@ import { loadWebAssets } from "../src/channels/webAssets.js";
 import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
 import type { PageSeed, RunIndexRowSeed } from "../src/channels/webSeed.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
+import type { CostReport, DailyCost } from "../src/core/costs.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
 import { normalizeSpans } from "../src/core/normalizeSpans.js";
@@ -21,9 +22,11 @@ import { systemClock } from "../src/core/trace/clock.js";
 //
 // SWITCHBOARD_PREVIEW_CAPABILITIES=minimal serves the same fixtures with every
 // optional capability off (the nav shrinks to Runs, no Scheduled tab, no docs).
+// SWITCHBOARD_PREVIEW_NOW=<epoch ms> holds the fixtures' clock still, so two
+// renders of one tree agree (scripts/screenshots.mts).
 
 const PORT = Number(process.env.PORT ?? 8788);
-const NOW = systemClock();
+const NOW = process.env.SWITCHBOARD_PREVIEW_NOW ? Number(process.env.SWITCHBOARD_PREVIEW_NOW) : systemClock();
 
 const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"));
 // The shell stamps the capabilities the nav paints from: every one on by
@@ -422,7 +425,9 @@ const RESIDENTS = {
   ],
 };
 
-const day = (date: string, bot: number, llm: number) => ({
+// Typed as the report the page renders, so the fixture cannot drift from the
+// shape again (a missing `account` once left the preview's costs page blank).
+const day = (date: string, bot: number, llm: number): DailyCost => ({
   date,
   containers: {
     "switchboard bot": { cpu: bot * 0.1, memory: bot * 0.8, disk: bot * 0.1, total: bot },
@@ -430,9 +435,13 @@ const day = (date: string, bot: number, llm: number) => ({
   },
   durableObjects: { RunHistoryDO: 0.12 },
   doRequestsUsd: 0.05,
-  cloudUsd: bot + 0.49,
+  doRowsUsd: 0.01,
+  doStorageUsd: 0.01,
+  workersUsd: 0.03,
+  r2Usd: 0.02,
+  cloudUsd: bot + 0.56,
   llmUsd: llm,
-  total: bot + 0.49 + llm,
+  total: bot + 0.56 + llm,
 });
 const COSTS_DAYS = Array.from({ length: 30 }, (_, i) => {
   const d = new Date(NOW - (29 - i) * 86_400_000);
@@ -442,17 +451,35 @@ const COSTS_DAYS = Array.from({ length: 30 }, (_, i) => {
     6 + Math.cos(i / 2) * 4 + (i % 7 === 3 ? 9 : 0),
   );
 });
-const COSTS = {
+const COSTS_CLOUD_USD = COSTS_DAYS.reduce((s, d) => s + d.cloudUsd, 0);
+const COSTS: CostReport = {
   group: "switchboard",
   label: "Switchboard",
   range: { from: COSTS_DAYS[0].date, to: COSTS_DAYS[29].date, days: 30, partialLastDay: true },
   llmAvailable: true,
   days: COSTS_DAYS,
   totals: {
-    cloudUsd: COSTS_DAYS.reduce((s, d) => s + d.cloudUsd, 0),
+    cloudUsd: COSTS_CLOUD_USD,
     llmUsd: COSTS_DAYS.reduce((s, d) => s + d.llmUsd, 0),
     total: COSTS_DAYS.reduce((s, d) => s + d.total, 0),
-    byResource: { cpu: 2.1, memory: 14.4, disk: 0.8, durableObjects: 3.6 },
+    byResource: {
+      cpu: 2.1,
+      memory: 14.4,
+      disk: 0.8,
+      durableObjects: 3.6,
+      doRows: 0.3,
+      doStorage: 0.3,
+      workers: 0.9,
+      r2: 0.6,
+    },
+  },
+  // Three other tenants' worth on the same account: the "share of account" tile reads 25%.
+  account: { cloudUsd: COSTS_CLOUD_USD * 4 },
+  attribution: {
+    workers: ["switchboard", "switchboard-resident"],
+    containerApps: { "app-bot": "switchboard bot", "app-sandbox": "thread sandboxes" },
+    durableObjectNamespaces: { "ns-history": "RunHistoryDO" },
+    r2Buckets: { "switchboard-resident-cache": "switchboard-resident-cache" },
   },
 };
 
@@ -547,7 +574,7 @@ function page(pathname: string, all: boolean): { title: string; seed: PageSeed; 
   if (pathname.startsWith("/costs"))
     return {
       title: "Switchboard spend",
-      seed: { page: "costs", report: COSTS as never, groups: ["api", "web"] },
+      seed: { page: "costs", report: COSTS, groups: ["api", "web"] },
     };
   return null;
 }

@@ -35,7 +35,7 @@
     "cli": "tsx src/cli.ts",
     "verify": "npm run verify:root && npm run verify --workspaces --if-present && npm run check:site",
     "verify:root": "npm run check:consistency && npm run typecheck && npm run lint && npm run format:check && npm test && npm run check:dist",
-    "check:consistency": "npm run check:lockfile && npm run check:sandbox-pair && npm run skills:check && npm run licenses:check && npm run docs:check && npm run specs:check && npm run decisions:check && npm run hygiene:check && npm run check:project-facts && npm run agents:check && npm run clock:check",
+    "check:consistency": "npm run check:lockfile && npm run check:sandbox-pair && npm run skills:check && npm run licenses:check && npm run docs:check && npm run specs:check && npm run decisions:check && npm run hygiene:check && npm run check:project-facts && npm run agents:check && npm run clock:check && npm run screenshots:check",
     "ci:gate": "node scripts/ci-gate.mjs",
     "fix": "npm run docs:gen && npm run agents:gen && npm run clock:gen && npm run hygiene:gen && npm run deploy:gen && npm run skills:sync && npm run lint:fix && npm run format",
     "deploy:gen": "npm run --silent cli -- deploy init",
@@ -70,6 +70,8 @@
     "docs:dev": "npm run dev -w docs --",
     "docs:build": "npm run build -w docs",
     "web:preview": "tsx scripts/web-preview.ts",
+    "screenshots:gen": "tsx scripts/screenshots.mts",
+    "screenshots:check": "tsx scripts/screenshots.mts --check",
     "load": "tsx scripts/load.ts"
   },
   "dependencies": {

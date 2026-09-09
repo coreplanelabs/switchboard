@@ -185,6 +185,14 @@
       "does": "Serves the dashboard bundle over fixtures for a visual check.",
       "when": "After a `web/` change."
     },
+    "screenshots:gen": {
+      "does": "Renders the dashboard's screenshots from the fixture preview, both themes, and records their inputs' hashes in `docs/public/screenshots/manifest.json`.",
+      "when": "After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`. Not part of `fix`: it needs a browser."
+    },
+    "screenshots:check": {
+      "does": "The dashboard's source and fixtures still hash to what the screenshots were rendered from — no browser.",
+      "when": "Part of `check:consistency`."
+    },
     "load": {
       "does": "Load harness: `-- history|resident|sandbox|e2e|cards|provider`.",
       "when": "Capacity receipts (docs/reference/specs/load-harness.md)."

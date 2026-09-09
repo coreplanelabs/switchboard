@@ -13,6 +13,8 @@ package-lock.json
 deploy/*/wrangler.jsonc
 web/auto-imports.d.ts
 web/components.d.ts
+# Written by `npm run screenshots:gen`
+docs/public/screenshots/manifest.json
 src/core/__snapshots__
 src/core/testing/pr329.body.md
 src/core/testing/pr329.description.json

@@ -93,6 +93,31 @@ describe("site links in the theme's components", () => {
     }
     expect(wrong).toEqual([]);
   });
+
+  it("every image a component draws is a file under docs/public", () => {
+    // The landing page's screenshots are `/screenshots/<name>-<theme>.png`,
+    // built from a template string the dead-link check never sees; the names
+    // it can take are the `name`s in the component's data.
+    const wrong: string[] = [];
+    const checked: string[] = [];
+    for (const rel of components) {
+      const source = readFileSync(`${THEME}/${rel}`, "utf8");
+      const shots = /const shots = \[([\s\S]*?)\n\];/.exec(source)?.[1] ?? "";
+      const names = [...shots.matchAll(/^\s*name: "([^"]+)",$/gm)].map((m) => m[1]);
+      const paths = [
+        ...[...source.matchAll(/:src="`(\/[^`]*)`"/g)].flatMap((m) =>
+          names.map((n) => m[1].replace("${shot.name}", n)),
+        ),
+        ...[...source.matchAll(/\bsrc="(\/[^"]*)"/g)].map((m) => m[1]),
+      ];
+      for (const path of paths) {
+        checked.push(path);
+        if (!existsSync(`${DOCS}/public${path}`)) wrong.push(`${rel}: ${path} — no such file under docs/public`);
+      }
+    }
+    expect(checked).toContain("/screenshots/run-page-light.png");
+    expect(wrong).toEqual([]);
+  });
 });
 
 describe("absolute URLs in docs/", () => {
