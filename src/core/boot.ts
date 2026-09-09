@@ -29,7 +29,7 @@ import {
   type LiveRunRow,
   type StepRecord,
 } from "./runLedger/types.js";
-import { reclaimedRunRecord } from "./dispatcher.js";
+import { reclaimedRunRecord } from "./dispatch/record.js";
 import { shipInterruptedNote } from "./shipPipeline.js";
 
 export interface ReclaimedClosure {

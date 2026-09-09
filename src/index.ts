@@ -64,13 +64,8 @@ import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHo
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
-import {
-  activeRunCount,
-  DEPLOY_RESTART_NOTICE,
-  setShutdownNotice,
-  writeAbandonedRunRecords,
-  type CoreDeps,
-} from "./core/dispatcher.js";
+import { activeRunCount, DEPLOY_RESTART_NOTICE, setShutdownNotice, type CoreDeps } from "./core/dispatcher.js";
+import { writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters ---
