@@ -1655,7 +1655,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  (`parseWantSha`) before it reaches this argument. */
   private async commitInMirror(sha: string): Promise<boolean> {
     const r = await this.run(["git", "-C", MIRROR_DIR, "cat-file", "-e", `${sha}^{commit}`]);
-    return r.exitCode === 0;
+    if (r.exitCode === 0) return true;
+    // `cat-file -e` exits 1 for an object the repository does not have; any
+    // other exit (a corrupt mirror, a killed git) is that step's own failure,
+    // never mistaken for "commit absent" and folded into `unknown-ref`.
+    if (r.exitCode === 1) return false;
+    throw new StepError("cat-file", `git cat-file exited ${r.exitCode}: ${r.stderr.trim() || "(no output)"}`);
   }
 
   /** Attach's fetch decision (item 51) over the mirror's actual state: the ref
@@ -3443,6 +3448,9 @@ export class ResidentDO extends Sandbox<Env> {
         // `refs/pull/N/head` still names its head, and the caller told us that
         // head — so a review of a merged PR stays on the warm resident instead
         // of falling back to a cold sandbox that clones the same commit itself.
+        // No fetch ran ⇒ the ref existed at the check: `mirrorNeedsFetch` fetches
+        // for every missing ref, so only a fetched mirror needs the re-read.
+        // (Under the mirror mutex — the mirror cannot change in between.)
         const refExists = !fetched || (await this.refExists(binding.ref));
         const target = attachTarget({
           refExists,
