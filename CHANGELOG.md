@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.9.0](https://github.com/coreplanelabs/switchboard/compare/v1.8.0...v1.9.0) (2026-09-09)
+
+
+### Features
+
+* **dispatcher:** why a run went to a cold sandbox is on its stream — a cold_sandbox run note beside the card's fallback text ([#758](https://github.com/coreplanelabs/switchboard/issues/758)) ([ec99e90](https://github.com/coreplanelabs/switchboard/commit/ec99e90bfa162d02b14500ae71454df3b25a4b4f))
+
+
+### Bug fixes
+
+* **resident:** an attach whose ref is gone checks out the expected commit detached instead of refusing — a review of a merged PR stays on the resident ([#757](https://github.com/coreplanelabs/switchboard/issues/757)) ([436ce9f](https://github.com/coreplanelabs/switchboard/commit/436ce9f17b8ea839a91da41d6ab83a245dc83d4f))
+* **resident:** the attach's ref-exists shortcut names its invariant, and a cat-file failure is its own step error — the [#757](https://github.com/coreplanelabs/switchboard/issues/757) review fixes ([#759](https://github.com/coreplanelabs/switchboard/issues/759)) ([0d5d547](https://github.com/coreplanelabs/switchboard/commit/0d5d54735b9fec3dfd48fcd96a4c7d9b27c63cd8))
+* **tracing:** the queued numbers ride on the request root from its start, so the run page's "queued … before we saw it" caption can render ([#755](https://github.com/coreplanelabs/switchboard/issues/755)) ([9f0b9ed](https://github.com/coreplanelabs/switchboard/commit/9f0b9ed11121dac03d8669a76e2b54e68d2ae725))
+
 ## [1.8.0](https://github.com/coreplanelabs/switchboard/compare/v1.7.0...v1.8.0) (2026-09-09)
 
 
