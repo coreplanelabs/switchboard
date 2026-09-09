@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.7.0](https://github.com/coreplanelabs/switchboard/compare/v1.6.0...v1.7.0) (2026-09-09)
+
+
+### Features
+
+* **cli:** load .env at startup, a Worker secret is optional where its feature is, and one deploy entry point — the gaps the Get started tutorial surfaced ([#731](https://github.com/coreplanelabs/switchboard/issues/731)) ([e79aa9b](https://github.com/coreplanelabs/switchboard/commit/e79aa9b8aea7b49fdc4b4d9e65ed48c71d54f5c3))
+* **dispatcher:** the run's stream is live from the reservation — the attach streams as it happens and the request is on the page before the workspace exists ([#732](https://github.com/coreplanelabs/switchboard/issues/732)) ([22afbe4](https://github.com/coreplanelabs/switchboard/commit/22afbe49c7aac5217f9bc111ac40456442312780))
+* **resident:** the resident container moves to 4 vCPU / 12 GiB / 20 GB — sixteen threads no longer share one core ([#733](https://github.com/coreplanelabs/switchboard/issues/733)) ([346a3fe](https://github.com/coreplanelabs/switchboard/commit/346a3fec31c12e5c5f75b32e488ef36ab8622b34))
+
+
+### Bug fixes
+
+* **slack:** the status budget credits an interval once even when the clock steps back, and the terminal re-send cap has one home ([#724](https://github.com/coreplanelabs/switchboard/issues/724)) ([514dc65](https://github.com/coreplanelabs/switchboard/commit/514dc656942dfb239db7d563cb05514fcd309487))
+* **tracing:** the bot's reads of the resident admin listing run under a root, so the Worker's /residents line adopts a trace ([#735](https://github.com/coreplanelabs/switchboard/issues/735)) ([0d4279e](https://github.com/coreplanelabs/switchboard/commit/0d4279e21fbb6f534dde3f4a94b4b1a28c28c1fe))
+
+
+### Documentation
+
+* **readme:** the front door — pitch, seams, what you need, quick start; everything else moves into the docs tree ([#727](https://github.com/coreplanelabs/switchboard/issues/727)) ([8c048da](https://github.com/coreplanelabs/switchboard/commit/8c048da71f1efc6f26d815124a77eb3df39e32c4))
+* **site:** every tutorial, how-to and explanation page takes its Diataxis shape, and the nav reaches a running ask in three clicks ([#729](https://github.com/coreplanelabs/switchboard/issues/729)) ([4921547](https://github.com/coreplanelabs/switchboard/commit/4921547545345f131cd6d546a43e73a9e7063cb3))
+* **site:** get started, set up accounts, deploy, security model and architecture pages, with the Slack app manifest ([#728](https://github.com/coreplanelabs/switchboard/issues/728)) ([1a9dda5](https://github.com/coreplanelabs/switchboard/commit/1a9dda543aa2f3433a721114a86962cdb779a4fd))
+* **site:** the home page is a landing page, in a theme of its own, with diagrams drawn in its palette ([#730](https://github.com/coreplanelabs/switchboard/issues/730)) ([caaa932](https://github.com/coreplanelabs/switchboard/commit/caaa932ded87308e265bc308b4e4ddc364b14f11))
+
 ## [1.6.0](https://github.com/coreplanelabs/switchboard/compare/v1.5.0...v1.6.0) (2026-09-08)
 
 
