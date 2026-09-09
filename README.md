@@ -74,11 +74,21 @@ cp .env.example .env          # set ANTHROPIC_API_KEY, or another provider's key
 npx tsx src/cli.ts ask "what can you do?"
 ```
 
-That is the whole pipeline — directives, config layers, authorization, the agent loop — with the answer printed to your terminal. Add directives the way you would in Slack: `npx tsx src/cli.ts ask "model:anthropic/claude-opus-5 effort:high explain the config layers you resolve"`. A published container image and a one-command installer arrive with the public release; until then, the clone above is the install.
+That is the whole pipeline — directives, config layers, authorization, the agent loop — with the answer printed to your terminal. Add directives the way you would in Slack: `npx tsx src/cli.ts ask "model:anthropic/claude-opus-5 effort:high explain the config layers you resolve"`.
+
+The clone is the install until the CLI is on npm. The tree carries it as the package `@coreplane/switchboard` — the same `src/cli.ts`, bundled with the files it reads — and the release workflow publishes it once the project turns publishing on; from that release, an empty directory is enough:
+
+```bash
+npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key <your key>
+npx @coreplane/switchboard ask "what can you do?"
+```
+
+`curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init` behind a Node version check. The bot itself is the published container image, `ghcr.io/coreplanelabs/switchboard`.
 
 Next steps:
 
-- [Run it locally](docs/tutorials/run-it-locally.md) — the tutorial behind the commands above, then connecting the same process to Slack and GitHub.
+- [Get started](docs/tutorials/get-started.md) — the tutorial behind the commands above: an answer in your terminal, then in Slack, then from production.
+- [Run it locally](docs/tutorials/run-it-locally.md) — the same loop, then connecting the process to Slack and GitHub.
 - [Your first request in Slack](docs/tutorials/first-request-in-slack.md) — mention it, follow up, ask for something real.
 - [Deploy](docs/how-to/deploy.md) — the Cloudflare deployment: the profile, the secrets, the first `deploy all`, and the release workflow after that.
 
