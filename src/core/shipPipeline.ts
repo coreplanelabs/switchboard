@@ -27,31 +27,15 @@
 //     orchestrator itself never reads the inbox — it has no model turn.
 
 import type { AgentDef } from "../agents/registry.js";
-import type { Effort } from "../effort.js";
 import { runAgent } from "../runner.js";
-import { descriptionTurnTarget, runDescriptionTurn } from "./descriptionTurn.js";
-import type { ChatMessage, Provider } from "../providers/types.js";
-import type { ExecutorFactoryOptions } from "../execution/factory.js";
-import type {
-  OpenedPullRequest,
-  OpenPrRef,
-  PullRequestFacts,
-  PullRequestTarget,
-  RepoShipInfo,
-} from "../execution/githubPulls.js";
+import type { ChatMessage } from "../providers/types.js";
+import type { PullRequestFacts } from "../execution/githubPulls.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { ToolContext } from "../tools/workspace.js";
 import type { Span } from "../core/trace/types.js";
-import type { WebCapability } from "../tools/web.js";
-import type { GithubCapability } from "../tools/github.js";
-import type { SkillStore } from "../skills/index.js";
-import type { PrDescription } from "./prDescription.js";
 import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdict } from "./reviewVerdict.js";
 import type { RunEvent, ShipRoundOutcome } from "./runEvents.js";
-import type { RunControl } from "./runRegistry.js";
-import type { FollowUpInbox } from "./threadAdmission.js";
 import { normalizeHead, sameCommit } from "./reviewedHead.js";
-import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "./codingPrPostStep.js";
 import {
   attachRoundWorkspace,
   checkPrHeadPreflight,
@@ -64,11 +48,18 @@ import {
   type ReviewPostOutcome,
 } from "./reviewRound.js";
 import type { ShipEntry } from "./ship/preflight.js";
+import {
+  buildShipFixTurn,
+  runShipCodingChild,
+  type CodingChildDeps,
+  type CodingChildGithub,
+} from "./ship/codingChild.js";
 
-// The dispatcher's ship branch reaches the preflight through this module; the
-// forwarding goes when that branch moves out of dispatcher.ts and imports the
-// stage directly.
+// The dispatcher's ship branch reaches the preflight and the child-round types
+// through this module; the forwarding goes when that branch moves out of
+// dispatcher.ts and imports the stages directly.
 export { shipPreflight } from "./ship/preflight.js";
+export type { ShipBlocks, ShipChildSpec } from "./ship/childRound.js";
 
 // ---- config (`ship` block, docs/reference/specs/agent-ship.md item 8) -------------------
 
@@ -159,104 +150,30 @@ export function buildShipReviewTurn(input: {
     `Previous round's findings:\n${findings}\n\nFix round's dispositions:\n${dispositions}`
   );
 }
-
-/** The fix round's one user turn: the findings payload verbatim (ids, severity,
- *  file:line, title) plus the review prose, and the loop contract — every
- *  severity gets a disposition, description resubmitted, branch repushed. */
-export function buildShipFixTurn(input: { where: string; findings: Finding[]; review: string }): string {
-  const findings =
-    input.findings.map(formatFinding).join("\n") || "(the review listed no structured findings — address its prose)";
-  return (
-    `The review of ${input.where} requested changes. Load the \`address-review-findings\` skill and address EVERY finding below, nits included: ` +
-    `record one disposition per finding with submit_dispositions (fixed|declined, with a note), squash to coherent commits, ` +
-    `resubmit the PR description with submit_pr_description, and push the branch. Never merge and never approve.\n\n` +
-    `Findings:\n${findings}\n\nReview:\n${input.review}`
-  );
-}
-
 // ---- the round loop (spec items 3–8) ------------------------------------------
 
-/** One child round's resolved coordinates: the child agent's def and the
- *  model/effort the config layers resolved FOR THAT AGENT (a `model:` or
- *  `effort:` directive on the ship request wins, like any request). */
-export interface ShipChildSpec {
-  agent: AgentDef;
-  provider: Provider;
-  /** `<provider>/<model>` as resolved — for the child's config-awareness block. */
-  modelRef: string;
-  model: string;
-  effort?: Effort;
-}
-
-/** The ship coding rounds' branch contract, appended AFTER the composed
- *  system so it beats the coding prompt's generic "create a branch with a
- *  descriptive name" step — a ship child that leaves the pipeline branch
- *  strands the pipeline (the thread binding cannot follow it). */
-export function shipBranchContract(branch: string): string {
-  return (
-    `SHIP PIPELINE BRANCH CONTRACT (overrides any instruction above to create or switch branches): ` +
-    `this worktree is already checked out on \`${branch}\`, the pipeline's PR branch. ` +
-    `Do NOT create a branch and do NOT switch branches — implement, commit, and push on \`${branch}\` ` +
-    `(\`git push -u origin ${branch}\`). Switchboard opens and edits the PR from that branch only; ` +
-    `work pushed anywhere else is unreachable to this pipeline.`
-  );
-}
-
-/** The advisory/system blocks composed into one child's prompt (the same seam
- *  the dispatcher uses: memory → config awareness → instructions → agent). */
-export interface ShipBlocks {
-  memory: string | undefined;
-  config: string | undefined;
-  /** The self-description block (routing-and-config behavior 11). */
-  about?: string | undefined;
-  instructions: string | undefined;
-  skills: string | undefined;
-}
-
-export interface ShipGithub {
+/** Every GitHub seam the pipeline writes through: the coding round's slice,
+ *  plus what the orchestrator and the review round use themselves. */
+export interface ShipGithub extends CodingChildGithub {
   /** Round 0's pipeline-branch create (`refs/heads/<branch>` at the base
    *  tip): the ref must exist on origin BEFORE the first attach, or the
    *  resident refuses the binding. Idempotent — 422 already-exists is
    *  success inside the implementation. Throws on any real failure. */
   createBranchRef: (repo: string, branch: string, fromRef: string) => Promise<void>;
-  openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
-  /** The open PR heading a branch (githubPulls.findOpenPrByHead) — the
-   *  post-step's check before it reports a description-less push as "no PR". */
-  findOpenPrByHead: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   postReviewComment: (target: ReviewCommentTarget, body: string) => Promise<void>;
   fetchPrHead: FetchPrHead;
   fetchPrCommits: FetchPrCommits;
   prFacts: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
-  /** The repo's default branch — the PR base of last resort (resolveBaseRefLazy,
-   *  githubPulls.ts), threaded into the pipeline's own runCodingPrPostStep call
-   *  below. In practice `entry.base` is already resolved by shipPreflight, so
-   *  this fires only on the rare resume where that lookup itself failed. */
-  fetchRepoShipInfo: (repo: string) => Promise<RepoShipInfo | undefined>;
 }
 
-export interface ShipPipelineInput {
+/** The pipeline's whole input: the coding round's slice (which carries what
+ *  every child round reads), plus what the orchestrator itself uses. */
+export interface ShipPipelineInput extends CodingChildDeps {
   entry: ShipEntry;
   /** Round 0's message list (thread history + the task turn), built by the
    *  dispatcher; unused on a resume. Review/fix rounds synthesize their own. */
   round0Messages: ChatMessage[];
-  /** Resolve one child round's agent/provider/model/effort. */
-  child: (name: "coding" | "review") => ShipChildSpec;
-  /** The prompt blocks for one child (skills are scoped per child agent). */
-  blocks: (spec: ShipChildSpec) => ShipBlocks;
-  factory: ExecutorFactoryOptions;
-  threadKey: string;
   caps: ShipCaps;
-  control: RunControl;
-  /** The thread's follow-up inbox (docs/reference/specs/thread-admission.md): handed to
-   *  every child round's runner so a reply during the pipeline is read by the
-   *  child in flight at its next step. Absent (tests) → children run as
-   *  without follow-ups. */
-  inbox?: FollowUpInbox;
-  /** Run-visibility event sink (registry + card refresh). */
-  onEvent: (event: RunEvent) => void;
-  onProgress: (note: string) => void;
-  /** The card checklist hook children drive through update_status. */
-  reportProgress: (checklist: string) => void;
   /** Registry publish for events the pipeline owns (typed artifacts:
    *  pr_description, pr_opened; the ship_round boundaries) — the dispatcher's
    *  hook also feeds the card's round header off the `ship_round` events. */
@@ -267,15 +184,7 @@ export interface ShipPipelineInput {
   span?: Span;
   /** Thread reply for mid-pipeline notes (review-post notes, the PR link). */
   reply: (text: string) => Promise<void>;
-  web?: WebCapability;
-  skills?: SkillStore;
-  /** The `github_*` tools' capability for the child runs (docs/reference/specs/github-tools.md). */
-  githubTools?: GithubCapability;
   github: ShipGithub;
-  /** Deep string-leaf redaction for the published pr_description event (the
-   *  dispatcher passes its own, so ship and plain coding publish ONE shape). */
-  redactDescription: (d: PrDescription) => PrDescription;
-  logKey: string;
   now?: () => number;
 }
 
@@ -290,22 +199,6 @@ export interface ShipPipelineInput {
 export interface ShipOutcome {
   status: "completed" | "aborted" | "capped" | "stopped_soft" | "stopped_hard";
   reply: string;
-}
-
-interface CodingRoundResult {
-  answer: string;
-  /** Attach-time refusal (the thread's worktree is bound to another ref) —
-   *  the pipeline aborts with it; no model turn ran. */
-  refusal?: string;
-  prNote?: string;
-  opened?: { number: number; url: string; created: boolean };
-  headSha?: string;
-  description?: PrDescription;
-  /** The round's LAST submit_dispositions set (a later call replaces the
-   *  earlier one). The loop keys it by the review round it answers — finding
-   *  ids are only unique within one round. */
-  dispositions?: FindingDisposition[];
-  residentUnavailable?: string;
 }
 
 interface ReviewRoundResult {
@@ -339,6 +232,8 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     ...def,
     maxMinutes: Math.min(def.maxMinutes, Math.max(remainingMs(), 0) / 60_000),
   });
+  /** The pipeline state every child round is handed (ship/childRound.ts). */
+  const childCtx = { entry, clip, now };
 
   /** Findings per review round and dispositions per fix round, both keyed by
    *  the REVIEW round they belong to. Finding ids are only unique WITHIN one
@@ -456,220 +351,9 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       `the remaining pipeline time (~${Math.max(0, Math.round(remainingMs() / 60_000))} min of the ${caps.maxMinutes}-minute budget) cannot hold another round`,
     );
 
-  // ---- one coding child (round 0, and every fix round) ----------------------
   /** One round as a `ship.round` span (docs/reference/specs/tracing.md), when traced. */
   const round = <T>(index: number, agentName: "coding" | "review", fn: (span: Span | undefined) => Promise<T>) =>
     input.span ? input.span.span("ship.round", fn, { attrs: { index, agent: agentName } }) : fn(undefined);
-
-  const runCodingChild = async (
-    opts: {
-      messages: ChatMessage[];
-      knownFindingIds?: string[];
-      attachHeadSha?: string;
-    },
-    roundSpan: Span | undefined,
-  ): Promise<CodingRoundResult> => {
-    const spec = input.child("coding");
-    const ws = await attachRoundWorkspace({
-      factory: input.factory,
-      round: {
-        threadKey: input.threadKey,
-        agent: spec.agent,
-        repo: entry.repo,
-        ref: entry.branch,
-        headSha: opts.attachHeadSha,
-      },
-      logKey,
-    });
-    const { executor, resident, binding, note } = ws.selection;
-    if (resident !== true) {
-      await ws.release({ hardStopped: false, ...(roundSpan ? { span: roundSpan } : {}) });
-      return { answer: "", residentUnavailable: note ?? "no resident worktree attached" };
-    }
-    // Binding honesty (mirrors guardAttachedHead): the resident binds ONE ref
-    // per thread at first attach and ignores later hints — a thread already
-    // bound to another branch would code, push, and open-or-edit somewhere
-    // the pipeline never looks. Refuse BEFORE any model call, naming both
-    // refs; an attach that answered no ref proves nothing and proceeds.
-    if (binding?.ref !== undefined && binding.ref !== entry.branch) {
-      await ws.release({ hardStopped: false, ...(roundSpan ? { span: roundSpan } : {}) });
-      return {
-        answer: "",
-        refusal:
-          `🔀 Ship round not started: this thread's worktree is bound to \`${binding.ref}\`, but the pipeline branch is \`${entry.branch}\` — ` +
-          `the resident binds one ref per thread at its first attach, so this thread cannot drive the ship branch. Start ship in a fresh thread.`,
-      };
-    }
-    let description: PrDescription | undefined;
-    let roundDispositions: FindingDisposition[] | undefined;
-    const toolContext: ToolContext = {
-      executor,
-      reportProgress: input.reportProgress,
-      web: input.web,
-      skills: input.skills,
-      github: input.githubTools,
-      agentName: spec.agent.name,
-      onPrDescription: (d) => {
-        description = d;
-      },
-      ...(opts.knownFindingIds
-        ? {
-            knownFindingIds: opts.knownFindingIds,
-            onDispositions: (d: FindingDisposition[]) => {
-              roundDispositions = d;
-            },
-          }
-        : {}),
-    };
-    const composeSystem = makeSystemComposer({
-      agent: spec.agent,
-      resident: true,
-      repo: entry.repo,
-      workspace: binding?.workspace,
-      prTarget: undefined,
-      blocks: input.blocks(spec),
-    });
-    let answer: string;
-    let observed: Awaited<ReturnType<typeof observeCodingWorkspace>> | undefined;
-    // The branch the child's own `git push` named (pr-description item 5):
-    // the post-step opens from it, and from the checkout only when no
-    // push was observed. The latest push wins.
-    const pushes = trackPushedBranch();
-    // The branch contract OVERRIDES the coding prompt's generic "create a
-    // branch" step — a child that follows that step pushes its own branch
-    // and strands the pipeline: the thread's
-    // binding stays on the ship branch, so the review round can never see
-    // a PR opened from anywhere else.
-    const system = `${composeSystem({ sha: undefined, verified: false })}\n\n${shipBranchContract(entry.branch)}`;
-    const onEvent = (e: RunEvent) => {
-      pushes.observe(e);
-      input.onEvent(e);
-    };
-    // Where the post-step's PR would open: the PR's true base (entry.base) —
-    // NEVER the thread's resident binding ref, which ship bound to the HEAD
-    // branch itself. Shared by the description turn's decision and the post-step.
-    const prTarget = { repo: entry.repo, baseRef: entry.base, bindingRef: undefined, resolvedRef: undefined };
-    const observeNow = async () => {
-      const pushedBranch = pushes.branch();
-      return observeCodingWorkspace(
-        executor,
-        {
-          probeRemote: false,
-          ...(pushedBranch !== undefined ? { pushedBranch } : {}),
-        },
-        roundSpan,
-      );
-    };
-    // True when the round was given the description turn and it still
-    // submitted nothing — the post-step's warning then says so.
-    let descriptionTurnRan = false;
-    try {
-      answer = await runAgent({
-        provider: spec.provider,
-        model: spec.model,
-        agent: clip(spec.agent),
-        messages: opts.messages,
-        ...(roundSpan ? { span: roundSpan } : {}),
-        backend: ws.selection.backend,
-        system,
-        effort: spec.effort,
-        toolContext,
-        onProgress: input.onProgress,
-        onEvent,
-        control,
-        inbox: input.inbox,
-      });
-      // A hard stop tore the work down mid-flight — observe nothing, post nothing.
-      if (control.requested !== "hard") observed = await observeNow();
-      // The description turn (docs/reference/specs/pr-description.md item 5,
-      // descriptionTurn.ts) — the same enforcement dispatch() applies to a
-      // plain coding run: a round that pushed onto the pipeline's own open PR
-      // without resubmitting the description gets ONE bounded extra turn
-      // asking for it, while the workspace is still attached. The turn runs
-      // on a COPY of the round's messages (the pipeline's transcript is its
-      // own); the description arrives through this round's onPrDescription
-      // hook, so `description` below sees it.
-      if (observed && description === undefined && control.requested !== "hard") {
-        const turnTarget = await descriptionTurnTarget({
-          observed,
-          description,
-          target: prTarget,
-          findOpenPr: github.findOpenPrByHead,
-          logKey,
-        });
-        if (turnTarget) {
-          descriptionTurnRan = true;
-          const turnMessages = [...opts.messages];
-          const run = (span?: Span) =>
-            runDescriptionTurn({
-              ...(span ? { span } : {}),
-              target: turnTarget,
-              answer,
-              messages: turnMessages,
-              system,
-              turn: {
-                provider: spec.provider,
-                model: spec.model,
-                agent: clip(spec.agent),
-                ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
-                toolContext,
-                onProgress: input.onProgress,
-                onEvent,
-                control,
-                ...(ws.selection.backend ? { backend: ws.selection.backend } : {}),
-              },
-              logKey,
-            });
-          await (roundSpan ? roundSpan.span("run.description_turn", run) : run());
-          // Re-read, not narrowed: a hard stop may have landed during the turn.
-          if (!control.hardSignal.aborted) observed = await observeNow();
-        }
-      }
-    } finally {
-      await ws.release({ hardStopped: control.requested === "hard", ...(roundSpan ? { span: roundSpan } : {}) });
-    }
-    if (description)
-      input.publish({ type: "pr_description", description: input.redactDescription(description), at: now() });
-    // Branch contract enforced structurally, before any PR write: a child
-    // whose head branch (the one it pushed, else the one it ended on) is not
-    // the pipeline branch pushed work this pipeline cannot reach (the thread
-    // binding stays on the ship branch) — opening or editing a PR from it
-    // would strand the loop, as the first live run proved.
-    if (observed?.branch !== undefined && observed.branch !== entry.branch) {
-      return {
-        answer,
-        refusal:
-          `⚠️ The coding round left the pipeline branch: its work is on \`${observed.branch}\` instead of \`${entry.branch}\`, ` +
-          `so no PR was opened or edited from it — work pushed there is unreachable to this pipeline.`,
-      };
-    }
-    let opened: { number: number; url: string; created: boolean } | undefined;
-    let prNote: string | undefined;
-    if (observed && control.requested !== "hard") {
-      prNote = await runCodingPrPostStep({
-        observed,
-        description,
-        target: prTarget,
-        openPullRequest: github.openPullRequest,
-        findOpenPr: github.findOpenPrByHead,
-        fetchRepoInfo: github.fetchRepoShipInfo,
-        descriptionTurnRan,
-        publish: (e) => {
-          if (e.type === "pr_opened") opened = { number: e.number, url: e.url, created: e.created };
-          input.publish(e);
-        },
-        logKey,
-      });
-    }
-    return {
-      answer,
-      ...(prNote !== undefined ? { prNote } : {}),
-      ...(opened !== undefined ? { opened } : {}),
-      ...(observed?.head !== undefined ? { headSha: observed.head } : {}),
-      ...(description !== undefined ? { description } : {}),
-      ...(roundDispositions !== undefined ? { dispositions: roundDispositions } : {}),
-    };
-  };
 
   // ---- one review child (pinned head, extracted units) ----------------------
   const runReviewChild = async (roundIndex: number, roundSpan: Span | undefined): Promise<ReviewRoundResult> => {
@@ -882,7 +566,9 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
       );
     }
     emitRound(0, "coding", "started");
-    const r0 = await round(0, "coding", (span) => runCodingChild({ messages: input.round0Messages }, span));
+    const r0 = await round(0, "coding", (span) =>
+      runShipCodingChild(input, childCtx, { messages: input.round0Messages }, span),
+    );
     if (r0.residentUnavailable) {
       emitRound(0, "coding", "aborted");
       return residentOutcome(r0.residentUnavailable);
@@ -988,7 +674,9 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     if (remainingMs() < SHIP_ROUND_RESERVE_MS) return wallClockCap();
     emitRound(reviewRounds, "coding", "started");
     const fx = await round(reviewRounds, "coding", (span) =>
-      runCodingChild(
+      runShipCodingChild(
+        input,
+        childCtx,
         {
           messages: [
             {
