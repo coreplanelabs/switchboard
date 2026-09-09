@@ -26,6 +26,8 @@ flowchart LR
     A["1 · memory<br/>(state Worker — Durable Object<br/>migrations land before anything writes)"] --> B["2 · bot"] --> C["3 · resident"] --> D["4 · sandbox"]
 ```
 
+The same run publishes the bot image to GitHub Container Registry — `ghcr.io/<owner>/<repo>:<version>` and `:latest`, with a build-provenance attestation and an SBOM — for the local loop and for anyone running the container outside Cloudflare ([Deploy](deploy.md#running-the-container-somewhere-else) says how to verify it). The deploy does not consume it: wrangler builds the same Dockerfile at deploy time, so the two jobs neither wait on nor fail with each other.
+
 Runs in flight do not hold the release. On SIGTERM the bot hands every resumable run to the next container, which continues it under the same Slack card within seconds; the bot's preflight says so as a warning and proceeds. What the deploy does wait out (every 60 s, up to its budget) is a container rollout that has not settled yet; still refusing after that is a real failure, red, for a person, as is any other non-zero exit.
 
 ## 4. Confirm it is live

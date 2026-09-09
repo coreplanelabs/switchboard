@@ -123,9 +123,19 @@ Nobody deploys routine releases by hand: merging the release PR runs the same `d
 The image the bot Worker builds is an ordinary container, and Socket Mode is outbound-only, so it also runs anywhere that runs a container — without the Workers, every optional capability is simply off. The one shape the tree keeps is the local loop, `docker-compose.yml`: the same image on a dev box, or on one host a single trusted operator administers, with your `.env` and `config/config.yaml` mounted, runtime overrides and workspaces on named volumes, and the health probe on loopback:
 
 ```bash
+docker compose pull     # the image the last release published — or `docker compose build` to build it here
 docker compose up -d
 docker compose logs -f
 ```
+
+Every release publishes that image to GitHub Container Registry as `ghcr.io/<owner>/<repo>:<version>` and `:latest` — the owner and name are the repository's, lowercased — built from the root `Dockerfile` with a build-provenance attestation and an SBOM attached. `docker compose pull` fetches it; `docker compose build` builds the same Dockerfile locally under the same name, and `up` runs whichever is present. Before you run an image you did not build, check that it came from this repository's release workflow and nothing else:
+
+```bash
+gh attestation verify oci://ghcr.io/<owner>/<repo>:<version> --owner <owner>
+docker buildx imagetools inspect ghcr.io/<owner>/<repo>:<version> --format '{{ json .SBOM }}'
+```
+
+The first resolves the tag to its digest and checks the signed attestation against the workflow that built it; the second prints the SBOM. Production on Cloudflare does not pull this image — wrangler builds the same Dockerfile at deploy time — so a release that failed to publish still deploys, and the image is yours to run without the Workers.
 
 There is no state Worker in this shape: overrides and run history (with `runHistory.store: file`) live on the volume, tools run on the container with `execution.type: local`, and the dashboards serve loopback callers only. Nothing else is built or tested as a host — the deploy tooling, the secrets path and these pages are Cloudflare's.
 
