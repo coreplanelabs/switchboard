@@ -7,11 +7,11 @@ import {
   UNSEALED_HOLD_MS,
   type FinishedFrame,
   type IndexEvent,
-  type RunRegistryOptions,
   type SealedFrame,
 } from "./runRegistry.js";
 import type { RunEvent } from "./runEvents.js";
 import { MAX_EVENT_BYTES } from "./runRecord.js";
+import { call, result, seq, spanEnd, testRegistry } from "./runRegistry/testing.js";
 
 // Feature: docs/reference/specs/live-view.md — the in-memory, live-only run registry that
 // backs the external live-view page. It mints an unguessable id+token per run,
@@ -19,27 +19,6 @@ import { MAX_EVENT_BYTES } from "./runRecord.js";
 // already happened, fans events out to live subscribers, and evicts finished
 // runs after a TTL. Id/token/clock are injectable so every property is
 // deterministic here.
-
-const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", summary });
-const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result", tool: "bash", ok, summary });
-/** What `publish` hands back: the input event stamped with its per-run `seq`. */
-const seq = (n: number, e: RunEvent): RunEvent => ({ ...e, seq: n });
-/** A span record (docs/reference/specs/tracing.md): the union gains the variant with the emitters. */
-const spanEnd = (name: string): RunEvent =>
-  ({ type: "span_end", spanId: `s-${name}`, name, startedAt: 1, durationMs: 5, status: "ok" }) as unknown as RunEvent;
-
-/** A registry with deterministic ids/tokens/clock for tests. */
-function testRegistry(over: Partial<RunRegistryOptions> = {}) {
-  let n = 0;
-  let clock = 1000;
-  const reg = new RunRegistry({
-    genId: () => `id-${++n}`,
-    genToken: () => `tok-${n}`,
-    now: () => clock,
-    ...over,
-  });
-  return { reg, tick: (ms: number) => (clock += ms) };
-}
 
 describe("RunRegistry.create", () => {
   it("mints a distinct id and token per run", () => {
