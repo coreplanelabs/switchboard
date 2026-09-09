@@ -12,6 +12,7 @@ import {
 import type { ChannelVisibility } from "./authz/types.js";
 import type { RunStatus } from "./runRecord.js";
 import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
+import { RunControl } from "./runRegistry/runControl.js";
 
 // The run registry is the unit-testable core of the external live-view page
 // (docs/reference/specs/live-view.md) and the ONE per-run event store while a run is live
@@ -35,41 +36,14 @@ import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "./runRecord.js";
 // whose callers are authorized ONE LAYER UP (the command registry's policy table
 // plus the Cloudflare Access gate). Nothing in this file decides who
 // an operator is; it only trusts that its token-free callers already did.
-
-/**
- * Per-run stop control. One per run, minted by `RunRegistry.create()` and
- * handed to the runner; `requestStop` is driven through the registry's
- * token-gated `requestStop(id, token, mode)`. Two modes, one direction:
- *   - `soft`: only records the request. The runner polls `requested` between
- *     steps, takes no new step, and wraps up through the guaranteed finale.
- *   - `hard`: records the request AND aborts `hardSignal`, which the runner
- *     threads into the in-flight provider call and tool execution so they are
- *     cancelled now, with no finale.
- * A soft request escalates to hard; a hard request never de-escalates; repeats
- * are idempotent. Everything here is synchronous and never throws.
- */
-export class RunControl {
-  private mode: StopMode | undefined;
-  private readonly hard = new AbortController();
-
-  /** The strongest stop requested so far, or undefined while none has been. */
-  get requested(): StopMode | undefined {
-    return this.mode;
-  }
-
-  /** Aborted iff a HARD stop has been requested. Pass to anything cancellable. */
-  get hardSignal(): AbortSignal {
-    return this.hard.signal;
-  }
-
-  /** Record a stop request; returns the effective mode after it (hard wins). */
-  requestStop(mode: StopMode): StopMode {
-    if (this.mode === "hard") return "hard";
-    this.mode = mode;
-    if (mode === "hard") this.hard.abort(new Error("run stopped (hard) by operator"));
-    return this.mode;
-  }
-}
+//
+// The registry's parts live as sibling modules under `./runRegistry/`; this
+// file is the registry itself and its public contract. The dispatcher's stages
+// (`src/core/dispatch/`, `src/core/shipPipeline.ts`) still import a few of the
+// moved names from here while their own split (decision record 0024) is in
+// flight, so those names are re-exported below; once the stages import the
+// sibling modules directly, the re-exports go.
+export { RunControl };
 
 /** The identifiers a freshly created run is addressed by, plus its control. */
 /** `create()` for a run that already has an identity and a past (a resume,

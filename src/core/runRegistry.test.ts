@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_BACKLOG_LIMIT,
   REPLAY_EVERYTHING,
-  RunControl,
   RunRegistry,
   UNSEALED_HOLD_MS,
   type FinishedFrame,
@@ -883,38 +882,6 @@ describe("RunRegistry.snapshot — record inputs", () => {
 // Feature: docs/reference/specs/live-view.md item 10 — run control. Every run owns a
 // RunControl (soft/hard stop request + a hard AbortSignal); `requestStop` is the
 // token-gated control-plane entry the /runs surface calls.
-describe("RunControl", () => {
-  it("starts unrequested with a live hard signal", () => {
-    const c = new RunControl();
-    expect(c.requested).toBeUndefined();
-    expect(c.hardSignal.aborted).toBe(false);
-  });
-
-  it("soft: records the mode, does NOT abort the hard signal", () => {
-    const c = new RunControl();
-    expect(c.requestStop("soft")).toBe("soft");
-    expect(c.requested).toBe("soft");
-    expect(c.hardSignal.aborted).toBe(false);
-  });
-
-  it("hard: records the mode AND aborts the hard signal", () => {
-    const c = new RunControl();
-    expect(c.requestStop("hard")).toBe("hard");
-    expect(c.requested).toBe("hard");
-    expect(c.hardSignal.aborted).toBe(true);
-  });
-
-  it("escalates soft → hard, never de-escalates hard → soft; repeats are idempotent", () => {
-    const c = new RunControl();
-    c.requestStop("soft");
-    expect(c.requestStop("hard")).toBe("hard");
-    expect(c.requested).toBe("hard");
-    expect(c.requestStop("soft")).toBe("hard"); // stays hard
-    expect(c.requested).toBe("hard");
-    expect(c.requestStop("hard")).toBe("hard");
-  });
-});
-
 describe("RunRegistry.requestStop — run control", () => {
   it("create() hands out the run's control; a valid stop drives it and reports the effective mode", () => {
     const { reg } = testRegistry();

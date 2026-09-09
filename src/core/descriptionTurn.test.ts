@@ -15,7 +15,7 @@ import {
 } from "./descriptionTurn.js";
 import type { PrDescription } from "./prDescription.js";
 import type { RunEvent } from "./runEvents.js";
-import { RunControl } from "./runRegistry.js";
+import { RunControl } from "./runRegistry/runControl.js";
 
 // Feature: docs/reference/specs/pr-description.md item 5 — the description turn.
 // The decision (`descriptionTurnTarget`) and the turn (`runDescriptionTurn`)
