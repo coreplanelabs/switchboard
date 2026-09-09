@@ -30,22 +30,39 @@ interface CachedToken {
 //   "write" — the full installation grant (coding agent, and the bot process's
 //             deterministic review post via githubComments.ts).
 //   "read"  — least-privilege for a read-only agent's SANDBOX (the review
-//             agent): it can read/clone a private repo and read its PRs, but
-//             physically CANNOT comment, review, push, or otherwise write —
-//             even if the model or a prompt-injected diff tries. This closes
-//             the double-post / injection hole at the token, not the prompt.
+//             agent): it can read/clone a private repo and read its PRs,
+//             issues and CI results, but physically CANNOT comment, review,
+//             push, or otherwise write — even if the model or a
+//             prompt-injected diff tries. This closes the double-post /
+//             injection hole at the token, not the prompt.
 export type GithubTokenScope = "write" | "read";
 
-// Subset of the installation's permissions for a read-scoped token: enough for
-// `gh pr view`/`gh pr diff` and `git clone`/checkout on a PRIVATE repo, nothing
-// that writes. contents:read → clone/checkout; pull_requests:read → PR
-// metadata + diff; issues:read → the `github_issue_list/get` tools
-// (docs/reference/specs/github-tools.md) on the read path; metadata:read → always
-// required by GitHub.
+// Subset of the installation's permissions for a read-scoped token: enough to
+// clone and read a PRIVATE repo, its PRs and issues, and its CI results —
+// nothing that writes. Every value is "read"; GitHub refuses a request for a
+// permission the installation does not hold, so each of these must stay in the
+// App's grant (docs/reference/specs/execution.md item 5).
+//   contents:read      → `git clone`/checkout, file reads at any ref.
+//   pull_requests:read → `gh pr view`/`gh pr diff`, PR metadata and reviews.
+//   issues:read        → the `github_issue_list/get` tools
+//                        (docs/reference/specs/github-tools.md) on the read path.
+//   actions:read       → workflow runs, jobs and their logs, the Actions cache
+//                        list (`gh run list/view --log`, `gh cache list`), so a
+//                        review can read why CI is red instead of guessing.
+//   checks:read        → check-runs and check-suites on a commit (the PR's
+//                        checks tab; `gh pr checks` reads these).
+//   metadata:read      → always required by GitHub for any installation token.
+// Not requested: `statuses` (the legacy commit-status API — GitHub Actions
+// reports through check-runs, so a repository built on Actions never needs it;
+// one whose CI posts commit statuses instead would need it added here for those
+// rows to show in `gh pr checks`); `workflows` (that grant only exists as
+// write: editing workflow files is a push, which contents:read already forbids).
 const READ_ONLY_PERMISSIONS = {
   contents: "read",
   pull_requests: "read",
   issues: "read",
+  actions: "read",
+  checks: "read",
   metadata: "read",
 } as const;
 
