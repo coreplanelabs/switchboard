@@ -8,7 +8,8 @@
 
 import type { AgentDef } from "../agents/registry.js";
 import type { ChannelIO, IncomingMessage } from "./types.js";
-import type { CoreDeps, DispatchOptions, ResumeContext } from "./dispatcher.js";
+import type { CoreDeps, DispatchOptions } from "./dispatcher.js";
+import type { ResumeContext } from "./dispatch/admission.js";
 import type { RepoContext } from "./repoContext.js";
 import type { ResumableRun } from "./boot.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";

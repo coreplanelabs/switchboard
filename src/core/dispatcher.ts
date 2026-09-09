@@ -1,4 +1,3 @@
-import type { ConfigStore } from "../config.js";
 import type { Capabilities } from "./capabilities.js";
 import type { ResidentFleetFacts } from "./residentFleet.js";
 import { configAwarenessBlock } from "./configAwareness.js";
@@ -8,19 +7,15 @@ import { AGENTS, getAgent, type AgentDef } from "../agents/registry.js";
 import { lastThreadDirectives, parseDirectives, type RequestDirectives, type ThreadDirectives } from "../directives.js";
 import { mergeTools, runAgent } from "../runner.js";
 import { TOOLSETS } from "../tools/workspace.js";
-import type { LedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
-import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "./runLedger/types.js";
-import type { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
-import type { ResumePlan } from "./runLedger/resume.js";
-import { durableInboxMessage, messageFromInbox } from "./runLedger/inboxMessage.js";
+import type { LedgerRun } from "./runLedger/writeThrough.js";
+import { durableInboxMessage } from "./runLedger/inboxMessage.js";
 import { systemClock } from "./trace/index.js";
-import { COMMAND_RUN_AGENT } from "./runOwner.js";
-import type { Clock, Span, SpanSink, Tracer } from "./trace/types.js";
+import type { Span, SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
 import { cardShapeLineOf, queuedCaption } from "./runShape.js";
-import { graftResidentSteps, residentTraceOf, sanitizeGraftedSteps } from "../execution/residentTrace.js";
+import { graftResidentSteps, residentTraceOf } from "../execution/residentTrace.js";
 import type { ResidentStep } from "../execution/residentStepTrace.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { makeWebCapability } from "../tools/web.js";
@@ -66,26 +61,16 @@ import {
 } from "./reviewRound.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "./codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "./descriptionTurn.js";
-import { recognizeOperation } from "./operations.js";
 import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
 import { isSpanRecord, redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
-import {
-  decideFollowUp,
-  mergeFollowUps,
-  refusalReply,
-  steerAck,
-  ThreadAdmission,
-  type FollowUpInput,
-  type LiveThread,
-} from "./threadAdmission.js";
+import { mergeFollowUps, type LiveThread } from "./threadAdmission.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { MAX_EVENT_BYTES, utf8ByteLength, type RunStatus } from "./runRecord.js";
 import { markdownOutput } from "./llmOutput/index.js";
-import type { RunHistoryWriter } from "./runHistoryWriter.js";
-import { assembleRunRecord, channelVisibilityOf, reclaimedRunRecord, type RecordDeps } from "./dispatch/record.js";
+import { assembleRunRecord, channelVisibilityOf, type RecordDeps } from "./dispatch/record.js";
 import {
   activityLine,
   attachmentSuffix,
@@ -95,22 +80,26 @@ import {
   humanizeMessageText,
   isMrkdwnChannel,
   liveViewLink,
-  replyCommandOutput,
 } from "./dispatch/reply.js";
+import {
+  admit,
+  adoptCarriedRun,
+  closeResumedRow,
+  defaultAdmission,
+  foldCarriedInbox,
+  type AdmissionContext,
+  type AdmissionDeps,
+  type DispatchFollowUp,
+  type RestartContext,
+  type ResumeContext,
+} from "./dispatch/admission.js";
+import { answerChatCommand, answerOperation, type FastPathDeps } from "./dispatch/fastPath.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { startReviewReadingDiff } from "./readingDiff.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { RestGithubApi, type GithubApi } from "../execution/githubApi.js";
 import type { GithubCapability } from "../tools/github.js";
-import {
-  invokeChatCommand,
-  parseChatCommand,
-  type ChatCommandResult,
-  type ChatCommands,
-  type ParsedChatCommand,
-} from "./commandChat.js";
-import { cliWords } from "./commandSurface.js";
-import { defaultRunRegistry, type RunHandle, type RunRegistry, REPLAY_EVERYTHING } from "./runRegistry.js";
+import { defaultRunRegistry, type RunHandle, REPLAY_EVERYTHING } from "./runRegistry.js";
 import { inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 import { createCardShell, type CardShell } from "./statusCardFrame.js";
 import { createRunEnding, type RunEnding } from "./runEnding.js";
@@ -128,8 +117,7 @@ import type {
 // parsing, layered resolution, permission gates, history assembly, executor
 // selection, and the agent run. Channels are pure transports (src/channels/).
 
-export interface CoreDeps extends RecordDeps {
-  config: ConfigStore;
+export interface CoreDeps extends AdmissionDeps, FastPathDeps, RecordDeps {
   providers: ProviderRegistry;
   /** What is on in this process (src/core/capabilities.ts): computed ONCE at
    *  startup from the config and the environment, read by every surface —
@@ -140,8 +128,6 @@ export interface CoreDeps extends RecordDeps {
    *  background so the About block names the Worker's number, never a constant
    *  (routing-and-config item 11). `NO_FLEET` without residents. */
   residentFleet: ResidentFleetFacts;
-  /** The wall clock (docs/reference/specs/tracing.md): `systemClock` in production, a ticking clock in tests. */
-  clock?: Clock;
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
   tracer?: Tracer;
   /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */
@@ -150,28 +136,6 @@ export interface CoreDeps extends RecordDeps {
   spanLog?: SpanLog;
   /** where runtime state (sandboxes.json) lives; default ./data */
   dataDir?: string;
-  /**
-   * Resolves the target repo/ref for a message (resident environments).
-   * Defaults to the production resolver in repoContext.ts (explicit repo/PR/
-   * branch signals in the message, then the thread-established repo from
-   * history); injectable for tests. No repo signal → {} → the per-thread
-   * executor path with no resident probe (total input contract).
-   */
-  resolveRepoContext?: (msg: IncomingMessage, history: HistoryItem[]) => Promise<RepoContext> | RepoContext;
-  /**
-   * Live run-view registry: every run is registered here and its
-   * events published so the external /runs page can stream them. Optional;
-   * defaults to the process-wide singleton so the dispatcher and the served
-   * /runs endpoints (src/index.ts) share one instance. Injectable for tests.
-   */
-  runRegistry?: RunRegistry;
-  /**
-   * Thread admission (docs/reference/specs/thread-admission.md): the per-process map of
-   * threads with a run in flight, so a follow-up in such a thread is steered
-   * into that run or refused instead of starting a rival one. Defaults to the
-   * process-wide singleton; injectable for tests.
-   */
-  admission?: ThreadAdmission<DispatchFollowUp>;
   /**
    * Posts a review comment back to a PR. Called after a `review`
    * run against a resolved PR, unless the request opted out. Default: the real
@@ -284,33 +248,6 @@ export interface CoreDeps extends RecordDeps {
    */
   githubApi?: GithubApi;
   /**
-   * The write path onto `runStore` (docs/decisions/0006-runs-have-two-lives.md): after every run the dispatcher
-   * builds the `RunRecord` at finish and hands it here AFTER the reply is sent —
-   * fire-and-forget with bounded retries, drain-counted via `pending()`. With
-   * history off it is the `NullRunHistoryWriter` — every write dropped —
-   * so the dispatcher never asks whether there is one. Production wires
-   * `createRunHistoryWriter` over the selected store (src/index.ts, src/cli.ts).
-   */
-  runHistoryWriter: RunHistoryWriter;
-  /**
-   * The run ledger's write-through (docs/reference/specs/run-history.md item 35): every
-   * agent run and ship pipeline is claimed on the state Worker's ledger when
-   * its run is created, mirrors its steps/events/state while it runs, takes
-   * `finishing` before the reply and finishes through the ledger's one
-   * transaction (`runHistoryWriter.write(record, { via })`). Without a ledger
-   * it is the `NullLedgerWriteThrough`: nothing is claimed and the run goes on
-   * exactly as before the ledger existed. Production wires
-   * `createLedgerWriteThrough` beside the run store (src/index.ts), so a
-   * ledger always comes with a writer: without one the finish never reaches the
-   * ledger and a claimed row closes only by lease expiry (a test-only pairing).
-   */
-  runLedger: LedgerWriteThrough;
-  /** The threads whose live run is on the ledger but not in this process
-   *  (thread-admission item 5), fed by the reclaim sweep: a follow-up on one
-   *  is steered into that run's durable inbox instead of starting a rival.
-   *  Empty in a process without a ledger. */
-  threadsElsewhere: Pick<ThreadsElsewhere, "get" | "forget">;
-  /**
    * Where `friction propose` files its proposals. Default: the GitHub REST
    * tracker with the App installation token (App `issues:write`; never a `gh`
    * shell-out — AGENTS.md invariant 5). Injectable so tests assert filing
@@ -320,34 +257,6 @@ export interface CoreDeps extends RecordDeps {
   /** Floor between two status-card edits (default `STATUS_UPDATE_MIN_MS`).
    *  Tests that assert on an individual intermediate frame set 0. */
   statusUpdateMinMs?: number;
-  /**
-   * The command registry bound to its deps (`bindCommands`; docs/decisions/0008-one-command-definition-every-surface.md), for the
-   * chat fast path: `<group> <verb> [args…] [--option value…]` messages that
-   * name a registered, chat-exposed command (and the bare word `help`) are
-   * answered inline through `invoke`, never a model turn — since phase 4b this
-   * is EVERY command (`help`, `config`, `memory`, `repo`, `friction`, `runs`,
-   * `schedule`), there is no legacy chat parser left. Absent (most unit tests,
-   * or before the surface is wired) → no message is a command and every text
-   * goes to the model. Every real process binds the one core catalogue through
-   * `buildCoreCommands` (src/core/commandCatalogue.ts): the bot (src/index.ts)
-   * and the CLI harness (src/cli.ts).
-   */
-  commands?: ChatCommands;
-}
-
-/** Registry commands the dispatcher records as inline runs: the ones
- *  that DO work beyond answering from local state — ledger reads and GitHub
- *  writes (`friction.*`), a durable memory mutation (`memory.forget`), a repo
- *  provisioned/torn down/reprovisioned (`repo.onboard|offboard|rebuild|
- *  reconfigure`), a deterministic op executed (`repo.test|build`). Config
- *  replies, `help`, listings, and usage/help replies are not runs. */
-export function isInlineRunCommand(id: string): boolean {
-  return (
-    id.startsWith("friction.") ||
-    id === "memory.forget" ||
-    /^repo\.(onboard|offboard|rebuild|reconfigure|test|build)$/.test(id) ||
-    /^mcp\.(add|connect|remove)$/.test(id)
-  );
 }
 
 /** Floor between two edits of a run's status card (see `coalesceStatus`). Below
@@ -383,70 +292,12 @@ function githubCapabilityFor(deps: CoreDeps, userId: string): GithubCapability {
 // must not kill runs mid-flight — see index.ts signal handling).
 let activeRuns = 0;
 
-/** A follow-up as the dispatcher admits it: the runner's `FollowUpInput` plus
- *  the message and channel handle it arrived on — what a fresh turn needs if
- *  the live run ends without consuming it (docs/reference/specs/thread-admission.md item 4). */
-export type DispatchFollowUp = FollowUpInput & { msg: IncomingMessage; io: ChannelIO };
-
-/** The process-wide admission map (one bot process = one map; the registry's
- *  singleton is the same shape of default). */
-const defaultAdmission = new ThreadAdmission<DispatchFollowUp>();
-
 /** The note a follow-up's sender gets when the run it was folded into was
  *  stopped by an operator before its next step read it. */
 const FOLLOW_UP_DROPPED_BY_STOP =
   "⛔ The run this was folded into was stopped before it read this follow-up, so it was not run. Re-send it to run it fresh.";
 export function activeRunCount(): number {
   return activeRuns;
-}
-
-/** A run this generation reclaimed at boot and is continuing (docs/reference/specs/
- *  run-history.md item 38): the ledger row as it stands, the last step record,
- *  the resume plan built from the transcript, the events published before the
- *  restart (replayed into the registry under their seqs), and the repo context
- *  rebuilt from the row's meta. */
-export interface ResumeContext {
-  row: LiveRunRow;
-  lastStep: StepRecord;
-  plan: Extract<ResumePlan, { kind: "resume" }>;
-  events: AppendableEvent[];
-  /** The highest event seq on the ledger; appends continue past it. */
-  lastSeq: number;
-  repoCtx: RepoContext;
-  /** The durable inbox past the last record (item 40): folded in at the run's first boundary. */
-  inbox: InboxItem[];
-}
-
-/** A run reserved at admission whose owner died while attaching (item 42):
- *  dispatched again from its request under the row's id and card. The row is
- *  still `attaching` and this generation's; the inbox holds the follow-ups
- *  steered in meanwhile. */
-export interface RestartContext {
-  row: LiveRunRow;
-  inbox: InboxItem[];
-}
-
-export { DURABLE_INBOX_MAX_BYTES, durableInboxMessage } from "./runLedger/inboxMessage.js";
-
-/** A durable inbox item back as a follow-up for the resumed run, on the
- *  resume's channel handle; undefined when the stored shape is not one this
- *  build wrote (skipped, never fatal). */
-export function followUpFromInbox(item: InboxItem, io: ChannelIO, fallbackAt: number): DispatchFollowUp | undefined {
-  const restored = messageFromInbox(item.message, fallbackAt);
-  if (!restored) return undefined;
-  const { msg, at } = restored;
-  return {
-    text: msg.text,
-    userId: msg.userId,
-    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-    ...(msg.images !== undefined ? { images: msg.images } : {}),
-    ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-    at,
-    ledgerSeq: item.seq,
-    msg,
-    io,
-  };
 }
 
 export interface DispatchOptions {
@@ -459,40 +310,6 @@ export interface DispatchOptions {
   /** A fresh turn's wait behind the run it was parked on (the `queued …
    *  behind the previous run` caption; a `request` attr; never a duration term). */
   queuedBehindMs?: number;
-}
-
-/** Close a restart's row this dispatch will never run (item 42): the thread
- *  has a newer run — the user re-mentioned after the kill — so the reserved
- *  run is closed `interrupted` with a record of its identity and request,
- *  through an adopted handle so the ledger's finish removes the row.
- *  Best-effort, like `closeResumedRow` below. */
-async function closeRestartRow(adopted: LedgerRun, restart: RestartContext, why: string): Promise<void> {
-  try {
-    await adopted.sink.put(
-      reclaimedRunRecord({ row: restart.row, events: [], status: "interrupted", finishedAt: systemClock() }),
-    );
-  } catch (err) {
-    console.warn(
-      `[restart] ${restart.row.runId} could not be closed (${why}): ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-}
-
-/** Close a reclaimed row this dispatch adopted but will never finish (item
- *  38): the record is the row plus the events published before the restart,
- *  status `interrupted`, through the adopted run's sink so the ledger's finish
- *  removes the row. Best-effort: a failure is a warning, the sweep's next pass
- *  finds the row again. */
-async function closeResumedRow(adopted: LedgerRun, resume: ResumeContext, why: string): Promise<void> {
-  try {
-    await adopted.sink.put(
-      reclaimedRunRecord({ row: resume.row, events: resume.events, status: "interrupted", finishedAt: systemClock() }),
-    );
-  } catch (err) {
-    console.warn(
-      `[resume] ${resume.row.runId} could not be closed (${why}): ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
 }
 
 export async function dispatch(
@@ -621,73 +438,18 @@ export async function dispatch(
     },
   };
   try {
-    // Stage A — the ONE text-only fast path: a
-    // message that names a registered, chat-exposed command (`<group> <verb>
-    // [args…] [--kebab-flag value…]`, or the bare word `help`) is answered
-    // inline through the registry — never a model turn — BEFORE `io.history()`,
-    // so a recognized command costs no history fetch and the natural-language
-    // recognizer below never sees it (the two can never both claim one
-    // message). ONE grammar for every command: config, memory, repo,
-    // friction, runs, schedule, help. Prose falls through unchanged.
-    //
-    // Commands that DO real work — ledger reads and GitHub writes (`friction.*`),
-    // a durable memory mutation, a repo provisioned or torn down, a
-    // deterministic op executed — are runs: a registry record with the
-    // request and the reply, on /runs like any other, and a receipt to the
-    // channel. The weekly cron reaches this path through /ingress as
-    // `http:cron`, so a scheduled firing is a run too. The outcome comes from
-    // the command's `ok`, never from the reply text. Config replies, `help`,
-    // listings, and usage/help replies are answered directly, no run.
-    if (deps.commands) {
-      const chatCmd = parseChatCommand(msg.text, deps.commands);
-      if (chatCmd) {
-        const res = await runChatCommand(deps, msg, io, chatCmd, ending, trace);
-        // The command run (if the command made one) seals after its reply.
-        await ending.sealAfterReply(
-          async () => {},
-          () => root.span("post.reply", () => replyCommandOutput(io, chatCmd, res.text)),
-        );
-        if (res.followUp) postSettledOutcome(res.followUp, io, root);
-        return;
-      }
-    }
+    // Stage A (dispatch/fastPath.ts): a message that names a registered chat
+    // command is answered inline — never a model turn, and before the history
+    // fetch, so a command costs none.
+    if (await answerChatCommand(deps, { msg, io, ending, trace })) return;
 
     const directives = parseDirectives(msg.text);
     const history = await root.span("dispatch.history", () => io.history());
 
-    // Natural-language deterministic ops: the few conservative forms
-    // `recognizeOperation` admits ("run the tests on main in acme/api") are
-    // TRANSLATED into the registry's `repo.test` / `repo.build` — the very
-    // command `repo test acme/api main` is — so one handler executes, one gate
-    // sequence applies (the policy table on `agent { coding }` — the right to run
-    // the implicit target agent; canUseRepo inside), and zero model turns are
-    // spent. Natural language is an accelerator, not a promise: when the op
-    // cannot serve (`not_found` — the repo has no resident; `unavailable` — no
-    // backend or a backend failure) the agent still gets the ask, while a
-    // refusal or a result is the reply. An explicit agent:/model: directive
-    // disables recognition — the user picked a model path.
-    const opAsk = deps.commands
-      ? recognizeOperation(msg.text, history, { allowNatural: !directives.agent && !directives.model })
-      : null;
-    if (opAsk) {
-      const translated: ParsedChatCommand = {
-        kind: "invoke",
-        id: `repo.${opAsk.op}`,
-        input: { args: [opAsk.repo, opAsk.ref], options: {} },
-      };
-      const res = await runChatCommand(deps, msg, io, translated, ending, trace);
-      if (!(res.error === "not_found" || res.error === "unavailable")) {
-        await ending.sealAfterReply(
-          async () => {},
-          () => root.span("post.reply", () => io.reply(res.text)),
-        );
-        return;
-      }
-      // A fall-through: the command run answered nothing the agent will not; it
-      // is sealed now with no reply attempted, and the agent run below is a
-      // second run in this dispatch.
-      await ending.sealAfterReply(async () => {});
-    }
+    // The natural-language op fast path (dispatch/fastPath.ts): a conservative
+    // op form is the registry command it names; an op that cannot serve falls
+    // through to the agent.
+    if (await answerOperation(deps, { msg, io, ending, trace, directives, history })) return;
 
     // Thread stickiness: a follow-up without explicit directives runs on the
     // agent/model this thread already established (last directive in the
@@ -719,274 +481,41 @@ export async function dispatch(
 
     const agent = getAgent(resolved.agentName);
 
-    // Thread admission (docs/reference/specs/thread-admission.md item 1): ONE live run per
-    // thread. Claimed HERE — after the agent gate (a follow-up's sender must be
-    // allowed to run the live agent, exactly like a first message) and before
-    // anything slow (the setup card, repo resolution, the executor attach), so
-    // no window exists in which two runs can attach the same per-thread
-    // workspace. A thread with a run in flight either folds this message into
-    // that run (its inbox; the runner reads it at the next step boundary — for
-    // a ship run, the child round in flight) or refuses it with a pointer to
-    // the live run when a DIFFERENT agent was asked for explicitly. Either way
-    // this dispatch ends here: no card, no run, no workspace.
-    // A resumed run's slot carries the row's original start (run-history item 38):
-    // the steer ack's "N in" is the run's elapsed time, not the resume's.
+    // Thread admission (docs/reference/specs/thread-admission.md item 1) and the
+    // carried run's row and inbox: the admission stage (dispatch/admission.ts).
+    // What the stage takes hold of — the thread slot, an adopted row, a
+    // reservation — comes back here before the next step that can throw, so
+    // the outer finally releases exactly what it did before the extraction.
     const carriedRow = resume?.row ?? restart?.row;
-    let claim = admission.claim(msg.threadKey, {
-      agent: agent.name,
-      ...(carriedRow ? { now: carriedRow.startedAt } : {}),
-    });
-    if (claim.kind === "live" && restart) {
-      // A restart is not a follow-up either (item 42): a live run here means
-      // the user re-mentioned after the kill; the reserved run is closed
-      // `interrupted` on the ledger with no reply to the thread.
-      const adopted = deps.runLedger.adopt({
-        runId: restart.row.runId,
-        threadKey: msg.threadKey,
-        state: restart.row.state,
-        lastStep: 0,
-        lastSeq: 0,
-      });
-      await root.span(
-        "dispatch.admission",
-        () => closeRestartRow(adopted, restart, "the thread has a newer run in flight"),
-        { attrs: { outcome: "restart_superseded" } },
-      );
-      console.log(
-        `[restart] ${msg.threadKey} run ${restart.row.runId} not restarted: the thread has a newer run in flight — closed interrupted`,
-      );
-      return;
-    }
-    if (claim.kind === "live" && resume) {
-      // A resume is not a follow-up (run-history item 38): its message is
-      // synthetic, so it must never be steered into — or refuse against — the
-      // run that now holds the thread. A live run here means the user moved on
-      // after the kill (a re-mention started a fresh run); the reclaimed run
-      // is closed `interrupted` on the ledger, with no reply to the thread.
-      const adopted = deps.runLedger.adopt({
-        runId: resume.row.runId,
-        threadKey: msg.threadKey,
-        state: resume.row.state,
-        lastStep: resume.lastStep.step,
-        lastSeq: resume.lastSeq,
-      });
-      await root.span(
-        "dispatch.admission",
-        () => closeResumedRow(adopted, resume, "the thread has a newer run in flight"),
-        { attrs: { outcome: "resume_superseded" } },
-      );
-      console.log(
-        `[resume] ${msg.threadKey} run ${resume.row.runId} not resumed: the thread has a newer run in flight — closed interrupted`,
-      );
-      return;
-    }
-    if (claim.kind === "live") {
-      // The gate above ran against THIS message's resolved agent; a steered
-      // follow-up is read by the LIVE agent, so its sender must be allowed to
-      // run that one too (invariant 3 — no path runs an agent for a user the
-      // allowlist excludes, and "run" includes "is heard by").
-      if (!deps.config.canRunAgent(msg.userId, claim.live.agent)) {
-        await refuse("live_agent_allowlist", () =>
-          io.reply(
-            `🚫 You're not on the allowlist for the \`${claim.live.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
-          ),
-        );
-        return;
-      }
-      const decision = decideFollowUp(claim.live, { agent: directives.agent });
-      if (decision.kind === "refuse") {
-        console.log(
-          `[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${claim.live.agent} run in flight`,
-        );
-        await refuse("follow_up_refused", () => io.reply(refusalReply(claim.live, decision, clock())));
-        return;
-      }
-      // The durable copy first (run-history item 40), so its seq rides on the
-      // in-memory item and the next step record says the run consumed it. A
-      // run with no row yet (still in setup) has no durable copy: it is not
-      // resumable until its seed lands anyway.
-      const at = clock();
-      const ledgerSeq = claim.live.runId
-        ? await deps.runLedger.pushInbox(claim.live.runId, durableInboxMessage(msg, directives.text, at))
-        : undefined;
-      if (admission.get(msg.threadKey) !== claim.live) {
-        // The run finished and released the thread during the round trip: an
-        // item pushed now would sit on a dead slot (and its durable copy went
-        // with the finish). Nothing is dropped silently — the follow-up is a
-        // request of its own now (item 4's rule, taken early).
-        console.log(`[dispatch] ${msg.threadKey} the run finished during the steer — running the follow-up fresh`);
-        return dispatch(deps, msg, io);
-      }
-      claim.live.inbox.push({
-        text: directives.text,
-        userId: msg.userId,
-        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-        ...(msg.images !== undefined ? { images: msg.images } : {}),
-        ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-        at,
-        ...(ledgerSeq !== undefined ? { ledgerSeq } : {}),
-        msg,
-        io,
-      });
-      console.log(
-        `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
-      );
-      await root.span("dispatch.admission", () => io.reply(steerAck(claim.live, at)), {
-        attrs: { outcome: "steered" },
-      });
-      return;
-    }
-    // The thread is free here, but its live run may be on the ledger under
-    // another generation, or reclaimed and not yet launched (thread-admission
-    // item 5 — the boot gap). Then the follow-up is steered into that run's
-    // durable inbox: the resume folds it in. The same gates as an in-process
-    // steer apply (the live agent's allowlist, no agent switch). A push the
-    // ledger refuses means the row is gone — the map is stale — so the message
-    // runs fresh and the thread is forgotten until the next sweep.
-    // (A restart's own row is in that map: it is not steered into itself.)
-    const elsewhere = resume || restart ? undefined : deps.threadsElsewhere.get(msg.threadKey);
-    const farAgent = elsewhere?.agent;
-    if (elsewhere && farAgent === undefined) {
-      // No agent on the row: the no-agent-switch gate cannot be judged, so the
-      // message is not steered into it (a claim always records the agent; this
-      // is a guard, not a path).
-      console.log(`[dispatch] ${msg.threadKey} run ${elsewhere.runId} on the ledger names no agent — running fresh`);
-    } else if (elsewhere && farAgent !== undefined) {
-      // This dispatch holds the slot for nothing but a steer: release it NOW,
-      // before any round trip, so the resume's own dispatch (which may launch
-      // this instant) finds the thread free instead of a rival that closes its
-      // row as "a newer run in flight".
-      admission.release(msg.threadKey, claim.live);
-      const far: LiveThread<DispatchFollowUp> = {
-        agent: farAgent,
-        inbox: claim.live.inbox,
-        startedAt: elsewhere.startedAt,
-        runId: elsewhere.runId,
-      };
-      if (!deps.config.canRunAgent(msg.userId, far.agent)) {
-        await io.reply(
-          `🚫 You're not on the allowlist for the \`${far.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
-        );
-        return;
-      }
-      const decision = decideFollowUp(far, { agent: directives.agent });
-      const now = clock();
-      if (decision.kind === "refuse") {
-        console.log(
-          `[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${far.agent} run ${far.runId} live on another generation`,
-        );
-        await io.reply(refusalReply(far, decision, now));
-        return;
-      }
-      const seq = await deps.runLedger.pushInbox(elsewhere.runId, durableInboxMessage(msg, directives.text, now));
-      if (seq !== undefined) {
-        // The run may have been launched here during the round trip (its
-        // adopt-time re-read ran before this push landed, or after — either
-        // way the inbox folds one seq in once): hand the item to it as well.
-        const nowLive = admission.get(msg.threadKey);
-        if (nowLive && nowLive.runId === elsewhere.runId) {
-          nowLive.inbox.push({
-            text: directives.text,
-            userId: msg.userId,
-            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-            ...(msg.images !== undefined ? { images: msg.images } : {}),
-            ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-            at: now,
-            ledgerSeq: seq,
-            msg,
-            io,
-          });
-        }
-        console.log(
-          `[dispatch] ${msg.threadKey} follow-up steered into run ${elsewhere.runId} live on another generation (durable seq ${seq}${nowLive ? ", now live here" : ""})`,
-        );
-        await io.reply(steerAck(far, now));
-        return;
-      }
-      deps.threadsElsewhere.forget(msg.threadKey);
-      console.log(`[dispatch] ${msg.threadKey} run ${elsewhere.runId} is no longer on the ledger — running fresh`);
-      // Take the slot back for the fresh run below.
-      const again = admission.claim(msg.threadKey, { agent: agent.name });
-      if (again.kind === "live") {
-        // Someone claimed it during the round trip: this message steers into them as any follow-up would.
-        return dispatch(deps, msg, io);
-      }
-      claim = again;
-    }
-    admitted = claim.live;
-    // A resumed run (run-history item 38): its ledger row has been this
-    // generation's since the boot reclaim — take it up NOW, before the card,
-    // the repo resolution and the workspace attach, so the heartbeat keeps
-    // the lease through a slow resident attach. No claim, no seed.
-    if (resume) {
-      ledgerRun = deps.runLedger.adopt({
-        runId: resume.row.runId,
-        threadKey: msg.threadKey,
-        state: resume.row.state,
-        lastStep: resume.lastStep.step,
-        lastSeq: resume.lastSeq,
-        onStop: (mode) => void registered?.control.requestStop(mode),
-        onFenced: () => void registered?.control.requestStop("hard"),
-      });
-    }
-    if (restart) {
-      // A restart (item 42): the row is this generation's since the reclaim and
-      // still `attaching` — take it up NOW, as a resume adopts its row, so the
-      // heartbeat keeps the lease through this attach as well. The reserve is
-      // the owner's idempotent re-claim; the request rides on the row already.
-      requestRow = restart.row.meta.request;
-      reserved = await root.span("dispatch.ledger_reserve", () =>
-        deps.runLedger.reserve({
-          runId: restart.row.runId,
-          threadKey: msg.threadKey,
-          startedAt: restart.row.startedAt,
-          meta: restart.row.meta,
-          card: restart.row.card,
-          ...reservationHooks,
-        }),
-      );
-    }
-    const carriedInbox = resume
-      ? { tag: "resume", known: resume.lastStep.inboxConsumedSeq, items: resume.inbox }
-      : restart
-        ? { tag: "restart", known: 0, items: restart.inbox }
-        : undefined;
-    if (carriedInbox && carriedRow) {
-      // The follow-ups steered in after the last record (item 40): the reclaim's
-      // snapshot PLUS whatever landed since — a boot-gap steer between the
-      // reclaim and this claim wrote to the ledger and was acked, so the inbox
-      // is re-read here, past the highest seq already known. From this point
-      // the thread is claimed in-process and steers reach the run directly. The
-      // runner folds them in at its first boundary and records the seq it
-      // reached. Their acks were the admitting generation's — none is sent again.
-      // Name the run on the slot NOW — its id is the row's — so a boot-gap steer
-      // whose push lands after the re-read below finds the run it belongs to and
-      // hands the item over in memory (the registry row is created at the
-      // reservation below, after this re-read — too late for that check).
-      admitted.runId = carriedRow.runId;
-      const known = Math.max(carriedInbox.known, ...carriedInbox.items.map((i) => i.seq));
-      const late = await deps.runLedger.readInbox(carriedRow.runId, known);
-      const items = [...carriedInbox.items, ...late.filter((i) => i.seq > known)];
-      const fallbackAt = clock();
-      let folded = 0;
-      for (const item of items) {
-        const followUp = followUpFromInbox(item, io, fallbackAt);
-        if (!followUp) {
-          console.warn(
-            `[${carriedInbox.tag}] ${msg.threadKey} run ${carriedRow.runId}: inbox item ${item.seq} has a shape this build cannot read — skipped`,
-          );
-          continue;
-        }
-        admitted.inbox.push(followUp);
-        folded++;
-      }
-      if (folded > 0)
-        console.log(
-          `[${carriedInbox.tag}] ${msg.threadKey} run ${carriedRow.runId}: ${folded} follow-up(s) from the durable inbox pending (${late.length} landed after the reclaim)`,
-        );
-    }
+    const admissionCtx: AdmissionContext = {
+      msg,
+      io,
+      directives,
+      agentName: agent.name,
+      resume,
+      restart,
+      carriedRow,
+      clock,
+      root,
+      refuse,
+      admission,
+      hooks: {
+        reservation: reservationHooks,
+        adopt: {
+          onStop: (mode) => void registered?.control.requestStop(mode),
+          onFenced: () => void registered?.control.requestStop("hard"),
+        },
+      },
+    };
+    const outcome = await admit(deps, admissionCtx);
+    if (outcome.kind === "redispatch") return dispatch(deps, msg, io);
+    if (outcome.kind !== "proceed") return;
+    admitted = outcome.admitted;
+    const taken = await adoptCarriedRun(deps, admissionCtx);
+    ledgerRun = taken.ledgerRun;
+    reserved = taken.reserved;
+    requestRow = taken.requestRow;
+    await foldCarriedInbox(deps, admissionCtx, admitted);
 
     const { provider: providerName, model } = parseModelRef(resolved.modelRef);
     const provider = deps.providers.get(providerName);
@@ -3048,178 +2577,6 @@ function redactStringLeaves(value: unknown): unknown {
   return value;
 }
 
-/** The agent name an inline (no-model) command run carries in its `RunMeta` and
- *  record — the one value `runs list agent=command` selects on. */
-export { COMMAND_RUN_AGENT };
-
-/**
- * Answer one parsed chat command through the registry as the message's user:
- * the caller carries the message's channel + thread as its `origin`, and a LAZY
- * repo resolver (history + the production repo resolver) for the commands that
- * ask for the thread's bound repo (`memory list` with the repo scope) — paid
- * only when asked. Commands that do work (`isInlineRunCommand`) are recorded as
- * inline runs; help/usage replies and read-only answers are not.
- */
-async function runChatCommand(
-  deps: CoreDeps,
-  msg: IncomingMessage,
-  io: ChannelIO,
-  parsed: ParsedChatCommand,
-  ending: RunEnding,
-  trace: RequestTrace,
-): Promise<ChatCommandResult> {
-  const commands = deps.commands;
-  if (!commands) return { ok: false, text: "" };
-  const resolveRepo = async (): Promise<string | undefined> =>
-    (await resolveRepoForCommand(deps, msg, await io.history())).repo;
-  const invoke = (span: Span) => invokeChatCommand({ commands, parsed, msg, config: deps.config, resolveRepo, span });
-  if (parsed.kind === "invoke" && isInlineRunCommand(parsed.id))
-    return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace);
-  // A config reply, a listing, `help`: no run — the command's own work is the
-  // request's one step, log-only.
-  return trace.root.span("run.command", invoke, { attrs: { command: parsed.kind === "invoke" ? parsed.id : "help" } });
-}
-
-/**
- * A command with a deferred outcome (`CommandDef.settle` — `repo onboard` /
- * `repo rebuild`, whose provisioning settles minutes after the 202) gets a
- * SECOND reply in the thread when it does: awaited off the request path, so the
- * acknowledgement is never held back. Best-effort by design — the poll lives in
- * this process, so a restart mid-provision loses the follow-up; the resident
- * state itself is never in doubt (`repo list` / the residents dash read it
- * live), and the acknowledgement says so.
- */
-function postSettledOutcome(followUp: () => Promise<{ text: string } | undefined>, io: ChannelIO, root: Span): void {
-  // Minutes after the request ended: a late child of its root, log-only.
-  void root
-    .span("post.settled_outcome", () => followUp().then((outcome) => (outcome ? io.reply(outcome.text) : undefined)))
-    .catch((err) => console.error("[command] settle follow-up failed:", err));
-}
-
-/**
- * Run an inline (no-model) command AS a run: register it in the run
- * registry under a `<command> · #channel · user · "…"` label with the caller's
- * identity as its `RunMeta` (agent `command`), publish the request as the
- * `input` event and the reply as the `answer` event, finish it with its status,
- * hand the channel its receipt — `completed` when the command did its work,
- * `failed` when it was refused, misconfigured, or threw — and persist it through
- * the same `runHistoryWriter` path as an agent run, so a scheduled firing
- * outlives the registry TTL. The run record is the canonical trace
- * (docs/decisions/0008-one-command-definition-every-surface.md); the channel reply is a projection of it.
- * A thrown command still finishes its run (as `failed`, with the `⚠️ <error>`
- * reply as its `answer`) and the error propagates to the dispatcher's outer
- * handler.
- */
-async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?: unknown; residentMs?: number }>(
-  deps: CoreDeps,
-  msg: IncomingMessage,
-  command: string,
-  io: ChannelIO,
-  execute: (span: Span) => Promise<T>,
-  ending: RunEnding,
-  trace: RequestTrace,
-): Promise<T> {
-  const registry = deps.runRegistry ?? defaultRunRegistry;
-  const root = trace.root;
-  const clock = deps.clock ?? systemClock;
-  const channelVisibility = await root.span("dispatch.channel_visibility", () =>
-    channelVisibilityOf(deps, msg.channelId),
-  );
-  const run = registry.create(
-    composeRunLabel({
-      agent: command,
-      channelId: msg.channelId,
-      userId: msg.userId,
-      channelName: msg.channelName,
-      userName: msg.userName,
-      text: msg.text,
-    }),
-    {
-      agent: COMMAND_RUN_AGENT,
-      channelId: msg.channelId,
-      userId: msg.userId,
-      threadKey: msg.threadKey,
-      channelVisibility,
-      receivedAt: trace.receivedAt,
-    },
-  );
-  // The command run rides the request's trace like an agent run: the setup
-  // spans so far backfill, then `run.command` and the reply follow live. A
-  // natural-language fall-through rebinds the same root to the agent run next.
-  trace.bindRun(run.id, (e) => registry.publish(run.id, e));
-  io.runStarted?.({ id: run.id });
-  registry.publish(run.id, { type: "input", text: redactSecrets(msg.text), at: clock() });
-  // A command run's meta names no model (docs/reference/specs/tracing.md): the agent and the trace.
-  registry.publish(run.id, { type: "run_meta", agent: COMMAND_RUN_AGENT, traceId: root.traceId, at: clock() });
-  let result: T | undefined;
-  try {
-    // The command's deterministic body is the run's one counted step (`tools`
-    // for a command run); a resident op's own steps graft under it.
-    result = await root.span(
-      "run.command",
-      async (span) => {
-        const r = await execute(span);
-        const steps = sanitizeGraftedSteps(r.trace);
-        if (steps.length > 0)
-          graftResidentSteps(steps, {
-            parent: span,
-            prefix: "run.command",
-            baseAt: span.record().startedAt,
-            clipAt: clock(),
-            ...(r.residentMs !== undefined ? { residentTotalMs: r.residentMs } : {}),
-          });
-        return r;
-      },
-      { attrs: { command } },
-    );
-    registry.publish(run.id, { type: "answer", text: redactSecrets(result.text), at: clock() });
-    return result;
-  } catch (err) {
-    // A thrown command still gets an `answer`: the same `⚠️ <error>` line the
-    // dispatcher's outer handler replies with, so the record explains its
-    // `failed` status and the channel reply stays a projection of it.
-    registry.publish(run.id, { type: "answer", text: redactSecrets(errorReply(err)), at: clock() });
-    throw err;
-  } finally {
-    const status: RunStatus = result?.ok ? "completed" : "failed";
-    registry.finish(run.id, status);
-    io.runFinished?.({ id: run.id, status });
-    // Sealed by the caller's drain after its reply (or at once, with no reply,
-    // when the command fell through to the agent); the record is written then.
-    // A command's status is its own `ok` — a reply that throws never flips it.
-    ending.finished(run.id);
-    const snap = registry.snapshot(run.id, run.token);
-    const finishedAt = snap?.finishedAt ?? clock();
-    // A command run owns its window's tools: `run.command` is the work.
-    const diagnosis = analyzeRunFriction(snap?.events ?? [], {
-      finished: true,
-      truncated: snap?.truncated ?? false,
-      schema: SPAN_SCHEMA,
-      owner: "command",
-      window: { start: trace.receivedAt, end: finishedAt },
-    });
-    ending.register({
-      runId: run.id,
-      flipOnPostFinishFailure: false,
-      write: (seal) =>
-        deps.runHistoryWriter.write(
-          assembleRunRecord({
-            run,
-            snap,
-            agent: COMMAND_RUN_AGENT,
-            msg,
-            channelVisibility,
-            finishedAt,
-            status,
-            diagnosis,
-            seal,
-          }),
-          { span: root },
-        ),
-    });
-  }
-}
-
 /** The notice the drain (src/index.ts) sets on SIGTERM from a deploy rollout.
  *  Exported so the Slack adapter's orphan sweep can strip it from a frozen
  *  card's title — an interrupted card must not keep the stale
@@ -3343,29 +2700,4 @@ function normalizeAlternation(messages: ChatMessage[]): ChatMessage[] {
   }
   while (out.length > 0 && out[0].role !== "user") out.shift();
   return out;
-}
-
-/** Repo resolution for a chat command that asks for the thread's bound repo
- *  (`Caller.origin.repo`, e.g. `memory list` with the repo scope): the
- *  injected resolver in tests, the production resolver (registry-vetted slugs,
- *  PR → repo) otherwise; a failure means "no repo bound", never an error reply. */
-async function resolveRepoForCommand(
-  deps: CoreDeps,
-  msg: IncomingMessage,
-  history: HistoryItem[],
-): Promise<RepoContext> {
-  try {
-    return (
-      (await (deps.resolveRepoContext
-        ? deps.resolveRepoContext(msg, history)
-        : resolveRepoContext(
-            msg,
-            history,
-            residentOnboardedProbe(deps.config.config.execution?.resident),
-            residentSlugsLister(deps.config.config.execution?.resident),
-          ))) ?? {}
-    );
-  } catch {
-    return {};
-  }
 }
