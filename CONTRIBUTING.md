@@ -97,7 +97,12 @@ contract for each feature and a documentation tree organized by
 [Diataxis](https://diataxis.fr). A pull request that changes what a user,
 operator, or dashboard viewer sees updates the matching spec and the matching
 docs page in the same PR. Reference tables are generated from the code
-(`npm run docs:gen`); never edit between the generated markers by hand.
+(`npm run docs:gen`); never edit between the generated markers by hand. The
+dashboard's screenshots are generated the same way: a change under `web/` that
+alters what a surface looks like needs `npm run screenshots:gen` (once:
+`npx playwright-core install chromium`) and the regenerated PNGs committed —
+`npm run screenshots:check` and its unit-test twin fail otherwise, naming the
+file that changed.
 
 **Respect the invariants.** [AGENTS.md](AGENTS.md) lists the rules the
 architecture depends on: the core never imports a platform SDK, every boundary

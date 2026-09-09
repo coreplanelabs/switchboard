@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { join } from "node:path";
 import {
   expectedFiles,
+  FIXED_NOW,
   hashInputs,
   listInputs,
   MANIFEST_PATH,
@@ -32,10 +33,6 @@ import {
   type Manifest,
 } from "../src/docs/screenshotManifest.js";
 
-/** The instant every picture is rendered at, on the server and in the browser:
- *  a weekday afternoon after the fixture's own timestamps, so "4 hours ago"
- *  reads the same on every machine. Changing it changes every picture. */
-const NOW = 1_788_877_800_000;
 const PORT = 8791;
 /** A picture past this is a page weight problem, not a screenshot. */
 const SIZE_BUDGET_BYTES = 400 * 1024;
@@ -75,7 +72,7 @@ function runCheck(): number {
 async function startPreview(): Promise<() => void> {
   const server = spawn(join(root, "node_modules", ".bin", "tsx"), ["scripts/web-preview.ts"], {
     cwd: root,
-    env: { ...process.env, PORT: String(PORT), SWITCHBOARD_PREVIEW_NOW: String(NOW) },
+    env: { ...process.env, PORT: String(PORT), SWITCHBOARD_PREVIEW_NOW: String(FIXED_NOW) },
     stdio: ["ignore", "ignore", "inherit"],
   });
   const stop = () => server.kill();
@@ -119,7 +116,7 @@ async function runGen(): Promise<number> {
       await context.addInitScript((t: string) => localStorage.setItem("vueuse-color-scheme", t), theme);
       for (const surface of SURFACES) {
         const page = await context.newPage();
-        await page.clock.setFixedTime(NOW);
+        await page.clock.setFixedTime(FIXED_NOW);
         await page.goto(`http://127.0.0.1:${PORT}${surface.path}`, { waitUntil: "load" });
         await page.waitForSelector("#app header");
         await page.evaluate(() => document.fonts.ready);
@@ -139,7 +136,7 @@ async function runGen(): Promise<number> {
     await browser.close();
     stopPreview();
   }
-  const manifest = renderManifest(currentInputs(), NOW);
+  const manifest = renderManifest(currentInputs());
   writeFileSync(join(root, MANIFEST_PATH), `${JSON.stringify(manifest, null, 2)}\n`);
   console.log(`${tag} wrote ${MANIFEST_PATH} — ${Object.keys(manifest.inputs).length} input(s) hashed`);
   return 0;

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   expectedFiles,
+  FIXED_NOW,
   hashInputs,
   isScreenshotInput,
   listInputs,
@@ -29,6 +30,7 @@ describe("isScreenshotInput", () => {
       "scripts/web-preview.ts",
       "scripts/screenshots.mts",
       "src/channels/webShell.ts",
+      "src/docs/screenshotManifest.ts",
       "web/src/main.ts",
       "web/src/App.vue",
       "web/src/components/run/Timeline.vue",
@@ -102,8 +104,12 @@ describe("expectedFiles", () => {
 });
 
 describe("manifestProblems", () => {
-  const inputs = { "scripts/web-preview.ts": "a".repeat(64), "web/src/App.vue": "b".repeat(64) };
-  const recorded: Manifest = renderManifest(inputs, 1_700_000_000_000);
+  const inputs = {
+    "scripts/web-preview.ts": "a".repeat(64),
+    "src/docs/screenshotManifest.ts": "m".repeat(64),
+    "web/src/App.vue": "b".repeat(64),
+  };
+  const recorded: Manifest = renderManifest(inputs);
   const pngs = expectedFiles();
 
   it("is silent when every recorded hash equals the tree's and every picture exists", () => {
@@ -125,6 +131,24 @@ describe("manifestProblems", () => {
     ]);
   });
 
+  it("names this module when it changed — the surfaces, the viewport and the clock live here, so a change to any of them is drift", () => {
+    const changed = { ...inputs, "src/docs/screenshotManifest.ts": "n".repeat(64) };
+    expect(manifestProblems(changed, recorded, pngs)).toEqual([
+      "src/docs/screenshotManifest.ts changed since the screenshots were rendered",
+    ]);
+  });
+
+  it("names a manifest rendered at another viewport or clock than this module pins", () => {
+    const otherClock = { ...recorded, now: FIXED_NOW + 1 };
+    expect(manifestProblems(inputs, otherClock, pngs)).toEqual([
+      `the pictures were rendered at clock ${FIXED_NOW + 1}; the fixed clock is now ${FIXED_NOW}`,
+    ]);
+    const otherViewport = { ...recorded, viewport: { width: 1280, height: 800, deviceScaleFactor: 1 } as never };
+    expect(manifestProblems(inputs, otherViewport, pngs)).toEqual([
+      "the pictures were rendered at 1280×800 at 1×; the viewport is now 1440×900 at 2×",
+    ]);
+  });
+
   it("names a missing or unexpected picture", () => {
     expect(manifestProblems(inputs, recorded, pngs.slice(1))).toEqual([`${pngs[0]} is missing`]);
     expect(manifestProblems(inputs, recorded, [...pngs, "stray.png"])).toEqual([
@@ -141,10 +165,10 @@ describe("manifestProblems", () => {
 
 describe("renderManifest", () => {
   it("records the inputs, the viewport and the fixed clock, and nothing that varies between two renders of the same tree", () => {
-    const m = renderManifest({ x: "0".repeat(64) }, 1_700_000_000_000);
+    const m = renderManifest({ x: "0".repeat(64) });
     expect(m).toEqual({
       viewport: { width: 1440, height: 900, deviceScaleFactor: 2 },
-      now: 1_700_000_000_000,
+      now: FIXED_NOW,
       inputs: { x: "0".repeat(64) },
     });
   });
