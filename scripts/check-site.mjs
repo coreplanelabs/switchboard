@@ -15,6 +15,9 @@ const required = [
   "how-to/index.html",
   "reference/index.html",
   "explanation/index.html",
+  // The specs directory is the one README nested two levels deep; its index is
+  // what the sidebar's "Specs" entry and the footer link to.
+  "reference/specs/index.html",
   "reference/cli.html",
 ];
 

@@ -170,7 +170,7 @@
     },
     "docs:dev": {
       "does": "Serves the docs site locally with live reload.",
-      "when": "Writing docs."
+      "when": "Writing docs; `-- --port <n>` picks the port."
     },
     "docs:build": {
       "does": "Builds the docs site to `docs/.vitepress/dist`.",

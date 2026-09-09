@@ -74,7 +74,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run hygiene:gen` | Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`. | Part of `fix`, safe to run blindly: new imprint fails it like `hygiene:check`. |
 | `npm run docs:changed` | Says whether the last push touched the docs or their build (a CI job output). | CI only — gates the docs deploy. |
 | `npm run deploy:targets` | Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment. | CI only — the `deploy targets` job. |
-| `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs. |
+| `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs; `-- --port <n>` picks the port. |
 | `npm run docs:build` | Builds the docs site to `docs/.vitepress/dist`. | Rarely by hand; `verify -w docs` and the docs Worker's deploy run it. |
 | `npm run web:preview` | Serves the dashboard bundle over fixtures for a visual check. | After a `web/` change. |
 | `npm run load` | Load harness: `-- history\|resident\|sandbox\|e2e\|cards\|provider`. | Capacity receipts (docs/reference/specs/load-harness.md). |
