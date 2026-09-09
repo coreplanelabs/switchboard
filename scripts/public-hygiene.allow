@@ -47,8 +47,8 @@ src/core/selfDescription.ts	export const SWITCHBOARD_REPO = "coreplanelabs/switc
 src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Source of truth: the code lives in the GitHub repo coreplanelabs/switchboard — README.md (architecture + agents), AGENTS.md (invariants + map), and one behavioral spec per feature under docs/reference/specs/*.md (e.g. docs/reference/specs/resident-repos.md, docs/reference/specs/routing-and-config.md, docs/reference/specs/github-tools.md). For a question about how Switchboard works beyond this block, read those files with the GitHub tools when you have them (github_tree / github_file on coreplanelabs/switchboard) — they are private, so a public-web fetch 404s; if you have no GitHub tools, answer from this block and point at that path. Never describe yourself as stateless, tool-less by design, or unable to know your own workings."
 
 # Synthetic Slack ids of the real shape: mention-rendering and directive-position tests need a valid <@U…>/<#C…|name> token.
-src/core/dispatcher.test.ts	composeRunLabel({ ...base, repo: "o/r", text: "<@U0AAAAAAAAA> review this. Sent using <@U0BBBBBBBBB|Claude>" }),
-src/core/dispatcher.test.ts	expect(composeRunLabel({ ...base, repo: "o/r", text: "post in <#C0AAAAAAAAA|general> and <#C0BQ>" })).toBe(
+src/core/dispatch/reply.test.ts	composeRunLabel({ ...base, repo: "o/r", text: "<@U0AAAAAAAAA> review this. Sent using <@U0BBBBBBBBB|Claude>" }),
+src/core/dispatch/reply.test.ts	expect(composeRunLabel({ ...base, repo: "o/r", text: "post in <#C0AAAAAAAAA|general> and <#C0BQ>" })).toBe(
 src/core/repoContext.test.ts	msg("<@U0AAAAAAAAA> agent:coding model:anthropic/claude-fable-5 in api: fix it"),
 
 # Anthropic's API version header: the integration's own version string, not a date of ours.

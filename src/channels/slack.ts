@@ -1,6 +1,7 @@
 import { extname } from "node:path";
 import { App, SocketModeReceiver, webApi } from "@slack/bolt";
-import { dispatch, STATUS_PREFIXES, type CoreDeps } from "../core/dispatcher.js";
+import { dispatch, type CoreDeps } from "../core/dispatcher.js";
+import { STATUS_PREFIXES } from "../core/dispatch/reply.js";
 import {
   createStatusBudget,
   STATUS_EDITS_PER_MINUTE,
