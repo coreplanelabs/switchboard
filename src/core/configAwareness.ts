@@ -1,5 +1,5 @@
 import type { Scope } from "../config.js";
-import type { Effort } from "../effort.js";
+import { EFFORT_LEVELS, type Effort } from "../effort.js";
 
 // Config awareness (docs/reference/specs/routing-and-config.md behavior 8). The config
 // system — per-user / per-channel / per-agent layers, runtime overrides,
@@ -92,12 +92,16 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
   }
 
   const channelGate = i.canEditChannelConfig ? "per-channel" : "per-channel; restricted for this user — ask an admin";
+  // The level list is the ladder itself, so a level added to EFFORT_LEVELS is
+  // advertised here without anyone remembering to retype it. Stated once (the
+  // block rides on every turn); the directive form points back at it.
+  const levels = `<${EFFORT_LEVELS.join("|")}>`;
   lines.push(
     "Users inspect and tune settings: `config show`, " +
-      "`config set me --agent <name> --model <provider>/<model> --effort <low|medium|high>` (per-user; `--models.<agent>` / `--efforts.<agent>` per agent), " +
+      `\`config set me --agent <name> --model <provider>/<model> --effort ${levels}\` (per-user; \`--models.<agent>\` / \`--efforts.<agent>\` per agent), ` +
       `\`config set channel …\` (${channelGate}), \`config instructions me "<free text>"\` ` +
       "(custom instructions; `config instructions channel …` channel-wide), `config clear me|channel`, " +
-      "and per-message `agent:<name>` / `model:<provider>/<model>` / `effort:<low|medium|high>` directives.",
+      "and per-message `agent:<name>` / `model:<provider>/<model>` / `effort:<level>` directives.",
     "When asked about your settings or tuning, answer from this block — you are not stateless or untunable.",
   );
   return lines.join("\n");

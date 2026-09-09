@@ -220,20 +220,24 @@ jobs:
         env:
           CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
         run: |
+          # Every Worker the profile has, with its /healthz and — for one whose
+          # health route needs a bearer — the env var holding it, from the plan;
+          # no hostname is typed here. The plan is read before the summary block
+          # so its failure is a workflow annotation (a `::warning::` only counts
+          # on stdout) while the table below still shows the gap.
+          plan_ok=true
+          if ! npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/fleet.json" 2> "$RUNNER_TEMP/fleet.err"; then
+            plan_ok=false
+            echo "::warning::the live table could not read the deployment profile — deploy plan failed: $(tr '\n' ' ' < "$RUNNER_TEMP/fleet.err")"
+            echo '{"steps":[]}' > "$RUNNER_TEMP/fleet.json"
+          fi
           {
             echo
             echo "### Live after this run"
             echo
             echo "| Worker | build.commit |"
             echo "|---|---|"
-            # Every Worker the profile has, with its /healthz and — for one whose
-            # health route needs a bearer — the env var holding it, from the plan;
-            # no hostname is typed here.
-            if ! npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/fleet.json" 2> "$RUNNER_TEMP/fleet.err"; then
-              echo "::warning::the live table could not read the deployment profile — deploy plan failed: $(tr '\n' ' ' < "$RUNNER_TEMP/fleet.err")"
-              echo '{"steps":[]}' > "$RUNNER_TEMP/fleet.json"
-              echo "| (plan unreadable — see the warning) | ? |"
-            fi
+            if [ "$plan_ok" = false ]; then echo "| (plan unreadable — see the warning) | ? |"; fi
             jq -r '.steps[] | [.script, (.healthUrl // .wakeUrl // .liveGate.healthUrl // ""), (.liveGate.bearerEnv // "")] | @tsv' "$RUNNER_TEMP/fleet.json" |
             while IFS=$'\t' read -r script url bearerEnv; do
               if [ -z "$url" ]; then echo "| $script | (no health URL in the plan) |"; continue; fi
