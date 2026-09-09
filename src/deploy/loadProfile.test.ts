@@ -94,7 +94,7 @@ describe("renderWorkerConfigsOnHost", () => {
     expect(
       await renderWorkerConfigsOnHost({ log: (l) => lines.push(l) }, env, (path, text) => written.set(path, text)),
     ).toEqual([]);
-    expect(lines).toEqual([`[deploy:all] rendered 5 Worker config(s) from ${PROFILE_EXAMPLE_PATH}`]);
+    expect(lines).toEqual([`[deploy:all] rendered 4 Worker config(s) from ${PROFILE_EXAMPLE_PATH}`]);
     const example = await loadProfileOnHost(env);
     const rendered = renderWorkerConfigs(example.profile, (p) => (existsSync(p) ? readFileSync(p, "utf8") : undefined));
     if (!rendered.ok) throw new Error(rendered.problems.join("; "));

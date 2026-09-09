@@ -7,7 +7,7 @@ Goal: every external account OpenSwitchboard can use, created with exactly the p
 | A Slack app | yes, for Slack | The Slack channel: mentions, threads, status cards | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` |
 | One model provider | yes | Every agent | `ANTHROPIC_API_KEY`, or the variable your provider block names |
 | A GitHub App | for coding and review | Reading repositories and issues; the coding agent's branches and pull requests | `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY` |
-| Cloudflare | for production | Hosting; the state Worker, residents, sandboxes, dashboards behind Access, a docs site | wrangler's login, plus a deploy token for CI |
+| Cloudflare | for production | Hosting; the state Worker, residents, sandboxes, dashboards behind Access | wrangler's login, plus a deploy token for CI |
 | E2B | optional | Per-thread sandboxes without a Cloudflare account | `E2B_API_KEY` |
 | Brave Search | optional | The research agent's web search | `BRAVE_SEARCH_API_KEY` |
 
@@ -99,7 +99,6 @@ Nothing about OpenSwitchboard requires Cloudflare. A laptop or any always-on con
 | **The sandbox Worker** | Each thread's `bash` runs in its own throwaway container instead of on the bot host — the thing that makes it safe to let untrusted users reach the coding agent. |
 | **The resident Worker** | Always-warm checkouts of the repositories you onboard, so a coding run starts on an installed tree instead of cloning cold; its own GitHub credential. The most expensive piece: one container per onboarded repository. |
 | **Cloudflare Access** | Identity in front of the dashboards (`/runs`, `/residents`, `/costs`). Without an identity gate the dashboards refuse every remote caller; Access is how a team gets in with SSO, and service tokens are how machines call `/api/*`. |
-| **The docs Worker** | This documentation on your own hostname, so `/docs` on the bot points at your site. Assets only; deploying it cannot disturb a run. |
 
 What you need: an account, a domain in it (every hostname in the deployment profile must be under a zone in the account), `npx wrangler login` once, and Docker running wherever `deploy all` runs — the bot's image is built there. For deploys from CI, a Cloudflare API token with *Workers Scripts: Edit*, *Containers: Edit*, *Workers R2 Storage: Edit* and *Account Settings: Read* at the account, and *Workers Routes: Edit* and *DNS: Edit* on the zone; `deploy all` checks the token's capabilities before it touches a Worker, because a token that can deploy the state Worker but not list containers would strand the bot half-deployed. The Access application, if you want one, is created in the Zero Trust dashboard by hand: its team domain and AUD tag go in the profile's `access` block and reach the bot as `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`. The whole sequence is [Deploy](deploy.md).
 

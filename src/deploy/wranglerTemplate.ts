@@ -8,27 +8,38 @@
 // `deploy init` re-renders; a hand edit to the rendered file is drift that
 // `deploy init --check` (the `deploy:check` gate) reports.
 //
-// Pure: the view a profile gives a Worker, and the text → text render. Reading
-// and writing files is the command's job (src/core/commands/deploy.ts) through
-// its injected file access.
+// The project's docs site (deploy/cloudflare-docs/) is rendered by the same
+// machinery from a different view: it is the project's website, not a Worker an
+// installation runs, so its script name and hostname are project facts
+// (project.json `name` + `docs`), and the only thing the profile contributes is
+// the account the project's own CI deploys it to (`siteView`).
+//
+// Pure: the view a profile gives a Worker, the view the facts give the site, and
+// the text → text render. Reading and writing files is the command's job
+// (src/core/commands/deploy.ts) through its injected file access.
 
 import { WORKER_DIRS } from "./plan.js";
 import { profileUrls, WORKER_KINDS, type DeploymentProfile, type WorkerKind } from "./profile.js";
 
 export const TEMPLATE_FILE = "wrangler.template.jsonc";
 export const RENDERED_FILE = "wrangler.jsonc";
+/** The project's docs site — the one config under deploy/ that is not a Worker of the installation. */
+export const SITE_DIR = "deploy/cloudflare-docs";
+/** The facts file the site's view reads (project.json), repo-relative — the path `deploy init` asks its file access for. */
+export const PROJECT_FACTS_FILE = "project.json";
 
 /** The first lines of every rendered file: what it is and how it changes. */
 export const GENERATED_HEADER: readonly string[] = [
   "// GENERATED — do not edit. `npm run deploy:gen` (the CLI's `deploy init`) renders this file from",
-  "// wrangler.template.jsonc in this directory and the deployment profile (deploy/profile.json).",
+  "// wrangler.template.jsonc in this directory and the deployment profile (deploy/profile.json) —",
+  "// the docs site's from project.json and the profile's account.",
   "// Change the template or the profile and re-render; `npm run deploy:check` fails on a hand edit.",
 ];
 
-/** What a template may name: `{{account}}`, `{{zone}}`, `{{script}}`, `{{hostname}}`,
- *  `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}` and `{{urls.docsBaseUrl}}` (each inside
- *  an `{{#if urls.…}}` block — the state Worker and the docs Worker are optional), and inside an
- *  `{{#if access}}` block `{{access.teamDomain}}` / `{{access.aud}}`. */
+/** What a Worker's template may name: `{{account}}`, `{{zone}}`, `{{script}}`, `{{hostname}}`,
+ *  `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}` (inside an `{{#if urls.stateWorkerUrl}}`
+ *  block — the state Worker is optional), and inside an `{{#if access}}` block
+ *  `{{access.teamDomain}}` / `{{access.aud}}`. */
 export interface TemplateView {
   account: string;
   zone: string;
@@ -42,15 +53,12 @@ export interface TemplateView {
     /** The state Worker other Workers record firings on, when the profile has one —
      *  a template names it inside an `{{#if urls.stateWorkerUrl}}` block. */
     stateWorkerUrl?: string;
-    /** The installation's docs site (its `/docs` redirect target), when the profile has a docs Worker —
-     *  a template names it inside an `{{#if urls.docsBaseUrl}}` block. */
-    docsBaseUrl?: string;
   };
   /** The Cloudflare Access application in front of the bot, when the installation has one. */
   access: { teamDomain: string; aud: string } | undefined;
 }
 
-/** Pure: the view for one Worker; `undefined` when the profile has no such Worker (the optional docs Worker). */
+/** Pure: the view for one Worker; `undefined` when the profile has no such Worker (an optional one left out). */
 export function templateView(profile: DeploymentProfile, kind: WorkerKind): TemplateView | undefined {
   const worker = profile.workers[kind];
   if (!worker) return undefined;
@@ -60,9 +68,37 @@ export function templateView(profile: DeploymentProfile, kind: WorkerKind): Temp
     zone: profile.zone,
     script: worker.script,
     hostname: worker.hostname,
-    urls: { publicBaseUrl: urls.publicBaseUrl, stateWorkerUrl: urls.stateWorkerUrl, docsBaseUrl: urls.docsBaseUrl },
+    urls: { publicBaseUrl: urls.publicBaseUrl, stateWorkerUrl: urls.stateWorkerUrl },
     access: profile.access,
   };
+}
+
+/** What the site's template may name: `{{account}}` (the profile's — where the project's own CI
+ *  deploys the site), `{{script}}` (`<name>-docs`) and `{{hostname}}` (the host of the `docs` fact). */
+export interface SiteView {
+  account: string;
+  script: string;
+  hostname: string;
+}
+
+/** Pure: the site's view from the profile's account and the project's facts (project.json parsed:
+ *  `name`, the identifier the script name is built from, and `docs`, the URL the site is published
+ *  at), or the problem with the facts — never a value from the profile's Workers. */
+export function siteView(
+  profile: Pick<DeploymentProfile, "account">,
+  facts: unknown,
+): { ok: true; view: SiteView } | { ok: false; problem: string } {
+  const f = facts as { name?: unknown; docs?: unknown } | null;
+  if (typeof f?.name !== "string" || f.name === "") return { ok: false, problem: "`name` is missing" };
+  if (typeof f.docs !== "string") return { ok: false, problem: "`docs` is missing" };
+  let host: string;
+  try {
+    host = new URL(f.docs).host;
+  } catch {
+    return { ok: false, problem: `\`docs\` "${f.docs}" is not a URL` };
+  }
+  if (host === "") return { ok: false, problem: `\`docs\` "${f.docs}" has no host` };
+  return { ok: true, view: { account: profile.account, script: `${f.name}-docs`, hostname: host } };
 }
 
 export type RenderOutcome = { ok: true; text: string } | { ok: false; problems: string[] };
@@ -75,7 +111,7 @@ const PLACEHOLDER = /\{\{([A-Za-z0-9_.]+)\}\}/g;
  *  byte except placeholders (substituted), directive lines (removed), and the
  *  lines of a block whose condition is unset (dropped). Anything unresolved is
  *  a problem naming the line; the render is all-or-nothing. */
-export function renderTemplate(template: string, view: TemplateView): RenderOutcome {
+export function renderTemplate(template: string, view: TemplateView | SiteView): RenderOutcome {
   const problems: string[] = [];
   const out: string[] = [];
   const lines = template.split("\n");
@@ -120,7 +156,7 @@ function nameAt(line: string): string {
 }
 
 /** A dotted path into the view; `undefined` for anything not there (never throws). */
-function lookup(view: TemplateView, path: string): unknown {
+function lookup(view: TemplateView | SiteView, path: string): unknown {
   let cur: unknown = view;
   for (const key of path.split(".")) {
     if (cur === null || typeof cur !== "object" || !(key in cur)) return undefined;
@@ -144,6 +180,39 @@ export function workerConfigTargets(profile: DeploymentProfile): ConfigTarget[] 
     templatePath: `${WORKER_DIRS[kind]}/${TEMPLATE_FILE}`,
     outputPath: `${WORKER_DIRS[kind]}/${RENDERED_FILE}`,
   }));
+}
+
+/** The site's (template → rendered file) pair — beside the Workers' in `deploy init`, never in a plan. */
+export const SITE_CONFIG_TARGET = {
+  dir: SITE_DIR,
+  templatePath: `${SITE_DIR}/${TEMPLATE_FILE}`,
+  outputPath: `${SITE_DIR}/${RENDERED_FILE}`,
+} as const;
+
+export type RenderedConfig = { ok: true; path: string; text: string } | { ok: false; problems: string[] };
+
+/** Pure over an injected reader: the site's rendered config from its template, the profile's account and
+ *  the project's facts (project.json's text, or undefined when absent); every problem names its source. */
+export function renderSiteConfig(
+  profile: Pick<DeploymentProfile, "account">,
+  factsText: string | undefined,
+  readTemplate: (path: string) => string | undefined,
+): RenderedConfig {
+  if (factsText === undefined) return { ok: false, problems: [`${PROJECT_FACTS_FILE}: no such file`] };
+  let facts: unknown;
+  try {
+    facts = JSON.parse(factsText);
+  } catch {
+    return { ok: false, problems: [`${PROJECT_FACTS_FILE}: not JSON`] };
+  }
+  const view = siteView(profile, facts);
+  if (!view.ok) return { ok: false, problems: [`${PROJECT_FACTS_FILE}: ${view.problem}`] };
+  const template = readTemplate(SITE_CONFIG_TARGET.templatePath);
+  if (template === undefined) return { ok: false, problems: [`${SITE_CONFIG_TARGET.templatePath}: no such file`] };
+  const r = renderTemplate(template, view.view);
+  return r.ok
+    ? { ok: true, path: SITE_CONFIG_TARGET.outputPath, text: r.text }
+    : { ok: false, problems: r.problems.map((p) => `${SITE_CONFIG_TARGET.templatePath} ${p}`) };
 }
 
 export type RenderedConfigs =
@@ -171,8 +240,6 @@ export function renderWorkerConfigs(
   }
   return problems.length > 0 ? { ok: false, problems } : { ok: true, files };
 }
-
-export type RenderedConfig = { ok: true; path: string; text: string } | { ok: false; problems: string[] };
 
 /** ONE Worker's rendered config — for a command that spawns wrangler in that Worker's directory
  *  alone (`deploy secrets`) and must not depend on every other template being present. */

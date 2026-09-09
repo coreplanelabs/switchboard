@@ -5,8 +5,8 @@
 // this component. Below sm the nav, docs, and theme fold into one finger-sized
 // hamburger menu; page actions (the status slot's controls) stay visible.
 // What the nav and the menu list follows the installation's capabilities (the
-// seed): a section that is off has no entry, and the docs link exists only
-// when this installation publishes a docs site.
+// seed): a section that is off has no entry. The docs link needs no capability:
+// it opens the project's published site, the same on every installation.
 import { computed } from "vue";
 import { useColorMode } from "@vueuse/core";
 import AppNav, { navSections, type NavSection } from "./AppNav.vue";
@@ -18,7 +18,6 @@ import { useCapabilities } from "../lib/capabilities";
 const props = defineProps<{ title: string; nav: NavSection }>();
 
 const caps = useCapabilities();
-const docsOn = caps?.docs === true;
 const sections = computed(() => navSections(caps, props.nav));
 
 const mode = useColorMode({ emitAuto: true });
@@ -31,7 +30,7 @@ const THEMES = [
 const menuItems = computed(() => [
   // The docs sit in their own group: an external destination, not a section of
   // this app, and the only item here that leaves the page.
-  ...(docsOn ? [[{ label: DOCS_LABEL, icon: DOCS_ICON, to: DOCS_HREF, target: "_blank" as const }]] : []),
+  [{ label: DOCS_LABEL, icon: DOCS_ICON, to: DOCS_HREF, target: "_blank" as const }],
   sections.value.map((s) => ({
     label: s.label,
     icon: s.icon,
@@ -62,7 +61,7 @@ const menuItems = computed(() => [
         <slot name="actions" />
         <span class="hidden items-center gap-4 sm:flex">
           <AppNav :current="nav" />
-          <DocsLink v-if="docsOn" />
+          <DocsLink />
           <ThemeToggle />
         </span>
         <UDropdownMenu :items="menuItems" :content="{ align: 'end' }" class="sm:hidden">

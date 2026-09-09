@@ -27,7 +27,6 @@ export const ALL_ON: Capabilities = {
   github: true,
   ingress: true,
   dashboardAuth: "access",
-  docs: true,
 };
 
 export interface MountAppOptions {

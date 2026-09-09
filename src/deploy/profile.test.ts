@@ -63,7 +63,6 @@ describe("parseProfile", () => {
     expect(u.stateWorkerUrl).toBeUndefined();
     expect(u.healthUrl("memory")).toBeUndefined();
     expect(u.baseUrl("sandbox")).toBeUndefined();
-    expect(u.docsBaseUrl).toBeUndefined();
     const withMemory = { ...botOnly, workers: { ...botOnly.workers, memory: TEST_PROFILE.workers.memory } };
     expect(parseProfile(withMemory).ok).toBe(true);
     expect(profileUrls(withMemory).stateWorkerUrl).toBe("https://switchboard-memory.example.test");
@@ -82,12 +81,12 @@ describe("parseProfile", () => {
     expect(clash.ok ? [] : clash.problems).toEqual(["workers: two Workers share a script name"]);
   });
 
-  it("a Worker may name its own zone — a public docs site on a product domain — and its hostname is judged against that zone", () => {
+  it("a Worker may name its own zone — a second domain the account owns — and its hostname is judged against that zone", () => {
     const ownZone = parseProfile({
       ...TEST_PROFILE,
       workers: {
         ...TEST_PROFILE.workers,
-        docs: { script: "switchboard-docs", hostname: "product.example", zone: "product.example" },
+        sandbox: { script: "switchboard-sandbox", hostname: "sb.product.example", zone: "product.example" },
       },
     });
     expect(ownZone.ok).toBe(true);
@@ -95,17 +94,26 @@ describe("parseProfile", () => {
       ...TEST_PROFILE,
       workers: {
         ...TEST_PROFILE.workers,
-        docs: { script: "switchboard-docs", hostname: "docs.example.test", zone: "product.example" },
+        sandbox: { script: "switchboard-sandbox", hostname: "sb.example.test", zone: "product.example" },
       },
     });
     expect(outsideOwnZone.ok ? [] : outsideOwnZone.problems).toEqual([
-      "workers.docs.hostname: not under zone product.example",
+      "workers.sandbox.hostname: not under zone product.example",
     ]);
   });
 
-  it("the docs Worker and the secrets source are optional; access is optional and strict when present", () => {
-    const { docs: _docs, ...runtimeOnly } = TEST_PROFILE.workers;
-    expect(parseProfile({ ...TEST_PROFILE, workers: runtimeOnly }).ok).toBe(true);
+  it("the docs site is not a Worker of the installation: a profile that still names one parses with the key dropped", () => {
+    // The project's site deploys from project.json's facts (wranglerTemplate.ts
+    // `siteView`); an older profile's `workers.docs` is neither a step nor a URL.
+    const legacy = parseProfile({
+      ...TEST_PROFILE,
+      workers: { ...TEST_PROFILE.workers, docs: { script: "switchboard-docs", hostname: "docs.example.test" } },
+    });
+    expect(legacy.ok).toBe(true);
+    if (legacy.ok) expect(Object.keys(legacy.profile.workers)).toEqual(["memory", "bot", "resident", "sandbox"]);
+  });
+
+  it("the secrets source is optional; access is optional and strict when present", () => {
     expect(parseProfile({ ...TEST_PROFILE, secretsSource: "op://Vault/Switchboard" }).ok).toBe(true);
     expect(parseProfile({ ...TEST_PROFILE, access: { teamDomain: "team.cloudflareaccess.com", aud: "x" } }).ok).toBe(
       false,
@@ -114,15 +122,15 @@ describe("parseProfile", () => {
 });
 
 describe("profileUrls", () => {
-  it("derives every URL from the hostnames — health per Worker, the bot's public base and admin route, the state Worker, the docs site", () => {
+  it("derives every URL from the hostnames — health per Worker, the bot's public base and admin route, the state Worker", () => {
     const u = profileUrls(TEST_PROFILE);
     expect(u.healthUrl("memory")).toBe("https://switchboard-memory.example.test/healthz");
     expect(u.healthUrl("sandbox")).toBe("https://switchboard-sandbox.example.test/healthz");
     expect(u.publicBaseUrl).toBe("https://switchboard.example.test");
     expect(u.botAdminRestartUrl).toBe("https://switchboard.example.test/admin/restart");
     expect(u.stateWorkerUrl).toBe("https://switchboard-memory.example.test");
-    expect(u.docsBaseUrl).toBe("https://docs.switchboard.example.test");
-    const { docs: _docs, ...runtimeOnly } = TEST_PROFILE.workers;
-    expect(profileUrls({ ...TEST_PROFILE, workers: runtimeOnly }).docsBaseUrl).toBeUndefined();
+    expect(Object.keys(u).sort()).toEqual(
+      ["baseUrl", "botAdminRestartUrl", "healthUrl", "publicBaseUrl", "stateWorkerUrl"].sort(),
+    );
   });
 });

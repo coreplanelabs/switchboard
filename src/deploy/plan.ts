@@ -163,14 +163,13 @@ export const CONTAINERS_CAPABILITY: CapabilityCheck = {
 };
 
 /** Each Worker's directory: package.json, wrangler.template.jsonc and the wrangler.jsonc rendered from
- *  it (src/deploy/wranglerTemplate.ts). The docs Worker is here too — it has a config to render even
- *  though it deploys on its own (docs/reference/specs/docs-site.md), never as a `deploy all` step. */
+ *  it (src/deploy/wranglerTemplate.ts). The project's docs site (deploy/cloudflare-docs/) is not a
+ *  Worker of the installation — its config renders from project.json (`SITE_DIR` there). */
 export const WORKER_DIRS: Readonly<Record<WorkerKind, string>> = {
   memory: "deploy/cloudflare-memory",
   bot: "deploy/cloudflare",
   resident: "deploy/cloudflare-resident",
   sandbox: "deploy/cloudflare-sandbox",
-  docs: "deploy/cloudflare-docs",
 };
 
 /** Canonical order. Never reorder without updating README + AGENTS.md. */

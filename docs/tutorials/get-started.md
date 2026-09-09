@@ -108,7 +108,7 @@ The same `runs list` from Part 1 now shows this run too, with `slack:` in its ch
 
 ## Part 3 — an answer from production
 
-Production is the bot as a container on Cloudflare, with a **state Worker** beside it so that config, run history and chat-set overrides survive the container's restarts. Those two are the smallest deployment that behaves like production; the sandbox, resident and docs Workers are optional additions described in [Deploy](../how-to/deploy.md).
+Production is the bot as a container on Cloudflare, with a **state Worker** beside it so that config, run history and chat-set overrides survive the container's restarts. Those two are the smallest deployment that behaves like production; the sandbox and resident Workers are optional additions described in [Deploy](../how-to/deploy.md).
 
 **Before you start:** a Cloudflare account, a domain (a *zone*) in it, `npx wrangler login` run once in `deploy/cloudflare` against that account, and Docker running — the bot's image is built on your machine.
 

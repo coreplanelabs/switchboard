@@ -51,8 +51,6 @@ export interface Capabilities {
    * verifier in src/index.ts, so this value names the strategy that actually runs.
    */
   dashboardAuth: DashboardAuthMode;
-  /** This installation publishes its own docs site: `DOCS_BASE_URL` is set (the bot Worker renders it from the profile). */
-  docs: boolean;
 }
 
 /** Everything on — the catalogue as the reference docs render it, and the shape a fixture starts from. */
@@ -68,7 +66,6 @@ export const ALL_CAPABILITIES: Readonly<Capabilities> = Object.freeze({
   github: true,
   ingress: true,
   dashboardAuth: "access",
-  docs: true,
 });
 
 /** The minimal installation: Slack plus a provider, tools on the bot host, nothing optional configured. */
@@ -84,7 +81,6 @@ export const NO_CAPABILITIES: Readonly<Capabilities> = Object.freeze({
   github: false,
   ingress: false,
   dashboardAuth: "none",
-  docs: false,
 });
 
 const DEFAULT_STATE_TOKEN_ENV = "MEMORY_TOKEN";
@@ -123,6 +119,5 @@ export function capabilitiesFrom(config: AppConfig, env: NodeJS.ProcessEnv): Cap
       present(env.GH_TOKEN),
     ingress: ingress.ok && Object.keys(ingress.tokens).length > 0,
     dashboardAuth: resolveDashboardAuthMode(config.dashboard?.auth, accessConfigured),
-    docs: present(env.DOCS_BASE_URL),
   };
 }

@@ -27,12 +27,6 @@
   // every dashboard request is denied.
   "vars": {
     "PUBLIC_BASE_URL": "{{urls.publicBaseUrl}}",
-    // DOCS_BASE_URL: where the bot's /docs redirect sends people — this
-    // installation's docs site (profile `workers.docs`). Without a docs Worker
-    // the var is not rendered and /docs points at the project's published docs.
-    // {{#if urls.docsBaseUrl}}
-    "DOCS_BASE_URL": "{{urls.docsBaseUrl}}",
-    // {{/if}}
     // {{#if access}}
     "ACCESS_TEAM_DOMAIN": "{{access.teamDomain}}",
     "ACCESS_AUD": "{{access.aud}}",

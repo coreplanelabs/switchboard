@@ -9,7 +9,13 @@ import { parseInvocation } from "../commandSurface.js";
 import { RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
 import { TEST_PROFILE } from "../../deploy/testing/profile.js";
 import type { RestartRunResult } from "../../deploy/run.js";
-import { GENERATED_HEADER, TEMPLATE_FILE, workerConfigTargets } from "../../deploy/wranglerTemplate.js";
+import {
+  GENERATED_HEADER,
+  PROJECT_FACTS_FILE,
+  SITE_CONFIG_TARGET,
+  TEMPLATE_FILE,
+  workerConfigTargets,
+} from "../../deploy/wranglerTemplate.js";
 import type { SecretsSource } from "../../deploy/secrets.js";
 import type { SecretsHostIO } from "../../deploy/secretsHost.js";
 import {
@@ -135,10 +141,21 @@ const noSecrets: SecretsHostIO = {
   },
 };
 
-/** A one-line template per Worker dir: enough to see the profile land in the render. */
+/** A one-line template per Worker dir (and the site's): enough to see the profile and the facts land in the render. */
 const TEMPLATE = '{ "name": "{{script}}", "account_id": "{{account}}", "routes": [{ "pattern": "{{hostname}}" }] }\n';
+/** The project facts the site's config renders from — a made-up project, so no test pins the real host. */
+const FACTS = JSON.stringify({ name: "switchboard", docs: "https://docs.example.test" });
 const templatesOnDisk = () =>
-  new Map<string, string>(workerConfigTargets(TEST_PROFILE).map((t) => [t.templatePath, TEMPLATE]));
+  new Map<string, string>([
+    ...workerConfigTargets(TEST_PROFILE).map((t): [string, string] => [t.templatePath, TEMPLATE]),
+    [SITE_CONFIG_TARGET.templatePath, TEMPLATE],
+    [PROJECT_FACTS_FILE, FACTS],
+  ]);
+/** Every file `deploy init` renders: the Workers the profile has, then the site. */
+const renderedPaths = () => [
+  ...workerConfigTargets(TEST_PROFILE).map((t) => t.outputPath),
+  SITE_CONFIG_TARGET.outputPath,
+];
 const neverRunsPlan = async (): Promise<DeployRunResult> => {
   throw new Error("must not run");
 };
@@ -594,26 +611,46 @@ describe("deploy.init", () => {
     });
   });
 
-  it("renders every Worker's wrangler.jsonc from its template and the profile (header first), writes it, and is a no-op the second time", async () => {
+  it("renders every Worker's wrangler.jsonc from its template and the profile, and the site's from project.json (header first), writes them, and is a no-op the second time", async () => {
     const { commands, disk, writes } = init(templatesOnDisk());
     const res = await commands.invoke("deploy.init", {}, cli);
     if (!res.ok) throw new Error(res.message);
-    const targets = workerConfigTargets(TEST_PROFILE);
+    const paths = renderedPaths();
     expect(res.value).toEqual({
       profile: { origin: "profile", path: "deploy/profile.json" },
-      files: targets.map((t) => ({ path: t.outputPath, status: "written" })),
+      files: paths.map((path) => ({ path, status: "written" })),
     });
-    expect(writes).toEqual(targets.map((t) => t.outputPath));
+    expect(writes).toEqual(paths);
     expect(disk.get("deploy/cloudflare-resident/wrangler.jsonc")).toBe(
       `${GENERATED_HEADER.join("\n")}\n{ "name": "switchboard-resident", "account_id": "${TEST_PROFILE.account}", "routes": [{ "pattern": "switchboard-resident.example.test" }] }\n`,
     );
+    // The site: `<name>-docs` on the docs host from the facts, the account from the profile.
+    expect(disk.get("deploy/cloudflare-docs/wrangler.jsonc")).toBe(
+      `${GENERATED_HEADER.join("\n")}\n{ "name": "switchboard-docs", "account_id": "${TEST_PROFILE.account}", "routes": [{ "pattern": "docs.example.test" }] }\n`,
+    );
     expect(renderText(commands.get("deploy.init")!, res.value)).toBe(
-      ["Worker configs from deploy/profile.json:", ...targets.map((t) => `  written   ${t.outputPath}`)].join("\n"),
+      ["Worker configs from deploy/profile.json:", ...paths.map((path) => `  written   ${path}`)].join("\n"),
     );
     const again = await commands.invoke("deploy.init", {}, cli);
     if (!again.ok) throw new Error(again.message);
     expect((again.value as { files: { status: string }[] }).files.every((f) => f.status === "unchanged")).toBe(true);
-    expect(writes).toHaveLength(targets.length);
+    expect(writes).toHaveLength(paths.length);
+  });
+
+  it("the site's config needs project.json: without it, or with a `docs` fact that is not a URL, the render is `unavailable` naming the file; nothing is written", async () => {
+    const noFacts = templatesOnDisk();
+    noFacts.delete(PROJECT_FACTS_FILE);
+    const without = init(noFacts);
+    const res = await without.commands.invoke("deploy.init", {}, cli);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
+    expect(res.ok ? "" : res.message).toContain("project.json: no such file");
+    expect(without.writes).toEqual([]);
+    const badFacts = templatesOnDisk();
+    badFacts.set(PROJECT_FACTS_FILE, JSON.stringify({ name: "switchboard", docs: "not a url" }));
+    const bad = init(badFacts);
+    const badRes = await bad.commands.invoke("deploy.init", {}, cli);
+    expect(badRes.ok ? "" : badRes.message).toContain('project.json: `docs` "not a url" is not a URL');
+    expect(bad.writes).toEqual([]);
   });
 
   it("--check writes nothing: equal files pass; a hand-edited or absent rendered file is `conflict` (exit 1) naming it and the fix", async () => {

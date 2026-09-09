@@ -278,7 +278,6 @@ function capabilityLine(c: Capabilities): string {
     `ingress ${onOff(c.ingress)}`,
     `residents ${onOff(c.residents)}`,
     `dashboard auth ${c.dashboardAuth}`,
-    `docs ${onOff(c.docs)}`,
   ].join(" · ");
 }
 

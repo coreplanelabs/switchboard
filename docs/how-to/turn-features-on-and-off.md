@@ -17,7 +17,7 @@ Each of these is a complete `config.yaml` plus an environment, kept as a test fi
 |---|---|---|
 | **minimal** | Slack and one provider. Tools run on the bot host. No Access, so the dashboards serve loopback callers only (`dashboardAuth: none`). Nothing optional. | [Run it locally](../tutorials/run-it-locally.md) is this configuration |
 | **local-full** | Everything a laptop can turn on: memory (in-process), run history on disk, GitHub via `GH_TOKEN`, an `mcp` block, one ingress bearer, a local docs URL. No Workers, so no residents, costs, schedules or ledger, and execution stays `local`. | Add blocks to the minimal config; the [configuration reference](../reference/configuration.md) has each one's off-state |
-| **cloud-full** | Everything on: the four Workers, tools in a Cloudflare sandbox, resident repositories, memory, run history and the ledger on the state Worker, MCP, costs, schedules, the GitHub App, ingress, Access, a docs site. | [Deploy](deploy.md), then [Operate production](operate-production.md) |
+| **cloud-full** | Everything on: the four Workers, tools in a Cloudflare sandbox, resident repositories, memory, run history and the ledger on the state Worker, MCP, costs, schedules, the GitHub App, ingress, Access. | [Deploy](deploy.md), then [Operate production](operate-production.md) |
 
 ## 2. Add the block that turns a capability on
 
@@ -34,7 +34,6 @@ Each of these is a complete `config.yaml` plus an environment, kept as a test fi
 | `github` | The App triple `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`, or a personal `GH_TOKEN` | The `github_*` tools (repository reads, issue writes) for the agents that carry them; the coding agent's push and PR; `friction propose` filing issues | Agents answer from the conversation and the web only; the coding agent cannot open a PR | A GitHub App (recommended: scoped, rotates) or one personal token |
 | `ingress` | `SWITCHBOARD_INGRESS_TOKENS`, a JSON map of bearer → `{ subject, channel? }`, each subject granted in `grants.http:<subject>` / `mcp:<subject>` | `POST /ingress` and the MCP server at `/mcp`: CI, cron and other agents drive OpenSwitchboard without Slack ([HTTP](../reference/dashboard-routes.md), [MCP](connect-an-mcp-server.md)) | Both routes refuse every bearer; Slack and the CLI are the only ways in | Nothing: a token is a string you mint |
 | `dashboardAuth` | `dashboard.auth` in `config.yaml`, or the default: `access` when `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD` are set (a Cloudflare Access application in front of the bot's hostname), else `none`. `token` needs `dashboard.token.actor` and the bearer in `DASHBOARD_TOKEN` (or the env var `dashboard.token.env` names) | `access`: the dashboards for anyone your Access policy admits, service tokens for machines. `token`: the dashboards and `/api/*` for whatever sends the bearer (a proxy, curl, a script) as the one configured actor. `none`: the dashboards for loopback callers of a localhost deployment only | Nothing is ever open: `none` refuses every remote caller, and an explicit `none` on a public `PUBLIC_BASE_URL` refuses to start ([Dashboard routes](../reference/dashboard-routes.md)) | Cloudflare Access (the free tier covers small teams); `token` and `none` cost nothing |
-| `docs` | `DOCS_BASE_URL`, rendered from the profile's `workers.docs` on Cloudflare, or the `npm run docs:dev` URL locally | `/docs` redirects to this installation's own docs site; the dashboard header's docs icon points there | `/docs` sends people to the project's published docs | The assets-only docs Worker (`deploy/cloudflare-docs/`): deploys in seconds, cannot disturb a run |
 
 The `MEMORY_TOKEN` rows share one Worker: `memory.worker`, `runHistory.worker`, `schedules.worker` and `runtimeOverrides.worker` all name the state Worker (`deploy/cloudflare-memory/`) with the same bearer. Deploy it once and four capabilities are a config block away ([Worker topology](../explanation/worker-topology.md)).
 
@@ -57,7 +56,6 @@ This table is generated from the command registry. Every command declares the ca
 | `github` | — |
 | `ingress` | — |
 | `dashboardAuth` | — |
-| `docs` | — |
 
 The other 19 commands are on in every installation.
 

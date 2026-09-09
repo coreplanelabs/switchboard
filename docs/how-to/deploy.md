@@ -2,7 +2,7 @@
 
 Goal: OpenSwitchboard running in production on Cloudflare — the first time by hand from your machine, and from then on by the release workflow, with a config change or a rotated secret going live without a rebuild.
 
-Cloudflare is the one supported production target: the bot runs as a container behind a Worker, and up to four more Workers give it durable state, sandboxes, resident repositories and a docs site. `docker-compose.yml` in the tree is the local loop — a laptop or a dev box running the same image against your `.env` — not a second production path. This page is the first deployment, by hand; the day-two pages are [Ship a release](ship-a-release.md) (production deploys on the release, from CI), [Rotate a secret](rotate-a-secret.md) and [Operate production](operate-production.md) (a deploy or a config change outside a release, the preflights, the span log). Why one target: [the decision record](../decisions/0023-one-production-target.md).
+Cloudflare is the one supported production target: the bot runs as a container behind a Worker, and up to three more Workers give it durable state, sandboxes and resident repositories. The docs site is the project's website, not a piece an installation deploys. `docker-compose.yml` in the tree is the local loop — a laptop or a dev box running the same image against your `.env` — not a second production path. This page is the first deployment, by hand; the day-two pages are [Ship a release](ship-a-release.md) (production deploys on the release, from CI), [Rotate a secret](rotate-a-secret.md) and [Operate production](operate-production.md) (a deploy or a config change outside a release, the preflights, the span log). Why one target: [the decision record](../decisions/0023-one-production-target.md).
 
 ## The pieces
 
@@ -12,7 +12,6 @@ Cloudflare is the one supported production target: the bot runs as a container b
 | memory (the state Worker) | `deploy/cloudflare-memory/` | Durable Objects for the config document, run history, the run ledger, memory, schedules, chat-set overrides | yes, in practice: without it the bot's config has nowhere to be pushed and nothing survives a restart |
 | resident | `deploy/cloudflare-resident/` | One container per onboarded repository, always warm | optional |
 | sandbox | `deploy/cloudflare-sandbox/` | A proxy in front of per-thread execution containers | optional |
-| docs | `deploy/cloudflare-docs/` | This site, assets only | optional |
 
 Deploys run in one order — memory, bot, resident, sandbox — because the state Worker's Durable Object migrations must exist before the bot writes to them. `deploy all` is the only runner; nothing here is deployed by hand in parallel. Why the order: [Worker topology](../explanation/worker-topology.md).
 
