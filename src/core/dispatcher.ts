@@ -424,7 +424,7 @@ export async function dispatch(
       shell,
       admitted,
     });
-    const { run, runId, channelVisibility, liveUrl, publishText, publishRunMeta } = registration;
+    const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
     const reservation = await reserveRun(deps, {
       msg,
@@ -496,7 +496,7 @@ export async function dispatch(
     const verifiedAtAttach = headGate.verifiedAtAttach;
     // The run's meta went out at the reservation with the head as resolved
     // then; the record and the page must name the head actually reviewed.
-    if (headGate.headAdopted) publishRunMeta(repoCtx);
+    if (headGate.headAdopted) publishMeta(repoCtx);
 
     // Whether this run reviews a resolved PR (its system prompt carries the
     // REVIEW TARGET block, item 9) — the same predicate the post-step and the
@@ -545,7 +545,7 @@ export async function dispatch(
     setupCard = undefined; // from here the run loop owns the card's close
     clearInterval(setupHeartbeat);
     card.update(shell.live()); // the ack card becomes the run card
-    const activityAt = clock();
+    const loopStartedAt = clock();
     // The run loop owns the run from here: its finally finishes it (the outer
     // finally discards a run that never got this far). Events are fed to the
     // registry in onEvent below; the stream has been live since the reservation.
@@ -610,7 +610,7 @@ export async function dispatch(
       clock,
       root,
       startedAt,
-      activityAt,
+      loopStartedAt,
       channelVisibility,
       publishText,
       ending,
@@ -623,8 +623,8 @@ export async function dispatch(
       prNote,
       toolCalls,
       runDiagnosis,
-      finalDetail,
-      checkedOffDetail,
+      checklistAsLeft,
+      checklistCheckedOff,
       releaseWorkspace,
     } = ran;
 
@@ -649,14 +649,14 @@ export async function dispatch(
       ending,
       card,
       shell,
-      finalDetail,
-      checkedOffDetail,
+      checklistAsLeft,
+      checklistCheckedOff,
       doneLines,
       runDiagnosis,
       releaseWorkspace,
       root,
     });
-    if (delivery === "fenced") return;
+    if (delivery.kind === "fenced") return;
 
     // After the reply (dispatch/reply.ts): the memory reflection pass and the
     // deterministic review post-step.

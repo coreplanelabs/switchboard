@@ -280,6 +280,18 @@ export function assembleRunRecord(input: {
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }
 
+/** What `writeTombstone` reads off the dispatch. */
+export interface TombstoneContext {
+  msg: IncomingMessage;
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  repoCtx: RepoContext;
+  channelVisibility: ChannelVisibility;
+  run: RunHandle;
+  registry: RunRegistry;
+  resume: ResumeContext | undefined;
+}
+
 /**
  * Tombstone-first (run-history item 42): a provisional TERMINAL record —
  * status `interrupted`, `finishedAt` = `startedAt` — written the moment the run
@@ -288,19 +300,7 @@ export function assembleRunRecord(input: {
  * The finish write replaces it; the drain deadline upgrades it. Nothing for a
  * resume, whose record the ledger already holds.
  */
-export function writeTombstone(
-  deps: RecordDeps,
-  ctx: {
-    msg: IncomingMessage;
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    repoCtx: RepoContext;
-    channelVisibility: ChannelVisibility;
-    run: RunHandle;
-    registry: RunRegistry;
-    resume: ResumeContext | undefined;
-  },
-): void {
+export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
   const { msg, agent, resolved, repoCtx, channelVisibility, run, registry, resume } = ctx;
   // Tombstone-first: a provisional TERMINAL record — status
   // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
@@ -346,6 +346,23 @@ export function writeTombstone(
   }
 }
 
+/** What `registerFinishRecord` reads off the dispatch. */
+export interface FinishRecordContext {
+  ending: RunEnding;
+  run: RunHandle;
+  snap: RunSnapshot | null;
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  msg: IncomingMessage;
+  channelVisibility: ChannelVisibility;
+  repoCtx: RepoContext;
+  finishedAt: number;
+  status: RunStatus;
+  diagnosis: FrictionDiagnosis;
+  root: Span;
+  ledgerRun: LedgerRun | undefined;
+}
+
 /**
  * The finish record, registered for the drain that follows the reply: the
  * finish-site snapshot and diagnosis assembled after the seal — so the record
@@ -354,24 +371,7 @@ export function writeTombstone(
  * otherwise. A reply that threw after the loop completed flips a `completed`
  * run to `failed`: the thread never saw the answer.
  */
-export function registerFinishRecord(
-  deps: RecordDeps,
-  ctx: {
-    ending: RunEnding;
-    run: RunHandle;
-    snap: RunSnapshot | null;
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    msg: IncomingMessage;
-    channelVisibility: ChannelVisibility;
-    repoCtx: RepoContext;
-    finishedAt: number;
-    status: RunStatus;
-    diagnosis: FrictionDiagnosis;
-    root: Span;
-    ledgerRun: LedgerRun | undefined;
-  },
-): void {
+export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext): void {
   const {
     ending,
     run,

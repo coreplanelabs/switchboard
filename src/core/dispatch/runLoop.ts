@@ -55,9 +55,49 @@ export interface RunOutcome {
   /** "Did real work" — the memory reflection gate. */
   toolCalls: number;
   runDiagnosis: FrictionDiagnosis | undefined;
-  finalDetail: () => string | undefined;
-  checkedOffDetail: () => string | undefined;
+  /** The agent's checklist exactly as it left it (○/✱ items still open) — what a failed or stopped card shows. */
+  checklistAsLeft: () => string | undefined;
+  /** The same checklist with every open item ticked ✓ — what a completed card shows. */
+  checklistCheckedOff: () => string | undefined;
   releaseWorkspace: (span?: Span) => Promise<void>;
+}
+
+/** What `runLoop` reads off the dispatch. */
+export interface RunLoopContext {
+  msg: IncomingMessage;
+  io: ChannelIO;
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  provider: Provider;
+  model: string;
+  messages: ChatMessage[];
+  system: string;
+  composeSystem: ReturnType<typeof makeSystemComposer>;
+  mcpForRun: McpToolsForRun;
+  run: RunHandle;
+  registry: RunRegistry;
+  round: RoundWorkspace;
+  admitted: LiveThread<DispatchFollowUp>;
+  ledgerRun: LedgerRun | undefined;
+  resume: ResumeContext | undefined;
+  repoCtx: RepoContext;
+  isPrReview: boolean;
+  isCodingPrRun: boolean;
+  /** The head this run reviews at the start; the settle may advance it. */
+  reviewHead: string | undefined;
+  card: StatusHandle;
+  shell: CardShell;
+  /** The done card's shape and queued lines, from the finish-site diagnosis (the dispatch's `doneLines`). */
+  doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
+  clock: Clock;
+  root: Span;
+  /** When the run started — the ack card's clock, before the attach and the prompt. */
+  startedAt: number;
+  /** When the loop took the card, after the claim: the activity clock's start (the "quiet for …" suffix counts from here, not from `startedAt`). */
+  loopStartedAt: number;
+  channelVisibility: ChannelVisibility;
+  publishText: RegisteredRun["publishText"];
+  ending: RunEnding;
 }
 
 /**
@@ -70,44 +110,7 @@ export interface RunOutcome {
  * A throw propagates after the workspace is released, as before; the caller's
  * outer catch replies.
  */
-export async function runLoop(
-  deps: RunDeps,
-  ctx: {
-    msg: IncomingMessage;
-    io: ChannelIO;
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    provider: Provider;
-    model: string;
-    messages: ChatMessage[];
-    system: string;
-    composeSystem: ReturnType<typeof makeSystemComposer>;
-    mcpForRun: McpToolsForRun;
-    run: RunHandle;
-    registry: RunRegistry;
-    round: RoundWorkspace;
-    admitted: LiveThread<DispatchFollowUp>;
-    ledgerRun: LedgerRun | undefined;
-    resume: ResumeContext | undefined;
-    repoCtx: RepoContext;
-    isPrReview: boolean;
-    isCodingPrRun: boolean;
-    /** The head this run reviews at the start; the settle may advance it. */
-    reviewHead: string | undefined;
-    card: StatusHandle;
-    shell: CardShell;
-    /** The done card's shape and queued lines, from the finish-site diagnosis (the dispatch's `doneLines`). */
-    doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
-    clock: Clock;
-    root: Span;
-    startedAt: number;
-    /** The moment the loop took the card: the activity clock's start. */
-    activityAt: number;
-    channelVisibility: ChannelVisibility;
-    publishText: RegisteredRun["publishText"];
-    ending: RunEnding;
-  },
-): Promise<RunOutcome> {
+export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOutcome> {
   const {
     msg,
     io,
@@ -140,7 +143,7 @@ export async function runLoop(
   } = ctx;
   const { executor, binding } = round.selection;
   let reviewHead = ctx.reviewHead;
-  let lastActivityAt = ctx.activityAt;
+  let lastActivityAt = ctx.loopStartedAt;
   // The card body is the agent's own checklist (via the update_status tool)
   // plus a live one-line activity trace (current tool call + redacted result
   // summary) so the card reflects progress per tool event, not only on the
@@ -168,8 +171,8 @@ export async function runLoop(
   // the run completing IS the proof they happened, and the model rarely
   // re-posts the checklist after its last step; a stop/failure keeps the
   // honest partial state.
-  const finalDetail = () => checklist;
-  const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
+  const checklistAsLeft = () => checklist;
+  const checklistCheckedOff = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
   // The runner's progress notes carry the 💭 thought line at each model turn
   // (docs/reference/specs/tracing.md): the card shows it as activity, as it showed the
   // `turn` event before spans replaced it.
@@ -672,7 +675,7 @@ export async function runLoop(
     if (runFailed)
       await root
         .span("post.card_close", () =>
-          card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail(), ...doneLines(diagnosis) })),
+          card.done(shell.close({ kind: "done", icon: "❌", detail: checklistAsLeft(), ...doneLines(diagnosis) })),
         )
         .catch(() => {});
   }
@@ -685,8 +688,8 @@ export async function runLoop(
     prNote,
     toolCalls,
     runDiagnosis,
-    finalDetail,
-    checkedOffDetail,
+    checklistAsLeft,
+    checklistCheckedOff,
     releaseWorkspace,
   };
 }

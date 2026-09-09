@@ -295,8 +295,8 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       ending,
       card: { update: () => {}, done: async (f: StatusUpdate) => void closes.push(f) },
       shell,
-      finalDetail: () => "○ step",
-      checkedOffDetail: () => "✓ step",
+      checklistAsLeft: () => "○ step",
+      checklistCheckedOff: () => "✓ step",
       doneLines: () => ({}),
       runDiagnosis: undefined,
       releaseWorkspace: async () => void releases.push(1),
@@ -307,7 +307,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
 
   it("delivered: the card closes ✅ with the checked-off checklist, the reply carries the answer (a review's with its run link), the run is sealed replyOk, the workspace is released after", async () => {
     const s = finishedRun();
-    expect(await deliverAnswer(s.ctx)).toBe("delivered");
+    expect(await deliverAnswer(s.ctx)).toEqual({ kind: "delivered" });
     expect(s.closes).toHaveLength(1);
     expect(JSON.stringify(s.closes[0])).toContain("✅");
     expect(JSON.stringify(s.closes[0])).toContain("✓ step");
@@ -318,9 +318,11 @@ describe("deliverAnswer — the answer reaches the thread", () => {
 
   it("a soft stop keeps the honest checklist and the ⏹ icon; a PR note rides after the answer", async () => {
     const s = finishedRun();
-    expect(await deliverAnswer({ ...s.ctx, stopped: "soft", prNote: "PR #1 opened", agent: getAgent("coding") })).toBe(
-      "delivered",
-    );
+    expect(
+      await deliverAnswer({ ...s.ctx, stopped: "soft", prNote: "PR #1 opened", agent: getAgent("coding") }),
+    ).toEqual({
+      kind: "delivered",
+    });
     expect(JSON.stringify(s.closes[0])).toContain("⏹");
     expect(JSON.stringify(s.closes[0])).toContain("○ step");
     expect(s.replies).toEqual(["the findings\n\nPR #1 opened"]);
@@ -328,7 +330,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
 
   it("fenced: another generation owns the run — nothing reaches the thread, the record is dropped, the workspace is still released", async () => {
     const s = finishedRun(async () => "fenced");
-    expect(await deliverAnswer(s.ctx)).toBe("fenced");
+    expect(await deliverAnswer(s.ctx)).toEqual({ kind: "fenced" });
     expect(s.replies).toEqual([]);
     expect(s.closes).toEqual([]);
     expect(s.states).toEqual([{ finalStatus: "completed" }]);

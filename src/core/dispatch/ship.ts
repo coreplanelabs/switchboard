@@ -92,7 +92,7 @@ export interface ShipDeps
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
  *  pipeline must not re-derive, because the gates already ran against them. */
-export interface ShipBranchContext {
+export interface ShipContext {
   /** AGENTS["ship"] — labels and run meta only; never handed to runAgent. */
   agent: AgentDef;
   /** The modelRef resolved for the ship request — recorded on the run, never
@@ -136,7 +136,7 @@ export async function runShipBranch(
   deps: ShipDeps,
   msg: IncomingMessage,
   io: ChannelIO,
-  ctx: ShipBranchContext,
+  ctx: ShipContext,
 ): Promise<void> {
   // `closeLines` keeps its default owner (`agent`): a ship run's children are
   // agent runs, so its `run.command` grafts — none today — would count as
@@ -309,8 +309,8 @@ export async function runShipBranch(
   // outright) can never erase which round the pipeline is in.
   let roundHeader: string | undefined;
   const currentFrame = () => shell.live({ notice: shutdownNotice, detail: [roundHeader, checklist, lastActivity] });
-  const finalDetail = () => checklist;
-  const checkedOffDetail = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
+  const checklistAsLeft = () => checklist;
+  const checklistCheckedOff = () => checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
   const onEvent = (e: RunEvent) => {
     registry.publish(run.id, e);
     if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md)
@@ -492,7 +492,7 @@ export async function runShipBranch(
     if (outcome === undefined)
       await root
         .span("post.card_close", () =>
-          card.done(shell.close({ kind: "done", icon: "❌", detail: finalDetail(), ...doneLines(diagnosis) })),
+          card.done(shell.close({ kind: "done", icon: "❌", detail: checklistAsLeft(), ...doneLines(diagnosis) })),
         )
         .catch(() => {});
   }
@@ -531,7 +531,7 @@ export async function runShipBranch(
           shell.close({
             kind: "done",
             icon,
-            detail: outcome.status === "completed" ? checkedOffDetail() : finalDetail(),
+            detail: outcome.status === "completed" ? checklistCheckedOff() : checklistAsLeft(),
             ...doneLines(shipDiagnosis),
           }),
         ),

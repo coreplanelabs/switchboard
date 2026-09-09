@@ -136,7 +136,7 @@ function setup(answer: string | Error) {
     clock: () => NOW,
     root: trace.root,
     startedAt: NOW,
-    activityAt: NOW,
+    loopStartedAt: NOW,
     channelVisibility: "unknown" as const,
     publishText: (type: "input" | "context" | "answer", text: string) => {
       published.push(`${type}:${text}`);

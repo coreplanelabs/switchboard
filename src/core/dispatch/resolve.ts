@@ -36,15 +36,20 @@ export interface ResolveDeps {
   resolveRepoContext?: (msg: IncomingMessage, history: HistoryItem[]) => Promise<RepoContext> | RepoContext;
 }
 
+/** What `readRequest` reads off the dispatch. */
+export interface ReadRequestContext {
+  msg: IncomingMessage;
+  io: ChannelIO;
+  root: Span;
+}
+
 /** The request as the model will see it: its directives parsed and stripped
  *  from the text, and the thread's history — fetched under its own span, after
  *  the chat fast path (a command never pays for it) and before the op fast
  *  path (which reads it). */
-export async function readRequest(ctx: {
-  msg: IncomingMessage;
-  io: ChannelIO;
-  root: Span;
-}): Promise<{ directives: RequestDirectives; history: HistoryItem[] }> {
+export async function readRequest(
+  ctx: ReadRequestContext,
+): Promise<{ directives: RequestDirectives; history: HistoryItem[] }> {
   const { msg, io, root } = ctx;
   const directives = parseDirectives(msg.text);
   const history = await root.span("dispatch.history", () => io.history());
@@ -96,6 +101,16 @@ export interface ResolvedTarget {
   repoCtxP: Promise<RepoContext>;
 }
 
+/** What `resolveTarget` reads off the dispatch. */
+export interface ResolveTargetContext {
+  msg: IncomingMessage;
+  history: HistoryItem[];
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  resume: ResumeContext | undefined;
+  root: Span;
+}
+
 /**
  * The provider behind the model ref (an unknown provider throws here, before
  * any card), and the target repo/ref/PR resolution, STARTED — a promise the
@@ -103,17 +118,7 @@ export interface ResolvedTarget {
  * memory read. A resume carries its repo context; an agent that declares no
  * repository resolves none.
  */
-export function resolveTarget(
-  deps: ResolveDeps,
-  ctx: {
-    msg: IncomingMessage;
-    history: HistoryItem[];
-    agent: AgentDef;
-    resolved: ResolvedRequest;
-    resume: ResumeContext | undefined;
-    root: Span;
-  },
-): ResolvedTarget {
+export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): ResolvedTarget {
   const { msg, history, agent, resolved, resume, root } = ctx;
   const { provider: providerName, model } = parseModelRef(resolved.modelRef);
   const provider = deps.providers.get(providerName);
