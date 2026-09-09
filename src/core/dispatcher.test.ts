@@ -16,17 +16,8 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
-import {
-  activeRunCount,
-  dispatch,
-  setShutdownNotice,
-  turnContent,
-  type CoreDeps,
-  type DispatchFollowUp,
-  DURABLE_INBOX_MAX_BYTES,
-  durableInboxMessage,
-  followUpFromInbox,
-} from "./dispatcher.js";
+import { activeRunCount, dispatch, setShutdownNotice, turnContent, type CoreDeps } from "./dispatcher.js";
+import { durableInboxMessage, type DispatchFollowUp } from "./dispatch/admission.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { RunControl, RunRegistry, activityOfEvents, type IndexEvent } from "./runRegistry.js";
 import { createTracer } from "./trace/tracer.js";
@@ -9927,57 +9918,6 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(a.replies.at(-1)).toBe("fresh answer");
     expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]);
     expect(ledger.inbox.get("run-far")).toBeUndefined();
-  });
-
-  it("the durable copy carries a follow-up's attachments when they fit the state Worker's body cap and names what it dropped when they do not; the resume restores them as image/document parts, or tells the model what was lost", () => {
-    const base = { ...msg("look at these", "slack:UY"), userName: "uy" };
-    const small = durableInboxMessage(
-      {
-        ...base,
-        images: [{ mediaType: "image/png", data: "QUJD" }],
-        documents: [{ mediaType: "application/pdf", data: "UERG", name: "spec.pdf" }],
-      },
-      "look at these",
-      9_000,
-    );
-    expect(small.images).toEqual([{ mediaType: "image/png", data: "QUJD" }]);
-    expect(small.documents).toEqual([{ mediaType: "application/pdf", data: "UERG", name: "spec.pdf" }]);
-    expect(small.attachmentsDropped).toBeUndefined();
-    const io = fakeIO().io;
-    const restored = followUpFromInbox({ seq: 3, message: small }, io, 0)!;
-    expect(restored.images).toEqual([{ mediaType: "image/png", data: "QUJD" }]);
-    expect(restored.documents).toEqual([{ mediaType: "application/pdf", data: "UERG", name: "spec.pdf" }]);
-    expect(restored.text).toBe("look at these");
-    // Over the cap: the text is kept, the bytes are not, and the count is recorded.
-    const big = durableInboxMessage(
-      { ...base, images: [{ mediaType: "image/png", data: "A".repeat(DURABLE_INBOX_MAX_BYTES) }] },
-      "look at these",
-      9_000,
-    );
-    expect(big.images).toBeUndefined();
-    expect(big.attachmentsDropped).toEqual({ images: 1, documents: 0 });
-    expect(Buffer.byteLength(JSON.stringify(big), "utf8")).toBeLessThan(DURABLE_INBOX_MAX_BYTES);
-    const lossy = followUpFromInbox({ seq: 4, message: big }, io, 0)!;
-    expect(lossy.images).toBeUndefined();
-    expect(lossy.text).toBe(
-      "look at these\n\n(1 attachment from this reply could not be carried across the bot's restart and is not attached.)",
-    );
-    // A malformed attachment entry is dropped on the way back, never fatal.
-    const odd = followUpFromInbox(
-      {
-        seq: 5,
-        message: {
-          ...small,
-          images: [
-            { mediaType: 7, data: "QUJD" },
-            { mediaType: "image/png", data: "QUJD" },
-          ],
-        },
-      },
-      io,
-      0,
-    )!;
-    expect(odd.images).toEqual([{ mediaType: "image/png", data: "QUJD" }]);
   });
 
   it("a fenced finishing means another generation owns the run: nothing more reaches the thread and no record is written from here — the run is theirs (D9)", async () => {
