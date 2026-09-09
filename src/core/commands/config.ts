@@ -59,6 +59,10 @@ const scopeArg = {
 const channelOption = z.string().optional().describe("target channel (default: the channel you are speaking in)");
 
 const effort = z.enum(EFFORT_LEVELS);
+/** The ladder as the option descriptions print it (`<low|medium|high|xhigh|max>`):
+ *  derived, so a level added to `EFFORT_LEVELS` reaches help and the machine
+ *  schemas without anyone retyping the list. */
+const effortLevels = `<${EFFORT_LEVELS.join("|")}>`;
 const modelRef = z.string().min(1);
 
 /** The channel a channel-scoped read/write targets: `--channel`, else the
@@ -121,8 +125,8 @@ export const configSet = defineCommand({
     agent: z.string().min(1).optional().describe("force which agent handles requests in this scope"),
     model: modelRef.optional().describe("force a model (provider/model) regardless of agent"),
     models: z.record(z.string(), modelRef).optional().describe("per-agent model: --models.<agent> provider/model"),
-    effort: effort.optional().describe(`force a model effort (${EFFORT_LEVELS.join(" | ")})`),
-    efforts: z.record(z.string(), effort).optional().describe("per-agent effort: --efforts.<agent> low|medium|high"),
+    effort: effort.optional().describe(`force a model effort ${effortLevels}`),
+    efforts: z.record(z.string(), effort).optional().describe(`per-agent effort: --efforts.<agent> ${effortLevels}`),
     channel: channelOption,
   }),
   action: "config:write",
