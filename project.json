@@ -124,6 +124,10 @@
       "does": "Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist.",
       "when": "After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit."
     },
+    "specs:coverage": {
+      "does": "Maps a change's paths to the specs whose `Code`/`Tests` headers cover them, then lists changed source paths no spec covers.",
+      "when": "`-- --changed origin/main...HEAD` before review (the review agent runs it); `-- --require` fails on an uncovered path (warn-only today); `-- --json` for machines."
+    },
     "decisions:check": {
       "does": "Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`.",
       "when": "Part of `check:consistency`; when a record fails it, write a new record and supersede the old one instead of editing it."

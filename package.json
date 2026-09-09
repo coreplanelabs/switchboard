@@ -61,6 +61,7 @@
     "docs:gen": "tsx scripts/docs-gen.ts",
     "docs:check": "tsx scripts/docs-gen.ts --check",
     "specs:check": "node scripts/specs-check.mjs",
+    "specs:coverage": "tsx scripts/specs-coverage.ts",
     "decisions:check": "tsx scripts/decisions-check.ts",
     "hygiene:check": "node scripts/public-hygiene.mjs",
     "hygiene:gen": "node scripts/public-hygiene.mjs --write",
