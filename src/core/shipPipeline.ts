@@ -45,12 +45,6 @@ import {
 } from "./ship/codingChild.js";
 import { runShipReviewChild, type ReviewChildDeps, type ReviewChildGithub } from "./ship/reviewChild.js";
 
-// The dispatcher's ship branch reaches the preflight and the child-round types
-// through this module; the forwarding goes when that branch moves out of
-// dispatcher.ts and imports the stages directly.
-export { shipPreflight } from "./ship/preflight.js";
-export type { ShipBlocks, ShipChildSpec } from "./ship/childRound.js";
-
 // ---- config (`ship` block, docs/reference/specs/agent-ship.md item 8) -------------------
 
 /** The `ship` config block: pipeline caps, resolved at deployment level like

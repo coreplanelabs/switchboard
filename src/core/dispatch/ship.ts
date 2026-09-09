@@ -27,15 +27,9 @@ import {
   type PullRequestFacts,
 } from "../../execution/githubPulls.js";
 import { resolveGithubIdentity, type GithubIdentity } from "../../execution/githubApp.js";
-import {
-  resolveShipCaps,
-  runShipPipeline,
-  shipPreflight,
-  shipRoundHeader,
-  type ShipBlocks,
-  type ShipChildSpec,
-  type ShipOutcome,
-} from "../shipPipeline.js";
+import { resolveShipCaps, runShipPipeline, shipRoundHeader, type ShipOutcome } from "../shipPipeline.js";
+import { shipPreflight } from "../ship/preflight.js";
+import type { ShipBlocks, ShipChildSpec } from "../ship/childRound.js";
 import { skillGuidanceBlock } from "../../skills/index.js";
 import { isSpanRecord, redactSecrets, type RunEvent } from "../runEvents.js";
 import type { LiveThread } from "../threadAdmission.js";
