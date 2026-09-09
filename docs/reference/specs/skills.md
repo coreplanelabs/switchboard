@@ -4,7 +4,7 @@ Agents can list and load **skills** — reusable methodologies (spec-driven deve
 
 This is delivered in stages. **PR1 (this spec) ships the seam + two stores + the seeded bundled skills + the load path.** User-uploaded skills backed by a durable store are tracked below as `[gap]` (PR2).
 
-- **Code**: `src/skills/` (`types.ts`, `frontmatter.ts`, `stores.ts`, `index.ts`), tools in `src/tools/skills.ts`, wired into `src/tools/workspace.ts` (TOOLSETS + `ToolContext`) and `src/core/dispatcher.ts` (progressive-disclosure block + tool context); bundled skills under `skills/<slug>/SKILL.md`; production stores wired in `src/index.ts` and `src/cli.ts`.
+- **Code**: `src/skills/` (`types.ts`, `frontmatter.ts`, `stores.ts`, `index.ts`), tools in `src/tools/skills.ts`, wired into `src/tools/workspace.ts` (TOOLSETS + `ToolContext`) and `src/core/dispatch/provision.ts` (`composePrompt`: the progressive-disclosure block) + `src/core/dispatcher.ts` (the tool context); bundled skills under `skills/<slug>/SKILL.md`; production stores wired in `src/index.ts` and `src/cli.ts`.
 - **Docs**: [AGENTS.md invariants 2 (≥2 impls, core sees the interface), 4 (namespacing), 7 (no hardcoded models)](../../../AGENTS.md).
 - **Attribution**: the bundled skills are vendored from [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) (MIT) at the commit pinned in `skills/manifest.yaml` (items 9–10); the frontmatter gains only `agents` scoping, the pinned `source` link and the `upstream` provenance block; the body is upstream's, byte-for-byte.
 - **Tests**: `src/skills/skills.test.ts`, `src/tools/skills.test.ts`, `src/core/dispatcher.test.ts`.

@@ -1,4 +1,3 @@
-import type { ResidentFleetFacts } from "./residentFleet.js";
 import { configAwarenessBlock } from "./configAwareness.js";
 import { selfDescriptionBlock } from "./selfDescription.js";
 import { customInstructionsBlock } from "./customInstructions.js";
@@ -7,19 +6,15 @@ import type { RequestDirectives, ThreadDirectives } from "../directives.js";
 import { mergeTools, runAgent } from "../runner.js";
 import { TOOLSETS } from "../tools/workspace.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
-import { durableInboxMessage } from "./runLedger/inboxMessage.js";
 import { systemClock } from "./trace/index.js";
 import type { Span, SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
 import { cardShapeLineOf, queuedCaption } from "./runShape.js";
-import { graftResidentSteps, residentTraceOf } from "../execution/residentTrace.js";
-import type { ResidentStep } from "../execution/residentStepTrace.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { makeWebCapability } from "../tools/web.js";
-import { ResidentNeedsRefError } from "../execution/resident.js";
-import { parseModelRef, type ChatMessage, type ContentPart } from "../providers/types.js";
+import { parseModelRef } from "../providers/types.js";
 import { currentPrHeadSha, prCommitsSince, type RepoContext } from "./repoContext.js";
 import type { PrCommitList } from "./headMoved.js";
 import { postReviewComment, type ReviewCommentTarget } from "../execution/githubComments.js";
@@ -47,23 +42,16 @@ import {
 } from "./shipPipeline.js";
 import { PrDescriptionSchema, type PrDescription } from "./prDescription.js";
 import { parseVerdictInput, type ReviewVerdict } from "./reviewVerdict.js";
-import {
-  attachRoundWorkspace,
-  makeSystemComposer,
-  runReviewPostStep,
-  settleReviewedHead,
-  type RoundWorkspace,
-} from "./reviewRound.js";
+import { runReviewPostStep, settleReviewedHead } from "./reviewRound.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "./codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "./descriptionTurn.js";
-import { memoryContextBlock, scheduleReflection, type MemoryStore } from "./memory/index.js";
-import { skillGuidanceBlock, type SkillStore } from "../skills/index.js";
-import { mcpGuidanceBlock, type McpToolSource } from "../mcp/source.js";
+import { scheduleReflection } from "./memory/index.js";
+import { skillGuidanceBlock } from "../skills/index.js";
 import { isSpanRecord, redactSecrets, type RunEvent, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import { mergeFollowUps, type LiveThread } from "./threadAdmission.js";
 import { resolveChatActor } from "./authz/actor.js";
-import { MAX_EVENT_BYTES, utf8ByteLength, type RunStatus } from "./runRecord.js";
+import { utf8ByteLength, type RunStatus } from "./runRecord.js";
 import { markdownOutput } from "./llmOutput/index.js";
 import { assembleRunRecord, channelVisibilityOf, type RecordDeps } from "./dispatch/record.js";
 import {
@@ -97,6 +85,16 @@ import {
   authorizeRepo,
   type AuthorizeDeps,
 } from "./dispatch/authorize.js";
+import { buildMessages, contextMessageTexts } from "./dispatch/messages.js";
+import {
+  attachWorkspace,
+  composePrompt,
+  openAckCard,
+  registerRun,
+  reserveRun,
+  startMemoryRead,
+  type ProvisionDeps,
+} from "./dispatch/provision.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "./runFriction.js";
 import { startReviewReadingDiff } from "./readingDiff.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -106,33 +104,19 @@ import { defaultRunRegistry, type RunHandle, REPLAY_EVERYTHING } from "./runRegi
 import { inFlightToolAfter, quietSuffix } from "./statusCardLabel.js";
 import { createCardShell, type CardShell } from "./statusCardFrame.js";
 import { createRunEnding, type RunEnding } from "./runEnding.js";
-import { coalesceStatus } from "./statusCoalescer.js";
-import type {
-  ChannelIO,
-  DocumentAttachment,
-  HistoryItem,
-  ImageAttachment,
-  IncomingMessage,
-  StatusHandle,
-} from "./types.js";
+import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle } from "./types.js";
 
 // The dispatcher is the channel-agnostic core: config commands, directive
 // parsing, layered resolution, permission gates, history assembly, executor
 // selection, and the agent run. Channels are pure transports (src/channels/).
 
-export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, AuthorizeDeps, RecordDeps {
-  /** What the resident Worker last said about the fleet (its cap), read in the
-   *  background so the About block names the Worker's number, never a constant
-   *  (routing-and-config item 11). `NO_FLEET` without residents. */
-  residentFleet: ResidentFleetFacts;
+export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, AuthorizeDeps, ProvisionDeps, RecordDeps {
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
   tracer?: Tracer;
   /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */
   sinks?: SpanSink[];
   /** The in-process span log every root also feeds (docs/reference/specs/tracing.md item 26); `GET /admin/trace/log` reads it. */
   spanLog?: SpanLog;
-  /** where runtime state (sandboxes.json) lives; default ./data */
-  dataDir?: string;
   /**
    * Posts a review comment back to a PR. Called after a `review`
    * run against a resolved PR, unless the request opted out. Default: the real
@@ -197,39 +181,6 @@ export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, Auth
    */
   fetchPrCommits?: (q: { repo: string; base: string; sha: string }) => Promise<PrCommitList | undefined>;
   /**
-   * Cross-session memory store (docs/decisions/0017-memory-off-by-default.md). When `config.memory.enabled`
-   * is true the dispatcher retrieves scope-relevant records from this store
-   * and injects them as an advisory context block before the model turn, and
-   * after the reply a background reflection pass writes distilled records back
-   * to it. With memory off (the default) production wires a `NullMemoryStore`
-   * (src/index.ts, src/cli.ts) — and the memory module selects one whatever
-   * is wired — so model input is byte-identical to memory-off and nothing is
-   * written. Injectable for tests.
-   */
-  memory: MemoryStore;
-  /**
-   * Skill store backing the load-a-skill capability. When present, the
-   * dispatcher appends the calling agent's scoped skill name+description list to
-   * its system prompt (progressive disclosure) and passes the store to the tool
-   * context so list_skills/use_skill work. Absent (as in most unit tests) →
-   * no skill block and the skill tools report themselves unavailable, leaving
-   * the request unchanged. Production wires a BundledSkillStore (src/index.ts,
-   * src/cli.ts); the DO-backed upload store is PR2, behind this same interface.
-   */
-  skills?: SkillStore;
-  /**
-   * External MCP servers as tools (docs/reference/specs/mcp-tools.md). Asked once
-   * per run, before the first model turn, for the servers scoped to the
-   * resolved agent; the bridged tools ride `RunOptions.extraTools` and the
-   * outcome becomes the MCP prompt block + one `mcp_unavailable` note per
-   * server that did not answer. No server scoped to the agent — the
-   * `NullMcpToolSource` of a process without MCP included — → the request is
-   * byte-identical to before the feature. Whether the self-serve surface
-   * (`mcp add …`) exists is `capabilities.mcp`, which the config awareness
-   * block tells the model (docs/reference/specs/mcp-tools.md item 17).
-   */
-  mcp: McpToolSource;
-  /**
    * The GitHub API behind the `github_*` tools (docs/reference/specs/github-tools.md).
    * Absent → the production REST client on the App credential; tests inject an
    * `InMemoryGithubApi`. The per-run capability adds the requesting user's
@@ -243,20 +194,7 @@ export interface CoreDeps extends AdmissionDeps, FastPathDeps, ResolveDeps, Auth
    * without a network call.
    */
   issueTracker?: IssueTracker;
-  /** Floor between two status-card edits (default `STATUS_UPDATE_MIN_MS`).
-   *  Tests that assert on an individual intermediate frame set 0. */
-  statusUpdateMinMs?: number;
 }
-
-/** Floor between two edits of a run's status card (see `coalesceStatus`). Below
- *  the 5 s heartbeat so a heartbeat frame is never held back by it. */
-const STATUS_UPDATE_MIN_MS = 3000;
-
-/** Bounds on the thread context recorded into a run's stream as `context`
- *  events: the newest turns win, at most this many, within this
- *  many bytes of redacted text in total. */
-const CONTEXT_MAX_ITEMS = 20;
-const CONTEXT_MAX_BYTES = 256 * 1024;
 
 /** The web capability (undici Agent with the SSRF-checking connector + the
  *  search adapter) is built ONCE per process, not per run: the Agent owns the
@@ -497,31 +435,10 @@ export async function dispatch(
       root,
     });
 
-    // Cross-session memory — READ path, STARTED here and awaited
-    // below, so the memory Worker round trip (up to 5 s) overlaps the repo/PR
-    // resolution and the executor attach instead of adding to them. Its scopes
-    // are the org, this channel, this user, and — once resolution settles —
-    // the bound repo; the read never depends on the repo GATE, only on
-    // the repo NAME, and a failed resolution simply means no repo scope.
-    // Started after the agent gate, never before: a refused request must not
-    // touch memory (retrieval bumps usage counters). Flag-gated: with memory
-    // disabled (default) this resolves to undefined via a NullMemoryStore,
-    // leaving `messages` and `system` byte-identical to memory-off. The no-op
-    // catch keeps an early return (repo refusal, ask-once) from leaving the
-    // rejection unhandled; the real await below still surfaces a failure where
-    // it did.
-    const memoryBlockP = root.span("dispatch.memory_read", (span) =>
-      memoryContextBlock(
-        deps.config.config.organization,
-        deps.config.config.memory,
-        deps.memory,
-        directives.text,
-        msg.userId,
-        { channelId: msg.channelId, repo: repoCtxP.then((ctx) => ctx.repo) },
-        span,
-      ),
-    );
-    memoryBlockP.catch(() => {});
+    // Cross-session memory — READ path, started here (dispatch/provision.ts) so
+    // the memory Worker round trip overlaps the repo/PR resolution and the
+    // attach; awaited when the prompt is composed.
+    const memoryBlockP = startMemoryRead(deps, { msg, directives, repoCtxP, root });
 
     // Acknowledge NOW, before anything slow. Everything between here and the
     // model turn can take minutes — repo/PR resolution (GitHub REST), memory
@@ -534,26 +451,11 @@ export async function dispatch(
     // card's elapsed time spans the whole run, not the resume.
     // The card's clock is the request's: it ticks from receipt (docs/reference/specs/tracing.md).
     const startedAt = carriedRow?.startedAt ?? receivedAt;
-    // One builder for every paint of this card (statusCardFrame.ts): the ack,
-    // the spinner frames, the closes before the run starts, the done frame.
-    const shell = createCardShell({
-      label: `*${agent.name}* on \`${resolved.modelRef}\``,
-      startedAt,
-      now: clock,
-    });
-    // Coalesced: the run below refreshes it on every event, the channel sees at
-    // most one edit per STATUS_UPDATE_MIN_MS, always the newest frame.
-    const card = coalesceStatus(
-      await root.span("dispatch.ack_card", () => io.status(shell.ack())),
-      deps.statusUpdateMinMs ?? STATUS_UPDATE_MIN_MS,
-    );
+    const ack = await openAckCard(deps, { io, agent, resolved, startedAt, clock, root, trace });
+    const { shell, card } = ack;
     setupCard = card;
     setupShell = shell;
-    // From here the card names the setup step in flight (the card sink's
-    // display label — `attaching the workspace…`) until the agent loop starts;
-    // the setup heartbeat paints it.
-    trace.bindCard({ setupLabel: (label) => shell.setSetupLabel(label) });
-    setupHeartbeat = setInterval(() => card.update(shell.live()), 5000);
+    setupHeartbeat = ack.heartbeat;
 
     // The repo/ref resolution started above (before the ack) lands here; the
     // gate below runs against it exactly as before.
@@ -632,252 +534,68 @@ export async function dispatch(
     });
     if (headPreflight.kind === "refused") return;
 
-    // The reservation (item 42): the run's row BEFORE the workspace attach —
-    // identity, request, card, no prompt — so a kill during a slow attach (a
-    // resident's mutex wait, a cold clone) leaves a row the next generation
-    // restarts instead of a run that vanished. Its heartbeat holds the lease
-    // through the attach; the claim after the prompt exists promotes it. A
-    // resume adopted its row above; a restart reserved it above.
-    // The run's id, minted here (item 42) — after the ship fork, which mints
-    // its own — so the registry row, the row reserved before the attach and
-    // the record all share it; a resume or a restart keeps the row's.
-    const runId = carriedRow?.runId ?? registry.mintId();
-    // Asked once per run (the authorization spec's channel-visibility rule):
-    // the registry row, the reservation and the claim reuse it.
-    const channelVisibility = await root.span("dispatch.channel_visibility", () =>
-      channelVisibilityOf(deps, msg.channelId),
-    );
-    // The registry row, created NOW — before the reservation and the attach —
-    // so the run is one row on every surface from the moment it is admitted:
-    // the runs index lists it with its label and its capability link, the run
-    // page serves it, a stop during the attach latches in its control. Before
-    // this the row came after the attach, and the runs index showed the
-    // reservation meanwhile as a labelless ledger row with a tokenless link.
-    // Its stream stays empty until the run loop binds the trace below (the
-    // request is the first event of the record, live-view item 12).
-    // A human-first label for the Access-gated runs index (`GET /runs`): agent +
-    // repo (repo runs) or channel/user (chat runs) + a snippet of the request,
-    // so a row reads like `review · #general · alice · "…"` rather
-    // than raw ids. Built from the directive-stripped text so directives (agent:/
-    // model:) never clutter the snippet. The registry redacts and caps it;
-    // `run.label` is the one the record and the friction row carry (never
-    // `runLabel`, which may hold a pasted secret).
-    const runLabel = composeRunLabel({
-      agent: agent.name,
-      repo: repoCtx.repo,
-      channelId: msg.channelId,
-      userId: msg.userId,
-      channelName: msg.channelName,
-      userName: msg.userName,
-      text: directives.text,
+    // The reservation (item 42): the run's row on every surface BEFORE the
+    // workspace attach (dispatch/provision.ts) — the registry row, its label and
+    // link, the request and context events — then, for a fresh request, the
+    // ledger row. `registered` the moment the row exists: a later throw discards it.
+    const registration = await registerRun(deps, {
+      msg,
+      io,
+      agent,
+      resolved,
+      directives,
+      history,
+      repoCtx,
+      carriedRow,
+      resume,
+      startedAt,
+      receivedAt,
+      clock,
+      root,
+      trace,
+      registry,
+      shell,
+      admitted,
     });
-    const run = registry.create(
-      runLabel,
-      {
-        agent: agent.name,
-        model: resolved.modelRef,
-        channelId: msg.channelId,
-        userId: msg.userId,
-        threadKey: msg.threadKey,
-        channelVisibility,
-        ...(carriedRow ? {} : { receivedAt }), // the window opens at receipt (docs/reference/specs/tracing.md); a resume or restart keeps its original stamps
-        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-      },
-      // Under the run's id, at the card's start (the reservation's, or the
-      // carried row's) — a resume replays its events, a restart starts them
-      // afresh at the row's original start.
-      { id: runId, startedAt, ...(resume ? { replay: resume.events } : {}) },
-    );
+    const { run, runId, channelVisibility, liveUrl, publishText, publishRunMeta } = registration;
     registered = run;
-    // With no PUBLIC_BASE_URL the link is simply omitted — the feature
-    // degrades gracefully, the run is otherwise unchanged. The card carries it
-    // from here, and a follow-up's ack/refusal can link the run page
-    // (thread-admission item 1).
-    const liveUrl = liveViewLink(run.id, run.token);
-    shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
-    if (liveUrl) admitted.runLink = liveUrl;
-    io.runStarted?.({ id: run.id });
-    // The run's stream is live from here (docs/reference/specs/tracing.md item 6): the
-    // spans so far — the root, the ack card, the repo resolution — are
-    // backfilled, and the attach and the resident's grafted steps stream as
-    // they happen, so the run page and the index's event count move through a
-    // long attach. Every streamed setup span is head material
-    // (`isHeadMaterial`: `request`, `slack.receive`, `dispatch.*`), so the
-    // protected head still runs unbroken from the first event through the
-    // request published next.
-    trace.bindRun(run.id, (e) => registry.publish(run.id, e));
-    // The narrative events the dispatcher itself publishes — the request, the
-    // thread context, the final answer — go straight to the registry: redacted
-    // like every event, uncapped (the run record is the source of truth; the
-    // registry's byte-bounded backlog and the record's per-event budget bound
-    // persistence), never through onEvent (no card refresh, no friction input),
-    // and logged as ONE line of type + byte-length — never the text, which may
-    // span lines or carry what redaction missed.
-    const publishText = (
-      type: "input" | "context" | "answer",
-      text: string,
-      source?: { url?: string; channel?: string; user?: string },
-      raw?: string,
-    ) => {
-      const redacted = redactSecrets(text);
-      const event = { type, text: redacted, ...(source ? { source } : {}), at: clock() };
-      // The model's raw answer rides on the event only when normalization
-      // changed it AND the event still fits the per-event byte budget — the
-      // budget already truncates `text` and must not be starved by a second
-      // copy (docs/reference/specs/llm-output.md item 5).
-      const withRaw = raw !== undefined ? { ...event, raw: redactSecrets(raw) } : event;
-      registry.publish(run.id, utf8ByteLength(JSON.stringify(withRaw)) <= MAX_EVENT_BYTES ? withRaw : event);
-      console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
-    };
-    // The request is the first content event of the run record (live-view item
-    // 12), published NOW — before the attach — so the run page shows what the
-    // run is about while the workspace is still being attached: the
-    // directive-stripped text, humanized (Slack `<url|label>`/mention markup
-    // unwrapped, entities unescaped — it is channel-authored mrkdwn, not prose)
-    // + an attachment count. Every other channel's text is recorded exactly as
-    // it was dispatched to the model, so the record never diverges from the input.
-    const humanize = isMrkdwnChannel(msg.channelId);
-    const attachments = attachmentSuffix(msg.images, msg.documents);
-    const source = {
-      ...(msg.sourceUrl ? { url: msg.sourceUrl } : {}),
-      ...(msg.channelName ? { channel: msg.channelName } : {}),
-      ...(msg.userName ? { user: msg.userName } : {}),
-    };
-    const requestText = humanize ? humanizeMessageText(directives.text) : directives.text;
-    if (!resume)
-      publishText(
-        "input",
-        attachments ? `${requestText} ${attachments}` : requestText,
-        Object.keys(source).length > 0 ? source : undefined,
-      );
-    // What the run is about (live-view item 19): agent, model, and the repo
-    // context as resolved NOW — so the page can head the record with linked
-    // owner/repo · ref · #PR · sha. Straight after the request; published once
-    // more if the attach adopts a moved PR head below (readers take the latest).
-    const publishRunMeta = () =>
-      registry.publish(run.id, {
-        type: "run_meta",
-        agent: agent.name,
-        model: resolved.modelRef,
-        traceId: root.traceId,
-        ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-        ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
-        ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
-        ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-        at: clock(),
-      });
-    if (!resume) publishRunMeta();
-    // The thread context fed to the model follows the request as `context`
-    // events — text only, attachments as metadata lines, bounded to
-    // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
-    if (!resume && deps.config.config.runHistory?.includeContext !== false) {
-      for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
-    }
-    if (!resume && !restart) {
-      requestRow = durableInboxMessage(msg, msg.text, receivedAt);
-      const request = requestRow;
-      reserved = await root.span("dispatch.ledger_reserve", () =>
-        deps.runLedger.reserve({
-          runId,
-          threadKey: msg.threadKey,
-          startedAt,
-          meta: {
-            agent: agent.name,
-            model: resolved.modelRef,
-            channelId: msg.channelId,
-            userId: msg.userId,
-            threadKey: msg.threadKey,
-            channelVisibility,
-            ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-            ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-            ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
-            ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
-            ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
-            readonly: agent.toolset === "readonly",
-            request,
-          },
-          card: card.handle ?? null,
-          ...reservationHooks,
-        }),
-      );
-      // Named on the slot from here (the row exists now): a steer's durable
-      // copy lands under it, and the boot-gap hand-off finds it. Deliberately
-      // AFTER the reserve resolves, not before: a steer that lands during the
-      // round trip rides in memory alone (thread-admission item 5 scopes the
-      // durable window "from the reserve on"), where naming the run earlier
-      // would push to a row that may not exist yet and warn for nothing.
-      admitted.runId = runId;
+    const reservation = await reserveRun(deps, {
+      msg,
+      agent,
+      resolved,
+      repoCtx,
+      channelVisibility,
+      runId,
+      startedAt,
+      receivedAt,
+      resume,
+      restart,
+      card,
+      hooks: reservationHooks,
+      admitted,
+      root,
+    });
+    if (reservation) {
+      reserved = reservation.reserved;
+      requestRow = reservation.requestRow;
     }
 
-    // The workspace attach is paired with its release on the round's agent
-    // (reviewRound.ts): readonly toolset → readonly worktree +
-    // release("always"); writable → release("if-clean").
-    let round: RoundWorkspace;
-    try {
-      // The attach is one `dispatch.workspace.attach` span naming its backend
-      // (docs/reference/specs/tracing.md): the setup step that takes minutes on a cold clone.
-      round = await root.span("dispatch.workspace.attach", async (span) => {
-        // The resident's own steps (clone, install, the mutex wait…) graft under
-        // this span, rebased to its start (docs/reference/specs/tracing.md item 19) — on a
-        // failed attach too, where the trace says which step blew the budget.
-        const graft = (steps: readonly ResidentStep[], residentTotalMs?: number) =>
-          graftResidentSteps(steps, {
-            parent: span,
-            prefix: "dispatch.workspace.attach",
-            baseAt: span.record().startedAt,
-            clipAt: clock(),
-            ...(residentTotalMs !== undefined ? { residentTotalMs } : {}),
-          });
-        let attached: Awaited<ReturnType<typeof attachRoundWorkspace>>;
-        try {
-          attached = await attachRoundWorkspace({
-            factory: {
-              execution: deps.config.config.execution,
-              workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
-              dataDir: deps.dataDir ?? "./data",
-            },
-            round: { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
-            logKey: msg.threadKey,
-            span,
-          });
-        } catch (err) {
-          const failed = residentTraceOf(err);
-          if (failed) graft(failed.steps, failed.residentMs);
-          throw err;
-        }
-        if (attached.selection.backend) span.setAttrs({ backend: attached.selection.backend });
-        if (attached.selection.trace) graft(attached.selection.trace, attached.selection.attachMs);
-        return attached;
-      });
-    } catch (err) {
-      // Ask-once: the resident has no ref binding for this thread, the
-      // message named no branch, AND the resident did not name a default to
-      // bind to (the factory binds to `defaultRef` itself when the 409 carries
-      // one — only a Worker predating that field reaches here). Binding is
-      // explicit-or-ask-once, never a silent guess. ONE clarifying question,
-      // no model turn burned (mirrors the named-refusal reply shape). The
-      // user's answer in the thread (e.g. "on main") carries the ref on the
-      // next message and re-attach binds it.
-      if (err instanceof ResidentNeedsRefError) {
-        const repo = repoCtx.repo;
-        await refuse("which_branch", async () => {
-          await card.done(
-            shell.close({ kind: "not_started", icon: "🌿", reason: "which branch?", ...closeLines(clock(), false) }),
-          );
-          await io.reply(
-            `🌿 Which branch of \`${repo}\` should this thread work on? ` +
-              `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
-          );
-        });
-        return;
-      }
-      throw err;
-    }
+    // The workspace attach (dispatch/provision.ts): the setup step that takes
+    // minutes on a cold clone, and the ask-once refusal when no branch is bound.
+    const attach = await attachWorkspace(deps, {
+      msg,
+      io,
+      refuse,
+      card,
+      shell,
+      closeLines,
+      clock,
+      agent,
+      repoCtx,
+      root,
+    });
+    if (attach.kind === "refused") return;
+    const { round } = attach;
     const { executor, note, resident, binding } = round.selection;
     if (fencedWhileAttaching) {
       // The reservation's lease lapsed during the attach and another generation
@@ -911,7 +629,7 @@ export async function dispatch(
     const verifiedAtAttach = headGate.verifiedAtAttach;
     // The run's meta went out at the reservation with the head as resolved
     // then; the record and the page must name the head actually reviewed.
-    if (headGate.headAdopted) publishRunMeta();
+    if (headGate.headAdopted) publishRunMeta(repoCtx);
 
     // Whether this run reviews a resolved PR (its system prompt carries the
     // REVIEW TARGET block, item 9) — the same predicate the post-step and the
@@ -924,109 +642,27 @@ export async function dispatch(
     // the PR from the workspace's observed origin remote (an agent-discovered
     // repo; the App token bounds what is writable either way).
     const isCodingPrRun = agent.toolset === "full";
-    // Progressive disclosure: the calling agent's scoped skill
-    // name+description list trails the agent's own instructions (it is
-    // guidance about the agent's tools, not advisory context like the memory
-    // block). Bodies load on demand via use_skill — never dumped here. No
-    // store, or an agent with no scoped skills (general/research) → undefined
-    // and the prompt is untouched.
-    const skillsBlock = deps.skills ? skillGuidanceBlock(deps.skills, agent.name) : undefined;
-    // External MCP tools (docs/reference/specs/mcp-tools.md item 8): discovery for
-    // the servers scoped to THIS agent, once, before the model turn. A server
-    // that does not answer contributes no tools and is named in the MCP block
-    // (and, once the run is registered, in an `mcp_unavailable` note). Nothing
-    // scoped — a process without MCP has the null source — → no tools, no
-    // block, request unchanged.
-    const mcpForRun = await root.span("dispatch.mcp_discovery", () =>
-      deps.mcp.toolsFor(agent.name, { userId: msg.userId, channelId: msg.channelId }),
-    );
-    const mcpBlock = mcpGuidanceBlock(mcpForRun.servers);
-
-    // Config awareness (routing-and-config behavior 8): tell the model the
-    // RESOLVED agent/model/scope of this very run and how users tune it, so no
-    // agent can confabulate "I'm stateless / nothing is tunable". Built from
-    // the same `resolved`/`directives`/`sticky` values that selected the run,
-    // so it can never describe a different state than the one executing.
-    // Universal (every agent, every turn), a few lines, names only.
-    const scopes = deps.config.scopes(msg.channelId, msg.userId);
-    const configBlock = configAwarenessBlock({
-      agentName: agent.name,
-      modelRef: resolved.modelRef,
-      effort: resolved.effort,
-      channel: scopes.channel,
-      user: scopes.user,
-      messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
-      threadDirective: { agent: sticky.agent, model: sticky.model, effort: sticky.effort },
-      canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
-      mcp: {
-        registryOn: deps.capabilities.mcp,
-        served: mcpForRun.servers.filter((s) => s.toolCount !== undefined).map((s) => s.server),
-        unavailable: mcpForRun.servers.filter((s) => s.unavailable !== undefined).map((s) => s.server),
-      },
-    });
-
-    // Self-description (routing-and-config behavior 11): what Switchboard is —
-    // agents, residents, runs, where the source and specs live — built from
-    // the live agent registry, on every agent's prompt, so "how does your
-    // resident system work?" is answered from fact instead of a public-web
-    // 404 on our private repo.
-    const aboutBlock = selfDescriptionBlock(
-      AGENTS,
-      deps.config.config.organization,
-      deps.capabilities,
-      deps.residentFleet.cap(),
-    );
-
-    // Custom instructions: the requester's user text + this
-    // channel's text, as ONE advisory block. Read from the same resolved
-    // scopes as the config block, AFTER resolution and every gate above — so
-    // by construction they cannot influence agent, model, or permissions.
-    // Absent (the default) → no block, prompt unchanged.
-    const instructionsBlock = customInstructionsBlock(scopes);
-
-    // Effective system prompt, composed AFTER executor resolution (via
-    // RunOptions.system) by the extracted composer (reviewRound.ts): a
-    // resident-path run swaps in the agent's resident variant with the
-    // resolved repo named and the worktree path when the attach answered it;
-    // a PR review gets the REVIEW TARGET block (item 9) recomposed
-    // per pinned head. Order: memory (advisory context, leads when present) →
-    // config block → custom instructions → the agent's effective instructions
-    // (+ skills). The memory block is absent with memory off (default),
-    // keeping the memory-off request byte-identical to a NullMemoryStore run.
-    // Retrieval was started before the repo resolution and executor selection
-    // above; by now it has usually landed. The shared AgentDef is never
-    // mutated (concurrent dispatches share it).
-    // The prompt waits on the memory read here: `dispatch.compose` is that wait
-    // (the composition itself is synchronous).
-    const memoryBlock = await root.span("dispatch.compose", () => memoryBlockP);
-    const composeSystem = makeSystemComposer({
+    // The prompt (dispatch/provision.ts): skills, MCP discovery, the config and
+    // self-description blocks, the custom instructions, the memory block, and
+    // the system composer pinned to the head this run reviews.
+    const prompt = await composePrompt(deps, {
+      msg,
       agent,
-      resident: resident === true,
-      repo: repoCtx.repo,
-      workspace: binding?.workspace,
-      prTarget:
-        isPrReview && repoCtx.repo && repoCtx.pr !== undefined
-          ? { repo: repoCtx.repo, pr: repoCtx.pr, ref: repoCtx.ref, baseRef: repoCtx.baseRef }
-          : undefined,
-      blocks: {
-        memory: memoryBlock,
-        config: configBlock,
-        about: aboutBlock,
-        instructions: instructionsBlock,
-        skills: skillsBlock,
-        mcp: mcpBlock,
-      },
+      resolved,
+      directives,
+      sticky,
+      repoCtx,
+      selection: round.selection,
+      isPrReview,
+      memoryBlockP,
+      verifiedAtAttach,
+      resume,
+      root,
     });
+    const { mcpForRun, composeSystem, system } = prompt;
     // The PR head this run reviews — the resolved head, or the one adopted at
-    // attach; the head settle (item 12) advances it after the model turn. The
-    // post-step pins to it and the reviewed-head guard checks against it.
-    let reviewHead = repoCtx.headSha;
-    // The first turn's system, pinned to that head; a re-review recomposes its
-    // own inside settleReviewedHead.
-    // A resume re-sends the prompt the run started with, verbatim (plan D3):
-    // memory retrieval and MCP discovery are not reproducible, and the model's
-    // cached prefix and thinking blocks are bound to it.
-    const system = resume ? resume.row.system : composeSystem({ sha: reviewHead, verified: verifiedAtAttach });
+    // attach; the head settle (item 12) advances it after the model turn.
+    let reviewHead = prompt.reviewHead;
 
     if (note) shell.setLabel(`${shell.label} · ${oneLine(note)}`);
     // A run that went to a cold sandbox says why on its stream too (resident-
@@ -2455,112 +2091,4 @@ export const DEPLOY_RESTART_NOTICE = "⏸ deploy in progress — this run contin
 let shutdownNotice: string | undefined;
 export function setShutdownNotice(notice: string | undefined): void {
   shutdownNotice = notice;
-}
-
-function buildMessages(
-  history: HistoryItem[],
-  currentText: string,
-  currentImages?: ImageAttachment[],
-  currentDocuments?: DocumentAttachment[],
-): ChatMessage[] {
-  const messages: ChatMessage[] = history.map((h) => ({
-    role: h.role,
-    content: turnContent(h.text, h.images, h.documents),
-  }));
-  messages.push({ role: "user", content: turnContent(currentText, currentImages, currentDocuments) });
-  return normalizeAlternation(messages);
-}
-
-/**
- * Attachments first (images, then documents), then the user's text — a turn
- * always has at least one part. PDFs become a native `document` part; text/code
- * files are inlined as a fenced text part naming the file (provider-agnostic).
- * Exported for tests.
- */
-export function turnContent(text: string, images?: ImageAttachment[], documents?: DocumentAttachment[]): ContentPart[] {
-  const parts: ContentPart[] = (images ?? []).map((img) => ({
-    type: "image" as const,
-    mediaType: img.mediaType,
-    data: img.data,
-  }));
-  for (const doc of documents ?? []) {
-    if (doc.mediaType === "application/pdf") {
-      parts.push({ type: "document", mediaType: doc.mediaType, data: doc.data, name: doc.name });
-    } else {
-      parts.push({ type: "text", text: fenceFile(doc.name, doc.data) });
-    }
-  }
-  if (text) parts.push({ type: "text", text });
-  if (parts.length === 0) parts.push({ type: "text", text: "(empty message)" });
-  return parts;
-}
-
-/**
- * The text recorded for one turn in the run stream: the turn's text
- * plus one metadata line per attachment — name, media type, decoded size — and
- * NEVER the attachment itself (no base64, no file body). Images and PDFs carry
- * base64 (size = decoded bytes); text/code documents carry their decoded text.
- * The text is humanized (`humanizeMessageText`: Slack link/mention markup
- * unwrapped, entities unescaped) — every caller feeds channel-authored turns.
- * Redaction happens at publish, not here.
- */
-function messageText(
-  text: string,
-  humanize: boolean,
-  images?: ImageAttachment[],
-  documents?: DocumentAttachment[],
-): string {
-  const lines = [(humanize ? humanizeMessageText(text) : text).trim()];
-  for (const img of images ?? [])
-    lines.push(attachmentLine(img.name, img.mediaType, Buffer.byteLength(img.data, "base64")));
-  for (const doc of documents ?? []) {
-    const bytes = Buffer.byteLength(doc.data, doc.mediaType === "application/pdf" ? "base64" : "utf8");
-    lines.push(attachmentLine(doc.name, doc.mediaType, bytes));
-  }
-  return lines.filter((l) => l.length > 0).join("\n");
-}
-
-function attachmentLine(name: string | undefined, mime: string, bytes: number): string {
-  return `[attachment: ${name ?? "attachment"} · ${mime} · ${bytes} bytes]`;
-}
-
-/**
- * The thread-context turns to record as `context` events: the
- * NEWEST turns first, at most `CONTEXT_MAX_ITEMS`, until the redacted texts
- * together exceed `CONTEXT_MAX_BYTES` — then returned in thread order. Each turn is prefixed with its role so a context row reads as
- * the conversation did; attachments are metadata lines (see `messageText`).
- */
-function contextMessageTexts(history: readonly HistoryItem[], humanize: boolean): string[] {
-  const kept: string[] = [];
-  let bytes = 0;
-  for (let i = history.length - 1; i >= 0 && kept.length < CONTEXT_MAX_ITEMS; i--) {
-    const h = history[i];
-    const text = `${h.role}: ${messageText(h.text, humanize, h.images, h.documents)}`;
-    // Budget what will actually be published (publishText redacts).
-    const size = utf8ByteLength(redactSecrets(text));
-    if (bytes + size > CONTEXT_MAX_BYTES) break;
-    bytes += size;
-    kept.push(text);
-  }
-  return kept.reverse();
-}
-
-/** Inline a text/code file's content, fenced and labeled with its name. */
-function fenceFile(name: string | undefined, content: string): string {
-  return `\n\n[file: ${name ?? "attachment"}]\n\`\`\`\n${content}\n\`\`\`\n`;
-}
-
-/** Providers require user-first and behave best with merged consecutive roles. */
-function normalizeAlternation(messages: ChatMessage[]): ChatMessage[] {
-  const out: ChatMessage[] = [];
-  for (const m of messages) {
-    const last = out[out.length - 1];
-    if (last && last.role === m.role) {
-      last.content.push(...m.content);
-    } else {
-      out.push({ role: m.role, content: [...m.content] });
-    }
-  }
-  while (out.length > 0 && out[0].role !== "user") out.shift();
-  return out;
 }
