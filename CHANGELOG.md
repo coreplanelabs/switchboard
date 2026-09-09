@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.12.0](https://github.com/coreplanelabs/switchboard/compare/v1.11.0...v1.12.0) (2026-09-09)
+
+
+### Features
+
+* **cli:** the CLI as an npm package, published on release once the owner turns it on ([#794](https://github.com/coreplanelabs/switchboard/issues/794)) ([ec170a3](https://github.com/coreplanelabs/switchboard/commit/ec170a3a26c43948e1731c1895a3caebf3c7a180))
+* **docs:** OpenSwitchboard is the product name; the docs site is the project's website, not a Worker ([#795](https://github.com/coreplanelabs/switchboard/issues/795)) ([08f0b59](https://github.com/coreplanelabs/switchboard/commit/08f0b595167e7b89ba2fd46d8686afedcef5999a))
+* **sandbox:** the cold sandbox image ships a Docker engine — a lazy daemon start behind the docker command ([#797](https://github.com/coreplanelabs/switchboard/issues/797)) ([ed39624](https://github.com/coreplanelabs/switchboard/commit/ed396241b75361d9183f3e8ce559d71670c12535))
+* **sandbox:** the cold sandbox runs on standard-4 — 4 vCPU and 12 GiB so one thread can typecheck a large monorepo ([#796](https://github.com/coreplanelabs/switchboard/issues/796)) ([9b61e18](https://github.com/coreplanelabs/switchboard/commit/9b61e18a1ab3efca7879afae92e80ae078708949))
+* **sandbox:** the read-scoped sandbox token also reads Actions and checks — CI runs, logs and the cache list without any write ([#798](https://github.com/coreplanelabs/switchboard/issues/798)) ([c1a4f52](https://github.com/coreplanelabs/switchboard/commit/c1a4f52e43d3858216233245888b6d5c9a97d107))
+
+
+### Documentation
+
+* **agents:** record 0026 — a run is a capability profile over three axes, named agents become presets, and a routing stage picks the profile ([#800](https://github.com/coreplanelabs/switchboard/issues/800)) ([a5d8f69](https://github.com/coreplanelabs/switchboard/commit/a5d8f696ca4a014361ef90649bca3243d72bead2))
+* **process:** the PR title is the changelog line — the scope vocabulary is the code map's Areas, a breaking title needs its migration note ([#793](https://github.com/coreplanelabs/switchboard/issues/793)) ([f242497](https://github.com/coreplanelabs/switchboard/commit/f242497b808e7bad35a4b2951dad5fec3ac480bc))
+
+
+### Refactoring
+
+* **core:** Phase 6 closes — the settle stage, the naming and YAGNI passes, the parked nits, record 0025 ([#790](https://github.com/coreplanelabs/switchboard/issues/790)) ([f32cea7](https://github.com/coreplanelabs/switchboard/commit/f32cea75f562acc0c45ac05fe3c3cd052f93b123))
+
 ## [1.11.0](https://github.com/coreplanelabs/switchboard/compare/v1.10.0...v1.11.0) (2026-09-09)
 
 
