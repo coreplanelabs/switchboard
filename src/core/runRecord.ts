@@ -582,7 +582,7 @@ type Sized = { event: RunEvent; bytes: number };
 
 /** The protected head as a record sees it: the leading run of head material
  *  (`input`, `context`, `run_meta`, the setup spans, the `mcp_unavailable` /
- *  `spans_dropped` notes) — the same set the registry protects. */
+ *  `spans_dropped` / `cold_sandbox` notes) — the same set the registry protects. */
 function headLength(events: readonly Sized[]): number {
   let n = 0;
   while (n < events.length && isHeadMaterial(events[n].event)) n++;

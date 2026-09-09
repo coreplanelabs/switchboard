@@ -1643,6 +1643,15 @@ export async function dispatch(
     const system = resume ? resume.row.system : composeSystem({ sha: reviewHead, verified: verifiedAtAttach });
 
     if (note) shell.setLabel(`${shell.label} · ${oneLine(note)}`);
+    // A run that went to a cold sandbox says why on its stream too (resident-
+    // repos item 24): the card is not the only witness — the run page would
+    // otherwise show resident steps grafted under an attach that ended on the
+    // sandbox backend, with nothing saying the resident gave up. Only a
+    // sandbox-backed run: a resident run's note is the positive `resident ·
+    // <repo> · <ref>@<sha7>` (or "attached to the last snapshot"), not a
+    // fallback. Head material, like every setup event ahead of the loop.
+    if (note && !resident)
+      registry.publish(run.id, { type: "run_note", kind: "cold_sandbox", summary: oneLine(note), at: clock() });
     console.log(`[run] ${msg.threadKey} user=${msg.userId} agent=${agent.name} model=${resolved.modelRef}`);
     setupCard = undefined; // from here the run loop owns the card's close
     clearInterval(setupHeartbeat);

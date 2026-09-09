@@ -57,7 +57,15 @@ export type RunNoteKind =
    *  resubmitting the PR description, and the same run is being given one
    *  bounded extra model turn to submit it (docs/reference/specs/pr-description.md
    *  item 5). Published by the dispatcher before that turn. */
-  | "description_turn";
+  | "description_turn"
+  /** The run is on a cold per-thread sandbox instead of a warm resident, and
+   *  the summary says why — the resident attach failed (its steps so far are
+   *  grafted under the attach span), the resident was unreachable or not
+   *  serviceable, or the repo is not onboarded (docs/reference/specs/resident-repos.md
+   *  item 24). The same text the card carries; published by the dispatcher
+   *  after the attach, before the first turn, so the run page explains a
+   *  sandbox run that shows resident steps. */
+  | "cold_sandbox";
 
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
@@ -75,6 +83,7 @@ export const RUN_NOTE_KINDS = [
   "follow_up",
   "resumed",
   "description_turn",
+  "cold_sandbox",
 ] as const satisfies readonly RunNoteKind[];
 type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
 const _everyKindListed: _EveryKindListed = true;
@@ -149,7 +158,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
     case "run_meta":
       return true;
     case "run_note":
-      return event.kind === "mcp_unavailable" || event.kind === "spans_dropped";
+      return event.kind === "mcp_unavailable" || event.kind === "spans_dropped" || event.kind === "cold_sandbox";
     case "span_start":
       return event.name === "request" || event.name === "slack.receive" || event.name.startsWith("dispatch.");
     case "span_end":

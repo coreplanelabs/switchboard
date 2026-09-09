@@ -1092,7 +1092,7 @@ describe("resident repo dispatch", () => {
     expect(provider.requests).toHaveLength(1);
   });
 
-  it("a resident fallback note appears in the status frames (named, never silent)", async () => {
+  it("a resident fallback note appears in the status frames and on the run's stream as a cold_sandbox note (named, never silent)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -1106,12 +1106,25 @@ describe("resident repo dispatch", () => {
     vi.stubGlobal("fetch", fetchSpy);
     const provider = capturingProvider();
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+    const registry = new RunRegistry({ genId: () => "run-cold", genToken: () => "tok" });
+    deps.runRegistry = registry;
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(replies).toContain("answer");
     expect(fetchSpy.mock.calls.filter((c) => String(c[0]).includes("resident.example"))).toHaveLength(1);
     expect(statuses.some((s) => s.title.includes("resident restoring (rehydrating) — using fresh sandbox"))).toBe(true);
+    // …and on the run's stream: a `cold_sandbox` note with the same text, after
+    // the attach and before the loop, head material like the rest of the setup
+    // — so the run page, not only the card, says why this run went cold.
+    const events = registry.snapshotById("run-cold")!.events;
+    const noteAt = events.findIndex((e) => e.type === "run_note" && e.kind === "cold_sandbox");
+    const attachEndAt = events.findIndex((e) => e.type === "span_end" && e.name === "dispatch.workspace.attach");
+    const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
+    expect(events[noteAt]).toMatchObject({ summary: "resident restoring (rehydrating) — using fresh sandbox" });
+    expect(noteAt).toBeGreaterThan(attachEndAt);
+    expect(noteAt).toBeLessThan(loopAt);
+    expect(events.slice(0, loopAt).every(isHeadMaterial)).toBe(true);
   });
 });
 
@@ -1833,6 +1846,11 @@ describe("repo/ref resolution + resident prompt selection", () => {
       .events.filter((e) => e.type === "run_meta")
       .map((e) => (e as { headSha?: string }).headSha);
     expect(metaHeads).toEqual([resolvedHead, attached]);
+    // A resident run: its card note is the positive `resident · acme/api · …`,
+    // and nothing on the stream claims the run went cold.
+    expect(
+      registry.snapshotById("run-adopt")!.events.some((e) => e.type === "run_note" && e.kind === "cold_sandbox"),
+    ).toBe(false);
     const system = provider.requests[0].system ?? "";
     expect(system).toContain(
       reviewTargetBlock({
