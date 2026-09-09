@@ -10473,6 +10473,16 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     const [, firstRoot, fresh] = roots;
     expect(firstRoot!.endedAt).toBeLessThanOrEqual(fresh!.startedAt);
     expect(fresh!.attrs.queuedBehindMs).toBeGreaterThanOrEqual(250_000);
+    // The queued numbers are on the roots AT START — the record's `request`
+    // span_start is the only streamed event of a root, and the page's caption
+    // reads it (tracing item 18): the follow-up's own root started with its
+    // platform delay, the fresh turn's with its wait behind the run.
+    const starts = log.starts.filter((r) => r.name === "request");
+    expect(starts.map((r) => r.attrs)).toEqual([
+      { channel: "slack" }, // the first run's request: no platform stamp in this fixture
+      { channel: "slack", queuedBeforeMs: 5_000 }, // the steered follow-up's own request
+      { channel: "slack", queuedBehindMs: fresh!.attrs.queuedBehindMs }, // the fresh turn
+    ]);
     expect(ticks.every((t) => t.span !== null)).toBe(true);
     // The steered follow-up's ack was an admission span on the first request.
     expect(log.ends.filter((r) => r.name === "dispatch.admission").map((r) => r.attrs)).toEqual([

@@ -171,3 +171,32 @@ describe("startProcessRoot", () => {
     await expect(withProcessRoot({ clock: () => 1 }, "drain", async () => 1)).resolves.toBe(1);
   });
 });
+
+describe("startRequestRoot — the queued numbers are on the root at start", () => {
+  it("originAt and queuedBehindMs become queuedBeforeMs / queuedBehindMs attrs of the root's span_start, so a bound run's record carries them; a platform stamp after receipt clamps to 0", () => {
+    const log = recordingSink();
+    const trace = startRequestRoot(
+      { config: config(), clock: createTickingClock(20_000).now, sinks: [log] },
+      { channel: "slack", receivedAt: 20_000, originAt: 20_000 - 111_714, queuedBehindMs: 250_000 },
+    );
+    const events: RunEvent[] = [];
+    trace.bindRun("r1", (e) => events.push(e));
+    expect(events[0]).toMatchObject({
+      type: "span_start",
+      name: "request",
+      attrs: { channel: "slack", queuedBeforeMs: 111_714, queuedBehindMs: 250_000 },
+    });
+    expect(log.starts.find((s) => s.name === "request")?.attrs).toMatchObject({ queuedBeforeMs: 111_714 });
+
+    const late = startRequestRoot(
+      { config: config(), clock: createTickingClock(20_000).now, sinks: [recordingSink()] },
+      { channel: "slack", receivedAt: 20_000, originAt: 25_000 },
+    );
+    expect(late.root.record().attrs).toEqual({ channel: "slack", queuedBeforeMs: 0 });
+    const plain = startRequestRoot(
+      { config: config(), clock: createTickingClock(20_000).now, sinks: [recordingSink()] },
+      { channel: "http", receivedAt: 20_000 },
+    );
+    expect(plain.root.record().attrs).toEqual({ channel: "http" });
+  });
+});

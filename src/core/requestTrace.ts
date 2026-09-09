@@ -53,7 +53,25 @@ export interface RequestTraceDeps {
 export interface RequestRootOptions {
   channel: Channel | undefined;
   receivedAt: number;
+  /** When the platform stamped the message (a Slack `ts`): the root starts with
+   *  `queuedBeforeMs = receivedAt − originAt`, the `queued … before we saw it`
+   *  caption's source. It must be on the root AT START — the root's only
+   *  streamed event is its `span_start`, so an attr set later never reaches a
+   *  run's record (docs/reference/specs/tracing.md, Stamps). */
+  originAt?: number;
+  /** A fresh turn's wait behind the run it was parked on: `queuedBehindMs` on
+   *  the root at start, for the same reason. */
+  queuedBehindMs?: number;
   attrs?: SpanAttrs;
+}
+
+/** The queued captions' numbers as root attrs: a platform delay only when it is
+ *  known and non-negative; the wait behind a previous run as given. */
+export function queuedAttrsOf(opts: Pick<RequestRootOptions, "receivedAt" | "originAt" | "queuedBehindMs">): SpanAttrs {
+  return {
+    ...(opts.originAt !== undefined ? { queuedBeforeMs: Math.max(0, opts.receivedAt - opts.originAt) } : {}),
+    ...(opts.queuedBehindMs !== undefined ? { queuedBehindMs: opts.queuedBehindMs } : {}),
+  };
 }
 
 /** The root's leading sinks: the injected ones (a test's recording sink), else
@@ -81,7 +99,7 @@ export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOption
   const root = tracer.start("request", {
     sinks: [...leadingSinks(deps), stream, card, collector],
     startedAt: opts.receivedAt,
-    attrs: { ...(opts.channel ? { channel: opts.channel } : {}), ...(opts.attrs ?? {}) },
+    attrs: { ...(opts.channel ? { channel: opts.channel } : {}), ...queuedAttrsOf(opts), ...(opts.attrs ?? {}) },
   });
   return {
     root,

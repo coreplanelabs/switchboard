@@ -524,13 +524,21 @@ export async function dispatch(
   // the run once it exists; the outermost finally ends it. The window opens at
   // `receivedAt`; the queued captions are attrs on the root and lines on the
   // card, never part of a duration.
+  // The queued numbers ride on the root FROM ITS START (`originAt`,
+  // `queuedBehindMs` in the root options): the root's only streamed event is
+  // its `span_start`, so an attr set later would never reach a run's record,
+  // and the page's `queued …` caption reads the record.
   const trace =
-    opts.trace ?? startRequestRoot(deps, { channel: channelOf(msg.channelId), receivedAt: msg.receivedAt ?? clock() });
+    opts.trace ??
+    startRequestRoot(deps, {
+      channel: channelOf(msg.channelId),
+      receivedAt: msg.receivedAt ?? clock(),
+      ...(msg.originAt !== undefined ? { originAt: msg.originAt } : {}),
+      ...(opts.queuedBehindMs !== undefined ? { queuedBehindMs: opts.queuedBehindMs } : {}),
+    });
   const root = trace.root;
   const receivedAt = trace.receivedAt;
   const queuedBeforeMs = msg.originAt !== undefined ? Math.max(0, receivedAt - msg.originAt) : undefined;
-  if (queuedBeforeMs !== undefined) root.setAttrs({ queuedBeforeMs });
-  if (opts.queuedBehindMs !== undefined) root.setAttrs({ queuedBehindMs: opts.queuedBehindMs });
   // A fresh turn's wait is the one behind the run; a platform delay is only
   // named when no such wait exists.
   const queued = queuedCaption("behind", opts.queuedBehindMs) ?? queuedCaption("before", queuedBeforeMs);
@@ -2531,7 +2539,13 @@ export async function dispatch(
       // follow-up arrived — the `queued … behind the previous run` caption.
       const freshAt = clock();
       const earliestAt = Math.min(...pending.map((p) => p.at));
-      const fresh = startRequestRoot(deps, { channel: channelOf(last.msg.channelId), receivedAt: freshAt });
+      const queuedBehindMs = Math.max(0, freshAt - earliestAt);
+      // The wait is on the root at start, so the fresh run's record carries it.
+      const fresh = startRequestRoot(deps, {
+        channel: channelOf(last.msg.channelId),
+        receivedAt: freshAt,
+        queuedBehindMs,
+      });
       // Pinned to the agent the follow-ups were addressed to: they were
       // admitted as input FOR this run's agent (a different one would have
       // been refused), so the fresh turn must not fall back to whatever the
@@ -2548,7 +2562,7 @@ export async function dispatch(
           originAt: undefined,
         },
         last.io,
-        { trace: fresh, queuedBehindMs: Math.max(0, freshAt - earliestAt) },
+        { trace: fresh, queuedBehindMs },
       ).catch((err: unknown) =>
         console.error(
           `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
