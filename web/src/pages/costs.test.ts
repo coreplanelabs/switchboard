@@ -13,11 +13,16 @@ function report(over: Partial<CostReport> = {}): CostReport {
     containers: { bot: { cpu: bot * 0.1, memory: bot * 0.8, disk: bot * 0.1, total: bot } },
     durableObjects: { "bot DO": 0.2 },
     doRequestsUsd: 0.05,
-    cloudUsd: bot + 0.25,
+    doRowsUsd: 0.01,
+    doStorageUsd: 0.01,
+    workersUsd: 0.02,
+    r2Usd: 0.01,
+    cloudUsd: bot + 0.3,
     llmUsd: llm,
-    total: bot + 0.25 + llm,
+    total: bot + 0.3 + llm,
   });
   const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3)];
+  const cloudUsd = days.reduce((s, d) => s + d.cloudUsd, 0);
   return {
     group: "switchboard",
     label: "Switchboard <b>",
@@ -25,10 +30,26 @@ function report(over: Partial<CostReport> = {}): CostReport {
     llmAvailable: true,
     days,
     totals: {
-      cloudUsd: days.reduce((s, d) => s + d.cloudUsd, 0),
+      cloudUsd,
       llmUsd: 19.5,
       total: days.reduce((s, d) => s + d.total, 0),
-      byResource: { cpu: 0.25, memory: 2.0, disk: 0.25, durableObjects: 0.75 },
+      byResource: {
+        cpu: 0.25,
+        memory: 2.0,
+        disk: 0.25,
+        durableObjects: 0.75,
+        workers: 0.06,
+        doRows: 0.03,
+        doStorage: 0.03,
+        r2: 0.03,
+      },
+    },
+    account: { cloudUsd: cloudUsd * 4 }, // three other tenants' worth on the same account
+    attribution: {
+      workers: ["switchboard", "switchboard-resident"],
+      containerApps: { "app-bot": "bot" },
+      durableObjectNamespaces: { "ns-bot": "bot DO", "ns-resident": "switchboard-resident" },
+      r2Buckets: { "switchboard-resident-cache": "switchboard-resident-cache" },
     },
     ...over,
   };
@@ -51,10 +72,36 @@ describe("CostsPage", () => {
     const w = mountApp(CostsPage, { seed: seed() });
     const t = w.text();
     expect(t).toContain("Yesterday");
-    expect(t).toContain("$14.05"); // 2026-08-28: 1.3 + 0.25 + 12.5 — not the partial day
+    expect(t).toContain("$14.10"); // 2026-08-28: 1.3 + 0.3 + 12.5 — not the partial day
     expect(t).toContain("2026-08-28 · last full day");
     expect(t).toContain("Projected month");
     expect(t).toContain("LLM share");
+  });
+
+  it("says what share of the account's whole Cloudflare spend this group is, and what was attributed to it", () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    const t = w.text();
+    expect(t).toContain("Share of account");
+    expect(t).toContain("25%"); // the group is a quarter of the account
+    expect(t).toContain("$3.40 of $13.60 Cloudflare spend in range");
+    expect(t).toContain("switchboard, switchboard-resident");
+    expect(t).toMatch(/namespace they host \(2\)/);
+    expect(t).toMatch(/named after them \(1\)/);
+  });
+
+  it("stacks the small platform meters (Workers, SQLite rows and storage, R2) as one series and lists each in the split", () => {
+    const w = mountApp(CostsPage, { seed: seed() });
+    expect(w.find(".legend").text()).toContain("Workers · storage · R2");
+    const titles = w.findAll("rect.seg title").map((n) => n.text());
+    expect(titles).toContain("2026-08-28 · Workers · storage · R2 · $0.05");
+    const t = w.text();
+    for (const row of [
+      "Workers requests + CPU",
+      "Durable Object SQLite rows",
+      "Durable Object SQLite storage",
+      "R2 storage + operations",
+    ])
+      expect(t).toContain(row);
   });
 
   it("draws one stacked bar per day as inline SVG with a title per segment (hover without JS)", () => {
