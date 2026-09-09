@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { IndexEvent } from "../runRegistry.js";
+import type { IndexEvent } from "./indexFeed.js";
 import { call, testRegistry } from "./testing.js";
 
 // Feature: docs/reference/specs/run-history.md, docs/reference/specs/run-visibility.md

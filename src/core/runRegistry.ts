@@ -32,6 +32,7 @@ import {
   type RunSummary,
   type SealResult,
 } from "./runRegistry/projections.js";
+import { IndexFeed, type IndexSubscriber } from "./runRegistry/indexFeed.js";
 
 // The run registry is the unit-testable core of the external live-view page
 // (docs/reference/specs/live-view.md) and the ONE per-run event store while a run is live
@@ -100,19 +101,6 @@ export type StopRequestResult = { ok: true; mode: StopMode } | { ok: false; reas
  *  settled. Reachable only when a reply hangs; while it holds, the run's row,
  *  its subscribers and its live-view token stay pinned. */
 export const UNSEALED_HOLD_MS = 15 * 60_000;
-
-/**
- * A single change on the Access-gated runs index (`GET /runs`), delivered live to
- * `subscribeIndex` listeners. `upsert` carries the run's current summary — the
- * same shape `listActive()` returns — and covers create, per-event activity, and
- * finish (a finished run is an `upsert` with `finished: true`, not a removal).
- * `removed` fires exactly once, when a finished run is finally evicted by the TTL
- * sweep — the only removal signal (eviction stays lazy/timer-free).
- */
-export type IndexEvent = { type: "upsert"; run: RunSummary } | { type: "removed"; id: string };
-
-/** A live subscriber to the runs-index feed. */
-export type IndexSubscriber = (event: IndexEvent) => void;
 
 /** Longest label kept on a run summary (redacted first — see `create()`). Wider
  *  than the dispatcher's own composed-label cap, so this is a safety net, not
@@ -188,9 +176,8 @@ function safeEqual(a: string, b: string): boolean {
 
 export class RunRegistry {
   private readonly runs = new Map<string, RunState>();
-  /** Live subscribers to the runs-index feed (see subscribeIndex). Separate from
-   *  per-run `subscribers`: these get every run's lifecycle, not one run's events. */
-  private readonly indexSubscribers = new Set<IndexSubscriber>();
+  /** The runs-index feed every lifecycle step below notifies (see subscribeIndex). */
+  private readonly index = new IndexFeed();
   private readonly bounds: BacklogBounds;
   private readonly ttlMs: number;
   private readonly genId: () => string;
@@ -260,7 +247,7 @@ export class RunRegistry {
       if (!isSpanRecord(event)) run.stepCount++;
       appendToBacklog(run, this.bounds, { ...event, seq });
     }
-    this.notifyIndex({ type: "upsert", run: summaryOf(run) });
+    this.index.notify({ type: "upsert", run: summaryOf(run) });
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
   }
 
@@ -338,7 +325,7 @@ export class RunRegistry {
     // events are seconds apart, so one upsert per event is not chatty; the
     // summary is built cheaply from the run we already hold. A span record is
     // timing, not activity: it never repaints the index.
-    if (!span) this.notifyIndex({ type: "upsert", run: summaryOf(run) });
+    if (!span) this.index.notify({ type: "upsert", run: summaryOf(run) });
   }
 
   /** Mark a run finished — the agent stopped: stamp `finishedAt`, send every
@@ -365,7 +352,7 @@ export class RunRegistry {
     }
     // A finished run stays on the index (marked finished) until the TTL evicts
     // it — so finish is an upsert, not a removal. Eviction emits the removal.
-    this.notifyIndex({ type: "upsert", run: summaryOf(run) });
+    this.index.notify({ type: "upsert", run: summaryOf(run) });
   }
 
   /**
@@ -392,7 +379,7 @@ export class RunRegistry {
         // A dead sink must not break the discard for the remaining subscribers.
       }
     }
-    this.notifyIndex({ type: "removed", id });
+    this.index.notify({ type: "removed", id });
   }
 
   /**
@@ -443,7 +430,7 @@ export class RunRegistry {
           // A dead sink must not break the seal for the remaining subscribers.
         }
       }
-      if (opts.upsert) this.notifyIndex({ type: "upsert", run: summaryOf(run) });
+      if (opts.upsert) this.index.notify({ type: "upsert", run: summaryOf(run) });
     }
     return sealResultOf(run);
   }
@@ -460,7 +447,7 @@ export class RunRegistry {
     const run = this.runs.get(id);
     if (!run) return;
     run.persisted = true;
-    this.notifyIndex({ type: "upsert", run: summaryOf(run) });
+    this.index.notify({ type: "upsert", run: summaryOf(run) });
   }
 
   /** True iff the run exists (not yet evicted) and the token matches — the same
@@ -521,14 +508,7 @@ export class RunRegistry {
    * shared lifecycle, so this feed reflects all of them without a dispatcher hook.
    */
   subscribeIndex(onEvent: IndexSubscriber): Unsubscribe {
-    for (const run of this.listActive()) onEvent({ type: "upsert", run });
-    this.indexSubscribers.add(onEvent);
-    let active = true;
-    return () => {
-      if (!active) return;
-      active = false;
-      this.indexSubscribers.delete(onEvent);
-    };
+    return this.index.subscribe(onEvent, this.listActive());
   }
 
   /**
@@ -589,20 +569,6 @@ export class RunRegistry {
       .map((run) => summaryOf(run));
   }
 
-  /** Fan an index event out to index subscribers. Each callback is isolated: one
-   *  that throws (e.g. a dead SSE sink) is swallowed so it can neither corrupt
-   *  registry state nor throw into the create/publish/finish/sweep caller. */
-  private notifyIndex(ev: IndexEvent): void {
-    for (const onEvent of this.indexSubscribers) {
-      try {
-        onEvent(ev);
-      } catch {
-        // A misbehaving index subscriber must not break the lifecycle call that
-        // triggered this notification, nor stop the other subscribers.
-      }
-    }
-  }
-
   /** Constant-time token check against a live run. Unknown id → null (fast);
    *  the token is the capability, and run ids are themselves unguessable. */
   private validate(id: string, token: string): RunState | null {
@@ -629,7 +595,7 @@ export class RunRegistry {
       // Eviction is the ONLY removal signal for the index feed (a finished-but-
       // -unevicted run stays listed). Fires once per run — the delete above
       // ensures a later sweep won't re-emit it.
-      this.notifyIndex({ type: "removed", id });
+      this.index.notify({ type: "removed", id });
     }
   }
 }
