@@ -157,6 +157,19 @@ gh api -X PUT repos/OWNER/REPO/vulnerability-alerts
 gh api -X PUT repos/OWNER/REPO/automated-security-fixes
 ```
 
+## 7. Description, homepage and topics
+
+What the repository says about itself on GitHub — the one-line description, the homepage link and the topics — is stated once, in `project.json` (`description`, `docs`, `topics`), and `check:project-facts` holds it there: a description over GitHub's 350 characters, or a topic GitHub would refuse, fails the check before the command does. Read the values from the file rather than retyping them:
+
+```sh
+gh repo edit OWNER/REPO \
+  --description "$(jq -r .description project.json)" \
+  --homepage "$(jq -r .docs project.json)" \
+  $(jq -r '.topics[] | "--add-topic " + .' project.json)
+```
+
+`--add-topic` only adds; a topic dropped from `project.json` is taken off with `--remove-topic NAME`. What GitHub holds afterwards: `gh repo view OWNER/REPO --json description,homepageUrl,repositoryTopics`.
+
 ## What you did
 
-You reproduced the settings that make `main` a changelog: squash-only merges titled by the PR, a ruleset that requires CI's job names, permission for the two workflows that act on PRs, the secrets the deploy needs, and the variables that name your installation and, if you want it, your review App. The conventions these settings enforce are in [Contributing](../../CONTRIBUTING.md); the path they protect is [Ship a release](ship-a-release.md).
+You reproduced the settings that make `main` a changelog: squash-only merges titled by the PR, a ruleset that requires CI's job names, permission for the two workflows that act on PRs, the secrets the deploy needs, the variables that name your installation and, if you want it, your review App, and the description, homepage and topics from `project.json`. The conventions these settings enforce are in [Contributing](../../CONTRIBUTING.md); the path they protect is [Ship a release](ship-a-release.md).

@@ -1,5 +1,7 @@
 # Switchboard
 
+[![CI](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coreplanelabs/switchboard/badge)](https://scorecard.dev/viewer/?uri=github.com/coreplanelabs/switchboard) [![Latest release](https://img.shields.io/github/v/release/coreplanelabs/switchboard)](https://github.com/coreplanelabs/switchboard/releases/latest) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.
 
 *A 30-second recording goes here: a Slack mention, the status card ticking through the run, the PR link landing in the thread.*

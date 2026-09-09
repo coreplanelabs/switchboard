@@ -2,7 +2,7 @@
   "name": "switchboard",
   "version": "1.10.0",
   "private": true,
-  "description": "Agent gateway: messages from Slack, the CLI, HTTP, or MCP are routed to agents that answer, review, and ship code on any model provider, executing in sandboxes you control",
+  "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.",
   "license": "Apache-2.0",
   "homepage": "https://github.com/coreplanelabs/switchboard#readme",
   "repository": {

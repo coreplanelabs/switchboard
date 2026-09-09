@@ -51,7 +51,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run check:lockfile` | Every native package in the lockfile carries its Linux x64 and macOS arm64 variants. | After any `npm install`; the fix is `rm -rf node_modules && npm install`. |
 | `npm run check:sandbox-pair` | Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag. | After bumping either half of a pair. |
 | `npm run check:pr-title` | Judges one PR title against Conventional Commits with the types release-please knows. | `-- "feat(scope): …"` before opening a PR; CI's `title` check runs it. |
-| `npm run check:project-facts` | Every copy of the project's name, repository, docs URL and contact address equals `project.json`. | After editing `project.json` or a community file; part of `check:consistency`. |
+| `npm run check:project-facts` | Every copy of the project's name, repository, docs URL and contact address equals `project.json`; its description and topics fit what GitHub accepts. | After editing `project.json` or a community file; part of `check:consistency`. |
 | `npm run agents:gen` | Writes the Commands table in AGENTS.md from `package.json` and this file. | After adding or changing a script; part of `fix`. |
 | `npm run clock:gen` | Regenerates the clock-read allowlist (`src/core/trace/clockAllowlist.json`) from the tree — empty since the ratchet reached zero, so a regeneration that is not `{}` names a new direct read. | Part of `fix`. |
 | `npm run clock:check` | No production file reads the wall clock directly: the allowlist is empty and the tree agrees. | Part of `check:consistency`. |
