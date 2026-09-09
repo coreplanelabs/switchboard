@@ -28,7 +28,7 @@ Keyed by platform-namespaced actor id. Three axes, each a list of names or the e
 
 | Axis | Names | Decides |
 |---|---|---|
-| `actions` | `<group>:read` / `<group>:write` / `<group>:exec` for every command group (`runs`, `friction`, `repo`, `config`, `memory`, `mcp`, `schedule`, `deploy`, `help`), `agent:run:<name>`, `dispatch`, `deploy:write` | which commands and agents the actor may run |
+| `actions` | `<group>:read` / `<group>:write` / `<group>:exec` for every command group (`runs`, `friction`, `repo`, `config`, `memory`, `mcp`, `schedule`, `deploy`, `env`, `setup`, `help`), `agent:run:<name>`, `dispatch`, `deploy:write` | which commands and agents the actor may run |
 | `channels` | channel ids (`slack:C…`, `http:<name>`, `mcp:<name>`) | whose runs the actor may read beyond the public ones |
 | `repos` | `owner/name` slugs (case-insensitive) | which restricted repos the actor may use |
 

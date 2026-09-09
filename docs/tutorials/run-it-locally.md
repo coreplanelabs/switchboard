@@ -13,11 +13,10 @@ By the end of this lesson Switchboard has answered a question on your own machin
 ```bash
 git clone <repository-url> switchboard && cd switchboard
 npm ci
-cp config/config.example.yaml config/config.yaml
-cp .env.example .env
+npm run cli -- init --organization <your GitHub org> --anthropic-key <your key>
 ```
 
-Open `.env` and set `ANTHROPIC_API_KEY`; the process loads the file at startup (a variable your shell exports wins). Nothing else is required to start: every optional block in `config.yaml` is commented out, and off means absent, not degraded ([Turn features on and off](../how-to/turn-features-on-and-off.md)).
+`init` writes `.env` (mode 600, your key on its line) and `config/config.yaml` from the checked-in examples and prints what is on; the process loads `.env` at startup (a variable your shell exports wins). Nothing else is required to start: every optional block in `config.yaml` is commented out, and off means absent, not degraded ([Turn features on and off](../how-to/turn-features-on-and-off.md)).
 
 ## 2. Ask it something
 

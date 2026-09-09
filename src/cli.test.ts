@@ -24,6 +24,7 @@ import {
   parseCliArgv,
   runCli,
   runCommand,
+  USAGE,
   type CliInvocation,
 } from "./cli.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -418,9 +419,19 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
       "deploy secrets",
       "deploy config",
       "env bootstrap",
+      "setup init",
     ]) {
       expect(cat.stdout, form).toContain(form);
     }
+    // The installer's one-word spelling: `init …` is `setup init …`, bound by the same grammar (and its `--help`).
+    expect(parseCliArgv(["init", "--organization", "acme", "--dry-run"], commands)).toMatchObject({
+      kind: "command",
+      id: "setup.init",
+      input: { options: { organization: "acme", dryRun: true } },
+    });
+    expect(parseCliArgv(["init", "--help"], commands)).toEqual({ kind: "command-help", id: "setup.init" });
+    expect(parseCliArgv(["init", "--bogus"], commands)).toMatchObject({ kind: "invalid", code: "invalid_input" });
+    expect(USAGE).toContain("init [--option value…]");
     // Only a BARE `help` is the catalogue: `help show` is the registered command (the conformance suite found it unreachable).
     expect(parseCliArgv(["help", "show"], commands)).toMatchObject({ kind: "command", id: "help.show" });
     expect(parseCliArgv(["help", "show", "--help"], commands)).toEqual({ kind: "command-help", id: "help.show" });

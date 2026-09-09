@@ -59,7 +59,7 @@ This table is generated from the command registry. Every command declares the ca
 | `dashboardAuth` | — |
 | `docs` | — |
 
-The other 18 commands are on in every installation.
+The other 19 commands are on in every installation.
 
 <!-- /generated:capability-commands -->
 

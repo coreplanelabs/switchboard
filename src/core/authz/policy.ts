@@ -102,12 +102,13 @@ export const POLICY: readonly Rule[] = [
   // `agent:run:*` covers every agent through wildcard coverage (grants.ts).
   { action: "agent:run", resource: "agent", when: [grant("agent:run:{name}")] },
 
-  // ── help / schedules / deploy / env ──────────────────────────────────────
+  // ── help / schedules / deploy / env / setup ──────────────────────────────────────
   { action: "help:read", resource: "command", when: [grant("help:read")] },
   { action: "schedule:read", resource: "command", when: [grant("schedule:read")] },
   { action: "deploy:read", resource: "command", when: [grant("deploy:read")] },
   { action: "deploy:write", resource: "command", when: [grant("deploy:write")] },
   { action: "env:write", resource: "command", when: [grant("env:write")] },
+  { action: "setup:write", resource: "command", when: [grant("setup:write")] },
 
   // ── mcp (external MCP servers live in the three config tiers) ────────────
   { action: "mcp:read", resource: "command", when: [grant("mcp:read")] },

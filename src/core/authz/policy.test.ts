@@ -277,6 +277,7 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
   ...commandRow("deploy:read", "deploy.plan", [A.admin, A.browser, A.operator], [A.chatUser, A.dispatchOnly, A.token]),
   ...commandRow("deploy:write", "deploy.all", [A.admin, A.operator], [A.chatUser, A.browser, A.dispatchOnly]),
   ...commandRow("env:write", "env.bootstrap", [A.admin, A.operator], [A.chatUser, A.browser, A.dispatchOnly]),
+  ...commandRow("setup:write", "setup.init", [A.admin, A.operator], [A.chatUser, A.browser, A.dispatchOnly]),
   ...commandRow("mcp:read", "mcp.list", [A.chatUser, A.browser, A.operator], [A.dispatchOnly, A.noGrants, A.token]),
   ...commandRow("mcp:write", "mcp.add", [A.chatUser, A.mcpWriter, A.operator], [A.browser, A.dispatchOnly, A.noGrants]),
   // A CHANNEL's MCP servers: the channel-config right for a person…

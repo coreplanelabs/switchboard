@@ -11,6 +11,8 @@ deploy
 !deploy/cloudflare-resident/package.json
 !deploy/cloudflare-sandbox/package.json
 !deploy/cloudflare-docs/package.json
+# `switchboard init` derives an installation's profile from the example; the container installs too.
+!deploy/profile.example.json
 docs
 !docs/package.json
 README.md
