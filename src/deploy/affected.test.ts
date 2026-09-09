@@ -208,6 +208,8 @@ describe("classifyPath", () => {
       "LICENSE",
       "NOTICE",
       "docker-compose.yml",
+      // A host manifest the tree no longer carries; its deletion in a diff must not roll the fleet.
+      "fly.toml",
       "tsconfig.scripts.json",
       "release-please-config.json",
       ".release-please-manifest.json",
