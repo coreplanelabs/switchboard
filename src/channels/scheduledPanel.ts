@@ -134,15 +134,11 @@ const DETAIL_SHOWN = 120;
 /** The detail as the panel shows it: the reply's facts, not its title. Drops a
  *  leading emoji/symbol run and a leading `*Title* —` (the head line of a
  *  command reply names the command before its numbers — the row already names
- *  the command), collapses whitespace, and cuts at `DETAIL_SHOWN` with `…`
- *  (pre-item-16 records flattened a whole multi-line reply into one line). */
+ *  the command), collapses whitespace, and cuts at `DETAIL_SHOWN` with `…`. */
 export function firingDetailSummary(detail: string): string {
   let s = detail.replace(/\s+/g, " ").trim();
   s = s.replace(/^[^\p{L}\p{N}*_`<[(]+/u, ""); // leading emoji / symbols
   s = s.replace(/^\*[^*]{1,60}\*\s+[—–-]\s+/, ""); // `*Friction proposals* — `
   s = s.replace(/^[^\p{L}\p{N}]+/u, "").trim();
-  // A legacy record's flattened body starts with its numbered list (" 1. `…"):
-  // the head line ends where the list begins.
-  s = s.replace(/\s+1\.\s+`[\s\S]*$/, "");
   return s.length > DETAIL_SHOWN ? `${s.slice(0, DETAIL_SHOWN)}…` : s;
 }

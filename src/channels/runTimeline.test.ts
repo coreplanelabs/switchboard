@@ -60,12 +60,18 @@ describe("createRunTimeline — grouping", () => {
     expect(t.pending()).toBeNull();
   });
 
-  it("a legacy result without callId attaches to the oldest running call of the same tool", () => {
+  it("a result without a callId attaches to nothing: it is an orphan, a finished call of its own, and the running calls stay running", () => {
     const t = createRunTimeline();
-    t.push({ type: "tool_call", tool: "bash", summary: "$ one" });
-    t.push({ type: "tool_call", tool: "bash", summary: "$ two" });
-    const [ch] = t.push({ type: "tool_result", tool: "bash", ok: true, summary: "done" });
-    expect(ch.kind === "result" && ch.call.title).toBe("one");
+    t.push({ type: "tool_call", tool: "bash", summary: "$ one", callId: "a" });
+    t.push({ type: "tool_call", tool: "bash", summary: "$ two", callId: "b" });
+    const changes = t.push({ type: "tool_result", tool: "bash", ok: true, summary: "done" });
+    expect(kinds(changes)).toEqual(["call"]);
+    expect(changes[0].kind === "call" && changes[0].call).toMatchObject({ title: "bash", status: "ok" });
+    expect(t.steps()[0].calls.map((c) => [c.title, c.status])).toEqual([
+      ["one", "running"],
+      ["two", "running"],
+      ["bash", "ok"],
+    ]);
   });
 
   it("an orphan result (its call trimmed from the backlog) becomes its own finished call — nothing is dropped", () => {
@@ -437,7 +443,7 @@ describe("createRunTimeline — span records", () => {
     expect(t.push(end("x", "dispatch.compose", 1, Number.NaN))).toEqual([]);
   });
 
-  it("a model.turn span_end draws the turn row from its attrs and is a step boundary, exactly like the legacy `turn`", () => {
+  it("a model.turn span_end draws the turn row from its attrs and is a step boundary", () => {
     const t = createRunTimeline();
     t.push(call("a", "ls"));
     const changes = t.push(
@@ -498,8 +504,7 @@ describe("createRunTimeline — span records", () => {
 describe("createRunTimeline — model turns (item 15)", () => {
   // The runner's one timing record for a model call (docs/reference/specs/tracing.md): a
   // `model.turn` span whose end carries the stop reason, the usage and the
-  // model as attrs. A legacy record's `turn` reaches the fold as one of these
-  // through `normalizeSpans` on the history seed.
+  // model as attrs.
   const turn = (over: Record<string, unknown> = {}, attrs: Record<string, unknown> = {}) => ({
     type: "span_end",
     spanId: "t1",
@@ -556,10 +561,11 @@ describe("createRunTimeline — model turns (item 15)", () => {
     expect(t.push({ type: "span_start", spanId: "t1", name: "model.turn", at: 1_000 })).toEqual([]);
   });
 
-  it("a raw legacy `turn` event draws nothing here — the history seed normalizes it into a `model.turn` span first", () => {
+  it("an event of a kind the fold does not know draws nothing — a stored record from before spans carries its turns as such", () => {
     const t = createRunTimeline();
     expect(
       t.push({ type: "turn", startedAt: 1_000, durationMs: 304_000, stopReason: "tool_use", at: 305_000 }),
     ).toEqual([]);
+    expect(t.steps()).toEqual([]);
   });
 });

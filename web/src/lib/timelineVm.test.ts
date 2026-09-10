@@ -11,6 +11,7 @@ import {
   CURRENTLY_DELIVERING,
   GLOSS,
   NO_ROOT_NOTE,
+  NO_TIMING_NOTE,
   RANKED_NOTE,
   type TimelineInput,
 } from "./timelineVm";
@@ -208,9 +209,9 @@ describe("buildTimeline", () => {
   });
 
   it("a record with no root shows the header's total and `getting ready: not recorded (too large)`; a live page before its root shows the total alone", () => {
-    const legacy = [sp("t1", "model.turn", 10_000, 40_000), sp("c1", "tool.bash", 40_000, 50_000)];
+    const noRoot = [sp("t1", "model.turn", 10_000, 40_000), sp("c1", "tool.bash", 40_000, 50_000)];
     const record = buildTimeline({
-      spans: legacy,
+      spans: noRoot,
       losses: [],
       window: { start: 0, end: 60_000 },
       owner: "agent",
@@ -233,6 +234,26 @@ describe("buildTimeline", () => {
     });
     expect(early.lede).toBe("3s");
     expect(early.note).toBe("");
+  });
+
+  it("an `untimed` record (written before span schema) shows the header's total and `no timing data` — no bar, no ranked steps, whatever spans it might carry", () => {
+    const record = buildTimeline({
+      spans: [sp("root", "request", 0, 60_000), sp("c1", "tool.bash", 40_000, 50_000, { parent: "root" })],
+      losses: [],
+      window: { start: 0, end: 60_000 },
+      owner: "agent",
+      totalMs: 60_000,
+      phase: "ended",
+      delivery: {},
+      untimed: true,
+    });
+    expect(record.lede).toBe("1m 00s");
+    expect(record.note).toBe(NO_TIMING_NOTE);
+    expect(NO_TIMING_NOTE).toBe("no timing data");
+    expect(record.shown).toBe(false);
+    expect(record.bar).toEqual([]);
+    expect(record.ranked).toEqual([]);
+    expect(record.captions).toEqual([]);
   });
 
   it("below the gate the lede is the total and the dominant word, nothing else shown; a command run's `run.command` is its tools while an agent run's is setup", () => {

@@ -38,6 +38,9 @@ export interface TimelineInput {
   delivery?: { finishedAt?: number; sealedAt?: number; replyOk?: boolean };
   /** The record was cut to its budget: `not recorded` reads `(too large)`. */
   truncated?: boolean;
+  /** The record predates span schema (`RunHistorySeed.untimed`): no shape is
+   *  computed and the note says so. */
+  untimed?: boolean;
 }
 
 export interface BarSegment {
@@ -86,6 +89,8 @@ export const RANKED_NOTE =
   "Ranked by each step's own time, its children excluded — the buckets above count every instant once.";
 export const CURRENTLY_DELIVERING = "currently delivering";
 export const NO_ROOT_NOTE = "getting ready: not recorded (too large)";
+/** A record written before span schema: the one neutral empty state. */
+export const NO_TIMING_NOTE = "no timing data";
 const NOT_LOADED_GLOSS = "not loaded (the record has the full shape)";
 
 const BUCKET_WORD: Record<Bucket, PrintedTerm> = {
@@ -102,10 +107,6 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
   const printed = printedShape(p);
   const total = formatDuration(printed.totalS * 1000, "clock");
   const root = spans.find((s) => s.name === "request" && s.parentSpanId === undefined);
-  const captions = [
-    queuedCaption("before", numberAttr(root, "queuedBeforeMs")),
-    queuedCaption("behind", numberAttr(root, "queuedBehindMs")),
-  ].filter((c): c is string => c !== undefined);
   const open = input.phase === "live" ? deepestOpenCounted(spans, owner, window) : undefined;
   const current = currentOf(input, open);
   const openStep = open ? displayNameOf(open.name) : "";
@@ -124,10 +125,20 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
       attrs: s.attrs,
     })),
   };
+  if (input.untimed) {
+    // A record from before span schema: the header's total and the one note;
+    // no shape is read from whatever the record carries.
+    const empty = { current, openStep, captions: [], gloss: GLOSS, rankedNote: RANKED_NOTE, debug };
+    return { ...empty, lede: total, shown: false, bar: [], ranked: [], note: NO_TIMING_NOTE };
+  }
+  const captions = [
+    queuedCaption("before", numberAttr(root, "queuedBeforeMs")),
+    queuedCaption("behind", numberAttr(root, "queuedBehindMs")),
+  ].filter((c): c is string => c !== undefined);
   const base = { current, openStep, captions, gloss: GLOSS, rankedNote: RANKED_NOTE, debug };
   if (!root) {
-    // A legacy record (no root) or a live page before its first frame: the
-    // header's total, and on a record the one word for the missing setup.
+    // A record whose root was never stored, or a live page before its first
+    // frame: the header's total, and on a record the one word for the missing setup.
     return { ...base, lede: total, shown: false, bar: [], ranked: [], note: finished ? NO_ROOT_NOTE : "" };
   }
   const termText = (term: PrintedTerm): string =>

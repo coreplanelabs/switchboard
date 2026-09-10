@@ -155,6 +155,7 @@ const timeline = computed(() => {
       phase: "ended",
       delivery: { finishedAt: seed.finishedAt, sealedAt: seed.sealedAt, replyOk: seed.replyOk },
       ...(seed.truncated !== undefined ? { truncated: seed.truncated } : {}),
+      ...(seed.untimed ? { untimed: true } : {}),
     });
   }
   if (!runClock) return null;
