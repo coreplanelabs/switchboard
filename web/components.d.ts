@@ -19,6 +19,7 @@ declare module 'vue' {
     ExpandableText: typeof import('./src/components/ExpandableText.vue')['default']
     GithubMark: typeof import('./src/components/GithubMark.vue')['default']
     MarkdownText: typeof import('./src/components/MarkdownText.vue')['default']
+    ReplyBlock: typeof import('./src/components/run/ReplyBlock.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     RunRow: typeof import('./src/components/runs/RunRow.vue')['default']

@@ -8,6 +8,7 @@ import GithubMark from "../components/GithubMark.vue";
 import StepBlock from "../components/run/StepBlock.vue";
 import SpanRow from "../components/run/SpanRow.vue";
 import TimelineSection from "../components/run/TimelineSection.vue";
+import ReplyBlock from "../components/run/ReplyBlock.vue";
 import { buildTimeline, type TimelinePhase } from "../lib/timelineVm";
 import { runOwnerOf } from "@core/core/runOwner.js";
 import { useSeed } from "../lib/seed";
@@ -49,6 +50,10 @@ import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 const seed = useSeed("run");
 const isHistory = seed?.mode === "history";
 const title = isHistory ? "Run" : "Live run";
+/** A finished run's page leads with its outcome: the Reply sits under the
+ *  Request, above the work. A live page keeps the Reply last — it lands there
+ *  as it arrives, and nothing on a live page jumps. */
+const replyFirst = isHistory;
 
 const openParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("open") : null;
 const model = createRunPageModel({
@@ -496,6 +501,77 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
            turns the model was given, folded; THIS RUN — the timeline's summary
            card and then the steps; REPLY — what went back. -->
 
+      <!-- The facts bar (item 19/21): what the run is about, first thing under the
+         header — agent · model · effort · linked repo · the branch (a link to it
+         on GitHub) · the head commit (a link) · GitHub-marked #PR · the Reading
+         diff control at the right edge. Every link is built from a
+         shape-verified value; an odd one stays text. A reader with three
+         seconds gets the run's identity before any prose. -->
+      <div
+        v-if="state.meta"
+        id="runmeta"
+        class="runmeta facts mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 px-(--sb-gutter) text-xs text-dimmed"
+      >
+        <span class="agent text-[0.68rem] font-semibold uppercase tracking-wider text-toned">{{
+          state.meta.agent
+        }}</span>
+        <span class="model">{{ state.meta.model }}</span>
+        <span v-if="state.meta.effort" class="effort">{{ state.meta.effort }} effort</span>
+        <a
+          v-if="links.repo"
+          class="text-primary no-underline hover:underline"
+          :href="links.repo"
+          target="_blank"
+          rel="noopener noreferrer"
+          >{{ state.meta.repo }}</a
+        >
+        <span v-else-if="state.meta.repo" class="repo">{{ state.meta.repo }}</span>
+        <a
+          v-if="links.tree"
+          class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned no-underline hover:border-primary hover:text-primary"
+          :href="links.tree"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="the branch on GitHub"
+          >{{ state.meta.ref }}</a
+        >
+        <span
+          v-else-if="state.meta.ref"
+          class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned"
+          >{{ state.meta.ref }}</span
+        >
+        <a
+          v-if="links.commit && state.meta.headSha"
+          class="sha tabular-nums text-toned no-underline hover:text-primary hover:underline"
+          :href="links.commit"
+          target="_blank"
+          rel="noopener noreferrer"
+          :title="`the head commit ${state.meta.headSha}`"
+          >{{ shortSha(state.meta.headSha) }}</a
+        >
+        <a
+          v-if="links.pr"
+          class="prlink whitespace-nowrap text-primary no-underline hover:underline"
+          :href="links.pr"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
+        </a>
+        <!-- The review's reading diff (docs/reference/specs/reading-diff.md item 12):
+             present exactly when the run published reading-diff artifacts —
+             a link-weight control like the chips beside it. -->
+        <button
+          v-if="prReview.state.ready"
+          type="button"
+          class="reading-diff ml-auto inline-flex cursor-pointer items-center gap-1 whitespace-nowrap text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
+          data-testid="reading-diff-button"
+          @click="prPanelOpen = true"
+        >
+          <UIcon name="i-lucide-git-compare" class="size-3.5 shrink-0" aria-hidden="true" />
+          Reading diff
+        </button>
+      </div>
       <!-- Request -->
       <!-- The card's spacing states the hierarchy: the frame (label, meta)
            and the framed prose breathe by the same rhythm — the meta row is
@@ -534,79 +610,21 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           >
         </h2>
         <!-- A long request folds to its first lines (item 12); the fade takes this card's ground. -->
-        <ExpandableText :lines="5">
+        <ExpandableText :lines="3">
           <MarkdownText :text="state.request.text" />
         </ExpandableText>
-        <!-- What the run is about (item 19/21): agent · model · effort · linked
-             repo · the branch (a link to it on GitHub) · the head commit (a
-             link) · GitHub-marked #PR. Every link is built from a
-             shape-verified value; an odd one stays text. -->
-        <div
-          v-if="state.meta"
-          id="runmeta"
-          class="runmeta mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 border-t border-default pt-2.5 text-xs text-dimmed"
-        >
-          <span class="agent text-[0.68rem] font-semibold uppercase tracking-wider text-toned">{{
-            state.meta.agent
-          }}</span>
-          <span class="model">{{ state.meta.model }}</span>
-          <span v-if="state.meta.effort" class="effort">{{ state.meta.effort }} effort</span>
-          <a
-            v-if="links.repo"
-            class="text-primary no-underline hover:underline"
-            :href="links.repo"
-            target="_blank"
-            rel="noopener noreferrer"
-            >{{ state.meta.repo }}</a
-          >
-          <span v-else-if="state.meta.repo" class="repo">{{ state.meta.repo }}</span>
-          <a
-            v-if="links.tree"
-            class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned no-underline hover:border-primary hover:text-primary"
-            :href="links.tree"
-            target="_blank"
-            rel="noopener noreferrer"
-            title="the branch on GitHub"
-            >{{ state.meta.ref }}</a
-          >
-          <span
-            v-else-if="state.meta.ref"
-            class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned"
-            >{{ state.meta.ref }}</span
-          >
-          <a
-            v-if="links.commit && state.meta.headSha"
-            class="sha tabular-nums text-toned no-underline hover:text-primary hover:underline"
-            :href="links.commit"
-            target="_blank"
-            rel="noopener noreferrer"
-            :title="`the head commit ${state.meta.headSha}`"
-            >{{ shortSha(state.meta.headSha) }}</a
-          >
-          <a
-            v-if="links.pr"
-            class="prlink whitespace-nowrap text-primary no-underline hover:underline"
-            :href="links.pr"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
-          </a>
-          <!-- The review's reading diff (docs/reference/specs/reading-diff.md item 12):
-               present exactly when the run published reading-diff artifacts —
-               a link-weight control like the chips beside it. -->
-          <button
-            v-if="prReview.state.ready"
-            type="button"
-            class="reading-diff ml-auto inline-flex cursor-pointer items-center gap-1 whitespace-nowrap text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
-            data-testid="reading-diff-button"
-            @click="prPanelOpen = true"
-          >
-            <UIcon name="i-lucide-git-compare" class="size-3.5 shrink-0" aria-hidden="true" />
-            Reading diff
-          </button>
-        </div>
       </section>
+
+      <!-- Reply, on a finished run's page: the outcome before the work. -->
+      <ReplyBlock
+        v-if="state.reply && replyFirst"
+        position="first"
+        :text="state.reply.text"
+        :at="state.reply.at"
+        :caption="reply"
+        :when="fmtTime(state.reply.at)"
+        :when-title="fmtTimeTitle(state.reply.at)"
+      />
 
       <!-- Earlier in this thread: the turns the model was given as context,
            collapsed by default. The chevron says "this opens" — the same fold
@@ -810,33 +828,16 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <li ref="logEnd" aria-hidden="true" />
       </ol>
 
-      <!-- Reply: what went back — the product's word (docs: "the reply lands in
-           the thread"). Not always an answer: the caption says what it is,
-           from the run's facts. -->
-      <section
-        v-if="state.reply"
-        id="reply"
-        class="block mt-6 rounded-lg border border-ok/40 bg-(--ui-bg-muted) px-(--sb-gutter) py-3"
-      >
-        <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-ok">
-          <span>Reply</span>
-          <a
-            v-if="reply.href"
-            class="caption font-normal normal-case tracking-normal text-dimmed no-underline hover:text-primary hover:underline"
-            :href="reply.href"
-            target="_blank"
-            rel="noopener noreferrer"
-            >{{ reply.text }}</a
-          >
-          <span v-else class="caption font-normal normal-case tracking-normal text-dimmed">{{ reply.text }}</span>
-          <span
-            class="ts ml-auto select-none text-xs font-normal normal-case tracking-normal text-dimmed"
-            :title="fmtTimeTitle(state.reply.at)"
-            >{{ fmtTime(state.reply.at) }}</span
-          >
-        </h2>
-        <MarkdownText :text="state.reply.text" />
-      </section>
+      <!-- Reply, on a live page: it lands last, as it arrives. -->
+      <ReplyBlock
+        v-if="state.reply && !replyFirst"
+        position="last"
+        :text="state.reply.text"
+        :at="state.reply.at"
+        :caption="reply"
+        :when="fmtTime(state.reply.at)"
+        :when-title="fmtTimeTitle(state.reply.at)"
+      />
     </div>
 
     <!-- The PR-review slideout: the pr-review module rendering the adapter's

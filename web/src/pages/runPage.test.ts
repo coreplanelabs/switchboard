@@ -672,7 +672,9 @@ describe("RunPage — history mode", () => {
     expect(heading.find("#fold svg").exists()).toBe(false); // text, like the card's controls
     expect(heading.find("#fold").text()).toBe("Expand all");
     const order = Array.from(w.find(".max-w-6xl").element.children).map((el) => el.id);
-    expect(order).toEqual(["request", "context", "thisrun", "timeline", "log", "reply"]);
+    // A finished run's page leads with its outcome: the Reply sits right under the Request.
+    expect(order).toEqual(["request", "reply", "context", "thisrun", "timeline", "log"]);
+    expect(w.find("#reply").attributes("data-position")).toBe("first");
     // Every block's heading is the same small-caps label with the moment at the right edge.
     for (const id of ["request", "reply"]) {
       const h2 = w.find(`#${id} h2`);
@@ -701,7 +703,12 @@ describe("RunPage — history mode", () => {
       ] as LiveFrame[]),
     });
     expect(w.find("#request .expandable .md").exists()).toBe(true);
-    expect(w.find("#request .expandable .body").attributes("style")).toContain("--expandable-lines: 5");
+    expect(w.find("#request .expandable .body").attributes("style")).toContain("--expandable-lines: 3");
+    // The facts bar sits under the header, before the Request, with the Reading diff control at its right edge.
+    const blocks = Array.from(w.find(".max-w-6xl").element.children).map((el) => el.id);
+    expect(blocks.indexOf("runmeta")).toBe(0);
+    expect(blocks.indexOf("request")).toBe(1);
+    expect(w.find("#request #runmeta").exists()).toBe(false);
     const button = w.find('[data-testid="reading-diff-button"]');
     expect(button.element.tagName).toBe("BUTTON");
     expect(button.text()).toBe("Reading diff");
