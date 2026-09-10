@@ -64,7 +64,7 @@ flowchart LR
 | Optional | An E2B account | Per-thread micro-VMs without Cloudflare |
 | Optional | A Brave Search key (`BRAVE_SEARCH_API_KEY`) | Web search for the research agent |
 
-Off means absent from `help`, the dashboard and the plan ([Turn features on and off](docs/how-to/turn-features-on-and-off.md)). The bot is the published image `ghcr.io/coreplanelabs/switchboard`.
+Off means absent from `help`, the dashboard and the plan ([Turn features on and off](docs/how-to/turn-features-on-and-off.md)). The bot is `npx @coreplane/switchboard start` on any machine with Node, or the published image `ghcr.io/coreplanelabs/switchboard`.
 
 ## Learn more
 

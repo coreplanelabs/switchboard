@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -85,8 +85,11 @@ describe("the tarball", () => {
         "dist/assets/deploy/cloudflare/package.json",
         "dist/assets/deploy/cloudflare-resident/Dockerfile",
         "dist/assets/Dockerfile",
+        // The dashboard's build, where the bot reads it from the package root — `start` serves it.
+        "dist/assets/web/dist/.vite/manifest.json",
       ]),
     );
+    expect(packed.files.filter((f) => f.startsWith("dist/assets/web/dist/assets/")).length).toBeGreaterThan(1);
     for (const f of packed.files) {
       expect(f, "only the manifest, README, LICENSE and dist/ ship").toMatch(
         /^(package\.json|README\.md|LICENSE|dist\/)/,
@@ -117,13 +120,71 @@ describe("the installed CLI", () => {
     expect(r.stdout).toContain("providers: anthropic");
     expect(r.stdout).toContain("ANTHROPIC_API_KEY=••••••••");
     expect(r.stdout).toContain("organization: acme");
-    // The next commands are the package's own ask and the bot from the image — never the checkout's `npm run cli`.
+    // The next commands are the package's own ask and start (the bot, no Docker), then the image as the
+    // one-line alternative — never the checkout's `npm run cli` or `npm run dev`.
     expect(r.stdout).toContain(`  npx ${facts.npmPackage} ask "what can you do?"`);
-    expect(r.stdout).toContain("# the bot, from the published image");
+    expect(r.stdout).toContain(`  npx ${facts.npmPackage} start\n`);
+    expect(r.stdout).toContain("# the same bot from the published image");
     expect(r.stdout).not.toContain("npm run cli");
+    expect(r.stdout).not.toContain("npm run dev");
     expect(r.stdout).not.toContain("sk-test");
     for (const leak of [REPO_ROOT, tmp, "dist/assets", "node_modules"]) expect(r.stdout).not.toContain(leak);
     expect(existsSync(join(work, ".env"))).toBe(false);
+  });
+
+  it("`start --help` says what the bot is and what it reads, under the bin's own name; `start` with an argument is the usage error", () => {
+    const help = switchboard(join(tmp, "install"), "start", "--help");
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stdout).toContain("usage: switchboard start");
+    expect(help.stdout).toContain("Socket Mode");
+    expect(help.stdout).toContain("SLACK_APP_TOKEN");
+    expect(help.stdout).toContain("config/config.yaml");
+    expect(help.stdout).not.toContain("npx tsx");
+    const extra = switchboard(join(tmp, "install"), "start", "--port", "8080");
+    expect(extra.status).toBe(2);
+    expect(extra.stderr).toContain("start takes no arguments");
+  });
+
+  it("`start` from the installed package boots the bot process: in a directory with no .env it refuses at once naming the missing variable (the process's own rule), exit 1 — no stack, no Docker", () => {
+    const work = join(tmp, "work-start");
+    mkdirSync(work);
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => k !== "SLACK_BOT_TOKEN" && k !== "SLACK_APP_TOKEN"),
+    );
+    const r = spawnSync(bin, ["start"], { cwd: work, encoding: "utf8", env, timeout: 30_000 });
+    expect(r.status).toBe(1);
+    expect(r.stderr.trim()).toBe("Missing required env var SLACK_BOT_TOKEN");
+    expect(r.stdout).toBe("");
+  });
+
+  it("`start` with tokens boots ONE bot from the package: the startup log once, the HTTP server on PORT once, the dashboard bundle found beside the bundle — then Slack refuses the fake tokens (exit 1) or, unreachable, the process is drained by SIGINT (exit 0); never a second boot on the same port", async () => {
+    const work = join(tmp, "work-start-boot");
+    mkdirSync(work);
+    const init = switchboard(work, "init", "--organization", "acme", "--anthropic-key", "sk-test");
+    expect(init.status, init.stderr).toBe(0);
+    const port = 18_000 + (process.pid % 1000);
+    const env = { ...process.env, SLACK_BOT_TOKEN: "xoxb-fake", SLACK_APP_TOKEN: "xapp-fake", PORT: String(port) };
+    const child = spawn(bin, ["start"], { cwd: work, env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
+    child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+    const exited = new Promise<number | null>((done) => child.on("exit", (code) => done(code)));
+    // The socket handshake decides how the process ends: Slack answers `invalid_auth` and runBot rejects, or the
+    // network is unavailable and the web client retries — then SIGINT drains it. Either way, what matters is above.
+    const settled = await Promise.race([exited, new Promise<"alive">((r) => setTimeout(() => r("alive"), 15_000))]);
+    if (settled === "alive") child.kill("SIGINT");
+    const code = await Promise.race([exited, new Promise<"stuck">((r) => setTimeout(() => r("stuck"), 15_000))]);
+    if (code === "stuck") child.kill("SIGKILL");
+    expect(code, `stdout:\n${stdout}\nstderr:\n${stderr}`).not.toBe("stuck");
+    const count = (needle: string) => stdout.split("\n").filter((l) => l.includes(needle)).length;
+    expect(count("[build] "), stdout).toBe(1);
+    expect(count("[capabilities] "), stdout).toBe(1);
+    expect(count(`http server on :${port} (`), stdout).toBe(1);
+    expect(stderr).not.toContain("EADDRINUSE");
+    expect(stderr).not.toContain("web app manifest not found");
+    expect(code === 1 || code === 0, `exit ${code}`).toBe(true);
+    if (code === 0) expect(stdout).toContain("[drain] SIGINT");
   });
 
   it("`deploy plan` in a directory with no profile reads the shipped example profile and Worker templates, says the plan is the example's, and names the directory as the root", () => {

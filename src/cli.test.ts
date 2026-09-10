@@ -208,6 +208,42 @@ describe("parseCliArgv — the `ask` built-in (the channel harness, not a regist
   });
 });
 
+describe("parseCliArgv — the `start` built-in (the bot process, not a registry command)", () => {
+  it("a bare `start` is the process; `start --help` is its help; anything else after it is a usage error naming what it reads", async () => {
+    const { commands } = await fixture();
+    expect(parseCliArgv(["start"], commands)).toEqual({ kind: "start" });
+    expect(parseCliArgv(["start", "--help"], commands)).toEqual({ kind: "start-help" });
+    expect(parseCliArgv(["start", "-h"], commands)).toEqual({ kind: "start-help" });
+    expect(parseCliArgv(["start", "--port", "8080"], commands)).toMatchObject({
+      kind: "usage",
+      error: expect.stringContaining("start takes no arguments"),
+    });
+    expect(USAGE).toContain("start");
+    // Neither built-in is in the catalogue: they are not registry commands.
+    const cat = await runCli(commands, { kind: "catalogue" }, CLI_CALLER);
+    expect(cat.stdout).not.toMatch(/^\s+start\b/m);
+  });
+
+  it("`start --help` says what it starts and where it reads from — the process the image runs, .env and config/config.yaml from the working directory, PORT for the HTTP server — under the program's own name", async () => {
+    const { commands } = await fixture();
+    const out = await runCli(commands, { kind: "start-help" }, CLI_CALLER);
+    expect(out.exitCode).toBe(0);
+    expect(out.stderr).toBe("");
+    expect(out.stdout).toContain(`usage: ${programName(process.argv[1])} start`);
+    for (const fact of [
+      "Socket Mode",
+      ".env",
+      "SLACK_BOT_TOKEN",
+      "SLACK_APP_TOKEN",
+      "config/config.yaml",
+      "SWITCHBOARD_CONFIG",
+      "PORT",
+      "SIGINT",
+    ])
+      expect(out.stdout, fact).toContain(fact);
+  });
+});
+
 describe("runCommand", () => {
   function command(argv: string[], commands: CommandInvoker) {
     const parsed = parseCliArgv(argv, commands);

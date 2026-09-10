@@ -19,6 +19,17 @@
 //   npx tsx src/cli.ts ask "what is 2+2"
 //   npx tsx src/cli.ts ask "agent:coding model:openai/gpt-5 ship a PR that ..."
 //   npx tsx src/cli.ts ask --thread cli:mywork "agent:coding continue where we left off"
+// And a SECOND built-in that is not a registry command either: `start` runs the
+// bot — the very process the container image runs (src/index.ts `runBot`),
+// from the directory it is run in, so an operator with the npm package and no
+// Docker has Slack from a laptop. It is the PROCESS, not a command: a command
+// returns a value and exits, the bot runs until a signal drains it, and no
+// registry command may start an agent run — the bot starts them all through
+// `dispatch()`. Nothing of the CLI's own is wired for it: the registry, its
+// config open and its capabilities are built only when an invocation reaches
+// for them, so `start` opens the config exactly once, in the bot.
+//   npx tsx src/cli.ts start
+//   npx tsx src/cli.ts start --help          # what it starts, what it reads
 // And ONE spelling shortcut, the front door the docs promise: a bare `init` is
 // the registry's `setup init` — the same command, the same flags, no grammar of
 // its own (`CLI_SHORTHANDS`).
@@ -34,8 +45,7 @@
 // already read the config and the data directory.
 
 import "./loadEnv.js";
-import { existsSync, realpathSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { existsSync } from "node:fs";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
@@ -75,6 +85,7 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
+import { claimEntry } from "./invokedAsScript.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -93,9 +104,32 @@ export const USAGE = [
   `usage: ${PROGRAM} <group> <verb> [args…] [--option value…] [--json]`,
   `       ${PROGRAM} <group> <verb> --help`,
   `       ${PROGRAM} ask [--thread <key>] "[agent:name] [model:provider/model] your request"`,
+  `       ${PROGRAM} start                            (the bot: Slack from .env and config/ here)`,
   `       ${PROGRAM} init [--option value…]          (= setup init: the installer)`,
   `       ${PROGRAM} help`,
 ].join("\n");
+
+/** `start --help`: nothing is derived for a built-in, so this says what the
+ *  process is and what it reads — the facts an operator needs before running it. */
+export function startHelpText(program: string): string {
+  return [
+    `usage: ${program} start`,
+    "",
+    "Runs the bot: the same process the container image runs — Slack over Socket Mode (an outbound",
+    "websocket, so no public address is needed) and, when PORT is set, the HTTP server on that port",
+    "(/healthz, POST /ingress, POST /mcp, the dashboard under /runs) — until SIGINT or SIGTERM drains it.",
+    "",
+    "It reads, from the directory it is run in:",
+    "  .env                  the credentials; SLACK_BOT_TOKEN and SLACK_APP_TOKEN are required, and a",
+    "                        variable the shell already exports wins over the file",
+    "  config/config.yaml    the config (or the file SWITCHBOARD_CONFIG names)",
+    "  data/                 runtime overrides and, with `runHistory: { store: file }`, the run records",
+    "  skills/               the bundled skills, when the directory exists (or SWITCHBOARD_SKILLS_DIR)",
+    "The dashboard's built bundle comes with the program (or from SWITCHBOARD_WEB_DIST).",
+    "",
+    `\`${program} init\` writes .env and config/config.yaml; \`${program} ask "…"\` runs one request without Slack.`,
+  ].join("\n");
+}
 
 /** One-word spellings of a registry command — `init` for the installer. The
  *  word is replaced by the command's `<group> <verb>` before parsing, so what
@@ -111,6 +145,10 @@ export type CliInvocation =
   | { kind: "catalogue" }
   /** The built-in harness: dispatch `text` on `threadKey`. */
   | { kind: "ask"; threadKey: string; text: string }
+  /** The built-in process: run the bot from this directory (src/index.ts `runBot`). */
+  | { kind: "start" }
+  /** `start --help`: what the process is and what it reads. */
+  | { kind: "start-help" }
   /** The command exists but its tail is malformed: the grammar's `invalid_input` (usage hint in `error`). */
   | GrammarRejection
   /** Nothing to bind: no `<group> <verb>`, an unknown command, a malformed `ask`. */
@@ -120,8 +158,9 @@ const WORD = /^[a-z][a-z0-9]*$/;
 
 /**
  * argv → what to do. `--json` (anywhere) is the CLI's one output switch — a
- * transport concern, not grammar. `ask` is parsed here because it is the CLI's
- * own built-in; everything else goes to `parseInvocation` unchanged.
+ * transport concern, not grammar. `ask` and `start` are parsed here because
+ * they are the CLI's own built-ins; everything else goes to `parseInvocation`
+ * unchanged.
  */
 export function parseCliArgv(
   argv: readonly string[],
@@ -132,6 +171,7 @@ export function parseCliArgv(
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h" || (argv[0] === "help" && argv.length === 1))
     return { kind: "catalogue" };
   if (argv[0] === "ask") return parseAsk(argv.slice(1), now);
+  if (argv[0] === "start") return parseStart(argv.slice(1));
   const shorthand = CLI_SHORTHANDS[argv[0]];
   if (shorthand !== undefined) argv = [...cliWords(shorthand), ...argv.slice(1)];
   const json = argv.includes("--json");
@@ -175,6 +215,16 @@ function parseAsk(argv: readonly string[], now: () => number): CliInvocation {
   const text = words.join(" ").trim();
   if (!text) return { kind: "usage", error: `${USAGE}\n  ask needs a request` };
   return { kind: "ask", threadKey: thread || `cli:${now()}`, text };
+}
+
+/** `start` takes nothing: what the process reads is decided by the directory and the environment, never by a flag. */
+function parseStart(argv: readonly string[]): CliInvocation {
+  if (argv.length === 0) return { kind: "start" };
+  if (argv[0] === "--help" || argv[0] === "-h") return { kind: "start-help" };
+  return {
+    kind: "usage",
+    error: `${USAGE}\n  start takes no arguments: it reads .env and config/config.yaml from the directory it runs in (start --help)`,
+  };
 }
 
 /** The list a usage error and `help` print: every command this surface exposes. */
@@ -234,10 +284,10 @@ export async function runCommand(
   };
 }
 
-/** What every non-`ask` invocation prints — the pure half `main()` and the tests share. */
+/** What every invocation but the two processes (`ask`, `start`) prints — the pure half `main()` and the tests share. */
 export async function runCli(
   commands: CommandInvoker,
-  parsed: Exclude<CliInvocation, { kind: "ask" }>,
+  parsed: Exclude<CliInvocation, { kind: "ask" | "start" }>,
   caller: Caller,
   opts: { now?: number } = {},
 ): Promise<CommandRunOutput> {
@@ -248,6 +298,8 @@ export async function runCli(
       return { exitCode: 2, stdout: "", stderr: errorLine(parsed.code, parsed.error) };
     case "catalogue":
       return { exitCode: 0, stdout: `${USAGE}\n\ncommands:\n${cliCatalogue(commands)}`, stderr: "" };
+    case "start-help":
+      return { exitCode: 0, stdout: startHelpText(PROGRAM), stderr: "" };
     case "command-help": {
       const cmd = commands.get(parsed.id);
       return { exitCode: 0, stdout: cmd ? helpText(cmd) : `unknown command: ${chatForm(parsed.id)}`, stderr: "" };
@@ -375,7 +427,16 @@ export function cliCapabilities(
   }
 }
 
-async function main(): Promise<void> {
+/** The CLI's own wiring — the registry over the bot config and the run store —
+ *  built ONCE, and only when an invocation reaches for it (`wireCli` below):
+ *  `start` never does, so the bot it runs is the one thing that opens the config. */
+interface CliWiring {
+  commands: CommandInvoker;
+  bot: () => Promise<{ config: ConfigStore; runStore: RunStore }>;
+  mcpWiring: () => Promise<ReturnType<typeof buildMcp>>;
+}
+
+function wireCli(): CliWiring {
   const warn = (m: string) => console.error(m);
   // The bot config and, from it, the run history store: a CLI `ask`
   // persists exactly like a bot run when `runHistory` is configured (null
@@ -431,8 +492,36 @@ async function main(): Promise<void> {
       },
     },
   );
+  return { commands, bot, mcpWiring };
+}
+
+async function main(): Promise<void> {
+  const warn = (m: string) => console.error(m);
+  // The parser needs the catalogue only to bind a `<group> <verb>`; `ask`,
+  // `start` and the bare `help` are decided before it is asked, so the wiring
+  // happens behind these accessors, on the first invocation that binds a command.
+  let wired: CliWiring | undefined;
+  const wiring = () => (wired ??= wireCli());
+  const commands: CommandInvoker = {
+    list: () => wiring().commands.list(),
+    get: (id) => wiring().commands.get(id),
+    invoke: (...args) => wiring().commands.invoke(...args),
+    settles: (id) => wiring().commands.settles(id),
+    settle: (...args) => wiring().commands.settle(...args),
+  };
 
   const parsed = parseCliArgv(process.argv.slice(2), commands);
+  if (parsed.kind === "start") {
+    // The bot's entry, loaded here and not at the top, for two reasons: its
+    // module-level state (the process start time, the event-loop histogram)
+    // belongs to the bot process alone, so an `ask` or a `deploy plan` never
+    // pays for it; and the entry claim (src/invokedAsScript.ts) must be this
+    // module's — a static import would evaluate index.ts first and, inside the
+    // bundle where both share one import.meta.url, hand it the process.
+    const { runBot } = await import("./index.js");
+    await runBot();
+    return;
+  }
   if (parsed.kind !== "ask") {
     const out = await runCli(commands, parsed, CLI_CALLER);
     if (out.stdout) console.log(out.stdout);
@@ -440,6 +529,7 @@ async function main(): Promise<void> {
     process.exit(out.exitCode);
   }
 
+  const { bot, mcpWiring } = wiring();
   const { config, runStore } = await bot();
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
@@ -492,23 +582,10 @@ async function main(): Promise<void> {
   await runHistoryWriter.settled();
 }
 
-/** True when this module is the script Node was started with — through a
- *  symlink too (the `switchboard` bin npm links to `dist/cli.js`: `argv[1]` is
- *  the link, `import.meta.url` the target), never when merely imported. */
-function invokedAsScript(): boolean {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  try {
-    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
-  } catch {
-    return false;
-  }
-}
-
 // Run only when invoked as a script (tsx/node src/cli.ts, the `switchboard`
 // bin, the container's entrypoint), never on import (the parsing helpers above
 // are unit-tested).
-if (invokedAsScript()) {
+if (claimEntry(import.meta.url)) {
   main().catch((err) => {
     // `ask` without a bot config: the same one-line refusal the commands give, not a stack.
     console.error(err instanceof CommandError ? errorLine(err.code, err.message) : err);

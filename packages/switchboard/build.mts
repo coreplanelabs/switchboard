@@ -3,7 +3,8 @@
 //   dist/cli.js      the CLI, bundled from ../../src/cli.ts by esbuild — one file, the
 //                    repository's own modules inlined, every npm dependency left external
 //                    (they are this package's `dependencies`, held equal to the root's by
-//                    build.test.mts)
+//                    build.test.mts). The bot's entry (src/index.ts) is in the closure —
+//                    `start` runs it — so the bundle is the bot as much as the CLI.
 //   dist/assets/     the files the CLI reads at run time, under the paths the tree keeps
 //                    them at: the examples `init` derives from, project.json, what the
 //                    repository tracks under deploy/ minus its tests and the agent-env
@@ -11,19 +12,31 @@
 //                    the sources under src/ each Worker's worker.ts imports, and the root
 //                    manifest and lockfile, so a deploy from the package can materialise a
 //                    Worker directory and `npm ci --workspace` it at the release's pinned
-//                    versions (src/deploy/workArea.ts); plus source.json, the version and
-//                    commit this build came from (src/packageRoot.ts `parsePackageSource`)
+//                    versions (src/deploy/workArea.ts); the dashboard's built bundle
+//                    (web/dist, built here first) the bot serves from the package root
+//                    (src/channels/webAssets.ts `webDistDir`); plus source.json, the version
+//                    and commit this build came from (src/packageRoot.ts `parsePackageSource`)
 //   LICENSE          a copy of the repository's, so the tarball carries the license text
 // src/packageRoot.ts finds dist/assets/ beside the bundle by its project.json.
 //
 //   npm run build -w packages/switchboard
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { buildStamp } from "../../deploy/bin/build-stamp.mjs";
+import { WEB_DIST_DIR } from "../../src/channels/webAssets.js";
 import { importClosure, INERT_RULES } from "../../src/deploy/affected.js";
 import { WORKER_SPECS } from "../../src/deploy/plan.js";
 import { PACKAGE_SOURCE_FILE, type PackageSource } from "../../src/packageRoot.js";
@@ -65,13 +78,43 @@ export function shippedDeployAssets(trackedDeployPaths: readonly string[]): stri
 
 /**
  * Pure: every path the build copies under dist/assets/, repository-relative —
- * the root assets, the deploy assets, and the source files the Workers'
- * `worker.ts` import (`workerSourceFiles`), each once, sorted after the root list.
+ * the root assets, the deploy assets, the source files the Workers' `worker.ts`
+ * import (`workerSourceFiles`) and the dashboard's built files (`webDistAssets`),
+ * each once, sorted after the root list.
  */
-export function shippedAssets(trackedDeployPaths: readonly string[], workerSources: readonly string[] = []): string[] {
-  const rest = new Set([...shippedDeployAssets(trackedDeployPaths), ...workerSources]);
+export function shippedAssets(
+  trackedDeployPaths: readonly string[],
+  workerSources: readonly string[] = [],
+  webDist: readonly string[] = [],
+): string[] {
+  const rest = new Set([...shippedDeployAssets(trackedDeployPaths), ...workerSources, ...webDist]);
   for (const root of ROOT_ASSETS) rest.delete(root);
   return [...ROOT_ASSETS, ...[...rest].sort()];
+}
+
+/** The Vite manifest the bot reads first (src/channels/webAssets.ts `loadWebAssets`): without it there is no bundle. */
+const WEB_MANIFEST = ".vite/manifest.json";
+
+/**
+ * Pure: the dashboard's built files as tree paths (`web/dist/<file>`), from a
+ * listing of `web/dist` — every file, since the bot serves the whole directory.
+ * A listing without the Vite manifest is not a build: an error naming the
+ * command that makes one, never a package whose `start` boots half-blind.
+ */
+export function webDistAssets(filesUnderDist: readonly string[]): string[] {
+  if (!filesUnderDist.includes(WEB_MANIFEST))
+    throw new Error(`${WEB_DIST_DIR} has no ${WEB_MANIFEST} — it is not a build (npm run build -w web makes one)`);
+  return filesUnderDist.map((f) => `${WEB_DIST_DIR}/${f}`).sort();
+}
+
+/** Builds the dashboard (`npm run build -w web`, as the Dockerfile does) and lists what it produced. */
+function buildWebDist(): string[] {
+  execFileSync("npm", ["run", "build", "--workspace", "web", "--silent"], { cwd: REPO_ROOT, stdio: "inherit" });
+  const dist = join(REPO_ROOT, WEB_DIST_DIR);
+  const files = readdirSync(dist, { recursive: true, encoding: "utf8" }).filter((rel) =>
+    statSync(join(dist, rel)).isFile(),
+  );
+  return webDistAssets(files);
 }
 
 function trackedDeployPaths(): string[] {
@@ -127,7 +170,7 @@ async function main(): Promise<void> {
     const abs = join(REPO_ROOT, path);
     return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
   };
-  const assets = shippedAssets(trackedDeployPaths(), await workerSourceFiles(readTree));
+  const assets = shippedAssets(trackedDeployPaths(), await workerSourceFiles(readTree), buildWebDist());
   for (const rel of assets) {
     const to = join(ASSETS_DIR, rel);
     mkdirSync(dirname(to), { recursive: true });

@@ -205,11 +205,11 @@ describe("planInit — the capability summary and the next commands", () => {
     expect(withShellToken.capabilities.github).toBe(true);
   });
 
-  it("in a checkout the next commands are the CLI's ask, the bot from source, and docker compose with the image fact; a profile adds deploy secrets/config/all", () => {
+  it("in a checkout the next commands are the CLI's ask, the bot from source (npm run dev), and docker compose with the image fact; a profile adds deploy secrets/config/all", () => {
     const local = planned(minimal);
     expect(local.next).toEqual([
       'npm run cli -- ask "what can you do?"',
-      "npx tsx src/index.ts",
+      "npm run dev",
       "docker compose up -d   # the same bot from the published image ghcr.io/example/switchboard:latest",
     ]);
     const prod = planned({ ...minimal, cloudflare: ACCOUNT, zone: "example.com" });
@@ -220,11 +220,12 @@ describe("planInit — the capability summary and the next commands", () => {
     ]);
   });
 
-  it("from the published npm package the next commands are the package's own ask and the bot from the image; a profile adds the package's own deploy steps", () => {
+  it("from the published npm package the next commands are the package's own ask, the package's own start — the bot with no Docker — and the image as the one-line alternative; a profile adds the package's own deploy steps", () => {
     const plan = planned(minimal, { inCheckout: false, package: "@example/switchboard" });
     expect(plan.next).toEqual([
       'npx @example/switchboard ask "what can you do?"',
-      'docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/example/switchboard:latest   # the bot, from the published image',
+      "npx @example/switchboard start",
+      'docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/example/switchboard:latest   # the same bot from the published image',
     ]);
     // The profile is written into the directory init runs in: from the package, that directory is where the deploy runs from.
     const prod = planned(
@@ -245,7 +246,7 @@ describe("planInit — the capability summary and the next commands", () => {
       sandbox: { script: "switchboard-sandbox", hostname: "switchboard-sandbox.example.com" },
     });
     expect(parseProfile(raw)).toMatchObject({ ok: true, profile: { images: "registry" } });
-    expect(prod.next.slice(2)).toEqual([
+    expect(prod.next.slice(3)).toEqual([
       "npx @example/switchboard deploy secrets memory",
       "npx @example/switchboard deploy secrets bot",
       "npx @example/switchboard deploy secrets resident",
