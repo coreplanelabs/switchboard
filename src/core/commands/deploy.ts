@@ -4,9 +4,11 @@ import {
   planImageCopies,
   publishedImagesFrom,
   registryHas,
+  type ImageCopy,
   type ImagesPlan,
   type ImageStatus,
   type PublishedImages,
+  type RegistryImage,
 } from "../../deploy/images.js";
 import type { ImagesHostIO } from "../../deploy/imagesHost.js";
 import {
@@ -61,8 +63,11 @@ import {
 // commands. `deploy plan` is pure — the plan `planDeploy` computes from the
 // options (every surface; a browser can read what a deploy WOULD do). `deploy
 // all` executes it (CLI only: it spawns wrangler on the operator's machine) —
-// the former `npm run deploy:all` script. Same options on both, so a plan you
-// read is the plan you run. `deploy restart` (item 8) restarts the bot
+// the former `npm run deploy:all` script — and, in `registry` mode, first copies
+// the images its steps lack into the account registry (the same copy `deploy
+// images` makes), so the operator's whole deploy is the one command. Same
+// selection options on both, so a plan you read is the plan you run; `deploy
+// all --dry-run` adds what it would copy. `deploy restart` (item 8) restarts the bot
 // container WITHOUT a build — how a rotated bot secret goes live — through the
 // Worker's `POST /admin/restart`; CLI only like `deploy all`: it is an
 // operator action that stops a container and reads the bearer from the
@@ -89,11 +94,12 @@ export interface DeployCommandDeps {
     secrets: SecretsHostIO;
     /** `deploy config`: read the source, validate, push the `base` document to the state Worker (src/deploy/run.ts `pushConfigOnHost`). */
     pushConfig(opts: { source: string; stateWorkerUrl: string; key: string }): Promise<ConfigPushOutcome>;
-    /** `deploy images` (and `deploy plan` in `registry` mode): the account registry's listing, whether Docker is
-     *  here, one image copy (src/deploy/imagesHost.ts). */
+    /** `deploy images` (and `deploy plan` / `deploy all` in `registry` mode): the account registry's listing, the
+     *  credential the copy pushes with, one image copy over HTTPS (src/deploy/imagesHost.ts). */
     images: ImagesHostIO;
-    /** The version this CLI runs as (src/packageRoot.ts `packageVersion`): the images a release published carry
-     *  it, so it is what `deploy images` copies and what `registry`-mode configs reference. */
+    /** The version this CLI runs as (src/deploy/host.ts `cliVersionOnHost`: the root `package.json`'s in a checkout,
+     *  `source.json`'s from the published package): the images a release published carry it, so it is what the copy
+     *  moves and what `registry`-mode configs reference. */
     cliVersion(): string;
   };
 }
@@ -166,40 +172,63 @@ function toOptions(
   };
 }
 
+/** A computed plan with what it was computed from — so `deploy all` can rebuild it after a copy from the
+ *  same answers (the profile, the `--affected` report, the published images) plus a fresh listing. */
+interface Planned {
+  plan: DeployPlan;
+  loaded: LoadedProfile;
+  images: ImagesInput;
+  affected: AffectedReport | undefined;
+}
+
 /** The plan both commands compute: `--affected` asks the probe and lets the
  *  report select (`--only`/`--skip` then narrow that selection); otherwise
  *  `--only/--skip` select, and an empty selection is a mistake in the
- *  invocation. An empty AFFECTED selection is a true answer. */
+ *  invocation. An empty AFFECTED selection is a true answer. In `registry` mode
+ *  the plan says which of its steps' images the account registry holds and
+ *  refuses nothing over a missing one — nor, when it is only read (`dryRun`),
+ *  over a registry it cannot read: `deploy plan` reports, `deploy all` copies. */
 async function computePlan(
   options: z.output<typeof deployOptions>,
   deps: DeployCommandDeps,
   dryRun: boolean,
-): Promise<DeployPlan> {
+): Promise<Planned> {
   if (options.base !== undefined && !options.affected)
     throw new CommandError("invalid_input", "--base only means something with --affected");
   const loaded = await loadProfile(deps);
   const affected = options.affected
     ? await deps.deploy.affected(options.base !== undefined ? { base: options.base } : {})
     : undefined;
-  const plan = planDeploy(
-    toOptions(options, dryRun, affected),
-    deps.deploy.host,
-    loaded,
-    await imagesInput(loaded, deps),
-  );
+  const images = await imagesInput(loaded, deps, dryRun);
+  const plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.host, loaded, images);
   if (plan.steps.length === 0 && !affected)
     throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
-  // Fail closed: a `registry`-mode step whose image is not in the account registry would deploy a
-  // Worker whose container cannot start. The plan says which, and the fix is one command.
-  if (plan.images.mode === "registry") {
-    const missing = plan.images.images.filter((i) => i.present === false);
-    if (missing.length > 0)
-      throw new CommandError(
-        "unavailable",
-        `refusing — the account registry has no image for ${missing.map((i) => `${i.kind} (${i.ref})`).join(", ")}; run \`deploy images\` first: it copies the release's images at version ${plan.images.version} into the account registry`,
-      );
-  }
-  return plan;
+  return { plan, loaded, images, affected };
+}
+
+/** The same plan again, over the listing read back after a copy: every answer the first plan was computed
+ *  from is reused — the `--affected` probe is never asked twice, so the selection the copies were planned
+ *  for is the selection that deploys. */
+function replan(
+  options: z.output<typeof deployOptions>,
+  planned: Planned,
+  listing: readonly RegistryImage[],
+  deps: DeployCommandDeps,
+): DeployPlan {
+  const images: ImagesInput =
+    planned.images.mode === "registry"
+      ? { mode: "registry", published: planned.images.published, registry: listing }
+      : planned.images;
+  return planDeploy(toOptions(options, false, planned.affected), deps.deploy.host, planned.loaded, images);
+}
+
+/** The copies a plan needs: its `registry`-mode steps whose image the account registry lacks, in
+ *  deploy order — the same plan `deploy images` makes, narrowed to the planned Workers. Nothing in
+ *  `build` mode, nothing for the example profile (never probed, never deployed). */
+function copiesFor(plan: DeployPlan, images: ImagesInput, account: string): ImageCopy[] {
+  if (plan.images.mode !== "registry" || images.mode !== "registry" || !images.registry) return [];
+  const missing = new Set(plan.images.images.filter((i) => i.present === false).map((i) => i.kind));
+  return planImageCopies(images.published, account, images.registry).copy.filter((c) => missing.has(c.kind));
 }
 
 /** The profile, or `unavailable` naming what is wrong with it — the one error a caller can act on. */
@@ -223,14 +252,19 @@ async function publishedImages(deps: DeployCommandDeps): Promise<PublishedImages
 /** What the planner needs to say where each step's image comes from. `build` mode needs nothing (the
  *  Dockerfiles are static, and a facts file without `images` is no concern of a checkout that builds).
  *  `registry` mode reads the published images and probes the account registry — for a real profile,
- *  never for the example (a placeholder account has no registry, and nothing deploys from the example). */
-async function imagesInput(loaded: LoadedProfile, deps: DeployCommandDeps): Promise<ImagesInput> {
+ *  never for the example (a placeholder account has no registry, and nothing deploys from the example).
+ *  A registry that cannot be read (no CLOUDFLARE_API_TOKEN, a refused token) is `unavailable` for a run —
+ *  `deploy all` needs it to copy — and, for a read (`deploy plan`, a dry run), a plan that says `not
+ *  probed` and why: the plan is read on every surface and needs no credential to be read. */
+async function imagesInput(loaded: LoadedProfile, deps: DeployCommandDeps, readOnly: boolean): Promise<ImagesInput> {
   if (loaded.profile.images !== "registry") return { mode: "build" };
   const published = await publishedImages(deps);
-  if (loaded.origin === "example") return { mode: "registry", published };
+  if (loaded.origin === "example") return { mode: "registry", published, unprobed: "the example profile" };
   const registry = await deps.deploy.images.registry(loaded.profile.account);
-  if ("error" in registry)
+  if ("error" in registry) {
+    if (readOnly) return { mode: "registry", published, unprobed: registry.error };
     throw new CommandError("unavailable", `cannot read the account registry — ${registry.error}`);
+  }
   return { mode: "registry", published, registry: registry.value };
 }
 
@@ -244,27 +278,79 @@ export const deployPlan = defineCommand({
   describe:
     "The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.",
   render: (output) => formatPlan(output as unknown as DeployPlan),
-  handler: async ({ options, deps }) => planJson(await computePlan(options, deps, true)),
+  handler: async ({ options, deps }) => planJson((await computePlan(options, deps, true)).plan),
 });
+
+const allOptions = deployOptions.extend({
+  dryRun: flag
+    .optional()
+    .describe(
+      "compute the plan and the image copies it would make into the account registry, then stop — nothing copied, nothing deployed",
+    ),
+});
+
+/** One image `deploy all` copied (or, under --dry-run, would copy) into the account registry. */
+interface CopiedImage {
+  kind: string;
+  source: string;
+  target: string;
+}
+
+/** What `deploy all` reports: the plan it ran, each step's result, and the images it copied first — or, under
+ *  `--dry-run`, the ones it would have. */
+interface AllOutput {
+  plan: DeployPlan;
+  results: Parameters<typeof formatDeployResults>[0];
+  copied: CopiedImage[];
+  wouldCopy: CopiedImage[];
+}
+
+const copiedImage = (c: ImageCopy): CopiedImage => ({ kind: c.kind, source: c.source, target: c.target });
+const listCopies = (copies: readonly CopiedImage[]) => copies.map((c) => `${c.kind} ← ${c.source}`).join(", ");
 
 export const deployAll = defineCommand({
   id: "deploy.all",
-  options: deployOptions,
+  options: allOptions,
   action: "deploy:write",
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an `echo ok` probe — until the new containers are live. --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.",
+    "Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an `echo ok` probe — until the new containers are live. In `registry` mode it first copies the release's images its Workers lack into the account registry (what `deploy images` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.",
   render: (output) => {
-    const o = output as JsonObject;
-    const results = o.results as unknown as Parameters<typeof formatDeployResults>[0];
-    if (results.length === 0)
-      return `nothing to deploy — every Worker already serves this tree's inputs\n${formatPlan(o.plan as unknown as DeployPlan)}`;
-    return `deployed and live\n${formatDeployResults(results, [])}`;
+    const o = output as unknown as AllOutput;
+    const lines: string[] = [];
+    if (o.copied.length > 0) lines.push(`copied into the account registry: ${listCopies(o.copied)}`);
+    if (o.plan.dryRun) {
+      if (o.wouldCopy.length > 0) lines.push(`would copy into the account registry: ${listCopies(o.wouldCopy)}`);
+      lines.push(formatPlan(o.plan), "(dry run — nothing copied, nothing deployed)");
+    } else if (o.results.length === 0)
+      lines.push(`nothing to deploy — every Worker already serves this tree's inputs`, formatPlan(o.plan));
+    else lines.push("deployed and live", formatDeployResults(o.results, []));
+    return lines.join("\n");
   },
   handler: async ({ options, deps }) => {
-    const plan = await computePlan(options, deps, false);
-    if (plan.steps.length === 0) return { plan: planJson(plan), results: [] };
+    const dryRun = options.dryRun ?? false;
+    const planned = await computePlan(options, deps, dryRun);
+    const { loaded, images } = planned;
+    let { plan } = planned;
+    const copies = copiesFor(plan, images, loaded.profile.account);
+    const output = (results: AllOutput["results"], copied: ImageCopy[], wouldCopy: ImageCopy[]): JsonValue =>
+      ({
+        plan: planJson(plan),
+        results,
+        copied: copied.map(copiedImage),
+        wouldCopy: wouldCopy.map(copiedImage),
+      }) as unknown as JsonValue;
+    if (dryRun) return output([], [], copies);
+    if (plan.steps.length === 0) return output([], [], []);
+    if (copies.length > 0) {
+      // The images first, before the live gate and before any Worker rolls: a step whose container
+      // cannot start is never deployed. The listing read back as the proof is the listing the plan
+      // is rebuilt on — from the first plan's own answers, so the runner gets a plan whose images are
+      // all present and whose selection is the one the copies were planned for.
+      const after = await copyImages(copies, loaded.profile.account, deps);
+      plan = replan(options, planned, after, deps);
+    }
     const result = await deps.deploy.run(plan);
     if (result.kind === "refused")
       throw new CommandError("unavailable", `refusing —\n  - ${result.problems.join("\n  - ")}`);
@@ -278,7 +364,7 @@ export const deployAll = defineCommand({
         `deploy stopped —\n${formatDeployResults(result.results, result.notAttempted)}`,
       );
     }
-    return { plan: planJson(plan), results: result.results as unknown as JsonValue };
+    return output(result.results, copies, []);
   },
 });
 
@@ -589,7 +675,7 @@ const imagesOptions = z.object({
   dryRun: flag
     .optional()
     .describe(
-      "say which images the account registry already holds at the version and which would be copied; nothing is pulled or pushed",
+      "say which images the account registry already holds at the version and which would be copied; nothing is copied",
     ),
 });
 
@@ -620,6 +706,39 @@ function imagesOutput(plan: ImagesPlan, copied: ImageStatus): ImagesOutput {
   };
 }
 
+/** Copy the images the account registry lacks, in order: the credential first — the one thing the copy needs that
+ *  the rest of the deploy does not, refused by name before anything moves — then each transfer, stopping at the
+ *  first failure naming the image and what was not attempted. A transfer that reported success is not the proof:
+ *  the registry is listed again and every copy must appear; that listing is returned for the caller to plan on. */
+async function copyImages(
+  copies: readonly ImageCopy[],
+  account: string,
+  deps: DeployCommandDeps,
+): Promise<RegistryImage[]> {
+  const credential = await deps.deploy.images.credential(account);
+  if (!credential.ok) throw new CommandError("unavailable", credential.problem);
+  for (const [i, copy] of copies.entries()) {
+    const r = await deps.deploy.images.copy(copy, account);
+    if (!r.ok) {
+      const rest = copies.slice(i + 1).map((c) => c.kind);
+      throw new CommandError(
+        "unavailable",
+        `copying the ${copy.kind} image (${copy.source} → ${copy.target}) failed — ${r.problem}; stopping — ${rest.length > 0 ? rest.join(", ") : "nothing"} not attempted`,
+      );
+    }
+  }
+  const after = await deps.deploy.images.registry(account);
+  if ("error" in after)
+    throw new CommandError("unavailable", `copied, but cannot read the account registry back — ${after.error}`);
+  const unlisted = copies.filter((c) => !registryHas(after.value, c.name, c.version));
+  if (unlisted.length > 0)
+    throw new CommandError(
+      "unavailable",
+      `copied ${copies.map((c) => c.target).join(", ")}, but the account registry does not list ${unlisted.map((c) => c.target).join(", ")} afterwards`,
+    );
+  return after.value;
+}
+
 export const deployImages = defineCommand({
   id: "deploy.images",
   options: imagesOptions,
@@ -627,7 +746,7 @@ export const deployImages = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so `registry`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. Needs Docker where it runs.",
+    "Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so `registry`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. A registry-to-registry transfer over HTTPS: needs CLOUDFLARE_API_TOKEN with Containers Edit, nothing else.",
   render: (output) => {
     const o = output as unknown as ImagesOutput;
     if (o.mode === "build")
@@ -638,7 +757,7 @@ export const deployImages = defineCommand({
         (i) =>
           `${i.status.padEnd(10)} ${i.kind.padEnd(8)} ${i.target}${i.status === "present" ? "" : ` ← ${i.source}`}`,
       ),
-      `version ${o.version} on account ${o.account}: ${o.images.length - copied} present, ${copied} ${o.images.some((i) => i.status === "would copy") ? "to copy (dry run — nothing pulled or pushed)" : "copied"}`,
+      `version ${o.version} on account ${o.account}: ${o.images.length - copied} present, ${copied} ${o.images.some((i) => i.status === "would copy") ? "to copy (dry run — nothing copied)" : "copied"}`,
     ].join("\n");
   },
   handler: async ({ options, deps }) => {
@@ -659,31 +778,7 @@ export const deployImages = defineCommand({
     const plan = planImageCopies(published, account, before.value);
     if (options.dryRun) return imagesOutput(plan, "would copy") as unknown as JsonValue;
     if (plan.copy.length === 0) return imagesOutput(plan, "copied") as unknown as JsonValue;
-    // Docker is the one thing this command needs that the rest of the CLI does not; refused before
-    // anything is pulled, naming where it is.
-    const docker = await deps.deploy.images.docker();
-    if (!docker.ok) throw new CommandError("unavailable", docker.problem);
-    for (const [i, copy] of plan.copy.entries()) {
-      const r = await deps.deploy.images.copy(copy, account);
-      if (r.code !== 0) {
-        const rest = plan.copy.slice(i + 1).map((c) => c.kind);
-        const said = wranglerFailureLine(r.output);
-        throw new CommandError(
-          "unavailable",
-          `copying the ${copy.kind} image (${copy.source} → ${copy.target}) failed (exit ${r.code}); stopping — ${rest.length > 0 ? rest.join(", ") : "nothing"} not attempted${said ? `. ${said}` : ""}`,
-        );
-      }
-    }
-    // A push that returned 0 is not the proof; the registry listing it afterwards is.
-    const after = await deps.deploy.images.registry(account);
-    if ("error" in after)
-      throw new CommandError("unavailable", `pushed, but cannot read the account registry back — ${after.error}`);
-    const unlisted = plan.copy.filter((c) => !registryHas(after.value, c.name, c.version));
-    if (unlisted.length > 0)
-      throw new CommandError(
-        "unavailable",
-        `pushed ${plan.copy.map((c) => c.target).join(", ")}, but the account registry does not list ${unlisted.map((c) => c.target).join(", ")} afterwards`,
-      );
+    await copyImages(plan.copy, account, deps);
     return imagesOutput(plan, "copied") as unknown as JsonValue;
   },
 });

@@ -184,6 +184,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "required": false,
         "type": "integer",
       },
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
     ],
     "resource": "command",
     "surfaces": [

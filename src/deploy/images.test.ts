@@ -3,10 +3,8 @@ import {
   accountRegistryImage,
   containerImage,
   DOCKERFILES,
-  dockerUnavailableProblem,
   IMAGE_KINDS,
   imagesFromFacts,
-  parseRegistryListing,
   planImageCopies,
   publishedImagesFrom,
   registryHas,
@@ -17,8 +15,8 @@ import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "./te
 
 // Feature: docs/reference/specs/release-and-deploy.md items 25–26 — the three
 // published images, the reference each Worker deploys under the profile's image
-// mode, and the copy plan `deploy images` runs from a registry listing. Pure:
-// nothing here names a real account or pulls anything.
+// mode, and the copy plan the copy runs from a registry listing. Pure: nothing
+// here names a real account or moves anything.
 
 const ACCOUNT = TEST_PROFILE.account;
 
@@ -91,16 +89,6 @@ describe("the account registry listing", () => {
     { name: "unrelated", tags: ["1.2.3"] },
   ];
 
-  it("parses wrangler's `images list --json` rows (name + tags) and refuses any other shape", () => {
-    expect(parseRegistryListing(listing)).toEqual(listing);
-    expect(parseRegistryListing([{ name: "x", tags: ["1", 2, "3"] }])).toEqual([{ name: "x", tags: ["1", "3"] }]);
-    expect(parseRegistryListing([])).toEqual([]);
-    expect(parseRegistryListing({ name: "x", tags: [] })).toBeUndefined();
-    expect(parseRegistryListing([{ name: "x" }])).toBeUndefined();
-    expect(parseRegistryListing([null])).toBeUndefined();
-    expect(parseRegistryListing("text")).toBeUndefined();
-  });
-
   it("holds `<name>:<version>` when that name lists that tag — another name's tag or another version does not count", () => {
     expect(registryHas(listing, "switchboard", "1.2.3")).toBe(true);
     expect(registryHas(listing, "switchboard-resident", "1.2.3")).toBe(false);
@@ -132,13 +120,11 @@ describe("the account registry listing", () => {
         present: false,
       },
     ]);
-    // The local tag is the BARE name: wrangler namespaces a bare tag under the account; a host-qualified one it
-    // would push back where it came from.
+    // Each copy carries the bare name and the version it lands under in the account registry.
     expect(plan.copy).toEqual([
       {
         kind: "resident",
         source: "ghcr.io/example/switchboard-resident:1.2.3",
-        localTag: "switchboard-resident:1.2.3",
         target: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3`,
         name: "switchboard-resident",
         version: "1.2.3",
@@ -146,7 +132,6 @@ describe("the account registry listing", () => {
       {
         kind: "sandbox",
         source: "ghcr.io/example/switchboard-sandbox:1.2.3",
-        localTag: "switchboard-sandbox:1.2.3",
         target: `registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:1.2.3`,
         name: "switchboard-sandbox",
         version: "1.2.3",
@@ -156,15 +141,5 @@ describe("the account registry listing", () => {
     const all = [...IMAGE_KINDS].map((k) => ({ name: registryName(TEST_PUBLISHED_IMAGES.names[k]), tags: ["1.2.3"] }));
     expect(planImageCopies(TEST_PUBLISHED_IMAGES, ACCOUNT, all).copy).toEqual([]);
     expect(planImageCopies(TEST_PUBLISHED_IMAGES, ACCOUNT, []).copy.map((c) => c.kind)).toEqual([...IMAGE_KINDS]);
-  });
-});
-
-describe("dockerUnavailableProblem", () => {
-  it("says Docker is missing here, keeps what the host said, and names the reusable deploy workflow as the place that has it", () => {
-    const p = dockerUnavailableProblem("docker: command not found");
-    expect(p).toContain("docker is not available here (docker: command not found)");
-    expect(p).toContain("`deploy images` pulls and pushes with Docker");
-    expect(p).toContain(".github/workflows/deploy-production.yml");
-    expect(dockerUnavailableProblem("")).not.toContain("()");
   });
 });

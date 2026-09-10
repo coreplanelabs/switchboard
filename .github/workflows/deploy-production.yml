@@ -23,13 +23,15 @@
 #
 # Images (`copy-images`): a profile whose Workers run the images the release
 # published (`images: registry`) needs them copied into its account's registry
-# once per version — `deploy images`, run here BEFORE the plan, since a
-# registry-mode plan refuses a Worker whose copy is absent. The profile decides,
-# not this file: the command copies what a `registry` profile lacks and answers
-# a `build` profile (this repository's own, which wrangler builds at deploy
-# time) with nothing to copy, reading nothing. `auto` (the default) runs it;
-# `never` skips it. GitHub's runners carry Docker, which the copy needs, so
-# nothing is installed for it.
+# once per version. `deploy all` copies what its Workers lack by itself; the
+# `deploy images` step here, BEFORE the plan, pre-warms the registry so the
+# plan reads `present` and the deploy step is the deploy alone. The profile
+# decides, not this file: the command copies what a `registry` profile lacks
+# and answers a `build` profile (this repository's own, which wrangler builds at
+# deploy time) with nothing to copy, reading nothing. `auto` (the default) runs
+# it; `never` skips it and leaves the copy to `deploy all`. The copy is a
+# registry-to-registry transfer over HTTPS: nothing is installed for it, and
+# the Cloudflare token needs Containers Edit.
 #
 # A busy bot is not busy (docs/reference/specs/release-and-deploy.md item 13). Since the
 # run ledger's handoff (run-history item 39) the bot hands its runs to the next
@@ -110,7 +112,7 @@ on:
         type: string
         default: ""
       copy-images:
-        description: "`auto` (default): run `deploy images` before the plan — it copies what a `registry`-mode profile lacks and does nothing for a `build`-mode one; `never`: skip it"
+        description: "`auto` (default): run `deploy images` before the plan — it copies what a `registry`-mode profile lacks and does nothing for a `build`-mode one; `never`: skip it and leave the copy to `deploy all`"
         type: string
         default: auto
     secrets:
@@ -184,8 +186,11 @@ jobs:
       # profile is read with CONFIG_REPO_TOKEN, the App token minted below.
       SWITCHBOARD_DEPLOY_PROFILE: ${{ inputs.profile || vars.SWITCHBOARD_DEPLOY_PROFILE }}
       # The App is handed in as two secrets, or — this installation — loaded
-      # from the secrets manager when no client id was handed in.
+      # from the secrets manager when no client id was handed in. Neither means
+      # a `github://` profile has no App to read it with: refused by name below,
+      # before the mint step fails on an empty client id.
       LOAD_APP_FROM_VAULT: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' && secrets.CONFIG_REPO_APP_CLIENT_ID == '' }}
+      HAS_APP_CREDENTIALS: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID != '' || secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}
       WRANGLER_SEND_METRICS: "false"
       CI: "1"
       # A stalled npm-cache segment gives up after 1 min, not 10 (see ci.yml).
@@ -222,27 +227,31 @@ jobs:
             package)
               v="$VERSION"
               if [ -z "$v" ] && [ "$REF_TYPE" = "tag" ]; then v="${REF_NAME#v}"; fi
-              case "$v" in
-                [0-9]*.[0-9]*.[0-9]*) ;;
-                *) echo "::error::package mode needs the CLI's version — pass \`version\` (1.13.0) or run from a tag (v1.13.0); got '${v:-nothing}'. Nothing was deployed."; exit 1 ;;
-              esac
+              # A release version as the CLI judges one (src/deploy/images.ts VERSION): three numbers, an optional pre-release.
+              if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+                echo "::error::package mode needs the CLI's version — pass \`version\` (1.13.0) or run from a tag (v1.13.0); got '${v:-nothing}'. Nothing was deployed."; exit 1
+              fi
               echo "cli=npx --yes @coreplane/switchboard@$v" >> "$GITHUB_OUTPUT"
               echo "label=@coreplane/switchboard@$v" >> "$GITHUB_OUTPUT"
               echo "the published CLI at $v — nothing of the repository is checked out" ;;
             *) echo "::error::cli must be checkout or package — got '$MODE'. Nothing was deployed."; exit 1 ;;
           esac
-      # The calling repository: in `checkout` mode it is this repository and
-      # the tree `deploy all` deploys; in `package` mode only a profile that is
-      # a path inside it wants it on disk. A `github://` or `op://` profile is
-      # read over the network and the operator's directory stays empty. There is
-      # no `repository:` here — this workflow never checks out ANOTHER repository.
+      # The calling repository, in `checkout` mode: it is this repository and
+      # the tree `deploy all` deploys. Full history + tags: --affected diffs
+      # against the commit each Worker serves and falls back to the last `v*`
+      # tag before HEAD. There is no `repository:` here or below — this workflow
+      # never checks out ANOTHER repository.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: inputs.cli != 'package' || !(startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'github://') || startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'op://'))
+        if: inputs.cli != 'package'
         with:
-          # Full history + tags: --affected diffs against the commit each Worker
-          # serves and falls back to the last `v*` tag before HEAD.
           fetch-depth: 0
           fetch-tags: true
+      # In `package` mode only a profile that is a path inside the calling
+      # repository wants it on disk — shallow, there is no tree to judge. A
+      # `github://` or `op://` profile is read over the network and the
+      # operator's directory stays empty.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.cli == 'package' && !(startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'github://') || startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'op://'))
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: inputs.cli != 'package'
         with:
@@ -269,6 +278,13 @@ jobs:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           APP_CLIENT_ID: op://CI/coreplane-bot/client-id
           APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
+      # A configuration repository named with nothing to read it: said here, by
+      # name, instead of the mint step failing on an empty client id.
+      - name: the configuration repository needs the App
+        if: vars.CONFIG_REPO_NAME != '' && env.HAS_APP_CREDENTIALS != 'true'
+        run: |
+          echo "::error::CONFIG_REPO_NAME is set but no App can read that repository — pass CONFIG_REPO_APP_CLIENT_ID and CONFIG_REPO_APP_PRIVATE_KEY (or OP_SERVICE_ACCOUNT_TOKEN) as secrets, or unset the variable for a profile that is a path in this repository. Nothing was deployed."
+          exit 1
       - name: mint the App token that reads the configuration repository
         id: infra-token
         if: vars.CONFIG_REPO_NAME != ''
@@ -303,9 +319,10 @@ jobs:
           echo "args=$args" >> "$GITHUB_OUTPUT"
           echo "deploy all $args"
       # Once per version, before the plan: the release's images into the account
-      # registry (pull from the public registry, push with wrangler — the runner's
-      # Docker does both). The profile decides — a `build`-mode profile has nothing
-      # to copy and nothing is read — and a copy already present is skipped by name.
+      # registry, registry to registry over HTTPS. `deploy all` below would make
+      # the same copy itself; running it here first lets the plan read `present`.
+      # The profile decides — a `build`-mode profile has nothing to copy and
+      # nothing is read — and a copy already present is skipped by name.
       - name: copy the release's images into the account registry
         if: inputs.copy-images != 'never'
         env:

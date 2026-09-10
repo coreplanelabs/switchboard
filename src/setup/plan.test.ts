@@ -233,9 +233,23 @@ describe("planInit — the capability summary and the next commands", () => {
     );
     expect(prod.profile).toBe(true);
     expect(prod.files.map((f) => f.path)).toEqual([ENV_PATH, CONFIG_PATH, PROFILE_PATH]);
+    // From the package there is no tree to build an image from: the profile has all four Workers and deploys
+    // the release's published images, copied into the account registry by `deploy all` itself. A checkout's
+    // profile has the two smallest and says nothing about images — it builds (the test above).
+    const raw = JSON.parse(fileAt(prod, PROFILE_PATH).text) as { images?: string; workers: Record<string, unknown> };
+    expect(raw.images).toBe("registry");
+    expect(raw.workers).toEqual({
+      memory: { script: "switchboard-memory", hostname: "switchboard-memory.example.com" },
+      bot: { script: "switchboard", hostname: "switchboard.example.com" },
+      resident: { script: "switchboard-resident", hostname: "switchboard-resident.example.com" },
+      sandbox: { script: "switchboard-sandbox", hostname: "switchboard-sandbox.example.com" },
+    });
+    expect(parseProfile(raw)).toMatchObject({ ok: true, profile: { images: "registry" } });
     expect(prod.next.slice(2)).toEqual([
       "npx @example/switchboard deploy secrets memory",
       "npx @example/switchboard deploy secrets bot",
+      "npx @example/switchboard deploy secrets resident",
+      "npx @example/switchboard deploy secrets sandbox",
       'MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx @example/switchboard deploy all',
     ]);
   });

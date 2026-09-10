@@ -54,8 +54,9 @@ const source = z.string().min(1);
 /** Where a Worker's container image comes from (src/deploy/images.ts): `build` —
  *  each Worker's `image` is its Dockerfile and wrangler builds it at deploy time
  *  (a checkout; this project's own production); `registry` — the release's
- *  published images, copied into the account registry by `deploy images` and
- *  referenced as `registry.cloudflare.com/<account>/<name>:<version>`. */
+ *  published images, copied into the account registry by `deploy all` (or
+ *  `deploy images` ahead of it) and referenced as
+ *  `registry.cloudflare.com/<account>/<name>:<version>`. */
 export const IMAGE_MODES = ["build", "registry"] as const;
 export type ImageMode = (typeof IMAGE_MODES)[number];
 

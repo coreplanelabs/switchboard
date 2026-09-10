@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
-import { DOCKERFILES, IMAGE_KINDS, type ImageKind } from "./deploy/images.js";
+import { DOCKERFILES, IMAGE_KINDS, VERSION, type ImageKind } from "./deploy/images.js";
 import { WORKER_DIRS } from "./deploy/plan.js";
 
 // CI is a thin caller of the repository's own scripts. Every check a job runs
@@ -406,6 +406,41 @@ describe("the release publishes the bot image", () => {
     expect(attest.with?.["push-to-registry"]).toBe(true);
   });
 
+  it("retries the attestation once, on the same pushed digest, never rebuilding — a success on the first never runs the retry — and neither step asks for a storage record", () => {
+    // The images are not reproducible: a re-run of the leg pushes a different digest and leaves an unattested
+    // orphan, so the retry is a second attest step against `steps.build.outputs.digest` in the same job.
+    const attests = job.steps.filter((s) => s.uses?.startsWith("actions/attest-build-provenance@")) as (Step & {
+      id?: string;
+      "continue-on-error"?: boolean;
+    })[];
+    expect(attests).toHaveLength(2);
+    const [first, retry] = attests;
+    expect(first.id).toBe("attest");
+    expect(first["continue-on-error"]).toBe(true);
+    expect(first.if).toBeUndefined();
+    expect(retry.id).toBe("attest-retry");
+    expect(retry.if).toBe("steps.attest.outcome == 'failure'");
+    expect(retry["continue-on-error"]).toBeUndefined();
+    expect(retry.uses).toBe(first.uses);
+    expect(retry.with).toEqual(first.with);
+    for (const a of attests) {
+      expect(a.with?.["subject-digest"]).toBe("${{ steps.build.outputs.digest }}");
+      // The storage record needs a permission the job does not grant and buys nothing the registry copy does not.
+      expect(a.with?.["create-storage-record"]).toBe(false);
+    }
+    // One build per leg, and the retry follows the first attempt directly.
+    expect(job.steps.filter((s) => s.uses?.startsWith("docker/build-push-action@"))).toHaveLength(1);
+    expect(job.steps.indexOf(retry)).toBe(job.steps.indexOf(first) + 1);
+    // The steps are the same for every leg: nothing in them names a matrix value, so each image gets the retry.
+    for (const leg of matrix) {
+      expect(leg.name).toBeTruthy();
+      for (const a of attests) expect(JSON.stringify(a.with)).not.toContain("matrix.");
+    }
+    const said = job.steps.find((s) => s.if === "always() && steps.attest.outcome == 'failure'")!;
+    expect(said.run).toContain("::warning");
+    expect(said.run).toContain("steps.attest-retry.outcome");
+  });
+
   it("every action in the workflow is pinned to a full commit sha", () => {
     for (const j of Object.values(workflow.jobs)) {
       for (const s of j.steps ?? []) {
@@ -625,7 +660,7 @@ describe("the production deploy is one reusable workflow", () => {
   const isCommand = (line: string) => !/^(echo |if \[|\*\)|[a-z|"]+\) echo )/.test(line);
   const cliStep = steps.find((s) => s.id === "cli")!;
   const cliValues = [...(cliStep.run ?? "").matchAll(/echo "cli=([^"]+)" >> "\$GITHUB_OUTPUT"/g)].map((m) => m[1]);
-  const checkout = steps.find((s) => s.uses?.startsWith("actions/checkout@"))!;
+  const checkouts = steps.filter((s) => s.uses?.startsWith("actions/checkout@"));
 
   it("is callable with the inputs a caller needs, each defaulting to this repository's own call", () => {
     const inputs = workflow.on.workflow_call.inputs;
@@ -692,20 +727,47 @@ describe("the production deploy is one reusable workflow", () => {
         }
       }
     }
-    expect(steps.indexOf(cliStep)).toBeLessThan(steps.indexOf(checkout));
+    for (const c of checkouts) expect(steps.indexOf(cliStep)).toBeLessThan(steps.indexOf(c));
+    // The version is judged by the release-tag rule the CLI holds (src/deploy/images.ts `VERSION`), in shell.
+    const shell = VERSION.source.replaceAll("\\d", "[0-9]").replaceAll("(?:", "(");
+    expect(cliStep.run).toContain(`[[ "$v" =~ ${shell} ]]`);
+    expect(cliStep.run).not.toMatch(/\[0-9\]\*\.\[0-9\]\*\.\[0-9\]\*\)/);
+  });
+
+  it("a `github://` profile with CONFIG_REPO_NAME set and no App credentials is refused by name before the mint", () => {
+    expect(job.env?.HAS_APP_CREDENTIALS).toBe(
+      "${{ secrets.CONFIG_REPO_APP_CLIENT_ID != '' || secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}",
+    );
+    const refusal = steps.find((s) => s.name === "the configuration repository needs the App")!;
+    expect(refusal.if).toBe("vars.CONFIG_REPO_NAME != '' && env.HAS_APP_CREDENTIALS != 'true'");
+    expect(refusal.run).toContain("::error::");
+    expect(refusal.run).toContain("CONFIG_REPO_NAME");
+    expect(refusal.run).toContain("CONFIG_REPO_APP_CLIENT_ID");
+    expect(refusal.run).toContain("OP_SERVICE_ACCOUNT_TOKEN");
+    expect(refusal.run).toContain("exit 1");
+    const mint = steps.find((s) => s.uses?.startsWith("actions/create-github-app-token@"))!;
+    expect(steps.indexOf(refusal)).toBeLessThan(steps.indexOf(mint));
   });
 
   it("`package` mode fetches nothing of this repository and runs no npm script of it", () => {
-    // The one checkout is the CALLING repository (no `repository:`), and in
-    // package mode only for a profile that is a path inside it.
-    expect(steps.filter((s) => s.uses?.startsWith("actions/checkout@"))).toHaveLength(1);
-    expect(checkout.with).not.toHaveProperty("repository");
-    expect(checkout.with).not.toHaveProperty("ref");
-    expect(checkout.if).toBe(
-      "inputs.cli != 'package' || !(startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'github://') || startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'op://'))",
+    // Every checkout is the CALLING repository (no `repository:`, no `ref:`). The checkout-mode one is the tree
+    // `deploy all` deploys and needs the history `--affected` diffs against; the package-mode one exists only for a
+    // profile that is a path inside the calling repository, and is shallow — there is no tree to judge.
+    expect(checkouts).toHaveLength(2);
+    const [tree, profileOnly] = checkouts;
+    for (const c of checkouts) {
+      expect(c.with ?? {}).not.toHaveProperty("repository");
+      expect(c.with ?? {}).not.toHaveProperty("ref");
+    }
+    expect(tree.if).toBe("inputs.cli != 'package'");
+    expect(tree.with).toEqual({ "fetch-depth": 0, "fetch-tags": true });
+    expect(profileOnly.if).toBe(
+      "inputs.cli == 'package' && !(startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'github://') || startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'op://'))",
     );
+    expect(profileOnly.with ?? {}).not.toHaveProperty("fetch-depth");
+    expect(profileOnly.with ?? {}).not.toHaveProperty("fetch-tags");
     for (const s of packageSteps) {
-      if (s === checkout) continue;
+      if (s === profileOnly) continue;
       for (const line of lines(s))
         expect(line, `${s.name ?? s.uses} runs npm in package mode: ${line}`).not.toMatch(/^npm\b/);
       expect(s.run ?? "", `${s.name} reads the tree in package mode`).not.toMatch(/\bgit\b/);
@@ -741,6 +803,7 @@ describe("the production deploy is one reusable workflow", () => {
       "only from main",
       "the CLI",
       undefined, // npm ci
+      "the configuration repository needs the App",
       "the credentials this run has",
       "the selection",
       "copy the release's images into the account registry",
@@ -751,7 +814,7 @@ describe("the production deploy is one reusable workflow", () => {
     ]);
   });
 
-  it("`deploy images` runs before the plan — a registry-mode plan refuses a Worker whose copy is absent — unless `copy-images` is `never`", () => {
+  it("`deploy images` runs before the plan — a pre-warm; `deploy all` would copy the same images itself — unless `copy-images` is `never`", () => {
     const copy = steps.find((s) => /deploy images/.test(s.run ?? ""))!;
     expect(copy.if).toBe("inputs.copy-images != 'never'");
     expect(lines(copy)).toEqual(["$CLI deploy images"]);

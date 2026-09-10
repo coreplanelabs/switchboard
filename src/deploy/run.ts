@@ -253,7 +253,7 @@ function packageModeProblems(plan: DeployPlan): string[] {
       `${OPERATOR_ROOT.workArea} does not hold the package's version ${plan.root.version ?? "?"} — re-run; the work area is materialised before the checks`,
     );
   // Only a `build`-mode plan builds anything: in `registry` mode every image is a reference into the
-  // account registry (src/deploy/images.ts), and the plan already refused a missing one.
+  // account registry (src/deploy/images.ts), and `deploy all` copied a missing one before handing the plan over.
   if (plan.images.mode === "build") {
     for (const step of plan.steps) {
       const rendered = workerDir(`${step.dir}/${RENDERED_FILE}`);

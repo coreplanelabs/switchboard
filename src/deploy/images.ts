@@ -6,17 +6,22 @@
 // `project.json` records (`images`). Cloudflare cannot pull from that registry,
 // and an image it pulls from any external registry is fetched uncached on every
 // container start, so an installation that deploys published images COPIES them
-// once per version into its own account registry (`deploy images`: pull, tag,
-// `wrangler containers push`) and its Worker configs reference the copy —
-// `registry.cloudflare.com/<account>/<name>:<version>`. That is the profile's
-// `images: "registry"` mode. The other mode, `build`, is the checkout's: each
-// Worker's `image` is its Dockerfile and wrangler builds it at deploy time.
+// once per version into its own account registry — a registry-to-registry
+// transfer over HTTPS (src/deploy/registryTransfer.ts), run by `deploy images`
+// and by `deploy all` itself when a planned Worker's copy is missing — and its
+// Worker configs reference the copy, `registry.cloudflare.com/<account>/<name>:<version>`.
+// That is the profile's `images: "registry"` mode. The other mode, `build`, is
+// the checkout's: each Worker's `image` is its Dockerfile and wrangler builds it
+// at deploy time.
 //
-// Pure: the names, the references, the planner over a registry listing, and the
-// parser for wrangler's `images list --json`. Docker and wrangler run in
-// src/deploy/imagesHost.ts.
+// Pure: the names, the references, and the planner over the account registry's
+// listing (src/deploy/registryTransfer.ts reads that listing's shape). The
+// registry read and the transfer run in src/deploy/imagesHost.ts.
 
+import { ACCOUNT_REGISTRY, registryHas, type RegistryImage } from "./accountRegistry.js";
 import type { DeploymentProfile } from "./profile.js";
+
+export { ACCOUNT_REGISTRY, registryHas, type RegistryImage };
 
 /** The Workers with a container image, in deploy order (the memory Worker has none). */
 export const IMAGE_KINDS = ["bot", "resident", "sandbox"] as const;
@@ -29,9 +34,6 @@ export const DOCKERFILES: Readonly<Record<ImageKind, string>> = {
   resident: "./Dockerfile",
   sandbox: "./Dockerfile",
 };
-
-/** Cloudflare's managed registry — the one Containers pull from cached and pre-fetched. */
-export const ACCOUNT_REGISTRY = "registry.cloudflare.com";
 
 /** A release version as the tags carry it: `1.2.3`, or a pre-release `1.2.3-rc.1`. */
 export const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -102,36 +104,11 @@ export function containerImage(
     : accountRegistryImage(profile.account, registryName(published.names[kind]), published.version);
 }
 
-/** One row of `wrangler containers images list --json`: the name without the account prefix, and its tags. */
-export interface RegistryImage {
-  name: string;
-  tags: string[];
-}
-
-/** Pure: wrangler's listing, or `undefined` for any other shape. */
-export function parseRegistryListing(json: unknown): RegistryImage[] | undefined {
-  if (!Array.isArray(json)) return undefined;
-  const out: RegistryImage[] = [];
-  for (const row of json) {
-    const r = row as { name?: unknown; tags?: unknown } | null;
-    if (typeof r?.name !== "string" || !Array.isArray(r.tags)) return undefined;
-    out.push({ name: r.name, tags: r.tags.filter((t): t is string => typeof t === "string") });
-  }
-  return out;
-}
-
-/** Pure: does the account registry hold `<name>:<version>`? */
-export function registryHas(listing: readonly RegistryImage[], name: string, version: string): boolean {
-  return listing.some((r) => r.name === name && r.tags.includes(version));
-}
-
-/** One image to copy: pull `source`, tag it `localTag` (a bare name, so wrangler
- *  namespaces it under the account instead of pushing it back where it came
- *  from), push it, and it appears as `target`. */
+/** One image to copy: read `source` where the release published it, write it into the account
+ *  registry under `name` at `version`, and it appears as `target`. */
 export interface ImageCopy {
   kind: ImageKind;
   source: string;
-  localTag: string;
   target: string;
   name: string;
   version: string;
@@ -142,7 +119,7 @@ export interface ImagesPlan {
   account: string;
   /** Every image at the version: where it is published, where it lands, and whether the account registry already has it. */
   images: { kind: ImageKind; source: string; target: string; present: boolean }[];
-  /** The images not yet present — what `deploy images` copies, in order. */
+  /** The images not yet present — what the copy moves, in order. */
   copy: ImageCopy[];
 }
 
@@ -168,21 +145,9 @@ export function planImageCopies(
     images: images.map(({ kind, source, target, present }) => ({ kind, source, target, present })),
     copy: images
       .filter((i) => !i.present)
-      .map(({ kind, source, target, name }) => ({
-        kind,
-        source,
-        localTag: `${name}:${published.version}`,
-        target,
-        name,
-        version: published.version,
-      })),
+      .map(({ kind, source, target, name }) => ({ kind, source, target, name, version: published.version })),
   };
 }
 
 /** What `deploy images` reports for one image. */
 export type ImageStatus = "present" | "copied" | "would copy";
-
-/** The one refusal that has a place to go: no Docker where the command runs. */
-export function dockerUnavailableProblem(said: string): string {
-  return `docker is not available here${said ? ` (${said})` : ""} — \`deploy images\` pulls and pushes with Docker; run it where Docker is: the reusable deploy workflow (.github/workflows/deploy-production.yml), whose runner has it`;
-}
