@@ -9,10 +9,10 @@ import { formatDuration } from "./format";
 import {
   buildTimeline,
   CURRENTLY_DELIVERING,
-  GLOSS,
   NO_ROOT_NOTE,
   NO_TIMING_NOTE,
   RANKED_NOTE,
+  TERM_DEFINITIONS,
   type TimelineInput,
 } from "./timelineVm";
 
@@ -93,17 +93,28 @@ describe("buildTimeline", () => {
       ["Switchboard overhead", 4_000, 1.6, false],
     ]);
     expect(vm.bar.reduce((a, s) => a + s.ms, 0)).toBe(252_000);
-    expect(vm.gloss).toBe(GLOSS);
+    // The legend is the bar labelled: the same terms in the same order, the
+    // printed times, and every term's definition for the hover.
+    expect(vm.total).toBe("4m 12s");
+    expect(vm.legend.map((l) => [l.term, l.text])).toEqual([
+      ["getting ready", "34s"],
+      ["thinking", "2m 16s"],
+      ["in tools", "1m 10s"],
+      ["finishing up", "8s"],
+      ["Switchboard overhead", "4s"],
+    ]);
+    expect(vm.legend.map((l) => l.term)).toEqual(vm.bar.map((s) => s.term));
+    for (const l of vm.legend) expect(l.definition).toBe(TERM_DEFINITIONS[l.term]);
     expect(vm.rankedNote).toBe(RANKED_NOTE);
   });
 
-  it("ranks up to three steps by their own time (children excluded, the root and background out, ties by earlier start), labelled through the display table with whitelisted facts — never a raw span name", () => {
+  it("ranks up to three steps by their own time (children excluded; the root, the agent loop and background out; ties by earlier start), labelled through the display table with whitelisted facts — never a raw span name — each anchored to its row", () => {
     const vm = buildTimeline(finishedReview);
-    // run.agent's own time is zero (its turns and tools cover it); reading_diff is background.
+    // run.agent is structure, never ranked (its own time is the overhead term); reading_diff is background.
     expect(vm.ranked).toEqual([
-      { label: "a model turn", ms: 100_000, facts: [] },
-      { label: "bash", ms: 40_000, facts: ["timeout 20m 00s", "exit 1"] },
-      { label: "a model turn", ms: 36_000, facts: [] },
+      { label: "a model turn", ms: 100_000, facts: [], anchor: "span-t2" },
+      { label: "bash", ms: 40_000, facts: ["timeout 20m 00s", "exit 1"], anchor: "call-c2" },
+      { label: "a model turn", ms: 36_000, facts: [], anchor: "span-t1" },
     ]);
     for (const item of vm.ranked) {
       expect(RAW_NAMES.has(item.label)).toBe(false);
@@ -112,6 +123,27 @@ describe("buildTimeline", () => {
     }
     // The attach's own time is its 4 s outside the clone graft: 4th, so not listed.
     expect(vm.ranked.some((r) => r.label === "attaching the workspace")).toBe(false);
+    // A loop with idle time of its own is still never a step: it has no row to go to.
+    const idleLoop = buildTimeline({
+      ...finishedReview,
+      spans: REVIEW.map((s) => (s.spanId === "t2" ? { ...s, endedAt: 150_000, durationMs: 50_000 } : s)),
+    });
+    expect(idleLoop.ranked.some((r) => r.label === "a Switchboard step" || r.label === "the agent loop")).toBe(false);
+  });
+
+  it("a tool step is named by its card's command when the page knows the card; a call the page has no card for keeps the display table's word", () => {
+    const vm = buildTimeline({
+      ...finishedReview,
+      callTitle: (callId) => (callId === "c2" ? "npm test -- webhooks" : undefined),
+    });
+    expect(vm.ranked[1]).toEqual({
+      label: "npm test -- webhooks",
+      ms: 40_000,
+      facts: ["timeout 20m 00s", "exit 1"],
+      anchor: "call-c2",
+    });
+    const unknown = buildTimeline({ ...finishedReview, callTitle: () => undefined });
+    expect(unknown.ranked[1].label).toBe("bash");
   });
 
   it("live: the buckets over the elapsed window, then the open bucket as a drill-down that is a subset of its bucket and a hatched tail on the bar; no drill-down when the deepest open span is uncounted", () => {
@@ -182,6 +214,11 @@ describe("buildTimeline", () => {
     });
     expect(cut.lede).toBe("2m 00s — 30s getting ready · 20s thinking · 40s in tools · 30s not recorded (too large)");
     expect(cut.bar.find((s) => s.term === "not recorded")?.ms).toBe(30_000);
+    expect(cut.legend.find((l) => l.term === "not recorded")).toEqual({
+      term: "not recorded",
+      text: "30s",
+      definition: `${TERM_DEFINITIONS["not recorded"]} (too large)`,
+    });
     const plain = buildTimeline({
       ...finishedReview,
       spans,
@@ -220,9 +257,11 @@ describe("buildTimeline", () => {
       delivery: {},
     });
     expect(record.lede).toBe("1m 00s");
+    expect(record.total).toBe("1m 00s");
     expect(record.note).toBe(NO_ROOT_NOTE);
     expect(record.shown).toBe(false);
     expect(record.bar).toEqual([]);
+    expect(record.legend).toEqual([]);
     expect(record.ranked).toEqual([]);
     const early = buildTimeline({
       spans: [],
@@ -252,6 +291,7 @@ describe("buildTimeline", () => {
     expect(NO_TIMING_NOTE).toBe("no timing data");
     expect(record.shown).toBe(false);
     expect(record.bar).toEqual([]);
+    expect(record.legend).toEqual([]);
     expect(record.ranked).toEqual([]);
     expect(record.captions).toEqual([]);
   });

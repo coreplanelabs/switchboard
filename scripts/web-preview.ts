@@ -20,6 +20,7 @@ import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web
 //   /runs/live-1     a live run fed by a scripted SSE stream (loops forever)
 //   /runs/hist-1     a finished run in history mode        /runs/nope   the 404
 //   /runs/review-1   a finished PR review carrying both reading diffs (the panel)
+//   /runs/hist-4     a finished PR review with a request_changes verdict as the Reply
 //   /runs/scheduled  the Scheduled tab                     /residents   /costs
 //
 // SWITCHBOARD_PREVIEW_CAPABILITIES=minimal serves the same fixtures with every
@@ -77,6 +78,17 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
     eventCount: 214,
     channelId: "cli:local",
     userId: "cli:alice",
+  }),
+  row({
+    id: "hist-4",
+    label: 'review · acme/api · "please review https://github.com/acme/api/pull/42 — the retry-queue change"',
+    finished: true,
+    persisted: true,
+    startedAt: NOW - 3 * 3_600_000,
+    finishedAt: NOW - 3 * 3_600_000 + 252_000,
+    status: "completed",
+    eventCount: 27,
+    userName: "sam",
   }),
   row({
     id: "hist-2",
@@ -141,7 +153,7 @@ const modelTurn = (
 const HIST_EVENTS = [
   {
     type: "input",
-    text: "Add **retry logic** to the webhook sender:\n\n- exponential backoff\n- max 5 attempts\n- give up on 4xx",
+    text: "Add **retry logic** to the webhook sender:\n\n- exponential backoff\n- max 5 attempts\n- give up on 4xx\n\nAcceptance: a 5xx from the receiver retries with growing delays and gives up after the fifth attempt with one `warn` log naming the status; a 4xx never retries; the existing callers in `src/jobs/` keep their signature. Add tests for both paths before the implementation, and keep the change to `src/webhooks.ts` and its test file.",
     at: NOW - 2_400_000,
     seq: 1,
     source: { channel: "dev", user: "alice", url: "https://example.slack.com/archives/C1/p1" },
@@ -290,6 +302,16 @@ const HIST_EVENTS = [
     at: NOW - 750_000,
     seq: 25,
   },
+  // The post-step edited the PR the run was on (docs/reference/specs/pr-description.md
+  // item 5): the Reply's caption reads it as the run's PR fact.
+  {
+    type: "pr_opened",
+    url: "https://github.com/acme/web/pull/42",
+    number: 42,
+    created: false,
+    at: NOW - 750_200,
+    seq: 26,
+  },
 ];
 
 /** The history run as a traced stream (docs/reference/specs/tracing.md): the request root
@@ -358,6 +380,7 @@ const REVIEW_STREAM = normalizeSpans([
     at: REVIEW_RECEIVED_AT,
   },
   spanEnd("recv", "slack.receive", REVIEW_RECEIVED_AT, REVIEW_RECEIVED_AT + 900, "root"),
+  spanEnd("hist", "dispatch.history", REVIEW_RECEIVED_AT + 900, REVIEW_RECEIVED_AT + 1_000, "root"),
   {
     type: "input",
     text: "review https://github.com/acme/api/pull/57",
@@ -469,7 +492,148 @@ const REVIEW_STREAM = normalizeSpans([
     seq: 11,
   },
   spanEnd("agent", "run.agent", REVIEW_RECEIVED_AT + 3_800, REVIEW_RECEIVED_AT + 400_500, "root"),
-  spanEnd("post", "run.review_post_step", REVIEW_RECEIVED_AT + 400_500, REVIEW_FINISHED_AT, "root"),
+  // The finishing-up step the bar counts (docs/reference/specs/tracing.md), then the two
+  // delivery spans after the finish stamp — the streamed names, so every row
+  // on the page has a display name and the Finishing up head has a step.
+  spanEnd("observe", "run.observe_workspace", REVIEW_RECEIVED_AT + 400_500, REVIEW_FINISHED_AT, "root"),
+  spanEnd("close", "post.card_close", REVIEW_FINISHED_AT, REVIEW_FINISHED_AT + 400, "root"),
+  spanEnd("reply", "post.reply", REVIEW_FINISHED_AT + 400, REVIEW_FINISHED_AT + 1_400, "root"),
+] as RunEvent[]);
+
+/** A finished PR review (`/runs/hist-4`): the REVIEW row with the branch, head
+ *  and PR links and the Reading diff control, a reading-diff artifact, the
+ *  verdict as the Reply, and every phase of the bar present. Three hours old. */
+const VERDICT_RECEIVED_AT = NOW - 3 * 3_600_000;
+const V = (offsetMs: number) => VERDICT_RECEIVED_AT + offsetMs;
+const VERDICT_FINISHED_AT = V(252_000);
+const VERDICT_HEAD = "9f2c1a7e4b0d5c6f8a1b2c3d4e5f60718293a4b5";
+const VERDICT_EVENTS = [
+  {
+    type: "input",
+    text: "please review https://github.com/acme/api/pull/42 — the retry-queue change; the backoff cap is the part I'm least sure about",
+    at: V(1_500),
+    seq: 1,
+    source: { channel: "api-reviews", user: "sam", url: "https://example.slack.com/archives/C2/p1" },
+  },
+  {
+    type: "run_meta",
+    agent: "review",
+    model: "anthropic/claude-fable-5",
+    effort: "medium",
+    repo: "acme/api",
+    ref: "feat/retry-queue",
+    pr: 42,
+    headSha: VERDICT_HEAD,
+    at: V(1_600),
+    seq: 2,
+  },
+  {
+    type: "review_artifact",
+    artifact: "reading_diff",
+    poweredBy: "git",
+    baseRef: "main",
+    diff: "diff --git a/src/queue.ts b/src/queue.ts\n--- a/src/queue.ts\n+++ b/src/queue.ts\n@@ -40,7 +40,9 @@ export function nextDelay(attempt: number): number {\n-  return BASE_MS * 2 ** attempt;\n+  const raw = BASE_MS * 2 ** attempt;\n+  // cap the backoff so a long outage does not park a job for hours\n+  return Math.min(raw, MAX_DELAY_MS);\n }\n",
+    truncated: false,
+    at: V(20_000),
+    seq: 3,
+  },
+  modelTurn("r1", V(34_000), 36_000, 4, {
+    stopReason: "tool_use",
+    model: "anthropic/claude-fable-5",
+    inputTokens: 21_400,
+    outputTokens: 640,
+    cacheReadTokens: 18_000,
+  }),
+  {
+    type: "assistant",
+    text: "Reading the whole diff and the changed files once, then the callers of `nextDelay`.",
+    at: V(70_000),
+    seq: 5,
+  },
+  {
+    type: "tool_call",
+    callId: "rc1",
+    tool: "bash",
+    summary: "$ git diff origin/main...HEAD --stat",
+    at: V(70_500),
+    seq: 6,
+  },
+  {
+    type: "tool_result",
+    callId: "rc1",
+    tool: "bash",
+    ok: true,
+    summary: "(96 chars, 3 lines)",
+    output:
+      " src/queue.ts       | 4 +++-\n src/queue.test.ts  | 12 ++++++++++++\n 2 files changed, 15 insertions(+), 1 deletion(-)",
+    at: V(72_000),
+    seq: 7,
+  },
+  { type: "tool_call", callId: "rc2", tool: "bash", summary: "$ rg -n 'nextDelay' src", at: V(72_500), seq: 8 },
+  {
+    type: "tool_result",
+    callId: "rc2",
+    tool: "bash",
+    ok: true,
+    summary: "(140 chars, 3 lines)",
+    output:
+      "src/queue.ts:40:export function nextDelay(attempt: number): number {\nsrc/worker.ts:88:    await sleep(nextDelay(job.attempt));\nsrc/queue.test.ts:12:  expect(nextDelay(9)).toBe(60_000);",
+    at: V(100_000),
+    seq: 9,
+  },
+  modelTurn("r2", V(100_000), 100_000, 10, {
+    stopReason: "tool_use",
+    model: "anthropic/claude-fable-5",
+    inputTokens: 26_900,
+    outputTokens: 1_450,
+    cacheReadTokens: 21_000,
+  }),
+  {
+    type: "assistant",
+    text: "One correctness finding: `MAX_DELAY_MS` is applied before the jitter in `worker.ts`, so a capped delay can still exceed the cap by up to 20%. Declaring the verdict.",
+    at: V(200_000),
+    seq: 11,
+  },
+  {
+    type: "tool_call",
+    callId: "rc3",
+    tool: "submit_verdict",
+    summary: "submit_verdict request_changes",
+    at: V(200_500),
+    seq: 12,
+  },
+  {
+    type: "tool_result",
+    callId: "rc3",
+    tool: "submit_verdict",
+    ok: true,
+    summary: "(16 chars)",
+    output: "verdict recorded",
+    at: V(201_000),
+    seq: 13,
+  },
+  modelTurn("r3", V(201_000), 39_000, 14, { stopReason: "end_turn", model: "anthropic/claude-fable-5" }),
+  {
+    type: "answer",
+    text: "Changes requested: the backoff cap is applied before the jitter.\n\n**major** · `src/worker.ts:88` — `sleep(nextDelay(job.attempt))` is followed by `± 20%` jitter in `sleep`, so the cap in `nextDelay` is not a cap: attempt 9 can sleep 72 s against `MAX_DELAY_MS = 60_000`. Apply the jitter first, then `Math.min`.\n\n**nit** · `src/queue.test.ts:12` — the new test pins the capped value but not the jittered one; add a case at the cap.",
+    at: V(240_000),
+    seq: 15,
+  },
+];
+const VERDICT_STREAM = normalizeSpans([
+  { type: "span_start", spanId: "rroot", name: "request", attrs: { channel: "slack", queuedBeforeMs: 0 }, at: V(0) },
+  spanEnd("rrecv", "slack.receive", V(0), V(2_000), "rroot"),
+  spanEnd("rhist", "dispatch.history", V(2_000), V(6_000), "rroot"),
+  spanEnd("rrepo", "dispatch.repo_context", V(6_000), V(20_000), "rroot"),
+  spanEnd("rattach", "dispatch.workspace.attach", V(22_000), V(34_000), "rroot", { backend: "resident" }),
+  spanEnd("rclone", "dispatch.workspace.attach.clone", V(22_000), V(30_000), "rattach", { backend: "resident" }),
+  spanEnd("rdiff", "run.reading_diff", V(34_000), V(154_000), "rroot"),
+  { type: "span_start", spanId: "ragent", parentSpanId: "rroot", name: "run.agent", at: V(34_000) },
+  ...VERDICT_EVENTS,
+  spanEnd("ragent", "run.agent", V(34_000), V(240_000), "rroot"),
+  spanEnd("robs", "run.observe_workspace", V(240_000), V(248_000), "rroot"),
+  spanEnd("rclose", "post.card_close", V(252_000), V(252_400), "rroot"),
+  spanEnd("rreply", "post.reply", V(252_400), V(254_000), "rroot"),
 ] as RunEvent[]);
 
 /** The script's last command — the one the live stream holds out for a while. */
@@ -731,6 +895,24 @@ function page(pathname: string, all: boolean): { title: string; seed: PageSeed; 
         sealedAt: REVIEW_FINISHED_AT + 1_400,
         replyOk: true,
         durationMs: REVIEW_FINISHED_AT - REVIEW_RECEIVED_AT,
+      },
+    };
+  if (pathname === "/runs/hist-4")
+    return {
+      title: "Run",
+      seed: {
+        page: "run",
+        mode: "history",
+        id: "hist-4",
+        events: VERDICT_STREAM as never,
+        status: "completed",
+        eventCount: VERDICT_STREAM.length,
+        receivedAt: VERDICT_RECEIVED_AT,
+        startedAt: VERDICT_RECEIVED_AT + 1_500,
+        finishedAt: VERDICT_FINISHED_AT,
+        sealedAt: VERDICT_FINISHED_AT + 2_000,
+        replyOk: true,
+        durationMs: VERDICT_FINISHED_AT - VERDICT_RECEIVED_AT,
       },
     };
   if (pathname.startsWith("/runs/"))

@@ -7,7 +7,8 @@ import { RunnerClockKey, type CallVm } from "../../lib/runPageModel";
 // A call card: <details> — header row is the summary (status glyph, $ or tool
 // chip, the command with a one-line collapsed headline, right-hand facts,
 // chevron), the redacted output inside. The call's start time is pacing
-// information, not a headline: it rides on the card's hover.
+// information, not a headline: it rides on the card's hover. The card's id
+// (`call-<id>`) is what the timeline's Longest steps scroll to.
 //
 // In-progress work draws where it will end up: while the call runs, the facts
 // slot ticks its elapsed on the page's projected runner clock — the same slot
@@ -45,6 +46,7 @@ function toggle(): void {
 
 <template>
   <details
+    :id="`call-${call.id}`"
     class="call rounded-md border border-default bg-elevated open:bg-accented/40"
     :class="call.status"
     :open="call.open"

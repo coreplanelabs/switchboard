@@ -4,21 +4,25 @@ import StepItems from "./StepItems.vue";
 import MarkdownText from "../MarkdownText.vue";
 import { durationTone, heatStyle } from "../../lib/durationTone";
 import { formatClock, formatDuration, formatLocalIso } from "../../lib/format";
-import { modelName, type StepVm } from "../../lib/runPageModel";
+import { callSummary, modelName, type StepVm } from "../../lib/runPageModel";
 
 // ONE STEP = ONE BLOCK, read top to bottom (item 18): a rail marks where it
 // starts and ends. Its head is ONE meta row — `thought <span> · <token facts>`
 // on the left, the viewer's clock on the right — so every step's prose starts
 // flush left at the same rhythm. Under the prose, the calls it explains; from
-// the 2nd non-quiet call the cards fold into ONE group whose summary tallies
-// them (the fold rules live in runPageModel).
+// the 2nd non-quiet call the cards fold into ONE group whose summary reads
+// the tally as a sentence (the fold rules live in runPageModel).
 //
 // The timeline speaks TWO text sizes: `text-xs` for metadata (this head row,
-// card facts, quiet rows) and the body size for everything a person reads.
+// card facts, quiet rows, the group summary) and the body size for everything
+// a person reads. Every secondary fact is `text-dimmed`.
 //
 // Both durations on this block, the turn's thinking time and the group's
 // tallied tool time, are painted by the duration heat scale (item 24), so a
 // step that ate the run reads warm before anyone opens it.
+//
+// The block carries the id of its turn's span (`span-<id>`) so the timeline's
+// Longest steps can scroll to it.
 
 const props = defineProps<{ step: StepVm }>();
 const emit = defineEmits<{ toggleGroup: [] }>();
@@ -42,6 +46,7 @@ const tally = computed(() => {
   }
   return { n: ok + bad + infra + running, ok, bad, infra, running, ms };
 });
+const summary = computed(() => callSummary(tally.value));
 const timedOut = computed(() => cards.value.some((i) => i.kind === "call" && i.call.timedOut));
 const tallyHeat = computed(() => durationTone(tally.value.ms, "tool", timedOut.value));
 const tallyPaint = computed(() => heatStyle(tallyHeat.value));
@@ -56,6 +61,7 @@ const firstCallAt = computed(() => {
 
 <template>
   <li
+    :id="step.turn ? `span-${step.turn.spanId}` : undefined"
     class="step relative border-l-2 pb-3 pl-3 pt-2"
     :class="step.live ? 'border-ok/40' : 'border-(--ui-border-accented)/50'"
     :data-live="step.live ? '1' : undefined"
@@ -77,9 +83,9 @@ const firstCallAt = computed(() => {
             :title="step.turn.label"
             >thought {{ step.turn.chip }}</span
           >
-          <!-- Every head names the model that took the turn — the same badge
-               the pending-turn row wears. A turn on a DIFFERENT model than the
-               run was on is the thing to notice: a loud ⇄ chip instead. -->
+          <!-- The model is named where a reader learns something: the run's
+               first head, and every head where it CHANGED — a loud ⇄ chip. A
+               run on one model says it once. -->
           <span
             v-if="step.turn.switched"
             class="model-switch order-first rounded border border-warn/40 bg-warn/10 px-1.5 font-semibold text-warn"
@@ -87,7 +93,7 @@ const firstCallAt = computed(() => {
             >⇄ {{ modelName(step.turn.model) }}</span
           >
           <span
-            v-else-if="step.turn.model"
+            v-else-if="step.turn.showModel"
             class="model-badge order-first rounded bg-accented px-1.5 text-[0.68rem] font-semibold leading-normal tracking-wider text-muted"
             :title="step.turn.model"
             >{{ modelName(step.turn.model) }}</span
@@ -119,26 +125,30 @@ const firstCallAt = computed(() => {
     <div class="calls flex flex-col gap-2 pr-3">
       <StepItems v-if="!grouped" :items="step.items" />
       <details v-else class="grp" :open="step.groupOpen" :data-group-open="step.groupOpen ? '1' : '0'">
+        <!-- The group's summary is a muted line, not a header: the cards are
+             the work, this is their count as a reader says it. -->
         <summary
-          class="gsummary flex cursor-pointer list-none items-baseline gap-4 rounded-md border border-default bg-elevated px-3 py-2 hover:bg-accented/60 focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
+          class="gsummary flex cursor-pointer list-none items-baseline gap-3 rounded-md px-3 py-1 text-xs text-dimmed hover:bg-accented/40 hover:text-muted focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
           :title="typeof firstCallAt === 'number' ? `calls began ${formatLocalIso(firstCallAt)}` : undefined"
           @click.prevent="emit('toggleGroup')"
         >
           <span
-            class="gchev order-9 shrink-0 text-xs text-dimmed transition-transform motion-reduce:transition-none"
+            class="gchev shrink-0 select-none transition-transform motion-reduce:transition-none"
             :class="step.groupOpen ? 'rotate-90' : ''"
             >❯</span
           >
-          <span class="gcount font-semibold text-highlighted"
-            >{{ tally.n }} {{ tally.n === 1 ? "call" : "calls" }}</span
+          <span
+            class="gcount"
+            :class="tally.bad || tally.infra ? 'text-bad' : ''"
+            :data-ok="tally.ok"
+            :data-bad="tally.bad"
+            :data-infra="tally.infra"
+            :data-running="tally.running"
+            >{{ summary }}</span
           >
-          <span v-if="tally.ok" class="gok text-ok">✓ {{ tally.ok }}</span>
-          <span v-if="tally.bad" class="gbad text-bad">✗ {{ tally.bad }}</span>
-          <span v-if="tally.infra" class="ginfra text-warn">⚠ {{ tally.infra }}</span>
-          <span v-if="tally.running" class="grun text-info">{{ tally.running }} running</span>
           <span
             v-if="tally.ms > 0"
-            class="gtime ml-auto text-xs tabular-nums text-muted"
+            class="gtime ml-auto tabular-nums"
             :class="[
               tallyPaint ? 'heat' : '',
               tallyHeat.over ? 'font-semibold text-bad' : tallyHeat.level >= 2 ? 'font-medium' : '',
@@ -148,7 +158,7 @@ const firstCallAt = computed(() => {
             ><template v-if="tallyHeat.over">timed out · </template>{{ formatDuration(tally.ms, "clock") }}</span
           >
         </summary>
-        <div class="gbody flex flex-col gap-2 pb-1 pt-2">
+        <div class="gbody flex flex-col gap-2 pb-1 pt-1.5">
           <StepItems :items="step.items" />
         </div>
       </details>
