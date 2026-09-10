@@ -377,6 +377,34 @@ describe("setup.init — refusals and --dry-run", () => {
   });
 });
 
+describe("setup.init — a dry run over existing files", () => {
+  it("--dry-run previews whether or not the files exist — nothing is written, so nothing conflicts; without it the same files are still the conflict, and --force still matters only to a real write", async () => {
+    const b = bind({ existing: [ENV_PATH, CONFIG_PATH] });
+    const dry = await invoke(b, ["--organization", "acme", "--anthropic-key", KEY, "--dry-run"]);
+    expect(dry.ok, JSON.stringify(dry)).toBe(true);
+    expect(b.written).toEqual([]);
+    const value = dry.ok
+      ? (dry.value as { dryRun: boolean; files: { path: string; status: string; preview: string }[] })
+      : undefined;
+    expect(value?.files.map((f) => [f.path, f.status])).toEqual([
+      [ENV_PATH, "planned"],
+      [CONFIG_PATH, "planned"],
+    ]);
+    expect(value?.files[0].preview).toContain("ANTHROPIC_API_KEY=••••••••");
+    expect(JSON.stringify(dry) + renderText(setupInit, dry.ok ? dry.value : null)).not.toContain(KEY);
+    // The real write is unchanged: the conflict, then --force.
+    expect(await invoke(b, ["--organization", "acme", "--anthropic-key", KEY])).toMatchObject({
+      ok: false,
+      error: "conflict",
+      message: `refusing to overwrite ${ENV_PATH}, ${CONFIG_PATH} — pass --force to replace them`,
+    });
+    expect(b.written).toEqual([]);
+    const forced = await invoke(b, ["--organization", "acme", "--anthropic-key", KEY, "--force"]);
+    expect(forced.ok).toBe(true);
+    expect(b.written.map((f) => f.path)).toEqual([ENV_PATH, CONFIG_PATH]);
+  });
+});
+
 describe("setup.init — prompts", () => {
   it("half a Slack pair on a terminal asks for the missing token, whichever it is — never a refusal", async () => {
     const ask = (expected: string, answer: string) => async (q: string) => {

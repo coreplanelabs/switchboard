@@ -132,7 +132,7 @@ export const setupInit = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run previews with secrets masked.",
+    "The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run writes nothing and previews with secrets masked, existing files or not.",
   render: (output) => {
     const o = output as unknown as InitOutput;
     const lines = [o.dryRun ? "would write:" : "wrote:"];
@@ -152,16 +152,17 @@ export const setupInit = defineCommand({
     const paths = [ENV_PATH, CONFIG_PATH, PROFILE_PATH];
     const existing = new Set<string>();
     for (const p of paths) if (await deps.setup.exists(p)) existing.add(p);
+    const dryRun = options.dryRun ?? false;
     const plan: InitPlan = planInit(answers, templates, {
       existing,
-      force: options.force ?? false,
+      // A dry run writes nothing, so an existing file is no conflict: it previews either way; `--force` matters to a real write only.
+      force: (options.force ?? false) || dryRun,
       inCheckout: deps.setup.inCheckout(),
       env: deps.setup.env,
       image: deps.setup.image(),
       ...(deps.setup.package() !== undefined ? { package: deps.setup.package() } : {}),
     });
     if (!plan.ok) throw new CommandError(plan.code, plan.problems.join("\n"));
-    const dryRun = options.dryRun ?? false;
     const output: InitOutput = {
       dryRun,
       files: plan.files.map((f) => ({
