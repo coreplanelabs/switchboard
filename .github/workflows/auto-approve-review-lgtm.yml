@@ -43,7 +43,7 @@ permissions: {}
 
 jobs:
   approve:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-smidge
     if: >-
       vars.REVIEW_BOT_LOGIN != '' &&
       vars.REVIEW_BOT_ID != '' &&

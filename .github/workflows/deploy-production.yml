@@ -157,7 +157,7 @@ permissions:
 jobs:
   deploy:
     name: deploy ${{ inputs.targets }}
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     permissions:
       contents: read
     # One production deploy at a time, in order, never cancelled: a second

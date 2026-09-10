@@ -30,7 +30,7 @@ concurrency:
 jobs:
   title:
     name: title
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-smidge
     env:
       PR_TITLE: ${{ github.event.pull_request.title }}
     steps:

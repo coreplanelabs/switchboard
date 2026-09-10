@@ -22,7 +22,7 @@ permissions:
 jobs:
   visibility:
     name: is the repository public?
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-smidge
     outputs:
       public: ${{ steps.check.outputs.public }}
     steps:
@@ -42,7 +42,7 @@ jobs:
     name: analyze javascript-typescript
     needs: visibility
     if: needs.visibility.outputs.public == 'true'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     permissions:
       contents: read
       security-events: write
