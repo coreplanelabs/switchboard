@@ -1,37 +1,39 @@
 # The agents and their toolsets
 
-An agent in OpenSwitchboard is data, not code: a system prompt, a named toolset, and budgets (turns, tokens, wall-clock minutes). The dispatcher runs every agent through the same loop — call the model, execute the tool calls it asks for, append the results, repeat until the model stops or a budget runs out — so what distinguishes the agents is what each is *allowed to reach*, and that is the toolset. Which model an agent runs on is decided separately, by the [config layers](config-layers.md), so any agent can run on any configured provider.
+An agent is data (a system prompt, a named toolset, budgets); every agent runs the same dispatcher loop, and the toolset distinguishes them.
+
+The loop: call the model, run the tool calls it asks for, append the results, repeat until it stops or a budget runs out. The [config layers](config-layers.md) choose the model, so any agent runs on any provider.
 
 ## The five agents
 
-| Agent | What it does | Toolset | Turn budget |
+| Agent | What it does | Toolset | Budget |
 |---|---|---|---|
-| `general` | The default — a plain mention. Answers directly, reads the organization's repositories and manages their issues over GitHub, reads a linked URL. Refers code changes, PR reviews and web research to the other agents rather than attempting them ([spec](../reference/specs/agent-general.md)). | `assistant` — GitHub reads and issue writes, URL fetch, status updates. No shell, no workspace. | 8 turns, 5 minutes |
-| `coding` | Implements a change and ships a pull request ([spec](../reference/specs/agent-coding.md)). Cold path: clone, branch, edit, test, push. Resident path: the worktree is already warm. Either way the agent pushes the branch and submits a typed description; OpenSwitchboard renders the body at the pushed head and opens the PR itself ([spec](../reference/specs/pr-description.md)). | `full` — bash, read and write files, URL fetch, diff digest, PR description, skills, GitHub reads and issue writes. | 60 turns, 45 minutes |
-| `review` | Reviews a pull request with full-repository context and posts ranked findings with a submitted verdict ([spec](../reference/specs/agent-review.md)). | `readonly` — bash, read files, verdict, URL fetch, diff digest, skills, GitHub reads. No file writes, no issue writes. | 30 turns, 25 minutes; effort `medium` built in |
-| `ship` | Runs coding, then review, then fixes, as one pipeline until the review says LGTM ([spec](../reference/specs/agent-ship.md)). Opens the PR, loops review and fix rounds, reports merge-ready. A person still merges. | Orchestrator only: its definition is never sent to a model. Each child round runs on the `coding` or `review` definition above. | Bounded by the `ship` config block (rounds and minutes), not by its own numbers |
-| `research` | Answers questions with web search and URL reading, plus read access to the organization's repositories and issues. Never provisions a repository or workspace ([spec](../reference/specs/web-tools.md)). | `web` — web search, URL fetch, status updates, GitHub reads. | 12 turns, 8 minutes; effort `medium` built in |
+| `general` | The default. Answers directly, reads repositories and manages issues, reads a URL; refers code, reviews and research onward. | `assistant`: GitHub reads and issue writes, URL fetch, status. No shell, no workspace. | 8 turns, 5 min |
+| `coding` | Implements a change and pushes a branch; OpenSwitchboard renders its typed description and opens the PR. | `full`: bash, file read and write, URL fetch, diff digest, PR description, skills, GitHub reads, issue writes. | 60 turns, 45 min |
+| `review` | Reviews a pull request with full-repository context; ranked findings and a verdict. | `readonly`: bash, file read, verdict, URL fetch, diff digest, skills, GitHub reads. | 30 turns, 25 min, effort `medium` |
+| `ship` | Coding, review, fixes, until LGTM. A person merges. | Never sent to a model; each round runs `coding` or `review`. | The `ship` config block |
+| `research` | Web search and URL reading, plus repository and issue reads; no workspace. | `web`: search, URL fetch, status, GitHub reads. | 12 turns, 8 min, effort `medium` |
 
-The GitHub *read* tools (repositories, trees, files, code search, issue list and get) are in every toolset that has a tool loop, because they need no workspace and let any agent answer from the code. The issue *write* tools go only where the agent may act on GitHub: `assistant` and `full`. The review and research agents never mutate GitHub ([spec](../reference/specs/github-tools.md)).
+GitHub *read* tools need no workspace and are in every tool loop; issue *writes* are only in `assistant` and `full`.
 
-## Why the toolset is the boundary, and where it is not
+## The toolset is the boundary, not the wall
 
-A toolset decides what the model can *ask for*. The review agent has no write-file tool, so it cannot ask to write a file. But `bash` is in its toolset, and a shell can write files by other means — "read-only" is a contract enforced by toolset and prompt, not a wall. The wall is the executor: where those commands run, and what that place can reach. That is why [Execution and trust](execution-and-trust.md) is a separate page, and why the coding agent's power to push code is a property of the sandbox or resident it runs in, never of the bot process.
+A toolset decides what the model can ask for. `review` has no write-file tool but has `bash`, which writes files by other means. Read-only is a toolset-and-prompt contract; the wall is the executor ([Execution and trust](execution-and-trust.md)).
 
-## Turn budgets are backstops; the clock is the budget
+## The clock is the budget
 
-Every agent carries a turn budget and a wall-clock budget. The turn count is a backstop. The clock is what actually ends a long run: at the deadline the agent is cut off and made to write up what it has so far. Effort — how hard the model thinks per turn — rides the same config layers as the model, because it decides how much of that clock goes to thinking rather than to work. The review agent ships with `medium` built in; the coding agent has no built-in effort, so the deployment or the request decides.
+The turn count is a backstop; the clock ends a long run, and at the deadline the agent is cut off to write up what it has. Effort rides the config layers because it decides how much of the clock goes to thinking; `review` ships with `medium`, `coding` leaves it to the request.
 
-## Tools an agent can be given from outside
+## Tools from outside
 
-Any agent can additionally be handed tools from external MCP servers: they appear as `mcp__<server>__<tool>`, their descriptions and results are treated as untrusted data, and every call is budgeted and recorded. Which servers reach which agents is a config decision in three tiers, and only organization-level servers may reach `coding`, `review` or `ship`. How to connect one: [Connect an MCP server](../how-to/connect-an-mcp-server.md).
+External MCP servers add tools as `mcp__<server>__<tool>`: descriptions and results are untrusted data, every call is budgeted and recorded, and only organization-level servers reach `coding`, `review` or `ship` ([Connect an MCP server](../how-to/connect-an-mcp-server.md)).
 
-## Where an onboarded repository fits
+## Onboarded repositories
 
-A coding or review run against a repository an admin has onboarded starts in that repository's always-warm resident environment — a ready worktree on the thread's branch, dependencies installed. Every other run gets a cold per-thread workspace, cloned on first use. On both paths, follow-ups in the same thread reuse the same checkout. [Onboard a repo](../how-to/onboard-a-repo.md) is the how-to; [Worker topology](worker-topology.md) is what a resident is underneath.
+A coding or review run against an onboarded repository starts in its always-warm resident: a worktree on the thread's branch with dependencies installed. Other runs get a cold per-thread workspace on first use; follow-ups reuse it ([Onboard a repo](../how-to/onboard-a-repo.md)).
 
-## See also
+## Read next
 
-- [Add an agent](../how-to/add-an-agent.md) — a new agent is one registry entry; why an agent is data and the dispatcher the only orchestrator is [decision 0002](../decisions/0002-dispatcher-is-the-only-orchestrator.md).
-- [How a request flows](how-a-request-flows.md) — the loop every agent runs through.
-- [Reference: Slack commands](../reference/slack-commands.md) — the `agent:` directive and the rest of the grammar.
+- Specs: [general](../reference/specs/agent-general.md), [coding](../reference/specs/agent-coding.md), [review](../reference/specs/agent-review.md), [ship](../reference/specs/agent-ship.md), [research](../reference/specs/web-tools.md), [GitHub tools](../reference/specs/github-tools.md).
+- [Add an agent](../how-to/add-an-agent.md) — one registry entry ([decision 0002](../decisions/0002-dispatcher-is-the-only-orchestrator.md)).
+- [How a request flows](how-a-request-flows.md) — the loop itself.
