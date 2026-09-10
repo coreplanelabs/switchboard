@@ -1185,6 +1185,7 @@ describe("deploy.images", () => {
     const res = await commands.invoke("deploy.images", {}, cli);
     if (!res.ok) throw new Error(res.message);
     expect(res.value).toEqual({
+      mode: "registry",
       version: "1.2.3",
       account: ACCOUNT,
       images: [
@@ -1229,6 +1230,22 @@ describe("deploy.images", () => {
     if (!twice.ok) throw new Error(twice.message);
     expect((twice.value as { images: { status: string }[] }).images.every((i) => i.status === "present")).toBe(true);
     expect(renderText(commands.get("deploy.images")!, twice.value)).toContain("3 present, 0 copied");
+  });
+
+  it("a profile that builds its images (`images: build`) has nothing to copy: said, not refused, with the registry never read and Docker never probed — a caller runs it before every deploy and the profile decides", async () => {
+    const h = imagesHost({}, { ok: false, problem: "must not probe docker" });
+    const build: LoadedProfile = { profile: TEST_PROFILE, origin: "profile", path: "deploy/profile.json" };
+    const { commands } = withImages(h, build);
+    for (const options of [{}, { dryRun: true }]) {
+      const res = await commands.invoke("deploy.images", { options }, cli);
+      if (!res.ok) throw new Error(res.message);
+      expect(res.value).toEqual({ mode: "build", account: ACCOUNT, images: [] });
+      expect(renderText(commands.get("deploy.images")!, res.value)).toBe(
+        "images: build — the profile's Workers build their images with wrangler at deploy time; nothing to copy",
+      );
+    }
+    expect(h.listings()).toBe(0);
+    expect(h.copies).toEqual([]);
   });
 
   it("--dry-run only says what would be copied and touches nothing; the version is always this CLI's own — there is no --version, since the rendered configs reference nothing else", async () => {

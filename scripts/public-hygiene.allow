@@ -77,6 +77,10 @@ src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00
 .github/workflows/ci.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 .github/workflows/deploy-production.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/deploy-production.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
+
+# The published package the reusable deploy runs in `package` mode — spelled out because a caller in another repository has no checkout of this one to read project.json from; check:project-facts holds it equal to `npmPackage`.
+.github/workflows/deploy-production.yml	echo "cli=npx --yes @coreplane/switchboard@$v" >> "$GITHUB_OUTPUT"
+.github/workflows/deploy-production.yml	echo "label=@coreplane/switchboard@$v" >> "$GITHUB_OUTPUT"
 .github/workflows/release-please.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
 .github/workflows/release-please.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 
@@ -184,7 +188,7 @@ packages/switchboard/README.md	# @coreplane/switchboard
 packages/switchboard/README.md	The OpenSwitchboard command line: the installer and the operator commands of [Switchboard](https://github.com/coreplanelabs/switchboard), an agent gateway — mention it in Slack and an agent reviews the PR, ships the fix, or answers the question, on the model you choose, with its tools running where you decide.
 packages/switchboard/README.md	npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key <your key>
 packages/switchboard/README.md	npx @coreplane/switchboard ask "what can you do?"
-packages/switchboard/README.md	The bot itself — the always-on process that connects to Slack — is the published container image, `ghcr.io/coreplanelabs/switchboard`. The deploy commands (`init --cloudflare`, `deploy plan|init|secrets|config|all`) run from the directory you ran `init` in, no checkout needed; the bot's own image is the one piece still built from a checkout. Everything else: <https://openswitchboard.dev>.
+packages/switchboard/README.md	The bot itself — the always-on process that connects to Slack — is the published container image, `ghcr.io/coreplanelabs/switchboard`. The deploy commands (`init --cloudflare`, `deploy plan|init|secrets|config|images|all`) run from the directory you ran `init` in, no checkout needed: with `"images": "registry"` in the profile every Worker, the bot included, runs the image the release published, copied once per version into your Cloudflare account by `deploy images`, so nothing is built where you deploy. From CI, call the repository's reusable deploy workflow from a workflow of your own — `uses: <owner>/<repo>/.github/workflows/deploy-production.yml@v<version>` with `cli: package` — and a GitHub runner runs `deploy images`, then `deploy all`, at that version: no clone, and no Docker of yours ([Deploy from your CI](https://openswitchboard.dev/how-to/deploy#deploy-from-your-ci)). Everything else: <https://openswitchboard.dev>.
 
 # The deploy how-to's operator-directory example runs the package by its published name.
 docs/how-to/deploy.md	npx @coreplane/switchboard init --organization <org> --anthropic-key <key> --cloudflare <account id> --zone example.com

@@ -580,3 +580,208 @@ describe("the image check builds every image the deploy builds", () => {
     expect(elsewhere).toEqual([]);
   });
 });
+
+describe("the production deploy is one reusable workflow", () => {
+  // deploy-production.yml is called three ways — by release-please.yml when a
+  // release is cut, by a maintainer's dispatch from main, and by an operator's
+  // own repository (release-and-deploy.md item 27) — and runs the registry's
+  // `deploy images` / `deploy plan` / `deploy all` through one command word,
+  // `$CLI`: the checked-out tree's CLI (`checkout`, this repository's release)
+  // or the published package at one version (`package`, an operator with no
+  // checkout of this repository). These tests hold the two modes apart —
+  // nothing of this repository is fetched or `npm`-run in `package` mode, and
+  // `checkout` mode runs the commands it ran before the workflow was reusable
+  // plus the one mode-safe copy — and hold the copy to its place and its switch.
+  const file = ".github/workflows/deploy-production.yml";
+  const text = read(file);
+  interface DeployStep extends Step {
+    id?: string;
+    env?: Record<string, string>;
+  }
+  interface Trigger {
+    inputs: Record<string, { type: string; default: unknown; description: string }>;
+    secrets?: Record<string, { required: boolean }>;
+  }
+  const workflow = parse(text) as Workflow & {
+    on: { workflow_call: Trigger; workflow_dispatch: Trigger };
+    permissions?: Record<string, string>;
+  };
+  const job = workflow.jobs.deploy as Job & { permissions?: Record<string, string> };
+  const steps = job.steps as DeployStep[];
+  const facts = JSON.parse(read("project.json")) as { npmPackage: string };
+  const cliPkg = JSON.parse(read("packages/switchboard/package.json")) as { engines: { node: string } };
+
+  /** The step's `if` decides which mode it runs in; a step without one runs in both. */
+  const modeOf = (s: Step): "checkout" | "package" | "both" =>
+    s.if?.includes("inputs.cli != 'package'")
+      ? "checkout"
+      : s.if?.includes("inputs.cli == 'package'")
+        ? "package"
+        : "both";
+  const checkoutSteps = steps.filter((s) => modeOf(s) !== "package");
+  const packageSteps = steps.filter((s) => modeOf(s) !== "checkout");
+  const lines = (s: Step) => runLines(s, job);
+  /** A line that runs something (not an `echo` or a test of a variable). */
+  const isCommand = (line: string) => !/^(echo |if \[|\*\)|[a-z|"]+\) echo )/.test(line);
+  const cliStep = steps.find((s) => s.id === "cli")!;
+  const cliValues = [...(cliStep.run ?? "").matchAll(/echo "cli=([^"]+)" >> "\$GITHUB_OUTPUT"/g)].map((m) => m[1]);
+  const checkout = steps.find((s) => s.uses?.startsWith("actions/checkout@"))!;
+
+  it("is callable with the inputs a caller needs, each defaulting to this repository's own call", () => {
+    const inputs = workflow.on.workflow_call.inputs;
+    expect(Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, v.default]))).toEqual({
+      targets: "affected",
+      force: false,
+      profile: "",
+      cli: "checkout",
+      version: "",
+      "copy-images": "auto",
+    });
+    // A dispatch keeps the two operator-facing choices it always had; the rest default as above.
+    expect(Object.keys(workflow.on.workflow_dispatch.inputs)).toEqual(["targets", "force"]);
+    for (const k of ["targets", "force"]) expect(workflow.on.workflow_dispatch.inputs[k]).toEqual(inputs[k]);
+  });
+
+  it("declares every secret by name so another repository can pass them, none required — `secrets: inherit` still works", () => {
+    const secrets = workflow.on.workflow_call.secrets!;
+    expect(Object.keys(secrets).sort()).toEqual([
+      "CLOUDFLARE_API_TOKEN",
+      "CLOUDFLARE_DEPLOY_TOKEN",
+      "CONFIG_REPO_APP_CLIENT_ID",
+      "CONFIG_REPO_APP_PRIVATE_KEY",
+      "MEMORY_TOKEN",
+      "OP_SERVICE_ACCOUNT_TOKEN",
+      "RESIDENT_READ_TOKEN",
+      "SANDBOX_TOKEN",
+    ]);
+    for (const [name, s] of Object.entries(secrets)) expect(s.required, `${name} must be optional`).toBe(false);
+    // The App that reads a `github://` profile: handed in, or (this installation) loaded from the vault only when it was not.
+    expect(job.env?.LOAD_APP_FROM_VAULT).toBe(
+      "${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' && secrets.CONFIG_REPO_APP_CLIENT_ID == '' }}",
+    );
+    const vault = job.steps.find((s) => s.uses?.startsWith("1password/"))!;
+    expect(vault.if).toBe("env.LOAD_APP_FROM_VAULT == 'true'");
+    const mint = job.steps.find((s) => s.uses?.startsWith("actions/create-github-app-token@"))!;
+    expect(mint.if).toBe("vars.CONFIG_REPO_NAME != ''");
+    expect(mint.with?.["client-id"]).toBe("${{ env.APP_CLIENT_ID || secrets.CONFIG_REPO_APP_CLIENT_ID }}");
+    expect(mint.with?.["private-key"]).toBe("${{ env.APP_PRIVATE_KEY || secrets.CONFIG_REPO_APP_PRIVATE_KEY }}");
+  });
+
+  it("the profile is the `profile` input, else the calling repository's variable", () => {
+    expect(job.env?.SWITCHBOARD_DEPLOY_PROFILE).toBe("${{ inputs.profile || vars.SWITCHBOARD_DEPLOY_PROFILE }}");
+  });
+
+  it("one command word: the checkout's CLI, or the published package at an explicit version — never `latest`", () => {
+    expect(cliValues).toEqual(["npm run --silent cli --", `npx --yes ${facts.npmPackage}@$v`]);
+    // The version: the input, else the caller's tag without its `v`; anything else refuses before a checkout.
+    expect(cliStep.run).toContain('v="${REF_NAME#v}"');
+    expect(cliStep.run).toContain('[ "$REF_TYPE" = "tag" ]');
+    expect(cliStep.run).not.toMatch(/latest/);
+    expect(cliStep.env).toMatchObject({
+      MODE: "${{ inputs.cli }}",
+      VERSION: "${{ inputs.version }}",
+      REF_TYPE: "${{ github.ref_type }}",
+      REF_NAME: "${{ github.ref_name }}",
+    });
+    // Every deploy command in every step goes through it.
+    for (const s of steps) {
+      for (const line of lines(s).filter(isCommand)) {
+        if (/\bdeploy (plan|all|images)\b/.test(line)) {
+          expect(line, `a deploy command not routed through $CLI: ${line}`).toMatch(/\$CLI deploy /);
+          expect(s.env?.CLI).toBe("${{ steps.cli.outputs.cli }}");
+        }
+      }
+    }
+    expect(steps.indexOf(cliStep)).toBeLessThan(steps.indexOf(checkout));
+  });
+
+  it("`package` mode fetches nothing of this repository and runs no npm script of it", () => {
+    // The one checkout is the CALLING repository (no `repository:`), and in
+    // package mode only for a profile that is a path inside it.
+    expect(steps.filter((s) => s.uses?.startsWith("actions/checkout@"))).toHaveLength(1);
+    expect(checkout.with).not.toHaveProperty("repository");
+    expect(checkout.with).not.toHaveProperty("ref");
+    expect(checkout.if).toBe(
+      "inputs.cli != 'package' || !(startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'github://') || startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'op://'))",
+    );
+    for (const s of packageSteps) {
+      if (s === checkout) continue;
+      for (const line of lines(s))
+        expect(line, `${s.name ?? s.uses} runs npm in package mode: ${line}`).not.toMatch(/^npm\b/);
+      expect(s.run ?? "", `${s.name} reads the tree in package mode`).not.toMatch(/\bgit\b/);
+    }
+    // Node comes from the CLI's own `engines`, not from a `.nvmrc` there is no checkout of; no lockfile, no cache.
+    const setup = steps.filter((s) => s.uses?.startsWith("actions/setup-node@"));
+    expect(setup.map(modeOf)).toEqual(["checkout", "package"]);
+    expect(setup[0].with).toEqual({ "node-version-file": ".nvmrc", cache: "npm" });
+    const minimum = /^>=(\d+)$/.exec(cliPkg.engines.node)![1];
+    expect(setup[1].with).toEqual({ "node-version": Number(minimum) });
+    // The main-only guard guards a tree; a published version has none.
+    const guard = steps.find((s) => s.name === "only from main")!;
+    expect(guard.if).toBe("inputs.cli != 'package' && github.ref != 'refs/heads/main'");
+  });
+
+  it("`checkout` mode runs the commands it ran before the workflow was reusable, in order, plus the one copy the profile answers", () => {
+    const [checkoutCli] = cliValues;
+    const rendered = checkoutSteps.flatMap((s) =>
+      lines(s)
+        .filter(isCommand)
+        .map((l) => l.replaceAll("$CLI", checkoutCli)),
+    );
+    expect(rendered.filter((l) => /^(npm|git)\b|npm run --silent cli/.test(l))).toEqual([
+      "npm ci",
+      "npm run --silent cli -- deploy images",
+      'npm run --silent cli -- deploy plan $ARGS --allow-branch --json > "$RUNNER_TEMP/plan.json"',
+      'npm run --silent cli -- deploy plan $ARGS --allow-branch | tee "$RUNNER_TEMP/plan.txt"',
+      "git status --porcelain",
+      "npm run --silent cli -- deploy all $ARGS --allow-branch",
+      'if ! npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/fleet.json" 2> "$RUNNER_TEMP/fleet.err"; then',
+    ]);
+    expect(checkoutSteps.filter((s) => s.run).map((s) => s.name)).toEqual([
+      "only from main",
+      "the CLI",
+      undefined, // npm ci
+      "the credentials this run has",
+      "the selection",
+      "copy the release's images into the account registry",
+      "plan",
+      "the tree is the commit",
+      "deploy",
+      "what is live",
+    ]);
+  });
+
+  it("`deploy images` runs before the plan — a registry-mode plan refuses a Worker whose copy is absent — unless `copy-images` is `never`", () => {
+    const copy = steps.find((s) => /deploy images/.test(s.run ?? ""))!;
+    expect(copy.if).toBe("inputs.copy-images != 'never'");
+    expect(lines(copy)).toEqual(["$CLI deploy images"]);
+    expect(steps.indexOf(copy)).toBeLessThan(steps.findIndex((s) => s.name === "plan"));
+    expect(steps.indexOf(copy)).toBeGreaterThan(steps.indexOf(cliStep));
+    // The value is validated before anything runs, and a dispatch (no such input) behaves as `auto`.
+    expect(cliStep.run).toContain('auto|never|"") ;;');
+  });
+
+  it("keeps its shape: one job, `contents: read` at both levels, `environment: production`, the one concurrency group, every action pinned", () => {
+    expect(Object.keys(workflow.jobs)).toEqual(["deploy"]);
+    expect(workflow.permissions).toEqual({ contents: "read" });
+    expect(job.permissions).toEqual({ contents: "read" });
+    expect(job).toMatchObject({
+      environment: "production",
+      concurrency: { group: "deploy-production", "cancel-in-progress": false },
+    });
+    // The parser drops the comment, so the pin AND its version note are read from the text.
+    const uses = text.split("\n").filter((l) => /^\s*-?\s*uses:/.test(l));
+    expect(uses.length).toBe(steps.filter((s) => s.uses).length);
+    for (const l of uses) expect(l.trim(), `unpinned action: ${l.trim()}`).toMatch(/@[0-9a-f]{40} # v\d+\.\d+\.\d+$/);
+  });
+
+  it("this repository's own call passes `targets` alone and inherits its secrets — its rendered inputs are the defaults", () => {
+    const release = parse(read(".github/workflows/release-please.yml")) as {
+      jobs: Record<string, { uses?: string; with?: Record<string, unknown>; secrets?: string }>;
+    };
+    const call = release.jobs.deploy;
+    expect(call.uses).toBe("./.github/workflows/deploy-production.yml");
+    expect(call.with).toEqual({ targets: "affected" });
+    expect(call.secrets).toBe("inherit");
+  });
+});

@@ -98,9 +98,9 @@ npx tsx src/cli.ts deploy images --dry-run   # which of the three the account re
 npx tsx src/cli.ts deploy images             # pull, tag, `wrangler containers push` the missing ones
 ```
 
-For each of the bot, resident and sandbox images at this CLI's version — the only version the rendered configs reference, so there is no flag to copy another release; run that release's CLI — the command asks the account registry whether it already holds `registry.cloudflare.com/<account>/<name>:<version>` and skips it if so; otherwise it pulls `ghcr.io/<owner>/<repo>[-resident|-sandbox]:<version>`, tags it under the bare name and pushes it with wrangler, then lists the registry again and refuses unless every copy appears. It needs Docker where it runs — a CI runner has one; a laptop without it is refused before anything is pulled, naming the reusable deploy workflow as the place to run it — and the account's credential with the Containers scope. Run it once per release, before `deploy all`; a second run finds everything `present` and copies nothing. In `registry` mode `deploy plan` and `deploy all` check the same listing and refuse a Worker whose image is missing, naming this command.
+For each of the bot, resident and sandbox images at this CLI's version — the only version the rendered configs reference, so there is no flag to copy another release; run that release's CLI — the command asks the account registry whether it already holds `registry.cloudflare.com/<account>/<name>:<version>` and skips it if so; otherwise it pulls `ghcr.io/<owner>/<repo>[-resident|-sandbox]:<version>`, tags it under the bare name and pushes it with wrangler, then lists the registry again and refuses unless every copy appears. It needs Docker where it runs — a CI runner has one; a laptop without it is refused before anything is pulled, naming the reusable deploy workflow as the place to run it — and the account's credential with the Containers scope. Run it once per release, before `deploy plan` and `deploy all` — in `registry` mode both check the same listing and refuse a Worker whose image is missing, naming this command; a second run finds everything `present` and copies nothing. On a profile that builds (`"images": "build"`) there is nothing to copy: the command says so and reads nothing, which is why [the reusable deploy workflow](#deploy-from-your-ci) runs it before every plan and lets the profile decide.
 
-Our own production stays on `"images": "build"`: this repository's release builds the same Dockerfiles with wrangler at deploy time, so this step does not exist there.
+Our own production stays on `"images": "build"`: this repository's release builds the same Dockerfiles with wrangler at deploy time, so this step copies nothing there.
 
 ## 6. `deploy all` — the whole plan, in order
 
@@ -154,7 +154,54 @@ That needs the `repo:write` grant, which only admins hold until granted. What ha
 
 ## After the first time
 
-Nobody deploys routine releases by hand: merging the release PR runs the same `deploy all` from CI, with `--affected` so only the Workers whose inputs changed roll — [Ship a release](ship-a-release.md). For CI to do that it needs the deploy credentials as repository secrets and the profile's location as a repository variable, both set once: [Configure the repository](configure-the-repository.md#5-repository-secrets-and-variables). A deploy outside a release, or a config change without one, is [Operate production](operate-production.md).
+Nobody deploys routine releases by hand. For this repository, merging the release PR runs the same `deploy all` from CI with `--affected`, so only the Workers whose inputs changed roll — [Ship a release](ship-a-release.md); for CI to do that it needs the deploy credentials as repository secrets and the profile's location as a repository variable, both set once: [Configure the repository](configure-the-repository.md#5-repository-secrets-and-variables). For your own installation the same workflow is yours to call from your repository's CI — [below](#deploy-from-your-ci). A deploy outside a release, or a config change without one, is [Operate production](operate-production.md).
+
+## Deploy from your CI
+
+The release deploy this repository runs is one reusable GitHub Actions workflow, `.github/workflows/deploy-production.yml`, and a repository of yours can call it. Steps 1–3 above happen once, from your machine — the profile with `"images": "registry"`, the Worker configs, `deploy secrets` for each Worker; from then on a workflow in your repository does steps 5 and 6 on a GitHub runner with the published CLI: `deploy images`, then `deploy plan`, then `deploy all`, and a job summary of what each Worker serves afterwards. Nothing is cloned — not this repository, and yours only when the profile is a path in it — and the runner's own Docker does the image copy, so no machine of yours needs Docker.
+
+Commit `deploy/profile.json` and `config/config.yaml` to your repository (neither holds a secret: the profile names your account and hostnames, the config names Workers and features; every credential is a Worker secret or a repository secret) and add the caller:
+
+```yaml
+# .github/workflows/deploy-switchboard.yml
+name: deploy switchboard
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "`affected` (default), `all`, or a comma list of Workers"
+        default: affected
+  # schedule: [{ cron: "0 6 * * 1" }]   # optional: a weekly deploy of whatever is stale
+permissions:
+  contents: read
+jobs:
+  deploy:
+    uses: <owner>/<repo>/.github/workflows/deploy-production.yml@v<version>
+    permissions:
+      contents: read
+    with:
+      cli: package
+      version: <version>
+      targets: ${{ inputs.targets || 'affected' }}
+    secrets:
+      CLOUDFLARE_DEPLOY_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN }}
+      MEMORY_TOKEN: ${{ secrets.MEMORY_TOKEN }}
+      RESIDENT_READ_TOKEN: ${{ secrets.RESIDENT_READ_TOKEN }}
+      SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
+```
+
+`<owner>/<repo>` is this repository; `<version>` is the release you deploy, written twice on purpose — the workflow at that tag, the CLI at that version (`version` is what `npx` runs, and the workflow never falls back to `latest`; leave it empty only when your run is itself on a tag `v<version>`). The secrets are yours to set once with `gh secret set <NAME>`: `CLOUDFLARE_DEPLOY_TOKEN` with the scopes the workflow's header lists, `MEMORY_TOKEN` (the same value the state Worker holds), and `RESIDENT_READ_TOKEN` / `SANDBOX_TOKEN` when your profile has those Workers — the workflow warns about a missing one and `deploy all` refuses the step that needs it before anything deploys. Then:
+
+```bash
+gh workflow run deploy-switchboard.yml -f targets=all        # the first time
+gh workflow run deploy-switchboard.yml                       # afterwards: only what is stale
+```
+
+From the package, `--affected` judges every Worker against the release's commit, so a rerun of the same version deploys nothing and a new version deploys every Worker not already serving it. The run's summary carries the plan and a table of each Worker's live commit; GitHub records it under your repository's `production` environment, one deploy at a time.
+
+Two variations. The profile can live elsewhere: pass `profile:` as another path in your repository, or as `github://<org>/<config repo>/<path>@<ref>` — then the workflow mints a read-only token for that repository from a GitHub App you hand in as the `CONFIG_REPO_APP_CLIENT_ID` and `CONFIG_REPO_APP_PRIVATE_KEY` secrets, scoped by the `CONFIG_REPO_OWNER` and `CONFIG_REPO_NAME` repository variables (the shape this project's own production uses), and checks out nothing at all. And `copy-images: never` skips the copy when you have run `deploy images` yourself.
+
+Calling a workflow across repositories needs the workflow's repository to be public, or in your organization with access to its Actions allowed from other repositories — GitHub's rule, not ours. What the workflow does in each mode, and the contract behind it: [Release and deploy](../reference/specs/release-and-deploy.md).
 
 ## Running the container somewhere else
 

@@ -530,8 +530,9 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
           bytes: 12,
         }),
       // `deploy images`: the account registry already holds the bot's and the resident's images at the
-      // fixture version and not the sandbox's, so one copy is the effect and is recorded; Docker is
-      // here; a read of the registry is a probe, not an executor.
+      // fixture version and not the sandbox's, so under a `registry` profile one copy would be the effect
+      // and is recorded; the fixture's profile builds its images, so the command answers with nothing to
+      // copy and reads nothing. Docker is here; a read of the registry is a probe, not an executor.
       images: {
         registry: async () => ({
           value: [
