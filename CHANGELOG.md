@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.0](https://github.com/coreplanelabs/switchboard/compare/v1.16.0...v1.17.0) (2026-09-10)
+
+
+### Features
+
+* **commands:** the process says which build it runs — `status show` on every surface, and the About block names it ([#878](https://github.com/coreplanelabs/switchboard/issues/878)) ([af9c754](https://github.com/coreplanelabs/switchboard/commit/af9c754927a5fed5fdf4665d35a73a73cdf6dc56))
+
 ## [1.16.0](https://github.com/coreplanelabs/switchboard/compare/v1.15.0...v1.16.0) (2026-09-10)
 
 
