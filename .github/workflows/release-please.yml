@@ -99,7 +99,7 @@ jobs:
       # published lives here, on the release that would have published it.
       - name: npm publish is off
         if: always() && (steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created) == 'true' && vars.SWITCHBOARD_PUBLISH_NPM != 'true'
-        run: echo "::notice title=npm publish is off::this release does not publish the npm package — set the repository variable SWITCHBOARD_PUBLISH_NPM to true (and the NPM_TOKEN secret) to turn the publish-npm job on."
+        run: echo "::notice title=npm publish is off::this release does not publish the npm package — set the repository variable SWITCHBOARD_PUBLISH_NPM to true (with the package's trusted publisher naming this repository) to turn the publish-npm job on."
 
   # The release PR carries its deploy plan (docs/reference/specs/release-and-deploy.md
   # item 8). Posted from HERE, on the push to main that opened or updated the
@@ -280,12 +280,15 @@ jobs:
   # The same release publishes the CLI to npm (docs/reference/specs/packaging.md
   # item 5): the package under packages/switchboard, whose version the release
   # commit already carries (release-please-config.json's extra files), built by
-  # its own script and published with npm's provenance attestation — which is
-  # what `id-token: write` is for, and the only scope this job holds beyond
-  # reading the tree. The token is NPM_TOKEN, a granular access token with
-  # publish rights on the package's scope, set once as a repository secret by a
-  # person; npm reads it as NODE_AUTH_TOKEN for the registry setup-node names.
-  # Independent of `deploy` and `publish-image` like they are of each other.
+  # its own script. No token: the package's npm settings name this repository
+  # and this workflow file as its trusted publisher, and `npm publish`
+  # authenticates with the run's OIDC identity — which is what `id-token: write`
+  # is for, and the only scope this job holds beyond reading the tree. Nothing
+  # expires and no person's credential is in the path. `--provenance` only once
+  # the repository is public: npm signs provenance for public sources alone and
+  # the flag fails a private one, so a release before the flip publishes without
+  # it and the first release after the flip carries it. Independent of `deploy`
+  # and `publish-image`.
   # OFF until the owner turns it on: the job runs only when the repository
   # variable SWITCHBOARD_PUBLISH_NPM is the string `true` — unset, the job is
   # skipped and the `npm publish is off` step above says so in one line — so a
@@ -305,9 +308,9 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: package-lock.json
-          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later; the Node in .nvmrc may bundle an
+      # older one. Pinned, like every action above: a release runs the npm that was reviewed.
+      - run: npm install -g npm@11.19.1
       - run: npm ci
       - run: npm run build -w packages/switchboard
-      - run: npm publish --workspace packages/switchboard --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --workspace packages/switchboard --access public ${{ github.event.repository.private == false && '--provenance' || '' }}

@@ -171,12 +171,11 @@ describe("the package manifest", () => {
     expect(pkg.engines.node).toBe(`>=${pinned}`);
     expect(pkg.bin).toEqual({ switchboard: "dist/cli.js" });
     expect(pkg.files).toEqual(["dist"]);
-    expect(pkg.publishConfig).toEqual({ access: "public", provenance: true });
+    // Public by config; provenance is the workflow's call (only while the repository is public), not the manifest's.
+    expect(pkg.publishConfig).toEqual({ access: "public" });
   });
 
-  it("is private until publishing is turned on: npm refuses to publish it from anywhere, while `npm pack` still works (the smoke test)", () => {
-    // Publishing starts with a reviewed PR that removes this line — the visible record — plus the
-    // repository variable and secret the release workflow reads (docs/how-to/ship-a-release.md).
-    expect(pkg.private).toBe(true);
+  it("is publishable: no `private` flag — publishing is gated by the release workflow's switch and npm's trusted-publisher settings, not by the manifest", () => {
+    expect(pkg.private).toBeUndefined();
   });
 });
