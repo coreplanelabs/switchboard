@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import RunPage from "./RunPage.vue";
-import { mountApp } from "../testing/mount";
+import { ALL_ON, mountApp } from "../testing/mount";
 import { browser } from "../lib/browser";
+import type { Capabilities } from "@core/core/capabilities.js";
 import { formatClock, formatLocalIso } from "../lib/format";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
 import type { RunHistorySeed, RunLiveSeed } from "@core/channels/webSeed.js";
@@ -1224,7 +1225,7 @@ describe("RunPage — live mode", () => {
   });
 });
 
-// Feature: docs/reference/specs/reading-diff.md item 6 — the pr-review module on the run
+// Feature: docs/reference/specs/reading-diff.md item 12 — the pr-review module on the run
 // page: a run that published reading-diff artifacts gets the Reading diff
 // button; the slideout renders the module from the adapter's state. The
 // module itself is tested in src/modules/pr-review/; this is the wiring.
@@ -1293,5 +1294,86 @@ describe("PR-review panel wiring", () => {
     });
     expect(wrapper.find('[data-testid="reading-diff-button"]').exists()).toBe(false);
     wrapper.unmount();
+  });
+
+  it("a seeded pr_description renders in the panel: the dialog is named by the PR's title, the TL;DR and the Tour sit above the files", async () => {
+    const description: LiveFrame = {
+      type: "review_artifact",
+      artifact: "pr_description",
+      origin: "submitted",
+      repo: "acme/api",
+      pr: 42,
+      headSha: "e".repeat(40),
+      title: "Retry webhook deliveries",
+      body: "## TL;DR\n\nThe TL;DR.\n",
+      tldr: "The TL;DR.",
+      tour: [
+        {
+          title: "The marker",
+          description: "Renamed.",
+          anchor: { path: "src/a.ts", from: 1, to: 1, sha: "e".repeat(40) },
+        },
+      ],
+      remaining: [],
+      decisions: [],
+      complete: true,
+      problems: [],
+      truncated: false,
+      at: 4,
+    };
+    const wrapper = mountApp(RunPage, {
+      seed: historySeed([inputFrame, runMeta, artifact, description, { type: "answer", text: "ok", at: 9 }]),
+    });
+    await wrapper.find('[data-testid="reading-diff-button"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel = document.querySelector('[data-testid="pr-review-panel"]')!;
+    expect(panel.querySelector('[data-testid="pr-title"]')?.textContent).toContain("Retry webhook deliveries");
+    expect(panel.querySelector('[data-testid="description-tldr"]')?.textContent).toBe("The TL;DR.");
+    expect(panel.querySelectorAll('[data-testid="tour-step"]')).toHaveLength(1);
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(document.getElementById(dialog.getAttribute("aria-labelledby")!)?.textContent).toContain(
+      "Retry webhook deliveries",
+    );
+    wrapper.unmount();
+  });
+
+  const withAbridge = (on: boolean): Capabilities => ({ ...ALL_ON, readingDiffAbridge: on });
+
+  it("the abridge control: with the capability on and only the git diff the panel offers Abridge with meat, and a click POSTs /api/review.abridge for this run; off → nothing", async () => {
+    const on = mountApp(RunPage, {
+      seed: {
+        ...historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "ok", at: 9 }]),
+        capabilities: withAbridge(true),
+      },
+    });
+    await on.find('[data-testid="reading-diff-button"]').trigger("click");
+    await on.vm.$nextTick();
+    const button = document.querySelector<HTMLButtonElement>('[data-testid="abridge-button"]');
+    expect(button).not.toBeNull();
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: "run-1", state: "running", startedAt: 1 }),
+    });
+    button!.click();
+    await on.vm.$nextTick();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/review.abridge",
+      expect.objectContaining({ method: "POST", credentials: "same-origin" }),
+    );
+    expect(JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body)).toEqual({ id: "run-1" });
+    expect(document.querySelector('[data-testid="abridge-running"]')).not.toBeNull();
+    on.unmount();
+
+    const off = mountApp(RunPage, {
+      seed: {
+        ...historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "ok", at: 9 }]),
+        capabilities: withAbridge(false),
+      },
+    });
+    await off.find('[data-testid="reading-diff-button"]').trigger("click");
+    await off.vm.$nextTick();
+    expect(document.querySelector('[data-testid^="abridge"]')).toBeNull();
+    off.unmount();
   });
 });

@@ -3,11 +3,12 @@ import type { DiffFileEntry, FileStatus } from "./files";
 import { splitPath } from "./files";
 
 // The panel's left column: the files of the diff as a table of contents.
-// Stacked sections — the host's Tour slot first (a PR description's steps, each
-// a jump to a file and a line range), then the files. An entry names the
-// file's status, its path with the directory dimmed, its counts, and whether
-// the reader marked it viewed; the current file is the one the right column is
-// scrolled to.
+// Stacked sections — the description slot (the PR's TL;DR), the Tour slot (the
+// description's steps, each a jump to a file and a line range), then the
+// files. The panel fills the two slots from `data.description`; a host may
+// pass its own content instead. An entry names the file's status, its path
+// with the directory dimmed, its counts, and whether the reader marked it
+// viewed; the current file is the one the right column is scrolled to.
 
 defineProps<{
   files: readonly DiffFileEntry[];
@@ -33,10 +34,9 @@ const STATUS_CLASS: Record<FileStatus, string> = {
 
 <template>
   <nav class="file-list flex flex-col pb-24 text-xs" aria-label="Files changed" data-testid="file-list">
-    <!-- Seats for the PR description (a follow-up renders it here: its TL;DR
-         clamped by the app's expandable text, then the Tour, whose steps call
-         the diff view's scrollTo(path, from, to)). Nothing yet — the slots
-         fix the order: description, Tour, files. -->
+    <!-- The PR description's seats, in this order: the TL;DR, the Tour, then
+         the files. Empty slots render nothing, so a diff without a description
+         starts at the files. -->
     <slot name="description" />
     <slot name="tour" />
     <section class="files">

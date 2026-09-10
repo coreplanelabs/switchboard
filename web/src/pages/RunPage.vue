@@ -29,6 +29,7 @@ import {
   RunnerClockKey,
 } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
+import { createReviewAbridge } from "../lib/reviewAbridge";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
 import { panelTitle } from "../modules/pr-review/types";
 import { durationTone, heatStyle } from "../lib/durationTone";
@@ -291,11 +292,20 @@ const logEnd = ref<HTMLElement | null>(null);
 function atTail(): boolean {
   return window.innerHeight + window.scrollY >= document.body.scrollHeight - 60;
 }
-// PR-review panel (docs/reference/specs/reading-diff.md item 6): the collector is the
+// PR-review panel (docs/reference/specs/reading-diff.md item 12): the collector is the
 // runs→module adapter — it reads the same frames the timeline gets and, when
 // this run is a PR review carrying reading-diff artifacts, gates the button.
 const prReview = createPrReviewCollector();
 const prPanelOpen = ref(false);
+// The panel's "Abridge with meat" control: only when this deployment can
+// abridge (`readingDiffAbridge`) and the run is a stored one — the command
+// appends to the record. The panel shows it while the git diff stands alone;
+// the abridged diff lands through the collector like any other frame.
+const abridge =
+  seed?.mode === "history" && seed.capabilities.readingDiffAbridge
+    ? createReviewAbridge(seed.id, (e) => prReview.handle(e))
+    : undefined;
+onUnmounted(() => abridge?.dispose());
 
 function handle(e: unknown): void {
   const wasAtTail = atTail();
@@ -581,7 +591,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           >
             <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
           </a>
-          <!-- The review's reading diff (docs/reference/specs/reading-diff.md item 6):
+          <!-- The review's reading diff (docs/reference/specs/reading-diff.md item 12):
                present exactly when the run published reading-diff artifacts —
                a link-weight control like the chips beside it. -->
           <button
@@ -833,6 +843,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       <template #content="{ close }">
         <PrReviewPanel
           :data="prReview.state"
+          :abridge="abridge"
           closable
           :style="{ '--pr-review-ins': 'var(--sb-ok)', '--pr-review-del': 'var(--sb-bad)' }"
           @close="close()"

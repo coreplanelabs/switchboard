@@ -367,7 +367,7 @@ const HIST_STREAM = normalizeSpans([
 ] as RunEvent[]);
 
 // A finished PR review: the same stream shape, plus the two `review_artifact`
-// events the run-page panel renders (docs/reference/specs/reading-diff.md item 6) — git's
+// events the run-page panel renders (docs/reference/specs/reading-diff.md item 12) — git's
 // full diff (capped, so the truncation badge shows) and meat's abridged one.
 const REVIEW_RECEIVED_AT = NOW - 7 * 3_600_000;
 const REVIEW_FINISHED_AT = REVIEW_RECEIVED_AT + 412_000;
@@ -421,8 +421,11 @@ const REVIEW_STREAM = normalizeSpans([
     seq: 4,
   },
   // The PR's description as data (docs/reference/specs/reading-diff.md item 7), read back
-  // from the PR body: its title names the panel; the TL;DR and Tour wait for
-  // the follow-up that renders them.
+  // from the PR body: its title names the panel, the TL;DR and the What & why
+  // open the left column, the Tour's steps jump the diff. The steps cover every
+  // placement the panel draws: two the abridged diff keeps, one only the full
+  // diff carries (the sender's tests), one anchored at the previous push (the
+  // stale badge), one past the capped diff (muted).
   {
     type: "review_artifact",
     artifact: "pr_description",
@@ -431,13 +434,71 @@ const REVIEW_STREAM = normalizeSpans([
     pr: 57,
     headSha: "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d",
     title: "Webhook deliveries retry with exponential backoff, never on a 4xx",
-    body: "Webhook deliveries are tried once today; a flaky receiver loses the event. This adds a bounded retry policy and removes the unsigned legacy sender.",
+    body: [
+      "## TL;DR",
+      "",
+      "Webhook deliveries are tried once today; a flaky receiver loses the event. This adds a bounded retry policy and removes the unsigned legacy sender.",
+      "",
+      "## What & why",
+      "",
+      "A receiver that is down for a minute drops every event sent in that minute, and the queue never tries again. The sender now walks a backoff schedule — 500 ms doubling to a 30 s cap, five attempts — and stops early on any 4xx, because the receiver saying no is final. The policy is configurable under `webhooks.retry`; retries are counted so a noisy receiver shows up on the dashboard.",
+      "",
+      "The unsigned legacy sender had no callers left and no signature; it goes in the same change so the retry loop has one path to cover.",
+      "",
+      "## Tour",
+      "",
+      "### 1. The retry loop",
+    ].join("\n"),
     tldr: "Webhook deliveries are tried once today; a flaky receiver loses the event. This adds a bounded retry policy and removes the unsigned legacy sender.",
-    tour: [],
-    remaining: [],
+    tour: [
+      {
+        title: "The retry loop",
+        description:
+          "sendWebhook walks the backoff schedule: the first attempt is immediate, every later one waits its delay; a 4xx returns at once, anything else counts a retry.",
+        lookFor: "the early return on a 4xx — it must come before the retry counter",
+        anchor: { path: "src/webhooks/sender.ts", from: 31, to: 40, sha: "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d" },
+      },
+      {
+        title: "The backoff schedule",
+        description:
+          "backoffDelays doubles from the base delay and caps each step; isRetryable names what is worth another try.",
+        anchor: { path: "src/webhooks/retry.ts", from: 1, to: 7, sha: "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d" },
+      },
+      {
+        title: "The tests pin the two rules",
+        description: "A 503 is retried up to the policy and then given up on; a 404 is never retried.",
+        lookFor: "the attempts count on the 503 case equals maxAttempts",
+        anchor: {
+          path: "src/webhooks/sender.test.ts",
+          from: 27,
+          to: 42,
+          sha: "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d",
+        },
+      },
+      {
+        title: "The policy is config",
+        description: "webhooks.retry with defaults, so an existing config keeps working.",
+        anchor: { path: "src/config/schema.ts", from: 60, to: 66, sha: "4b7e1c9d2f3a8e5b6c0d1e2f3a4b5c6d7e8f9a0b" },
+      },
+      {
+        title: "The runbook",
+        description: "How to read the retry counter and when to raise the cap.",
+        anchor: {
+          path: "docs/how-to/webhook-retries.md",
+          from: 1,
+          to: 12,
+          sha: "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d",
+        },
+      },
+    ],
+    remaining: [
+      { path: "src/webhooks/legacySender.ts", note: "deleted; no callers" },
+      { path: "src/metrics/counters.ts", note: "the retry counter" },
+      { path: "CHANGELOG.md", note: "the Unreleased entry" },
+    ],
     decisions: [],
     complete: false,
-    problems: ["no Tour section in the body"],
+    problems: ["no Decisions section in the body", "no Validation section in the body"],
     truncated: false,
     at: REVIEW_RECEIVED_AT + 6_500,
     seq: 5,

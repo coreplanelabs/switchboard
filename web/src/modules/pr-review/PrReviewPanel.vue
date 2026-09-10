@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
-import type { PrReviewData, ReadingDiff } from "./types";
+import { computed, nextTick, reactive, ref, watch } from "vue";
+import type { AbridgeControl, PrReviewData, ReadingDiff } from "./types";
 import {
   panelTitle,
   poweredByExplanation,
@@ -9,22 +9,27 @@ import {
   prLinks,
   truncatedExplanation,
 } from "./types";
-import { countFiles, parseFiles } from "./files";
+import { countFiles, filePaths, parseFiles } from "./files";
+import DescriptionBlock from "./DescriptionBlock.vue";
 import FileList from "./FileList.vue";
 import LabelTip from "./LabelTip.vue";
 import ReadingDiffView from "./ReadingDiffView.vue";
+import TourList from "./TourList.vue";
 
 // The PR-review panel: the change as a reviewer reads it, under the PR's own
 // title. Props-only (see README.md) — the host app decides where it lives
 // (Switchboard: a slideout on review-run pages) and adapts its own data.
 //
 // Shape: a header (the title linking to the PR; one compact line of facts —
-// the reference, the head, the base, the counts, the producer; the tabs, the
-// wrap toggle and, for a host that asks, the close control) over two columns
-// that scroll on their own — the file list (a Tour seat, then the files) and
-// the diff. The panel owns what both columns share: the current file (the
-// list's click, the view's scroll-spy) and the viewed marks, kept per path
-// for the panel's lifetime.
+// the reference, the head, the base, the counts, the producer; the tabs — or
+// the abridge control when the host offers one and the full diff stands alone
+// —, the wrap toggle and, for a host that asks, the close control) over two
+// columns that scroll on their own — the left one opens on the PR's
+// description and its Tour, then lists the files; the right one is the diff.
+// The panel owns what both columns share: the current file (the list's click,
+// the view's scroll-spy), the viewed marks, kept per path for the panel's
+// lifetime, and the Tour's active step — a jump switches to the full diff
+// when the shown one lacks the step's file or its lines.
 
 const props = withDefaults(
   defineProps<{
@@ -32,14 +37,18 @@ const props = withDefaults(
     /** Render a close control that emits `close` — for a host that puts the
      *  panel in a dialog of its own and hides the dialog's chrome. */
     closable?: boolean;
+    /** The abridging of the full diff, when the host can ask for one; absent
+     *  when the deployment cannot — nothing then renders. */
+    abridge?: AbridgeControl;
   }>(),
-  { closable: false },
+  { closable: false, abridge: undefined },
 );
 const emit = defineEmits<{ close: [] }>();
 
 const links = computed(() => prLinks(props.data.pr));
 const title = computed(() => panelTitle(props.data));
 const diffs = computed(() => props.data.readingDiffs);
+const description = computed(() => props.data.description);
 /** One tab per producer, abridged first; a lone diff renders without tabs. */
 const tabs = computed(() => {
   const meat = diffs.value.find((d) => d.poweredBy === "meat");
@@ -53,10 +62,11 @@ watch(
 );
 const shown = computed(() => tabs.value[active.value] ?? tabs.value[0] ?? null);
 const files = computed(() => (shown.value ? parseFiles(shown.value.diff) : []));
+const gitTab = computed(() => tabs.value.findIndex((d) => d.poweredBy === "git"));
 /** The full diff's file count while the abridged one is shown (the footer's
  *  "N of M files shown"); undefined when there is nothing to compare against. */
 const fullFileCount = computed(() => {
-  const git = diffs.value.find((d) => d.poweredBy === "git");
+  const git = tabs.value[gitTab.value];
   return shown.value?.poweredBy === "meat" && git ? countFiles(git.diff) : undefined;
 });
 const totals = computed(() => ({
@@ -64,6 +74,18 @@ const totals = computed(() => ({
   deleted: files.value.reduce((n, f) => n + f.deleted, 0),
 }));
 const shortSha = computed(() => props.data.pr.headSha?.slice(0, 7));
+
+/** The abridge control shows while the full diff stands alone and the host
+ *  offers one; once the abridged diff arrives the tabs take its place. */
+const abridgeShown = computed(
+  () =>
+    props.abridge !== undefined &&
+    props.abridge.state.state !== "done" &&
+    tabs.value.length === 1 &&
+    shown.value?.poweredBy === "git",
+);
+const ABRIDGE_EXPLANATION =
+  "Abridge the full diff with meat.dev: a model keeps the concepts and drops what a reviewer need not read. One model call; usually a minute or three.";
 
 const viewed = reactive(new Set<string>());
 function toggleViewed(path: string): void {
@@ -77,6 +99,53 @@ const view = ref<InstanceType<typeof ReadingDiffView> | null>(null);
 function select(path: string): void {
   current.value = path;
   view.value?.scrollToFile(path);
+}
+
+// The Tour. Each step is placed against the shown diff and the full one; a
+// jump brings the step's file on screen — switching to the full diff when the
+// abridgement dropped the file, or dropped the lines — then lights the range.
+const shownPaths = computed(() => new Set(files.value.map((f) => f.path)));
+const fullPaths = computed(() => {
+  const git = tabs.value[gitTab.value];
+  return git ? new Set(filePaths(git.diff)) : shownPaths.value;
+});
+const activeStep = ref<number | null>(null);
+const missedStep = ref<number | null>(null);
+watch(description, () => {
+  activeStep.value = null;
+  missedStep.value = null;
+});
+
+/** Bring a file's diff on screen: already shown, or in the full diff (switch
+ *  the tab and wait for the render). False when no diff carries it. */
+async function showFile(path: string): Promise<boolean> {
+  if (shownPaths.value.has(path)) return true;
+  if (gitTab.value < 0 || !fullPaths.value.has(path)) return false;
+  active.value = gitTab.value;
+  await nextTick();
+  return true;
+}
+
+async function jumpTo(index: number): Promise<void> {
+  const step = description.value?.tour[index];
+  if (!step || !(await showFile(step.anchor.path))) return;
+  const { path, from, to } = step.anchor;
+  activeStep.value = index;
+  current.value = path;
+  let hit = (await view.value?.scrollTo(path, from, to)) ?? false;
+  // The abridged diff carries the file but not these lines: the full diff may.
+  if (!hit && active.value !== gitTab.value && gitTab.value >= 0) {
+    active.value = gitTab.value;
+    await nextTick();
+    current.value = path;
+    hit = (await view.value?.scrollTo(path, from, to)) ?? false;
+  }
+  missedStep.value = hit ? null : index;
+  if (!hit) view.value?.scrollToFile(path);
+}
+
+async function openPath(path: string): Promise<void> {
+  if (await showFile(path)) select(path);
 }
 
 const wrap = ref(false);
@@ -120,6 +189,45 @@ const wrap = ref(false);
             </button>
           </LabelTip>
         </div>
+        <!-- Where the tabs would be: the abridge control, while only the full
+             diff exists and the host can produce the abridged one. -->
+        <template v-else-if="abridgeShown && abridge">
+          <LabelTip v-if="abridge.state.state === 'absent'" :text="ABRIDGE_EXPLANATION">
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="outline"
+              icon="i-lucide-scissors"
+              label="Abridge with meat"
+              data-testid="abridge-button"
+              @click="abridge.start()"
+            />
+          </LabelTip>
+          <span
+            v-else-if="abridge.state.state === 'running'"
+            class="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted"
+            data-testid="abridge-running"
+          >
+            <UIcon name="i-lucide-loader-circle" class="size-3.5 animate-spin" />
+            Abridging… usually 1–3 minutes
+          </span>
+          <span
+            v-else-if="abridge.state.state === 'failed'"
+            class="inline-flex min-w-0 shrink items-center gap-1.5 text-xs text-error"
+            data-testid="abridge-failed"
+          >
+            <UIcon name="i-lucide-circle-alert" class="size-3.5 shrink-0" />
+            <span class="truncate" :title="abridge.state.reason">Abridging failed: {{ abridge.state.reason }}</span>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="outline"
+              label="Retry"
+              data-testid="abridge-retry"
+              @click="abridge.start()"
+            />
+          </span>
+        </template>
         <UButton
           v-if="shown"
           size="xs"
@@ -206,8 +314,27 @@ const wrap = ref(false);
     <div v-if="shown" class="body flex min-h-0 flex-1">
       <aside class="hidden w-[17.5rem] shrink-0 overflow-y-auto border-r border-default md:block">
         <FileList :files="files" :current="current" :viewed="viewed" @select="select" @toggle-viewed="toggleViewed">
-          <template #description><slot name="description" /></template>
-          <template #tour><slot name="tour" /></template>
+          <template #description>
+            <slot name="description">
+              <DescriptionBlock v-if="description" :description="description" />
+            </slot>
+          </template>
+          <template #tour>
+            <slot name="tour">
+              <TourList
+                v-if="description && (description.tour.length > 0 || description.remaining.length > 0)"
+                :steps="description.tour"
+                :remaining="description.remaining"
+                :shown-paths="shownPaths"
+                :full-paths="fullPaths"
+                :reviewed-sha="data.pr.headSha ?? description.headSha"
+                :active="activeStep"
+                :missed="missedStep"
+                @jump="jumpTo"
+                @open="openPath"
+              />
+            </slot>
+          </template>
         </FileList>
       </aside>
       <ReadingDiffView
