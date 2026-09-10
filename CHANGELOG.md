@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.15.0](https://github.com/coreplanelabs/switchboard/compare/v1.14.0...v1.15.0) (2026-09-10)
+
+
+### Features
+
+* **core:** every secret is a Secret — one getter, value revealed only at the boundary, a lint that forbids raw env reads ([#856](https://github.com/coreplanelabs/switchboard/issues/856)) ([ce0deff](https://github.com/coreplanelabs/switchboard/commit/ce0deff5ff2859ece5d4d26cac7aef71da9048a1))
+* **review:** a review run records the PR's description as data — the TL;DR and the Tour's steps with their anchors, submitted by the coding run or parsed from the body ([#857](https://github.com/coreplanelabs/switchboard/issues/857)) ([a2e2245](https://github.com/coreplanelabs/switchboard/commit/a2e2245e02f8d05f079118c899c9cd4362164981))
+* **review:** abridged reading diffs on demand — meat runs on the bot host over the PR's complete diff, never inside an execution container ([#860](https://github.com/coreplanelabs/switchboard/issues/860)) ([9ca57bb](https://github.com/coreplanelabs/switchboard/commit/9ca57bb7a326c9c06d760bbc2efac91b316b136a))
+* **web:** the reading-diff panel opens on the PR's description and its Tour — each step jumps to the lines it names, and Abridge with meat asks for the reading diff ([#861](https://github.com/coreplanelabs/switchboard/issues/861)) ([33cb5ce](https://github.com/coreplanelabs/switchboard/commit/33cb5ce57192290ffcf9efa48ab1fba59efec3e2))
+* **web:** the run page reads as one structure — a legible timeline, one vocabulary, links on the branch, the request folded ([#858](https://github.com/coreplanelabs/switchboard/issues/858)) ([a3a3f2a](https://github.com/coreplanelabs/switchboard/commit/a3a3f2ae8a6188d7ba7fee38cf6d7156bf33c916))
+
+
+### Bug fixes
+
+* **cli:** the first run behaves — a failed ask exits 1, dry-run always previews, help and logs read clean ([#853](https://github.com/coreplanelabs/switchboard/issues/853)) ([2e3eac7](https://github.com/coreplanelabs/switchboard/commit/2e3eac70dd3cd107fc70c174d5b79689a5162976))
+* **review:** the review reads the whole merge-base diff, and a digest that covers less than the PR refuses the verdict ([#854](https://github.com/coreplanelabs/switchboard/issues/854)) ([1ea622c](https://github.com/coreplanelabs/switchboard/commit/1ea622c0bc870ba4c55d2b069888adb42b7bfb76))
+* **web:** the abridge poller stops on a repeated cursor, ignores frames after dispose, and retries without a fresh model call ([#862](https://github.com/coreplanelabs/switchboard/issues/862)) ([9266073](https://github.com/coreplanelabs/switchboard/commit/926607313cc4d8815305b6a061fb2f603724053d))
+* **web:** the reading-diff panel renders as a diff — gutter and inline prefixes, a file list beside the hunks, the PR's title on top, both themes ([#855](https://github.com/coreplanelabs/switchboard/issues/855)) ([823364b](https://github.com/coreplanelabs/switchboard/commit/823364bb99eab04e15320f5780cd9afde293e079))
+
+
+### Refactoring
+
+* **runs:** run readers take span-schema records only ([#846](https://github.com/coreplanelabs/switchboard/issues/846)) ([9a6cc74](https://github.com/coreplanelabs/switchboard/commit/9a6cc74002daee7d90d70ecf5076854aea2373ac))
+
 ## [1.14.0](https://github.com/coreplanelabs/switchboard/compare/v1.13.0...v1.14.0) (2026-09-10)
 
 
