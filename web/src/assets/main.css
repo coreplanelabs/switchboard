@@ -94,4 +94,11 @@
   body {
     @apply bg-default text-default font-mono text-[0.8125rem] leading-normal antialiased;
   }
+  /* Tailwind v4's preflight leaves buttons on the default cursor and Nuxt UI
+   * does not add one: every enabled button on the dashboard — the run page's
+   * folds, the panel's tabs, chevrons and close — shows the pointer. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
 }

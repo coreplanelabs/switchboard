@@ -28,6 +28,7 @@ import {
 } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
+import { panelTitle } from "../modules/pr-review/types";
 import { durationTone, heatStyle } from "../lib/durationTone";
 import { formatClock, formatDateTime, formatDuration, formatLocalIso } from "../lib/format";
 import { statusLabel } from "../lib/indexRow";
@@ -735,10 +736,22 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
     </div>
 
     <!-- The PR-review slideout: the pr-review module rendering the adapter's
-         state. Wide, because a diff is the content. -->
-    <USlideover v-model:open="prPanelOpen" title="PR review" :ui="{ content: 'max-w-3xl' }">
-      <template #body>
-        <PrReviewPanel :data="prReview.state" />
+         state. Nearly the viewport, because a diff beside its file list is the
+         content; the body's padding and scroll go — the panel's two columns
+         scroll on their own. The diff's two hues are the run page's status
+         colors, so an added line and a passed call read as one green. -->
+    <USlideover
+      v-model:open="prPanelOpen"
+      :title="panelTitle(prReview.state)"
+      :ui="{ content: 'w-[min(96vw,90rem)] max-w-none' }"
+    >
+      <template #content="{ close }">
+        <PrReviewPanel
+          :data="prReview.state"
+          closable
+          :style="{ '--pr-review-ins': 'var(--sb-ok)', '--pr-review-del': 'var(--sb-bad)' }"
+          @close="close()"
+        />
       </template>
     </USlideover>
   </AppShell>
