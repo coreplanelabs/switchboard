@@ -3,7 +3,6 @@
 export interface Shot {
   /** The file stem under docs/public/screenshots/. */
   name: string;
-  caption: string;
   alt: string;
 }
 
