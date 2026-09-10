@@ -47,7 +47,7 @@ Never a baseline, held only by a grant (or `all`): `config:write` (`config set/c
 
 ### Validation
 
-The load fails, naming the entry and field, on an unknown id prefix (`slack:`, `http:`, `mcp:`, `access:`, `schedule:` are the vocabulary), a misspelled `all`, an unknown axis, or a block that is not a mapping. Nothing is ever widened to recover from a typo.
+The load fails, naming the entry and field, on an unknown id prefix (`slack:`, `http:`, `mcp:`, `access:`, `schedule:` are the vocabulary), a misspelled `all`, an unknown axis, or a block that is not a mapping. Nothing is ever widened to recover from a typo. `grants` and `restrict` are the only authorization keys `config.yaml` has: any other top-level key — `permissions`, a misspelling — is unknown and fails the load by name.
 
 ## `restrict`
 
@@ -66,22 +66,7 @@ Both lists are optional and independent. An agent or repo **not** listed is open
 
 ## Ingress tokens are credentials, not grants
 
-`SWITCHBOARD_INGRESS_TOKENS` is `{ "<token>": { "subject": "<name>", "channel"?: "<name>" } }`. A token **identifies** — it resolves to the actor `http:<subject>` over `/ingress` and `mcp:<subject>` over MCP — and what that actor may do is its `grants` entry and nothing else. Starting a run (`POST /ingress`, the MCP `dispatch` tool) needs the `dispatch` action; running a registry command as text or as an MCP tool needs that command's action. A token whose subject has no `grants` entry can do nothing. `channel` is where the token's dispatches are recorded (`http:<channel>`), not a right: to *read* a channel's runs, name it under `channels`. The retired `scopes` key is tolerated with a startup warning naming the subject and grants nothing.
-
-## The retired `permissions` block
-
-A config that still carries `permissions:` is refused at load with this mapping. Each old key becomes a grant, a restriction, or both:
-
-| Was | Is |
-|---|---|
-| `admins: [id…]` | `grants.<id>: { actions: all, channels: all, repos: all }` |
-| `agents.<name>: [id…]` | `restrict.agents: [<name>]` + `grants.<id>.actions: [agent:run:<name>]` |
-| `repos.<owner/name>: [id…]` | `restrict.repos: [<owner/name>]` + `grants.<id>.repos: [<owner/name>]` |
-| `channelConfig: [id…]` (or absent = everyone) | `grants.<id>.actions: [config:write]` — **closed by default now**; grant it to whoever should edit channel config |
-| `repoManagement: [id…]` | `grants.<id>.actions: [repo:write, friction:write]` |
-| `operators: [access:<sub>…]` | `grants.access:<sub>: { actions: [<group>:read, <group>:write, …], channels: all }` |
-| `serviceTokens.<cn>: [action…]` | `grants.access:svc:<cn>: { actions: [action…] }` |
-| token `scopes: [action…]` | `grants.http:<subject>.actions` and `grants.mcp:<subject>.actions` |
+`SWITCHBOARD_INGRESS_TOKENS` is `{ "<token>": { "subject": "<name>", "channel"?: "<name>" } }`. A token **identifies** — it resolves to the actor `http:<subject>` over `/ingress` and `mcp:<subject>` over MCP — and what that actor may do is its `grants` entry and nothing else. Starting a run (`POST /ingress`, the MCP `dispatch` tool) needs the `dispatch` action; running a registry command as text or as an MCP tool needs that command's action. A token whose subject has no `grants` entry can do nothing. `channel` is where the token's dispatches are recorded (`http:<channel>`), not a right: to *read* a channel's runs, name it under `channels`. `subject` and `channel` are the whole entry; any other field (`scopes`, say) is ignored, so nothing in the token map can widen what the `grants` entry says.
 
 ## See also
 

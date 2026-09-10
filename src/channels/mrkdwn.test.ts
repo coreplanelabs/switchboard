@@ -44,8 +44,8 @@ describe("mdToMrkdwn", () => {
     expect(mdToMrkdwn("![alt](https://img.test/a.png)")).toBe("https://img.test/a.png");
   });
 
-  // [text](url) -> <url|text> is a link-injection surface (the since-retired
-  // SlackFormatter had the gap). The url's structural chars are
+  // [text](url) -> <url|text> is a link-injection surface (a formatter without
+  // this step has the gap). The url's structural chars are
   // percent-encoded and the label's escaped so a link can't forge or break
   // out of the <url|label> structure.
   it("escapes link labels and percent-encodes urls so a link can't forge structure", () => {

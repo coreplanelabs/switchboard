@@ -451,7 +451,7 @@ describe("createCommandHttpHandler — the Access API is bound by channel visibi
       ? { actions: new Set(["runs:read", "runs:write"]), channels: new Set<string>(), repos: new Set<string>() }
       : grantsFor(id, { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] });
 
-  it("an Access operator without all-channels gets 404 not_found on a private-channel run, byte-identical to a run that does not exist; the legacy operator (all-channels) reads it", async () => {
+  it("an Access operator without all-channels gets 404 not_found on a private-channel run, byte-identical to a run that does not exist; an operator with all-channels reads it", async () => {
     const { handler } = await fixture({ grantsFor: nativeGrants });
     const priv = fakeReqRes({ method: "GET", url: "/api/runs.get?id=fin-priv" });
     await handler(priv.req, priv.res, nativeOperator);
@@ -472,7 +472,7 @@ describe("createCommandHttpHandler — the Access API is bound by channel visibi
     expect((asOperator.json() as { id: string }).id).toBe("fin-priv");
   });
 
-  it("runs.list from the Access API shows an operator without all-channels only the public runs; the legacy operator and the reader bot (all-channels) see the fleet; a browser identity config names nothing for sees the public runs", async () => {
+  it("runs.list from the Access API shows an operator without all-channels only the public runs; an operator and the reader bot with all-channels see the fleet; a browser identity config names nothing for sees the public runs", async () => {
     const { handler, live } = await fixture({ grantsFor: nativeGrants });
     const listed = async (identity: AccessIdentity) => {
       const t = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });

@@ -18,8 +18,8 @@
 // when /healthz says the reconnect catch-up is failing or the bot token lacks
 // required scopes (`catchUp.error`, `catchUp.missingScopes`).
 //
-// Fail closed: unreachable bot, a body without the JSON shape (a Worker that
-// predates this preflight answers a bare `ok`), a wrangler failure, or an app
+// Fail closed: unreachable bot, a body without the JSON shape (a bot whose
+// /healthz answers a bare `ok` is not one this preflight can read), a wrangler failure, or an app
 // not in the listing all refuse — a deploy never proceeds blind.
 // `SWITCHBOARD_DEPLOY_FORCE=1` (or `--force` when run directly) is the
 // explicit, warned bypass.
@@ -158,7 +158,7 @@ export function decide({ health, apps }, { force = false } = {}) {
     const p = health.payload;
     if (!p || typeof p !== "object") {
       problems.push(
-        `bot answered /healthz without JSON (${JSON.stringify(p).slice(0, 40)}) — the running Worker predates the preflight; deploy once with SWITCHBOARD_DEPLOY_FORCE=1`,
+        `bot answered /healthz without JSON (${JSON.stringify(p).slice(0, 40)}) — its /healthz is not the JSON this preflight reads; deploy once with SWITCHBOARD_DEPLOY_FORCE=1`,
       );
     } else {
       if (!Number.isInteger(p.inFlight) || p.inFlight < 0) {

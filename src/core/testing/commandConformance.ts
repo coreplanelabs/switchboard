@@ -818,7 +818,7 @@ export function renderAuthorizationMatrix(matrix: AuthorizationMatrix): string[]
   const out = [
     "### Authorization (every surface asks the same table)",
     "",
-    `Admission = \`authorize(actor, action, resource)\` over \`src/core/authz/policy.ts\` for the happy-path input, one column per actor of the fixed set (a legacy \`permissions.*\` + token deployment translated by \`grantsFor\`). ✅ admitted, ⛔ refused as \`unauthorized\` before parse. Refusals the DATA decides (the \`channel\` scope of \`config set\`, an MCP tier, a shared memory record) are the handler's and are asserted in the command tests, not here.`,
+    `Admission = \`authorize(actor, action, resource)\` over \`src/core/authz/policy.ts\` for the happy-path input, one column per actor of the fixed set (one \`grants\` deployment plus its ingress tokens, resolved through \`grantsFor\`). ✅ admitted, ⛔ refused as \`unauthorized\` before parse. Refusals the DATA decides (the \`channel\` scope of \`config set\`, an MCP tier, a shared memory record) are the handler's and are asserted in the command tests, not here.`,
     "",
     `| Command | Action | Resource | ${matrix.roles.map((r) => r.column).join(" | ")} |`,
     `|---|---|---|${matrix.roles.map(() => ":-:").join("|")}|`,

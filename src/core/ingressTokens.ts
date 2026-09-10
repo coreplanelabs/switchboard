@@ -13,45 +13,36 @@
 /** The identity a token maps to. `subject` becomes the platform-namespaced user
  *  id (`http:<subject>`); an optional `channel` names the channel a dispatch
  *  through this token is recorded under (`http:<channel>`) — routing, not a
- *  grant. */
+ *  grant. These two are the whole identity: any other field in an entry is
+ *  ignored, so nothing in the token map can widen what the grants entry says. */
 export interface IngressIdentity {
   subject: string;
   channel?: string;
 }
 
-/** The field the token map carried before grants: a token's own list of
- *  actions. It grants nothing now; an entry that still has it is kept (the
- *  credential is intact) and the caller is told to remove the key. */
-export const RETIRED_TOKEN_FIELD = "scopes";
-
 export type IngressTokenMap = Record<string, IngressIdentity>;
 
 export type ParsedIngressTokens =
-  | {
-      ok: true;
-      tokens: IngressTokenMap;
-      /** One line per entry that still carries the retired `scopes` field, naming the subject — never the token. */
-      warnings: string[];
-    }
+  | { ok: true; tokens: IngressTokenMap }
   /** `reason` names the shape problem (never the token material). */
-  | { ok: false; reason: string; tokens: IngressTokenMap; warnings: string[] };
+  | { ok: false; reason: string; tokens: IngressTokenMap };
 
 /** Parse the raw env value. Entries with an empty token, a non-object value, a
  *  missing/empty `subject`, or a non-string `channel` are skipped; the rest are
- *  kept. `ok: false` only for a value that is not a JSON object at all. */
+ *  kept, each reduced to `{ subject, channel? }`. `ok: false` only for a value
+ *  that is not a JSON object at all. */
 export function parseIngressTokenMap(raw: string | undefined): ParsedIngressTokens {
-  if (!raw || raw.trim() === "") return { ok: true, tokens: {}, warnings: [] };
+  if (!raw || raw.trim() === "") return { ok: true, tokens: {} };
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { ok: false, reason: "not valid JSON", tokens: {}, warnings: [] };
+    return { ok: false, reason: "not valid JSON", tokens: {} };
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, reason: "must be a JSON object", tokens: {}, warnings: [] };
+    return { ok: false, reason: "must be a JSON object", tokens: {} };
   }
   const tokens: IngressTokenMap = {};
-  const warnings: string[] = [];
   for (const [token, value] of Object.entries(parsed as Record<string, unknown>)) {
     if (token === "") continue;
     if (typeof value !== "object" || value === null) continue;
@@ -60,14 +51,9 @@ export function parseIngressTokenMap(raw: string | undefined): ParsedIngressToke
     const channel = v.channel;
     if (typeof subject !== "string" || subject === "") continue;
     if (channel !== undefined && typeof channel !== "string") continue;
-    if (RETIRED_TOKEN_FIELD in v) {
-      warnings.push(
-        `entry for subject "${subject}" carries \`${RETIRED_TOKEN_FIELD}\`, which grants nothing any more — its rights are the grants entry for http:${subject} / mcp:${subject} in config.yaml; remove the key`,
-      );
-    }
     tokens[token] = typeof channel === "string" ? { subject, channel } : { subject };
   }
-  return { ok: true, tokens, warnings };
+  return { ok: true, tokens };
 }
 
 /** The raw token that maps to `subject`, or undefined when no entry does (or

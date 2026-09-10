@@ -4,7 +4,7 @@
 
 import { TRACING_LOG_LEVELS } from "../core/trace/sinks.js";
 import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
-import { RETIRED_SELF_IMPROVEMENT_KEYS } from "../core/selfImprovement.js";
+import type { SelfImprovementConfig } from "../core/selfImprovement.js";
 import type { RunHistoryConfig } from "../core/runStore.js";
 import type { ShipConfig } from "../core/shipPipeline.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
@@ -23,6 +23,47 @@ import type { AppConfig, Scope, TracingConfig } from "../config.js";
 
 /** Upper bound on one scope's `instructions` text (prepended to every turn). */
 export const MAX_INSTRUCTIONS_LENGTH = 2000;
+
+/** Every top-level key `config.yaml` defines — the type checker holds this
+ *  equal to `AppConfig`, so a key added to the interface is accepted at load
+ *  the moment it is declared, and a key the interface does not have fails the
+ *  load by name (`unknownKeys`). */
+const CONFIG_KEYS: Record<keyof AppConfig, true> = {
+  organization: true,
+  providers: true,
+  defaults: true,
+  channels: true,
+  users: true,
+  grants: true,
+  restrict: true,
+  execution: true,
+  workspaceDir: true,
+  memory: true,
+  selfImprovement: true,
+  schedules: true,
+  costs: true,
+  dashboard: true,
+  review: true,
+  ship: true,
+  slack: true,
+  runHistory: true,
+  runtimeOverrides: true,
+  tracing: true,
+  mcp: true,
+};
+
+/** The `selfImprovement` fields, held equal to `SelfImprovementConfig` the same way. */
+const SELF_IMPROVEMENT_KEYS: Record<keyof SelfImprovementConfig, true> = {
+  repo: true,
+  label: true,
+  minRuns: true,
+  top: true,
+};
+
+/** The keys of `value` that `known` does not name, in document order. */
+function unknownKeys(value: object, known: Record<string, true>): string[] {
+  return Object.keys(value).filter((key) => !Object.hasOwn(known, key));
+}
 
 /** Every scope's `instructions` (both kinds, either file) must be a string within the cap. */
 export function validateInstructions(
@@ -140,6 +181,9 @@ export function validateMcpServers(
 /** Validates in place: throws on the first fatal finding. The one non-fatal
  *  findings live elsewhere (`loadAppConfigFrom` reports the document source). */
 export function validateConfig(cfg: AppConfig): void {
+  // A key the document does not define is a typo or a setting that no longer
+  // exists; either way it must not read as a working setting.
+  for (const key of unknownKeys(cfg, CONFIG_KEYS)) throw new Error(`config.yaml: unknown key \`${key}\``);
   validateScopeEfforts(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
   if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
@@ -159,14 +203,7 @@ export function validateConfig(cfg: AppConfig): void {
   // Static instructions ride every turn too — hold them to the same cap the
   // chat command enforces, and fail loudly at load rather than silently truncate.
   validateInstructions(cfg, "config.yaml");
-  // The one authorization shape: `grants` + `restrict`. The retired
-  // `permissions` block is refused with its replacement, never silently ignored
-  // — an ignored allowlist would look like a working restriction.
-  if ("permissions" in (cfg as unknown as Record<string, unknown>)) {
-    throw new Error(
-      "config.yaml: `permissions` is gone — express it as `grants` (who holds what: admins → actions/channels/repos `all`, repoManagement → `repo:write`, channelConfig → `config:write`, operators → every `<group>:read`/`<group>:write`, serviceTokens → an `access:svc:<common_name>` entry) and `restrict` (which agents and repos are closed unless granted); see docs/reference/authorization.md",
-    );
-  }
+  // The one authorization shape: `grants` + `restrict` (docs/reference/authorization.md).
   validateGrants(cfg.grants);
   validateRestrict(cfg.restrict);
   validateSelfImprovement(cfg.selfImprovement);
@@ -240,19 +277,15 @@ function validateRunHistory(rh: RunHistoryConfig): void {
   }
 }
 
-/** `selfImprovement`: the section's own ledger is gone — the friction ledger is
- *  run history — so a key from that era is refused with its replacement, never
- *  silently ignored as if it still did something. */
+/** `selfImprovement` (docs/reference/specs/self-improvement.md item 1): a mapping of
+ *  `repo`/`label`/`minRuns`/`top`; the friction ledger is run history
+ *  (`runHistory`), so the section has no ledger keys and an unknown field is
+ *  refused by name, never ignored as if it did something. */
 function validateSelfImprovement(si: AppConfig["selfImprovement"]): void {
   if (si === undefined) return;
   if (typeof si !== "object" || si === null) throw new Error("config.yaml: selfImprovement must be a mapping");
-  for (const key of RETIRED_SELF_IMPROVEMENT_KEYS) {
-    if (key in si) {
-      throw new Error(
-        `config.yaml: selfImprovement.${key} is gone — the friction ledger is run history; configure \`runHistory.worker\` (retention bounds the runs \`friction report\` sees) and remove the key`,
-      );
-    }
-  }
+  for (const key of unknownKeys(si, SELF_IMPROVEMENT_KEYS))
+    throw new Error(`config.yaml: selfImprovement: unknown field ${key}`);
 }
 
 /** `runtimeOverrides` (routing-and-config item 12): a mapping; `worker.baseUrl` https; `tokenEnv` a name. */

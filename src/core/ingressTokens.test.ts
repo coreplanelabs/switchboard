@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseIngressTokenMap, RETIRED_TOKEN_FIELD, tokenForSubject } from "./ingressTokens.js";
+import { parseIngressTokenMap, tokenForSubject } from "./ingressTokens.js";
 
 // Feature: docs/reference/specs/http-ingress.md — the ONE parser of SWITCHBOARD_INGRESS_TOKENS,
 // shared by the bot's ingress adapters and the Worker shim. Node-free. A
@@ -14,30 +14,19 @@ describe("parseIngressTokenMap", () => {
     expect(parsed).toEqual({
       ok: true,
       tokens: { s3cr3t: { subject: "alice", channel: "ops" }, t2: { subject: "bob" } },
-      warnings: [],
     });
     expect("channel" in parsed.tokens.t2).toBe(false);
   });
 
   it("absent / blank → ok with an empty map (the caller treats empty as disabled)", () => {
-    expect(parseIngressTokenMap(undefined)).toEqual({ ok: true, tokens: {}, warnings: [] });
-    expect(parseIngressTokenMap("   ")).toEqual({ ok: true, tokens: {}, warnings: [] });
+    expect(parseIngressTokenMap(undefined)).toEqual({ ok: true, tokens: {} });
+    expect(parseIngressTokenMap("   ")).toEqual({ ok: true, tokens: {} });
   });
 
   it("not JSON / not an object → ok:false with a reason and an empty map (never open)", () => {
-    expect(parseIngressTokenMap("{oops")).toEqual({ ok: false, reason: "not valid JSON", tokens: {}, warnings: [] });
-    expect(parseIngressTokenMap("[1,2]")).toEqual({
-      ok: false,
-      reason: "must be a JSON object",
-      tokens: {},
-      warnings: [],
-    });
-    expect(parseIngressTokenMap("null")).toEqual({
-      ok: false,
-      reason: "must be a JSON object",
-      tokens: {},
-      warnings: [],
-    });
+    expect(parseIngressTokenMap("{oops")).toEqual({ ok: false, reason: "not valid JSON", tokens: {} });
+    expect(parseIngressTokenMap("[1,2]")).toEqual({ ok: false, reason: "must be a JSON object", tokens: {} });
+    expect(parseIngressTokenMap("null")).toEqual({ ok: false, reason: "must be a JSON object", tokens: {} });
   });
 
   it("skips malformed entries (empty token, non-object, missing/blank subject, non-string channel) and keeps the rest", () => {
@@ -51,28 +40,25 @@ describe("parseIngressTokenMap", () => {
         "": { subject: "empty-token" },
       }),
     );
-    expect(parsed).toEqual({ ok: true, tokens: { good: { subject: "alice" } }, warnings: [] });
+    expect(parsed).toEqual({ ok: true, tokens: { good: { subject: "alice" } } });
   });
 
-  it("the retired `scopes` field grants nothing: the entry is kept as a credential (never dropped, never widened) and a warning names the subject — not the token — and the replacement", () => {
+  it("an identity is exactly { subject, channel? }: any other field in an entry (`scopes`, a typo) is ignored — nothing in the token map can widen what the grants entry says", () => {
     const parsed = parseIngressTokenMap(
       JSON.stringify({
         plain: { subject: "a" },
-        legacy: { subject: "b", channel: "ops", scopes: ["dispatch", "runs:read"] },
-        weird: { subject: "c", scopes: "runs:write" },
+        withScopes: { subject: "b", channel: "ops", scopes: ["dispatch", "runs:read"] },
+        typo: { subject: "c", chanel: "ops", actions: "all" },
       }),
     );
-    expect(parsed.ok).toBe(true);
-    expect(parsed.tokens).toEqual({
-      plain: { subject: "a" },
-      legacy: { subject: "b", channel: "ops" },
-      weird: { subject: "c" },
+    expect(parsed).toEqual({
+      ok: true,
+      tokens: {
+        plain: { subject: "a" },
+        withScopes: { subject: "b", channel: "ops" },
+        typo: { subject: "c" },
+      },
     });
-    expect(parsed.warnings).toHaveLength(2);
-    expect(parsed.warnings[0]).toContain(`entry for subject "b" carries \`${RETIRED_TOKEN_FIELD}\``);
-    expect(parsed.warnings[0]).toContain("grants entry for http:b / mcp:b");
-    expect(parsed.warnings.join("\n")).not.toContain("legacy"); // the token material never appears
-    expect(parsed.warnings.join("\n")).not.toContain("weird");
   });
 });
 

@@ -533,10 +533,22 @@ describe("restrict — closed unless granted (authorization.md item 11)", () => 
     expect(s.restrictedAgentsFor("slack:URANDOM")).toEqual([]);
   });
 
-  it("the retired `permissions` block is refused at load, pointing at grants + restrict", () => {
+  it("an unknown top-level key is refused at load naming it — `permissions` is one, a typo of `grants` another; nothing is mapped or ignored", () => {
     expect(() => store(YAML_FIXTURE + `permissions:\n  admins: ["slack:UADMIN"]\n`)).toThrow(
-      /config\.yaml: `permissions` is gone — express it as `grants`.*and `restrict`.*docs\/reference\/authorization\.md/,
+      /^config\.yaml: unknown key `permissions`$/,
     );
+    expect(() => store(YAML_FIXTURE + `grant:\n  slack:UADMIN:\n    actions: all\n`)).toThrow(
+      /^config\.yaml: unknown key `grant`$/,
+    );
+    // A name every object inherits is not a key the document defines.
+    for (const key of ["constructor", "toString", "hasOwnProperty"]) {
+      expect(() => store(YAML_FIXTURE + `${key}: 1\n`), key).toThrow(
+        new RegExp(`^config\\.yaml: unknown key \`${key}\`$`),
+      );
+      expect(() => store(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n  ${key}: 1\n`), key).toThrow(
+        new RegExp(`^config\\.yaml: selfImprovement: unknown field ${key}$`),
+      );
+    }
   });
 });
 
@@ -576,22 +588,24 @@ describe("runHistory config", () => {
   });
 });
 
-// Feature: self-improvement.md item 1 — the section has no ledger of its own
-// any more; a key from that era is refused with its replacement, never ignored.
+// Feature: self-improvement.md item 1 — the section is `repo`/`label`/`minRuns`/`top`;
+// the friction ledger is run history, so the section carries no ledger keys and
+// an unknown field is refused by name, never ignored as if it did something.
 describe("selfImprovement", () => {
   it("loads with repo/label/minRuns/top", () => {
     const s = store(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n  label: friction\n  minRuns: 3\n  top: 2\n`);
     expect(s.config.selfImprovement).toEqual({ repo: "o/r", label: "friction", minRuns: 3, top: 2 });
   });
 
-  it("refuses worker / ledgerPath / ledgerMax naming runHistory.worker as the replacement; a non-mapping is refused too", () => {
+  it("an unknown field is refused naming it (a ledger key such as `worker` or `ledgerPath` is one); a non-mapping is refused too", () => {
     for (const key of [
       "worker:\n    baseUrl: https://state.example\n",
       "ledgerPath: data/friction.jsonl\n",
       "ledgerMax: 500\n",
+      "toop: 3\n",
     ]) {
       expect(() => store(`${YAML_FIXTURE}\nselfImprovement:\n  repo: o/r\n  ${key}`)).toThrow(
-        /selfImprovement\.(worker|ledgerPath|ledgerMax) is gone — the friction ledger is run history; configure `runHistory\.worker`/,
+        /^config\.yaml: selfImprovement: unknown field (worker|ledgerPath|ledgerMax|toop)$/,
       );
     }
     expect(() => store(`${YAML_FIXTURE}\nselfImprovement: 3\n`)).toThrow(/selfImprovement must be a mapping/);

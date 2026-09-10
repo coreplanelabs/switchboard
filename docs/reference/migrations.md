@@ -4,10 +4,8 @@ What an operator changes when a major version breaks something: one section per 
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
-## 1.0.0
+## 2.0.0
 
-The `permissions` block and the per-token `scopes` list are gone; `grants` and `restrict` are the whole authorization configuration.
-
-- A `config.yaml` that still carries `permissions:` is refused at startup with the mapping from each old key to its `grants` / `restrict` form — [The retired `permissions` block](authorization.md#the-retired-permissions-block) is the same table. Rewrite the block by that table, then restart.
-- A token's `scopes` in `SWITCHBOARD_INGRESS_TOKENS` is tolerated with a startup warning and grants nothing; move each action into `grants.http:<subject>.actions` and `grants.mcp:<subject>.actions` ([Ingress tokens are credentials, not grants](authorization.md#ingress-tokens-are-credentials-not-grants)).
-- Channel config editing is closed by default now: grant `config:write` to whoever edited channel config before.
+- A `config.yaml` top-level key the document does not define — `permissions:` included — is an unknown key and fails the load by name; write who holds what as `grants` and what is closed as `restrict` ([authorization](authorization.md)).
+- A token entry's `scopes` in `SWITCHBOARD_INGRESS_TOKENS` is ignored like any field other than `subject` and `channel`; the token holds exactly its `grants.http:<subject>` / `grants.mcp:<subject>` entry ([Ingress tokens are credentials, not grants](authorization.md#ingress-tokens-are-credentials-not-grants)).
+- A `selfImprovement` field other than `repo`, `label`, `minRuns`, `top` fails the load by name; the friction ledger is `runHistory`.

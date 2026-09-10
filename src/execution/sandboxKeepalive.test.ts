@@ -137,9 +137,8 @@ describe("recycledMidCommandMessage", () => {
     );
   });
 
-  // The Worker's one-shot heal of a legacy-image container calls
-  // `destroy()`; a command concurrently pending on the same Durable Object is
-  // disconnected with this text — the container really is gone.
+  // A sandbox `destroy()`ed under a pending call disconnects it with this
+  // text — the container really is gone.
   it("recognizes the destroy-time disconnect text as a recycle", () => {
     expect(recycledMidCommandMessage(90_000, "The sandbox was destroyed while the operation was pending.")).toMatch(
       RECYCLED,
@@ -229,17 +228,18 @@ describe("sandbox Worker wiring (static)", () => {
   });
 
   // docs/reference/specs/execution.md items 3 and 6: a failure text is never
-  // empty, and a container on a previous image is named and healed. Both
-  // Worker catches go through `thrownText`; the bare `shape.message ??
-  // String(err)` that kept the SDK's "" is gone.
+  // empty, and a container on a previous image is named. Both Worker catches
+  // go through `thrownText`; the bare `shape.message ?? String(err)` that
+  // kept the SDK's "" is gone.
   it("every failure text goes through thrownText — the empty-string fallthrough is gone", () => {
     expect(worker).toContain("thrownText(");
     expect(worker).not.toContain(".message ?? String(err)");
   });
 
-  it("onStart logs the container/SDK version skew and exec heals a legacy-image container once", () => {
+  it("onStart logs the container/SDK version skew; exec is super.exec under the keepalive, with no retry of its own", () => {
     expect(worker).toContain("getVersion(");
-    expect(worker).toContain("legacyContainerError(");
+    expect(worker).toMatch(/\(\) => super\.exec\(command, options\)/);
+    expect(worker).not.toMatch(/this\.destroy\(/);
   });
 
   // The rollout window a NEW thread can fall into is closed by replacing the

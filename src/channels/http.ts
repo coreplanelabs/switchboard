@@ -34,7 +34,6 @@ export const MAX_BODY_BYTES = 1_000_000; // 1 MB
  *  Defined in src/core/ingressTokens.ts (node-free, shared with the Worker
  *  shim); re-exported here so the MCP adapter and tests keep one import site. */
 export type { IngressIdentity };
-export { RETIRED_TOKEN_FIELD } from "../core/ingressTokens.js";
 
 /** Ingress auth config: raw bearer token -> identity. An empty map means the
  *  endpoint is DISABLED (fail-closed) — never open. */
@@ -432,13 +431,12 @@ export function createIngressHandler(
  * for `http:<subject>` / `mcp:<subject>` in config.yaml. Absent, empty, or
  * malformed => an empty map => the endpoint is DISABLED (fail-closed). A
  * malformed value is logged (without token material) and treated as no tokens
- * rather than silently opening the endpoint; an entry still carrying the
- * retired `scopes` field is kept and warned about by subject.
+ * rather than silently opening the endpoint; any field of an entry other than
+ * `subject` and `channel` is ignored.
  */
 export function parseIngressTokens(env: Record<string, string | undefined>): IngressConfig {
   // One parser for the bot and the Worker shim (src/core/ingressTokens.ts).
   const parsed = parseIngressTokenMap(env.SWITCHBOARD_INGRESS_TOKENS);
   if (!parsed.ok) console.error(`[ingress] SWITCHBOARD_INGRESS_TOKENS is ${parsed.reason} — ingress disabled`);
-  for (const warning of parsed.warnings) console.warn(`[ingress] SWITCHBOARD_INGRESS_TOKENS: ${warning}`);
   return { tokens: parsed.tokens };
 }

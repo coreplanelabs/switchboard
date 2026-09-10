@@ -32,11 +32,6 @@ export interface SelfImprovementConfig {
   top?: number;
 }
 
-/** Keys the section used to carry for its own ledger. The ledger is run history
- *  now (`runHistory.worker`), so a config that still names them is refused with
- *  the replacement — a silently ignored key would look like a working setting. */
-export const RETIRED_SELF_IMPROVEMENT_KEYS = ["worker", "ledgerPath", "ledgerMax"] as const;
-
 export interface RunSelfImprovementOptions {
   records: readonly FrictionRunRecord[];
   tracker: IssueTracker;

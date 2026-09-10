@@ -79,7 +79,7 @@ defaults:
 # config), `repo:write` (repo onboard/offboard/…, friction propose) and every
 # `runs:*` are never a baseline: nobody holds them until granted, and nobody is
 # an admin without an `all` entry. An unknown id prefix or a misspelled `all`
-# fails the load; so does the retired `permissions` block.
+# fails the load, as does any top-level key this file does not document.
 # grants:
 #   slack:U0ADMIN:                    # an admin, spelled out
 #     actions: all

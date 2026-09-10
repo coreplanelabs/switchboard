@@ -72,10 +72,8 @@ export async function withActivityKeepalive<T>(
  *  (`Session '<id>' shell exited (exit code: <n>)`) and the
  *  `OperationInterruptedError` text for a container that stopped under a
  *  pending call, and the disconnect text for a sandbox `destroy()`ed under a
- *  pending call — which the Worker's own one-shot heal of a legacy-image
- *  container can cause for a command concurrently pending on the same
- *  Durable Object. Anything else — a transport error, a file-op
- *  failure — is never recycle-shaped, whenever it arrives. */
+ *  pending call. Anything else — a transport error, a file-op failure — is
+ *  never recycle-shaped, whenever it arrives. */
 const RECYCLE_SHAPED: readonly RegExp[] = [
   /^Command execution failed$/,
   /^Session terminated$/i,

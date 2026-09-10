@@ -109,15 +109,15 @@ describe("parseProfile", () => {
     ]);
   });
 
-  it("the docs site is not a Worker of the installation: a profile that still names one parses with the key dropped", () => {
+  it("the docs site is not a Worker of the installation: a profile naming `workers.docs` parses with the key dropped", () => {
     // The project's site deploys from project.json's facts (wranglerTemplate.ts
-    // `siteView`); an older profile's `workers.docs` is neither a step nor a URL.
-    const legacy = parseProfile({
+    // `siteView`); a `workers.docs` entry is neither a step nor a URL.
+    const withDocs = parseProfile({
       ...TEST_PROFILE,
       workers: { ...TEST_PROFILE.workers, docs: { script: "switchboard-docs", hostname: "docs.example.test" } },
     });
-    expect(legacy.ok).toBe(true);
-    if (legacy.ok) expect(Object.keys(legacy.profile.workers)).toEqual(["memory", "bot", "resident", "sandbox"]);
+    expect(withDocs.ok).toBe(true);
+    if (withDocs.ok) expect(Object.keys(withDocs.profile.workers)).toEqual(["memory", "bot", "resident", "sandbox"]);
   });
 
   it("the secrets source is optional; access is optional and strict when present", () => {

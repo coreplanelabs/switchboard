@@ -92,7 +92,7 @@ describe("bot deploy preflight — decide()", () => {
     expect(decide({ health: health(0), apps: apps("ready") }).allow).toBe(true);
   });
 
-  it("fails closed: unreachable bot, non-JSON / legacy `ok` health, impossible inFlight, wrangler failure, app not listed", () => {
+  it("fails closed: unreachable bot, non-JSON / bare `ok` health, impossible inFlight, wrangler failure, app not listed", () => {
     const cases = [
       { health: { ok: false, error: "GET … failed: fetch failed" }, apps: apps("active") },
       { health: { ok: true, payload: "ok" }, apps: apps("active") },
@@ -105,7 +105,7 @@ describe("bot deploy preflight — decide()", () => {
       const d = decide(c);
       expect(d.allow, JSON.stringify(c)).toBe(false);
     }
-    expect(decide(cases[1]).message).toMatch(/predates the preflight/);
+    expect(decide(cases[1]).message).toMatch(/not the JSON this preflight reads/);
   });
 
   it("force → allow with a warning that names what will be killed", () => {

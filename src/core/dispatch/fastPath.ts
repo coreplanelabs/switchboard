@@ -52,9 +52,9 @@ export interface FastPathDeps extends RecordDeps, Pick<ResolveDeps, "resolveRepo
    * The command registry bound to its deps (`bindCommands`; docs/decisions/0008-one-command-definition-every-surface.md), for the
    * chat fast path: `<group> <verb> [args…] [--option value…]` messages that
    * name a registered, chat-exposed command (and the bare word `help`) are
-   * answered inline through `invoke`, never a model turn — since phase 4b this
-   * is EVERY command (`help`, `config`, `memory`, `repo`, `friction`, `runs`,
-   * `schedule`), there is no legacy chat parser left. Absent (most unit tests,
+   * answered inline through `invoke`, never a model turn — this is EVERY
+   * command (`help`, `config`, `memory`, `repo`, `friction`, `runs`,
+   * `schedule`); the registry's adapter is the only chat parser. Absent (most unit tests,
    * or before the surface is wired) → no message is a command and every text
    * goes to the model. Every real process binds the one core catalogue through
    * `buildCoreCommands` (src/core/commandCatalogue.ts): the bot (src/index.ts)

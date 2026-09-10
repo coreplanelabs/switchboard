@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   isContainerStarting,
   isFleetBusyError,
-  legacyContainerError,
   thrownShape,
   thrownText,
   FLEET_BUSY_BACKOFF_MS,
@@ -168,43 +167,5 @@ describe("thrownText", () => {
     expect(text.length).toBeGreaterThan(0);
     expect(text).toContain("(no error name)");
     expect(thrownText({ message: undefined })).toContain("(no error name)");
-  });
-});
-
-// Feature: docs/reference/specs/execution.md items 6 and 9 — the legacy-container shape a
-// 0.12.x client produces against a 0.3.x server: `SandboxError` (the base
-// class, not a typed subclass), an empty message, no code. Matched INSIDE the
-// Durable Object, where the prototype and the `code` getter are intact, so
-// `instanceof Error` plus the name is the whole test.
-describe("legacyContainerError", () => {
-  // Mirrors 0.12.9's `SandboxError`: `message` comes from the body's
-  // `message` (absent → ""), `code` from the body's `code`, and the raw body
-  // is kept as `errorResponse`.
-  const sandboxError = (body: Record<string, unknown>) => {
-    const err = new Error(typeof body.message === "string" ? body.message : "");
-    err.name = "SandboxError";
-    if (body.code !== undefined) Object.assign(err, { code: body.code });
-    Object.assign(err, { errorResponse: body });
-    return err;
-  };
-  const LEGACY_BODY = { error: "Session ID and command are required" };
-
-  it("matches a SandboxError built from a 0.3.7 {error} body — empty message, no code, the old server's text in errorResponse.error", () => {
-    expect(legacyContainerError(sandboxError(LEGACY_BODY))).toBe(true);
-    expect(legacyContainerError(sandboxError({ error: "Session 'x' not found" }))).toBe(true);
-  });
-
-  it("is NOT a SandboxError with a message or a code (every 0.12.x body has both), one whose body has no error text, a plain Error, or a non-Error", () => {
-    expect(legacyContainerError(sandboxError({ error: "x", message: "Session 'x' not found" }))).toBe(false);
-    expect(legacyContainerError(sandboxError({ error: "x", code: "INTERNAL_ERROR" }))).toBe(false);
-    expect(legacyContainerError(sandboxError({}))).toBe(false);
-    expect(legacyContainerError(sandboxError({ error: "" }))).toBe(false);
-    const noBody = new Error("");
-    noBody.name = "SandboxError";
-    expect(legacyContainerError(noBody)).toBe(false);
-    expect(legacyContainerError(new Error(""))).toBe(false);
-    expect(legacyContainerError({ name: "SandboxError", message: "" })).toBe(false);
-    expect(legacyContainerError(undefined)).toBe(false);
-    expect(legacyContainerError("")).toBe(false);
   });
 });
