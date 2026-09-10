@@ -19,6 +19,7 @@ import {
   resolveRange,
   storageDayCostUsd,
   workersCostUsd,
+  workflowsCostUsd,
   type CloudflareUsage,
   type CostGroupConfig,
   type LlmCostRow,
@@ -134,6 +135,13 @@ const USAGE: CloudflareUsage = {
     { date: AUG_28, bucketName: "switchboard-resident-cache", actionType: "DeleteObjects", requests: 1_000_000 }, // free
     { date: AUG_28, bucketName: "other-tenant-tfstate", actionType: "PutObject", requests: 1_000_000 },
   ],
+  // workflowsAdaptiveGroups: the resident Worker's refresh Workflow is named
+  // `<worker>-refresh` by the deploy template — attributed by that exact name,
+  // like the bucket; the other tenant's Workflow shares the suffix only.
+  workflows: [
+    { date: AUG_28, workflowName: "switchboard-resident-refresh", steps: 100_000, stateBytes: 30.4375 * GB }, // $0.80 + $0.20
+    { date: AUG_28, workflowName: "other-tenant-refresh", steps: 1_000_000, stateBytes: 0 },
+  ],
 };
 
 const LLM: LlmCostRow[] = [
@@ -191,6 +199,16 @@ describe("the other meters Cloudflare bills a Workers deployment on", () => {
     expect(workersCostUsd(1_000_000, 0)).toBeCloseTo(0.3, 9);
     expect(workersCostUsd(0, 1_000_000_000)).toBeCloseTo(0.02, 9); // 1e9 µs = 1e6 ms
   });
+  it("Workflows: $0.80 per 100,000 steps plus state at $0.20 per GB-month prorated per day; CPU and requests are not here — they ride the hosting Worker's own row", () => {
+    expect(CLOUDFLARE_PRICES.workflowStepsPer100k).toBe(0.8);
+    expect(CLOUDFLARE_PRICES.workflowStorageGbMonth).toBe(0.2);
+    expect(workflowsCostUsd(100_000, 0)).toBeCloseTo(0.8, 12);
+    expect(workflowsCostUsd(0, 30.4375 * GB)).toBeCloseTo(0.2, 12); // one GB-month-day of state
+    expect(workflowsCostUsd(0, 0)).toBe(0);
+    // Six steps a cycle, one cycle every ten minutes, one resident: 864 steps a day ≈ 0.7 cents.
+    expect(workflowsCostUsd(6 * 144, 0)).toBeCloseTo(0.006912, 12);
+  });
+
   it("R2 operations: class A mutates or lists ($4.50/M), class B reads ($0.36/M), deletes and aborts are free; an unknown action is classed by its verb", () => {
     for (const a of [
       "PutObject",
@@ -263,6 +281,27 @@ describe("buildCostReport", () => {
     expect(d.doStorageUsd).toBeCloseTo(0.2, 9); // 30.4375 GB for one day = one GB-month
   });
 
+  it("attributes a Workflow by the exact `<worker>-refresh` name the deploy gives it and prices its steps and state into the group's own meter, leaving the hosting Worker's request and CPU figures untouched", () => {
+    const d = report.days.find((x) => x.date === AUG_28)!;
+    expect(d.workflowsUsd).toBeCloseTo(0.8 + 0.2, 9); // 100k steps + one GB-month-day of state; the other tenant's 1M steps are not ours
+    expect(report.attribution.workflows).toEqual({ "switchboard-resident-refresh": "switchboard-resident" });
+    expect(d.workersUsd).toBeCloseTo(0.3 + 0.02, 9); // the Worker row is what it was: nothing re-metered
+    expect(report.totals.byResource.workflows).toBeCloseTo(1.0, 9);
+    expect(d.cloudUsd).toBeCloseTo(
+      d.containers.resident.total +
+        d.containers.bot.total +
+        d.durableObjects["bot DO"] +
+        d.durableObjects["switchboard-resident"] +
+        d.doRequestsUsd +
+        d.doRowsUsd +
+        d.doStorageUsd +
+        d.workersUsd +
+        d.r2Usd +
+        d.workflowsUsd,
+      9,
+    );
+  });
+
   it("prices the whole account the same way so the group's share of it is honest — the other tenant's rows count there and only there", () => {
     const d = report.days.find((x) => x.date === AUG_28)!;
     const otherWorkers = 9 * 0.3;
@@ -271,8 +310,16 @@ describe("buildCostReport", () => {
     const otherR2 = (1 / 30.4375) * 0.015 + 4.5 + (1 / 30.4375) * 0.015; // tfstate storage + its PutObjects + the prefix-sharing bucket
     const otherDo = 11032.6 * 12.5e-6 + (994 / 1e6) * 0.15;
     const otherContainer = containerCostUsd(USAGE.containers[2]).total;
+    const otherWorkflows = 10 * 0.8; // the other tenant's 1M steps
     expect(report.account.cloudUsd).toBeCloseTo(
-      report.totals.cloudUsd + otherWorkers + otherRows + otherStorage + otherR2 + otherDo + otherContainer,
+      report.totals.cloudUsd +
+        otherWorkers +
+        otherRows +
+        otherStorage +
+        otherR2 +
+        otherDo +
+        otherContainer +
+        otherWorkflows,
       6,
     );
     expect(report.account.cloudUsd).toBeGreaterThan(d.cloudUsd);
@@ -300,7 +347,7 @@ describe("buildCostReport", () => {
     const d = report.days.find((x) => x.date === AUG_28)!;
     const containers = d.containers.bot.total + d.containers.resident.total;
     const dos = d.durableObjects["bot DO"] + d.durableObjects["switchboard-resident"] + d.doRequestsUsd;
-    const rest = d.doRowsUsd + d.doStorageUsd + d.workersUsd + d.r2Usd;
+    const rest = d.doRowsUsd + d.doStorageUsd + d.workersUsd + d.r2Usd + d.workflowsUsd;
     expect(d.cloudUsd).toBeCloseTo(containers + dos + rest, 9);
     expect(d.total).toBeCloseTo(containers + dos + rest + 12.5, 9);
     expect(report.totals.total).toBeCloseTo(
@@ -320,7 +367,8 @@ describe("buildCostReport", () => {
         split.doRows +
         split.doStorage +
         split.workers +
-        split.r2,
+        split.r2 +
+        split.workflows,
     ).toBeCloseTo(report.totals.cloudUsd, 9);
     expect(split.memory).toBeGreaterThan(split.cpu); // provisioned memory dominates
   });
@@ -448,6 +496,31 @@ describe("CloudflareGraphqlUsageSource", () => {
                 sum: { requests: 3 },
               },
             ],
+            // One row per event type: only the step endings are billable steps
+            // (the pricing page: "Step count does not include rollback handlers
+            // or retries"), so the attempts and the instance events fold away.
+            workflows: [
+              {
+                dimensions: { date: AUG_28, workflowName: "switchboard-resident-refresh", eventType: "STEP_SUCCESS" },
+                count: 4,
+              },
+              {
+                dimensions: { date: AUG_28, workflowName: "switchboard-resident-refresh", eventType: "STEP_FAILURE" },
+                count: 1,
+              },
+              {
+                dimensions: { date: AUG_28, workflowName: "switchboard-resident-refresh", eventType: "ATTEMPT_START" },
+                count: 9,
+              },
+              {
+                dimensions: {
+                  date: AUG_28,
+                  workflowName: "switchboard-resident-refresh",
+                  eventType: "WORKFLOW_SUCCESS",
+                },
+                count: 1,
+              },
+            ],
           },
         ],
       },
@@ -486,6 +559,11 @@ describe("CloudflareGraphqlUsageSource", () => {
     expect(usage.r2Operations).toEqual([
       { date: AUG_28, bucketName: "switchboard-cache", actionType: "GetObject", requests: 3 },
     ]);
+    // Steps are the step endings summed per Workflow per day; the state
+    // bytes have no dataset, so the source answers 0 and the meter prices what it can see.
+    expect(usage.workflows).toEqual([
+      { date: AUG_28, workflowName: "switchboard-resident-refresh", steps: 5, stateBytes: 0 },
+    ]);
     // Every dataset Cloudflare bills a Workers deployment on, in one request.
     for (const dataset of [
       "containersUsageAdaptiveGroups",
@@ -495,6 +573,7 @@ describe("CloudflareGraphqlUsageSource", () => {
       "workersInvocationsAdaptive",
       "r2StorageAdaptiveGroups",
       "r2OperationsAdaptiveGroups",
+      "workflowsAdaptiveGroups",
     ])
       expect(body.query).toContain(dataset);
   });

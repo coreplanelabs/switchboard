@@ -14,7 +14,8 @@ import { systemClock } from "./trace/clock.js";
 //     `durableObjectsSqlStorageGroups` (DO SQLite bytes stored),
 //     `workersInvocationsAdaptive` (Worker requests and CPU time),
 //     `r2StorageAdaptiveGroups` and `r2OperationsAdaptiveGroups` (R2 bytes stored
-//     and class A/B operations). NOT summed request wall time for DO duration:
+//     and class A/B operations), `workflowsAdaptiveGroups` (Workflow step
+//     endings; the state bytes have no dataset). NOT summed request wall time for DO duration:
 //     concurrent long requests (SSE streams, exec) overlap, so that sum runs ~2×
 //     above what is billed.
 //   - Anthropic Admin API `GET /v1/organizations/cost_report` grouped by
@@ -25,7 +26,8 @@ import { systemClock } from "./trace/clock.js";
 // Attribution is by Worker script name: a group names its Workers, and
 // everything Cloudflare bills hangs off a script — a Durable Object namespace
 // is attributed to the script that hosts it (the invocations dataset says
-// which), an R2 bucket by the exact `<script>-cache` name the deploy templates give it.
+// which), an R2 bucket by the exact `<script>-cache` name the deploy templates
+// give it, a Workflow by the exact `<script>-refresh` name they give it.
 // Container applications carry no script in any dataset, so they stay a
 // configured id → label map. A resource that appears in the account after the
 // config was written is therefore counted, not silently dropped, as long as it
@@ -115,9 +117,10 @@ export function parseCostsConfig(raw: unknown): CostsConfig | undefined {
 // ---- prices -------------------------------------------------------------------
 
 /** Cloudflare list prices (USD), developers.cloudflare.com/containers/pricing,
- *  /durable-objects/platform/pricing, /workers/platform/pricing and /r2/pricing.
- *  Gross: the Workers Paid plan's fee and included allowances are not
- *  subtracted — the page prices what was used, at the rate it would bill at. */
+ *  /durable-objects/platform/pricing, /workers/platform/pricing, /r2/pricing
+ *  and /workflows/reference/pricing. Gross: the Workers Paid plan's fee and
+ *  included allowances are not subtracted — the page prices what was used, at
+ *  the rate it would bill at. */
 export const CLOUDFLARE_PRICES = {
   vcpuSecond: 0.00002,
   memoryGibSecond: 0.0000025,
@@ -137,6 +140,13 @@ export const CLOUDFLARE_PRICES = {
   r2StorageGbMonth: 0.015,
   r2ClassAPerMillion: 4.5,
   r2ClassBPerMillion: 0.36,
+  /** Workflows (developers.cloudflare.com/workflows/reference/pricing, Workers
+   *  Paid): steps "500,000 included per month + $0.80/ additional 100,000",
+   *  storage "1 GB-month included + $0.20/ GB-month". The other two line items,
+   *  requests and CPU time, "use Workers Standard pricing" and land on the
+   *  hosting Worker's own `workersInvocationsAdaptive` row — never re-metered here. */
+  workflowStepsPer100k: 0.8,
+  workflowStorageGbMonth: 0.2,
 } as const;
 
 const GIB = 2 ** 30;
@@ -196,6 +206,19 @@ export interface R2OperationsRow {
   actionType: string;
   requests: number;
 }
+/** `workflowsAdaptiveGroups`: a Workflow's billable steps per day — the step
+ *  endings (`STEP_SUCCESS` + `STEP_FAILURE` events; attempts are retries and
+ *  the pricing page excludes retries and rollback handlers from the count) —
+ *  and its persisted state. No analytics dataset reports the state bytes, so
+ *  the GraphQL source answers 0 there and only a source that knows them
+ *  (none yet) prices the storage line. */
+export interface WorkflowUsageRow {
+  date: string;
+  workflowName: string;
+  steps: number;
+  /** The day's peak bytes of persisted instance state; 0 when the source has no figure. */
+  stateBytes: number;
+}
 export interface CloudflareUsage {
   containers: ContainerUsageRow[];
   durableObjectRequests: DoRequestsRow[];
@@ -204,6 +227,7 @@ export interface CloudflareUsage {
   workers: WorkerUsageRow[];
   r2Storage: R2StorageRow[];
   r2Operations: R2OperationsRow[];
+  workflows: WorkflowUsageRow[];
 }
 export const EMPTY_USAGE: CloudflareUsage = {
   containers: [],
@@ -213,6 +237,7 @@ export const EMPTY_USAGE: CloudflareUsage = {
   workers: [],
   r2Storage: [],
   r2Operations: [],
+  workflows: [],
 };
 export interface LlmCostRow {
   date: string;
@@ -284,6 +309,14 @@ export function r2OperationClass(actionType: string): R2OperationClass {
   return "A";
 }
 
+/** Workflows: steps at the per-100,000 rate plus one day of the state's GB-month rate. */
+export function workflowsCostUsd(steps: number, stateBytes: number): number {
+  return (
+    (steps / 100_000) * CLOUDFLARE_PRICES.workflowStepsPer100k +
+    storageDayCostUsd(stateBytes, CLOUDFLARE_PRICES.workflowStorageGbMonth)
+  );
+}
+
 export function r2OperationsCostUsd(actionType: string, requests: number): number {
   const cls = r2OperationClass(actionType);
   if (cls === "free") return 0;
@@ -301,6 +334,8 @@ export interface CostAttribution {
   durableObjectNamespaces: Record<string, string>;
   /** bucket name → label (a configured label, else the bucket's name). */
   r2Buckets: Record<string, string>;
+  /** Workflow name → the Worker that hosts it (the deploy template's `<worker>-refresh`). */
+  workflows: Record<string, string>;
 }
 
 /** The bucket names the deploy templates give a Worker's buckets (`{{script}}-cache`
@@ -308,6 +343,11 @@ export interface CostAttribution {
  *  prefix: on a shared account `switchboard-2-tfstate` must not become
  *  `switchboard`'s. A bucket named any other way is attributed by `r2Buckets`. */
 const TEMPLATE_BUCKET_NAMES: ReadonlyArray<(worker: string) => string> = [(w) => `${w}-cache`];
+
+/** The Workflow names the deploy templates give a Worker's Workflows
+ *  (`{{script}}-refresh`, the resident's refresh cycle). The analytics dataset
+ *  carries no script name, so the name is the only join — exact, like the buckets'. */
+const TEMPLATE_WORKFLOW_NAMES: ReadonlyArray<(worker: string) => string> = [(w) => `${w}-refresh`];
 
 /** Namespace → hosting script, from every invocation row (any date in range). */
 function namespaceHosts(usage: CloudflareUsage): Map<string, string> {
@@ -327,7 +367,18 @@ export function attributionOf(cfg: CostGroupConfig, usage: CloudflareUsage): Cos
   for (const name of bucketNames)
     if (!(name in r2Buckets) && cfg.workers.some((w) => TEMPLATE_BUCKET_NAMES.some((shape) => shape(w) === name)))
       r2Buckets[name] = name;
-  return { workers: [...cfg.workers], containerApps: { ...cfg.containerApps }, durableObjectNamespaces, r2Buckets };
+  const workflows: Record<string, string> = {};
+  for (const name of new Set(usage.workflows.map((r) => r.workflowName).filter(Boolean))) {
+    const host = cfg.workers.find((w) => TEMPLATE_WORKFLOW_NAMES.some((shape) => shape(w) === name));
+    if (host) workflows[name] = host;
+  }
+  return {
+    workers: [...cfg.workers],
+    containerApps: { ...cfg.containerApps },
+    durableObjectNamespaces,
+    r2Buckets,
+    workflows,
+  };
 }
 
 // ---- the report -------------------------------------------------------------------
@@ -348,6 +399,8 @@ export interface DailyCost {
   workersUsd: number;
   /** The group's R2 buckets: one day of storage plus class A/B operations. */
   r2Usd: number;
+  /** The group's Workflows: steps plus one day of persisted state. */
+  workflowsUsd: number;
   cloudUsd: number;
   llmUsd: number;
   total: number;
@@ -363,6 +416,8 @@ export interface ResourceSplit {
   doStorage: number;
   workers: number;
   r2: number;
+  /** Workflow steps + state. */
+  workflows: number;
 }
 
 export interface CostReport {
@@ -405,6 +460,7 @@ const emptySplit = (): ResourceSplit => ({
   doStorage: 0,
   workers: 0,
   r2: 0,
+  workflows: 0,
 });
 
 /** Pure: prices the group's rows in the range. Rows for apps/namespaces/
@@ -422,6 +478,7 @@ export function buildCostReport(
   const workers = new Set(cfg.workers);
   const namespaces = attribution.durableObjectNamespaces;
   const buckets = attribution.r2Buckets;
+  const workflowNames = attribution.workflows;
   const byResource = emptySplit();
   let accountCloudUsd = 0;
   const days: DailyCost[] = eachDay(range).map((date) => {
@@ -497,6 +554,14 @@ export function buildCostReport(
       if (row.bucketName in buckets) r2Usd += usd;
     }
     byResource.r2 += r2Usd;
+    let workflowsUsd = 0;
+    for (const row of usage.workflows) {
+      if (row.date !== date) continue;
+      const usd = workflowsCostUsd(row.steps, row.stateBytes);
+      accountCloudUsd += usd;
+      if (row.workflowName in workflowNames) workflowsUsd += usd;
+    }
+    byResource.workflows += workflowsUsd;
     const llmUsd =
       llm && cfg.anthropicWorkspaceId
         ? llm
@@ -510,7 +575,8 @@ export function buildCostReport(
       doRowsUsd +
       doStorageUsd +
       workersUsd +
-      r2Usd;
+      r2Usd +
+      workflowsUsd;
     return {
       date,
       containers,
@@ -520,6 +586,7 @@ export function buildCostReport(
       doStorageUsd,
       workersUsd,
       r2Usd,
+      workflowsUsd,
       cloudUsd,
       llmUsd,
       total: cloudUsd + llmUsd,
@@ -586,13 +653,40 @@ export const CF_USAGE_QUERY = `query SwitchboardCosts($accountTag: String!, $fro
       max { payloadSize metadataSize } dimensions { date bucketName } }
     r2Operations: r2OperationsAdaptiveGroups(limit: 10000, filter: { datetime_geq: $from, datetime_lt: $to }) {
       sum { requests } dimensions { date bucketName actionType } }
+    workflows: workflowsAdaptiveGroups(limit: 10000, filter: { datetimeHour_geq: $from, datetimeHour_lt: $to }) {
+      count dimensions { date workflowName eventType } }
   } }
 }`;
+
+/** The `workflowsAdaptiveGroups` events that are billable steps: one per step
+ *  ending. `ATTEMPT_*` are the retries inside a step and `WORKFLOW_*` the
+ *  instance's own lifecycle — neither is a step on the bill. */
+export const WORKFLOW_STEP_EVENTS: ReadonlySet<string> = new Set(["STEP_SUCCESS", "STEP_FAILURE"]);
+
+/** Fold the dataset's per-event rows into one steps figure per Workflow per day. */
+export function workflowStepsFromEvents(
+  rows: ReadonlyArray<{ date: string; workflowName: string; eventType: string; count: number }>,
+): WorkflowUsageRow[] {
+  const byKey = new Map<string, WorkflowUsageRow>();
+  for (const r of rows) {
+    if (!WORKFLOW_STEP_EVENTS.has(r.eventType) || !r.workflowName) continue;
+    const key = `${r.date} ${r.workflowName}`;
+    const row = byKey.get(key) ?? { date: r.date, workflowName: r.workflowName, steps: 0, stateBytes: 0 };
+    row.steps += r.count;
+    byKey.set(key, row);
+  }
+  return [...byKey.values()];
+}
 
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 
-type GqlGroup = { dimensions?: Record<string, unknown>; sum?: Record<string, unknown>; max?: Record<string, unknown> };
+type GqlGroup = {
+  dimensions?: Record<string, unknown>;
+  sum?: Record<string, unknown>;
+  max?: Record<string, unknown>;
+  count?: unknown;
+};
 
 /** Reads Cloudflare's billing datasets over GraphQL with a scoped API token
  *  (Account Analytics:Read). The token travels only in the Authorization header
@@ -632,6 +726,7 @@ export class CloudflareGraphqlUsageSource implements CloudflareUsageSource {
       workers?: GqlGroup[];
       r2Storage?: GqlGroup[];
       r2Operations?: GqlGroup[];
+      workflows?: GqlGroup[];
     };
     return {
       containers: (account.containers ?? []).map((r) => ({
@@ -676,6 +771,14 @@ export class CloudflareGraphqlUsageSource implements CloudflareUsageSource {
         actionType: str(r.dimensions?.actionType),
         requests: num(r.sum?.requests),
       })),
+      workflows: workflowStepsFromEvents(
+        (account.workflows ?? []).map((r) => ({
+          date: str(r.dimensions?.date),
+          workflowName: str(r.dimensions?.workflowName),
+          eventType: str(r.dimensions?.eventType),
+          count: num(r.count),
+        })),
+      ),
     };
   }
 }

@@ -77,7 +77,7 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
@@ -141,10 +141,21 @@ import {
   restoreArchivePath,
   withTimeout,
   type RefreshDisk,
+  type RefreshPlan,
   type RestoreSample,
   type RefreshFailure,
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
+import {
+  REFRESH_STEP_RETRIES,
+  lifecycleOf,
+  parseLifecycle,
+  refreshInstanceId,
+  shouldCreateRefreshInstance,
+  stepTimeoutMs,
+  type RefreshRow,
+  type ResidentLifecycle,
+} from "../../src/execution/residentInstanceId.js";
 import {
   MIRROR_MUTEX_KEY,
   REFRESH_CYCLE_LEASE_MS,
@@ -285,10 +296,21 @@ function refusalOutcome(err: ThreadErr): string {
   return err.needs ? `needs_${err.needs}` : "error";
 }
 
+/** What a refresh instance is created with: the resident it runs for. Every
+ *  other input is read from the resident's rows at each step, never carried. */
+interface RefreshInstanceParams {
+  resource: string;
+}
+
 interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
   REGISTRY: DurableObjectNamespace<ResidentRegistryDO>;
   BACKUP_BUCKET: R2Bucket;
+  /** The refresh cycle as a Workflow instance (docs/reference/specs/resident-repos.md
+   *  item 7): `ResidentRefresh` below. The watchdog cron creates one per
+   *  resident whose row says `lifecycle: workflow`; an `alarm` resident (the
+   *  default) never has one. */
+  RESIDENT_REFRESH: Workflow<RefreshInstanceParams>;
   // Presigned snapshot transfers (docs/reference/specs/resident-repos.md item 61): with all
   // four present the container moves archive bytes itself over presigned R2
   // URLs and the DO stays out of the data path; any one absent → the SDK's
@@ -530,6 +552,24 @@ const DISK_FULL_REARM_S = 1;
  *  detach and sweep eviction. Surfaced as the live view's `disk`; the attach
  *  admission projects a new tree's cost from its parts. */
 const DISK_KEY = "resident:disk";
+/** Which scheduler drives this resident's refresh cycle (docs/reference/specs/resident-repos.md
+ *  item 7): the alarm chain (the default — a row without the key reads `alarm`)
+ *  or the Workflow instance the watchdog cron creates. Set through the admin
+ *  `/debug` `lifecycle` op; read by the alarm's entry, the watchdog's re-arm
+ *  branches and the cron's instance-creation duty, so the two schedulers never
+ *  both drive a cycle for one resident. */
+const LIFECYCLE_KEY = "resident:lifecycle";
+/** The refresh instance row (item 7): the last instance the cron created for
+ *  this resident, with the step it last reported and the cycle lease it holds,
+ *  and the last bucket the cron skipped (a live cycle, a duplicate id). */
+const REFRESH_INSTANCE_KEY = "resident:refreshInstance";
+/** The refresh instance's step budgets: each `step.do` timeout is the DO
+ *  method's own budget, capped at the engine's 30-minute step ceiling
+ *  (`stepTimeoutMs`), so a step timeout and a command timeout agree. */
+const REFRESH_FETCH_STEP_BUDGET_MS = RESTORE_MAX_MS + GIT_NETWORK_TIMEOUT_MS; // a wake's restore, then the fetch
+const REFRESH_INSTALL_STEP_BUDGET_MS = REFRESH_INSTALL_TIMEOUT_MS + DEPS_STEP_OVERHEAD_MS; // the install's own lease
+const REFRESH_BUILD_STEP_BUDGET_MS = GIT_NETWORK_TIMEOUT_MS + REFRESH_BUILD_TIMEOUT_MS; // the build's mutex lease
+const REFRESH_SNAPSHOT_STEP_BUDGET_MS = R2_TRANSFER_TIMEOUT_MS + GIT_NETWORK_TIMEOUT_MS; // the archives, then the reclaim pass and the disk sample
 const DISK_MEASURE_CALLBACK = "onDiskMeasure";
 const DISK_MEASURE_DELAY_S = 1;
 /** A `du` over a multi-GB checkout plus every live tree is seconds warm, tens
@@ -1071,6 +1111,54 @@ type SnapshotStepResult =
   | { done: true; record: SnapshotRecord }
   | { done: false; superseded: false; record: SnapshotRecord; previous: SnapshotRecord | undefined }
   | { done: false; superseded: true };
+
+/** The refresh instance row (REFRESH_INSTANCE_KEY, item 7). */
+interface RefreshInstanceRow {
+  /** The most recent instance the cron created (or a step reported) for this resident. */
+  instance: {
+    id: string;
+    createdAt: string;
+    /** `<step>: <outcome>` of the step the instance last ran; null before its first. */
+    lastStep: string | null;
+    /** The cycle lease the instance holds in the in-flight row, from its fetch step to its end. */
+    holder: string | null;
+  } | null;
+  /** The most recent bucket the cron did not create for: a live cycle, or the engine's duplicate-id refusal. */
+  skipped: { id: string; at: string; why: string } | null;
+}
+
+/** What every instance step answers besides its own facts: the resident's
+ *  wall clock at the step's start and the commands it ran, so the instance
+ *  can graft them under its root the way the bot grafts an attach's. */
+interface InstanceStepTrace {
+  startedAt: number;
+  trace: ResidentStep[];
+}
+/** A step's own verdict: `done` with its facts; `stopped` by a gate that ends
+ *  the cycle with nothing to record (idle, a container restart, an offboard);
+ *  `failed` by the repository's own doing, already recorded as `degraded`.
+ *  A step killed from outside answers none of these — it throws, and the
+ *  engine retries it. */
+type InstanceStepResult<T> =
+  ({ status: "done" } & T) | { status: "stopped"; why: string } | { status: "failed"; reason: string };
+type InstanceStepAnswer<T> = InstanceStepResult<T> & InstanceStepTrace;
+/** The fetch step's facts, small by construction: refs, shas, keys, words. */
+interface RefreshFetchFacts {
+  ref: string;
+  sha: string;
+  factsSha: string;
+  lockfileKey: string;
+  action: RefreshPlan["action"];
+  /** Whether the install step must run: a rebuild whose lockfile key moved, on a repo with an install command. */
+  install: boolean;
+  mintError: string | null;
+}
+/** What the cron did about one resident's refresh instance this pass. */
+interface RefreshInstanceAction {
+  id: string;
+  action: "created" | "duplicate" | "skipped" | "failed";
+  why: string;
+}
 
 // ---------------------------------------------------------------------------
 // Registry DO (singleton): onboarded set + config, atomic cap enforcement
@@ -2638,6 +2726,14 @@ export class ResidentDO extends Sandbox<Env> {
 
   private async onRefreshAlarmTraced(payload: string): Promise<void> {
     const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
+    // Item 7: a resident on the Workflow lifecycle has no chain. An alarm a
+    // previous flip left armed — or an attach's +1 s pull, or a provisioning's
+    // first arm — runs nothing and re-arms nothing, so the two schedulers never
+    // both drive a cycle for one resident.
+    if ((await this.getLifecycle()) === "workflow") {
+      console.log(`refresh: lifecycle is workflow — the alarm chain runs no cycle for ${resource}`);
+      return;
+    }
     let refreshCounted = false;
     /** This cycle's lease holder in the in-flight row, once it is counted. */
     let cycleHolder: string | null = null;
@@ -2648,93 +2744,9 @@ export class ResidentDO extends Sandbox<Env> {
     // owned by provisioning, which arms the first refresh itself.
     if (before.state === "onboarding" || before.state === "down") return;
     try {
-      await this.ensureHydrated();
-      const record = await this.registry().getRecord(resource);
-      if (!record) return; // offboarded mid-flight: let the chain die quietly
-      const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
-      if (!facts) throw new StepError("facts", "no repo facts recorded despite hydration");
-
-      // Deploy-ordering hazard: `wrangler deploy` swaps the app's image but a
-      // RUNNING container keeps the old one, so new Worker code can name pool
-      // users the image lacks. Reconcile here (every cycle, cheap) — see
-      // reconcileImage — so a rollout self-applies within one refresh.
-      if (await this.reconcileImage("refresh")) {
-        // Container stopping; it restarts on the new image in seconds. Re-arm
-        // SHORT so the resident is re-warmed within a minute instead of
-        // sitting on the old cadence for a full 600 s.
-        this.rearmOutcome = "image-stale-restart";
-        return; // finally re-arms
-      }
-
-      // Idle sleep: nobody has attached for IDLE_AFTER_S and no live tree is
-      // dirty → skip this fetch and park the alarm far out so SLEEP_AFTER can
-      // elapse. Staleness is repaid at the next attach (refreshIfStale). A
-      // dirty live tree pins the container awake: sleep destroys the disk and
-      // uncommitted work is not snapshotted.
-      // Only a SETTLED resident may park: a cycle that finds `refreshing`/
-      // `restoring` at entry is looking at a marker left by a cycle that died
-      // mid-flight (a deploy evicting the DO: stuck `refreshing` + parked →
-      // every run falls back cold because the bot's warm-gate probe never
-      // sees `warm` again). Run the full cycle instead; it
-      // ends warm or degraded, and the next one may park.
-      // Decide off a FRESH state read — `before` predates several awaits
-      // (hydration, registry, facts, reconcile) — same re-read discipline as
-      // every other state decision in this file.
-      const entry = await this.getStatus();
-      if (entry.state === "degraded" && isDiskFullReason(entry.reason)) {
-        // The cycle owns the disk-full verdict (docs/reference/specs/resident-repos.md item 54): re-probe before
-        // fetching. Still full → nothing a fetch can do; decide whether the
-        // container may be recycled and stop here (a fetch that happened to fit
-        // would flip the resident `warm`, the bot would attach, git-setup would
-        // fail and flip it back — a flap loop). Space back (a detach or the
-        // sweep freed trees) → run the cycle as usual and earn `warm`.
-        const free = await this.freeKiB();
-        if (free !== null && free < DISK_FULL_FREE_KIB) {
-          await this.recoverFromDiskFull(entry.reason, 0);
-          return; // finally re-arms: short after a recycle, the cadence otherwise
-        }
-      }
-      let settled = entry.state === "warm";
-      if (entry.state === "degraded" && !isNonEvidenceReason(entry.reason)) {
-        // Count consecutive cycles that found the same REFRESH-PRODUCED degraded
-        // reason (github-unreachable, <step>-failed); a stable streak means
-        // retrying is not going to help and parking is the right cost behavior.
-        // Any other state resets the streak (below).
-        const prev = await this.ctx.storage.get<{ reason: string; count: number }>(DEGRADED_STREAK_KEY);
-        const streak =
-          prev && prev.reason === entry.reason
-            ? { reason: entry.reason, count: prev.count + 1 }
-            : { reason: entry.reason, count: 1 };
-        await this.ctx.storage.put(DEGRADED_STREAK_KEY, streak);
-        settled = streak.count >= DEGRADED_PARK_AFTER_CYCLES;
-      } else {
-        // Warm, or a degraded stamped by the WATCHDOG (alarm-missed /
-        // stale-mid-flight) or by an INTERRUPTED cycle (refresh-interrupted —
-        // a deploy killed the step; it says nothing about the repo): the
-        // watchdog pulled this cycle to +5s precisely so a refresh RUNS, and the
-        // interrupted cycle re-armed short for the same reason.
-        // Counting those toward the streak would be self-fulfilling —
-        // each cycle that found the reason would park without attempting anything,
-        // and after three the resident would sit parked-degraded for 6h at a
-        // time. Never settled; streak reset.
-        await this.ctx.storage.delete(DEGRADED_STREAK_KEY);
-      }
-      if (settled && (await this.isIdle())) {
-        // isIdle awaited (git status per live tree) — re-read before writing.
-        const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
-        if (!now.idleSince)
-          await this.ctx.storage.put(FACTS_KEY, {
-            ...now,
-            idleSince: new Date(systemClock()).toISOString(),
-          } satisfies RepoFacts);
-        this.rearmOutcome = "idle";
-        return; // finally re-arms at IDLE_REFRESH_INTERVAL_S
-      }
-      if (facts.idleSince) {
-        const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
-        const { idleSince: _woke, ...awake } = now;
-        await this.ctx.storage.put(FACTS_KEY, awake satisfies RepoFacts);
-      }
+      const gate = await this.refreshGate(resource);
+      if (!gate.go) return; // finally re-arms on the outcome the gate set
+      const { record, facts } = gate;
       // From here the cycle mutates the mirror/checkout: count it as in flight
       // so an attach-path reconcileImage never stops the container under it,
       // and lease it in the in-flight row so the watchdog can tell this cycle
@@ -2744,65 +2756,9 @@ export class ResidentDO extends Sandbox<Env> {
       cycleHolder = this.nextHolder();
       await this.recordInFlight("refresh", cycleHolder, REFRESH_CYCLE_LEASE_MS, "refresh");
 
-      // Token-mint failure is a command-level error — the resident
-      // keeps serving the last snapshot and lifecycle state is NOT flipped by
-      // it. It is recorded, and the cycle then CONTINUES with an anonymous
-      // fetch (exactly what an unconfigured App does): a public repo outside
-      // the installation stays fresh, and a private one fails at the fetch
-      // below into a visible `degraded(github-unreachable: …)`. Returning here
-      // instead would freeze whatever state the resident was in — a public
-      // repo the App is not installed on would sit in the watchdog's
-      // `degraded(alarm-missed)` forever with an ever-staler mirror, because
-      // the App cannot mint for a repo it is not installed on.
-      let token: string | null = null;
-      // This cycle's mint error, kept so it survives the warm facts write below
-      // (which clears errors from PRIOR cycles) and prefixes a fetch failure's
-      // reason — the observable for "App configured, repo outside the
-      // installation" is a warm-but-anonymous resident with the mint named.
-      let mintError: string | undefined;
-      if (githubAppConfigured(this.env)) {
-        try {
-          token = (await mintRepoScopedToken(this.env, resource.slice("repo:".length))).token;
-        } catch (err) {
-          mintError = `token-mint-failed (command-level, fetching anonymously): ${errMsg(err)}`;
-          await this.recordRefreshError(mintError);
-        }
-      }
-
-      await this.setResidentState("refreshing");
-      let sha: string;
-      try {
-        // Same mirror mutex as attach's fetch/worktree work: the
-        // refresh alarm and an in-flight attach serialize instead of racing
-        // a prune against a worktree clone.
-        sha = (await this.fetchMirror({ ref: facts.defaultRef, cycle, token })).sha;
-      } catch (err) {
-        // The fetch itself failed — or the tip could not be read afterwards,
-        // which is the mirror's own failure, not GitHub's: the cycle's
-        // classifier below names that step.
-        if (err instanceof StepError && err.step === "rev-parse") throw err;
-        // A private repo whose mint failed lands here (the anonymous fetch is
-        // refused): say so, rather than blaming GitHub reachability alone.
-        const cause = mintError ? `${mintError}; then ` : "";
-        const message = `${cause}${errMsg(err)}`;
-        // A full disk fails this step too — the credential file is written
-        // here (`ENOSPC` on /workspace/.resident/git-credentials would read as
-        // github-unreachable, a SERVICEABLE reason, so every run would attach
-        // and die at git-setup). Name the disk instead: not
-        // serviceable, and the recovery below can free it.
-        const failure = await this.classifyFailure("fetch", message);
-        if (failure.diskFull) {
-          await this.setResidentState("degraded", failure.reason);
-          await this.recoverFromDiskFull(failure.reason, refreshCounted ? 1 : 0);
-          return;
-        }
-        await this.setResidentState("degraded", `github-unreachable: ${message}`);
-        return;
-      }
-
-      // Pure function of the commit — computed from the mirror before
-      // any checkout work so the planner can compare it to the deps marker.
-      const lockfileHash = sha === facts.sha ? facts.lockfileHash : await this.lockfileKey(sha);
+      const fetched = await this.refreshFetch(resource, facts, cycle, 1);
+      if (!fetched.ok) return;
+      const { sha, lockfileHash, mintError, token } = fetched;
       const plan = planRefresh({
         sha,
         factsSha: facts.sha,
@@ -2811,8 +2767,7 @@ export class ResidentDO extends Sandbox<Env> {
       });
       // Whether this cycle's snapshot step committed (`superseded` means
       // another writer moved the record, whose facts then stand).
-      let committed = false;
-      let previous: SnapshotRecord | undefined;
+      let committed = true;
       if (plan.action !== "unchanged") {
         const t0 = systemClock();
         console.log(`refresh: ${facts.sha.slice(0, 8)} → ${sha.slice(0, 8)}: ${plan.action} (${plan.why})`);
@@ -2826,25 +2781,8 @@ export class ResidentDO extends Sandbox<Env> {
         // install so an interruption mid-install can never read as completion.
         let depsEntry: string | null = null;
         if (plan.action === "rebuild") {
-          await this.runOk(["rm", "-f", BUILT_MARKER, ...(plan.install ? [DEPS_MARKER] : [])], "clear-markers");
-          if (plan.install && record.commands.install) {
-            // The installing marker brackets the install (item 57): written
-            // before, removed after the deps key lands, so a cycle that ends in
-            // between is planned as a resume. The install is seeded from the
-            // key the checkout holds now — npm reconciles the delta; a resumed
-            // install finds its key already in the store when the last attempt
-            // completed, or reconciles from the warm key again when it did not.
-            await this.writeDiskMarkers({ installingKey: lockfileHash });
-            depsEntry = (
-              await this.installDeps({
-                key: lockfileHash,
-                sha,
-                installCmd: record.commands.install,
-                budgetMs: REFRESH_INSTALL_TIMEOUT_MS,
-                seedFromKey: facts.lockfileHash,
-              })
-            ).entry;
-          }
+          await this.refreshClearMarkers(plan.install);
+          if (plan.install) depsEntry = await this.refreshInstall(record, facts, sha, lockfileHash);
         }
         // `reuse`: the checkout already holds this sha with its deps and build
         // (an interrupted cycle got that far) — the build step finds it done and
@@ -2856,89 +2794,17 @@ export class ResidentDO extends Sandbox<Env> {
           buildCmd: record.commands.build,
           depsEntry,
         });
-        const snapped = await this.snapshot({ resource, stamp: { ref: facts.defaultRef, sha, lockfileHash } });
-        if (!snapped.done && !snapped.superseded) previous = snapped.previous;
-        committed = snapped.done || !snapped.superseded;
+        committed = await this.refreshSnapshot(resource, { ref: facts.defaultRef, sha, lockfileHash });
         console.log(`refresh: ${sha.slice(0, 8)} ${plan.action} done in ${systemClock() - t0}ms`);
-        if (committed) {
-          await this.writeDiskMarkers({ ready: sha });
-          if (previous) await this.deleteBackupObjects([previous.mirror.id, previous.checkout.id]).catch(() => {});
-        }
-      } else {
-        committed = true;
       }
-
-      // The snapshot step moved the facts to the stamp in the same write as
-      // the record (a wake never sees a half-updated pair); this is the cycle's
-      // own bookkeeping on a fresh read. A superseded snapshot leaves the
-      // other writer's stamp alone.
-      const fresh = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
-      const updatedFacts: RepoFacts = {
-        ...fresh,
-        ...(committed ? { sha, lockfileHash, lastRefreshAt: new Date(systemClock()).toISOString() } : {}),
-      };
-      // Clear a PRIOR cycle's error; keep THIS cycle's mint error visible.
-      delete updatedFacts.lastRefreshError;
-      if (mintError) updatedFacts.lastRefreshError = mintError;
-      // A wake cycle cleared idleSince above; `facts` was read at alarm entry and
-      // still carries it — never resurrect it here (the dash would show a stale
-      // "idle since" and every attach would take the wake-fetch path).
-      delete updatedFacts.idleSince;
-      await this.ctx.storage.put(FACTS_KEY, updatedFacts);
-      await this.setResidentState("warm");
-      // Event-triggered reclamation: the prune above already told the
-      // mirror which branches died; finished refs give their worktree and
-      // pool user back now, not at the idle TTL. Housekeeping, never a
-      // lifecycle flip — a failure here is a log line.
-      try {
-        const gc = await this.reclaimFinishedRefs(resource, facts.defaultRef, token);
-        if (gc.reclaimed.length > 0) console.log(`reclaim ${resource}: ${JSON.stringify(gc)}`);
-      } catch (err) {
-        console.log(`reclaim ${resource}: pass failed: ${errMsg(err)}`);
-      }
-      // Item 55: the cycle's disk sample — what /residents, `repo list`, the
-      // watchdog line and the next attach admission read. Housekeeping too.
-      await this.measureDisk().catch((err) => console.log(`disk: measure failed: ${errMsg(err)}`));
+      await this.refreshComplete(resource, facts, { sha, lockfileHash, committed, mintError, token });
     } catch (err) {
       if (err instanceof ResidentDownError) return; // already down with reason; chain stops below
-      // A step killed from OUTSIDE (the container replaced under it — an
-      // image-changing deploy or a container stop; a Worker-only deploy leaves
-      // the container running and interrupts nothing) is
-      // `refresh-interrupted`: it is not evidence about the repo — it
-      // never counts toward the park streak (the entry gate above) — and the
-      // chain re-arms SHORT so the resident is warm again within a minute
-      // instead of after the full cadence (an unclassified kill otherwise
-      // costs the resident the whole 10-minute cadence, e.g.
-      // `degraded(build-failed: exit 143 …)` until the next alarm).
-      // Any other failure is the repo's own: `<step>-failed: …` /
-      // `refresh-failed: …` as before. Non-StepErrors classify too — an SDK
-      // replacement error can surface between steps — with the generic
-      // "refresh" step, whose failure reason is the pre-existing
-      // `refresh-failed: …` shape.
-      // A full disk is a third class: `disk-full: …`, never serviceable,
-      // and the one failure the resident can act on itself (recoverFromDiskFull).
-      const failure =
-        err instanceof StepError
-          ? await this.classifyFailure(err.step, err.message)
-          : await this.classifyFailure("refresh", errMsg(err));
+      const failure = await this.classifyCycleError(err);
       // Set BEFORE the writes on purpose: if either throws, the finally still
       // re-arms short — the safe direction for an interruption.
       if (failure.interrupted) this.rearmOutcome = "interrupted";
-      // The classified reason, always in the log: a StepError logged its own
-      // output block above, but a failure between steps (an SDK error, the
-      // markers, the snapshot) reached only the state entry — which the next
-      // cycle's failure overwrites (an install timeout that starts an
-      // incident leaves no trace once the follow-up cycle fails).
-      console.log(`refresh: cycle failed — ${failure.reason.slice(0, 400)}`);
-      // Record on the facts too: the degraded state write below can be
-      // clobbered within seconds by a concurrent attach/exec whose
-      // ensureHydrated flips the state to `restoring · rehydrating`, leaving
-      // no visible trace of WHY.
-      // `lastRefreshError` survives that race and the next completed cycle
-      // clears it, same as a mint error.
-      await this.recordRefreshError(failure.reason);
-      await this.setResidentState("degraded", failure.reason); // last snapshot keeps serving
-      if (failure.diskFull) await this.recoverFromDiskFull(failure.reason, refreshCounted ? 1 : 0);
+      await this.refreshFailed(failure, refreshCounted ? 1 : 0);
     } finally {
       if (refreshCounted) this.refreshesInFlight--;
       if (cycleHolder) await this.clearInFlight("refresh", cycleHolder);
@@ -2960,8 +2826,683 @@ export class ResidentDO extends Sandbox<Env> {
         consecutiveInterrupted,
       });
       this.rearmOutcome = "normal";
-      if (state && state !== "down" && state !== "onboarding") await this.armRefresh(resource, interval);
+      // A flip to `workflow` while this cycle ran: the chain ends here (item 7).
+      const chained = (await this.getLifecycle()) === "alarm";
+      if (chained && state && state !== "down" && state !== "onboarding") await this.armRefresh(resource, interval);
     }
+  }
+
+  // -- the cycle's phases, shared by the alarm and the instance (item 7) -------
+  //
+  // The alarm chain and the Workflow instance run the same cycle in the same
+  // order: the gates, the fetch, the plan, the install, the build, the
+  // snapshot, the completion. Each phase is one method here so neither
+  // scheduler carries a copy; the instance calls them one step at a time
+  // (`refreshInstance*`, below), the alarm in one handler (above).
+
+  /** The cycle's entry gates, in the alarm's order: hydrate; the registry
+   *  record (gone → the resident was offboarded mid-flight, nothing to do);
+   *  the image reconcile (a stale image stops the container, which restarts
+   *  on the current one — `image-stale-restart`); the disk-full re-probe (a
+   *  disk still full decides its own recovery and stops the cycle — item 54);
+   *  the park streak and the idle gate (`idle`); and, for a cycle that runs,
+   *  the end of idle mode. Sets `rearmOutcome` for the alarm's finally; the
+   *  instance resets it. */
+  private async refreshGate(
+    resource: string,
+  ): Promise<{ go: false; why: string } | { go: true; record: ResidentRecord; facts: RepoFacts }> {
+    await this.ensureHydrated();
+    const record = await this.registry().getRecord(resource);
+    if (!record) return { go: false, why: "offboarded" }; // offboarded mid-flight: let the chain die quietly
+    const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+    if (!facts) throw new StepError("facts", "no repo facts recorded despite hydration");
+
+    // Deploy-ordering hazard: `wrangler deploy` swaps the app's image but a
+    // RUNNING container keeps the old one, so new Worker code can name pool
+    // users the image lacks. Reconcile here (every cycle, cheap) — see
+    // reconcileImage — so a rollout self-applies within one refresh.
+    if (await this.reconcileImage("refresh")) {
+      // Container stopping; it restarts on the new image in seconds. Re-arm
+      // SHORT so the resident is re-warmed within a minute instead of
+      // sitting on the old cadence for a full 600 s.
+      this.rearmOutcome = "image-stale-restart";
+      return { go: false, why: "image-stale-restart" };
+    }
+
+    // Idle sleep: nobody has attached for IDLE_AFTER_S and no live tree is
+    // dirty → skip this fetch and park the alarm far out so SLEEP_AFTER can
+    // elapse. Staleness is repaid at the next attach (refreshIfStale). A
+    // dirty live tree pins the container awake: sleep destroys the disk and
+    // uncommitted work is not snapshotted.
+    // Only a SETTLED resident may park: a cycle that finds `refreshing`/
+    // `restoring` at entry is looking at a marker left by a cycle that died
+    // mid-flight (a deploy evicting the DO: stuck `refreshing` + parked →
+    // every run falls back cold because the bot's warm-gate probe never
+    // sees `warm` again). Run the full cycle instead; it
+    // ends warm or degraded, and the next one may park.
+    // Decide off a FRESH state read — the caller's read predates several awaits
+    // (hydration, registry, facts, reconcile) — same re-read discipline as
+    // every other state decision in this file.
+    const entry = await this.getStatus();
+    if (entry.state === "degraded" && isDiskFullReason(entry.reason)) {
+      // The cycle owns the disk-full verdict (docs/reference/specs/resident-repos.md item 54): re-probe before
+      // fetching. Still full → nothing a fetch can do; decide whether the
+      // container may be recycled and stop here (a fetch that happened to fit
+      // would flip the resident `warm`, the bot would attach, git-setup would
+      // fail and flip it back — a flap loop). Space back (a detach or the
+      // sweep freed trees) → run the cycle as usual and earn `warm`.
+      const free = await this.freeKiB();
+      if (free !== null && free < DISK_FULL_FREE_KIB) {
+        await this.recoverFromDiskFull(entry.reason, 0);
+        return { go: false, why: "disk-full" }; // the alarm's finally re-arms: short after a recycle, the cadence otherwise
+      }
+    }
+    let settled = entry.state === "warm";
+    if (entry.state === "degraded" && !isNonEvidenceReason(entry.reason)) {
+      // Count consecutive cycles that found the same REFRESH-PRODUCED degraded
+      // reason (github-unreachable, <step>-failed); a stable streak means
+      // retrying is not going to help and parking is the right cost behavior.
+      // Any other state resets the streak (below).
+      const prev = await this.ctx.storage.get<{ reason: string; count: number }>(DEGRADED_STREAK_KEY);
+      const streak =
+        prev && prev.reason === entry.reason
+          ? { reason: entry.reason, count: prev.count + 1 }
+          : { reason: entry.reason, count: 1 };
+      await this.ctx.storage.put(DEGRADED_STREAK_KEY, streak);
+      settled = streak.count >= DEGRADED_PARK_AFTER_CYCLES;
+    } else {
+      // Warm, or a degraded stamped by the WATCHDOG (alarm-missed /
+      // stale-mid-flight) or by an INTERRUPTED cycle (refresh-interrupted —
+      // a deploy killed the step; it says nothing about the repo): the
+      // watchdog pulled this cycle to +5s precisely so a refresh RUNS, and the
+      // interrupted cycle re-armed short for the same reason.
+      // Counting those toward the streak would be self-fulfilling —
+      // each cycle that found the reason would park without attempting anything,
+      // and after three the resident would sit parked-degraded for 6h at a
+      // time. Never settled; streak reset.
+      await this.ctx.storage.delete(DEGRADED_STREAK_KEY);
+    }
+    if (settled && (await this.isIdle())) {
+      // isIdle awaited (git status per live tree) — re-read before writing.
+      const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
+      if (!now.idleSince)
+        await this.ctx.storage.put(FACTS_KEY, {
+          ...now,
+          idleSince: new Date(systemClock()).toISOString(),
+        } satisfies RepoFacts);
+      this.rearmOutcome = "idle";
+      return { go: false, why: "idle" }; // the alarm's finally re-arms at IDLE_REFRESH_INTERVAL_S
+    }
+    if (facts.idleSince) {
+      const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
+      const { idleSince: _woke, ...awake } = now;
+      await this.ctx.storage.put(FACTS_KEY, awake satisfies RepoFacts);
+    }
+    return { go: true, record, facts };
+  }
+
+  /** The cycle's fetch phase: mint, `refreshing`, fetch, the lockfile key at
+   *  the new tip. Token-mint failure is a command-level error — the resident
+   *  keeps serving the last snapshot and lifecycle state is NOT flipped by
+   *  it. It is recorded, and the cycle then CONTINUES with an anonymous
+   *  fetch (exactly what an unconfigured App does): a public repo outside
+   *  the installation stays fresh, and a private one fails at the fetch
+   *  below into a visible `degraded(github-unreachable: …)`. Returning early
+   *  instead would freeze whatever state the resident was in — a public
+   *  repo the App is not installed on would sit in the watchdog's
+   *  `degraded(alarm-missed)` forever with an ever-staler mirror, because
+   *  the App cannot mint for a repo it is not installed on. A failed fetch
+   *  is recorded here — `degraded` with its reason, the disk-full recovery
+   *  when that is the cause — and answered `ok: false`. */
+  private async refreshFetch(
+    resource: string,
+    facts: RepoFacts,
+    cycle: string,
+    selfInFlight: number,
+  ): Promise<
+    | { ok: false; reason: string }
+    | { ok: true; sha: string; lockfileHash: string; mintError: string | undefined; token: string | null }
+  > {
+    let token: string | null = null;
+    // This cycle's mint error, kept so it survives the warm facts write
+    // (which clears errors from PRIOR cycles) and prefixes a fetch failure's
+    // reason — the observable for "App configured, repo outside the
+    // installation" is a warm-but-anonymous resident with the mint named.
+    let mintError: string | undefined;
+    if (githubAppConfigured(this.env)) {
+      try {
+        token = (await mintRepoScopedToken(this.env, resource.slice("repo:".length))).token;
+      } catch (err) {
+        mintError = `token-mint-failed (command-level, fetching anonymously): ${errMsg(err)}`;
+        await this.recordRefreshError(mintError);
+      }
+    }
+
+    await this.setResidentState("refreshing");
+    let sha: string;
+    try {
+      // Same mirror mutex as attach's fetch/worktree work: the
+      // refresh alarm and an in-flight attach serialize instead of racing
+      // a prune against a worktree clone.
+      sha = (await this.fetchMirror({ ref: facts.defaultRef, cycle, token })).sha;
+    } catch (err) {
+      // The fetch itself failed — or the tip could not be read afterwards,
+      // which is the mirror's own failure, not GitHub's: the cycle's
+      // classifier names that step.
+      if (err instanceof StepError && err.step === "rev-parse") throw err;
+      // A private repo whose mint failed lands here (the anonymous fetch is
+      // refused): say so, rather than blaming GitHub reachability alone.
+      const cause = mintError ? `${mintError}; then ` : "";
+      const message = `${cause}${errMsg(err)}`;
+      // A full disk fails this step too — the credential file is written
+      // here (`ENOSPC` on /workspace/.resident/git-credentials would read as
+      // github-unreachable, a SERVICEABLE reason, so every run would attach
+      // and die at git-setup). Name the disk instead: not
+      // serviceable, and the recovery below can free it.
+      const failure = await this.classifyFailure("fetch", message);
+      if (failure.diskFull) {
+        await this.setResidentState("degraded", failure.reason);
+        await this.recoverFromDiskFull(failure.reason, selfInFlight);
+        return { ok: false, reason: failure.reason };
+      }
+      const reason = `github-unreachable: ${message}`;
+      await this.setResidentState("degraded", reason);
+      return { ok: false, reason };
+    }
+
+    // Pure function of the commit — computed from the mirror before
+    // any checkout work so the planner can compare it to the deps marker.
+    const lockfileHash = sha === facts.sha ? facts.lockfileHash : await this.lockfileKey(sha);
+    return { ok: true, sha, lockfileHash, mintError, token };
+  }
+
+  /** A rebuild's first command: the markers for the steps about to be redone
+   *  come off — `built` always, `deps-key` only when the install runs — so
+   *  an interruption mid-step can never read as completion (item 48). */
+  private async refreshClearMarkers(install: boolean): Promise<void> {
+    await this.runOk(["rm", "-f", BUILT_MARKER, ...(install ? [DEPS_MARKER] : [])], "clear-markers");
+  }
+
+  /** The cycle's install phase: the store entry for the new lockfile key,
+   *  bracketed by the installing marker (item 57) — written before, removed
+   *  by the build once the deps key lands, so a cycle that ends in between is
+   *  planned as a resume. The install is seeded from the key the checkout
+   *  holds now — npm reconciles the delta; a resumed install finds its key
+   *  already in the store when the last attempt completed, or reconciles
+   *  from the warm key again when it did not. Null when the command table
+   *  has no install: the build then links nothing. */
+  private async refreshInstall(
+    record: ResidentRecord,
+    facts: RepoFacts,
+    sha: string,
+    lockfileHash: string,
+  ): Promise<string | null> {
+    if (!record.commands.install) return null;
+    await this.writeDiskMarkers({ installingKey: lockfileHash });
+    const { entry } = await this.installDeps({
+      key: lockfileHash,
+      sha,
+      installCmd: record.commands.install,
+      budgetMs: REFRESH_INSTALL_TIMEOUT_MS,
+      seedFromKey: facts.lockfileHash,
+    });
+    return entry;
+  }
+
+  /** The cycle's snapshot phase: the stamped pair to R2 and, when this cycle's
+   *  record stands (not superseded by another writer's), the ready marker and
+   *  the replaced snapshot's objects swept. Answers whether the record committed. */
+  private async refreshSnapshot(resource: string, stamp: SnapshotStamp): Promise<boolean> {
+    const snapped = await this.snapshot({ resource, stamp });
+    const committed = snapped.done || !snapped.superseded;
+    if (committed) {
+      await this.writeDiskMarkers({ ready: stamp.sha });
+      const previous = !snapped.done && !snapped.superseded ? snapped.previous : undefined;
+      if (previous) await this.deleteBackupObjects([previous.mirror.id, previous.checkout.id]).catch(() => {});
+    }
+    return committed;
+  }
+
+  /** The cycle's completion: the facts to the stamp (the snapshot step moved
+   *  them in the same write as the record — a wake never sees a half-updated
+   *  pair; this is the cycle's own bookkeeping on a fresh read, and a
+   *  superseded snapshot leaves the other writer's stamp alone), `warm`, then
+   *  the housekeeping that is never a lifecycle flip: the finished-ref
+   *  reclamation the prune already informed (item 45) and the disk sample
+   *  (item 55). */
+  private async refreshComplete(
+    resource: string,
+    facts: RepoFacts,
+    cycle: {
+      sha: string;
+      lockfileHash: string;
+      committed: boolean;
+      mintError: string | undefined;
+      token: string | null;
+    },
+  ): Promise<void> {
+    const fresh = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
+    const updatedFacts: RepoFacts = {
+      ...fresh,
+      ...(cycle.committed
+        ? { sha: cycle.sha, lockfileHash: cycle.lockfileHash, lastRefreshAt: new Date(systemClock()).toISOString() }
+        : {}),
+    };
+    // Clear a PRIOR cycle's error; keep THIS cycle's mint error visible.
+    delete updatedFacts.lastRefreshError;
+    if (cycle.mintError) updatedFacts.lastRefreshError = cycle.mintError;
+    // A wake cycle cleared idleSince at the gate; `facts` was read at entry and
+    // still carries it — never resurrect it here (the dash would show a stale
+    // "idle since" and every attach would take the wake-fetch path).
+    delete updatedFacts.idleSince;
+    await this.ctx.storage.put(FACTS_KEY, updatedFacts);
+    await this.setResidentState("warm");
+    // Event-triggered reclamation: the prune above already told the
+    // mirror which branches died; finished refs give their worktree and
+    // pool user back now, not at the idle TTL. Housekeeping, never a
+    // lifecycle flip — a failure here is a log line.
+    try {
+      const gc = await this.reclaimFinishedRefs(resource, facts.defaultRef, cycle.token);
+      if (gc.reclaimed.length > 0) console.log(`reclaim ${resource}: ${JSON.stringify(gc)}`);
+    } catch (err) {
+      console.log(`reclaim ${resource}: pass failed: ${errMsg(err)}`);
+    }
+    // Item 55: the cycle's disk sample — what /residents, `repo list`, the
+    // watchdog line and the next attach admission read. Housekeeping too.
+    await this.measureDisk().catch((err) => console.log(`disk: measure failed: ${errMsg(err)}`));
+  }
+
+  /** What a cycle's throw means. A step killed from OUTSIDE (the container
+   *  replaced under it — an image-changing deploy or a container stop; a
+   *  Worker-only deploy leaves the container running and interrupts nothing)
+   *  is `refresh-interrupted`: not evidence about the repo — it never counts
+   *  toward the park streak (the entry gate) — and the chain re-arms SHORT so
+   *  the resident is warm again within a minute instead of after the full
+   *  cadence (an unclassified kill otherwise costs the resident the whole
+   *  10-minute cadence, e.g. `degraded(build-failed: exit 143 …)` until the
+   *  next alarm); the instance throws it to the engine, whose retry re-enters
+   *  the step. Any other failure is the repo's own: `<step>-failed: …` /
+   *  `refresh-failed: …` as before. Non-StepErrors classify too — an SDK
+   *  replacement error can surface between steps — with the generic
+   *  "refresh" step, whose failure reason is the pre-existing
+   *  `refresh-failed: …` shape. A full disk is a third class: `disk-full: …`,
+   *  never serviceable, and the one failure the resident can act on itself
+   *  (recoverFromDiskFull). */
+  private async classifyCycleError(err: unknown): Promise<RefreshFailure> {
+    return err instanceof StepError
+      ? await this.classifyFailure(err.step, err.message)
+      : await this.classifyFailure("refresh", errMsg(err));
+  }
+
+  /** Record a cycle's failure the one way: the classified reason in the log
+   *  (a StepError logged its own output block, but a failure between steps —
+   *  an SDK error, the markers, the snapshot — reached only the state entry,
+   *  which the next cycle's failure overwrites), on the facts (the degraded
+   *  state write can be clobbered within seconds by a concurrent attach/exec
+   *  whose ensureHydrated flips the state to `restoring · rehydrating`;
+   *  `lastRefreshError` survives that race and the next completed cycle
+   *  clears it, same as a mint error), then `degraded` with the last snapshot
+   *  still serving, and the disk-full recovery when that is the cause. */
+  private async refreshFailed(failure: RefreshFailure, selfInFlight: number): Promise<void> {
+    console.log(`refresh: cycle failed — ${failure.reason.slice(0, 400)}`);
+    await this.recordRefreshError(failure.reason);
+    await this.setResidentState("degraded", failure.reason); // last snapshot keeps serving
+    if (failure.diskFull) await this.recoverFromDiskFull(failure.reason, selfInFlight);
+  }
+
+  // -- the refresh cycle as a Workflow instance (item 7) --------------------------
+  //
+  // `ResidentRefresh` (the Workflow entrypoint, below the DO) calls these four
+  // methods, one per step, through the DO stub. Each runs the same phase the
+  // alarm runs, over the same rows, so a step the engine retries re-enters
+  // the same idempotent read-then-act method (item 22) and finds the work
+  // done. Inputs and answers are small facts — refs, shas, keys, a path, a
+  // word — never a payload and never a credential: the token is minted inside
+  // the step that needs it.
+
+  /** Which scheduler drives this resident's refresh cycle (LIFECYCLE_KEY). */
+  async getLifecycle(): Promise<ResidentLifecycle> {
+    return lifecycleOf(await this.ctx.storage.get(LIFECYCLE_KEY));
+  }
+
+  /** Flip the resident between the alarm chain and the Workflow instance
+   *  (admin `/debug` `lifecycle`). To `workflow`: the pending alarm is
+   *  dropped; an alarm already firing runs to its end and re-arms nothing.
+   *  Back to `alarm`: the chain is re-armed the way the watchdog re-arms a
+   *  dead one, when the resident is in a state the chain serves. */
+  async setLifecycle(mode: ResidentLifecycle): Promise<{ lifecycle: ResidentLifecycle; refreshSchedules: number }> {
+    const previous = await this.getLifecycle();
+    await this.ctx.storage.put(LIFECYCLE_KEY, mode);
+    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+    if (mode === "workflow") {
+      this.deleteSchedules(REFRESH_CALLBACK);
+    } else if (previous !== "alarm") {
+      const { state } = await this.getStatus();
+      const pending = await this.listSchedules(REFRESH_CALLBACK);
+      if (state !== "onboarding" && state !== "down" && pending.length === 0) {
+        await this.schedule(5, REFRESH_CALLBACK, resource);
+      }
+    }
+    console.log(`lifecycle: ${resource} ${previous} → ${mode}`);
+    return { lifecycle: mode, refreshSchedules: (await this.listSchedules(REFRESH_CALLBACK)).length };
+  }
+
+  private async instanceRow(): Promise<RefreshInstanceRow> {
+    return (await this.ctx.storage.get<RefreshInstanceRow>(REFRESH_INSTANCE_KEY)) ?? { instance: null, skipped: null };
+  }
+
+  /** The facts the cron's instance-creation decision reads
+   *  (`shouldCreateRefreshInstance`): the flag, the state and when it last
+   *  changed, idle mode, the last instance's creation time. */
+  async refreshRow(): Promise<RefreshRow> {
+    const map = await this.ctx.storage.get<unknown>([
+      LIFECYCLE_KEY,
+      STATE_KEY,
+      UPDATED_KEY,
+      FACTS_KEY,
+      REFRESH_INSTANCE_KEY,
+    ]);
+    const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
+    const row = (map.get(REFRESH_INSTANCE_KEY) as RefreshInstanceRow | undefined) ?? { instance: null, skipped: null };
+    const epochMs = (iso: string | undefined): number | null => {
+      const t = Date.parse(iso ?? "");
+      return Number.isFinite(t) ? t : null;
+    };
+    return {
+      lifecycle: lifecycleOf(map.get(LIFECYCLE_KEY)),
+      state: (map.get(STATE_KEY) as ResidentState | undefined) ?? "down",
+      updatedAt: epochMs(map.get(UPDATED_KEY) as string | undefined),
+      idleSince: epochMs(facts?.idleSince),
+      lastInstanceAt: epochMs(row.instance?.createdAt),
+      instanceRunning: await this.instanceRunning(row.instance?.id ?? null),
+    };
+  }
+
+  /** Whether the engine still runs `id`: queued, running, paused or waiting.
+   *  The one fact the marker's age cannot give — a step between retry
+   *  attempts holds no lease and writes nothing — read from the engine, which
+   *  knows. An unknown id, a missing binding or a failed read answer false:
+   *  the marker's age then decides, as before. */
+  private async instanceRunning(id: string | null): Promise<boolean> {
+    if (!id) return false;
+    try {
+      const { status } = await (await this.env.RESIDENT_REFRESH.get(id)).status();
+      return (
+        status === "queued" ||
+        status === "running" ||
+        status === "paused" ||
+        status === "waiting" ||
+        status === "waitingForPause"
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** The cron created an instance for this resident. */
+  async recordRefreshInstance(id: string, createdAtMs: number): Promise<void> {
+    const row = await this.instanceRow();
+    await this.ctx.storage.put(REFRESH_INSTANCE_KEY, {
+      ...row,
+      instance: { id, createdAt: new Date(createdAtMs).toISOString(), lastStep: null, holder: null },
+    } satisfies RefreshInstanceRow);
+  }
+
+  /** The cron did not create for this bucket: a live cycle, or the engine's duplicate refusal. */
+  async recordRefreshSkipped(id: string, atMs: number, why: string): Promise<void> {
+    const row = await this.instanceRow();
+    await this.ctx.storage.put(REFRESH_INSTANCE_KEY, {
+      ...row,
+      skipped: { id, at: new Date(atMs).toISOString(), why },
+    } satisfies RefreshInstanceRow);
+  }
+
+  /** The lifecycle flag and the instance row, for `/status` and `/debug info`. */
+  async getRefreshView(): Promise<{
+    lifecycle: ResidentLifecycle;
+    instance: { id: string; createdAt: string; lastStep: string | null } | null;
+    skipped: RefreshInstanceRow["skipped"];
+  }> {
+    const [lifecycle, row] = await Promise.all([this.getLifecycle(), this.instanceRow()]);
+    const instance = row.instance
+      ? { id: row.instance.id, createdAt: row.instance.createdAt, lastStep: row.instance.lastStep }
+      : null;
+    return { lifecycle, instance, skipped: row.skipped };
+  }
+
+  /** An instance step ended: its outcome on the row, for the operator. An
+   *  instance the row does not know (created by hand) is adopted. */
+  private async recordInstanceStep(instance: string, step: string, outcome: string): Promise<void> {
+    const row = await this.instanceRow();
+    const known = row.instance?.id === instance ? row.instance : null;
+    await this.ctx.storage.put(REFRESH_INSTANCE_KEY, {
+      ...row,
+      instance: {
+        id: instance,
+        createdAt: known?.createdAt ?? new Date(systemClock()).toISOString(),
+        holder: known?.holder ?? null,
+        lastStep: residentText(`${step}: ${outcome}`),
+      },
+    } satisfies RefreshInstanceRow);
+  }
+
+  /** The instance's fetch step took the cycle lease: remember the holder so a
+   *  later step — in this incarnation or the next — can release exactly it. */
+  private async recordInstanceHolder(instance: string, holder: string): Promise<void> {
+    const row = await this.instanceRow();
+    const known = row.instance?.id === instance ? row.instance : null;
+    await this.ctx.storage.put(REFRESH_INSTANCE_KEY, {
+      ...row,
+      instance: {
+        id: instance,
+        createdAt: known?.createdAt ?? new Date(systemClock()).toISOString(),
+        lastStep: known?.lastStep ?? null,
+        holder,
+      },
+    } satisfies RefreshInstanceRow);
+  }
+
+  /** Release the cycle lease the instance holds, if any. */
+  private async clearInstanceLease(instance: string): Promise<void> {
+    const row = await this.instanceRow();
+    if (row.instance?.id !== instance || !row.instance.holder) return;
+    await this.clearInFlight("refresh", row.instance.holder);
+    await this.ctx.storage.put(REFRESH_INSTANCE_KEY, {
+      ...row,
+      instance: { ...row.instance, holder: null },
+    } satisfies RefreshInstanceRow);
+  }
+
+  /** Run one step of the refresh instance the way the alarm runs its cycle:
+   *  counted in flight (so an attach-path reconcileImage never stops the
+   *  container under it), under a step trace the instance grafts on its root,
+   *  its outcome on the instance row for `/status`. A step killed from outside
+   *  (the container replaced under it) is thrown to the engine, whose retry
+   *  re-enters the same idempotent method — the row stays `refreshing`, never
+   *  `degraded`, and a `refreshing` younger than the stale bound keeps the
+   *  cron from creating a second instance meanwhile. A failure of the repo's
+   *  own is recorded as the alarm records it — `degraded` with the reason,
+   *  the last snapshot still serving — and answered `failed`, which ends the
+   *  instance; the next cron firing starts the next cycle from that state. */
+  private async runInstanceStep<T>(
+    instance: string,
+    step: string,
+    fn: () => Promise<InstanceStepResult<T>>,
+  ): Promise<InstanceStepAnswer<T>> {
+    const startedAt = systemClock();
+    const trace = createStepTrace(startedAt);
+    this.refreshesInFlight++;
+    let outcome = "done";
+    try {
+      const result = await this.stepTrace.run(trace, fn);
+      if (result.status !== "done") {
+        outcome = result.status === "stopped" ? `stopped (${result.why})` : `failed (${result.reason})`;
+        await this.clearInstanceLease(instance);
+      }
+      return { ...result, startedAt, trace: trace.steps() };
+    } catch (err) {
+      if (err instanceof ResidentDownError) {
+        // Already down with its reason (goDown recorded it); the instance ends.
+        outcome = `failed (${err.message})`;
+        await this.clearInstanceLease(instance);
+        return { status: "failed", reason: err.message, startedAt, trace: trace.steps() };
+      }
+      const failure = await this.classifyCycleError(err);
+      if (failure.interrupted) {
+        outcome = `interrupted (${failure.reason}) — the engine retries`;
+        console.log(`refresh instance ${instance}: ${step} interrupted — ${failure.reason.slice(0, 400)}; retrying`);
+        throw err;
+      }
+      await this.refreshFailed(failure, 1);
+      await this.clearInstanceLease(instance);
+      outcome = `failed (${failure.reason})`;
+      return { status: "failed", reason: failure.reason, startedAt, trace: trace.steps() };
+    } finally {
+      this.refreshesInFlight--;
+      // The gates set this for the alarm's finally; no alarm runs on this path.
+      this.rearmOutcome = "normal";
+      await this.recordInstanceStep(instance, step, outcome).catch((err) =>
+        console.log(`refresh instance ${instance}: recording ${step} failed: ${errMsg(err)}`),
+      );
+    }
+  }
+
+  /** Step `fetch`: the gates, the cycle lease, the fetch and the plan. The
+   *  instance id is the cycle `fetchMirror` records, so a retry of this step
+   *  finds its fetch done. A rebuild's markers come off here, once per cycle,
+   *  never at the build step — a retried build must find its own work done. */
+  async refreshInstanceFetch(input: {
+    resource: string;
+    instance: string;
+  }): Promise<InstanceStepAnswer<RefreshFetchFacts>> {
+    return this.runInstanceStep<RefreshFetchFacts>(input.instance, "fetch", async () => {
+      const before = await this.getStatus();
+      // down stays down (a rebuild is the escape hatch); onboarding is owned by provisioning.
+      if (before.state === "onboarding" || before.state === "down") return { status: "stopped", why: "not-serving" };
+      const gate = await this.refreshGate(input.resource);
+      if (!gate.go) return { status: "stopped", why: gate.why };
+      const { record, facts } = gate;
+      const holder = this.nextHolder();
+      await this.recordInFlight("refresh", holder, REFRESH_CYCLE_LEASE_MS, "refresh");
+      await this.recordInstanceHolder(input.instance, holder);
+      const fetched = await this.refreshFetch(input.resource, facts, input.instance, 1);
+      if (!fetched.ok) return { status: "failed", reason: fetched.reason };
+      const { sha, lockfileHash } = fetched;
+      const plan = planRefresh({
+        sha,
+        factsSha: facts.sha,
+        lockfileKey: lockfileHash,
+        disk: await this.readRefreshDisk(),
+      });
+      if (plan.action !== "unchanged") {
+        console.log(`refresh: ${facts.sha.slice(0, 8)} → ${sha.slice(0, 8)}: ${plan.action} (${plan.why})`);
+      }
+      if (plan.action === "rebuild") await this.refreshClearMarkers(plan.install);
+      return {
+        status: "done",
+        ref: facts.defaultRef,
+        sha,
+        factsSha: facts.sha,
+        lockfileKey: lockfileHash,
+        action: plan.action,
+        install: plan.action === "rebuild" && plan.install && !!record.commands.install,
+        mintError: fetched.mintError ?? null,
+      };
+    });
+  }
+
+  /** Step `install`: the store entry for the new key (`installDeps` finds a
+   *  complete entry done). Answers the entry's path for the build to link. */
+  async refreshInstanceInstall(input: {
+    resource: string;
+    instance: string;
+    sha: string;
+    lockfileKey: string;
+  }): Promise<InstanceStepAnswer<{ entry: string | null }>> {
+    return this.runInstanceStep<{ entry: string | null }>(input.instance, "install", async () => {
+      const record = await this.registry().getRecord(input.resource);
+      if (!record) return { status: "stopped", why: "offboarded" };
+      const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+      if (!facts) return { status: "stopped", why: "no-facts" };
+      const entry = await this.refreshInstall(record, facts, input.sha, input.lockfileKey);
+      return { status: "done", entry };
+    });
+  }
+
+  /** Step `build`: the checkout to the sha and its build (`runBuild` finds a
+   *  checkout whose markers all name the target done). */
+  async refreshInstanceBuild(input: {
+    resource: string;
+    instance: string;
+    sha: string;
+    factsSha: string;
+    lockfileKey: string;
+    depsEntry: string | null;
+  }): Promise<InstanceStepAnswer<{ ran: boolean; why: string }>> {
+    return this.runInstanceStep<{ ran: boolean; why: string }>(input.instance, "build", async () => {
+      const record = await this.registry().getRecord(input.resource);
+      if (!record) return { status: "stopped", why: "offboarded" };
+      const built = await this.runBuild({
+        sha: input.sha,
+        factsSha: input.factsSha,
+        lockfileKey: input.lockfileKey,
+        buildCmd: record.commands.build,
+        depsEntry: input.depsEntry,
+      });
+      // `done` from the plan means the tree was already built for this sha; the
+      // step reports whether a build actually ran.
+      return { status: "done", ran: !built.done, why: built.why };
+    });
+  }
+
+  /** Step `snapshot`: the stamped pair to R2 (`snapshot` finds a record at the
+   *  stamp done and answers `superseded` to another writer, never a throw),
+   *  then the cycle's completion — facts, `warm`, the reclamation, the disk
+   *  sample — and the cycle lease released. An `unchanged` cycle skips the
+   *  archive and still completes, as the alarm does. */
+  async refreshInstanceSnapshot(input: {
+    resource: string;
+    instance: string;
+    ref: string;
+    sha: string;
+    lockfileKey: string;
+    action: RefreshPlan["action"];
+    mintError: string | null;
+  }): Promise<InstanceStepAnswer<{ committed: boolean }>> {
+    return this.runInstanceStep<{ committed: boolean }>(input.instance, "snapshot", async () => {
+      const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
+      if (!facts) return { status: "stopped", why: "no-facts" };
+      const committed =
+        input.action === "unchanged"
+          ? true
+          : await this.refreshSnapshot(input.resource, {
+              ref: input.ref,
+              sha: input.sha,
+              lockfileHash: input.lockfileKey,
+            });
+      // The reclamation's token: minted here (cached per slug), never carried
+      // between steps. A failed mint runs the reclamation anonymously (PR lookups
+      // answer unknown, trees are kept) and is recorded like the fetch's.
+      let token: string | null = null;
+      let snapshotMintError: string | undefined;
+      if (githubAppConfigured(this.env)) {
+        try {
+          token = (await mintRepoScopedToken(this.env, input.resource.slice("repo:".length))).token;
+        } catch (err) {
+          snapshotMintError = `token-mint-failed (reclamation runs anonymously): ${errMsg(err)}`;
+          console.log(`refresh instance ${input.instance}: ${snapshotMintError}`);
+        }
+      }
+      await this.refreshComplete(input.resource, facts, {
+        sha: input.sha,
+        lockfileHash: input.lockfileKey,
+        committed,
+        mintError: input.mintError ?? snapshotMintError,
+        token,
+      });
+      await this.clearInstanceLease(input.instance);
+      return { status: "done", committed };
+    });
   }
 
   /** Set during one alarm by the idle gate (`idle`), an image-stale container
@@ -3351,9 +3892,11 @@ export class ResidentDO extends Sandbox<Env> {
     action: "none" | "rearmed" | "provision-timed-out" | "auto-rebuilt";
     /** Item 55: the last disk sample's gauge, for the watchdog's status line. */
     disk: { usedKiB: number; totalKiB: number; freeKiB: number; at: string } | null;
+    /** Item 7: what the cron's instance-creation decision reads, after the check above settled the state. */
+    refresh: RefreshRow;
   }> {
     const [check, disk] = await Promise.all([this.watchdogCheckLifecycle(), this.diskGauge()]);
-    return { ...check, disk };
+    return { ...check, disk, refresh: await this.refreshRow() };
   }
 
   private async watchdogCheckLifecycle(): Promise<{
@@ -3396,6 +3939,10 @@ export class ResidentDO extends Sandbox<Env> {
     // Any serving state clears accumulated strikes (a recovery must reset the
     // counter, or an unrelated later down inherits stale strikes).
     await this.ctx.storage.delete(REBUILD_STRIKES_KEY);
+    // Item 7: a resident on the Workflow lifecycle has no chain to re-arm —
+    // its cycles are the instances the cron creates. The sweep re-arm below
+    // is housekeeping either way; the two refresh re-arms are the alarm's.
+    const chained = (await this.getLifecycle()) === "alarm";
 
     // The sweep chain has the same failure mode as the refresh chain (a DO
     // eviction mid-callback kills the self-rescheduling), but nothing re-armed
@@ -3466,8 +4013,22 @@ export class ResidentDO extends Sandbox<Env> {
         // a cycle that recorded a fresh lease between that read and this
         // delete keeps it, the way a release never deletes another holder's row.
         this.hydration = null;
+        if (!chained && (await this.instanceRunning((await this.instanceRow()).instance?.id ?? null))) {
+          // The engine still runs the recorded instance — a step between retry
+          // attempts, holding no lease and writing no state. Not stale: leave
+          // the marker, create nothing (the cron's decision reads the same fact).
+          return { resource, ...status, action: "none" };
+        }
         if (rowAgain.refresh) await this.clearInFlight("refresh", rowAgain.refresh.holder);
         if (rowAgain.hydration) await this.clearInFlight("hydration", rowAgain.hydration.holder);
+        if (!chained) {
+          // The orphan is named the same way; the next instance the cron
+          // creates (this very pass — the marker is no longer `refreshing`)
+          // normalizes it, no alarm involved.
+          const reason = `stale-mid-flight: ${status.state} since ${new Date(updatedAt).toISOString()} with no cycle running; the next refresh instance normalizes it`;
+          await this.setResidentState("degraded", reason);
+          return { resource, state: "degraded", reason, action: "none" };
+        }
         const reason = `stale-mid-flight: ${status.state} since ${new Date(updatedAt).toISOString()} with no cycle running; re-armed by watchdog`;
         await this.setResidentState("degraded", reason);
         this.deleteSchedules(REFRESH_CALLBACK);
@@ -3476,6 +4037,8 @@ export class ResidentDO extends Sandbox<Env> {
       }
     }
 
+    // No chain to be dead under the Workflow lifecycle (item 7).
+    if (!chained) return { resource, ...status, action: "none" };
     const pending = await this.listSchedules(REFRESH_CALLBACK);
     if (pending.length === 0) {
       await this.schedule(5, REFRESH_CALLBACK, resource);
@@ -5550,10 +6113,16 @@ export class ResidentDO extends Sandbox<Env> {
       MIRROR_MUTEX_KEY,
       inFlightKey("refresh"),
       inFlightKey("hydration"),
+      LIFECYCLE_KEY,
+      REFRESH_INSTANCE_KEY,
     ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
     const disk = (map.get(DISK_KEY) as DiskSample | undefined) ?? null;
+    const refreshRow = (map.get(REFRESH_INSTANCE_KEY) as RefreshInstanceRow | undefined) ?? {
+      instance: null,
+      skipped: null,
+    };
     const [refresh, provisionRun, provisionDeadline, bindings] = await Promise.all([
       this.listSchedules(REFRESH_CALLBACK),
       this.listSchedules(PROVISION_RUN_CALLBACK),
@@ -5616,6 +6185,20 @@ export class ResidentDO extends Sandbox<Env> {
         map.get(inFlightKey("refresh")) as Lease | undefined,
         map.get(inFlightKey("hydration")) as Lease | undefined,
       ),
+      // Item 7: which scheduler drives the refresh cycle, and — on the
+      // Workflow lifecycle — the instance the cron last created with the step
+      // it last reported, and the last bucket the cron skipped.
+      lifecycle: lifecycleOf(map.get(LIFECYCLE_KEY)),
+      refresh: {
+        instance: refreshRow.instance
+          ? {
+              id: refreshRow.instance.id,
+              createdAt: refreshRow.instance.createdAt,
+              lastStep: refreshRow.instance.lastStep,
+            }
+          : null,
+        skipped: refreshRow.skipped,
+      },
       threads,
       // Item 55: the last disk sample (`residentDiskBudget.ts` DiskSample), or
       // null before the first measurement of this incarnation.
@@ -5641,12 +6224,16 @@ export class ResidentDO extends Sandbox<Env> {
     return { killed: true, remaining: (await this.listSchedules(REFRESH_CALLBACK)).length };
   }
 
-  /** Pull the next refresh forward to ~1s from now. */
-  async debugRefreshNow(): Promise<{ scheduled: boolean }> {
+  /** Pull the next refresh forward to ~1s from now. A resident on the Workflow
+   *  lifecycle has no chain to pull: its next cycle is the instance the next
+   *  cron firing creates (`run-watchdog` runs that pass on demand). */
+  async debugRefreshNow(): Promise<{ scheduled: boolean; lifecycle: ResidentLifecycle }> {
+    const lifecycle = await this.getLifecycle();
+    if (lifecycle === "workflow") return { scheduled: false, lifecycle };
     const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
     this.deleteSchedules(REFRESH_CALLBACK);
     await this.schedule(1, REFRESH_CALLBACK, resource);
-    return { scheduled: true };
+    return { scheduled: true, lifecycle };
   }
 
   /** Fault injection for the watchdog's stuck-onboarding path: re-persist
@@ -6626,13 +7213,22 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   // deploy gate reads /residents. The registry check rides in the same flight
   // (its 404 is judged first, the probes' results discarded then).
   const stub = residentStub(env, resource.resource);
-  const [record, status, inFlight] = await Promise.all([
+  const [record, status, inFlight, refresh] = await Promise.all([
     registryStub(env).getRecord(resource.resource),
     stub.getStatus(),
     stub.getInFlightCount(),
+    stub.getRefreshView(),
   ]);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
-  return json({ state: status.state, reason: status.reason, inFlight });
+  // Item 7: which scheduler drives the refresh cycle and, on the Workflow
+  // lifecycle, the current instance with its last step and the last skipped bucket.
+  return json({
+    state: status.state,
+    reason: status.reason,
+    inFlight,
+    lifecycle: refresh.lifecycle,
+    refresh: { instance: refresh.instance, skipped: refresh.skipped },
+  });
 }
 
 // -- thread data plane handlers -----------------------------------------------
@@ -6991,20 +7587,87 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       if ("error" in days) return json({ error: days.error }, 400);
       return json(await stub.debugBackdateThread(threadKey.threadKey, days.value));
     }
+    case "lifecycle": {
+      // Item 7: which scheduler drives this resident's refresh cycle. Admin
+      // scope, one resident at a time; the default for every resident is `alarm`.
+      const mode = parseLifecycle(body.mode);
+      if (!mode) return json({ error: 'mode must be "alarm" or "workflow"' }, 400);
+      return json({ op, resource: resource.resource, ...(await stub.setLifecycle(mode)) });
+    }
     default:
       return json(
         {
-          error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, purge-bindings, backdate-thread)`,
+          error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, purge-bindings, backdate-thread, lifecycle)`,
         },
         400,
       );
   }
 }
 
+/** The cron's instance-creation duty for one resident (item 7). Only a
+ *  `workflow` row gets an instance, at most one per ten-minute bucket, never
+ *  while a cycle is live (`shouldCreateRefreshInstance`); the id is
+ *  deterministic per resident and bucket, so a second firing in one bucket
+ *  meets the engine's duplicate-id refusal, which is the expected no-op. A
+ *  skipped live cycle and a duplicate are recorded on the row for `/status`.
+ *  An `alarm` resident answers null: nothing here touches it. */
+/** Whether the engine knows an instance by this id, in any status. A missing
+ *  id rejects on `get` or on `status`; either way the answer is false. */
+async function refreshInstanceExists(env: Env, id: string): Promise<boolean> {
+  try {
+    await (await env.RESIDENT_REFRESH.get(id)).status();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function createRefreshInstance(
+  env: Env,
+  stub: ReturnType<typeof residentStub>,
+  resource: string,
+  row: RefreshRow,
+): Promise<RefreshInstanceAction | null> {
+  if (row.lifecycle !== "workflow") return null;
+  const now = systemClock();
+  const decision = shouldCreateRefreshInstance(row, now, {
+    intervalS: REFRESH_INTERVAL_S,
+    idleIntervalS: IDLE_REFRESH_INTERVAL_S,
+  });
+  const slug = resource.slice("repo:".length);
+  const slash = slug.indexOf("/");
+  const id = refreshInstanceId(slug.slice(0, slash), slug.slice(slash + 1), now);
+  if (!decision.create) {
+    if (decision.why === "mid-cycle" || decision.why === "running")
+      await stub.recordRefreshSkipped(id, now, decision.why);
+    return { id, action: "skipped", why: decision.why };
+  }
+  try {
+    await env.RESIDENT_REFRESH.create({ id, params: { resource } });
+  } catch (err) {
+    const message = errMsg(err);
+    // The engine refuses an id that names an instance still inside its
+    // retention, and the refusal carries no code — so the id is asked, not
+    // the wording: an instance that answers for it exists, and the refusal
+    // was the duplicate it looks like. Any other failure stays a failure.
+    if (await refreshInstanceExists(env, id)) {
+      await stub.recordRefreshSkipped(id, now, "duplicate");
+      return { id, action: "duplicate", why: "duplicate" };
+    }
+    console.error(`resident-watchdog: creating refresh instance ${id} failed — ${message}`);
+    return { id, action: "failed", why: residentText(message) };
+  }
+  await stub.recordRefreshInstance(id, now);
+  console.log(`resident-watchdog: created refresh instance ${id}`);
+  return { id, action: "created", why: decision.why };
+}
+
 /** One watchdog pass over every registered resident. Shared by the cron
  *  handler and the /debug run-watchdog op. Each check targets a different DO,
  *  so they run concurrently; a failing one becomes its own {error} entry
- *  without touching its neighbors, and the results follow the registry list. */
+ *  without touching its neighbors, and the results follow the registry list.
+ *  For a resident on the Workflow lifecycle the pass also creates the refresh
+ *  instance the bucket is due (item 7). */
 async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummary> {
   const registry = registryStub(env);
   const residents = await registry.list();
@@ -7012,13 +7675,15 @@ async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummar
   // one (the cron path; the /debug op runs bare), ending with the action taken
   // — never the resource, which names a repo.
   const checkOne = async (record: { resource: string }, span?: TraceSpan) => {
-    const check = await residentStub(env, record.resource).watchdogCheck();
+    const stub = residentStub(env, record.resource);
+    const check = await stub.watchdogCheck();
     if (check.action === "provision-timed-out") {
       // The DO already tried to release its own slot; this is the backstop.
       await registry.remove(record.resource);
     }
+    const instance = await createRefreshInstance(env, stub, record.resource, check.refresh);
     span?.setAttrs({ outcome: check.action });
-    return check;
+    return { ...check, instance };
   };
   const settled = await Promise.allSettled(
     residents.map((record) =>
@@ -7034,10 +7699,139 @@ async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummar
           reason: s.value.reason,
           action: s.value.action,
           disk: s.value.disk,
+          lifecycle: s.value.refresh.lifecycle,
+          instance: s.value.instance,
         }
       : { resource: record.resource, error: errMsg(s.reason) };
   });
   return { cap: (await registry.limits()).cap, count: residents.length, results };
+}
+
+// ---------------------------------------------------------------------------
+// The refresh cycle as a Workflow instance (docs/reference/specs/resident-repos.md item 7)
+// ---------------------------------------------------------------------------
+
+/** What an instance answers when it ends: small facts for the engine's record. */
+interface RefreshInstanceSummary {
+  instance: string;
+  /** `ok`, or the word a gate or a failure ended the cycle with. */
+  outcome: string;
+  step: "fetch" | "install" | "build" | "snapshot";
+  action?: RefreshPlan["action"];
+  sha?: string;
+}
+
+/** One refresh cycle as one short Workflow instance: `fetch`, `install` (only
+ *  when the plan moved the lockfile key), `build` (only when the branch
+ *  moved), `snapshot` — each a `step.do` calling the resident's own step
+ *  method through the DO stub, under the retry policy `REFRESH_STEP_RETRIES`
+ *  (six attempts, thirty seconds apart, doubling: about 15.5 minutes, past
+ *  the 3 to 10 minutes a resident Worker rollover takes to settle) and a
+ *  timeout equal to the method's own budget (never above the engine's 30
+ *  minutes). Inputs to a step are the event's `resource`, the instance id and
+ *  previous steps' returns — refs, shas, a key, a path — never a payload and
+ *  never a credential. A step killed from outside (the container replaced
+ *  under it) throws and the engine retries it into the same idempotent
+ *  method; a gate that ends the cycle (idle, a container restart) or a
+ *  failure of the repository's own (recorded as `degraded`, the last snapshot
+ *  still serving) ends the instance with that word, and the next cron firing
+ *  creates the next one from the row's state. The instance runs one cycle
+ *  and returns: it is created by the watchdog cron per resident and
+ *  ten-minute bucket (`createRefreshInstance`), never a loop.
+ *
+ *  The run is the cycle's root span, `resident.refresh` carrying the instance
+ *  id (docs/reference/specs/tracing.md item 25), with every command a step ran
+ *  grafted under it as a `resident.<step>` child — the same shape the alarm's
+ *  root has. */
+export class ResidentRefresh extends WorkflowEntrypoint<Env, RefreshInstanceParams> {
+  async run(
+    event: Readonly<WorkflowEvent<RefreshInstanceParams>>,
+    step: WorkflowStep,
+  ): Promise<RefreshInstanceSummary> {
+    const { resource } = event.payload;
+    const instance = event.instanceId;
+    const stub = residentStub(this.env, resource);
+    const root = startAdoptedRoot(tracer, "resident.refresh", {
+      sinks: traceSinks,
+      startedAt: event.timestamp.getTime(),
+      attrs: { instanceId: instance },
+    });
+    const graft = (answer: InstanceStepTrace) =>
+      graftResidentSteps(answer.trace, {
+        parent: root,
+        prefix: "resident",
+        baseAt: answer.startedAt,
+        clipAt: systemClock(),
+      });
+    const retries = REFRESH_STEP_RETRIES;
+    /** The word a step that did not finish ends the instance with, and its outcome for the root. */
+    const ended = (
+      at: RefreshInstanceSummary["step"],
+      answer: { status: "stopped"; why: string } | { status: "failed"; reason: string },
+    ): RefreshInstanceSummary => ({
+      instance,
+      outcome: answer.status === "stopped" ? answer.why : "failed",
+      step: at,
+    });
+    let summary: RefreshInstanceSummary | undefined;
+    try {
+      const fetched = await step.do("fetch", { retries, timeout: stepTimeoutMs(REFRESH_FETCH_STEP_BUDGET_MS) }, () =>
+        stub.refreshInstanceFetch({ resource, instance }),
+      );
+      graft(fetched);
+      if (fetched.status !== "done") return (summary = ended("fetch", fetched));
+      let depsEntry: string | null = null;
+      if (fetched.install) {
+        const installed = await step.do(
+          "install",
+          { retries, timeout: stepTimeoutMs(REFRESH_INSTALL_STEP_BUDGET_MS) },
+          () => stub.refreshInstanceInstall({ resource, instance, sha: fetched.sha, lockfileKey: fetched.lockfileKey }),
+        );
+        graft(installed);
+        if (installed.status !== "done") return (summary = ended("install", installed));
+        depsEntry = installed.entry;
+      }
+      if (fetched.action !== "unchanged") {
+        const built = await step.do("build", { retries, timeout: stepTimeoutMs(REFRESH_BUILD_STEP_BUDGET_MS) }, () =>
+          stub.refreshInstanceBuild({
+            resource,
+            instance,
+            sha: fetched.sha,
+            factsSha: fetched.factsSha,
+            lockfileKey: fetched.lockfileKey,
+            depsEntry,
+          }),
+        );
+        graft(built);
+        if (built.status !== "done") return (summary = ended("build", built));
+      }
+      const snapped = await step.do(
+        "snapshot",
+        { retries, timeout: stepTimeoutMs(REFRESH_SNAPSHOT_STEP_BUDGET_MS) },
+        () =>
+          stub.refreshInstanceSnapshot({
+            resource,
+            instance,
+            ref: fetched.ref,
+            sha: fetched.sha,
+            lockfileKey: fetched.lockfileKey,
+            action: fetched.action,
+            mintError: fetched.mintError,
+          }),
+      );
+      graft(snapped);
+      if (snapped.status !== "done") return (summary = ended("snapshot", snapped));
+      return (summary = { instance, outcome: "ok", step: "snapshot", action: fetched.action, sha: fetched.sha });
+    } catch (err) {
+      // A step out of retries: the engine records the failed instance by id;
+      // the row keeps its last state and the next cron firing starts the next cycle.
+      root.fail(err);
+      throw err;
+    } finally {
+      const outcome = summary?.outcome ?? "error";
+      root.end(outcome === "ok" || (summary !== undefined && outcome !== "failed") ? "ok" : "error", { outcome });
+    }
+  }
 }
 
 function json(data: unknown, status = 200): Response {

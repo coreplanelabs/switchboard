@@ -88,5 +88,9 @@ describe("attrs", () => {
     // The Workers' own roots (docs/reference/specs/tracing.md item 25): counts, never names.
     expect(invalidAttrKeys({ residents: 3, swept: 120 })).toEqual([]);
     expect(invalidAttrKeys({ residents: "3" } as never)).toEqual(["residents"]);
+    // A refresh instance's id is an identifier by the platform's own rule — up to 100 characters, never free text.
+    expect(invalidAttrKeys({ instanceId: `refresh_${"a".repeat(84)}_2946834` })).toEqual([]);
+    expect(invalidAttrKeys({ instanceId: "refresh a/b" })).toEqual(["instanceId"]);
+    expect(invalidAttrKeys({ instanceId: "x".repeat(101) })).toEqual(["instanceId"]);
   });
 });

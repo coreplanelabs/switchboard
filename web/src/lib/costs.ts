@@ -5,15 +5,17 @@ import type { CostReport, DailyCost } from "@core/core/costs.js";
 // Pure data in, pure data out — the component does layout only.
 
 export const DO_LABEL = "Durable Objects";
-/** Workers requests + CPU, SQLite rows + storage, R2 — the meters that are cents
- *  a day at today's volume, stacked as one series so the chart stays legible. */
+/** Workers requests + CPU, SQLite rows + storage, R2, Workflows — the meters
+ *  that are cents a day at today's volume, stacked as one series so the chart
+ *  stays legible. */
 export const PLATFORM_LABEL = "Workers · storage · R2";
 export const LLM_LABEL = "LLM (Anthropic)";
 
 export const usd = (v: number, digits = 2): string => `$${v.toFixed(digits)}`;
 
-/** The day's Workers + SQLite rows/storage + R2 spend. */
-export const platformUsdOf = (d: DailyCost): number => d.workersUsd + d.doRowsUsd + d.doStorageUsd + d.r2Usd;
+/** The day's Workers + SQLite rows/storage + R2 + Workflows spend. */
+export const platformUsdOf = (d: DailyCost): number =>
+  d.workersUsd + d.doRowsUsd + d.doStorageUsd + d.r2Usd + d.workflowsUsd;
 
 /** Every stackable series in a report, in a stable order: containers (order of
  *  first appearance), then DOs as one series, then the platform meters, then LLM. */
@@ -158,6 +160,7 @@ export function resourceSplitOf(report: CostReport): ResourceSplitRow[] {
     ["Durable Object SQLite rows", b.doRows],
     ["Durable Object SQLite storage", b.doStorage],
     ["R2 storage + operations", b.r2],
+    ["Workflow steps + state", b.workflows],
   ];
   const tot = parts.reduce((s, p) => s + p[1], 0) || 1;
   return parts.map(([label, v]) => ({ label, usd: v, percent: (v / tot) * 100 }));

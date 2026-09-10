@@ -813,6 +813,7 @@ const day = (date: string, bot: number, llm: number): DailyCost => ({
   doStorageUsd: 0.01,
   workersUsd: 0.03,
   r2Usd: 0.02,
+  workflowsUsd: 0,
   cloudUsd: bot + 0.56,
   llmUsd: llm,
   total: bot + 0.56 + llm,
@@ -845,6 +846,7 @@ const COSTS: CostReport = {
       doStorage: 0.3,
       workers: 0.9,
       r2: 0.6,
+      workflows: 0,
     },
   },
   // Three other tenants' worth on the same account: the "share of account" tile reads 25%.
@@ -854,6 +856,7 @@ const COSTS: CostReport = {
     containerApps: { "app-bot": "switchboard bot", "app-sandbox": "thread sandboxes" },
     durableObjectNamespaces: { "ns-history": "RunHistoryDO" },
     r2Buckets: { "switchboard-resident-cache": "switchboard-resident-cache" },
+    workflows: {},
   },
 };
 

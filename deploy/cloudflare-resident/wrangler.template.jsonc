@@ -110,6 +110,18 @@
   // this Worker's script (`<script>-cache`), so two installations on one
   // account never share one — and BACKUP_BUCKET_NAME must say the same name.
   "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "{{script}}-cache" }],
+  // The refresh cycle as a Workflow instance (docs/reference/specs/resident-repos.md
+  // item 7): `ResidentRefresh` in worker.ts runs one cycle — fetch, install,
+  // build, snapshot — as steps the engine retries and records, calling the
+  // resident's own step methods. The watchdog cron below creates one instance
+  // per resident whose row says `lifecycle: workflow` (the admin `/debug`
+  // `lifecycle` op flips a resident; the default is the alarm chain, so nothing
+  // here changes a resident until it is flagged). Workflow names are unique per
+  // account, so the name follows this Worker's script (`<script>-refresh`) the
+  // way the bucket does — two installations on one account never share one,
+  // and the costs page attributes the Workflow's steps to this Worker by that
+  // exact name (src/core/costs.ts).
+  "workflows": [{ "name": "{{script}}-refresh", "binding": "RESIDENT_REFRESH", "class_name": "ResidentRefresh" }],
   // Watchdog cadence: every 10 minutes, strictly BELOW the container
   // sleep window (SLEEP_AFTER = "20m" in worker.ts) so a healthy resident is
   // re-warmed before the platform can ever sleep it. Invariant: watchdog/alarm
