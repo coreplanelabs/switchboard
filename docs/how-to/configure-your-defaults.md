@@ -32,6 +32,8 @@ The reply names the effective agent, model and effort for you, where each came f
 | `--effort <low\|medium\|high\|xhigh\|max>` | how hard the model thinks per turn; lower is much faster |
 | `--efforts.<agent> <level>` | the effort for one agent |
 
+A `provider/model` value names a `providers` block from `config.yaml` and a model that provider knows; the first slash is the separator, the rest is passed through. OpenRouter is one such block with no code behind it: `type: openai-compatible`, `baseUrl: https://openrouter.ai/api/v1`, `apiKeyEnv: OPENROUTER_API_KEY` (`config/config.example.yaml` carries it commented out), and because its own ids already name the vendor a model there is `openrouter/anthropic/claude-sonnet-4`. Three things the native adapter does are not done through the compatible one: `--effort` is not sent, so the model runs at its own default; document inputs reach the model as a text note saying the file was not sent; and no provider-side prompt caching is requested, so every turn pays for the whole context.
+
 ## Set a channel's defaults
 
 ```
