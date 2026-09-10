@@ -9,12 +9,19 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 import vueParser from "vue-eslint-parser";
 import { CLOCK_BAN_EXEMPT, CLOCK_BAN_FILES, CLOCK_READS } from "./src/core/trace/clockReads.mjs";
+import { HOST_TOOLING_FILES, SECRET_ENV_EXEMPT, SECRET_ENV_FILES, secretEnvPlugin } from "./src/secretEnv.mjs";
 
 // The clock ratchet (docs/reference/specs/tracing.md item 8): production code reads the wall
 // clock only through the injected `clock()` — `src/core/trace/clock.ts` and the
 // web's `wallClock.ts` are the two files that touch `Date`. The allowlist that
 // once exempted files still reading directly is empty; `clock-ban` applies
 // everywhere the ratchet does (src/core/trace/clockAllowlist.test.ts keeps it so).
+//
+// no-raw-env (docs/reference/specs/routing-and-config.md item 19): a credential is read
+// from `process.env` in src/secrets.ts and nowhere else. Every other production
+// file under src/ may read the public variables by name and nothing more; the
+// operator-side tooling keeps its bare `process.env` (it spawns wrangler with
+// the operator's environment) but may not read a secret by name either.
 
 export default tseslint.config(
   {
@@ -79,6 +86,18 @@ export default tseslint.config(
     rules: {
       "no-restricted-syntax": ["error", ...CLOCK_READS.map((r) => ({ selector: r.selector, message: r.message }))],
     },
+  },
+  {
+    files: [...SECRET_ENV_FILES],
+    ignores: [...SECRET_ENV_EXEMPT, ...HOST_TOOLING_FILES],
+    plugins: { secrets: secretEnvPlugin },
+    rules: { "secrets/no-raw-env": "error" },
+  },
+  {
+    files: [...HOST_TOOLING_FILES],
+    ignores: [...SECRET_ENV_EXEMPT],
+    plugins: { secrets: secretEnvPlugin },
+    rules: { "secrets/no-raw-env": ["error", { hostTooling: true }] },
   },
   prettier,
 );

@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 import { type AccessConfig, type AccessIdentity, type VerifyDeps, verifyAccessJwt } from "./accessAuth.js";
+import type { Secrets } from "../secrets.js";
 import {
   DEFAULT_DASHBOARD_TOKEN_ENV,
   resolveDashboardAuthMode,
@@ -182,7 +183,8 @@ export interface BuildDashboardVerifierInputs {
   dashboard: DashboardConfig | undefined;
   /** `parseAccessConfig(env)`: null when ACCESS_TEAM_DOMAIN / ACCESS_AUD are not both set. */
   access: AccessConfig | null;
-  env: NodeJS.ProcessEnv;
+  /** The process's credentials: the `token` strategy reads its bearer from the variable `dashboard.token.env` names. */
+  secrets: Secrets;
   /** The JWT verifier's deps (JWKS fetcher, clock, shared cache) for `access`. */
   verify: VerifyDeps;
   publicBaseUrl: string | undefined;
@@ -199,7 +201,7 @@ export interface BuildDashboardVerifierInputs {
  * localhost deployment now admits its loopback callers without a variable.
  */
 export function buildDashboardVerifier(inputs: BuildDashboardVerifierInputs): DashboardVerifier {
-  const { dashboard, access, env, publicBaseUrl } = inputs;
+  const { dashboard, access, secrets, publicBaseUrl } = inputs;
   const mode = resolveDashboardAuthMode(dashboard?.auth, access !== null);
   switch (mode) {
     case "access": {
@@ -217,9 +219,9 @@ export function buildDashboardVerifier(inputs: BuildDashboardVerifierInputs): Da
       if (subject === undefined) {
         throw new Error("dashboard.auth is token: dashboard.token.actor must name the bearer's actor as access:<name>");
       }
-      const token = (env[envName] ?? "").trim();
-      if (token === "") throw new Error(`dashboard.auth is token but ${envName} is not set`);
-      return tokenVerifier({ token, env: envName, subject });
+      const token = secrets.named(envName);
+      if (!token) throw new Error(`dashboard.auth is token but ${envName} is not set`);
+      return tokenVerifier({ token: token.reveal(), env: envName, subject });
     }
     case "none": {
       if (dashboard?.auth === "none" && !isLocalhostBase(publicBaseUrl)) {

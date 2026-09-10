@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "../../secrets.js";
 import { ConfigStore, InMemoryOverridesBacking } from "../../config.js";
 import { InMemoryMcpClient } from "../../mcp/fake.js";
 import { importCredentialKey } from "../../mcp/sealed.js";
@@ -51,7 +52,7 @@ function service() {
     key: importCredentialKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
     factory: () => new InMemoryMcpClient([{ name: "search", inputSchema: {}, annotations: { readOnlyHint: true } }]),
     publicBaseUrl: "https://switchboard.test",
-    env: {},
+    bearers: secretsFrom({}),
     // Auth detection (item 18): every server here answers 401 without OAuth metadata → `bearer`.
     fetch: async () => new Response("", { status: 401 }),
     now: () => 1_000_000,

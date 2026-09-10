@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import { AGENTS } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { LocalExecutor } from "./executor.js";
@@ -574,7 +575,7 @@ describe("residentOnboardedProbe", () => {
     resetResidentProbeCache();
   });
   const cfg = { baseUrl: "https://resident.example" };
-  const env = { RESIDENT_OPERATOR_TOKEN: "op-tok" } as NodeJS.ProcessEnv;
+  const env = secretsFrom({ RESIDENT_OPERATOR_TOKEN: "op-tok" });
   const answer = (status: number, body: unknown = {}) =>
     vi.stubGlobal(
       "fetch",
@@ -603,7 +604,7 @@ describe("residentOnboardedProbe", () => {
 
   it("undefined without the resident config or the operator bearer", () => {
     expect(residentOnboardedProbe(undefined, env)).toBeUndefined();
-    expect(residentOnboardedProbe(cfg, {} as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(residentOnboardedProbe(cfg, secretsFrom({}))).toBeUndefined();
   });
 });
 
@@ -618,7 +619,7 @@ describe("residentSlugsLister", () => {
     resetResidentProbeCache();
   });
   const cfg = { baseUrl: "https://resident.example/" };
-  const env = { RESIDENT_ADMIN_TOKEN: "admin-tok" } as NodeJS.ProcessEnv;
+  const env = secretsFrom({ RESIDENT_ADMIN_TOKEN: "admin-tok" });
 
   function stubFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
     const fn = vi.fn(async (url: unknown, init?: RequestInit) => handler(String(url), init));
@@ -651,9 +652,9 @@ describe("residentSlugsLister", () => {
 
   it("is undefined without the resident config or the admin bearer (names are then ignored by the resolver)", () => {
     expect(residentSlugsLister(undefined, env)).toBeUndefined();
-    expect(residentSlugsLister(cfg, {} as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(residentSlugsLister(cfg, secretsFrom({}))).toBeUndefined();
     expect(residentSlugsLister({ ...cfg, adminTokenEnv: "OTHER" }, env)).toBeUndefined();
-    expect(residentSlugsLister({ ...cfg, adminTokenEnv: "OTHER" }, { OTHER: "x" } as NodeJS.ProcessEnv)).toBeDefined();
+    expect(residentSlugsLister({ ...cfg, adminTokenEnv: "OTHER" }, secretsFrom({ OTHER: "x" }))).toBeDefined();
   });
 
   it("a non-2xx answer or a body without a residents array is no answer (undefined)", async () => {

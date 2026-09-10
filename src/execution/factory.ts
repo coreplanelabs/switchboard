@@ -14,6 +14,7 @@ import { repoResourceId } from "../core/residentAdmin.js";
 import { resolveGithubToken } from "./githubApp.js";
 import { isServiceable } from "./residentState.js";
 import { systemClock } from "../core/trace/clock.js";
+import { processSecrets, type Secret, type Secrets } from "../secrets.js";
 
 export interface ResidentExecutionConfig {
   /** base URL of the resident Worker (deploy/cloudflare-resident/) */
@@ -159,7 +160,7 @@ export async function makeExecutor(
   if (ctx.repo && opts.execution?.resident) {
     const resident = opts.execution.resident;
     const tokenEnv = resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN";
-    const token = process.env[tokenEnv];
+    const token = processSecrets.named(tokenEnv);
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
     const resource = repoResourceId(ctx.repo);
     const probe = await probeResident(resident, token, resource, span);
@@ -184,7 +185,7 @@ export async function makeExecutor(
         return await openResident(
           {
             baseUrl: resident.baseUrl,
-            token,
+            token: token.reveal(),
             resource,
             threadKey: ctx.threadKey,
             refHint: ctx.ref,
@@ -305,9 +306,9 @@ async function openResident(
  *  local/dev. */
 export function residentOnboardedProbe(
   cfg: ResidentExecutionConfig | undefined,
-  env: NodeJS.ProcessEnv = process.env,
+  secrets: Secrets = processSecrets,
 ): ((slug: string) => Promise<boolean | "unreachable">) | undefined {
-  const token = cfg?.baseUrl ? env[cfg.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN"] : undefined;
+  const token = cfg?.baseUrl ? secrets.named(cfg.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN") : undefined;
   if (!cfg?.baseUrl || !token) return undefined;
   return async (slug) => {
     const probe = await probeResident(cfg, token, repoResourceId(slug));
@@ -326,16 +327,16 @@ export function residentOnboardedProbe(
  *  bearer is unset (local/dev): names are ignored, slug addressing still works. */
 export function residentSlugsLister(
   cfg: ResidentExecutionConfig | undefined,
-  env: NodeJS.ProcessEnv = process.env,
+  secrets: Secrets = processSecrets,
 ): (() => Promise<string[] | undefined>) | undefined {
-  const token = cfg?.baseUrl ? env[cfg.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN"] : undefined;
+  const token = cfg?.baseUrl ? secrets.named(cfg.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN") : undefined;
   if (!cfg?.baseUrl || !token) return undefined;
   return async () => {
     if (probeOutage && systemClock() < probeOutage.until) return undefined;
     let res: Response;
     try {
       res = await fetch(`${cfg.baseUrl.replace(/\/$/, "")}/residents`, {
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token.reveal()}` },
         signal: AbortSignal.timeout(cfg.probeTimeoutMs ?? 2000),
       });
     } catch (err) {
@@ -361,14 +362,20 @@ export function residentSlugsLister(
  *  cached transport failure answers without a fetch. */
 async function probeResident(
   cfg: ResidentExecutionConfig,
-  token: string,
+  token: Secret,
   resource: string,
   span?: Span,
 ): Promise<ResidentStatusProbe> {
   if (probeOutage && systemClock() < probeOutage.until) {
     return { kind: "unreachable", error: `${probeOutage.error}; probe skipped during outage window`, transport: true };
   }
-  const probe = await ResidentExecutor.probeStatus(cfg.baseUrl, token, resource, cfg.probeTimeoutMs ?? 2000, span);
+  const probe = await ResidentExecutor.probeStatus(
+    cfg.baseUrl,
+    token.reveal(),
+    resource,
+    cfg.probeTimeoutMs ?? 2000,
+    span,
+  );
   if (probe.kind === "unreachable" && probe.transport) {
     probeOutage = { until: systemClock() + PROBE_OUTAGE_WINDOW_MS, error: probe.error };
   }
@@ -396,10 +403,10 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: Executor
 
   if (type === "e2b") {
     const apiKeyEnv = opts.execution?.apiKeyEnv ?? "E2B_API_KEY";
-    const apiKey = process.env[apiKeyEnv];
+    const apiKey = processSecrets.named(apiKeyEnv);
     if (!apiKey) throw new Error(`execution.type is "e2b" but ${apiKeyEnv} is not set`);
     return E2BExecutor.open({
-      apiKey,
+      apiKey: apiKey.reveal(),
       threadKey,
       timeoutMs: (opts.execution?.timeoutMinutes ?? 30) * 60_000,
       statePath: resolve(opts.dataDir, "sandboxes.json"),
@@ -414,11 +421,11 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: Executor
       throw new Error(`execution.type is "cloudflare" but execution.url is not set`);
     }
     const apiKeyEnv = opts.execution.apiKeyEnv ?? "SANDBOX_TOKEN";
-    const token = process.env[apiKeyEnv];
+    const token = processSecrets.named(apiKeyEnv);
     if (!token) throw new Error(`execution.type is "cloudflare" but ${apiKeyEnv} is not set`);
     return new CloudflareSandboxExecutor({
       url: opts.execution.url,
-      token,
+      token: token.reveal(),
       threadKey,
       resolveEnvs: () => githubEnvs(ctx.agent),
       repo: ctx.repo,

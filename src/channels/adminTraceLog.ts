@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { authorizeIngressBearer } from "../deploy/restart.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
 import type { SpanLog, SpanLogQuery } from "../core/trace/spanLog.js";
+import type { Secret } from "../secrets.js";
 
 // `GET /admin/trace/log` (docs/reference/specs/tracing.md item 26): the bot's own span log,
 // for an ingress bearer whose actor holds `trace:read` — readable by us, never
@@ -18,8 +19,8 @@ const SPAN_NAME = /^[a-z0-9_.-]{1,64}$/;
 export interface AdminTraceLogDeps {
   /** Grants by actor id (`ConfigStore.grantsFor`): the bearer's `http:<subject>` must hold `trace:read`. */
   grantsFor: GrantsLookup;
-  /** `SWITCHBOARD_INGRESS_TOKENS` as the process sees it. */
-  tokens: string | undefined;
+  /** The `SWITCHBOARD_INGRESS_TOKENS` secret as the process sees it. */
+  tokens: Secret | undefined;
   spanLog: SpanLog;
   log?: (line: string) => void;
 }
@@ -66,7 +67,7 @@ export function handleAdminTraceLog(req: IncomingMessage, res: ServerResponse, d
   }
   const auth = authorizeIngressBearer(
     req.headers.authorization,
-    deps.tokens,
+    deps.tokens?.reveal(),
     deps.grantsFor,
     TRACE_LOG_SCOPE,
     "trace log",

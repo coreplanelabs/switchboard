@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "./secrets.js";
 import {
   BASE_CONFIG_DOCUMENT_KEY,
   baseConfigDocument,
@@ -6,7 +7,7 @@ import {
   isBaseConfigDocument,
   parseConfigLocation,
   STATE_CONFIG_LOCATION,
-  stateWorkerFromEnv,
+  stateWorkerFrom,
   type BaseConfigDocument,
 } from "./configDocument.js";
 
@@ -38,18 +39,18 @@ describe("baseConfigDocument / isBaseConfigDocument", () => {
   });
 });
 
-describe("stateWorkerFromEnv", () => {
-  it("needs both the URL and the bearer, naming the missing one", () => {
-    expect(stateWorkerFromEnv({ STATE_WORKER_URL: "https://s.example", MEMORY_TOKEN: "t" })).toEqual({
-      ok: true,
-      baseUrl: "https://s.example",
-      token: "t",
-    });
-    expect(stateWorkerFromEnv({ MEMORY_TOKEN: "t" })).toMatchObject({
+describe("stateWorkerFrom", () => {
+  it("needs both the URL and the bearer, naming the missing one; the bearer comes back wrapped", () => {
+    const both = stateWorkerFrom({ STATE_WORKER_URL: "https://s.example" }, secretsFrom({ MEMORY_TOKEN: "t" }));
+    expect(both).toMatchObject({ ok: true, baseUrl: "https://s.example" });
+    if (!both.ok) throw new Error("unreachable");
+    expect(both.token.reveal()).toBe("t");
+    expect(`${both.token}`).toBe("[secret:MEMORY_TOKEN]");
+    expect(stateWorkerFrom({}, secretsFrom({ MEMORY_TOKEN: "t" }))).toMatchObject({
       ok: false,
       problem: expect.stringContaining("STATE_WORKER_URL is not set"),
     });
-    expect(stateWorkerFromEnv({ STATE_WORKER_URL: "https://s.example" })).toMatchObject({
+    expect(stateWorkerFrom({ STATE_WORKER_URL: "https://s.example" }, secretsFrom({}))).toMatchObject({
       ok: false,
       problem: expect.stringContaining("MEMORY_TOKEN is not set"),
     });

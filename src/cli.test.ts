@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "./secrets.js";
 import { z } from "zod";
 import {
   CommandError,
@@ -412,7 +413,7 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     });
     const commands = buildCoreCommands(config, store, {
       registry: new RunRegistry({ now: () => NOW }),
-      env: {},
+      secrets: secretsFrom({}),
       dataDir: dir,
       warn: () => {},
     });
@@ -458,7 +459,7 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     };
     const commands = buildCoreCommands(new ConfigStore(cfg, join(dir, "overrides.json")), null, {
       registry: new RunRegistry({ now: () => NOW }),
-      env: {},
+      secrets: secretsFrom({}),
       dataDir: dir,
       warn: () => {},
       affected: async (opts) => {
@@ -606,7 +607,7 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
     };
     const commands = buildCoreCommands(config, store, {
       registry: new RunRegistry({ now: () => NOW }),
-      env: {},
+      secrets: secretsFrom({}),
       dataDir: join(missing, ".."),
       warn: () => {},
     });
@@ -649,7 +650,7 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
     const config = bindBotConfig(cfg, join(dir, "overrides.json"), { env: {}, warn: () => {} });
     const commands = buildCoreCommands(config, () => null, {
       registry: new RunRegistry({ now: () => NOW }),
-      env: {},
+      secrets: secretsFrom({}),
       dataDir: dir,
       warn: () => {},
     });
@@ -713,7 +714,7 @@ describe("a command that never touches the config never waits for the open", () 
     const hanging: typeof fetch = () => new Promise(() => {}); // the Worker never answers
     let asked = 0;
     const config = bindBotConfig(cfg, join(dir, "overrides.json"), {
-      env: { MEMORY_TOKEN: "t" },
+      secrets: secretsFrom({ MEMORY_TOKEN: "t" }),
       warn: () => {},
       fetch: hanging,
     });
@@ -723,7 +724,7 @@ describe("a command that never touches the config never waits for the open", () 
     };
     const commands = buildCoreCommands(counted, () => null, {
       registry: new RunRegistry({ now: () => NOW }),
-      env: {},
+      secrets: secretsFrom({}),
       dataDir: dir,
       warn: () => {},
     });
@@ -757,25 +758,25 @@ describe("cliCapabilities — what the CLI's catalogue is bound to", () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-cli-caps-"));
     const cfg = join(dir, "config.yaml");
     writeFileSync(cfg, yaml("memory:\n  enabled: true\nrunHistory:\n  worker:\n    baseUrl: https://state.example\n"));
-    expect(cliCapabilities(cfg, {})).toMatchObject({ memory: true, runHistory: false, mcp: false });
-    expect(cliCapabilities(cfg, { MEMORY_TOKEN: "t" })).toMatchObject({
+    expect(cliCapabilities(cfg, {}, secretsFrom({}))).toMatchObject({ memory: true, runHistory: false, mcp: false });
+    expect(cliCapabilities(cfg, {}, secretsFrom({ MEMORY_TOKEN: "t" }))).toMatchObject({
       memory: true,
       runHistory: true,
       runLedger: true,
     });
     writeFileSync(cfg, yaml(""));
-    expect(cliCapabilities(cfg, {})).toEqual(NO_CAPABILITIES);
+    expect(cliCapabilities(cfg, {}, secretsFrom({}))).toEqual(NO_CAPABILITIES);
   });
 
   it("no file, a `state://` location, or a file that does not parse → the full catalogue (a command that needs the config still fails `unavailable` naming the cause)", () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-cli-caps-"));
-    expect(cliCapabilities(join(dir, "missing.yaml"), {})).toEqual(ALL_CAPABILITIES);
-    expect(cliCapabilities("state://base", { STATE_WORKER_URL: "https://s", MEMORY_TOKEN: "t" })).toEqual(
-      ALL_CAPABILITIES,
-    );
+    expect(cliCapabilities(join(dir, "missing.yaml"), {}, secretsFrom({}))).toEqual(ALL_CAPABILITIES);
+    expect(
+      cliCapabilities("state://base", { STATE_WORKER_URL: "https://s" }, secretsFrom({ MEMORY_TOKEN: "t" })),
+    ).toEqual(ALL_CAPABILITIES);
     const bad = join(dir, "bad.yaml");
     writeFileSync(bad, "organization: acme\nproviders: 3\n");
-    expect(cliCapabilities(bad, {})).toEqual(ALL_CAPABILITIES);
+    expect(cliCapabilities(bad, {}, secretsFrom({}))).toEqual(ALL_CAPABILITIES);
   });
 
   it("the bound CLI catalogue reflects it: `memory list` is a usage error (exit 2) under a config without memory, a command under one with it", async () => {
@@ -785,10 +786,10 @@ describe("cliCapabilities — what the CLI's catalogue is bound to", () => {
     const bind = (path: string) =>
       buildCoreCommands(bindBotConfig(path, join(dir, "overrides.json"), { env: {} }), () => null, {
         registry: new RunRegistry({ now: () => NOW }),
-        env: {},
+        secrets: secretsFrom({}),
         dataDir: dir,
         warn: () => {},
-        capabilities: cliCapabilities(path, {}),
+        capabilities: cliCapabilities(path, {}, secretsFrom({})),
       });
     const off = bind(cfg);
     const parsed = parseCliArgv(["memory", "list"], off);

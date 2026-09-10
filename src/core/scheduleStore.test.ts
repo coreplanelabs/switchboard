@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import {
   buildScheduleStore,
   InMemoryScheduleStore,
@@ -119,26 +120,34 @@ describe("WorkerScheduleStore (HTTPS client to the state Worker)", () => {
 describe("buildScheduleStore (startup selection)", () => {
   it("worker + bearer → the durable Worker store", () => {
     const warn = vi.fn();
-    const store = buildScheduleStore({ worker: { baseUrl: "https://m.test", tokenEnv: "T" } }, { T: "secret" }, warn);
+    const store = buildScheduleStore(
+      { worker: { baseUrl: "https://m.test", tokenEnv: "T" } },
+      secretsFrom({ T: "secret" }),
+      warn,
+    );
     expect(store).toBeInstanceOf(WorkerScheduleStore);
     expect(warn).not.toHaveBeenCalled();
   });
 
   it("defaults the bearer env var to MEMORY_TOKEN (the state Worker's one secret)", () => {
-    const store = buildScheduleStore({ worker: { baseUrl: "https://m.test" } }, { MEMORY_TOKEN: "secret" }, vi.fn());
+    const store = buildScheduleStore(
+      { worker: { baseUrl: "https://m.test" } },
+      secretsFrom({ MEMORY_TOKEN: "secret" }),
+      vi.fn(),
+    );
     expect(store).toBeInstanceOf(WorkerScheduleStore);
   });
 
   it("no config → undefined with a warning naming what to set (the panel says firings are unavailable)", () => {
     const warn = vi.fn();
-    expect(buildScheduleStore(undefined, {}, warn)).toBeUndefined();
+    expect(buildScheduleStore(undefined, secretsFrom({}), warn)).toBeUndefined();
     expect(warn.mock.calls[0][0]).toContain("schedules.worker.baseUrl");
   });
 
   it("worker configured but its bearer unset → undefined with a warning naming the env var", () => {
     const warn = vi.fn();
     expect(
-      buildScheduleStore({ worker: { baseUrl: "https://m.test", tokenEnv: "STATE_BEARER" } }, {}, warn),
+      buildScheduleStore({ worker: { baseUrl: "https://m.test", tokenEnv: "STATE_BEARER" } }, secretsFrom({}), warn),
     ).toBeUndefined();
     expect(warn.mock.calls[0][0]).toContain("STATE_BEARER");
   });

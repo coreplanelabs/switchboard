@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import { ConfigStore, InMemoryOverridesBacking } from "../config.js";
 import { fakeAuthorizationServer, InMemoryMcpClient, type FakeAuthorizationServerOptions } from "../mcp/fake.js";
 import { MCP_TOKEN_MAX_CHARS } from "../mcp/registry.js";
@@ -37,7 +38,7 @@ function harness(opts: { rejectTokens?: string[]; email?: string; oauth?: FakeAu
     key: importCredentialKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
     publicBaseUrl: "https://switchboard.test",
     fetch: as.fetch,
-    env: {},
+    bearers: secretsFrom({}),
     resolveEmail: opts.email ? async () => opts.email : undefined,
     now: () => 1_000_000,
     nonce: () => `nonce-${String(++n).padStart(20, "0")}`,

@@ -79,4 +79,51 @@ describe("deploy/secrets.manifest.json", () => {
   it("STATE_WORKER_URL is a var, never a secret — it is a public URL", () => {
     expect(manifest.secrets.map((s) => s.name)).not.toContain("STATE_WORKER_URL");
   });
+
+  it("the image carries the manifest: src/secrets.ts reads it at startup, so a container without it cannot start", () => {
+    const dockerfile = readFileSync(resolve(ROOT, "Dockerfile"), "utf8");
+    expect(dockerfile).toMatch(/^COPY deploy\/secrets\.manifest\.json \.\/deploy\/$/m);
+  });
+
+  it("the build context carries the manifest: .dockerignore excludes deploy/ but not this file (a COPY of an ignored path fails the image build)", () => {
+    const rules = readFileSync(resolve(ROOT, ".dockerignore"), "utf8");
+    expect(dockerIgnores(rules, MANIFEST_PATH)).toBe(false);
+    // The matcher itself, against the file's own shape: the directory rule
+    // covers its children, a later negation wins, an unrelated path is kept.
+    expect(dockerIgnores(rules, "deploy/cloudflare/worker.ts")).toBe(true);
+    expect(dockerIgnores(rules, "deploy/cloudflare/package.json")).toBe(false);
+    expect(dockerIgnores(rules, "deploy/profile.example.json")).toBe(false);
+    expect(dockerIgnores(rules, "src/index.ts")).toBe(false);
+    expect(dockerIgnores("deploy\n!deploy/x.json\ndeploy/x.json\n", "deploy/x.json")).toBe(true);
+  });
 });
+
+/** Whether `.dockerignore` text excludes `path` from the build context, the way
+ *  Docker decides it: patterns are root-anchored and matched segment by segment
+ *  (`*` within a segment, `**` across segments); a pattern that names a directory
+ *  covers everything under it; the LAST matching rule wins, `!` re-includes. */
+function dockerIgnores(text: string, path: string): boolean {
+  const target = path.split("/");
+  let ignored = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const negated = line.startsWith("!");
+    const pattern = (negated ? line.slice(1) : line).replace(/^\/+|\/+$/g, "").split("/");
+    if (segmentsMatch(pattern, target)) ignored = !negated;
+  }
+  return ignored;
+}
+
+function segmentsMatch(pattern: string[], target: string[]): boolean {
+  if (pattern.length === 0) return true; // the pattern named an ancestor directory (or `**` consumed the rest)
+  if (target.length === 0) return false;
+  const [head, ...rest] = pattern;
+  if (head === "**") return segmentsMatch(rest, target) || segmentsMatch(pattern, target.slice(1));
+  const re = new RegExp(`^${head.split("*").map(escapeRegExp).join("[^/]*")}$`);
+  return re.test(target[0]) && segmentsMatch(rest, target.slice(1));
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

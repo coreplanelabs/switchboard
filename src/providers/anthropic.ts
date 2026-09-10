@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Effort } from "../effort.js";
+import { processSecrets } from "../secrets.js";
 import type {
   ChatMessage,
   CompletionRequest,
@@ -19,9 +20,10 @@ export class AnthropicProvider implements Provider {
 
   constructor(name: string, cfg: ProviderConfig, client?: AnthropicClientLike) {
     this.name = name;
-    const apiKey = cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined;
+    const apiKey = cfg.apiKeyEnv ? processSecrets.named(cfg.apiKeyEnv) : undefined;
     // Falls back to ANTHROPIC_API_KEY / ambient credentials when apiKeyEnv is unset.
-    this.client = client ?? new Anthropic(apiKey ? { apiKey } : {});
+    // The key is revealed into the SDK's constructor and held nowhere else here.
+    this.client = client ?? new Anthropic(apiKey ? { apiKey: apiKey.reveal() } : {});
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {

@@ -1,5 +1,6 @@
 import { isScheduleFiring, type ScheduleFiring } from "./schedules.js";
 import { errorSuffix } from "./workerError.js";
+import type { Secrets } from "../secrets.js";
 
 // Where scheduled firings are recorded. The Worker shim writes one
 // `ScheduleFiring` per cron firing; the bot's /runs "Scheduled" panel reads the
@@ -117,7 +118,7 @@ export interface SchedulesConfig {
  *  warning naming exactly what is missing. Pure w.r.t. the environment. */
 export function buildScheduleStore(
   cfg: SchedulesConfig | undefined,
-  env: Record<string, string | undefined>,
+  secrets: Secrets,
   warn: (message: string) => void,
 ): ScheduleStore | undefined {
   const worker = cfg?.worker;
@@ -128,12 +129,12 @@ export function buildScheduleStore(
     return undefined;
   }
   const tokenEnv = worker.tokenEnv ?? DEFAULT_SCHEDULE_TOKEN_ENV;
-  const token = env[tokenEnv]?.trim();
+  const token = secrets.named(tokenEnv);
   if (!token) {
     warn(
       `schedules.worker is configured but ${tokenEnv} is unset — firing history unavailable. Set ${tokenEnv} to the state Worker's bearer.`,
     );
     return undefined;
   }
-  return new WorkerScheduleStore({ baseUrl: worker.baseUrl, token });
+  return new WorkerScheduleStore({ baseUrl: worker.baseUrl, token: token.reveal() });
 }

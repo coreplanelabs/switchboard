@@ -1,6 +1,7 @@
 import { AGENTS } from "../agents/registry.js";
 import type { ConfigStore, ResolvedMcpServer, Scope } from "../config.js";
 import { assertUrlAllowed, BlockedUrlError, type FetchLike } from "../tools/web.js";
+import type { Secrets } from "../secrets.js";
 import {
   newTicket,
   planCallback,
@@ -83,7 +84,8 @@ export interface McpServiceOptions {
    *  18); absent → `mcp add` needs an explicit `--auth` and oauth servers
    *  cannot be connected. */
   fetch?: FetchLike;
-  env: Record<string, string | undefined>;
+  /** The process's credentials: a server pinned with `tokenEnv` reads its bearer here. */
+  bearers: Secrets;
   /** Resolve a chat user's email so a ticket binds to it; undefined → bind-on-first-open. */
   resolveEmail?: (userId: string) => Promise<string | undefined>;
   now?: () => number;
@@ -821,9 +823,9 @@ export class McpService {
     };
     if (r.entry.auth === "none") return { spec: base };
     if (r.entry.tokenEnv) {
-      const token = this.opts.env[r.entry.tokenEnv];
+      const token = this.opts.bearers.named(r.entry.tokenEnv);
       return token
-        ? { spec: { ...base, auth: { type: "bearer", token } } }
+        ? { spec: { ...base, auth: { type: "bearer", token: token.reveal() } } }
         : { name: r.name, unavailable: `${r.entry.tokenEnv} is not set on the bot` };
     }
     if (!this.opts.key) return { name: r.name, unavailable: "credential key not configured on this bot" };

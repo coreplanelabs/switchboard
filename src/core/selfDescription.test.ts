@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import { AGENTS } from "../agents/registry.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
 import { buildCoreCommands } from "./commandCatalogue.js";
@@ -26,7 +27,7 @@ function chatCommands(caps: Capabilities): Set<string> {
       throw new Error("config never read by list()");
     },
     null,
-    { registry: new RunRegistry(), env: {}, dataDir: ".", warn: () => {}, capabilities: caps },
+    { registry: new RunRegistry(), secrets: secretsFrom({}), dataDir: ".", warn: () => {}, capabilities: caps },
   );
   return new Set(
     commands

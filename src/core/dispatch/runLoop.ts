@@ -33,6 +33,7 @@ import type { RunEnding } from "../runEnding.js";
 import type { LiveThread } from "../threadAdmission.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
+import { publicEnv } from "../../secrets.js";
 import type { ChannelIO, IncomingMessage, StatusHandle } from "../types.js";
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
@@ -259,7 +260,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     const started = startReviewReadingDiff({
       executor,
       cfg: deps.config.config.review?.readingDiff,
-      env: process.env,
+      env: publicEnv(),
       baseRef: repoCtx.baseRef,
       publish: (e) => registry.publish(run.id, e),
       parent: root,

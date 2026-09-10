@@ -7,6 +7,7 @@ import { parseIngressTokenMap, type IngressIdentity } from "../core/ingressToken
 import { hasAction } from "../core/authz/authorize.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
 import type { Grants } from "../core/authz/types.js";
+import type { Secrets } from "../secrets.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusHandle, StatusUpdate } from "../core/types.js";
 
 // HTTP channel adapter: adapter #3. Like Slack and the CLI, it is pure
@@ -434,9 +435,9 @@ export function createIngressHandler(
  * rather than silently opening the endpoint; any field of an entry other than
  * `subject` and `channel` is ignored.
  */
-export function parseIngressTokens(env: Record<string, string | undefined>): IngressConfig {
+export function parseIngressTokens(secrets: Secrets): IngressConfig {
   // One parser for the bot and the Worker shim (src/core/ingressTokens.ts).
-  const parsed = parseIngressTokenMap(env.SWITCHBOARD_INGRESS_TOKENS);
+  const parsed = parseIngressTokenMap(secrets.get("SWITCHBOARD_INGRESS_TOKENS")?.reveal());
   if (!parsed.ok) console.error(`[ingress] SWITCHBOARD_INGRESS_TOKENS is ${parsed.reason} — ingress disabled`);
   return { tokens: parsed.tokens };
 }

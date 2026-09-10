@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { processSecrets } from "../../secrets.js";
 import { ConfigStore } from "../../config.js";
 import { parseDirectives } from "../../directives.js";
 import { buildCoreCommands } from "../commandCatalogue.js";
@@ -44,7 +45,7 @@ function deps(withCommands: boolean): FastPathDeps {
   const registry = new RunRegistry();
   const commands = buildCoreCommands(config, null, {
     registry,
-    env: process.env,
+    secrets: processSecrets,
     dataDir: dir,
     warn: () => {},
     audit: () => {},

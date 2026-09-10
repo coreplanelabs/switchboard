@@ -60,6 +60,7 @@ An entry has three axes (actions, channels, repositories); an absent axis is emp
 | Default | If you do nothing |
 |---|---|
 | Credentials come from the environment only | A key in `config.yaml` is not read; a missing one fails startup. |
+| A credential in the process is a `Secret` | Read once through one module and revealed only where it crosses a boundary — an SDK constructor, an `Authorization` header, a sandbox's env. Logged, stringified or serialized, it is `[secret:<NAME>]`; a raw `process.env` read of one anywhere else is a lint error, so a new leak fails CI. |
 | Channel config, repository management, run operations | Never a baseline; only an entry or an admin's `all` confers them. |
 | The review agent's sandbox | A read-only GitHub token, whatever the model attempts. |
 | Trace context from an outside caller | Stripped and re-minted. |

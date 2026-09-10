@@ -70,6 +70,9 @@ COPY package.json project.json build.jso[n] ./
 COPY .env.example ./
 COPY config/config.example.yaml ./config/
 COPY deploy/profile.example.json ./deploy/
+# Which environment variables are credentials: src/secrets.ts reads the manifest at
+# startup (src/core/secretsManifest.test.ts holds this line in place).
+COPY deploy/secrets.manifest.json ./deploy/
 # Bundled skills (#100): loaded at startup by BundledSkillStore from /app/skills.
 COPY skills ./skills
 RUN mkdir -p /app/data /app/workspaces && chown -R switchboard:switchboard /app

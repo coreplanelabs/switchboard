@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
+import { secretsFrom } from "./secrets.js";
 import {
   ConfigStore,
   FileOverridesBacking,
@@ -766,19 +767,21 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
 
   it("overridesBackingFor: no `runtimeOverrides` → the file; a worker → WorkerOverridesBacking; a worker without its bearer → a startup error naming the env var", () => {
     const base = { providers: {}, defaults: { agent: "general", models: {} } } as unknown as AppConfig;
-    expect(overridesBackingFor(base, { overridesPath: "/tmp/o.json", env: {} })).toBeInstanceOf(FileOverridesBacking);
+    expect(overridesBackingFor(base, { overridesPath: "/tmp/o.json", secrets: secretsFrom({}) })).toBeInstanceOf(
+      FileOverridesBacking,
+    );
     const withWorker = { ...base, runtimeOverrides: { worker: { baseUrl: "https://state.example" } } } as AppConfig;
     expect(
-      overridesBackingFor(withWorker, { overridesPath: "/tmp/o.json", env: { MEMORY_TOKEN: "t" } }),
+      overridesBackingFor(withWorker, { overridesPath: "/tmp/o.json", secrets: secretsFrom({ MEMORY_TOKEN: "t" }) }),
     ).toBeInstanceOf(WorkerOverridesBacking);
-    expect(() => overridesBackingFor(withWorker, { overridesPath: "/tmp/o.json", env: {} })).toThrow(
+    expect(() => overridesBackingFor(withWorker, { overridesPath: "/tmp/o.json", secrets: secretsFrom({}) })).toThrow(
       /runtimeOverrides.worker is configured but MEMORY_TOKEN is not set/,
     );
     const customEnv = {
       ...base,
       runtimeOverrides: { worker: { baseUrl: "https://state.example", tokenEnv: "STATE_TOKEN" } },
     } as AppConfig;
-    expect(() => overridesBackingFor(customEnv, { overridesPath: "/tmp/o.json", env: {} })).toThrow(
+    expect(() => overridesBackingFor(customEnv, { overridesPath: "/tmp/o.json", secrets: secretsFrom({}) })).toThrow(
       /STATE_TOKEN is not set/,
     );
   });
@@ -801,14 +804,15 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
     const { dir, cfg } = cfgFile();
     const path = join(dir, "overrides.json");
     writeFileSync(path, JSON.stringify({ channels: {}, users: { "slack:UX": { agent: "review" } } }));
-    const s = await openConfigStore(cfg, { overridesPath: path, env: {} });
+    const s = await openConfigStore(cfg, { overridesPath: path, env: {}, secrets: secretsFrom({}) });
     expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).agentName).toBe("review");
     expect(s.overridesLocation()).toBe(`file ${path}`);
   });
 });
 
 describe("loadAppConfigFrom", () => {
-  const env = { STATE_WORKER_URL: "https://state.example", MEMORY_TOKEN: "tok" };
+  const env = { STATE_WORKER_URL: "https://state.example" };
+  const secrets = secretsFrom({ MEMORY_TOKEN: "tok" });
   /** A state Worker whose `base` document is `document` (null = never pushed). */
   const stateWorker =
     (document: unknown, version = 3): typeof fetch =>
@@ -828,7 +832,7 @@ describe("loadAppConfigFrom", () => {
   it("a file path reads the file, as before", async () => {
     const cfg = join(mkdtempSync(join(tmpdir(), "swb-config-")), "config.yaml");
     writeFileSync(cfg, YAML_FIXTURE);
-    const config = await loadAppConfigFrom(cfg, { env: {}, warn: () => {} });
+    const config = await loadAppConfigFrom(cfg, { env: {}, secrets: secretsFrom({}), warn: () => {} });
     expect(config.defaults.agent).toBe("general");
   });
 
@@ -836,6 +840,7 @@ describe("loadAppConfigFrom", () => {
     const warnings: string[] = [];
     const config = await loadAppConfigFrom("state://base", {
       env,
+      secrets,
       warn: (m) => warnings.push(m),
       fetch: stateWorker(pushed),
     });
@@ -844,18 +849,21 @@ describe("loadAppConfigFrom", () => {
   });
 
   it("no document yet is a startup error naming `deploy config`; a wrong-shaped one, a missing variable, and an unreachable Worker name the cause", async () => {
-    await expect(loadAppConfigFrom("state://base", { env, warn: () => {}, fetch: stateWorker(null) })).rejects.toThrow(
+    await expect(
+      loadAppConfigFrom("state://base", { env, secrets, warn: () => {}, fetch: stateWorker(null) }),
+    ).rejects.toThrow(
       'SWITCHBOARD_CONFIG=state://base: no "base" document on state Worker https://state.example — push one with `deploy config`',
     );
     await expect(
-      loadAppConfigFrom("state://base", { env, warn: () => {}, fetch: stateWorker({ channels: {} }) }),
+      loadAppConfigFrom("state://base", { env, secrets, warn: () => {}, fetch: stateWorker({ channels: {} }) }),
     ).rejects.toThrow('the "base" document is not a base config document');
-    await expect(loadAppConfigFrom("state://base", { env: { MEMORY_TOKEN: "tok" }, warn: () => {} })).rejects.toThrow(
+    await expect(loadAppConfigFrom("state://base", { env: {}, secrets, warn: () => {} })).rejects.toThrow(
       "STATE_WORKER_URL is not set",
     );
     await expect(
       loadAppConfigFrom("state://base", {
         env,
+        secrets,
         warn: () => {},
         fetch: async () => {
           throw new Error("ECONNREFUSED");
@@ -867,7 +875,7 @@ describe("loadAppConfigFrom", () => {
   it("a pushed document whose YAML does not validate fails startup with the validation error, never a silent partial config", async () => {
     const broken = { ...pushed, yaml: "defaults:\n  agent: general\n  models: {}\n" };
     await expect(
-      loadAppConfigFrom("state://base", { env, warn: () => {}, fetch: stateWorker(broken) }),
+      loadAppConfigFrom("state://base", { env, secrets, warn: () => {}, fetch: stateWorker(broken) }),
     ).rejects.toThrow();
   });
 });

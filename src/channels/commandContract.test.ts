@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { ConfigStore } from "../config.js";
 import { CLI_CALLER, parseCliArgv, runCommand } from "../cli.js";
@@ -121,7 +122,7 @@ async function fixture() {
   // The ONE catalogue every real process binds (`buildCoreCommands`), over this fixture's stores.
   const commands = buildCoreCommands(config, store, {
     registry: reg,
-    env: {},
+    secrets: secretsFrom({}),
     dataDir: dir,
     warn: () => {},
     audit: () => {},

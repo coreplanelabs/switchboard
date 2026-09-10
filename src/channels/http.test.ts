@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import type { IncomingHttpHeaders } from "node:http";
 import {
   authenticate,
@@ -243,7 +244,7 @@ describe("handleIngressRequest — the dispatch grant (fail-closed)", () => {
 
   it("a token whose http:<subject> actor is granted dispatch dispatches; the token map itself grants nothing", async () => {
     const d = fakeDispatch("ok");
-    const auth = parseIngressTokens({ SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "alice" } }) });
+    const auth = ingress({ SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "alice" } }) });
     GRANTS.set("http:alice", { actions: new Set(["dispatch"]), channels: new Set(), repos: new Set() });
     const res = await handleIngressRequest(
       { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "hi" }) },
@@ -412,9 +413,12 @@ describe("authorizeRequest (header-only gate)", () => {
   });
 });
 
+/** The parser over a test environment (production hands it the process's secrets). */
+const ingress = (env: Record<string, string>) => parseIngressTokens(secretsFrom(env));
+
 describe("parseIngressTokens (env → config, fail-closed)", () => {
   it("parses a valid JSON token map", () => {
-    const cfg = parseIngressTokens({
+    const cfg = ingress({
       SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({
         s3cr3t: { subject: "alice", channel: "ops" },
         t2: { subject: "bob" },
@@ -427,14 +431,14 @@ describe("parseIngressTokens (env → config, fail-closed)", () => {
   });
 
   it("returns an empty (disabled) map when unset, blank, or malformed", () => {
-    expect(parseIngressTokens({}).tokens).toEqual({});
-    expect(parseIngressTokens({ SWITCHBOARD_INGRESS_TOKENS: "   " }).tokens).toEqual({});
-    expect(parseIngressTokens({ SWITCHBOARD_INGRESS_TOKENS: "{not json" }).tokens).toEqual({});
-    expect(parseIngressTokens({ SWITCHBOARD_INGRESS_TOKENS: "[]" }).tokens).toEqual({});
+    expect(ingress({}).tokens).toEqual({});
+    expect(ingress({ SWITCHBOARD_INGRESS_TOKENS: "   " }).tokens).toEqual({});
+    expect(ingress({ SWITCHBOARD_INGRESS_TOKENS: "{not json" }).tokens).toEqual({});
+    expect(ingress({ SWITCHBOARD_INGRESS_TOKENS: "[]" }).tokens).toEqual({});
   });
 
   it("skips malformed entries (missing/blank subject, bad channel, empty token) without opening", () => {
-    const cfg = parseIngressTokens({
+    const cfg = ingress({
       SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({
         good: { subject: "alice" },
         noSubject: { channel: "ops" },
@@ -452,7 +456,7 @@ describe("parseIngressTokens (env → config, fail-closed)", () => {
 // token may do is config's `grants["http:<subject>"]` / `["mcp:<subject>"]`.
 describe("parseIngressTokens — a token is a credential, its rights are config's", () => {
   it("an entry is subject + optional channel; nothing about what it may do", () => {
-    const cfg = parseIngressTokens({
+    const cfg = ingress({
       SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ t: { subject: "ci", channel: "ops" }, u: { subject: "alice" } }),
     });
     expect(cfg.tokens).toEqual({ t: { subject: "ci", channel: "ops" }, u: { subject: "alice" } });
@@ -461,7 +465,7 @@ describe("parseIngressTokens — a token is a credential, its rights are config'
   it("a field other than subject/channel (`scopes`, say) is ignored, silently: the identity is exactly { subject, channel? } and nothing is logged", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const cfg = parseIngressTokens({
+    const cfg = ingress({
       SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ t: { subject: "ci", scopes: ["dispatch", "runs:read"] } }),
     });
     expect(cfg.tokens).toEqual({ t: { subject: "ci" } });

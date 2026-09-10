@@ -1,12 +1,16 @@
 // Feature: docs/reference/specs/tracing.md item 26 — the span log behind an ingress bearer with trace:read.
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { Secret } from "../secrets.js";
 import { handleAdminTraceLog, parseTraceLogQuery, TRACE_LOG_PATH } from "./adminTraceLog.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { createSpanLog } from "../core/trace/spanLog.js";
 import { createTracer } from "../core/trace/tracer.js";
 
-const TOKENS = JSON.stringify({ "tok-tracer": { subject: "tracer" }, "tok-deployer": { subject: "ops" } });
+const TOKENS = new Secret(
+  JSON.stringify({ "tok-tracer": { subject: "tracer" }, "tok-deployer": { subject: "ops" } }),
+  "SWITCHBOARD_INGRESS_TOKENS",
+);
 const GRANTS: Record<string, Grants> = {
   "http:tracer": { actions: new Set(["trace:read"]), channels: new Set(), repos: new Set() },
   "http:ops": { actions: new Set(["deploy:write"]), channels: new Set(), repos: new Set() },
@@ -22,7 +26,7 @@ function request(method: string, url: string, authorization?: string) {
   return { req, res, body: () => JSON.parse(writes.body ?? "null") as Record<string, unknown>, writes };
 }
 
-function harness(over: { tokens?: string | undefined } = {}) {
+function harness(over: { tokens?: Secret | undefined } = {}) {
   const spanLog = createSpanLog();
   const logs: string[] = [];
   const deps = {

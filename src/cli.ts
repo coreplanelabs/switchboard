@@ -82,6 +82,7 @@ import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { claimEntry } from "./invokedAsScript.js";
+import { processSecrets, publicEnv, type EnvRecord, type Secrets } from "./secrets.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -365,7 +366,10 @@ export async function loadBotConfig(
   configPath: string,
   overridesPath: string,
   opts: {
-    env?: Record<string, string | undefined>;
+    /** The public environment (`STATE_WORKER_URL`); default: the process's, without its secrets. */
+    env?: EnvRecord;
+    /** The credentials (`MEMORY_TOKEN`); default: the process's. */
+    secrets?: Secrets;
     exists?: (path: string) => boolean;
     warn?: (message: string) => void;
     fetch?: typeof fetch;
@@ -382,7 +386,8 @@ export async function loadBotConfig(
   // implicit reads span, the same way the bot passes them.
   return openConfigStore(configPath, {
     overridesPath,
-    env: opts.env ?? process.env,
+    env: opts.env ?? publicEnv(),
+    secrets: opts.secrets ?? processSecrets,
     warn: opts.warn ?? ((m) => console.error(m)),
     commandGroups: coreCommandGroups(),
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
@@ -401,7 +406,8 @@ export function bindBotConfig(
   configPath: string,
   overridesPath: string,
   opts: {
-    env?: Record<string, string | undefined>;
+    env?: EnvRecord;
+    secrets?: Secrets;
     exists?: (path: string) => boolean;
     warn?: (message: string) => void;
     fetch?: typeof fetch;
@@ -437,13 +443,14 @@ export function bindBotConfig(
  */
 export function cliCapabilities(
   configPath: string,
-  env: NodeJS.ProcessEnv,
+  env: EnvRecord,
+  secrets: Secrets,
   opts: { exists?: (path: string) => boolean; load?: (path: string) => AppConfig } = {},
 ): Capabilities {
   if (parseConfigLocation(configPath).kind !== "file") return ALL_CAPABILITIES;
   if (!(opts.exists ?? existsSync)(configPath)) return ALL_CAPABILITIES;
   try {
-    return capabilitiesFrom((opts.load ?? loadAppConfig)(configPath), env);
+    return capabilitiesFrom((opts.load ?? loadAppConfig)(configPath), env, secrets);
   } catch {
     return ALL_CAPABILITIES;
   }
@@ -474,7 +481,7 @@ function wireCli(): CliWiring {
     (loaded ??= botConfig().then((config) => ({
       config,
       runStore:
-        buildRunStore(config.config.runHistory, process.env, {
+        buildRunStore(config.config.runHistory, processSecrets, {
           dataDir: "./data",
           warn: (m) => warn(`[run-history] ${m}`),
         }) ?? new NullRunStore(),
@@ -492,7 +499,7 @@ function wireCli(): CliWiring {
   let mcpLoaded: Promise<ReturnType<typeof buildMcp>> | undefined;
   const mcpWiring = () =>
     (mcpLoaded ??= bot().then((b) =>
-      buildMcp(b.config, process.env, {
+      buildMcp(b.config, processSecrets, {
         publicBaseUrl: process.env.PUBLIC_BASE_URL,
         secretsPath: "./data/cli-mcp-secrets.json",
         warn: (m) => warn(`[mcp] ${m}`),
@@ -503,11 +510,11 @@ function wireCli(): CliWiring {
     () => bot().then((b) => b.runStore),
     {
       registry: defaultRunRegistry,
-      env: process.env,
+      secrets: processSecrets,
       dataDir: "./data",
       warn,
       audit: () => {},
-      capabilities: cliCapabilities(CONFIG_PATH, process.env),
+      capabilities: cliCapabilities(CONFIG_PATH, publicEnv(), processSecrets),
       mcp: async () => {
         const w = await mcpWiring();
         return w.service ?? { unavailable: w.unavailable ?? "MCP is not enabled" };
@@ -563,13 +570,13 @@ async function main(): Promise<void> {
   // What is on in this process (src/core/capabilities.ts): the CLI's `ask`
   // resolves it once from the same config the bot would, so a run started here
   // carries the same prompt blocks and card notes as one started in Slack.
-  const capabilities = capabilitiesFrom(config.config, process.env);
+  const capabilities = capabilitiesFrom(config.config, publicEnv(), processSecrets);
   // Every optional subsystem is a real implementation or its Null Object
   // (docs/reference/specs/routing-and-config.md item 16), as in the bot. The CLI has no
   // run ledger: a one-shot process reclaims and resumes nothing.
   const mcp = (await mcpWiring()).source ?? new NullMcpToolSource();
   const memory =
-    buildMemoryStore(config.config.memory, process.env, (m) => warn(`[memory] ${m}`)) ?? new NullMemoryStore();
+    buildMemoryStore(config.config.memory, processSecrets, (m) => warn(`[memory] ${m}`)) ?? new NullMemoryStore();
   const runHistoryWriter = capabilities.runHistory
     ? createRunHistoryWriter({ store: runStore, warn, onPersisted: (id) => defaultRunRegistry.markPersisted(id) })
     : new NullRunHistoryWriter();
@@ -577,7 +584,7 @@ async function main(): Promise<void> {
   // one read for this one-shot process, from the admin plane the config names;
   // nothing to know without residents or without the admin bearer.
   const fleetWatcher = capabilities.residents
-    ? residentFleetWatcherFor(residentAdminFromConfig(config, process.env), { warn })
+    ? residentFleetWatcherFor(residentAdminFromConfig(config, processSecrets), { warn })
     : undefined;
   await fleetWatcher?.refresh();
   const residentFleet: ResidentFleetFacts = fleetWatcher ?? NO_FLEET;

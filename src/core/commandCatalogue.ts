@@ -30,6 +30,7 @@ import {
   type CommandRegistryOptions,
 } from "./commandRegistry.js";
 import type { Capabilities } from "./capabilities.js";
+import type { Secrets } from "../secrets.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import { selectFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
 import type { MemoryStore } from "./memory/types.js";
@@ -58,7 +59,8 @@ export interface CoreCommandWiring {
   /** The live registry — `defaultRunRegistry` in every real process, so the
    *  commands see the runs the dispatcher creates. */
   registry: RunRegistry;
-  env: Record<string, string | undefined>;
+  /** The process's credentials (src/secrets.ts) — the bearers the resident admin client and the deterministic ops read. */
+  secrets: Secrets;
   /** Where host-disk fallbacks live (the file run store, `runHistory.store: file`). */
   dataDir: string;
   warn: (message: string) => void;
@@ -101,16 +103,12 @@ export interface CoreCommandWiring {
  *  resident-backed wherever a resident service is configured (operator
  *  bearer), local for local execution (the caller's thread workspace — dev/CLI),
  *  else none (a per-thread remote backend has no deterministic-op surface). */
-export function defaultOperations(
-  config: ConfigStore,
-  env: Record<string, string | undefined>,
-  caller: Caller,
-): Operations | null {
+export function defaultOperations(config: ConfigStore, secrets: Secrets, caller: Caller): Operations | null {
   const execution = config.config.execution;
   const resident = execution?.resident;
   if (resident?.baseUrl) {
-    const token = env[resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN"];
-    return token ? new ResidentOperations({ baseUrl: resident.baseUrl, token }) : null;
+    const token = secrets.named(resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN");
+    return token ? new ResidentOperations({ baseUrl: resident.baseUrl, token: token.reveal() }) : null;
   }
   if (!execution?.type || execution.type === "local") {
     return new LocalOperations(
@@ -171,7 +169,7 @@ export function buildCoreCommands(
     async () => wiring.runs ?? createRunsService({ registry: wiring.registry, store: await runStore() }),
   );
   const admin = async (): Promise<ResidentAdminClient | { unavailable: string }> =>
-    wiring.residentAdmin?.() ?? residentAdminFromConfig(await cfg(), wiring.env);
+    wiring.residentAdmin?.() ?? residentAdminFromConfig(await cfg(), wiring.secrets);
   const deps: CoreCommandDeps = {
     help: {
       agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
@@ -196,7 +194,7 @@ export function buildCoreCommands(
     repo: {
       admin,
       operations: async (caller) =>
-        wiring.operations ? wiring.operations(caller) : defaultOperations(await cfg(), wiring.env, caller),
+        wiring.operations ? wiring.operations(caller) : defaultOperations(await cfg(), wiring.secrets, caller),
       canUseRepo: async (callerId, slug) => (await cfg()).canUseRepo(callerId, slug),
       inspect: wiring.repoInspector ?? githubRepoInspector(),
     },

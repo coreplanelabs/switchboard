@@ -53,6 +53,7 @@ import {
   type TranscriptTurn,
   type InboxItem,
 } from "./runLedger/types.js";
+import type { Secrets } from "../secrets.js";
 
 export interface WorkerRunLedgerOptions {
   baseUrl: string;
@@ -68,17 +69,17 @@ export interface WorkerRunLedgerOptions {
  *  `buildRunStore`'s selection so the two always point at the same Worker. */
 export function buildRunLedger(
   cfg: RunHistoryConfig | undefined,
-  env: Record<string, string | undefined>,
+  secrets: Secrets,
   deps: { fetch?: typeof fetch } = {},
 ): WorkerRunLedger | null {
   if (!cfg || cfg.store === "file") return null;
   const worker = cfg.worker;
   if (!worker?.baseUrl) return null;
-  const token = env[worker.tokenEnv ?? DEFAULT_RUN_STORE_TOKEN_ENV]?.trim();
+  const token = secrets.named(worker.tokenEnv ?? DEFAULT_RUN_STORE_TOKEN_ENV);
   if (!token) return null; // buildRunStore already warned
   return new WorkerRunLedger({
     baseUrl: worker.baseUrl,
-    token,
+    token: token.reveal(),
     storeKey: RUN_STORE_KEY,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
   });

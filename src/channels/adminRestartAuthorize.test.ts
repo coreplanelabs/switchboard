@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { Secret } from "../secrets.js";
 import { handleAdminRestartAuthorize } from "./adminRestartAuthorize.js";
 import { RESTART_SUBJECT_HEADER } from "../deploy/restart.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
@@ -9,7 +10,10 @@ import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 // `deploy:write` — the bot's config is the one grants source, the Worker only
 // holds the token map. Answers exactly what `authorizeRestart` decides.
 
-const TOKENS = JSON.stringify({ "tok-deployer": { subject: "ops" }, "tok-reader": { subject: "reader" } });
+const TOKENS = new Secret(
+  JSON.stringify({ "tok-deployer": { subject: "ops" }, "tok-reader": { subject: "reader" } }),
+  "SWITCHBOARD_INGRESS_TOKENS",
+);
 const GRANTS: Record<string, Grants> = {
   "http:ops": { actions: new Set(["deploy:write"]), channels: new Set(), repos: new Set() },
   "http:reader": { actions: new Set(["runs:read"]), channels: new Set(), repos: new Set() },
@@ -31,7 +35,7 @@ function request(method: string, authorization?: string, subject?: string) {
   return { req, res, writes };
 }
 
-function harness(over: { tokens?: string | undefined } = {}) {
+function harness(over: { tokens?: Secret | undefined } = {}) {
   const logs: string[] = [];
   return {
     deps: {

@@ -2,6 +2,7 @@ import { parseEnv } from "node:util";
 import YAML from "yaml";
 import { parseAppConfigText, type AppConfig } from "../config.js";
 import { capabilitiesFrom, type Capabilities } from "../core/capabilities.js";
+import { secretsFrom } from "../secrets.js";
 import { parseProfile } from "../deploy/profile.js";
 
 // `switchboard init`, the pure half (docs/reference/specs/init.md). The
@@ -150,7 +151,7 @@ export function planInit(answers: InitAnswers, templates: InitTemplates, world: 
   // wins over the file, exactly as `loadEnvFileIfPresent` leaves the process.
   const config = parseAppConfigText(files[1].text);
   const env = { ...parseEnv(files[0].text), ...definedOnly(world.env) };
-  const capabilities = capabilitiesFrom(config, env);
+  const capabilities = capabilitiesFrom(config, env, secretsFrom(env));
   return {
     ok: true,
     files,

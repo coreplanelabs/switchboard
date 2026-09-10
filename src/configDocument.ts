@@ -12,6 +12,7 @@
 // backing uses (`/config/get`, `/config/put` with optimistic versions).
 
 import { createHash } from "node:crypto";
+import type { EnvRecord, Secret, Secrets } from "./secrets.js";
 
 /** The ConfigDO key the base config lives under; the overrides key is `overrides`. */
 export const BASE_CONFIG_DOCUMENT_KEY = "base";
@@ -157,12 +158,13 @@ export class ConfigDocumentClient {
 }
 
 /** The state Worker the bot (or the CLI) reads the base document from, per the
- *  environment: `STATE_WORKER_URL` + `MEMORY_TOKEN`. A problem names the variable. */
-export function stateWorkerFromEnv(
-  env: Record<string, string | undefined>,
-): { ok: true; baseUrl: string; token: string } | { ok: false; problem: string } {
+ *  environment: `STATE_WORKER_URL` (public) + the `MEMORY_TOKEN` secret. A problem names the variable. */
+export function stateWorkerFrom(
+  env: EnvRecord,
+  secrets: Secrets,
+): { ok: true; baseUrl: string; token: Secret } | { ok: false; problem: string } {
   const baseUrl = env[STATE_WORKER_URL_ENV];
-  const token = env[STATE_WORKER_TOKEN_ENV];
+  const token = secrets.get(STATE_WORKER_TOKEN_ENV);
   if (!baseUrl)
     return {
       ok: false,

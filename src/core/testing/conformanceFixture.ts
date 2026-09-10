@@ -99,6 +99,7 @@ import {
   type Variant,
 } from "./commandConformance.js";
 import { expect } from "vitest";
+import { secretsFrom } from "../../secrets.js";
 export const NOW = 1_700_000_000_000;
 
 /** `deploy init`'s world: one template for every Worker dir and the site's, the project facts the site
@@ -374,7 +375,7 @@ export function fakeMcpService(): McpService {
     factory: () =>
       new InMemoryMcpClient([{ name: "search_issues", inputSchema: {}, annotations: { readOnlyHint: true } }]),
     publicBaseUrl: "https://switchboard.test",
-    env: {},
+    bearers: secretsFrom({}),
     fetch: async () => new Response("", { status: 401 }), // auth detection → bearer (item 18)
     now: () => NOW,
     nonce: () => "fixed-nonce-0123456789abcdef",

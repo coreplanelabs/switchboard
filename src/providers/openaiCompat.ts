@@ -8,6 +8,7 @@ import {
   type ProviderConfig,
   type TokenUsage,
 } from "./types.js";
+import { processSecrets, type Secret } from "../secrets.js";
 
 // Generic adapter for any OpenAI-compatible Chat Completions endpoint:
 // OpenAI, Azure OpenAI, Groq, Together, Ollama, vLLM, LM Studio, etc.
@@ -31,7 +32,8 @@ interface OAIMessage {
 export class OpenAICompatProvider implements Provider {
   readonly name: string;
   private baseUrl: string;
-  private apiKey?: string;
+  /** Held wrapped; revealed into the Authorization header of each request and nowhere else. */
+  private apiKey?: Secret;
 
   constructor(name: string, cfg: ProviderConfig) {
     this.name = name;
@@ -39,7 +41,7 @@ export class OpenAICompatProvider implements Provider {
       throw new Error(`Provider "${name}": openai-compatible providers require baseUrl`);
     }
     this.baseUrl = cfg.baseUrl.replace(/\/$/, "");
-    this.apiKey = cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined;
+    this.apiKey = cfg.apiKeyEnv ? processSecrets.named(cfg.apiKeyEnv) : undefined;
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {
@@ -63,7 +65,7 @@ export class OpenAICompatProvider implements Provider {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey.reveal()}` } : {}),
       },
       body: JSON.stringify(body),
       // A hard run stop cancels the request instead of waiting it out.

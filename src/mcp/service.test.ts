@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import { ConfigStore, InMemoryOverridesBacking } from "../config.js";
 import { fakeAuthorizationServer, InMemoryMcpClient, type FakeAuthorizationServerOptions } from "./fake.js";
 import { MCP_TICKET_TTL_MS, type McpTicket } from "./registry.js";
@@ -72,7 +73,7 @@ function harness(
     key: opts.key === false ? undefined : KEY,
     publicBaseUrl: opts.publicBaseUrl === undefined ? "https://switchboard.test" : opts.publicBaseUrl || undefined,
     ...(opts.fetch === false ? {} : { fetch: as.fetch }),
-    env: opts.env ?? { MCP_GITHUB_TOKEN: "ghp_static" },
+    bearers: secretsFrom(opts.env ?? { MCP_GITHUB_TOKEN: "ghp_static" }),
     resolveEmail: opts.email ? async (id) => opts.email![id] : undefined,
     now: () => t,
     nonce: () => `nonce-${String(++n).padStart(20, "0")}`,

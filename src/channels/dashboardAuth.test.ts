@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import { generateKeyPairSync, sign as rsaSign } from "node:crypto";
 import { type AccessConfig, type AccessJwk, type VerifyDeps } from "./accessAuth.js";
 import {
@@ -167,7 +168,7 @@ describe("loopbackVerifier — `none` serves loopback callers on a localhost dep
 // ── composition ──────────────────────────────────────────────────────────────
 
 describe("buildDashboardVerifier — composing the configured strategy, failing fast by name", () => {
-  const base = { access: null, env: {}, verify: deps(), publicBaseUrl: undefined };
+  const base = { access: null, secrets: secretsFrom({}), verify: deps(), publicBaseUrl: undefined };
 
   it("no key, no ACCESS_* → the loopback strategy (today's no-Access deployment boots unchanged)", () => {
     expect(buildDashboardVerifier({ ...base, dashboard: undefined }).mode).toBe("none");
@@ -187,7 +188,7 @@ describe("buildDashboardVerifier — composing the configured strategy, failing 
     const v = buildDashboardVerifier({
       ...base,
       dashboard: { auth: "token", token: { actor: "access:ops" } },
-      env: { DASHBOARD_TOKEN: "abc" },
+      secrets: secretsFrom({ DASHBOARD_TOKEN: "abc" }),
     });
     expect(v.mode).toBe("token");
     await expect(v.verify(req({ authorization: "Bearer abc" }))).resolves.toEqual({
@@ -197,7 +198,7 @@ describe("buildDashboardVerifier — composing the configured strategy, failing 
     const named = buildDashboardVerifier({
       ...base,
       dashboard: { auth: "token", token: { env: "MY_DASH", actor: "access:ops" } },
-      env: { MY_DASH: "xyz", DASHBOARD_TOKEN: "abc" },
+      secrets: secretsFrom({ MY_DASH: "xyz", DASHBOARD_TOKEN: "abc" }),
     });
     await expect(named.verify(req({ authorization: "Bearer abc" }))).resolves.toMatchObject({ ok: false });
     await expect(named.verify(req({ authorization: "Bearer xyz" }))).resolves.toMatchObject({ ok: true });
@@ -211,17 +212,21 @@ describe("buildDashboardVerifier — composing the configured strategy, failing 
       buildDashboardVerifier({
         ...base,
         dashboard: { auth: "token", token: { env: "MY_DASH", actor: "access:ops" } },
-        env: { MY_DASH: "   " },
+        secrets: secretsFrom({ MY_DASH: "   " }),
       }),
     ).toThrow(/MY_DASH is not set/);
     expect(() =>
-      buildDashboardVerifier({ ...base, dashboard: { auth: "token" }, env: { DASHBOARD_TOKEN: "abc" } }),
+      buildDashboardVerifier({
+        ...base,
+        dashboard: { auth: "token" },
+        secrets: secretsFrom({ DASHBOARD_TOKEN: "abc" }),
+      }),
     ).toThrow(/dashboard\.token\.actor must name the bearer's actor as access:<name>/);
     expect(() =>
       buildDashboardVerifier({
         ...base,
         dashboard: { auth: "token", token: { actor: "access:svc:ops" } },
-        env: { DASHBOARD_TOKEN: "abc" },
+        secrets: secretsFrom({ DASHBOARD_TOKEN: "abc" }),
       }),
     ).toThrow(/access:<name>/);
   });
@@ -255,7 +260,7 @@ describe("buildDashboardVerifier — composing the configured strategy, failing 
         ...base,
         dashboard: { auth: "token", token: { actor: "access:ops" } },
         access,
-        env: { DASHBOARD_TOKEN: "abc" },
+        secrets: secretsFrom({ DASHBOARD_TOKEN: "abc" }),
       }).mode,
     ).toBe("token");
   });

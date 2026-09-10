@@ -2,6 +2,7 @@ import type { MemoryConfig, MemoryStore } from "./types.js";
 import { DEFAULT_SCOPE_CAP } from "./engine.js";
 import { InMemoryMemoryStore } from "./stores.js";
 import { WorkerMemoryStore } from "./workerStore.js";
+import type { Secrets } from "../../secrets.js";
 
 /** Env var holding the Memory Worker bearer when `memory.worker.tokenEnv` is unset. */
 export const DEFAULT_MEMORY_TOKEN_ENV = "MEMORY_TOKEN";
@@ -36,7 +37,7 @@ export function resolveScopeCap(configured: number | undefined, warn: (message: 
 
 export function buildMemoryStore(
   cfg: MemoryConfig | undefined,
-  env: Record<string, string | undefined>,
+  secrets: Secrets,
   warn: (message: string) => void,
 ): MemoryStore | undefined {
   if (!cfg?.enabled) return undefined;
@@ -54,7 +55,7 @@ export function buildMemoryStore(
     return new InMemoryMemoryStore([], { cap });
   }
   const tokenEnv = worker.tokenEnv ?? DEFAULT_MEMORY_TOKEN_ENV;
-  const token = env[tokenEnv]?.trim();
+  const token = secrets.named(tokenEnv);
   if (!token) {
     warn(
       `memory.worker is configured but ${tokenEnv} is unset — using an IN-PROCESS store that a restart loses. ` +
@@ -62,5 +63,5 @@ export function buildMemoryStore(
     );
     return new InMemoryMemoryStore([], { cap });
   }
-  return new WorkerMemoryStore({ baseUrl: worker.baseUrl, token, cap });
+  return new WorkerMemoryStore({ baseUrl: worker.baseUrl, token: token.reveal(), cap });
 }

@@ -13,6 +13,9 @@ deploy
 !deploy/cloudflare-docs/package.json
 # `switchboard init` derives an installation's profile from the example; the container installs too.
 !deploy/profile.example.json
+# Which variables are credentials: src/secrets.ts reads the manifest at startup
+# (src/core/secretsManifest.test.ts holds this line and the Dockerfile's COPY in place).
+!deploy/secrets.manifest.json
 docs
 !docs/package.json
 README.md

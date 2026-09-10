@@ -28,6 +28,7 @@ import { dedupeDelivery, wasHandledHere } from "./slack/dedupe.js";
 import { resolveChannelName, resolveTeamUrl, resolveUserName, slackPermalink } from "./slack/lookups.js";
 import { isLiveCard, liveCardKey, liveCards, refreshForeignLiveCards, render } from "./slack/statusCard.js";
 import { ACK_EMOJI, catchUpMissedMentions, tsMs } from "./slackCatchUp.js";
+import { processSecrets, type Secret } from "../secrets.js";
 import { missingBotScopes, recordCatchUpOutcome, recordMissingScopes } from "./slackCatchUpStatus.js";
 import { recordSocketConnected, recordSocketDisconnected } from "./slackSocketStatus.js";
 export { classifyMessage, threadIncludesBot, type MessageDecision } from "./slackTriggers.js";
@@ -65,8 +66,8 @@ const processStatusBudget = createStatusBudget({ perMinute: STATUS_EDITS_PER_MIN
  *  a refused progress frame is dropped, a refused terminal frame is re-sent
  *  after Slack's Retry-After up to `TERMINAL_RESENDS` times (`SlackIO.status`).
  *  One retry for transport errors. */
-export function createStatusClient(token: string | undefined): SlackClient {
-  return new webApi.WebClient(token, { rejectRateLimitedCalls: true, retryConfig: { retries: 1 } });
+export function createStatusClient(token: Secret | undefined): SlackClient {
+  return new webApi.WebClient(token?.reveal(), { rejectRateLimitedCalls: true, retryConfig: { retries: 1 } });
 }
 
 /** Slack's Retry-After, in seconds, when `err` is the status client's rate-limit rejection. */
@@ -112,9 +113,12 @@ export function createSlackApp(deps: CoreDeps) {
   // adapter can listen to its websocket lifecycle: every `connected` — first
   // start and each reconnect — triggers the missed-mention catch-up
   // (docs/decisions/0012-reconnect-catch-up-as-recovery.md).
-  const receiver = new SocketModeReceiver({ appToken: process.env.SLACK_APP_TOKEN ?? "" });
-  const app = new App({ token: process.env.SLACK_BOT_TOKEN, receiver });
-  const statusClient = createStatusClient(process.env.SLACK_BOT_TOKEN);
+  // The two Slack credentials are revealed into Bolt's constructors and nowhere else.
+  const appToken = processSecrets.get("SLACK_APP_TOKEN");
+  const botToken = processSecrets.get("SLACK_BOT_TOKEN");
+  const receiver = new SocketModeReceiver({ appToken: appToken?.reveal() ?? "" });
+  const app = new App({ token: botToken?.reveal(), receiver });
+  const statusClient = createStatusClient(botToken);
 
   let botUserId: string | undefined;
   /** The bot-scope check runs once per process, on the first `connected`. */

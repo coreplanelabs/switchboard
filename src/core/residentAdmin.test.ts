@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../config.js";
+import { secretsFrom } from "../secrets.js";
 import { recordingSink } from "./testing/recordingSink.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "./trace/internalHosts.js";
 import { parseTraceparent } from "./trace/traceparent.js";
@@ -129,14 +130,14 @@ describe("makeResidentAdminClient (real fetch client)", () => {
 
   it("residentAdminFromConfig: no execution.resident → names the config; no bearer → names the env var; both set → the real client with the bearer", async () => {
     const NO_RESIDENT = YAML_FIXTURE.replace(/ {2}resident:[\s\S]*$/m, "");
-    expect(residentAdminFromConfig(store(NO_RESIDENT), {})).toEqual({
+    expect(residentAdminFromConfig(store(NO_RESIDENT), secretsFrom({}))).toEqual({
       unavailable: expect.stringContaining("execution.resident"),
     });
-    expect(residentAdminFromConfig(store(), { RESIDENT_ADMIN_TOKEN: "" })).toEqual({
+    expect(residentAdminFromConfig(store(), secretsFrom({ RESIDENT_ADMIN_TOKEN: "" }))).toEqual({
       unavailable: expect.stringContaining("RESIDENT_ADMIN_TOKEN"),
     });
     const { calls } = stubFetch({ body: { cap: 8, count: 0, residents: [] } });
-    const api = residentAdminFromConfig(store(), { RESIDENT_ADMIN_TOKEN: "admin-tok" });
+    const api = residentAdminFromConfig(store(), secretsFrom({ RESIDENT_ADMIN_TOKEN: "admin-tok" }));
     expect("unavailable" in api).toBe(false);
     await (api as ResidentAdminClient).residents();
     expect(route(calls[0])).toBe("/residents");
