@@ -85,13 +85,18 @@ describe("the package and the working directory", () => {
     expect(hostSetupIO(PACKAGE_ROOT).package()).toBeUndefined();
   });
 
-  it("hostSetupIO is scoped to the working directory: exists/readFile/write resolve there, inCheckout says whether it is the root", async () => {
+  it("hostSetupIO writes into the installation and reads a named file from where the operator stands: exists/write resolve in the root, readFile in the start directory, inCheckout says whether the root is the checkout", async () => {
     const cwd = tmp();
-    const io = hostSetupIO(cwd);
+    const startedIn = tmp();
+    const io = hostSetupIO(cwd, startedIn);
     expect(await io.exists(ENV_PATH)).toBe(false);
     expect(await io.readFile("key.pem")).toBeUndefined();
-    writeFileSync(join(cwd, "key.pem"), "PEM\n");
+    writeFileSync(join(cwd, "key.pem"), "IN THE INSTALLATION\n");
+    expect(await io.readFile("key.pem")).toBeUndefined(); // the installation is not where a named file is looked for
+    writeFileSync(join(startedIn, "key.pem"), "PEM\n");
     expect(await io.readFile("key.pem")).toBe("PEM\n");
+    expect(io.root()).toBe(cwd);
+    expect(hostSetupIO(cwd, cwd).root()).toBeUndefined();
     await io.write({ path: ENV_PATH, text: "A=1\n", mode: 0o600, secretNames: [] });
     expect(await io.exists(ENV_PATH)).toBe(true);
     expect(existsSync(join(cwd, ENV_PATH))).toBe(true);

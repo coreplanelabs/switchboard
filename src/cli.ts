@@ -21,8 +21,9 @@
 //   npx tsx src/cli.ts ask --thread cli:mywork "agent:coding continue where we left off"
 // And a SECOND built-in that is not a registry command either: `start` runs the
 // bot — the very process the container image runs (src/index.ts `runBot`),
-// from the directory it is run in, so an operator with the npm package and no
-// Docker has Slack from a laptop. It is the PROCESS, not a command: a command
+// from the installation (the operator root: a checkout, or from the package
+// SWITCHBOARD_HOME / a cwd that holds one / ~/.switchboard), so an operator with
+// the npm package and no Docker has Slack from a laptop. It is the PROCESS, not a command: a command
 // returns a value and exits, the bot runs until a signal drains it, and no
 // registry command may start an agent run — the bot starts them all through
 // `dispatch()`. Nothing of the CLI's own is wired for it: the registry, its
@@ -49,6 +50,9 @@
 import "./loadEnv.js";
 import { Console } from "node:console";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { OPERATOR_ROOT } from "./deploy/host.js";
+import { installationPath } from "./deploy/operatorRoot.js";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
 import { buildCoreCommands, unstampedStatus } from "./core/commandCatalogue.js";
@@ -85,7 +89,11 @@ import { NullMcpToolSource } from "./mcp/source.js";
 import { claimEntry } from "./invokedAsScript.js";
 import { processSecrets, publicEnv, type EnvRecord, type Secrets } from "./secrets.js";
 
-const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
+// The installation's files live under the operator root (src/deploy/operatorRoot.ts): the checkout,
+// or from the package SWITCHBOARD_HOME / a cwd that holds one / ~/.switchboard — so `init`, `ask`,
+// `start` and `deploy` agree on one place without a `cd` first.
+const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? installationPath(OPERATOR_ROOT, "config/config.yaml");
+const DATA_DIR = installationPath(OPERATOR_ROOT, "data");
 
 export const CLI_CALLER: Caller = { kind: "cli", id: CLI_ACTOR.id, actor: CLI_ACTOR };
 
@@ -102,7 +110,7 @@ export const USAGE = [
   `usage: ${PROGRAM} <group> <verb> [args…] [--option value…] [--json]`,
   `       ${PROGRAM} <group> <verb> --help`,
   `       ${PROGRAM} ask [--thread <key>] "[agent:name] [model:provider/model] your request"`,
-  `       ${PROGRAM} start                            (the bot: Slack from .env and config/ here)`,
+  `       ${PROGRAM} start                            (the bot: Slack from the installation's .env and config/)`,
   `       ${PROGRAM} init [--option value…]          (= setup init: the installer)`,
   `       ${PROGRAM} help`,
 ].join("\n");
@@ -117,7 +125,8 @@ export function startHelpText(program: string): string {
     "websocket, so no public address is needed) and, when PORT is set, the HTTP server on that port",
     "(/healthz, POST /ingress, POST /mcp, the dashboard under /runs) — until SIGINT or SIGTERM drains it.",
     "",
-    "It reads, from the directory it is run in:",
+    "It reads, from the installation (SWITCHBOARD_HOME; else the directory it is run in when that holds",
+    "one; else ~/.switchboard — a checkout is always its own):",
     "  .env                  the credentials; SLACK_BOT_TOKEN and SLACK_APP_TOKEN are required, and a",
     "                        variable the shell already exports wins over the file",
     "  config/config.yaml    the config (or the file SWITCHBOARD_CONFIG names)",
@@ -224,7 +233,7 @@ function parseStart(argv: readonly string[]): CliInvocation {
   if (argv[0] === "--help" || argv[0] === "-h") return { kind: "start-help" };
   return {
     kind: "usage",
-    error: `${USAGE}\n  start takes no arguments: it reads .env and config/config.yaml from the directory it runs in (start --help)`,
+    error: `${USAGE}\n  start takes no arguments: it reads the installation's .env and config/config.yaml — SWITCHBOARD_HOME, the directory you run in when it holds one, else ~/.switchboard (start --help)`,
   };
 }
 
@@ -476,14 +485,14 @@ function wireCli(): CliWiring {
   // that reach for it: `deploy plan`, `help`, `env`, … run at once whatever the
   // state Worker is doing; a command that needs the config and cannot have it
   // gets the `unavailable` error naming the cause.
-  const botConfig = bindBotConfig(CONFIG_PATH, "./data/cli-overrides.json");
+  const botConfig = bindBotConfig(CONFIG_PATH, join(DATA_DIR, "cli-overrides.json"));
   let loaded: Promise<{ config: ConfigStore; runStore: RunStore }> | undefined;
   const bot = () =>
     (loaded ??= botConfig().then((config) => ({
       config,
       runStore:
         buildRunStore(config.config.runHistory, processSecrets, {
-          dataDir: "./data",
+          dataDir: DATA_DIR,
           warn: (m) => warn(`[run-history] ${m}`),
         }) ?? new NullRunStore(),
     })));

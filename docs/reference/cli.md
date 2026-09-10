@@ -24,7 +24,7 @@ Not a registered command — a **channel**, exactly like Slack, just printing to
 npx tsx src/cli.ts start
 ```
 
-Not a registered command either — the **bot process** itself, the one the container image runs: Slack over Socket Mode and, with `PORT` set, the HTTP server and the dashboard, until Ctrl-C. It reads `.env` and `config/config.yaml` from the directory you run it in; `start --help` lists everything it reads. From the published package it is `npx @coreplane/switchboard start` — the bot from an empty directory with no Docker.
+Not a registered command either — the **bot process** itself, the one the container image runs: Slack over Socket Mode and, with `PORT` set, the HTTP server and the dashboard, until Ctrl-C. It reads `.env` and `config/config.yaml` from the installation (`SWITCHBOARD_HOME`, else the directory you run it in when that holds one, else `~/.switchboard`; a checkout is always its own); `start --help` lists everything it reads. From the published package it is `npx @coreplane/switchboard start` — the bot from an empty directory with no Docker.
 
 ## Every command
 

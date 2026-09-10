@@ -47,6 +47,9 @@ export interface SetupCommandDeps {
     readFile(path: string): Promise<string | undefined>;
     /** True when the working directory is the repository root — where the profile and `deploy/` live. */
     inCheckout(): boolean;
+    /** The installation directory, when it is not the one the operator stands in (`~/.switchboard`,
+     *  `SWITCHBOARD_HOME`): `init` names it so nobody hunts for the files. Undefined when they are here. */
+    root(): string | undefined;
     /** `project.json`'s `image` — what the next commands run outside a checkout. */
     image(): string;
     /** The published npm package this CLI runs from, when it does — the next `ask` is that package's; undefined in a checkout or the image. */
@@ -117,6 +120,8 @@ const DEFAULT_NAME = "switchboard";
 
 interface InitOutput {
   dryRun: boolean;
+  /** Where the files went, when not the current directory. */
+  root?: string;
   files: { path: string; mode: string; status: "planned" | "written" | "replaced"; preview?: string }[];
   providers: string[];
   capabilities: Capabilities;
@@ -135,7 +140,8 @@ export const setupInit = defineCommand({
     "The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run writes nothing and previews with secrets masked, existing files or not.",
   render: (output) => {
     const o = output as unknown as InitOutput;
-    const lines = [o.dryRun ? "would write:" : "wrote:"];
+    const where = o.root ? ` to ${o.root}` : "";
+    const lines = [o.dryRun ? `would write${where}:` : `wrote${where}:`];
     for (const f of o.files)
       lines.push(
         `  ${f.path.padEnd(22)}${f.mode === "600" ? "(mode 600)" : ""}${f.status === "replaced" ? " (replaced)" : ""}`.trimEnd(),
@@ -163,8 +169,10 @@ export const setupInit = defineCommand({
       ...(deps.setup.package() !== undefined ? { package: deps.setup.package() } : {}),
     });
     if (!plan.ok) throw new CommandError(plan.code, plan.problems.join("\n"));
+    const root = deps.setup.root();
     const output: InitOutput = {
       dryRun,
+      ...(root !== undefined ? { root } : {}),
       files: plan.files.map((f) => ({
         path: f.path,
         mode: f.mode.toString(8),

@@ -18,7 +18,7 @@ npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key
 npx @coreplane/switchboard ask "what can you do?"
 ```
 
-`init` writes `.env` (mode 600) and `config/config.yaml`; `ask` runs the whole pipeline. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`.
+`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` runs the whole pipeline. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`.
 
 Next: [Get started](docs/tutorials/get-started.md).
 

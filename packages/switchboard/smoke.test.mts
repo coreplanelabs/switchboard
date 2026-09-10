@@ -32,8 +32,19 @@ let packed: { filename: string; files: string[] };
  *  credential and account never reach it: a smoke test touches no account, and a `registry`-mode
  *  `deploy plan` reads the account registry only when a token is there. */
 function switchboard(cwd: string, ...args: string[]) {
+  return switchboardWithEnv(cwd, {}, ...args);
+}
+
+/** The same, with environment overrides. The installation is pinned to `cwd` (`SWITCHBOARD_HOME`)
+ *  unless the override says otherwise: a smoke test must never write into the developer's real
+ *  `~/.switchboard` — the default an empty directory would otherwise resolve to. */
+function switchboardWithEnv(cwd: string, over: Record<string, string | undefined>, ...args: string[]) {
   const { CLOUDFLARE_API_TOKEN: _token, CLOUDFLARE_ACCOUNT_ID: _account, ...env } = process.env;
-  const r = spawnSync(bin, args, { cwd, encoding: "utf8", env: { ...env, NO_COLOR: "1" } });
+  const r = spawnSync(bin, args, {
+    cwd,
+    encoding: "utf8",
+    env: { ...env, NO_COLOR: "1", SWITCHBOARD_HOME: cwd, ...over },
+  });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -132,6 +143,40 @@ describe("the installed CLI", () => {
     expect(existsSync(join(work, ".env"))).toBe(false);
   });
 
+  it("with nothing to go on, `init` from an empty directory writes the installation into ~/.switchboard and says so; a second empty directory then finds the same installation", () => {
+    const home = join(tmp, "home");
+    const here = join(tmp, "somewhere-else");
+    const there = join(tmp, "somewhere-else-again");
+    for (const d of [home, here, there]) mkdirSync(d);
+    // HOME is the temp directory's: the real home is never written; SWITCHBOARD_HOME is unset so the default decides.
+    const r = switchboardWithEnv(
+      here,
+      { HOME: home, SWITCHBOARD_HOME: undefined },
+      "init",
+      "--organization",
+      "acme",
+      "--anthropic-key",
+      "sk-test",
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`wrote to ${join(home, ".switchboard")}:`);
+    expect(existsSync(join(home, ".switchboard", ".env"))).toBe(true);
+    expect(existsSync(join(home, ".switchboard", "config", "config.yaml"))).toBe(true);
+    expect(existsSync(join(here, ".env"))).toBe(false);
+    const again = switchboardWithEnv(
+      there,
+      { HOME: home, SWITCHBOARD_HOME: undefined },
+      "init",
+      "--dry-run",
+      "--organization",
+      "acme",
+      "--anthropic-key",
+      "sk-test",
+    );
+    expect(again.status, again.stderr).toBe(0);
+    expect(again.stdout).toContain(`would write to ${join(home, ".switchboard")}:`);
+  });
+
   it("`start --help` says what the bot is and what it reads, under the bin's own name; `start` with an argument is the usage error", () => {
     const help = switchboard(join(tmp, "install"), "start", "--help");
     expect(help.status, help.stderr).toBe(0);
@@ -148,9 +193,12 @@ describe("the installed CLI", () => {
   it("`start` from the installed package boots the bot process: in a directory with no .env it refuses at once naming the missing variable (the process's own rule), exit 1 — no stack, no Docker", () => {
     const work = join(tmp, "work-start");
     mkdirSync(work);
-    const env = Object.fromEntries(
-      Object.entries(process.env).filter(([k]) => k !== "SLACK_BOT_TOKEN" && k !== "SLACK_APP_TOKEN"),
-    );
+    const env = {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([k]) => k !== "SLACK_BOT_TOKEN" && k !== "SLACK_APP_TOKEN"),
+      ),
+      SWITCHBOARD_HOME: work,
+    };
     const r = spawnSync(bin, ["start"], { cwd: work, encoding: "utf8", env, timeout: 30_000 });
     expect(r.status).toBe(1);
     expect(r.stderr.trim()).toBe("Missing required env var SLACK_BOT_TOKEN");
@@ -163,7 +211,13 @@ describe("the installed CLI", () => {
     const init = switchboard(work, "init", "--organization", "acme", "--anthropic-key", "sk-test");
     expect(init.status, init.stderr).toBe(0);
     const port = 18_000 + (process.pid % 1000);
-    const env = { ...process.env, SLACK_BOT_TOKEN: "xoxb-fake", SLACK_APP_TOKEN: "xapp-fake", PORT: String(port) };
+    const env = {
+      ...process.env,
+      SLACK_BOT_TOKEN: "xoxb-fake",
+      SLACK_APP_TOKEN: "xapp-fake",
+      PORT: String(port),
+      SWITCHBOARD_HOME: work,
+    };
     const child = spawn(bin, ["start"], { cwd: work, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
