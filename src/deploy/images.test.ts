@@ -5,7 +5,6 @@ import {
   DOCKERFILES,
   IMAGE_KINDS,
   imagesFromFacts,
-  parseRegistryListing,
   planImageCopies,
   publishedImagesFrom,
   registryHas,
@@ -89,16 +88,6 @@ describe("the account registry listing", () => {
     { name: "switchboard-resident", tags: ["1.2.2"] },
     { name: "unrelated", tags: ["1.2.3"] },
   ];
-
-  it("parses wrangler's `images list --json` rows (name + tags) and refuses any other shape", () => {
-    expect(parseRegistryListing(listing)).toEqual(listing);
-    expect(parseRegistryListing([{ name: "x", tags: ["1", 2, "3"] }])).toEqual([{ name: "x", tags: ["1", "3"] }]);
-    expect(parseRegistryListing([])).toEqual([]);
-    expect(parseRegistryListing({ name: "x", tags: [] })).toBeUndefined();
-    expect(parseRegistryListing([{ name: "x" }])).toBeUndefined();
-    expect(parseRegistryListing([null])).toBeUndefined();
-    expect(parseRegistryListing("text")).toBeUndefined();
-  });
 
   it("holds `<name>:<version>` when that name lists that tag — another name's tag or another version does not count", () => {
     expect(registryHas(listing, "switchboard", "1.2.3")).toBe(true);

@@ -1,185 +1,159 @@
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PACKAGE_ROOT } from "../packageRoot.js";
-import {
-  API_TOKEN_ENV,
-  apiTokenMissingProblem,
-  imagesHostIO,
-  registryCommand,
-  wranglerDir,
-  type Spawn,
-  type Transfer,
-} from "./imagesHost.js";
+import { API_TOKEN_ENV, apiTokenMissingProblem, imagesHostIO, RENEW_BEFORE_MS, type Transfer } from "./imagesHost.js";
 import { planImageCopies } from "./images.js";
-import { OPERATOR_ROOT } from "./host.js";
-import { WORKER_DIRS } from "./plan.js";
-import { containersEditProblem } from "./registryTransfer.js";
-import type { RunResult } from "./run.js";
+import { containersEditProblem, CREDENTIAL_MINUTES } from "./registryTransfer.js";
 import { TEST_PROFILE, TEST_PUBLISHED_IMAGES } from "./testing/profile.js";
 
 // Feature: docs/reference/specs/release-and-deploy.md item 26 — the host half of
-// the image copy over a fake spawn and a fake transfer: the one wrangler command
-// that reads the registry (in which directory, with which environment, in
-// either root), the credential minted once per account from CLOUDFLARE_API_TOKEN
-// and spent by every copy, and how each failure is reported. Nothing here spawns
-// a process or opens a socket.
+// the image copy over a fake transfer: the credential minted once per account
+// from CLOUDFLARE_API_TOKEN and spent by every registry read and copy, and how
+// each failure is reported. Nothing here spawns a process or opens a socket.
 
 const ACCOUNT = TEST_PROFILE.account;
-const BOT_DIR = join(PACKAGE_ROOT, WORKER_DIRS.bot);
 const [COPY, SECOND] = planImageCopies(TEST_PUBLISHED_IMAGES, ACCOUNT, []).copy;
-/** A package-mode root: the operator's work area, where the bot Worker's directory is materialised. */
-const PACKAGE_AT = { workArea: "/srv/switchboard/.switchboard" };
 const ENV = { [API_TOKEN_ENV]: "cf-token" };
+const CREDENTIALS_ENDPOINT = `POST https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/containers/registries/registry.cloudflare.com/credentials`;
 
-interface Call {
-  cmd: string;
-  args: string[];
-  cwd: string;
-  set?: Record<string, string>;
-  unset?: readonly string[];
-}
-
-/** A spawn that records every call and answers from a script keyed by `cmd args…`. */
-function fakeSpawn(script: Record<string, RunResult> = {}, calls: Call[] = []): { spawn: Spawn; calls: Call[] } {
-  const spawn: Spawn = async (cmd, args, opts) => {
-    calls.push({ cmd, args, cwd: opts.cwd, set: opts.set, unset: opts.unset });
-    return script[`${cmd} ${args.join(" ")}`] ?? { code: 0, output: "" };
-  };
-  return { spawn, calls };
-}
-
-/** A transfer that records its calls: the mint answers as told, the copy lands with a made-up digest. */
+/** A transfer that records its calls: the mint answers as told, the list is what it is told, the copy lands. */
 function fakeTransfer(
   mint: Awaited<ReturnType<Transfer["mint"]>> = { ok: true, credential: { authorization: "Basic djE6and0" } },
+  listing: Awaited<ReturnType<Transfer["list"]>> = { value: [{ name: "switchboard", tags: ["1.2.3"] }] },
 ) {
   const mints: { account: string; token: string }[] = [];
+  const lists: { account: string; authorization: string }[] = [];
   const copies: { source: string; account: string; authorization: string }[] = [];
   const transfer: Transfer = {
     mint: async (account, token) => {
       mints.push({ account, token });
       return mint;
     },
+    list: async (account, credential) => {
+      lists.push({ account, authorization: credential.authorization });
+      return listing;
+    },
     transfer: async (copy, account, credential) => {
       copies.push({ source: copy.source, account, authorization: credential.authorization });
       return { ok: true, report: { digest: `sha256:${copy.name}`, blobs: 3, uploaded: 2, bytes: 10 } };
     },
   };
-  return { transfer, mints, copies };
+  return { transfer, mints, lists, copies };
 }
 
-/** A host over the fakes in a checkout, its work area always ready — `readied` counts the asks. */
-function host(
-  spawn: Spawn,
-  transfer: Transfer,
-  readied: number[] = [0],
-  env: Record<string, string | undefined> = ENV,
-) {
-  return imagesHostIO({
-    spawn,
-    transfer,
-    env,
-    ready: async () => {
-      readied[0]++;
-      return { ok: true, copied: false, installed: [] };
-    },
-  });
-}
-
-describe("the registry command", () => {
-  it("reads the registry with wrangler in the bot Worker's directory — the tree's in a checkout, the work area's from the package — with the profile's account in the environment; no Worker config needed", () => {
-    expect(wranglerDir()).toBe(join(OPERATOR_ROOT.workArea, WORKER_DIRS.bot));
-    expect(registryCommand(ACCOUNT)).toEqual({
-      cmd: "npx",
-      args: ["wrangler", "containers", "images", "list", "--json"],
-      cwd: wranglerDir(),
-      set: { CLOUDFLARE_ACCOUNT_ID: ACCOUNT },
-    });
-    expect(registryCommand(ACCOUNT, PACKAGE_AT).cwd).toBe("/srv/switchboard/.switchboard/deploy/cloudflare");
-  });
-});
+const host = (transfer: Transfer, env: Record<string, string | undefined> = ENV, now?: () => number) =>
+  imagesHostIO({ transfer, env, ...(now ? { now } : {}) });
+const MINUTE = 60_000;
 
 describe("imagesHostIO", () => {
-  it("registry: the work area is readied first, then the parsed listing on success; wrangler's error line on a non-zero exit; a shape that is not a listing is named", async () => {
-    const listing = [{ name: "switchboard", tags: ["1.2.3"] }];
-    const ok = fakeSpawn({
-      "npx wrangler containers images list --json": { code: 0, output: `⛅️ wrangler\n${JSON.stringify(listing)}\n` },
-    });
-    const readied = [0];
-    expect(await host(ok.spawn, fakeTransfer().transfer, readied).registry(ACCOUNT)).toEqual({ value: listing });
-    expect(readied).toEqual([1]);
-    expect(ok.calls).toEqual([
-      {
-        cmd: "npx",
-        args: ["wrangler", "containers", "images", "list", "--json"],
-        cwd: BOT_DIR,
-        set: { CLOUDFLARE_ACCOUNT_ID: ACCOUNT },
-        unset: undefined,
-      },
-    ]);
-    const denied = fakeSpawn({
-      "npx wrangler containers images list --json": {
-        code: 1,
-        output: "✘ [ERROR] Authentication error [code: 10000]\n",
-      },
-    });
-    expect(await host(denied.spawn, fakeTransfer().transfer).registry(ACCOUNT)).toEqual({
-      error: "wrangler containers images list --json failed: ✘ [ERROR] Authentication error [code: 10000]",
-    });
-    const odd = fakeSpawn({ "npx wrangler containers images list --json": { code: 0, output: '{"not":"a list"}' } });
-    expect(await host(odd.spawn, fakeTransfer().transfer).registry(ACCOUNT)).toEqual({
-      error: "wrangler containers images list --json: no image listing in the output",
-    });
-  });
-
-  it("a work area that cannot be readied is the registry's error, and wrangler never runs", async () => {
-    const calls = fakeSpawn();
-    const io = imagesHostIO({
-      spawn: calls.spawn,
-      transfer: fakeTransfer().transfer,
-      env: ENV,
-      ready: async () => ({ ok: false, problem: "nope: no such stamp" }),
-    });
-    expect(await io.registry(ACCOUNT)).toEqual({ error: "nope: no such stamp" });
-    expect(calls.calls).toEqual([]);
-  });
-
-  it("credential: minted from CLOUDFLARE_API_TOKEN once per account and spent by every copy; the copies never run a process", async () => {
+  it("mints the credential from CLOUDFLARE_API_TOKEN once per account and spends it on the registry read, the pre-check and every copy", async () => {
     const t = fakeTransfer();
-    const spawn = fakeSpawn();
-    const io = host(spawn.spawn, t.transfer);
-    expect(await io.credential(ACCOUNT)).toEqual({ ok: true });
+    const io = host(t.transfer);
+    expect(await io.registry(ACCOUNT)).toEqual({ value: [{ name: "switchboard", tags: ["1.2.3"] }] });
     expect(await io.credential(ACCOUNT)).toEqual({ ok: true });
     expect(await io.copy(COPY, ACCOUNT)).toEqual({
       ok: true,
       report: { digest: "sha256:switchboard", blobs: 3, uploaded: 2, bytes: 10 },
     });
     expect(await io.copy(SECOND, ACCOUNT)).toMatchObject({ ok: true });
+    expect(await io.registry(ACCOUNT)).toMatchObject({ value: expect.any(Array) });
     expect(t.mints).toEqual([{ account: ACCOUNT, token: "cf-token" }]);
+    expect(t.lists).toEqual([
+      { account: ACCOUNT, authorization: "Basic djE6and0" },
+      { account: ACCOUNT, authorization: "Basic djE6and0" },
+    ]);
     expect(t.copies).toEqual([
       { source: COPY.source, account: ACCOUNT, authorization: "Basic djE6and0" },
       { source: SECOND.source, account: ACCOUNT, authorization: "Basic djE6and0" },
     ]);
-    expect(spawn.calls).toEqual([]);
-    // A copy without the pre-check mints for itself.
-    const alone = fakeTransfer();
-    expect(await host(spawn.spawn, alone.transfer).copy(COPY, ACCOUNT)).toMatchObject({ ok: true });
-    expect(alone.mints).toHaveLength(1);
   });
 
-  it("no CLOUDFLARE_API_TOKEN is refused by name before the API is asked; a token without Containers Edit is the mint's problem, on the pre-check and on a copy alike", async () => {
+  it("no CLOUDFLARE_API_TOKEN is refused by name before the API is asked — on the read, the pre-check and a copy alike", async () => {
     const unset = fakeTransfer();
-    const io = host(fakeSpawn().spawn, unset.transfer, [0], {});
+    const io = host(unset.transfer, {});
+    expect(await io.registry(ACCOUNT)).toEqual({ error: apiTokenMissingProblem() });
     expect(await io.credential(ACCOUNT)).toEqual({ ok: false, problem: apiTokenMissingProblem() });
     expect(await io.copy(COPY, ACCOUNT)).toEqual({ ok: false, problem: apiTokenMissingProblem() });
     expect(apiTokenMissingProblem()).toContain("CLOUDFLARE_API_TOKEN is not set");
     expect(apiTokenMissingProblem()).toContain("Containers Edit");
     expect(unset.mints).toEqual([]);
-    const forbidden = fakeTransfer({ ok: false, problem: containersEditProblem() });
-    const denied = host(fakeSpawn().spawn, forbidden.transfer);
-    expect(await denied.credential(ACCOUNT)).toEqual({ ok: false, problem: containersEditProblem() });
-    expect(await denied.copy(COPY, ACCOUNT)).toEqual({ ok: false, problem: containersEditProblem() });
+    expect(unset.lists).toEqual([]);
+  });
+
+  it("a token the credentials endpoint refuses is the mint's problem — the endpoint and the permission by name — on every operation, and a refused mint is not kept", async () => {
+    const forbidden = fakeTransfer({ ok: false, problem: containersEditProblem(CREDENTIALS_ENDPOINT) });
+    const io = host(forbidden.transfer);
+    const problem = containersEditProblem(CREDENTIALS_ENDPOINT);
+    expect(problem).toContain(`${CREDENTIALS_ENDPOINT} answered 403`);
+    expect(problem).toContain("Containers Edit");
+    expect(await io.registry(ACCOUNT)).toEqual({ error: problem });
+    expect(await io.credential(ACCOUNT)).toEqual({ ok: false, problem });
+    expect(await io.copy(COPY, ACCOUNT)).toEqual({ ok: false, problem });
+    expect(forbidden.lists).toEqual([]);
     expect(forbidden.copies).toEqual([]);
-    // A refused mint is not kept: the next ask tries again.
-    expect(forbidden.mints).toHaveLength(2);
+    expect(forbidden.mints).toHaveLength(3);
+  });
+
+  it("a credential nearing its 45-minute expiry is replaced before it is spent: fresh under 40 minutes old, minted again from then on", async () => {
+    let t = 1_000_000;
+    const clock = () => t;
+    const late = fakeTransfer();
+    const io = host(late.transfer, ENV, clock);
+    expect(RENEW_BEFORE_MS).toBe(5 * MINUTE);
+    expect(await io.registry(ACCOUNT)).toMatchObject({ value: expect.any(Array) });
+    t += (CREDENTIAL_MINUTES - 5) * MINUTE - 1;
+    expect(await io.copy(COPY, ACCOUNT)).toMatchObject({ ok: true });
+    expect(late.mints).toHaveLength(1);
+    t += 1;
+    expect(await io.copy(SECOND, ACCOUNT)).toMatchObject({ ok: true });
+    expect(late.mints).toHaveLength(2);
+    // The fresh one is now the one every call spends.
+    expect(await io.registry(ACCOUNT)).toMatchObject({ value: expect.any(Array) });
+    expect(late.mints).toHaveLength(2);
+  });
+
+  it("a 401 from the account registry replaces the credential and retries the operation once — copy and listing alike; a second 401 is the error, said", async () => {
+    let refusals = 2;
+    const t = fakeTransfer();
+    const expiring: Transfer = {
+      ...t.transfer,
+      list: async (account, credential) => {
+        t.lists.push({ account, authorization: credential.authorization });
+        return refusals-- > 0 ? { error: "GET …/_catalog answered 401", unauthorized: true } : { value: [] };
+      },
+      transfer: async (copy, account, credential) => {
+        t.copies.push({ source: copy.source, account, authorization: credential.authorization });
+        return refusals-- > 0
+          ? { ok: false, problem: "asking … failed — HTTP 401", unauthorized: true }
+          : { ok: true, report: { digest: "sha256:x", blobs: 1, uploaded: 1, bytes: 1 } };
+      },
+    };
+    const logged: string[] = [];
+    const io = imagesHostIO({ transfer: expiring, env: ENV, log: (l) => logged.push(l) });
+    // Two refusals in a row: the retry's own 401 is the answer.
+    expect(await io.registry(ACCOUNT)).toEqual({ error: "GET …/_catalog answered 401", unauthorized: true });
+    expect(t.mints).toHaveLength(2);
+    expect(t.lists).toHaveLength(2);
+    expect(logged.filter((l) => l.includes("refused the credential (401)"))).toHaveLength(1);
+    // One refusal: replaced and retried, the caller sees success.
+    refusals = 1;
+    expect(await io.copy(COPY, ACCOUNT)).toMatchObject({ ok: true });
+    expect(t.mints).toHaveLength(3);
+    expect(t.copies).toHaveLength(2);
+    // A 403 is not a credential to replace.
+    refusals = 0;
+    const forbidden: Transfer = { ...expiring, list: async () => ({ error: "GET … answered 403" }) };
+    const noRetry = imagesHostIO({ transfer: forbidden, env: ENV });
+    expect(await noRetry.registry(ACCOUNT)).toEqual({ error: "GET … answered 403" });
+  });
+
+  it("a listing the registry refuses is its own error, with the credential already minted and kept", async () => {
+    const denied = fakeTransfer(undefined, {
+      error: "GET https://registry.cloudflare.com/v2/_catalog?tags=true answered 403 — …",
+    });
+    const io = host(denied.transfer);
+    expect(await io.registry(ACCOUNT)).toEqual({
+      error: "GET https://registry.cloudflare.com/v2/_catalog?tags=true answered 403 — …",
+    });
+    expect(await io.credential(ACCOUNT)).toEqual({ ok: true });
+    expect(denied.mints).toHaveLength(1);
   });
 });

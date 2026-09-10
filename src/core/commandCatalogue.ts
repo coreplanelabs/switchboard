@@ -3,6 +3,7 @@ import { AGENTS } from "../agents/registry.js";
 import { bootstrapOnHost } from "../agentEnv/host.js";
 import type { ConfigStore } from "../config.js";
 import type { AffectedReport } from "../deploy/affected.js";
+import { systemClock } from "./trace/clock.js";
 import type { LoadedProfile } from "../deploy/profile.js";
 import {
   computeAffectedOnHost,
@@ -222,7 +223,7 @@ export function buildCoreCommands(
       files: hostDeployFiles,
       secrets: hostSecretsIO,
       pushConfig: pushConfigOnHost,
-      images: imagesHostIO({ log: (l) => console.log(l) }),
+      images: imagesHostIO({ log: (l) => console.log(l), now: wiring.now ?? systemClock }),
       cliVersion: packageVersion,
     },
     env: { bootstrap: bootstrapOnHost },

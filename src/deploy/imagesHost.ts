@@ -1,145 +1,133 @@
-// The host half of the image copy (`deploy images`, and `deploy all` in
-// `registry` mode): what this machine does that the plan cannot. The plan —
-// which images the account registry already holds, which to copy — is pure
-// (src/deploy/images.ts) and the commands (src/core/commands/deploy.ts) reach
-// these three operations through `deps.deploy.images`, so their tests run over
-// fakes and this file is the one that touches a process and the network.
+// The host half of the image copy (`deploy images`, and `deploy all` / `deploy
+// plan` in `registry` mode): what this machine does that the plan cannot. The
+// plan — which images the account registry already holds, which to copy — is
+// pure (src/deploy/images.ts) and the commands (src/core/commands/deploy.ts)
+// reach these three operations through `deps.deploy.images`, so their tests run
+// over fakes and this file is the one that touches the network.
 //
-// The registry is READ with wrangler (`containers images list --json`), run in
-// the bot Worker's directory as the operator root resolves it
-// (src/deploy/operatorRoot.ts: the tree in a checkout, the work area from the
-// published package — materialised and installed first, so the pinned wrangler
-// is there to run) with CLOUDFLARE_ACCOUNT_ID SET to the profile's account. The
-// deploy steps strip that variable because it would override the account the
-// rendered wrangler.jsonc pins; this is an account-level call that needs no
-// Worker config at all — `deploy plan` probes the registry from a root that has
-// rendered nothing — so the profile supplies the account the same way.
-//
-// The copy itself never touches a process: it is the HTTPS transfer of
-// src/deploy/registryTransferHost.ts, under a credential minted once per
-// account from CLOUDFLARE_API_TOKEN — the one thing the copy needs that the
-// rest of the deploy does not, refused by name when it is absent or when the
-// token lacks Containers Edit.
+// Nothing here spawns a process. Both the registry read and the copy are the
+// HTTPS calls of src/deploy/registryTransferHost.ts under one credential per
+// account, minted from CLOUDFLARE_API_TOKEN — the one thing `registry` mode
+// needs that the rest of the deploy does not, refused by name when the variable
+// is absent, and with the endpoint named when the token is refused. The
+// credential lives 45 minutes and a copy can run long: it is re-minted before
+// it gets close to expiry, and once more when the registry answers 401 anyway.
 
-import { ensureWorkAreaOnHost, OPERATOR_ROOT } from "./host.js";
-import { parseRegistryListing, type ImageCopy, type RegistryImage } from "./images.js";
-import { workPath, type OperatorRoot } from "./operatorRoot.js";
-import { lastErrorLines, WORKER_DIRS } from "./plan.js";
+import { systemClock } from "../core/trace/clock.js";
+import type { Clock } from "../core/trace/types.js";
+import type { ImageCopy, RegistryImage } from "./images.js";
+import { CREDENTIAL_MINUTES } from "./registryTransfer.js";
 import {
+  listAccountRegistry,
   mintRegistryCredential,
   transferImage,
   type RegistryCredential,
   type TransferIO,
   type TransferOutcome,
 } from "./registryTransferHost.js";
-import { run } from "./run.js";
-import { parseWranglerJson, type Read } from "./sandboxLiveGate.js";
-import type { WorkAreaOutcome } from "./workArea.js";
+import type { Read } from "./sandboxLiveGate.js";
 
-/** The environment variable the copy's credential is minted from. */
+/** The environment variable the registry credential is minted from. */
 export const API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
+
+/** How long before the credential's expiry a fresh one is minted instead: a blob upload may run for
+ *  minutes, and one that starts on a credential about to expire would fail mid-stream. */
+export const RENEW_BEFORE_MS = 5 * 60_000;
 
 /** What the commands need from the host. */
 export interface ImagesHostIO {
-  /** `wrangler containers images list --json` on the account: what its registry holds, or why it could not be read. */
+  /** What the account's registry holds (`GET /v2/_catalog?tags=true` under the minted credential), or why it could not be read. */
   registry(account: string): Promise<Read<RegistryImage[]>>;
-  /** Can this host push into the account's registry? Mints (and keeps, for the copies) a push+pull credential from
-   *  CLOUDFLARE_API_TOKEN; the problem names the missing variable or the missing token permission. */
+  /** Can this host reach the account's registry? Mints (and keeps, for the reads and copies) a push+pull credential
+   *  from CLOUDFLARE_API_TOKEN; the problem names the missing variable, or the endpoint and the token permission. */
   credential(account: string): Promise<{ ok: true } | { ok: false; problem: string }>;
   /** Copy one image into the account's registry over HTTPS, under the minted credential. */
   copy(copy: ImageCopy, account: string): Promise<TransferOutcome>;
 }
 
-/** The spawn the registry read runs through — injectable so a test hands it a fake. */
-export type Spawn = typeof run;
-
-/** The two network calls the copy makes — injectable so a test hands it a fake. */
+/** The three network calls the host makes — injectable so a test hands it a fake. */
 export interface Transfer {
   mint: typeof mintRegistryCredential;
+  list: typeof listAccountRegistry;
   transfer: typeof transferImage;
 }
 
-/** One command the host half runs, as argv — the shape a test pins. */
-export interface HostCommand {
-  cmd: string;
-  args: string[];
-  cwd: string;
-  set?: Record<string, string>;
-}
-
-/** The bot Worker's directory as wrangler runs in it — the one Worker every profile has. */
-export function wranglerDir(at: Pick<OperatorRoot, "workArea"> = OPERATOR_ROOT): string {
-  return workPath(at, WORKER_DIRS.bot);
-}
-
-/** Pure: the read of the account registry. */
-export function registryCommand(account: string, at: Pick<OperatorRoot, "workArea"> = OPERATOR_ROOT): HostCommand {
-  return {
-    cmd: "npx",
-    args: ["wrangler", "containers", "images", "list", "--json"],
-    cwd: wranglerDir(at),
-    set: { CLOUDFLARE_ACCOUNT_ID: account },
-  };
-}
-
-/** Pure: why the copy cannot start without the token. */
+/** Pure: why nothing can start without the token. */
 export function apiTokenMissingProblem(): string {
-  return `${API_TOKEN_ENV} is not set — copying images into the account registry mints a registry credential from it (a Cloudflare API token with Containers Edit)`;
+  return `${API_TOKEN_ENV} is not set — reading and copying images in the account registry needs a registry credential minted from it (a Cloudflare API token with Containers Edit)`;
 }
 
 export interface ImagesHostOptions {
-  spawn?: Spawn;
   transfer?: Transfer;
   /** The transfer's own I/O (endpoints, part size, fetch) — the tests' fake registry. */
   transferIO?: TransferIO;
   env?: Record<string, string | undefined>;
   log?: (line: string) => void;
-  /** The root the wrangler directory resolves under; default: this process's. */
-  at?: Pick<OperatorRoot, "workArea">;
-  /** Bring the bot Worker's directory to this CLI's version, installed — a no-op in a checkout, the work
-   *  area from the package (src/deploy/host.ts `ensureWorkAreaOnHost`). Injectable for the tests. */
-  ready?: () => Promise<WorkAreaOutcome>;
+  /** The clock the credential's age is judged by (default: the system clock). */
+  now?: Clock;
 }
 
 export function imagesHostIO(options: ImagesHostOptions = {}): ImagesHostIO {
-  const spawn = options.spawn ?? run;
-  const at = options.at ?? OPERATOR_ROOT;
-  const ready = options.ready ?? (() => ensureWorkAreaOnHost([WORKER_DIRS.bot], () => {}));
-  const transfer = options.transfer ?? { mint: mintRegistryCredential, transfer: transferImage };
+  const transfer = options.transfer ?? {
+    mint: mintRegistryCredential,
+    list: listAccountRegistry,
+    transfer: transferImage,
+  };
   const env = options.env ?? process.env;
+  const now = options.now ?? systemClock;
+  const log = options.log ?? (() => {});
   const transferIO: TransferIO = { ...(options.transferIO ?? {}), ...(options.log ? { log: options.log } : {}) };
-  // One credential per account for the life of this host: minted by the pre-check, spent by the copies.
-  const credentials = new Map<string, RegistryCredential>();
+  // One credential per account, kept while it is fresh: minted on the first ask, spent by every read and copy,
+  // replaced when it nears its expiry or when the registry refuses it.
+  const credentials = new Map<string, { credential: RegistryCredential; mintedAt: number }>();
   const credential = async (
     account: string,
+    replace = false,
   ): Promise<{ ok: true; credential: RegistryCredential } | { ok: false; problem: string }> => {
     const held = credentials.get(account);
-    if (held) return { ok: true, credential: held };
+    if (held && !replace && now() - held.mintedAt < CREDENTIAL_MINUTES * 60_000 - RENEW_BEFORE_MS)
+      return { ok: true, credential: held.credential };
     const token = env[API_TOKEN_ENV];
     if (!token) return { ok: false, problem: apiTokenMissingProblem() };
     const minted = await transfer.mint(account, token, transferIO);
-    if (minted.ok) credentials.set(account, minted.credential);
+    if (minted.ok) credentials.set(account, { credential: minted.credential, mintedAt: now() });
+    else credentials.delete(account);
     return minted;
   };
+  /** Did the registry refuse the credential? The transfer flags a 401 on its failures (`unauthorized: true`). */
+  const refusedCredential = (r: unknown): boolean =>
+    typeof r === "object" && r !== null && (r as { unauthorized?: true }).unauthorized === true;
+  /** Run one registry operation under the credential; a 401 from the registry replaces the credential once. */
+  const under = async <T>(
+    account: string,
+    op: (credential: RegistryCredential) => Promise<T>,
+    refusal: (problem: string) => T,
+  ): Promise<T> => {
+    const first = await credential(account);
+    if (!first.ok) return refusal(first.problem);
+    const r = await op(first.credential);
+    if (!refusedCredential(r)) return r;
+    log("[images] the account registry refused the credential (401) — minting a fresh one and trying once more");
+    const again = await credential(account, true);
+    if (!again.ok) return refusal(again.problem);
+    return op(again.credential);
+  };
   return {
-    registry: async (account) => {
-      const workArea = await ready();
-      if (!workArea.ok) return { error: workArea.problem };
-      const command = registryCommand(account, at);
-      const said = command.args.join(" ");
-      const r = await spawn(command.cmd, command.args, { cwd: command.cwd, set: command.set });
-      if (r.code !== 0) return { error: `${said} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}` };
-      const listing = parseRegistryListing(parseWranglerJson(r.output));
-      return listing === undefined ? { error: `${said}: no image listing in the output` } : { value: listing };
-    },
+    registry: (account) =>
+      under(
+        account,
+        (c) => transfer.list(account, c, transferIO),
+        (problem) => ({ error: problem }),
+      ),
     credential: async (account) => {
       const r = await credential(account);
       return r.ok ? { ok: true } : r;
     },
-    copy: async (copy, account) => {
-      const r = await credential(account);
-      if (!r.ok) return r;
-      return transfer.transfer(copy, account, r.credential, transferIO);
-    },
+    copy: (copy, account) =>
+      under(
+        account,
+        (c) => transfer.transfer(copy, account, c, transferIO),
+        (problem) => ({ ok: false, problem }),
+      ),
   };
 }

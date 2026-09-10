@@ -171,30 +171,54 @@ function toOptions(
   };
 }
 
+/** A computed plan with what it was computed from — so `deploy all` can rebuild it after a copy from the
+ *  same answers (the profile, the `--affected` report, the published images) plus a fresh listing. */
+interface Planned {
+  plan: DeployPlan;
+  loaded: LoadedProfile;
+  images: ImagesInput;
+  affected: AffectedReport | undefined;
+}
+
 /** The plan both commands compute: `--affected` asks the probe and lets the
  *  report select (`--only`/`--skip` then narrow that selection); otherwise
  *  `--only/--skip` select, and an empty selection is a mistake in the
  *  invocation. An empty AFFECTED selection is a true answer. In `registry` mode
  *  the plan says which of its steps' images the account registry holds and
- *  refuses nothing over a missing one: `deploy plan` reports it, `deploy all`
- *  copies it (`registry`: a listing already read, so the plan is not probed again). */
+ *  refuses nothing over a missing one — nor, when it is only read (`dryRun`),
+ *  over a registry it cannot read: `deploy plan` reports, `deploy all` copies. */
 async function computePlan(
   options: z.output<typeof deployOptions>,
   deps: DeployCommandDeps,
   dryRun: boolean,
-  registry?: readonly RegistryImage[],
-): Promise<{ plan: DeployPlan; loaded: LoadedProfile; images: ImagesInput }> {
+): Promise<Planned> {
   if (options.base !== undefined && !options.affected)
     throw new CommandError("invalid_input", "--base only means something with --affected");
   const loaded = await loadProfile(deps);
   const affected = options.affected
     ? await deps.deploy.affected(options.base !== undefined ? { base: options.base } : {})
     : undefined;
-  const images = await imagesInput(loaded, deps, registry);
+  const images = await imagesInput(loaded, deps, dryRun);
   const plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.host, loaded, images);
   if (plan.steps.length === 0 && !affected)
     throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
-  return { plan, loaded, images };
+  return { plan, loaded, images, affected };
+}
+
+/** The same plan again, over the listing read back after a copy: every answer the first plan was computed
+ *  from is reused — the `--affected` probe is never asked twice, so the selection the copies were planned
+ *  for is the selection that deploys. */
+function replan(
+  options: z.output<typeof deployOptions>,
+  planned: Planned,
+  listing: readonly RegistryImage[],
+  deps: DeployCommandDeps,
+): DeployPlan {
+  const images: ImagesInput =
+    planned.images.mode === "registry"
+      ? { mode: "registry", published: planned.images.published, registry: listing }
+      : planned.images;
+  return planDeploy(toOptions(options, false, planned.affected), deps.deploy.host, planned.loaded, images);
 }
 
 /** The copies a plan needs: its `registry`-mode steps whose image the account registry lacks, in
@@ -227,20 +251,19 @@ async function publishedImages(deps: DeployCommandDeps): Promise<PublishedImages
 /** What the planner needs to say where each step's image comes from. `build` mode needs nothing (the
  *  Dockerfiles are static, and a facts file without `images` is no concern of a checkout that builds).
  *  `registry` mode reads the published images and probes the account registry — for a real profile,
- *  never for the example (a placeholder account has no registry, and nothing deploys from the example) —
- *  unless a listing was just read (the proof after a copy), which stands in for the probe. */
-async function imagesInput(
-  loaded: LoadedProfile,
-  deps: DeployCommandDeps,
-  listing?: readonly RegistryImage[],
-): Promise<ImagesInput> {
+ *  never for the example (a placeholder account has no registry, and nothing deploys from the example).
+ *  A registry that cannot be read (no CLOUDFLARE_API_TOKEN, a refused token) is `unavailable` for a run —
+ *  `deploy all` needs it to copy — and, for a read (`deploy plan`, a dry run), a plan that says `not
+ *  probed` and why: the plan is read on every surface and needs no credential to be read. */
+async function imagesInput(loaded: LoadedProfile, deps: DeployCommandDeps, readOnly: boolean): Promise<ImagesInput> {
   if (loaded.profile.images !== "registry") return { mode: "build" };
   const published = await publishedImages(deps);
-  if (loaded.origin === "example") return { mode: "registry", published };
-  if (listing) return { mode: "registry", published, registry: listing };
+  if (loaded.origin === "example") return { mode: "registry", published, unprobed: "the example profile" };
   const registry = await deps.deploy.images.registry(loaded.profile.account);
-  if ("error" in registry)
+  if ("error" in registry) {
+    if (readOnly) return { mode: "registry", published, unprobed: registry.error };
     throw new CommandError("unavailable", `cannot read the account registry — ${registry.error}`);
+  }
   return { mode: "registry", published, registry: registry.value };
 }
 
@@ -322,9 +345,10 @@ export const deployAll = defineCommand({
     if (copies.length > 0) {
       // The images first, before the live gate and before any Worker rolls: a step whose container
       // cannot start is never deployed. The listing read back as the proof is the listing the plan
-      // is rebuilt on, so the runner gets a plan whose images are all present, probed once more never.
+      // is rebuilt on — from the first plan's own answers, so the runner gets a plan whose images are
+      // all present and whose selection is the one the copies were planned for.
       const after = await copyImages(copies, loaded.profile.account, deps);
-      plan = (await computePlan(options, deps, false, after)).plan;
+      plan = replan(options, planned, after, deps);
     }
     const result = await deps.deploy.run(plan);
     if (result.kind === "refused")

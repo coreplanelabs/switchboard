@@ -288,13 +288,21 @@ describe("deploy plan — what `deploy plan` prints", () => {
   const checkout = { root: { mode: "checkout" as const, path: "/work/switchboard" }, hasNodeModules: () => true };
 
   it("the full example profile: every Worker, in the canonical order", () => {
-    const plan = planDeploy(options(), checkout, example, { mode: "registry", published: TEST_PUBLISHED_IMAGES });
+    const plan = planDeploy(options(), checkout, example, {
+      mode: "registry",
+      published: TEST_PUBLISHED_IMAGES,
+      unprobed: "the example profile",
+    });
     expect(plan.steps.map((s) => s.name)).toEqual(DEPLOY_ORDER);
     expect(formatPlan(plan)).toMatchSnapshot();
   });
 
   it("a bot-only profile is a one-step plan with no state Worker to push the config to", () => {
-    const plan = planDeploy(options(), checkout, botOnly, { mode: "registry", published: TEST_PUBLISHED_IMAGES });
+    const plan = planDeploy(options(), checkout, botOnly, {
+      mode: "registry",
+      published: TEST_PUBLISHED_IMAGES,
+      unprobed: "the example profile",
+    });
     expect(plan.steps.map((s) => s.name)).toEqual(["bot"]);
     expect(plan.config.stateWorkerUrl).toBeUndefined();
     expect(formatPlan(plan)).toMatchSnapshot();

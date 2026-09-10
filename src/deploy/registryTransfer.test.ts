@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { ACCOUNT_REGISTRY } from "./images.js";
+import { ACCOUNT_REGISTRY, registryHas } from "./accountRegistry.js";
 import {
   appendDigest,
   basicAuthorization,
   blobsOf,
+  catalogProblem,
+  catalogUrl,
+  challengeTokenUrl,
   containersEditProblem,
   contentRange,
   CREDENTIAL_MINUTES,
@@ -14,6 +17,8 @@ import {
   MEDIA_TYPES,
   MIN_PART_BYTES,
   PART_BYTES,
+  parseBearerChallenge,
+  parseCatalog,
   parseCredential,
   parseImageRef,
   parseManifestDocument,
@@ -21,7 +26,6 @@ import {
   partBoundaries,
   resolveLocation,
   selectPlatformManifest,
-  sourceTokenUrl,
   TARGET_PLATFORM,
   targetRepository,
 } from "./registryTransfer.js";
@@ -83,23 +87,87 @@ describe("the credential", () => {
     expect(parseCredential(null)).toMatchObject({ ok: false });
   });
 
-  it("a 403 is the token permission, named; any other failure keeps the status and the API's words", () => {
-    expect(credentialProblem(403, '{"errors":[{"message":"Unauthorized to access requested resource"}]}')).toBe(
-      containersEditProblem(),
+  it("a 403 names the endpoint that answered it and the token permission Cloudflare documents — and says when a token that has it is still refused; any other failure keeps the status and the API's words", () => {
+    const url = credentialsUrl("https://api.cloudflare.com", "acct");
+    expect(credentialProblem(403, '{"errors":[{"message":"Unauthorized to access requested resource"}]}', url)).toBe(
+      containersEditProblem(`POST ${url}`),
     );
-    expect(containersEditProblem()).toBe(
-      "the Cloudflare API token needs Containers Edit to copy images into the account registry",
+    expect(containersEditProblem(`POST ${url}`)).toBe(
+      `POST ${url} answered 403 — the Cloudflare API token needs Containers Edit to copy images into the account registry (the permission Cloudflare documents for \`containers\`); a token that has it is missing a permission Cloudflare does not document for this endpoint`,
     );
-    expect(credentialProblem(500, "boom")).toBe("minting the account registry credential failed — HTTP 500: boom");
-    expect(credentialProblem(401, "")).toBe("minting the account registry credential failed — HTTP 401");
+    expect(credentialProblem(500, "boom", url)).toBe("minting the account registry credential failed — HTTP 500: boom");
+    expect(credentialProblem(401, "", url)).toBe("minting the account registry credential failed — HTTP 401");
+  });
+});
+
+describe("the account registry's listing", () => {
+  it("is the catalog with tags under the same credential — what `wrangler containers images list` reads", () => {
+    expect(catalogUrl("https://registry.cloudflare.com")).toBe("https://registry.cloudflare.com/v2/_catalog?tags=true");
+  });
+
+  it("parses the catalog's repositories under the account — the prefix stripped, another account's skipped, non-string tags dropped — and refuses any other shape", () => {
+    const catalog = {
+      repositories: {
+        "/acct/switchboard": ["1.2.2", "1.2.3", "latest"],
+        "acct/switchboard-resident": ["1.2.2"],
+        "/other/switchboard-sandbox": ["1.2.3"],
+        "/acct/odd": ["1", 2, "3"],
+      },
+      cursor: "next",
+    };
+    expect(parseCatalog(catalog, "acct")).toEqual([
+      { name: "switchboard", tags: ["1.2.2", "1.2.3", "latest"] },
+      { name: "switchboard-resident", tags: ["1.2.2"] },
+      { name: "odd", tags: ["1", "3"] },
+    ]);
+    expect(parseCatalog({ repositories: {} }, "acct")).toEqual([]);
+    expect(parseCatalog({ repositories: [] }, "acct")).toBeUndefined();
+    expect(parseCatalog({ repositories: { "/acct/x": "1.2.3" } }, "acct")).toBeUndefined();
+    expect(parseCatalog({}, "acct")).toBeUndefined();
+    expect(parseCatalog(null, "acct")).toBeUndefined();
+  });
+
+  it("holds `<name>:<version>` when that name lists that tag — another name's tag or another version does not count", () => {
+    const listing = [
+      { name: "switchboard", tags: ["1.2.2", "1.2.3", "latest"] },
+      { name: "switchboard-resident", tags: ["1.2.2"] },
+    ];
+    expect(registryHas(listing, "switchboard", "1.2.3")).toBe(true);
+    expect(registryHas(listing, "switchboard-resident", "1.2.3")).toBe(false);
+    expect(registryHas([], "switchboard", "1.2.3")).toBe(false);
+  });
+
+  it("a 403 on the catalog names that endpoint and the permission; any other failure keeps the registry's words", () => {
+    const url = catalogUrl("https://registry.cloudflare.com");
+    expect(catalogProblem(403, "", url)).toBe(containersEditProblem(`GET ${url}`));
+    expect(catalogProblem(401, '{"errors":[{"code":"UNAUTHORIZED"}]}', url)).toBe(
+      'listing the account registry failed — HTTP 401: {"errors":[{"code":"UNAUTHORIZED"}]}',
+    );
   });
 });
 
 describe("the source", () => {
-  it("asks the registry for an anonymous pull token on the one repository", () => {
-    expect(sourceTokenUrl("https://ghcr.io", "example/switchboard")).toBe(
-      "https://ghcr.io/token?scope=repository%3Aexample%2Fswitchboard%3Apull",
+  it("answers the registry's Bearer challenge — realm, service, scope — with an anonymous token request at the realm; another scheme, no header or no realm is nothing to answer", () => {
+    const challenge = parseBearerChallenge(
+      'Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:example/switchboard:pull"',
     );
+    expect(challenge).toEqual({
+      realm: "https://ghcr.io/token",
+      service: "ghcr.io",
+      scope: "repository:example/switchboard:pull",
+    });
+    expect(challengeTokenUrl(challenge!)).toBe(
+      "https://ghcr.io/token?service=ghcr.io&scope=repository%3Aexample%2Fswitchboard%3Apull",
+    );
+    // Case and parameter order are the registry's; a realm alone is a complete challenge.
+    expect(parseBearerChallenge('bearer scope="x",realm="https://r.example/t"')).toEqual({
+      realm: "https://r.example/t",
+      scope: "x",
+    });
+    expect(challengeTokenUrl({ realm: "https://r.example/t" })).toBe("https://r.example/t");
+    expect(parseBearerChallenge('Basic realm="registry"')).toBeUndefined();
+    expect(parseBearerChallenge('Bearer service="x"')).toBeUndefined();
+    expect(parseBearerChallenge(null)).toBeUndefined();
     expect(parseSourceToken({ token: "t" })).toEqual({ ok: true, token: "t" });
     expect(parseSourceToken({ access_token: "t" })).toEqual({ ok: true, token: "t" });
     expect(parseSourceToken({})).toEqual({ ok: false, problem: "the token response carries no token" });

@@ -11,7 +11,7 @@
 // which manifest is the one Cloudflare runs, and where a blob's upload parts
 // begin and end. The HTTP itself is src/deploy/registryTransferHost.ts.
 
-import { ACCOUNT_REGISTRY } from "./images.js";
+import { ACCOUNT_REGISTRY, type RegistryImage } from "./accountRegistry.js";
 
 /** A published reference, `<registry>/<repository>:<tag>`, taken apart. */
 export interface ImageRef {
@@ -60,23 +60,83 @@ export function parseCredential(
   return { ok: false, problem: "the credentials response carries no result.username / result.password" };
 }
 
-/** The one refusal an operator fixes on the token: the credentials endpoint answers 403 to a token without this permission. */
-export function containersEditProblem(): string {
-  return "the Cloudflare API token needs Containers Edit to copy images into the account registry";
+/** The one refusal an operator fixes on the token, naming the endpoint that answered 403. Containers Edit is
+ *  the permission Cloudflare documents for `containers` (wrangler gates every `containers` command on it);
+ *  Cloudflare documents no permission for the registry endpoint itself, so a token that has Containers Edit
+ *  and is still refused is said to be, rather than sent after a name nobody wrote down. */
+export function containersEditProblem(endpoint: string): string {
+  return `${endpoint} answered 403 — the Cloudflare API token needs Containers Edit to copy images into the account registry (the permission Cloudflare documents for \`containers\`); a token that has it is missing a permission Cloudflare does not document for this endpoint`;
 }
 
-/** Pure: why the mint failed — a 403 is the permission, by name; anything else keeps the status and the API's words. */
-export function credentialProblem(status: number, body: string): string {
-  if (status === 403) return containersEditProblem();
+/** Pure: why the mint failed — a 403 names the permission and the endpoint; anything else keeps the status and the API's words. */
+export function credentialProblem(status: number, body: string, endpoint: string): string {
+  if (status === 403) return containersEditProblem(`POST ${endpoint}`);
   const said = body.trim();
   return `minting the account registry credential failed — HTTP ${status}${said ? `: ${said}` : ""}`;
 }
 
+// --- the account registry's listing ---------------------------------------------------
+
+/** What the account registry holds: `GET /v2/_catalog?tags=true` under the minted credential — the call
+ *  `wrangler containers images list` makes. One page: an account holds a handful of repositories. */
+export function catalogUrl(targetBase: string): string {
+  return `${targetBase}/v2/_catalog?tags=true`;
+}
+
+/** Pure: the catalog's `repositories` (`"/<account>/<name>": [tags]`) as names under the account, or
+ *  `undefined` for any other shape. A repository outside the account is not the account's. */
+export function parseCatalog(json: unknown, account: string): RegistryImage[] | undefined {
+  const repositories = (json as { repositories?: unknown } | null)?.repositories;
+  if (repositories === null || typeof repositories !== "object" || Array.isArray(repositories)) return undefined;
+  const out: RegistryImage[] = [];
+  for (const [repository, tags] of Object.entries(repositories as Record<string, unknown>)) {
+    if (!Array.isArray(tags)) return undefined;
+    const stripped = repository.replace(/^\/+/, "");
+    if (!stripped.startsWith(`${account}/`)) continue;
+    out.push({
+      name: stripped.slice(account.length + 1),
+      tags: tags.filter((t): t is string => typeof t === "string"),
+    });
+  }
+  return out;
+}
+
+/** Pure: why the listing failed — a 403 names the permission and the endpoint; anything else keeps the status and the registry's words. */
+export function catalogProblem(status: number, body: string, endpoint: string): string {
+  if (status === 403) return containersEditProblem(`GET ${endpoint}`);
+  const said = body.trim();
+  return `listing the account registry failed — HTTP ${status}${said ? `: ${said}` : ""}`;
+}
+
 // --- the source ------------------------------------------------------------------
 
-/** An anonymous pull token on the one repository (the public registry's token endpoint). */
-export function sourceTokenUrl(sourceBase: string, repository: string): string {
-  return `${sourceBase}/token?scope=${encodeURIComponent(`repository:${repository}:pull`)}`;
+/** A registry's `WWW-Authenticate: Bearer realm="…",service="…",scope="…"` challenge, taken apart. */
+export interface BearerChallenge {
+  realm: string;
+  service?: string;
+  scope?: string;
+}
+
+/** Pure: the Bearer challenge in a 401's `WWW-Authenticate`, or `undefined` when there is none to answer
+ *  (no header, another scheme, no realm). */
+export function parseBearerChallenge(header: string | null): BearerChallenge | undefined {
+  if (!header || !/^bearer\s/i.test(header)) return undefined;
+  const params: Record<string, string> = {};
+  for (const m of header.slice("bearer ".length).matchAll(/(\w+)="([^"]*)"/g)) params[m[1].toLowerCase()] = m[2];
+  if (!params.realm) return undefined;
+  return {
+    realm: params.realm,
+    ...(params.service !== undefined ? { service: params.service } : {}),
+    ...(params.scope !== undefined ? { scope: params.scope } : {}),
+  };
+}
+
+/** The anonymous token request a challenge asks for: its realm, with the service and scope it named. */
+export function challengeTokenUrl(challenge: BearerChallenge): string {
+  const url = new URL(challenge.realm);
+  if (challenge.service !== undefined) url.searchParams.set("service", challenge.service);
+  if (challenge.scope !== undefined) url.searchParams.set("scope", challenge.scope);
+  return url.toString();
 }
 
 /** Pure: the token out of the token response (`token`, or the OAuth-shaped `access_token`). */

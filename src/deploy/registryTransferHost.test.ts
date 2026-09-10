@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { basicAuthorization, containersEditProblem, MEDIA_TYPES, MIN_PART_BYTES } from "./registryTransfer.js";
 import {
+  listAccountRegistry,
   mintRegistryCredential,
   REGISTRY_ENDPOINTS,
   transferImage,
@@ -127,6 +128,12 @@ class FakeRegistries {
   mounts: string[] = [];
   /** Knobs the tests turn. */
   credentialStatus = 200;
+  /** How the source registry authenticates: a Bearer challenge (the norm), none needed, or a 401 with nothing to answer. */
+  sourceAuth: "challenge" | "open" | "bare401" = "challenge";
+  /** The account registry refuses every credential — an expired one. */
+  targetUnauthorized = false;
+  catalogStatus = 200;
+  catalogBody: unknown = undefined;
   minPartBytes = MIN_PART_BYTES;
   failPatchOnce: number | undefined;
   corruptBlob: string | undefined;
@@ -143,6 +150,10 @@ class FakeRegistries {
     this.credentialRequests = [];
     this.mounts = [];
     this.credentialStatus = 200;
+    this.sourceAuth = "challenge";
+    this.targetUnauthorized = false;
+    this.catalogStatus = 200;
+    this.catalogBody = undefined;
     this.minPartBytes = MIN_PART_BYTES;
     this.failPatchOnce = undefined;
     this.corruptBlob = undefined;
@@ -188,7 +199,16 @@ class FakeRegistries {
 
   private sourceRegistry(req: IncomingMessage, res: ServerResponse, url: URL) {
     if (url.pathname === "/source/token") return json(res, 200, { token: "src-token" });
-    if (req.headers.authorization !== "Bearer src-token") return json(res, 401, { errors: [{ code: "UNAUTHORIZED" }] });
+    if (this.sourceAuth !== "open" && req.headers.authorization !== "Bearer src-token") {
+      // The registry's challenge: where to get a token, for which service and scope.
+      const headers: Record<string, string> =
+        this.sourceAuth === "challenge"
+          ? {
+              "www-authenticate": `Bearer realm="${this.base}/source/token",service="fake-registry",scope="repository:${REPO}:pull"`,
+            }
+          : {};
+      return json(res, 401, { errors: [{ code: "UNAUTHORIZED" }] }, headers);
+    }
     const m = /^\/source\/v2\/(.+)\/(manifests|blobs)\/([^/]+)$/.exec(url.pathname);
     if (!m || m[1] !== REPO) return json(res, 404, { errors: [{ code: "NAME_UNKNOWN" }] });
     if (m[2] === "manifests") {
@@ -207,8 +227,21 @@ class FakeRegistries {
   }
 
   private targetRegistry(req: IncomingMessage, res: ServerResponse, url: URL, body: Buffer) {
-    if (req.headers.authorization !== CREDENTIAL.authorization)
+    if (this.targetUnauthorized || req.headers.authorization !== CREDENTIAL.authorization)
       return json(res, 401, { errors: [{ code: "UNAUTHORIZED", message: "authentication required" }] });
+    if (url.pathname === "/target/v2/_catalog" && req.method === "GET") {
+      if (this.catalogStatus !== 200) return json(res, this.catalogStatus, { errors: [{ code: "DENIED" }] });
+      if (this.catalogBody !== undefined) return json(res, 200, this.catalogBody);
+      // The account's repositories as the registry names them: a leading slash, the account, the name.
+      const repositories: Record<string, string[]> = {};
+      for (const [name, stored] of this.targetManifests) {
+        const [repository, tag] = [name.slice(0, name.lastIndexOf(":")), name.slice(name.lastIndexOf(":") + 1)];
+        (repositories[`/${repository}`] ??= []).push(tag);
+        void stored;
+      }
+      for (const repository of this.targetBlobs.keys()) repositories[`/${repository}`] ??= [];
+      return json(res, 200, { repositories });
+    }
     const blobs = /^\/target\/v2\/(.+)\/blobs\/(sha256:[0-9a-f]+)$/.exec(url.pathname);
     if (blobs && req.method === "HEAD") {
       const has = this.targetBlobs.get(blobs[1])?.has(blobs[2]);
@@ -322,11 +355,12 @@ describe("mintRegistryCredential", () => {
     ]);
   });
 
-  it("a 403 is the token's missing Containers Edit, by name; another status keeps the API's words; an unreachable API is named too", async () => {
+  it("a 403 is the token's missing Containers Edit, by name, with the endpoint that answered; another status keeps the API's words; an unreachable API is named too", async () => {
     fake.credentialStatus = 403;
+    const endpoint = `POST ${fake.base}/api/client/v4/accounts/${ACCOUNT}/containers/registries/registry.cloudflare.com/credentials`;
     expect(await mintRegistryCredential(ACCOUNT, API_TOKEN, io())).toEqual({
       ok: false,
-      problem: containersEditProblem(),
+      problem: containersEditProblem(endpoint),
     });
     fake.credentialStatus = 500;
     const r = await mintRegistryCredential(ACCOUNT, API_TOKEN, io());
@@ -341,6 +375,42 @@ describe("mintRegistryCredential", () => {
     expect(down.ok).toBe(false);
     if (down.ok) throw new Error("unreachable");
     expect(down.problem).toMatch(/^minting the account registry credential failed — /);
+  });
+});
+
+describe("listAccountRegistry", () => {
+  it("reads the catalog with tags under the credential and answers the account's repositories by bare name — what a plan's presence probe and a copy's proof read", async () => {
+    fake.source = sourceImage([randomBytes(10)]);
+    expect(await listAccountRegistry(ACCOUNT, CREDENTIAL, io())).toEqual({ value: [] });
+    await transferImage(COPY, ACCOUNT, CREDENTIAL, io());
+    expect(await listAccountRegistry(ACCOUNT, CREDENTIAL, io())).toEqual({
+      value: [{ name: "switchboard-resident", tags: ["1.2.3"] }],
+    });
+    expect(fake.requests.filter((q) => q === "GET /target/v2/_catalog?tags=true")).toHaveLength(2);
+    // Another account's repository in the same catalog is not this account's.
+    fake.catalogBody = { repositories: { "/other/switchboard": ["1.2.3"], [`/${ACCOUNT}/switchboard`]: ["1.2.3"] } };
+    expect(await listAccountRegistry(ACCOUNT, CREDENTIAL, io())).toEqual({
+      value: [{ name: "switchboard", tags: ["1.2.3"] }],
+    });
+  });
+
+  it("a 403 on the listing names the endpoint and the permission; a refused credential and a body that is not a catalog are named too", async () => {
+    fake.catalogStatus = 403;
+    const url = `${fake.base}/target/v2/_catalog?tags=true`;
+    expect(await listAccountRegistry(ACCOUNT, CREDENTIAL, io())).toEqual({
+      error: containersEditProblem(`GET ${url}`),
+    });
+    fake.catalogStatus = 200;
+    const r = await listAccountRegistry(ACCOUNT, { authorization: basicAuthorization("v1", "expired") }, io());
+    expect(r).toEqual({
+      error:
+        'listing the account registry failed — HTTP 401: {"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}',
+      unauthorized: true,
+    });
+    fake.catalogBody = { nope: true };
+    expect(await listAccountRegistry(ACCOUNT, CREDENTIAL, io())).toEqual({
+      error: `${url}: no repository catalog in the response`,
+    });
   });
 });
 
@@ -364,12 +434,18 @@ describe("transferImage", () => {
     const pushed = fake.targetManifests.get(`${TARGET_NAME}:1.2.3`)!;
     expect(pushed.type).toBe(MEDIA_TYPES.ociManifest);
     expect(sha256(pushed.bytes)).toBe(fake.source.manifestDigest);
-    // The source was read by tag once, then by the selected digest; blobs by digest; the arm64 and attestation manifests were never fetched.
+    // The source was read by tag anonymously, answered its 401 challenge with one token request at the realm
+    // (service and scope as the challenge named them), then read by tag again and by the selected digest;
+    // blobs by digest; the arm64 and attestation manifests were never fetched.
     const reads = fake.requests.filter((q) => q.startsWith("GET /source/"));
-    expect(reads[0]).toBe(`GET /source/token?scope=repository%3A${encodeURIComponent(REPO)}%3Apull`);
-    expect(reads[1]).toBe(`GET /source/v2/${REPO}/manifests/1.2.3`);
-    expect(reads[2]).toBe(`GET /source/v2/${REPO}/manifests/${fake.source.manifestDigest}`);
-    expect(reads.filter((q) => q.includes("/manifests/"))).toHaveLength(2);
+    expect(reads[0]).toBe(`GET /source/v2/${REPO}/manifests/1.2.3`);
+    expect(reads[1]).toBe(
+      `GET /source/token?service=fake-registry&scope=repository%3A${encodeURIComponent(REPO)}%3Apull`,
+    );
+    expect(reads[2]).toBe(`GET /source/v2/${REPO}/manifests/1.2.3`);
+    expect(reads[3]).toBe(`GET /source/v2/${REPO}/manifests/${fake.source.manifestDigest}`);
+    expect(reads.filter((q) => q.includes("/source/token"))).toHaveLength(1);
+    expect(reads.filter((q) => q.includes("/manifests/"))).toHaveLength(3);
     // The present layer was HEADed and never fetched or uploaded; the 12 MiB layer went as 5 + 5 + 2 MiB.
     expect(reads.some((q) => q.endsWith(sha256(present)))).toBe(false);
     const patches = fake.requests.filter((q) => q.startsWith("PATCH "));
@@ -390,7 +466,35 @@ describe("transferImage", () => {
     fake.source = sourceImage([randomBytes(10)], "manifest");
     const r = await transferImage(COPY, ACCOUNT, CREDENTIAL, io());
     expect(r).toMatchObject({ ok: true, report: { digest: fake.source.manifestDigest, blobs: 2, uploaded: 2 } });
-    expect(fake.requests.filter((q) => q.includes("/source/v2/") && q.includes("/manifests/"))).toHaveLength(1);
+    // Once anonymously (the challenge), once with the token.
+    expect(fake.requests.filter((q) => q.includes("/source/v2/") && q.includes("/manifests/"))).toHaveLength(2);
+  });
+
+  it("a source that needs no token is read as it is, with no token request; a 401 that carries no Bearer challenge is named — there is nothing to answer", async () => {
+    fake.source = sourceImage([randomBytes(10)]);
+    fake.sourceAuth = "open";
+    expect(await transferImage(COPY, ACCOUNT, CREDENTIAL, io())).toMatchObject({ ok: true });
+    expect(fake.requests.filter((q) => q.includes("/source/token"))).toEqual([]);
+    fake.reset();
+    fake.source = sourceImage([randomBytes(10)]);
+    fake.sourceAuth = "bare401";
+    expect(await transferImage(COPY, ACCOUNT, CREDENTIAL, io())).toEqual({
+      ok: false,
+      problem: `reading ${SOURCE}'s manifest failed — HTTP 401 with no Bearer challenge to answer`,
+    });
+  });
+
+  it("a credential the account registry refuses is `unauthorized` on the copy and on the listing — what the host re-mints on", async () => {
+    fake.source = sourceImage([randomBytes(10)]);
+    fake.targetUnauthorized = true;
+    const copy = await transferImage(COPY, ACCOUNT, CREDENTIAL, io());
+    expect(copy).toMatchObject({ ok: false, unauthorized: true });
+    expect(copy.ok ? "" : copy.problem).toContain("HTTP 401");
+    const listing = await listAccountRegistry(ACCOUNT, CREDENTIAL, io());
+    expect(listing).toMatchObject({ error: expect.stringContaining("HTTP 401"), unauthorized: true });
+    fake.targetUnauthorized = false;
+    fake.catalogStatus = 403;
+    expect(await listAccountRegistry(ACCOUNT, CREDENTIAL, io())).not.toHaveProperty("unauthorized");
   });
 
   it("retries a failed part once and goes on; a part the registry refuses twice stops the copy naming the part, the status and the registry's code, with no manifest pushed", async () => {
@@ -475,6 +579,7 @@ describe("transferImage", () => {
     const r = await transferImage(COPY, ACCOUNT, { authorization: basicAuthorization("v1", "expired") }, io());
     expect(r).toEqual({
       ok: false,
+      unauthorized: true,
       problem: `asking ${TARGET_NAME} for ${sha256(Object.values(fake.source.blobs)[0]).slice(0, 19)} failed — HTTP 401`,
     });
     expect(fake.requests.filter((q) => q.startsWith("POST /target/"))).toEqual([]);

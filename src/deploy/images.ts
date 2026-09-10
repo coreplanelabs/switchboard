@@ -14,11 +14,14 @@
 // the checkout's: each Worker's `image` is its Dockerfile and wrangler builds it
 // at deploy time.
 //
-// Pure: the names, the references, the planner over a registry listing, and the
-// parser for wrangler's `images list --json`. The registry read and the
-// transfer run in src/deploy/imagesHost.ts.
+// Pure: the names, the references, and the planner over the account registry's
+// listing (src/deploy/registryTransfer.ts reads that listing's shape). The
+// registry read and the transfer run in src/deploy/imagesHost.ts.
 
+import { ACCOUNT_REGISTRY, registryHas, type RegistryImage } from "./accountRegistry.js";
 import type { DeploymentProfile } from "./profile.js";
+
+export { ACCOUNT_REGISTRY, registryHas, type RegistryImage };
 
 /** The Workers with a container image, in deploy order (the memory Worker has none). */
 export const IMAGE_KINDS = ["bot", "resident", "sandbox"] as const;
@@ -31,9 +34,6 @@ export const DOCKERFILES: Readonly<Record<ImageKind, string>> = {
   resident: "./Dockerfile",
   sandbox: "./Dockerfile",
 };
-
-/** Cloudflare's managed registry — the one Containers pull from cached and pre-fetched. */
-export const ACCOUNT_REGISTRY = "registry.cloudflare.com";
 
 /** A release version as the tags carry it: `1.2.3`, or a pre-release `1.2.3-rc.1`. */
 export const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -102,29 +102,6 @@ export function containerImage(
   return profile.images === "build"
     ? DOCKERFILES[kind]
     : accountRegistryImage(profile.account, registryName(published.names[kind]), published.version);
-}
-
-/** One row of `wrangler containers images list --json`: the name without the account prefix, and its tags. */
-export interface RegistryImage {
-  name: string;
-  tags: string[];
-}
-
-/** Pure: wrangler's listing, or `undefined` for any other shape. */
-export function parseRegistryListing(json: unknown): RegistryImage[] | undefined {
-  if (!Array.isArray(json)) return undefined;
-  const out: RegistryImage[] = [];
-  for (const row of json) {
-    const r = row as { name?: unknown; tags?: unknown } | null;
-    if (typeof r?.name !== "string" || !Array.isArray(r.tags)) return undefined;
-    out.push({ name: r.name, tags: r.tags.filter((t): t is string => typeof t === "string") });
-  }
-  return out;
-}
-
-/** Pure: does the account registry hold `<name>:<version>`? */
-export function registryHas(listing: readonly RegistryImage[], name: string, version: string): boolean {
-  return listing.some((r) => r.name === name && r.tags.includes(version));
 }
 
 /** One image to copy: read `source` where the release published it, write it into the account

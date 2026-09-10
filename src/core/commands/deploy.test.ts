@@ -10,6 +10,9 @@ import { RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
 import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "../../deploy/testing/profile.js";
 import type { ImagesHostIO } from "../../deploy/imagesHost.js";
 import { containersEditProblem } from "../../deploy/registryTransfer.js";
+
+/** The endpoint a refused mint names — the account registry's credentials endpoint. */
+const CREDENTIALS_ENDPOINT = `POST https://api.cloudflare.com/client/v4/accounts/${TEST_PROFILE.account}/containers/registries/registry.cloudflare.com/credentials`;
 import type { RestartRunResult } from "../../deploy/run.js";
 import {
   GENERATED_HEADER,
@@ -1281,7 +1284,7 @@ describe("deploy.images", () => {
     const unreadable: ImagesHostIO = {
       ...imagesHost({}).io,
       registry: async () => ({
-        error: "wrangler containers images list --json failed: ✘ [ERROR] Authentication error",
+        error: "GET https://registry.cloudflare.com/v2/_catalog?tags=true answered 401",
       }),
     };
     const denied = await bind(
@@ -1298,14 +1301,13 @@ describe("deploy.images", () => {
     ).commands.invoke("deploy.images", {}, cli);
     expect(denied).toMatchObject({ ok: false, error: "unavailable" });
     expect(denied.ok ? "" : denied.message).toBe(
-      "cannot read the account registry — wrangler containers images list --json failed: ✘ [ERROR] Authentication error",
+      "cannot read the account registry — GET https://registry.cloudflare.com/v2/_catalog?tags=true answered 401",
     );
-    const forbidden = imagesHost({}, { ok: false, problem: containersEditProblem() });
+    const forbidden = imagesHost({}, { ok: false, problem: containersEditProblem(CREDENTIALS_ENDPOINT) });
     const refused = await withImages(forbidden).commands.invoke("deploy.images", {}, cli);
     expect(refused).toMatchObject({ ok: false, error: "unavailable" });
-    expect(refused.ok ? "" : refused.message).toBe(
-      "the Cloudflare API token needs Containers Edit to copy images into the account registry",
-    );
+    expect(refused.ok ? "" : refused.message).toBe(containersEditProblem(CREDENTIALS_ENDPOINT));
+    expect(refused.ok ? "" : refused.message).toContain(`${CREDENTIALS_ENDPOINT} answered 403`);
     expect(forbidden.copies).toEqual([]);
   });
 
@@ -1591,6 +1593,37 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     expect(only.ok && (only.value as { copied: unknown[] }).copied).toEqual([]);
   });
 
+  it("with --affected, the copies are planned for the report's selection and the plan is rebuilt on the read-back listing from that same report — the probe is asked once", async () => {
+    const h = copying(["switchboard"]);
+    const { commands, plans, affectedCalls } = bind(
+      ran,
+      () => true,
+      neverRestarts,
+      async () => REPORT,
+      async () => REGISTRY,
+      undefined,
+      noSecrets,
+      neverPushes,
+      CHECKOUT_ROOT,
+      h.io,
+    );
+    const res = await commands.invoke("deploy.all", { options: { affected: true } }, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(affectedCalls).toEqual([{}]);
+    // The report selects bot + resident; only the resident's image was missing and copied.
+    expect(h.copies.map((c) => c.split(":")[0])).toEqual(["resident"]);
+    expect(plans).toHaveLength(1);
+    expect(plans[0].steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    expect(plans[0].affected).toEqual(REPORT);
+    expect(plans[0].images).toMatchObject({
+      mode: "registry",
+      images: [
+        { kind: "bot", present: true },
+        { kind: "resident", present: true },
+      ],
+    });
+  });
+
   it("`deploy all --dry-run` computes the plan and the copies it would make, then stops: nothing copied, nothing deployed, and the render says so", async () => {
     const h = copying(["switchboard"]);
     const { commands, plans } = planWith(h.io, REGISTRY, ran);
@@ -1617,11 +1650,11 @@ describe("deploy.plan / deploy.all in registry mode", () => {
   });
 
   it("a copy `deploy all` cannot make stops it before anything deploys: the token's missing Containers Edit by name, or the failed image, the transfer's problem and what was not attempted", async () => {
-    const forbidden = copying(["switchboard"], { ok: false, problem: containersEditProblem() });
+    const forbidden = copying(["switchboard"], { ok: false, problem: containersEditProblem(CREDENTIALS_ENDPOINT) });
     const denied = planWith(forbidden.io, REGISTRY, ran);
     const refused = await denied.commands.invoke("deploy.all", {}, cli);
     expect(refused).toMatchObject({ ok: false, error: "unavailable" });
-    expect(refused.ok ? "" : refused.message).toBe(containersEditProblem());
+    expect(refused.ok ? "" : refused.message).toBe(containersEditProblem(CREDENTIALS_ENDPOINT));
     expect(forbidden.copies).toEqual([]);
     expect(denied.plans).toEqual([]);
     const failing = copying(["switchboard"]);
@@ -1635,18 +1668,35 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     expect(stopped.plans).toEqual([]);
   });
 
-  it("a registry that cannot be read is `unavailable` with wrangler's words; the example profile is never probed and its plan reads `not probed`", async () => {
+  it("a registry that cannot be read: `deploy plan` reads `not probed` with the registry's words and refuses nothing; `deploy all` is `unavailable` with them; the example profile is never probed and reads `not probed (the example profile)`", async () => {
     const denied: ImagesHostIO = {
       ...listing([]),
       registry: async () => ({
-        error: "wrangler containers images list --json failed: ✘ [ERROR] Authentication error",
+        error: "GET https://registry.cloudflare.com/v2/_catalog?tags=true answered 401",
       }),
     };
-    const res = await planWith(denied).commands.invoke("deploy.plan", {}, cli);
-    expect(res).toMatchObject({ ok: false, error: "unavailable" });
-    expect(res.ok ? "" : res.message).toBe(
-      "cannot read the account registry — wrangler containers images list --json failed: ✘ [ERROR] Authentication error",
+    const { commands, plans } = planWith(denied);
+    const res = await commands.invoke("deploy.plan", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect((res.value as unknown as DeployPlan).images).toMatchObject({
+      mode: "registry",
+      unprobed: "GET https://registry.cloudflare.com/v2/_catalog?tags=true answered 401",
+      images: [
+        { kind: "bot", present: undefined },
+        { kind: "resident", present: undefined },
+        { kind: "sandbox", present: undefined },
+      ],
+    });
+    expect(renderText(commands.get("deploy.plan")!, res.value)).toContain(
+      "Images: registry (version 1.2.3) — not probed (GET https://registry.cloudflare.com/v2/_catalog?tags=true answered 401) —",
     );
+    // A run needs the listing to copy: refused before anything, with the registry's words.
+    const all = await commands.invoke("deploy.all", {}, cli);
+    expect(all).toMatchObject({ ok: false, error: "unavailable" });
+    expect(all.ok ? "" : all.message).toBe(
+      "cannot read the account registry — GET https://registry.cloudflare.com/v2/_catalog?tags=true answered 401",
+    );
+    expect(plans).toEqual([]);
     const example: LoadedProfile = { ...REGISTRY, origin: "example", path: "deploy/profile.example.json" };
     const onExample = planWith(denied, example);
     const fromExample = await onExample.commands.invoke("deploy.plan", {}, cli);

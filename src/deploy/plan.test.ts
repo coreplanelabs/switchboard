@@ -712,7 +712,13 @@ describe("the plan's images", () => {
       ),
     ).toContain("Images: registry (version 1.2.3) — 3 of 3 present — bot: ");
     expect(
-      formatPlanImages(plan({}, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES }).images),
+      formatPlanImages(
+        plan({}, installed, REGISTRY, {
+          mode: "registry",
+          published: TEST_PUBLISHED_IMAGES,
+          unprobed: "the example profile",
+        }).images,
+      ),
     ).toBe(
       `Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/${account}/switchboard:1.2.3, resident: registry.cloudflare.com/${account}/switchboard-resident:1.2.3, sandbox: registry.cloudflare.com/${account}/switchboard-sandbox:1.2.3`,
     );
@@ -733,15 +739,29 @@ describe("the plan's images", () => {
     );
   });
 
-  it("without a listing (the example profile is never probed) every image is `not probed`, said as such", () => {
-    const p = plan({ only: ["bot"] }, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES });
+  it("without a listing every image is `not probed`, with the reason the caller gives — the example profile, a registry it could not read — or `not read` when none is given", () => {
+    const p = plan({ only: ["bot"] }, installed, REGISTRY, {
+      mode: "registry",
+      published: TEST_PUBLISHED_IMAGES,
+      unprobed: "the example profile",
+    });
     expect(p.images).toEqual({
       mode: "registry",
       version: "1.2.3",
+      unprobed: "the example profile",
       images: [{ kind: "bot", ref: `registry.cloudflare.com/${account}/switchboard:1.2.3`, present: undefined }],
     });
     expect(formatPlan(p)).toContain(
       `Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/${account}/switchboard:1.2.3`,
     );
+    const denied = plan({ only: ["bot"] }, installed, REGISTRY, {
+      mode: "registry",
+      published: TEST_PUBLISHED_IMAGES,
+      unprobed: "CLOUDFLARE_API_TOKEN is not set — …",
+    });
+    expect(formatPlan(denied)).toContain("not probed (CLOUDFLARE_API_TOKEN is not set — …)");
+    const bare = plan({ only: ["bot"] }, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES });
+    expect(bare.images).toMatchObject({ unprobed: "not read" });
+    expect(formatPlan(bare)).toContain("not probed (not read)");
   });
 });

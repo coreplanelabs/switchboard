@@ -412,13 +412,20 @@ export interface DeployHost {
  *  reports it, and `deploy all` copies it before the plan runs (src/core/commands/deploy.ts). */
 export type PlanImages =
   | { mode: "build"; images: { kind: ImageKind; dockerfile: string }[] }
-  | { mode: "registry"; version: string; images: { kind: ImageKind; ref: string; present: boolean | undefined }[] };
+  | {
+      mode: "registry";
+      version: string;
+      images: { kind: ImageKind; ref: string; present: boolean | undefined }[];
+      /** Why the registry was not read when it was not (the example profile; no token; a refused one) — every `present` is then `undefined`. */
+      unprobed?: string;
+    };
 
 /** What the planner knows about the images, by the profile's mode: `build` needs nothing beyond the Dockerfiles;
  *  `registry` needs the release's published names and version and — when it could be probed — the account
  *  registry's listing. The command derives it from the profile, reading the facts only in `registry` mode. */
 export type ImagesInput =
-  { mode: "build" } | { mode: "registry"; published: PublishedImages; registry?: readonly RegistryImage[] };
+  | { mode: "build" }
+  | { mode: "registry"; published: PublishedImages; registry?: readonly RegistryImage[]; unprobed?: string };
 
 const hasImage = (name: WorkerName): name is ImageKind => (IMAGE_KINDS as readonly string[]).includes(name);
 
@@ -431,6 +438,7 @@ export function planImages(steps: readonly { name: WorkerName }[], account: stri
   return {
     mode: "registry",
     version: published.version,
+    ...(registry ? {} : { unprobed: input.unprobed ?? "not read" }),
     images: kinds.map((kind) => {
       const name = registryName(published.names[kind]);
       return {
@@ -585,7 +593,7 @@ export function formatPlanImages(images: PlanImages): string {
   const head = `Images: registry (version ${images.version})`;
   if (images.images.length === 0) return `${head} — no step has a container`;
   if (images.images.some((i) => i.present === undefined))
-    return `${head} — not probed (the example profile) — ${images.images.map((i) => `${i.kind}: ${i.ref}`).join(", ")}`;
+    return `${head} — not probed (${images.unprobed ?? "not read"}) — ${images.images.map((i) => `${i.kind}: ${i.ref}`).join(", ")}`;
   const present = images.images.filter((i) => i.present).length;
   const count = `${present} of ${images.images.length} present${present < images.images.length ? "; deploy all copies the rest" : ""}`;
   return `${head} — ${count} — ${images.images.map((i) => `${i.kind}: ${i.ref} (${i.present ? "present" : "missing"})`).join(", ")}`;

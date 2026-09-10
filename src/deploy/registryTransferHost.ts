@@ -15,20 +15,31 @@
 // under the source's media type, and the registry is asked for its digest
 // afterwards: a push that returned 201 is not the proof, the digest is.
 //
+// The account registry is also READ here (`listAccountRegistry`: `GET /v2/_catalog?tags=true`
+// under the same credential — what `wrangler containers images list` does), so
+// a plan probes presence with no process spawned and no Worker directory
+// installed, and a token the registry refuses is one named failure.
+//
 // Every endpoint is injectable so the tests run against an in-process registry.
 
 import { createHash } from "node:crypto";
-import { ACCOUNT_REGISTRY, type ImageCopy } from "./images.js";
+import { ACCOUNT_REGISTRY, type RegistryImage } from "./accountRegistry.js";
+import type { ImageCopy } from "./images.js";
 import {
   appendDigest,
   basicAuthorization,
   blobsOf,
+  catalogProblem,
+  catalogUrl,
+  challengeTokenUrl,
   contentRange,
   CREDENTIAL_REQUEST,
   credentialProblem,
   credentialsUrl,
   MANIFEST_ACCEPT,
   PART_BYTES,
+  parseBearerChallenge,
+  parseCatalog,
   parseCredential,
   parseImageRef,
   parseManifestDocument,
@@ -36,7 +47,6 @@ import {
   partBoundaries,
   resolveLocation,
   selectPlatformManifest,
-  sourceTokenUrl,
   targetRepository,
   type Descriptor,
   type ManifestDocument,
@@ -82,14 +92,32 @@ export interface TransferReport {
   bytes: number;
 }
 
-export type TransferOutcome = { ok: true; report: TransferReport } | { ok: false; problem: string };
+/** A failed copy says why; `unauthorized` when the account registry answered 401 — a credential past
+ *  its expiry, which the host re-mints once (src/deploy/imagesHost.ts). */
+export type TransferOutcome =
+  { ok: true; report: TransferReport } | { ok: false; problem: string; unauthorized?: true };
+
+/** The account registry's listing, or why it could not be read (`unauthorized`: the credential was refused). */
+export type RegistryListing = { value: RegistryImage[] } | { error: string; unauthorized?: true };
 
 /** A small request's budget, and a part's or a blob stream's. */
 const SHORT_MS = 60_000;
 const LONG_MS = 30 * 60_000;
 
-/** A failure with a place to go — the problem the command prints. */
-class TransferProblem extends Error {}
+/** A failure with a place to go — the problem the command prints; `unauthorized` when the account registry
+ *  refused the credential. */
+class TransferProblem extends Error {
+  constructor(
+    message: string,
+    readonly unauthorized = false,
+  ) {
+    super(message);
+  }
+}
+
+/** A target response that is not what the step needed: its status and words, flagged when it was a 401. */
+const refused = async (what: string, res: Response): Promise<TransferProblem> =>
+  new TransferProblem(`${what} — ${await said(res)}`, res.status === 401);
 
 const said = async (res: Response): Promise<string> => {
   const text = (await res.text().catch(() => "")).trim();
@@ -108,9 +136,10 @@ export async function mintRegistryCredential(
 ): Promise<{ ok: true; credential: RegistryCredential } | { ok: false; problem: string }> {
   const doFetch = io.fetch ?? fetch;
   const endpoints = io.endpoints ?? REGISTRY_ENDPOINTS;
+  const url = credentialsUrl(endpoints.api, account);
   let res: Response;
   try {
-    res = await doFetch(credentialsUrl(endpoints.api, account), {
+    res = await doFetch(url, {
       method: "POST",
       headers: { authorization: `Bearer ${apiToken}`, "content-type": "application/json" },
       body: JSON.stringify(CREDENTIAL_REQUEST),
@@ -122,10 +151,37 @@ export async function mintRegistryCredential(
       problem: `minting the account registry credential failed — ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  if (!res.ok) return { ok: false, problem: credentialProblem(res.status, await res.text().catch(() => "")) };
+  if (!res.ok) return { ok: false, problem: credentialProblem(res.status, await res.text().catch(() => ""), url) };
   const parsed = parseCredential(await res.json().catch(() => null));
   if (!parsed.ok) return { ok: false, problem: `minting the account registry credential failed — ${parsed.problem}` };
   return { ok: true, credential: { authorization: basicAuthorization(parsed.username, parsed.password) } };
+}
+
+/** What the account registry holds, under the minted credential: each repository's name (without the account
+ *  prefix) and tags. A failure keeps the registry's status and words; a 403 names the permission and the endpoint. */
+export async function listAccountRegistry(
+  account: string,
+  credential: RegistryCredential,
+  io: TransferIO = {},
+): Promise<RegistryListing> {
+  const doFetch = io.fetch ?? fetch;
+  const endpoints = io.endpoints ?? REGISTRY_ENDPOINTS;
+  const url = catalogUrl(endpoints.target);
+  let res: Response;
+  try {
+    res = await doFetch(url, {
+      headers: { authorization: credential.authorization },
+      signal: AbortSignal.timeout(SHORT_MS),
+    });
+  } catch (err) {
+    return { error: `listing the account registry failed — ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!res.ok) {
+    const error = catalogProblem(res.status, await res.text().catch(() => ""), url);
+    return res.status === 401 ? { error, unauthorized: true } : { error };
+  }
+  const listing = parseCatalog(await res.json().catch(() => null), account);
+  return listing === undefined ? { error: `${url}: no repository catalog in the response` } : { value: listing };
 }
 
 /** Copy one published image into the account registry as `<account>/<name>:<version>`. */
@@ -138,7 +194,8 @@ export async function transferImage(
   try {
     return { ok: true, report: await transfer(copy, account, credential, io) };
   } catch (err) {
-    if (err instanceof TransferProblem) return { ok: false, problem: err.message };
+    if (err instanceof TransferProblem)
+      return { ok: false, problem: err.message, ...(err.unauthorized ? { unauthorized: true } : {}) };
     return {
       ok: false,
       problem: `copying ${copy.source} failed — ${err instanceof Error ? err.message : String(err)}`,
@@ -164,32 +221,54 @@ async function transfer(
   const targetBase = `${endpoints.target}/v2/${targetName}`;
   const targetHeaders = { authorization: credential.authorization };
 
-  // The source: an anonymous pull token, the manifest by tag, and — behind an index — the linux/amd64 one by digest.
-  const tokenRes = await doFetch(sourceTokenUrl(sourceBase, repository), { signal: AbortSignal.timeout(SHORT_MS) });
-  if (!tokenRes.ok) throw new TransferProblem(`reading ${copy.source}'s pull token failed — ${await said(tokenRes)}`);
-  const token = parseSourceToken(await tokenRes.json().catch(() => null));
-  if (!token.ok) throw new TransferProblem(`reading ${copy.source}'s pull token failed — ${token.problem}`);
-  const sourceHeaders = { authorization: `Bearer ${token.token}` };
+  // The source: read anonymously; a 401 carries the registry's `WWW-Authenticate` Bearer challenge (realm,
+  // service, scope), answered once with an anonymous token request at the realm — the way every OCI
+  // registry hands out a pull token, so no endpoint is spelled here. A source that needs no token is read
+  // as it is; a 401 without a challenge has nothing to answer and is named.
+  const sourceHeaders: Record<string, string> = {};
+  const fromSource = async (what: string, url: string, init: RequestInit): Promise<Response> => {
+    const res = await doFetch(url, {
+      ...init,
+      headers: { ...sourceHeaders, ...(init.headers as Record<string, string>) },
+    });
+    if (res.status !== 401 || sourceHeaders.authorization) return res;
+    const challenge = parseBearerChallenge(res.headers.get("www-authenticate"));
+    if (!challenge) throw new TransferProblem(`${what} failed — HTTP 401 with no Bearer challenge to answer`);
+    const tokenRes = await doFetch(challengeTokenUrl(challenge), { signal: AbortSignal.timeout(SHORT_MS) });
+    if (!tokenRes.ok) throw new TransferProblem(`reading ${copy.source}'s pull token failed — ${await said(tokenRes)}`);
+    const token = parseSourceToken(await tokenRes.json().catch(() => null));
+    if (!token.ok) throw new TransferProblem(`reading ${copy.source}'s pull token failed — ${token.problem}`);
+    sourceHeaders.authorization = `Bearer ${token.token}`;
+    return doFetch(url, { ...init, headers: { ...sourceHeaders, ...(init.headers as Record<string, string>) } });
+  };
   const sourceManifests = `${sourceBase}/v2/${repository}/manifests`;
   const readManifest = async (reference: string): Promise<{ bytes: Buffer; document: ManifestDocument }> => {
-    const res = await doFetch(`${sourceManifests}/${reference}`, {
-      headers: { ...sourceHeaders, accept: MANIFEST_ACCEPT },
+    const what = `reading ${copy.source}'s manifest`;
+    const res = await fromSource(what, `${sourceManifests}/${reference}`, {
+      headers: { accept: MANIFEST_ACCEPT },
       signal: AbortSignal.timeout(SHORT_MS),
     });
-    if (!res.ok) throw new TransferProblem(`reading ${copy.source}'s manifest failed — ${await said(res)}`);
+    if (!res.ok) throw new TransferProblem(`${what} failed — ${await said(res)}`);
     const bytes = Buffer.from(await res.arrayBuffer());
     const document = parseManifestDocument(bytes.toString("utf8"), res.headers.get("content-type"));
     if (!document.ok) throw new TransferProblem(`${copy.source}: ${document.problem}`);
     return { bytes, document: document.document };
   };
-  let manifest = await readManifest(tag);
-  if (manifest.document.kind === "index") {
-    const selected = selectPlatformManifest(manifest.document);
+  // The manifest by tag and, behind an index, the linux/amd64 one by digest — the one Cloudflare runs.
+  const resolveManifest = async (): Promise<{
+    bytes: Buffer;
+    document: Extract<ManifestDocument, { kind: "manifest" }>;
+  }> => {
+    const first = await readManifest(tag);
+    if (first.document.kind === "manifest") return { bytes: first.bytes, document: first.document };
+    const selected = selectPlatformManifest(first.document);
     if (!selected.ok) throw new TransferProblem(`${copy.source}: ${selected.problem}`);
-    manifest = await readManifest(selected.descriptor.digest);
-    if (manifest.document.kind === "index")
+    const second = await readManifest(selected.descriptor.digest);
+    if (second.document.kind === "index")
       throw new TransferProblem(`${copy.source}: the ${selected.descriptor.digest} manifest is itself an index`);
-  }
+    return { bytes: second.bytes, document: second.document };
+  };
+  const manifest = await resolveManifest();
   const digest = sha256(manifest.bytes);
   const blobs = blobsOf(manifest.document);
 
@@ -202,8 +281,7 @@ async function transfer(
       signal: AbortSignal.timeout(SHORT_MS),
     });
     if (head.status === 404) missing.push(blob);
-    else if (!head.ok)
-      throw new TransferProblem(`asking ${targetName} for ${short(blob.digest)} failed — ${await said(head)}`);
+    else if (!head.ok) throw await refused(`asking ${targetName} for ${short(blob.digest)} failed`, head);
   }
   const bytes = missing.reduce((n, b) => n + b.size, 0);
   log(
@@ -219,14 +297,13 @@ async function transfer(
     });
     const startedAt = started.headers.get("location");
     if (started.status !== 202 || !startedAt)
-      throw new TransferProblem(
-        `starting the upload of ${short(blob.digest)} to ${targetName} failed — ${await said(started)}`,
-      );
+      throw await refused(`starting the upload of ${short(blob.digest)} to ${targetName} failed`, started);
     let location = resolveLocation(startedAt, `${targetBase}/blobs/uploads/`);
-    const source = await doFetch(`${sourceBase}/v2/${repository}/blobs/${blob.digest}`, {
-      headers: sourceHeaders,
-      signal: AbortSignal.timeout(LONG_MS),
-    });
+    const source = await fromSource(
+      `reading ${short(blob.digest)} from ${copy.source}`,
+      `${sourceBase}/v2/${repository}/blobs/${blob.digest}`,
+      { signal: AbortSignal.timeout(LONG_MS) },
+    );
     if (!source.ok || !source.body)
       throw new TransferProblem(`reading ${short(blob.digest)} from ${copy.source} failed — ${await said(source)}`);
     const hash = createHash("sha256");
@@ -257,9 +334,7 @@ async function transfer(
           `uploading ${short(blob.digest)} ${label} to ${targetName} failed twice — ${res instanceof Error ? res.message : String(res)}`,
         );
       if (res.status !== 202)
-        throw new TransferProblem(
-          `uploading ${short(blob.digest)} ${label} to ${targetName} failed twice — ${await said(res)}`,
-        );
+        throw await refused(`uploading ${short(blob.digest)} ${label} to ${targetName} failed twice`, res);
       const next = res.headers.get("location");
       if (next) location = resolveLocation(next, location);
     }
@@ -274,11 +349,11 @@ async function transfer(
       signal: AbortSignal.timeout(SHORT_MS),
     });
     if (committed.status !== 201)
-      throw new TransferProblem(`committing ${short(blob.digest)} to ${targetName} failed — ${await said(committed)}`);
+      throw await refused(`committing ${short(blob.digest)} to ${targetName} failed`, committed);
   }
 
   // The manifest, byte-identical under the source's media type; then the registry's own word on the digest.
-  const mediaType = manifest.document.kind === "manifest" ? manifest.document.mediaType : MANIFEST_ACCEPT;
+  const mediaType = manifest.document.mediaType;
   const pushed = await doFetch(`${targetBase}/manifests/${copy.version}`, {
     method: "PUT",
     headers: { ...targetHeaders, "content-type": mediaType },
@@ -286,13 +361,14 @@ async function transfer(
     signal: AbortSignal.timeout(SHORT_MS),
   });
   if (pushed.status !== 201)
-    throw new TransferProblem(`pushing the manifest as ${targetName}:${copy.version} failed — ${await said(pushed)}`);
+    throw await refused(`pushing the manifest as ${targetName}:${copy.version} failed`, pushed);
   const landed = await doFetch(`${targetBase}/manifests/${copy.version}`, {
     method: "HEAD",
     headers: { ...targetHeaders, accept: mediaType },
     signal: AbortSignal.timeout(SHORT_MS),
   });
   const reported = landed.headers.get("docker-content-digest");
+  if (landed.status === 401) throw await refused(`reading back ${targetName}:${copy.version} failed`, landed);
   if (!landed.ok || reported !== digest)
     throw new TransferProblem(
       `pushed the manifest as ${targetName}:${copy.version}, but the registry reports digest ${reported ?? `none (HTTP ${landed.status})`} where ${digest} was pushed`,
