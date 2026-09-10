@@ -144,11 +144,7 @@ describe("defineCommand — definition-time checks", () => {
       expect(() => defineCommand({ ...base, id })).toThrow(/<group>\.<verb>/);
   });
 
-  it("rejects the retired `scope` and `chatGate` fields (the policy table decides now) and a malformed action", () => {
-    expect(() => defineCommand({ ...base, id: "a.b", chatGate: "open" } as never)).toThrow(
-      /a\.b: `chatGate` is gone — declare `action`/,
-    );
-    expect(() => defineCommand({ ...base, id: "a.b", scope: "x:read" } as never)).toThrow(/a\.b: `scope` is gone/);
+  it("rejects a malformed action (the definition's one word about admission; the policy table decides)", () => {
     for (const action of ["x:delete", "read", "X:read", "x:read:more", ""])
       expect(() => defineCommand({ ...base, id: "a.b", action } as never), action).toThrow(
         /action must be <group>:read\|write\|exec/,

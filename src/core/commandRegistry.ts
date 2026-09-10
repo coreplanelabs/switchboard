@@ -189,9 +189,6 @@ export const COMMAND_ID = /^[a-z][a-z0-9]*\.[a-z][a-z0-9]*$/;
 /** The ONE shape of a command action — `<group>:read|write|exec`, lowercase. */
 export const COMMAND_ACTION = /^[a-z][a-z0-9]*:(read|write|exec)$/;
 const CAMEL_KEY = /^[a-z][A-Za-z0-9]*$/;
-/** Definition fields the policy table replaced; refused so a stale
- *  registration fails at definition time, not silently at authorize time. */
-const RETIRED_FIELDS = ["scope", "chatGate"] as const;
 
 /** A boolean option as text surfaces send it: a real boolean (the grammar's
  *  `--dry-run` / `--no-dry-run`, MCP JSON) or the strings `"true"`/`"false"`
@@ -210,12 +207,6 @@ export function defineCommand<D, const A extends readonly ArgDef[] = readonly []
   def: CommandDef<D, A, O>,
 ): CommandDef<D, A, O> {
   if (!COMMAND_ID.test(def.id)) throw new Error(`command id must be <group>.<verb> (lowercase): ${def.id}`);
-  for (const retired of RETIRED_FIELDS) {
-    if (retired in def)
-      throw new Error(
-        `${def.id}: \`${retired}\` is gone — declare \`action\` and let the policy table decide (docs/reference/specs/authorization.md)`,
-      );
-  }
   if (typeof def.action !== "string" || !COMMAND_ACTION.test(def.action))
     throw new Error(`${def.id}: action must be <group>:read|write|exec (lowercase), got ${String(def.action)}`);
   const args = def.args ?? [];
