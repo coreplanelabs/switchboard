@@ -11,9 +11,8 @@
 //   - an `assistant` event opens a new step, with that prose as its narration;
 //   - a `tool_call` joins the current step (calls before any prose form one
 //     un-narrated leading step);
-//   - a `tool_result` attaches to its call by `callId`; a legacy result with no
-//     id attaches to the oldest still-running call of the current step; a
-//     result whose call was never seen (backlog trimmed mid-pair) becomes a
+//   - a `tool_result` attaches to its call by `callId`; a result whose call was
+//     never seen (backlog trimmed mid-pair) or that carries no id becomes a
 //     call of its own, so nothing is dropped;
 //   - `context` (a thread turn the model was given) and `replay_note` (the
 //     stream's own capped-replay notice) pass through as their own change
@@ -286,15 +285,9 @@ export function createRunTimeline(): RunTimeline {
 
   function findCall(e: Record<string, unknown>): { step: TimelineStep; call: TimelineCall } | null {
     const id = str(e.callId);
-    if (id) {
-      for (let i = steps.length - 1; i >= 0; i--) {
-        for (const call of steps[i].calls) if (call.id === id && !call.result) return { step: steps[i], call };
-      }
-      return null;
-    }
-    if (!current) return null;
-    for (const call of current.calls) {
-      if (!call.result && call.tool === str(e.tool)) return { step: current, call };
+    if (!id) return null;
+    for (let i = steps.length - 1; i >= 0; i--) {
+      for (const call of steps[i].calls) if (call.id === id && !call.result) return { step: steps[i], call };
     }
     return null;
   }
@@ -341,11 +334,6 @@ export function createRunTimeline(): RunTimeline {
         ];
       case "assistant":
         return [{ kind: "step", step: openStep({ text: str(e.text), at: num(e.at) }) }];
-      case "turn":
-        // Legacy stored records only (docs/reference/specs/tracing.md): the history seed is
-        // normalized before the fold, so a stored `turn` arrives as a
-        // `model.turn` span and this case never draws — a raw one is ignored.
-        return [];
       case "review_artifact":
         // The reading diff is the review panel's material (docs/reference/specs/reading-diff.md
         // roadmap) — the timeline's step story does not change shape for it.
@@ -368,9 +356,8 @@ export function createRunTimeline(): RunTimeline {
         const status = e.status === "error" ? "error" : "ok";
         const attrs = typeof e.attrs === "object" && e.attrs !== null ? (e.attrs as Record<string, unknown>) : {};
         if (name === "model.turn") {
-          // The model turn's one timing record (docs/reference/specs/tracing.md): the same
-          // row the legacy `turn` event draws, from the span's attrs — and the
-          // same step boundary.
+          // The model turn's one timing record (docs/reference/specs/tracing.md): the
+          // turn row, from the span's attrs — and the step boundary.
           current = null;
           const facts: string[] = [];
           const inTok = num(attrs.inputTokens);

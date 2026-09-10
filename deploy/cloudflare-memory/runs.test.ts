@@ -37,7 +37,6 @@ const ZERO = { count: 0, durationMs: 0 };
 const diagnosis = () => ({
   eventCount: 0,
   toolCalls: 0,
-  hasTimings: false,
   // Every current analyzer category, zeroed — the DO normalizes on read, so a
   // fixture pinned to a category list would drift the moment one is added.
   byCategory: Object.fromEntries(FRICTION_CATEGORIES.map((c) => [c, ZERO])) as RunRecord["diagnosis"]["byCategory"],
@@ -134,7 +133,7 @@ describe("run history routes", () => {
     expect((await post("/runs/events", { storeKey: key, id: "big", afterSeq: 5000 })).data).toEqual({ events: [] });
   }, 60_000);
 
-  it("stores each event's JSON verbatim: the run-page fields (callId, exitCode, output, input.source, the turn's timing + usage) come back unchanged from get and events", async () => {
+  it("stores each event's JSON verbatim: the run-page fields (callId, exitCode, output, input.source, the model.turn span's timing + usage) come back unchanged from get and events", async () => {
     const key = storeKey();
     const evs: RunRecord["events"] = [
       {
@@ -144,11 +143,13 @@ describe("run history routes", () => {
         at: 1,
       },
       {
-        type: "turn",
+        type: "span_end",
+        spanId: "m1",
+        name: "model.turn",
         startedAt: 1,
         durationMs: 1,
-        stopReason: "tool_use",
-        usage: { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 },
+        status: "ok",
+        attrs: { stopReason: "tool_use", inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 },
         at: 2,
       },
       { type: "tool_call", tool: "bash", summary: "$ npm test", callId: "toolu_01", at: 2 },

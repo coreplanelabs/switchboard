@@ -24,12 +24,21 @@ import {
 
 let t = 0;
 const at = (ms: number) => (t += ms);
-const call = (summary: string, tool = "bash"): RunEvent => ({ type: "tool_call", tool, summary, at: at(10) });
+// Every pair is keyed the way the runner stamps it: `call` mints a `callId`
+// and `result` takes the oldest open one of its tool, so the analyzer times it.
+let nextCallId = 0;
+const openCallIds = new Map<string, string[]>();
+const call = (summary: string, tool = "bash"): RunEvent => {
+  const callId = `c${++nextCallId}`;
+  openCallIds.set(tool, [...(openCallIds.get(tool) ?? []), callId]);
+  return { type: "tool_call", tool, summary, callId, at: at(10) };
+};
 const result = (ok: boolean, summary: string, ms: number, tool = "bash"): RunEvent => ({
   type: "tool_result",
   tool,
   ok,
   summary,
+  callId: openCallIds.get(tool)?.shift() ?? `orphan${++nextCallId}`,
   at: at(ms),
 });
 
@@ -321,7 +330,7 @@ describe("clusterFriction", () => {
       t = 0;
       const rec = cleanRun(id, T0);
       rec.agent = agent;
-      rec.diagnosis = { ...rec.diagnosis, hasTimings: true, runMs };
+      rec.diagnosis = { ...rec.diagnosis, runMs };
       return rec;
     };
     const minute = 60_000;
@@ -344,7 +353,7 @@ describe("clusterFriction", () => {
   it("does not flag long runs when every run is long (no outlier) or when only one is", () => {
     const withRun = (id: string, runMs: number): FrictionRunRecord => {
       const rec = cleanRun(id, T0);
-      rec.diagnosis = { ...rec.diagnosis, hasTimings: true, runMs };
+      rec.diagnosis = { ...rec.diagnosis, runMs };
       return rec;
     };
     const minute = 60_000;

@@ -364,6 +364,7 @@ describe("RunRegistry.listActive", () => {
       startedAt: 1010, // clock at create()
       eventCount: 2,
       stepCount: 2,
+      schema: 2,
       activity: "x", // the latest tool call (item 20)
     });
     expect(list[1]).toEqual({
@@ -374,6 +375,7 @@ describe("RunRegistry.listActive", () => {
       startedAt: 1000,
       eventCount: 0,
       stepCount: 0,
+      schema: 2,
     });
     expect(a.id).toBe("id-1");
   });
@@ -416,7 +418,15 @@ describe("RunRegistry.listActive", () => {
     const bare = reg.create();
     const bareRow = reg.listActive().find((r) => r.id === bare.id)!;
     expect(bare.label).toBeUndefined();
-    expect(Object.keys(bareRow).sort()).toEqual(["eventCount", "finished", "id", "startedAt", "stepCount", "token"]);
+    expect(Object.keys(bareRow).sort()).toEqual([
+      "eventCount",
+      "finished",
+      "id",
+      "schema",
+      "startedAt",
+      "stepCount",
+      "token",
+    ]);
     const chat = reg.create("general · #ch", {
       channelId: "slack:C1",
       userId: "slack:UALICE",
@@ -538,6 +548,7 @@ describe("RunRegistry.markPersisted", () => {
           finishedAt: 1000,
           eventCount: 0,
           stepCount: 0,
+          schema: 2,
           persisted: true,
         },
       },

@@ -1,4 +1,3 @@
-import type { CompletionResult, TokenUsage } from "../providers/types.js";
 // Types only, and from the zod-free module deliberately: this file is part of
 // the node-free contract the memory Worker and web app compile with their own
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
@@ -207,7 +206,7 @@ export interface SpanEndEvent {
 
 export type RunEvent =
   /** `callId` is the provider's tool_use id — the explicit pair key between a
-   *  call and its result (live-view item 13); absent only on legacy captures. */
+   *  call and its result (live-view item 13); the runner stamps it on both. */
   /** `command` rides on bash calls only: the FULL command (redacted, capped at
    *  `COMMAND_CAP`, far above the 200-char `summary`), for consumers that must
    *  judge what the command did — the pushed-branch tracker
@@ -295,30 +294,6 @@ export type RunEvent =
    *  tool_use in one completion. Emitted by the runner, redacted, uncapped. The
    *  final text-only completion is NOT one of these (that is the `answer`). */
   | { type: "assistant"; text: string; spanId?: string; seq?: number; at?: number }
-  /** @deprecated as an emitted event (docs/reference/specs/tracing.md): the `model.turn` span
-   *  is the one timing record of a model call once the runner emits spans; kept
-   *  as a reader-only variant for stored streams, which `normalizeSpans`
-   *  adapts. One model call, as the runner saw it (live-view item 15): emitted when the
-   *  provider returns, BEFORE the `assistant`/`tool_call` events that call
-   *  produced — so a reader sees "thought for 5m 04s" above what the thinking
-   *  led to, the way Claude Code / ChatGPT / Cursor show it. `at` is when the
-   *  call returned; `startedAt` + `durationMs` are from the runner's clock, so
-   *  `at - startedAt === durationMs`. `usage` rides only when the provider
-   *  reported token counts. Shape follows the OTel GenAI `chat` span (duration,
-   *  stop reason, input/output tokens) so it exports without translation. */
-  | {
-      type: "turn";
-      /** The `<provider>/<model>` that took this turn — the run's model today
-       *  (a run is pinned to one at start), stamped per turn so the page can
-       *  name a silent model and make a switch stand out if one ever happens. */
-      model?: string;
-      startedAt: number;
-      durationMs: number;
-      stopReason: CompletionResult["stopReason"];
-      usage?: TokenUsage;
-      seq?: number;
-      at?: number;
-    }
   /** What the run is about (live-view item 19): the resolved agent and model,
    *  and — for a repo run — the repo, ref, PR number and PR head as resolved
    *  BEFORE the first model turn (`RepoContext`). Published by the dispatcher
@@ -357,27 +332,6 @@ export type RunEvent =
       /** Structured vendoring provenance (`Skill.upstream`, recorded by skills:sync). */
       upstream?: { repo: string; commit: string };
       bodyBytes: number;
-      spanId?: string;
-      seq?: number;
-      at?: number;
-    }
-  /** @deprecated as an emitted event (docs/reference/specs/tracing.md): the `mcp.<server>.<tool>`
-   *  span is the one timing record once the bridge emits spans; kept as a
-   *  reader-only variant for stored streams, which `normalizeSpans` adapts. One
-   *  call to an external MCP server's tool (docs/reference/specs/mcp-tools.md item
-   *  10). Emitted by the bridge beside the runner's generic `tool_call`/
-   *  `tool_result` pair so remote time is attributable per service: which
-   *  server and remote tool, whether it succeeded (`ok` = not a transport
-   *  error and not `isError`), how long, and how many result bytes. Never the
-   *  arguments or the body — those ride the redacted `tool_result.output`
-   *  like every tool's. Additive: unknown → ignored. */
-  | {
-      type: "mcp_tool_use";
-      server: string;
-      tool: string;
-      ok: boolean;
-      durationMs: number;
-      bytes: number;
       spanId?: string;
       seq?: number;
       at?: number;
@@ -422,7 +376,7 @@ export type RunEvent =
    *  pipeline publishes a `started` event when a round's child is dispatched
    *  and one settle event when its outcome is known (`ShipRoundOutcome`), so
    *  rounds are legible on the one stream and per-round cost is derivable by
-   *  slicing `turn` events between boundaries. `index` is 0-based in the
+   *  slicing `model.turn` spans between boundaries. `index` is 0-based in the
    *  spec's round vocabulary — round 0 is the initial coding round; a review
    *  round and its fix round share an index. Published by the ship pipeline
    *  straight to the registry (like `pr_opened`), never through the runner.

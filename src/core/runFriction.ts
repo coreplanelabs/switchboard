@@ -21,12 +21,14 @@ import type { SpanRecord } from "./trace/types.js";
 // fixture.
 //
 // Every duration comes from ONE span set: the stream normalized through
-// `normalizeSpans` (a legacy stream's turns, pairs and MCP facts become the
-// spans a live run emits) and paired by `spansFromEvents`. Model time is the
-// sum of the `model.turn` spans, tool time the sum of the `tool.*` spans, and
-// each timed finding carries the duration of the span it is about — so a
-// tool-denominated finding is a summand of tool time and a slow turn of model
-// time, and no share can exceed 100 %.
+// `normalizeSpans` (a tool pair whose twin span the record budget dropped gets
+// it back) and paired by `spansFromEvents`. Model time is the sum of the
+// `model.turn` spans, tool time the sum of the `tool.*` spans, and each timed
+// finding carries the duration of the span it is about — so a tool-denominated
+// finding is a summand of tool time and a slow turn of model time, and no
+// share can exceed 100 %. A stream with no spans (a hand-written capture, a
+// record from before spans) has no durations: the same classification, every
+// timed field absent — one code path, nothing special-cased.
 
 export type FrictionCategory =
   | "slow_tool"
@@ -115,12 +117,10 @@ export type RunShape = Omit<Partition, "backgroundOnlyMs">;
 export interface FrictionDiagnosis {
   eventCount: number;
   toolCalls: number;
-  /** True iff at least one event carried a timestamp (durations are meaningful). */
-  hasTimings: boolean;
   /** The window (`receivedAt` → `finishedAt`, or now) when one was given; else
-   *  first→last content stamp. */
+   *  first→last content stamp; absent when no content event carried one. */
   runMs?: number;
-  /** Sum of the `tool.*` span durations, when timed. */
+  /** Sum of the `tool.*` span durations, when the stream is timed (`runMs`). */
   toolTimeMs?: number;
   /** Sum of the `model.turn` span durations, when the stream had a turn and
    *  timings. Thinking and tool time are the counted terms of the shape; the
@@ -162,9 +162,6 @@ export interface FrictionOptions {
   /** Who owns the run: `run.command` counts as tools for a command run and as
    *  getting ready for an agent run. Default `agent`. */
   owner?: RunOwner;
-  /** The stream's schema (a record's, or `SPAN_SCHEMA` for a live stream);
-   *  absent reads as legacy, which `normalizeSpans` adapts. */
-  schema?: number;
 }
 
 const DEFAULT_SLOW_TOOL_MS = 30_000;
@@ -196,16 +193,14 @@ interface PendingCall {
 }
 
 /** The event types that tell the run's story rather than its steps — the
- *  narrative (`input`/`context`/`assistant`/`answer`) and the model call's own
- *  legacy receipt (`turn`), which sits above the step it produced but is not one. */
-type NarrativeEvent = Extract<RunEvent, { type: "input" | "context" | "assistant" | "answer" | "turn" | "run_meta" }>;
+ *  narrative (`input`/`context`/`assistant`/`answer`) and what the run is about. */
+type NarrativeEvent = Extract<RunEvent, { type: "input" | "context" | "assistant" | "answer" | "run_meta" }>;
 function isNarrative(ev: RunEvent): ev is NarrativeEvent {
   return (
     ev.type === "input" ||
     ev.type === "context" ||
     ev.type === "assistant" ||
     ev.type === "answer" ||
-    ev.type === "turn" ||
     ev.type === "run_meta"
   );
 }
@@ -215,8 +210,8 @@ function isNarrative(ev: RunEvent): ev is NarrativeEvent {
  *  when the stream carried one, else the first original event after the
  *  synthesized end) — and `producedOf` — the first content event after it, the
  *  event a model turn produced (its tool call, its narration, the answer). */
-function spanSet(events: readonly RunEvent[], schema: number | undefined) {
-  const normalized = normalizeSpans(events, { schema });
+function spanSet(events: readonly RunEvent[]) {
+  const normalized = normalizeSpans(events);
   const spans = spansFromEvents(normalized, "run");
   const originalIndex = new Map<RunEvent, number>();
   events.forEach((e, i) => originalIndex.set(e, i));
@@ -288,12 +283,9 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     }
   }
   const windowEnd = window?.end ?? lastAt;
-  // A stream whose content carried no stamps has no durations — a legacy or
-  // hand-written capture: the same classification, nothing timed.
-  const hasTimings = firstAt !== undefined;
 
   // ---- the span set: every duration comes from here -------------------------
-  const { spans, anchorOf, producedOf } = spanSet(events, opts.schema);
+  const { spans, anchorOf, producedOf } = spanSet(events);
   const losses: LossInterval[] = window ? lossesFromStream(events, { windowStart: window.start }) : [];
   const lossStarts = losses.map((l) => l.from).sort((a, b) => a - b);
   /** A span's end: its own, or — open — the window's end while live, the next
@@ -306,7 +298,6 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     return next ?? windowEnd;
   };
   const durationOfSpan = (s: SpanRecord): number | undefined => {
-    if (!hasTimings) return undefined;
     const end = endOf(s);
     return end === undefined ? undefined : Math.max(0, end - s.startedAt);
   };
@@ -388,10 +379,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       spanEvents++;
       return;
     }
-    if (isNarrative(ev)) narrativeEvents++;
-    // The narrative, the legacy `turn` receipt and `run_meta` are neither steps nor findings.
-    if (ev.type === "context" || ev.type === "input" || ev.type === "assistant" || ev.type === "answer") return;
-    if (ev.type === "turn" || ev.type === "run_meta") return;
+    if (isNarrative(ev)) {
+      narrativeEvents++; // the narrative and `run_meta` are neither steps nor findings
+      return;
+    }
     // Side facts about the run, not steps: skill_use rides beside a use_skill
     // call that already produced its own tool pair; review_artifact,
     // pr_description, pr_opened and the ship_round boundaries are published
@@ -399,7 +390,6 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     // any of them would distort the story.
     if (
       ev.type === "skill_use" ||
-      ev.type === "mcp_tool_use" ||
       ev.type === "review_artifact" ||
       ev.type === "pr_description" ||
       ev.type === "pr_opened" ||
@@ -613,10 +603,8 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   const diagnosis: FrictionDiagnosis = {
     eventCount: events.length - narrativeEvents - sideFactEvents - spanEvents,
     toolCalls,
-    hasTimings: hasTimings || window !== undefined,
-    ...(runMs !== undefined ? { runMs } : {}),
-    ...(runMs !== undefined && hasTimings ? { toolTimeMs: toolTimeMs ?? 0 } : {}),
-    ...(runMs !== undefined && hasTimings && modelTimeMs !== undefined ? { modelTimeMs } : {}),
+    ...(runMs !== undefined ? { runMs, toolTimeMs: toolTimeMs ?? 0 } : {}),
+    ...(runMs !== undefined && modelTimeMs !== undefined ? { modelTimeMs } : {}),
     byCategory,
     findings,
     verdict: "",
@@ -638,7 +626,7 @@ function verdictOf(d: FrictionDiagnosis): string {
   const top = ranked[0];
   const t = d.byCategory[top];
   const what = `${CATEGORY_LABEL[top]} dominated: ${t.count} finding${t.count === 1 ? "" : "s"}`;
-  if (!d.hasTimings || t.durationMs === 0) return what;
+  if (t.durationMs === 0) return what;
   const [denominator, of] = DENOMINATOR_OF[top] === "run" ? [d.runMs, "run time"] : [d.toolTimeMs, "tool time"];
   const share = denominator ? ` (${Math.round((t.durationMs / denominator) * 100)}% of ${of})` : "";
   return `${what}, ${formatDuration(t.durationMs, "report")}${share}`;
@@ -653,7 +641,6 @@ export function formatFrictionReport(d: FrictionDiagnosis): string {
   if (d.toolCalls > 0 && d.toolTimeMs !== undefined)
     totals.push(`tool time: ${formatDuration(d.toolTimeMs, "report")}`);
   if (d.modelTimeMs !== undefined) totals.push(`model time: ${formatDuration(d.modelTimeMs, "report")}`);
-  if (!d.hasTimings) totals.push("(no timestamps — durations unavailable)");
   if (d.truncatedInput) totals.push("(input truncated — some records were dropped before analysis)");
   lines.push(totals.join(" · "));
   if (d.shape) {
@@ -664,7 +651,7 @@ export function formatFrictionReport(d: FrictionDiagnosis): string {
   lines.push("", `${"category".padEnd(width)}  count  time`);
   for (const c of FRICTION_CATEGORIES) {
     const t = d.byCategory[c];
-    const time = t.count && d.hasTimings && t.durationMs > 0 ? formatDuration(t.durationMs, "report") : "-";
+    const time = t.count && t.durationMs > 0 ? formatDuration(t.durationMs, "report") : "-";
     lines.push(`${CATEGORY_LABEL[c].padEnd(width)}  ${String(t.count).padStart(5)}  ${time}`);
   }
   if (d.findings.length > 0) {

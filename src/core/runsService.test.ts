@@ -329,6 +329,7 @@ describe("RunsService.listRuns — read merge", () => {
         label: "coding · acme/x",
         startedAt: NOW,
         stepCount: 1,
+        schema: 2, // as the record writer stamps it; the live row carries the same
         events: [{ type: "input", text: "go", seq: 1 }],
       }),
     );
@@ -706,11 +707,17 @@ describe("RunsService with the run ledger — one registry across generations (r
     expect((await svc.listRuns({ visibleTo: { kind: "none" }, status: "active" })).runs).toEqual([]);
   });
 
-  it("getRun, getRunEvents and getRunFriction answer for a ledger row: the view (with the events on a messages read), a seq page, a live diagnosis", async () => {
+  it("getRun, getRunEvents and getRunFriction answer for a ledger row: the view (with the events on a messages read, stamped with the span schema — a ledger run is always timed), a seq page, a live diagnosis", async () => {
     const { svc, ledger } = ledgerSetup();
     await farRun(ledger);
     const view = await svc.getRun("far-1");
-    expect(view.ok && view.value).toMatchObject({ id: "far-1", finished: false, ownerGen: "g-OTHER", eventCount: 2 });
+    expect(view.ok && view.value).toMatchObject({
+      id: "far-1",
+      finished: false,
+      ownerGen: "g-OTHER",
+      eventCount: 2,
+      schema: 2,
+    });
     expect(view.ok && view.value.events).toBeUndefined();
     const full = await svc.getRun("far-1", { include: "messages" });
     expect(full.ok && full.value.events?.map((e) => e.type)).toEqual(["input", "tool_call"]);
@@ -929,11 +936,10 @@ describe("RunsService.getRunFriction", () => {
     reg.publish(id, call("$ ls"));
     reg.finish(id);
     await svc.getRunFriction(id);
-    // The live stream is schema 2 and a finished run's window is its own stamps (docs/reference/specs/tracing.md).
+    // A finished run's window is its own stamps (docs/reference/specs/tracing.md).
     expect(analyze).toHaveBeenCalledWith([expect.objectContaining({ seq: 1 })], {
       finished: true,
       truncated: false,
-      schema: 2,
       window: { start: expect.any(Number), end: expect.any(Number) },
     });
   });

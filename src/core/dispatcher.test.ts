@@ -5770,7 +5770,6 @@ describe("friction diagnosis reads the registry backlog", () => {
     expect(rec.diagnosis).toEqual(
       analyzeRunFriction(snap!.events, {
         finished: true,
-        schema: 2,
         window: { start: row.receivedAt ?? row.startedAt, end: row.finishedAt! },
       }),
     );
@@ -6039,7 +6038,6 @@ describe("run history write path", () => {
     expect(rec!.diagnosis).toEqual(
       analyzeRunFriction(rec!.events, {
         finished: true,
-        schema: 2,
         window: { start: rec!.receivedAt ?? rec!.startedAt, end: rec!.finishedAt },
       }),
     );
@@ -8350,8 +8348,7 @@ describe("MCP tools (docs/reference/specs/mcp-tools.md)", () => {
     expect(JSON.stringify(provider.requests[1].messages)).toContain("LINEAR RESULT for login bug");
     expect(JSON.stringify(provider.requests[1].messages)).toContain("UNTRUSTED CONTENT");
     // The run stream carries the remote call as an `mcp.<server>.<tool>` span
-    // under the tool call's own span, between the generic pair (docs/reference/specs/tracing.md
-    // — the legacy `mcp_tool_use` event is reader-only).
+    // under the tool call's own span, between the generic pair (docs/reference/specs/tracing.md).
     const events = [...runIds].flatMap((id) => registry.snapshotById(id)?.events ?? []);
     const call = events.findIndex((e) => e.type === "tool_call");
     const use = events.findIndex((e) => e.type === "span_end" && e.name === "mcp.linear.search_issues");
@@ -8366,7 +8363,6 @@ describe("MCP tools (docs/reference/specs/mcp-tools.md)", () => {
       parentSpanId: toolCall.spanId,
       attrs: { ok: true, bytes: expect.any(Number) },
     });
-    expect(events.some((e) => e.type === "mcp_tool_use")).toBe(false);
   });
 
   it("no source, or no server scoped to the agent → the request is byte-identical", async () => {

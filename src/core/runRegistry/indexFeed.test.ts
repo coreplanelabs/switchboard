@@ -28,6 +28,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           startedAt: 1010,
           eventCount: 0,
           stepCount: 0,
+          schema: 2,
         },
       },
       {
@@ -40,6 +41,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           startedAt: 1000,
           eventCount: 0,
           stepCount: 0,
+          schema: 2,
         },
       },
     ]);
@@ -60,7 +62,16 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     expect(events).toEqual([
       {
         type: "upsert",
-        run: { id: "id-1", token: "tok-1", label: "x", finished: false, startedAt: 1000, eventCount: 0, stepCount: 0 },
+        run: {
+          id: "id-1",
+          token: "tok-1",
+          label: "x",
+          finished: false,
+          startedAt: 1000,
+          eventCount: 0,
+          stepCount: 0,
+          schema: 2,
+        },
       },
     ]);
   });
@@ -82,6 +93,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           startedAt: 1000,
           eventCount: 1,
           stepCount: 1,
+          schema: 2,
           activity: "x",
         },
       },
@@ -107,6 +119,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           finishedAt: 1000,
           eventCount: 0,
           stepCount: 0,
+          schema: 2,
         },
       },
     ]);
@@ -149,7 +162,16 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
     // the well-behaved subscriber still received the upsert…
     expect(good).toContainEqual({
       type: "upsert",
-      run: { id: "id-1", token: "tok-1", label: "x", finished: false, startedAt: 1000, eventCount: 0, stepCount: 0 },
+      run: {
+        id: "id-1",
+        token: "tok-1",
+        label: "x",
+        finished: false,
+        startedAt: 1000,
+        eventCount: 0,
+        stepCount: 0,
+        schema: 2,
+      },
     });
     // …and registry state is uncorrupted.
     expect(reg.listActive().map((r) => r.label)).toEqual(["x"]);

@@ -29,7 +29,7 @@ import { ALL_GRANTS, grantsFor, type GrantsSource } from "../core/authz/grants.j
 import { NO_GRANTS, predicateFor } from "../core/authz/index.js";
 import { RunRegistry, type RunRegistryOptions } from "../core/runRegistry.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
-import { normalizeSpans } from "../core/normalizeSpans.js";
+import { normalizeSpans, SPAN_SCHEMA } from "../core/normalizeSpans.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { RunRecord } from "../core/runRecord.js";
 import { INDEX_PAGE_SIZE } from "./liveView.js";
@@ -856,10 +856,17 @@ describe("GET /runs/:id/friction — read-only friction diagnosis", () => {
   it("returns the JSON diagnosis of a finished run's backlog (no-store, GET only)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
-    reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm install", at: 1_000 });
-    reg.publish(id, { type: "tool_result", tool: "bash", ok: true, summary: "added 200 packages", at: 61_000 });
-    reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm test", at: 62_000 });
-    reg.publish(id, { type: "tool_result", tool: "bash", ok: false, summary: "2 failing", at: 63_000 });
+    reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm install", callId: "c1", at: 1_000 });
+    reg.publish(id, {
+      type: "tool_result",
+      tool: "bash",
+      ok: true,
+      summary: "added 200 packages",
+      callId: "c1",
+      at: 61_000,
+    });
+    reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm test", callId: "c2", at: 62_000 });
+    reg.publish(id, { type: "tool_result", tool: "bash", ok: false, summary: "2 failing", callId: "c2", at: 63_000 });
     reg.finish(id);
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", `/runs/${id}/friction?t=${token}`);
@@ -1167,11 +1174,11 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
       const seed = runSeedOf(t.body()) as RunHistorySeed;
       expect(seed.mode).toBe("history");
-      // The seed is the record's stream normalized (docs/reference/specs/tracing.md): this
-      // legacy record's tool pair gains its `tool.bash` twin, nothing else moves.
-      expect(seed.events).toEqual(normalizeSpans(record("r1").events));
-      expect(seed.events.filter((e) => e.type === "span_end")).toMatchObject([{ name: "tool.bash", status: "ok" }]);
-      expect(seed.events.filter((e) => e.type !== "span_start" && e.type !== "span_end")).toEqual(record("r1").events);
+      // This record carries no `schema` — it predates spans — so it is handed
+      // over as stored, no span set synthesized, and flagged `untimed`
+      // (docs/reference/specs/tracing.md).
+      expect(seed.events).toEqual(record("r1").events);
+      expect(seed.untimed).toBe(true);
       expect(seed.status).toBe("completed");
       expect(seed.eventCount).toBe(5);
       expect(seed.durationMs).toBe(10_000);
@@ -1180,6 +1187,27 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(seed.truncated).toBe(record("r1").truncated); // the timeline's `(too large)` (live-view item 25)
       expect(t.body()).not.toContain("?t=");
       expect(t.body()).not.toContain("tok-");
+    });
+
+    it("a span-schema record's seed is the stream normalized: a pair whose twin the budget dropped gains its `tool.bash` span, nothing else moves, and the seed is not `untimed`", async () => {
+      const h = harness();
+      const events: RunEvent[] = [
+        text("input", "please run it", 1),
+        { type: "tool_call", tool: "bash", summary: "$ npm test", callId: "c1", at: NOW - 69_000, seq: 2 },
+        { type: "tool_result", tool: "bash", ok: true, summary: "all green", callId: "c1", at: NOW - 65_000, seq: 3 },
+        text("answer", "done", 4),
+      ];
+      await h.store!.put(record("r1s", { events, schema: SPAN_SCHEMA }));
+      const t = fakeReqRes("GET", "/runs/r1s");
+      expect(h.handler(t.req, t.res)).toBe(true);
+      await done(t);
+      const seed = runSeedOf(t.body()) as RunHistorySeed;
+      expect(seed.events).toEqual(normalizeSpans(events));
+      expect(seed.events.filter((e) => e.type === "span_end")).toMatchObject([
+        { name: "tool.bash", status: "ok", durationMs: 4_000 },
+      ]);
+      expect(seed.events.filter((e) => e.type !== "span_start" && e.type !== "span_end")).toEqual(events);
+      expect(seed.untimed).toBeUndefined();
     });
 
     it("a record carrying receivedAt seeds a duration that opens there — the one definition (docs/reference/specs/tracing.md)", async () => {
@@ -1217,10 +1245,25 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect((runSeedOf(b.body()) as RunHistorySeed).status).toBe("failed");
     });
 
-    it("a finished run still in the registry is served tokenless in history mode (the card link outlives the TTL either way)", async () => {
+    it("a finished run still in the registry is served tokenless in history mode (the card link outlives the TTL either way), timed like every registry run: its seed is normalized and never `untimed`", async () => {
       const h = harness();
       const run = h.registry.create();
       h.registry.publish(run.id, text("input", "hi", 0));
+      h.registry.publish(run.id, {
+        type: "tool_call",
+        tool: "bash",
+        summary: "$ npm test",
+        callId: "c1",
+        at: NOW - 69_000,
+      });
+      h.registry.publish(run.id, {
+        type: "tool_result",
+        tool: "bash",
+        ok: true,
+        summary: "ok",
+        callId: "c1",
+        at: NOW - 65_000,
+      });
       h.registry.finish(run.id);
       const t = fakeReqRes("GET", `/runs/${run.id}`);
       h.handler(t.req, t.res);
@@ -1229,6 +1272,11 @@ describe("live view on RunsService: history pages + index toggle", () => {
       const seed = runSeedOf(t.body()) as RunHistorySeed;
       expect(seed.mode).toBe("history");
       expect(seed.events.some((e) => "text" in e && e.text === "hi")).toBe(true);
+      // The registry row is the current runner's: no `schema` to read from a store, and no doubt about its timing.
+      expect(seed.untimed).toBeUndefined();
+      expect(seed.events.filter((e) => e.type === "span_end")).toMatchObject([
+        { name: "tool.bash", durationMs: 4_000 },
+      ]);
       expect(t.body()).not.toContain(run.token);
     });
 

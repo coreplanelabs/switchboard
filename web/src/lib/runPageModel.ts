@@ -715,7 +715,7 @@ export function parseEndFrame(data: string | undefined): { sealedAt?: number; re
 /** The delivery caption beside a finished run's duration: `delivered in 2s`
  *  when the first reply attempt landed (`replyOk` true, and both stamps known),
  *  `reply failed` when it threw, nothing when none was measured — a fall-through
- *  command run, a backstop or sweep seal, a legacy record. */
+ *  command run, a backstop or sweep seal, a record without the stamps. */
 export function deliveryCaption(run: { finishedAt?: number; sealedAt?: number; replyOk?: boolean }): string {
   if (run.replyOk === false) return "reply failed";
   if (run.replyOk !== true || run.finishedAt === undefined || run.sealedAt === undefined) return "";

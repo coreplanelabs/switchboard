@@ -153,9 +153,9 @@ describe("bridgeMcpTools", () => {
   });
 
   // Feature: docs/reference/specs/tracing.md; docs/reference/specs/mcp-tools.md item 10 — under a tool
-  // span the remote call is one `mcp.<server>.<tool>` span; the legacy event
-  // is published only when no span is given.
-  it("under a tool span, each call is an mcp.<server>.<tool> span with ok and bytes, error-status when the server errs or the call throws (classified), and no mcp_tool_use event", async () => {
+  // span the remote call is one `mcp.<server>.<tool>` span; the bridge
+  // publishes no event of its own.
+  it("under a tool span, each call is an mcp.<server>.<tool> span with ok and bytes, error-status when the server errs or the call throws (classified), and no event of its own", async () => {
     const events: RunEvent[] = [];
     const log = recordingSink();
     let t = 1000;
@@ -166,13 +166,13 @@ describe("bridgeMcpTools", () => {
       { name: "bad", inputSchema: {}, handler: () => ({ content: [{ type: "text", text: "x" }], isError: true }) },
       { name: "boom", inputSchema: {}, handler: () => Promise.reject(new McpError("timeout", "took too long")) },
     ]);
-    const tools = bridgeMcpTools(server, client, await client.listTools(), { budget: newRunBudget(), now: () => t });
+    const tools = bridgeMcpTools(server, client, await client.listTools(), { budget: newRunBudget() });
     const spanCtx: ToolContext = { ...ctx(events), span: toolSpan };
     expect(await tools[0].run({ secret: "hunter2" }, spanCtx)).toContain("hello");
     await expect(tools[1].run({}, spanCtx)).rejects.toThrow(/reported an error/);
     const thrown = await tools[2].run({}, spanCtx).catch((e: unknown) => e);
     expect(classificationOf(thrown)).toEqual({ kind: "timeout" });
-    expect(events).toEqual([]); // no legacy event on the span path
+    expect(events).toEqual([]); // the span is the record; nothing rides the stream from here
     expect(log.ends.map((e) => [e.name, e.status, e.attrs, e.parentSpanId])).toEqual([
       ["mcp.linear.ok", "ok", { ok: true, bytes: 5 }, toolSpan.id],
       ["mcp.linear.bad", "error", { ok: false, bytes: 1 }, toolSpan.id],
@@ -187,28 +187,16 @@ describe("bridgeMcpTools", () => {
     expect(JSON.stringify(log.ends)).not.toMatch(/hunter2|hello/);
   });
 
-  it("publishes an mcp_tool_use event per call with no arguments or body (no span given)", async () => {
+  it("without a span (a bare tool test) a call publishes nothing to the stream", async () => {
     const events: RunEvent[] = [];
-    let t = 1000;
     const client = new InMemoryMcpClient([
       { name: "ok", inputSchema: {}, handler: () => ({ content: [{ type: "text", text: "hello" }] }) },
-      { name: "bad", inputSchema: {}, handler: () => ({ content: [{ type: "text", text: "x" }], isError: true }) },
       { name: "boom", inputSchema: {}, handler: () => Promise.reject(new Error("down")) },
     ]);
-    const tools = bridgeMcpTools(server, client, await client.listTools(), {
-      budget: newRunBudget(),
-      now: () => (t += 5),
-    });
-    await tools[0].run({ secret: "hunter2" }, ctx(events));
+    const tools = bridgeMcpTools(server, client, await client.listTools(), { budget: newRunBudget() });
+    expect(await tools[0].run({ secret: "hunter2" }, ctx(events))).toContain("hello");
     await tools[1].run({}, ctx(events)).catch(() => undefined);
-    await tools[2].run({}, ctx(events)).catch(() => undefined);
-    expect(events).toEqual([
-      { type: "mcp_tool_use", server: "linear", tool: "ok", ok: true, durationMs: 5, bytes: 5 },
-      { type: "mcp_tool_use", server: "linear", tool: "bad", ok: false, durationMs: 5, bytes: 1 },
-      { type: "mcp_tool_use", server: "linear", tool: "boom", ok: false, durationMs: 5, bytes: 0 },
-    ]);
-    expect(JSON.stringify(events)).not.toContain("hunter2");
-    expect(JSON.stringify(events)).not.toContain("hello");
+    expect(events).toEqual([]);
   });
 
   it("refuses the call after the per-run cap, across servers sharing the budget", async () => {

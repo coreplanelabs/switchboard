@@ -89,6 +89,9 @@ export interface RunHistorySeed {
   durationMs?: number;
   /** The record was cut to its budget: the timeline's `not recorded` reads `(too large)`. */
   truncated?: boolean;
+  /** The record predates span schema (docs/reference/specs/tracing.md): `events` carries
+   *  no span set and the timeline states `no timing data` instead of a shape. */
+  untimed?: true;
 }
 
 export interface RunNotFoundSeed {

@@ -61,7 +61,7 @@ describe("status vocabulary", () => {
     expect(countText({ eventCount: 12 })).toBe("12 events");
     expect(countText({ eventCount: 3, stepCount: 1 })).toBe("1 event");
     expect(countTip({ stepCount: 8 })).toBe("content events; span records excluded");
-    expect(countTip({})).toBe("events published, span records included"); // a legacy row's fallback counts them
+    expect(countTip({})).toBe("events published, span records included"); // a row without stepCount counts them
   });
 
   it("a finished row with no seal yet and no record is `delivering`: amber, whatever its status, and its tip says so; a seal or a persisted record ends it", () => {

@@ -163,10 +163,6 @@ describe("firingDetailSummary", () => {
     );
     expect(firingDetailSummary("🔍 109 runs analyzed — filed 2")).toBe("109 runs analyzed — filed 2");
     expect(firingDetailSummary("HTTP 401 unauthorized")).toBe("HTTP 401 unauthorized");
-    // legacy records flattened the whole reply into one line: cut at a sentence-ish width
-    const legacy =
-      "🔍 *Friction proposals* — 244 runs analyzed · 23 recurring patterns 1. `slow_tool:npm test` — 22 runs · 23× · 29m 9s · high 2. `slow_tool:npm test, npm run build` — 18 runs · 18× · 27m 26s · high 3. more";
-    expect(firingDetailSummary(legacy)).toBe("244 runs analyzed · 23 recurring patterns"); // the head ends where the list begins
     const long = firingDetailSummary("x".repeat(200));
     expect(long.length).toBe(121);
     expect(long.endsWith("…")).toBe(true);

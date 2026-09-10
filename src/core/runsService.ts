@@ -1,8 +1,8 @@
 import { matchesPredicate } from "./authz/predicate.js";
 import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
 import type { RunActor, RunEvent, StopMode } from "./runEvents.js";
-import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { systemClock } from "./trace/clock.js";
+import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { analyzeRunFriction, type FrictionOptions, type FrictionDiagnosis } from "./runFriction.js";
 import {
   clampListLimit,
@@ -78,8 +78,9 @@ export interface RunView {
    *  reply attempt completed or the branch was abandoned; `replyOk` is
    *  tri-state — `true` a reply was attempted and delivered, `false` attempted
    *  and threw, absent none was made. `stepCount`: content events only (span
-   *  records excluded). `schema`: the record's stream schema (2 once spans are
-   *  emitted); absent is legacy. All omitted when absent. */
+   *  records excluded). `schema`: the stream schema — `SPAN_SCHEMA` on every
+   *  registry and ledger view (a current runner emitted it); a STORED record
+   *  absent it or below it carries no timing. All omitted when absent. */
   receivedAt?: number;
   sealedAt?: number;
   replyOk?: boolean;
@@ -256,6 +257,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m.userName !== undefined ? { userName: m.userName } : {}),
     ...(row.stop ? { stop: { mode: row.stop, state: "stopping" as const } } : {}),
+    schema: SPAN_SCHEMA, // a ledger run is a current runner's: spans carry its timing
     ownerGen: row.ownerGen,
   };
 }
@@ -587,14 +589,13 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           value: {
             id,
             finished: snap.finished,
-            // A live stream is schema 2; the window is the run's own stamps, to
-            // now while live (docs/reference/specs/tracing.md) — the same window the live
-            // route passes, so the two surfaces time a run alike; a finished
-            // run's diagnosis carries the shape.
+            // The window is the run's own stamps, to now while live
+            // (docs/reference/specs/tracing.md) — the same window the live route
+            // passes, so the two surfaces time a run alike; a finished run's
+            // diagnosis carries the shape.
             diagnosis: analyze(snap.events, {
               finished: snap.finished,
               truncated: snap.truncated,
-              schema: SPAN_SCHEMA,
               window: { start: snap.receivedAt ?? snap.startedAt, end: snap.finishedAt ?? clock() },
             }),
           },

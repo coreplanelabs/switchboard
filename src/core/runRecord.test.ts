@@ -311,7 +311,7 @@ describe("isRunRecord", () => {
     }
   });
 
-  it("round-trips the run-page fields on tool, input and turn events verbatim (callId, exitCode, output, source, startedAt/durationMs/stopReason/usage) — the validator only checks each event's `type`", () => {
+  it("round-trips the run-page fields on tool, input and model.turn span events verbatim (callId, exitCode, output, source, startedAt/durationMs/attrs) — the validator only checks each event's `type`", () => {
     const events: RunEvent[] = [
       {
         type: "input",
@@ -321,11 +321,13 @@ describe("isRunRecord", () => {
         at: 1,
       },
       {
-        type: "turn",
+        type: "span_end",
+        spanId: "m1",
+        name: "model.turn",
         startedAt: 1,
         durationMs: 1,
-        stopReason: "tool_use",
-        usage: { inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 },
+        status: "ok",
+        attrs: { stopReason: "tool_use", inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1000 },
         seq: 2,
         at: 2,
       },

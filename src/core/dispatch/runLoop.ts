@@ -22,7 +22,6 @@ import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js
 import { startReviewReadingDiff } from "../readingDiff.js";
 import { isSpanRecord, redactSecrets, type RunEvent } from "../runEvents.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
-import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { markdownOutput } from "../llmOutput/index.js";
 import type { RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
@@ -640,7 +639,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     const diagnosis = analyzeRunFriction(events, {
       finished: true,
       truncated: snap?.truncated ?? false,
-      schema: SPAN_SCHEMA,
       window: { start: snap?.receivedAt ?? startedAt, end: finishedAt },
     });
     runDiagnosis = diagnosis;

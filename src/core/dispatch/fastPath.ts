@@ -13,7 +13,6 @@ import { COMMAND_RUN_AGENT } from "../runOwner.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { RequestTrace } from "../requestTrace.js";
 import { graftResidentSteps, sanitizeGraftedSteps } from "../../execution/residentTrace.js";
-import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../../execution/factory.js";
 import { resolveRepoContext, type RepoContext } from "../repoContext.js";
 import { recognizeOperation } from "../operations.js";
@@ -317,7 +316,6 @@ async function runInlineCommandRun<T extends { text: string; ok: boolean; trace?
     const diagnosis = analyzeRunFriction(snap?.events ?? [], {
       finished: true,
       truncated: snap?.truncated ?? false,
-      schema: SPAN_SCHEMA,
       owner: "command",
       window: { start: trace.receivedAt, end: finishedAt },
     });

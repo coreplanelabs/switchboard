@@ -103,6 +103,28 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
   }),
 ];
 
+/** One model call as the runner records it (docs/reference/specs/tracing.md): a
+ *  `model.turn` span under the agent loop, its stop reason, model and token
+ *  usage as attrs; `seq` places it in the replayed stream like every event. */
+const modelTurn = (
+  spanId: string,
+  startedAt: number,
+  durationMs: number,
+  seq: number,
+  attrs: Record<string, string | number>,
+) => ({
+  type: "span_end",
+  spanId,
+  parentSpanId: "agent",
+  name: "model.turn",
+  startedAt,
+  durationMs,
+  status: "ok",
+  attrs,
+  at: startedAt + durationMs,
+  seq,
+});
+
 const HIST_EVENTS = [
   {
     type: "input",
@@ -123,16 +145,13 @@ const HIST_EVENTS = [
     at: NOW - 2_399_000,
     seq: 3,
   },
-  {
-    type: "turn",
-    model: "anthropic/claude-fable-5",
-    startedAt: NOW - 2_399_000,
-    durationMs: 9_000,
+  modelTurn("m1", NOW - 2_399_000, 9_000, 4, {
     stopReason: "tool_use",
-    at: NOW - 2_390_000,
-    seq: 4,
-    usage: { inputTokens: 12_300, outputTokens: 810, cacheReadTokens: 11_200 },
-  },
+    model: "anthropic/claude-fable-5",
+    inputTokens: 12_300,
+    outputTokens: 810,
+    cacheReadTokens: 11_200,
+  }),
   {
     type: "assistant",
     text: "I'll look at the current sender first, then write the failing tests.",
@@ -207,15 +226,12 @@ const HIST_EVENTS = [
   // The slow middle of the run (item 24): a five-minute think, a typegen the
   // sandbox killed at its 15-minute deadline, and a 3.5-minute type check —
   // the durations that should read warm and over budget on the page.
-  {
-    type: "turn",
-    startedAt: NOW - 2_324_000,
-    durationMs: 304_000,
+  modelTurn("m2", NOW - 2_324_000, 304_000, 16, {
     stopReason: "tool_use",
-    at: NOW - 2_020_000,
-    seq: 16,
-    usage: { inputTokens: 48_900, outputTokens: 2_100, cacheReadTokens: 40_200 },
-  },
+    inputTokens: 48_900,
+    outputTokens: 2_100,
+    cacheReadTokens: 40_200,
+  }),
   { type: "assistant", text: "Regenerating the generated types before the type check.", at: NOW - 2_019_000, seq: 17 },
   { type: "tool_call", callId: "c5", tool: "bash", summary: "$ pnpm typegen", at: NOW - 2_018_000, seq: 18 },
   {
@@ -254,15 +270,7 @@ const HIST_EVENTS = [
   // The answer's own turn, on a DIFFERENT model than the run started on — not
   // something a run does today (it is pinned to one model), but the switch
   // treatment (`⇄ claude-opus-5` on the turn's head) has to be seen somewhere.
-  {
-    type: "turn",
-    model: "anthropic/claude-opus-5",
-    startedAt: NOW - 760_000,
-    durationMs: 9_000,
-    stopReason: "end_turn",
-    at: NOW - 751_000,
-    seq: 24,
-  },
+  modelTurn("m3", NOW - 760_000, 9_000, 24, { stopReason: "end_turn", model: "anthropic/claude-opus-5" }),
   {
     type: "answer",
     text: "Done — `sendWebhook` now retries with exponential backoff (5 attempts, 4xx gives up immediately). PR updated.",
@@ -273,8 +281,8 @@ const HIST_EVENTS = [
 
 /** The history run as a traced stream (docs/reference/specs/tracing.md): the request root
  *  and the setup spans ahead of the events, the agent loop around them, the
- *  post step after — and `normalizeSpans` making the legacy `turn`s and the
- *  tool pairs their spans, exactly as the history route does. */
+ *  post step after — and `normalizeSpans` giving the tool pairs their spans,
+ *  exactly as the history route does. */
 const RECEIVED_AT = NOW - 2_405_000;
 const HIST_FINISHED_AT = NOW - 750_000;
 const spanEnd = (

@@ -154,9 +154,35 @@ describe("RunPage — the timeline (item 25)", () => {
     expect(tl.find(".lede .shape").text().startsWith(w.find(".conn .dur").text())).toBe(true);
   });
 
-  it("history: a legacy record (no root) shows the total and the one word for its missing setup; a truncated record's lost stretch reads (too large)", () => {
+  it("history: an `untimed` record (written before span schema) renders its transcript and calls, and the timeline states `no timing data` — no bar, no shape, no crash on the event kinds it carries", () => {
     const { factory } = fakeEventSourceFactory();
-    const legacy = mountApp(RunPage, {
+    const w = mountApp(RunPage, {
+      seed: historySeed(
+        [
+          input,
+          // A stored `turn` from before spans: not a kind the fold knows; it draws nothing.
+          { type: "turn", startedAt: 1000, durationMs: 9_000, stopReason: "tool_use", at: 10_000 },
+          { type: "tool_call", tool: "bash", summary: "$ npm test", at: 10_000 },
+          { type: "tool_result", tool: "bash", ok: true, summary: "(7 chars)", output: "all ok", at: 12_000 },
+          { type: "answer", text: "done", at: 31_000 },
+        ] as LiveFrame[],
+        { status: "completed", finishedAt: 31_000, durationMs: 30_000, untimed: true },
+      ),
+      eventSource: factory,
+    });
+    expect(w.find("#timeline .lede .shape").text()).toBe("30s");
+    expect(w.find("#timeline .note").text()).toBe("no timing data");
+    expect(w.find("#timeline .bar").exists()).toBe(false);
+    expect(w.find("#timeline .ranked").exists()).toBe(false);
+    expect(w.text()).toContain("fix the");
+    expect(w.text()).toContain("npm test");
+    expect(w.text()).toContain("done");
+    expect(w.text()).not.toMatch(/legacy/i);
+  });
+
+  it("history: a record with no root shows the total and the one word for its missing setup; a truncated record's lost stretch reads (too large)", () => {
+    const { factory } = fakeEventSourceFactory();
+    const noRoot = mountApp(RunPage, {
       seed: historySeed(
         [
           input,
@@ -168,9 +194,9 @@ describe("RunPage — the timeline (item 25)", () => {
       ),
       eventSource: factory,
     });
-    expect(legacy.find("#timeline .lede .shape").text()).toBe("30s");
-    expect(legacy.find("#timeline .note").text()).toBe("getting ready: not recorded (too large)");
-    expect(legacy.find("#timeline .bar").exists()).toBe(false);
+    expect(noRoot.find("#timeline .lede .shape").text()).toBe("30s");
+    expect(noRoot.find("#timeline .note").text()).toBe("getting ready: not recorded (too large)");
+    expect(noRoot.find("#timeline .bar").exists()).toBe(false);
     const cut = mountApp(RunPage, {
       seed: historySeed(
         [
