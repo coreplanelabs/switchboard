@@ -72,9 +72,8 @@
 #                         (and its `configSource`) names — the token minted from
 #                         it is CONFIG_REPO_TOKEN for every command. A profile
 #                         that is a path in the calling repository needs neither.
-#   OP_SERVICE_ACCOUNT_TOKEN  this installation's alternative to handing the App
-#                         in: its client id and private key are loaded from the
-#                         secrets manager when no client id was passed.
+#                         In this repository they are the App release-please
+#                         acts as; nothing is fetched from a vault in CI.
 #
 # Variables — the CALLING repository's variables (where THAT installation's
 # profile lives; nothing in the tree names an installation):
@@ -137,9 +136,6 @@ on:
       CONFIG_REPO_APP_PRIVATE_KEY:
         required: false
         description: that App's private key
-      OP_SERVICE_ACCOUNT_TOKEN:
-        required: false
-        description: this installation's secrets manager, holding the App when no client id is passed
   workflow_dispatch:
     inputs:
       targets:
@@ -185,12 +181,10 @@ jobs:
       # `profile` input, else the calling repository's variable. A `github://`
       # profile is read with CONFIG_REPO_TOKEN, the App token minted below.
       SWITCHBOARD_DEPLOY_PROFILE: ${{ inputs.profile || vars.SWITCHBOARD_DEPLOY_PROFILE }}
-      # The App is handed in as two secrets, or — this installation — loaded
-      # from the secrets manager when no client id was handed in. Neither means
-      # a `github://` profile has no App to read it with: refused by name below,
-      # before the mint step fails on an empty client id.
-      LOAD_APP_FROM_VAULT: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' && secrets.CONFIG_REPO_APP_CLIENT_ID == '' }}
-      HAS_APP_CREDENTIALS: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID != '' || secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+      # The App is handed in as two secrets. No client id means a `github://`
+      # profile has no App to read it with: refused by name below, before the
+      # mint step fails on an empty client id.
+      HAS_APP_CREDENTIALS: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID != '' }}
       WRANGLER_SEND_METRICS: "false"
       CI: "1"
       # A stalled npm-cache segment gives up after 1 min, not 10 (see ci.yml).
@@ -268,30 +262,20 @@ jobs:
       # The profile and config are read from the configuration repository with
       # an App token that can read exactly that repository — the same App
       # release-please.yml acts as, minted here so a dispatched run has it too.
-      - name: load the App's credentials
-        if: env.LOAD_APP_FROM_VAULT == 'true'
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
-        with:
-          export-env: true
-          version: 2.39.0
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          APP_CLIENT_ID: op://CI/coreplane-bot/client-id
-          APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
       # A configuration repository named with nothing to read it: said here, by
       # name, instead of the mint step failing on an empty client id.
       - name: the configuration repository needs the App
         if: vars.CONFIG_REPO_NAME != '' && env.HAS_APP_CREDENTIALS != 'true'
         run: |
-          echo "::error::CONFIG_REPO_NAME is set but no App can read that repository — pass CONFIG_REPO_APP_CLIENT_ID and CONFIG_REPO_APP_PRIVATE_KEY (or OP_SERVICE_ACCOUNT_TOKEN) as secrets, or unset the variable for a profile that is a path in this repository. Nothing was deployed."
+          echo "::error::CONFIG_REPO_NAME is set but no App can read that repository — pass CONFIG_REPO_APP_CLIENT_ID and CONFIG_REPO_APP_PRIVATE_KEY as secrets, or unset the variable for a profile that is a path in this repository. Nothing was deployed."
           exit 1
       - name: mint the App token that reads the configuration repository
         id: infra-token
         if: vars.CONFIG_REPO_NAME != ''
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ env.APP_CLIENT_ID || secrets.CONFIG_REPO_APP_CLIENT_ID }}
-          private-key: ${{ env.APP_PRIVATE_KEY || secrets.CONFIG_REPO_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}
           owner: ${{ vars.CONFIG_REPO_OWNER }}
           repositories: ${{ vars.CONFIG_REPO_NAME }}
           permission-contents: read

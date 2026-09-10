@@ -274,23 +274,13 @@ jobs:
       # alone, like the release deploy's. Without the variable there is no
       # production to deploy the docs to, and the job skips like it does
       # without the token.
-      - name: load the App's credentials
-        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
-        with:
-          export-env: true
-          version: 2.39.0
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          APP_CLIENT_ID: op://CI/coreplane-bot/client-id
-          APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
       - name: mint the App token that reads the configuration repository
         id: infra-token
         if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ env.APP_CLIENT_ID }}
-          private-key: ${{ env.APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}
           owner: ${{ vars.CONFIG_REPO_OWNER }}
           repositories: ${{ vars.CONFIG_REPO_NAME }}
           permission-contents: read

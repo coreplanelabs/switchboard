@@ -69,17 +69,9 @@ src/core/commands/schedule.test.ts	"• `self-improvement` — `0 14 * * 1` · b
 src/core/commands/schedule.test.ts	"• `resident-watchdog` — `*/10 * * * *` · resident · resident watchdog — not a run · next 2026-08-30 12:10 UTC",
 src/core/commands/schedule.test.ts	expect(text).toContain("last 2026-08-30 11:00 UTC → completed (run run-abcd)");
 
-# The one credential step the release, release-plan and docs-deploy workflows keep for this installation: the GitHub App's client id and private key come from its secrets manager. The profile location and the repository it names are repository variables; another operator replaces this step with their own source of the App's credentials.
-.github/workflows/ci.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
-.github/workflows/ci.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
-.github/workflows/deploy-production.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
-.github/workflows/deploy-production.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
-
 # The published package the reusable deploy runs in `package` mode — spelled out because a caller in another repository has no checkout of this one to read project.json from; check:project-facts holds it equal to `npmPackage`.
 .github/workflows/deploy-production.yml	echo "cli=npx --yes @coreplane/switchboard@$v" >> "$GITHUB_OUTPUT"
 .github/workflows/deploy-production.yml	echo "label=@coreplane/switchboard@$v" >> "$GITHUB_OUTPUT"
-.github/workflows/release-please.yml	APP_CLIENT_ID: op://CI/coreplane-bot/client-id
-.github/workflows/release-please.yml	APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
 
 # The project's own home, docs URL, contact address and steward — the facts in project.json, which check:project-facts holds equal everywhere.
 package.json	"homepage": "https://github.com/coreplanelabs/switchboard#readme",

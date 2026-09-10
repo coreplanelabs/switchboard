@@ -706,21 +706,41 @@ describe("the production deploy is one reusable workflow", () => {
       "CONFIG_REPO_APP_CLIENT_ID",
       "CONFIG_REPO_APP_PRIVATE_KEY",
       "MEMORY_TOKEN",
-      "OP_SERVICE_ACCOUNT_TOKEN",
       "RESIDENT_READ_TOKEN",
       "SANDBOX_TOKEN",
     ]);
     for (const [name, s] of Object.entries(secrets)) expect(s.required, `${name} must be optional`).toBe(false);
-    // The App that reads a `github://` profile: handed in, or (this installation) loaded from the vault only when it was not.
-    expect(job.env?.LOAD_APP_FROM_VAULT).toBe(
-      "${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' && secrets.CONFIG_REPO_APP_CLIENT_ID == '' }}",
-    );
-    const vault = job.steps.find((s) => s.uses?.startsWith("1password/"))!;
-    expect(vault.if).toBe("env.LOAD_APP_FROM_VAULT == 'true'");
+    // The App that reads a `github://` profile is handed in as the two secrets — from nowhere else.
+    expect(job.env).not.toHaveProperty("LOAD_APP_FROM_VAULT");
     const mint = job.steps.find((s) => s.uses?.startsWith("actions/create-github-app-token@"))!;
     expect(mint.if).toBe("vars.CONFIG_REPO_NAME != ''");
-    expect(mint.with?.["client-id"]).toBe("${{ env.APP_CLIENT_ID || secrets.CONFIG_REPO_APP_CLIENT_ID }}");
-    expect(mint.with?.["private-key"]).toBe("${{ env.APP_PRIVATE_KEY || secrets.CONFIG_REPO_APP_PRIVATE_KEY }}");
+    expect(mint.with?.["client-id"]).toBe("${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}");
+    expect(mint.with?.["private-key"]).toBe("${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}");
+  });
+
+  it("no workflow reaches into a vault: no 1Password action, no `op://` reference, no OP_SERVICE_ACCOUNT_TOKEN — an org secret scoped to private repositories vanished the day the repository went public", () => {
+    const dir = new URL(".github/workflows/", `file://${root}`);
+    for (const f of readdirSync(dir).filter((n) => /\.ya?ml$/.test(n))) {
+      const text = read(`.github/workflows/${f}`);
+      const code = text
+        .split("\n")
+        .filter((l) => !l.trim().startsWith("#"))
+        .join("\n");
+      expect(code, `${f} names the vault token`).not.toContain("OP_SERVICE_ACCOUNT_TOKEN");
+      expect(code, `${f} loads from 1Password`).not.toContain("1password/");
+      expect(code, `${f} carries an op:// reference`).not.toMatch(/op:\/\/[A-Za-z]/);
+      // Every App token is minted from the two repository secrets, never from an env the run filled.
+      const wf = parse(text) as Workflow;
+      for (const j of Object.values(wf.jobs ?? {})) {
+        for (const s of j.steps ?? []) {
+          if (!s.uses?.startsWith("actions/create-github-app-token@")) continue;
+          expect(s.with?.["client-id"], `${f}: an App minted from something other than the secret`).toBe(
+            "${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}",
+          );
+          expect(s.with?.["private-key"]).toBe("${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}");
+        }
+      }
+    }
   });
 
   it("the profile is the `profile` input, else the calling repository's variable", () => {
@@ -756,15 +776,13 @@ describe("the production deploy is one reusable workflow", () => {
   });
 
   it("a `github://` profile with CONFIG_REPO_NAME set and no App credentials is refused by name before the mint", () => {
-    expect(job.env?.HAS_APP_CREDENTIALS).toBe(
-      "${{ secrets.CONFIG_REPO_APP_CLIENT_ID != '' || secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}",
-    );
+    expect(job.env?.HAS_APP_CREDENTIALS).toBe("${{ secrets.CONFIG_REPO_APP_CLIENT_ID != '' }}");
     const refusal = steps.find((s) => s.name === "the configuration repository needs the App")!;
     expect(refusal.if).toBe("vars.CONFIG_REPO_NAME != '' && env.HAS_APP_CREDENTIALS != 'true'");
     expect(refusal.run).toContain("::error::");
     expect(refusal.run).toContain("CONFIG_REPO_NAME");
     expect(refusal.run).toContain("CONFIG_REPO_APP_CLIENT_ID");
-    expect(refusal.run).toContain("OP_SERVICE_ACCOUNT_TOKEN");
+    expect(refusal.run).not.toContain("OP_SERVICE_ACCOUNT_TOKEN");
     expect(refusal.run).toContain("exit 1");
     const mint = steps.find((s) => s.uses?.startsWith("actions/create-github-app-token@"))!;
     expect(steps.indexOf(refusal)).toBeLessThan(steps.indexOf(mint));
