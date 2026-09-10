@@ -3,7 +3,6 @@
   "release-type": "node",
   "include-component-in-tag": false,
   "bootstrap-sha": "347ee7b7488285dcfc89b14614b4c4ad583d585a",
-  "release-as": "1.15.0",
   "changelog-sections": [
     { "type": "feat", "section": "Features" },
     { "type": "fix", "section": "Bug fixes" },
