@@ -55,12 +55,19 @@ function toggle(): void {
     :data-heat="heat.level"
   >
     <!-- Open on a phone, the full command takes its own line under the glyph
-         row (an inline pre-wrap column would wrap character by character). -->
+         row (an inline pre-wrap column would wrap character by character).
+         The chevron leads, as on every other fold of the page, so the facts
+         end on the page's one right gutter (less this card's border). -->
     <summary
-      class="flex min-w-0 cursor-pointer list-none items-baseline gap-3 rounded-md px-3 py-2 hover:bg-accented/60 focus-visible:outline-2 focus-visible:outline-primary max-sm:flex-wrap [&::-webkit-details-marker]:hidden"
+      class="flex min-w-0 cursor-pointer list-none items-baseline gap-3 rounded-md pl-3 pr-[calc(var(--sb-gutter)-1px)] py-2 hover:bg-accented/60 focus-visible:outline-2 focus-visible:outline-primary max-sm:flex-wrap [&::-webkit-details-marker]:hidden"
       :class="call.open ? 'rounded-b-none border-b border-default' : ''"
       @click.prevent="toggle"
     >
+      <span
+        class="chev shrink-0 select-none text-xs text-dimmed transition-transform motion-reduce:transition-none"
+        :class="call.open ? 'rotate-90' : ''"
+        >❯</span
+      >
       <span
         v-if="call.status === 'running'"
         class="spin inline-block size-[0.7em] shrink-0 animate-spin self-center rounded-full border-2 border-accented border-t-info motion-reduce:animate-none"
@@ -109,11 +116,6 @@ function toggle(): void {
           >timed out</span
         >
       </span>
-      <span
-        class="chev shrink-0 text-xs text-dimmed transition-transform motion-reduce:transition-none"
-        :class="call.open ? 'rotate-90' : ''"
-        >❯</span
-      >
     </summary>
     <div class="body">
       <pre

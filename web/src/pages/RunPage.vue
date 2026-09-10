@@ -35,6 +35,7 @@ import { panelTitle } from "../modules/pr-review/types";
 import { durationTone, heatStyle } from "../lib/durationTone";
 import { formatClock, formatDateTime, formatDuration, formatLocalIso } from "../lib/format";
 import { githubCommitUrl, githubPrUrl, githubRepoUrl, githubTreeUrl, shortSha } from "../lib/githubLinks";
+import { phasePaint } from "../lib/termPaint";
 import { statusLabel } from "../lib/indexRow";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
@@ -503,7 +504,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       <section
         v-if="state.request"
         id="request"
-        class="block mb-4 rounded-lg border border-default bg-(--ui-bg-muted) px-3.5 py-3"
+        class="block mb-4 rounded-lg border border-default bg-(--ui-bg-muted) px-(--sb-gutter) py-3"
       >
         <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
           <span>Request</span>
@@ -610,7 +611,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       <!-- Earlier in this thread: the turns the model was given as context,
            collapsed by default. The chevron says "this opens" — the same fold
            grammar as the cards. -->
-      <details v-if="state.context.length > 0" id="context" class="group mb-4 px-3.5">
+      <details v-if="state.context.length > 0" id="context" class="group mb-4 px-(--sb-gutter)">
         <summary
           class="flex min-h-6 cursor-pointer list-none items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted hover:text-toned [&::-webkit-details-marker]:hidden"
         >
@@ -642,7 +643,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
            own row, at the same weight as the card's controls. -->
       <h2
         id="thisrun"
-        class="mb-2 flex items-baseline gap-2.5 px-3.5 text-xs font-semibold uppercase tracking-wider text-muted"
+        class="mb-2 flex items-baseline gap-2.5 px-(--sb-gutter) text-xs font-semibold uppercase tracking-wider text-muted"
       >
         <span>This run</span>
         <span v-if="stepCount > 0" class="count font-normal normal-case tracking-normal text-dimmed"
@@ -680,7 +681,9 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             class="turn mt-5 border-l-2 border-(--ui-border-accented)/50 pb-3 pl-3 pt-2"
           >
             <!-- A turn that produced no step: the same ONE meta row a step heads with. -->
-            <div class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 pr-3 text-xs tabular-nums text-dimmed">
+            <div
+              class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 pr-(--sb-gutter) text-xs tabular-nums text-dimmed"
+            >
               <span class="thought" :class="item.turn.quick ? '' : 'text-warn'" :title="item.turn.label"
                 >thought {{ item.turn.chip }}</span
               >
@@ -720,6 +723,12 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
               @click.prevent="model.togglePhase(item)"
             >
               <span class="glyph select-none text-dimmed">{{ item.open ? "▾" : "▸" }}</span>
+              <!-- The bar's swatch for this phase: the head IS that segment's rows. -->
+              <span
+                class="swatch inline-block size-2 shrink-0 self-center rounded-[2px]"
+                :class="phasePaint(item.phase)"
+                aria-hidden="true"
+              />
               <span class="what">{{ phaseHeadText(item) }}</span>
             </button>
             <ul v-if="item.open" class="m-0 list-none p-0 pl-4">
@@ -731,7 +740,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
                at the moment the run read it, with who sent it and when. -->
           <li
             v-else-if="item.kind === 'followup'"
-            class="followup block mt-5 rounded-lg border border-default bg-(--ui-bg-muted) px-3.5 py-3"
+            class="followup block mt-5 rounded-lg border border-default bg-(--ui-bg-muted) px-(--sb-gutter) py-3"
           >
             <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
               <span>↪ Follow-up</span>
@@ -760,7 +769,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           </li>
           <li
             v-else
-            class="note mt-4 flex items-baseline gap-3 rounded-md px-3 py-1.5"
+            class="note mt-4 flex items-baseline gap-3 rounded-md pl-3 pr-(--sb-gutter) py-1.5"
             :class="item.replay ? 'text-dimmed' : 'bg-warn/10 text-warn'"
           >
             <span>{{ (item.replay ? "… " : "⏱ ") + item.text }}</span>
@@ -781,7 +790,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <li
           v-if="waiting?.kind === 'thinking'"
           id="thinking"
-          class="pending ml-3.5 mr-3 mt-5 flex items-center gap-3 rounded-md border border-dashed border-accented px-3 py-2 text-sm first:mt-0"
+          class="pending ml-3.5 mt-5 flex items-center gap-3 rounded-md border border-dashed border-accented pl-3 pr-[calc(var(--sb-gutter)-1px)] py-2 text-sm first:mt-0"
           aria-live="off"
           title="the model is working on its next turn — nothing back yet (since the last event, runner clock)"
         >
@@ -807,7 +816,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       <section
         v-if="state.reply"
         id="reply"
-        class="block mt-6 rounded-lg border border-ok/40 bg-(--ui-bg-muted) px-3.5 py-3"
+        class="block mt-6 rounded-lg border border-ok/40 bg-(--ui-bg-muted) px-(--sb-gutter) py-3"
       >
         <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-ok">
           <span>Reply</span>
