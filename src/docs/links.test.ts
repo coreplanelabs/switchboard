@@ -68,12 +68,13 @@ describe("site links in the theme's components", () => {
   // dead-link check compiles pages and never reads a component's `href`, so a
   // renamed tutorial would leave the landing page's button pointing at a 404.
   // Every internal path a component carries — an `href="/…"` attribute or a
-  // `link: "/…"` entry in its data — must be a page in this tree, and a
-  // fragment must be one of that page's headings.
-  const components = globSync("**/*.vue", { cwd: THEME });
+  // `link: "/…"` entry in its data (seams.mjs holds the seam cards') — must be
+  // a page in this tree, and a fragment must be one of that page's headings.
+  const components = globSync("**/*.{vue,mjs}", { cwd: THEME });
 
   it("finds the components (a glob that matches nothing would pass every assertion below)", () => {
     expect(components).toContain("LandingPage.vue");
+    expect(components).toContain("seams.mjs");
   });
 
   it("every internal path names a page, and every fragment one of its headings", () => {

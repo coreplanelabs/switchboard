@@ -30,9 +30,6 @@ web/src/pages/costs.test.ts	expect(w.find('table.data td[title="2026-08-27"]').e
 web/src/pages/scheduled.test.ts	traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
 web/src/pages/scheduled.test.ts	expect(w.find(".trace").attributes("title")).toBe("trace 4bf92f3577b34da6a3ce929d0e0e4736");
 
-# `#111` is a CSS colour in a mermaid style line.
-docs/explanation/how-switchboard-improves-itself.md	style HUMAN fill:#fde68a,stroke:#b45309,color:#111
-
 # `#42` is an issue in the example repo `acme/api`, the fixture name the tests use.
 docs/how-to/configure-your-defaults.md	@switchboard agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix issue #42
 docs/reference/slack-commands.md	Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.
@@ -163,8 +160,8 @@ docs/reference/specs/public-hygiene.md	4. **A legitimate line is allowed by name
 
 # The install path names the project's own published artifacts — the npm package (`project.json`'s `npmPackage`, held equal by check:project-facts), the image, the repository URL a contributor clones — the way an operator types them.
 CONTRIBUTING.md	published CLI package in `packages/switchboard/` (what `npx @coreplane/switchboard`
-README.md	The clone is the install until the CLI is on npm. The tree carries it as the package `@coreplane/switchboard` — the same `src/cli.ts`, bundled with the files it reads — and the release workflow publishes it once the project turns publishing on; from that release, an empty directory is enough:
-README.md	`curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init` behind a Node version check. The bot itself is the published container image, `ghcr.io/coreplanelabs/switchboard`.
+README.md	The clone is the install until the CLI is on npm. The tree carries it as the package `@coreplane/switchboard` — the same CLI, bundled with the files it reads — and the release workflow publishes it once the project turns publishing on; from that release, an empty directory is enough:
+README.md	`curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init` behind a Node version check (that script insists on Node 24). The bot — the long-running process that holds the Slack connection — is the published container image, `ghcr.io/coreplanelabs/switchboard`.
 README.md	git clone https://github.com/coreplanelabs/switchboard.git
 README.md	npx @coreplane/switchboard ask "what can you do?"
 README.md	npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key <your key>

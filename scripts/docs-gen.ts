@@ -1,5 +1,7 @@
-// Write the generated regions of docs/reference/* from the command registry
-// (docs/reference/specs/docs-site.md items 6–8).
+// Write the generated regions of the docs: the reference tables from the
+// command registry (docs/reference/specs/docs-site.md items 6–8), the decisions
+// index from the records (item 17), and the two diagrams drawn in more than one
+// place from their one source each (item 21).
 //
 //   npm run docs:gen     rewrite every region; prints one line per file changed
 //   npm run docs:check   verify the committed regions match the code — what CI
@@ -14,11 +16,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CommandRegistry, type CommandDef } from "../src/core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../src/core/commands/all.js";
+import { DISPATCHER, SEAMS } from "../docs/.vitepress/theme/seams.mjs";
+import { DEPLOY_ORDER } from "../src/deploy/plan.js";
 import { renderDecisionIndex, type DecisionRecord } from "../src/docs/decisions.js";
+import { DIAGRAM_REGION_NOTE, DIAGRAM_REGIONS, type DiagramSources } from "../src/docs/diagrams.js";
 import { docCommands, GENERATED_REGIONS, type DocCommand } from "../src/docs/reference.js";
-import { declaredRegions, replaceRegion } from "../src/docs/regions.js";
+import { declaredRegions, REGION_NOTE, replaceRegion } from "../src/docs/regions.js";
 
 const DOCS_DIR = process.env.SWITCHBOARD_DOCS_DIR ?? fileURLToPath(new URL("../docs", import.meta.url));
+
+/** The third source of generated regions: what the shared diagrams are drawn from. */
+const DIAGRAM_SOURCES: DiagramSources = { seams: SEAMS, dispatcher: DISPATCHER, deployOrder: DEPLOY_ORDER };
 
 /** The decision records — the second source of generated regions: their frontmatter is the index. */
 function decisionRecords(): DecisionRecord[] {
@@ -52,13 +60,14 @@ interface FileOutcome {
   problems: string[];
 }
 
-function renderFile(file: string, regions: Readonly<Record<string, () => string>>): FileOutcome {
+/** `note` is what each region's opening marker says wrote it — the tables and the diagrams name different sources. */
+function renderFile(file: string, regions: Readonly<Record<string, () => string>>, note = REGION_NOTE): FileOutcome {
   const path = join(DOCS_DIR, file);
   const current = readFileSync(path, "utf8");
   const problems: string[] = [];
   let next = current;
   for (const [name, renderer] of Object.entries(regions)) {
-    const outcome = replaceRegion(next, name, renderer());
+    const outcome = replaceRegion(next, name, renderer(), note);
     if (!outcome.ok) problems.push(`${file}: ${outcome.problem}`);
     else next = outcome.text;
   }
@@ -76,6 +85,9 @@ function render(cmds: readonly DocCommand[], records: readonly DecisionRecord[])
   return [
     ...Object.entries(GENERATED_REGIONS).map(([file, regions]) => renderFile(file, bind(regions, cmds))),
     ...Object.entries(RECORD_REGIONS).map(([file, regions]) => renderFile(file, bind(regions, records))),
+    ...Object.entries(DIAGRAM_REGIONS).map(([file, regions]) =>
+      renderFile(file, bind(regions, DIAGRAM_SOURCES), DIAGRAM_REGION_NOTE),
+    ),
   ];
 }
 
@@ -89,7 +101,9 @@ function main(): number {
   if (check) {
     for (const o of drifted) console.error(`docs:check ${o.file} is out of date — run \`npm run docs:gen\``);
     if (problems.length + drifted.length === 0) {
-      console.log(`docs:check ok — ${outcomes.length} file(s) match the command registry and the decision records`);
+      console.log(
+        `docs:check ok — ${outcomes.length} file(s) match the command registry, the decision records and the diagram sources`,
+      );
       return 0;
     }
     return 1;

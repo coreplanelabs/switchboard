@@ -28,8 +28,8 @@ least one model provider.
 git clone https://github.com/coreplanelabs/switchboard.git
 cd switchboard
 npm ci
-npx tsx src/cli.ts init --organization <your GitHub org> --anthropic-key <your key>
-npx tsx src/cli.ts ask "what can you do?"
+npm run cli -- init --organization <your GitHub org> --anthropic-key <your key>
+npm run cli -- ask "what can you do?"
 ```
 
 `init` writes the two gitignored files the tree deliberately lacks — `.env` (mode 600, your key on its line) and `config/config.yaml` (every optional block off) — from their checked-in examples; `init --help` lists the flags for another provider, Slack and the GitHub App, and the manual path (`cp config/config.example.yaml config/config.yaml`, `cp .env.example .env`, edit) still works. The process loads `.env` from the directory you run it in (a variable your shell exports wins). That last command runs the whole pipeline with the terminal as the channel, so
@@ -104,6 +104,27 @@ alters what a surface looks like needs `npm run screenshots:gen` (once:
 `npx playwright-core install chromium`) and the regenerated PNGs committed —
 `npm run screenshots:check` and its unit-test twin fail otherwise, naming the
 file that changed.
+
+**Diagrams share one visual system.** Every diagram is a ```mermaid fence; the
+site draws it in its own palette and GitHub in its defaults, so a fence carries
+structure and words only. `flowchart LR` for a path across the system (a
+request, a release, the deploy order), `flowchart TB` for a stack (layers,
+planes, a topology, a staged loop) — never `TD`, `RL` or `BT`. Shapes say what
+a thing is: `["…"]` a component or process, `{"…"}` the dispatcher, `[["…"]]` a
+Worker, `[("…")]` where state lives (a Durable Object, a disk), `(["…"])` a
+system or person outside the tree (GitHub, Slack, a user), `{{"…"}}` a human
+gate, and a `subgraph` a seam or a plane, titled `Name — what it is`. Every
+node and edge label is quoted; a list inside one reads `a · b · c`; a line
+breaks with `<br/>` and carries no other HTML and no `#`. Edge labels name what
+crosses — `message`, `runs`, `complete`, `bash · read · write`, `reply`,
+`bearer`, `git push`, `App token` — and a dashed edge is something the system
+does not do itself. No `style`, `classDef`, `linkStyle` or `%%` line: the theme
+owns the colours (`docs/.vitepress/theme/product.css`). The four seams and the
+deploy order are drawn in more than one place, so they are generated regions
+(`npm run docs:gen`) from `docs/.vitepress/theme/seams.mjs` and
+`src/deploy/plan.ts` — edit the source, never a copy. `src/docs/diagrams.test.ts`
+holds all of this over the tree and parses every fence; the records under
+`docs/decisions/` and `docs/plans/` are immutable and exempt.
 
 **Respect the invariants.** [AGENTS.md](AGENTS.md) lists the rules the
 architecture depends on: the core never imports a platform SDK, every boundary

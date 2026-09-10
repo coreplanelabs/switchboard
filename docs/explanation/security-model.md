@@ -16,14 +16,15 @@ flowchart TB
         S2["thread B<br/>a separate container"]
     end
     subgraph resident ["Resident plane — one container per onboarded repository"]
-        RW["resident Worker<br/>its own GitHub App key · own bearers"]
+        RW[["Resident Worker<br/>its own GitHub App key · own bearers"]]
         RD["repository X<br/>root-owned mirror · one worktree and one OS user per thread"]
     end
+    GH(["GitHub"])
     BOT -->|"per tool call"| S1 & S2
-    BOT -->|"per tool call, operator bearer"| RW --> RD
-    S1 & S2 -->|"git push"| GH["GitHub"]
-    RD -->|"git push, per-attach credential file"| GH
-    BOT -->|"opens and edits the PR, App token"| GH
+    BOT -->|"operator bearer · per tool call"| RW --> RD
+    S1 & S2 -->|"git push"| GH
+    RD -->|"git push · per-attach credential file"| GH
+    BOT -->|"App token · opens and edits the PR"| GH
 ```
 
 **The control plane** is the bot: the one process that is always on, that holds the Slack tokens and the model keys, and that decides what runs. It is deliberately the least valuable thing to steal. With execution sandboxed or resident it holds no credential that can push code; its bearers reach the other Workers only on the routes it needs. Compromising the bot yields a chatty assistant and a view of the conversations it can see.

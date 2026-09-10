@@ -6,29 +6,34 @@ OpenSwitchboard is an agent gateway. A message arrives over a channel, a dispatc
 
 Every boundary is an interface with more than one implementation, and the core in the middle imports none of the platforms behind them. A new channel, provider, executor or agent is a new implementation behind its seam, never a special case in the core.
 
+<!-- generated:four-seams · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
+
 ```mermaid
 flowchart LR
-    subgraph channel ["Channel — transport only"]
-        SL["Slack"]
-        CLI["CLI"]
-        HTTP["HTTP · MCP"]
+    subgraph channel ["Channel — how a request arrives"]
+        C1["Slack"]
+        C2["CLI"]
+        C3["HTTP · MCP"]
     end
-    D{"Dispatcher<br/>directives · config layers · authorization<br/>history · the agent loop"}
-    subgraph agent ["Agent — data, not code"]
-        AG["general · coding · review<br/>ship · research"]
+    D{"Dispatcher<br/>directives · config layers · authorization"}
+    subgraph agent ["Agent — what runs"]
+        AG["general · coding · review · ship · research"]
     end
     subgraph provider ["Provider — the model"]
-        P["Anthropic<br/>any OpenAI-compatible endpoint"]
+        P["Anthropic · OpenAI-compatible"]
     end
     subgraph executor ["Executor — where tools run"]
-        E["local host<br/>per-thread sandbox<br/>resident repository"]
+        E["local · sandbox · resident"]
     end
-    SL & CLI & HTTP -->|"one message shape"| D
-    D -->|"picks"| AG
-    D <-->|"complete"| P
-    D <-->|"bash · read · write"| E
-    D -->|"reply"| SL & CLI & HTTP
+    C1 & C2 & C3 -->|"message"| D
+    D -->|"runs"| AG
+    AG <-->|"complete"| P
+    AG <-->|"bash · read · write"| E
 ```
+
+<!-- /generated:four-seams -->
+
+The reply travels the same path back: the agent's answer and its status updates go through the dispatcher to whichever channel asked.
 
 - **A channel** turns a platform event into one message shape and a reply back into platform calls: chunking a Slack message, editing a status card, printing to a terminal, answering an HTTP request. It has no opinion about agents, models or execution.
 - **The dispatcher** is the only orchestrator. It reads the directives on a message, resolves the layered config, asks the policy table whether this actor may run this agent, assembles the thread's history and runs the agent loop. No platform SDK is imported anywhere near it.
@@ -75,23 +80,23 @@ A run has two lives: live in a registry while it happens, streamed to a page any
 Production is one long-lived process plus Workers that each solve a problem the process structurally cannot: outliving its own restarts, running untrusted commands somewhere that is not the bot, keeping a repository warm, serving docs without a container rollover.
 
 ```mermaid
-flowchart TD
+flowchart TB
+    SLACK(["Slack"])
+    GH(["GitHub"])
     BOT["Bot — one always-on container<br/>Slack + model keys · dispatcher · dashboards"]
     STATE[("State Worker<br/>config document · overrides · run history and ledger<br/>memory · schedule firings")]
-    RES["Resident Worker<br/>own GitHub App key"]
-    RDO[("one container per onboarded repository<br/>mirror · warm checkout · per-thread worktrees")]
-    SBX["Sandbox Worker<br/>proxy, no state"]
-    SDO[("one container per thread")]
-    DOCS["Docs Worker<br/>assets only"]
-    GH["GitHub"]
-    SLACK["Slack"]
+    RES[["Resident Worker<br/>own GitHub App key"]]
+    RDO[("one Durable Object per onboarded repository<br/>mirror · warm checkout · per-thread worktrees")]
+    SBX[["Sandbox Worker<br/>proxy, no state"]]
+    SDO["one container per thread"]
+    DOCS[["Docs Worker<br/>assets only"]]
     SLACK <-->|"outbound websocket"| BOT
     BOT -->|"bearer"| STATE
-    BOT -->|"bearer, per tool call"| RES --> RDO
-    BOT -->|"bearer, per tool call"| SBX --> SDO
-    BOT -->|"App token: opens and edits the PR"| GH
-    RDO -->|"push, per-attach credential"| GH
-    SDO -->|"push, scoped token"| GH
+    BOT -->|"bearer · per tool call"| RES --> RDO
+    BOT -->|"bearer · per tool call"| SBX --> SDO
+    BOT -->|"App token · opens and edits the PR"| GH
+    RDO -->|"git push · per-attach credential"| GH
+    SDO -->|"git push · scoped token"| GH
     BOT -.->|"/docs redirects"| DOCS
 ```
 
