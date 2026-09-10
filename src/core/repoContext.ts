@@ -72,6 +72,16 @@ import type { PrSize } from "./digestCoverage.js";
 // prod; AGENTS.md invariant 5). Unauthenticated works for public repos; any
 // fetch failure degrades gracefully to repo-only.
 
+/** `RepoContext.prDescription`: the PR's own words, as facts. */
+export interface PrFacts {
+  title: string;
+  body: string;
+  truncated: boolean;
+}
+
+/** The most body `RepoContext.prDescription` carries — GitHub's PR body limit. */
+export const PR_BODY_CAP = 65_536;
+
 export interface RepoContext {
   repo?: string;
   ref?: string;
@@ -114,6 +124,13 @@ export interface RepoContext {
    *  when the fields were missing, or when the PR object lagged the head ref
    *  after a force-push: its size then describes the OLD head. */
   prSize?: PrSize;
+  /** The PR's title and body as GitHub reported them at resolution time (from
+   *  the same REST call as the head), for the review run's `pr_description`
+   *  artifact (docs/reference/specs/reading-diff.md item 7). `body` is capped at
+   *  `PR_BODY_CAP` chars (`truncated` says so; GitHub's own limit is the same
+   *  number, so a real body never trips it). Unset when the fetch failed or
+   *  answered without a title. Facts only — never a reason to refuse. */
+  prDescription?: PrFacts;
   /** Set when the thread's bound PR was NOT usable for the post-step: it is
    *  closed/merged, or the fetch failed (network, non-2xx, malformed SHA).
    *  Lets the dispatcher say so in the thread instead of a silent Slack-only
@@ -513,6 +530,7 @@ export async function resolveRepoContext(
   let headSha: string | undefined;
   let baseRef: string | undefined;
   let prSize: PrSize | undefined;
+  let facts: PrFacts | undefined;
   if (s.pr && repo === s.pr.repo) {
     const head = await prHead(s.pr).catch(() => undefined);
     if (head?.ref) {
@@ -522,6 +540,7 @@ export async function resolveRepoContext(
     headSha = head?.sha;
     baseRef = head?.base;
     prSize = head?.size;
+    facts = head?.facts;
   }
 
   const out: RepoContext = {};
@@ -546,6 +565,7 @@ export async function resolveRepoContext(
     if (headSha) out.headSha = headSha;
     if (baseRef) out.baseRef = baseRef;
     if (prSize) out.prSize = prSize;
+    if (facts) out.prDescription = facts;
   } else if (repo && !s.pr) {
     const inherited = thread.pr;
     if (inherited && inherited.repo === repo) {
@@ -555,6 +575,7 @@ export async function resolveRepoContext(
         out.headSha = head.sha;
         if (head.base) out.baseRef = head.base;
         if (head.size) out.prSize = head.size;
+        if (head.facts) out.prDescription = head.facts;
       } else {
         out.prUnpostable = { number: inherited.number, reason: head.reason };
       }
@@ -570,11 +591,16 @@ export async function resolveRepoContext(
 async function openPrHeadSha(pr: {
   repo: string;
   number: number;
-}): Promise<{ sha: string; base?: string; size?: PrSize } | { reason: "closed" | "unreachable" }> {
+}): Promise<{ sha: string; base?: string; size?: PrSize; facts?: PrFacts } | { reason: "closed" | "unreachable" }> {
   const head = await prHead(pr).catch(() => undefined);
   if (head?.state === "closed") return { reason: "closed" };
   if (head?.state === "open" && head.sha) {
-    return { sha: head.sha, ...(head.base ? { base: head.base } : {}), ...(head.size ? { size: head.size } : {}) };
+    return {
+      sha: head.sha,
+      ...(head.base ? { base: head.base } : {}),
+      ...(head.size ? { size: head.size } : {}),
+      ...(head.facts ? { facts: head.facts } : {}),
+    };
   }
   return { reason: "unreachable" };
 }
@@ -639,14 +665,17 @@ export async function prCommitsSince(input: {
 /** GitHub's compare endpoint lists at most this many files. */
 const COMPARE_FILES_CAP = 300;
 
-/** GET /repos/{owner}/{repo}/pulls/{n} → { head.ref, head.sha, state }. Cross-fork
- *  head REFS are NOT returned (they don't resolve in the resident's mirror);
- *  the SHA is, since it only pins the review post. Never throws to the
- *  caller's happy path — callers .catch() to degrade. */
+/** GET /repos/{owner}/{repo}/pulls/{n} → { head.ref, head.sha, state } plus the
+ *  PR's title and body as facts. Cross-fork head REFS are NOT returned (they
+ *  don't resolve in the resident's mirror); the SHA is, since it only pins the
+ *  review post. Never throws to the caller's happy path — callers .catch() to
+ *  degrade. */
 async function prHead(pr: {
   repo: string;
   number: number;
-}): Promise<{ ref?: string; sha?: string; base?: string; size?: PrSize; state?: "open" | "closed" } | undefined> {
+}): Promise<
+  { ref?: string; sha?: string; base?: string; size?: PrSize; state?: "open" | "closed"; facts?: PrFacts } | undefined
+> {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
     "user-agent": "switchboard",
@@ -660,12 +689,18 @@ async function prHead(pr: {
   if (!res.ok) return undefined;
   const data = (await res.json().catch(() => ({}))) as {
     state?: string;
+    title?: unknown;
+    body?: unknown;
     head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
     base?: { ref?: string };
     changed_files?: unknown;
     additions?: unknown;
     deletions?: unknown;
   };
+  // The PR's own words, as facts: a title is required for them to count (an
+  // answer without one described nothing); a null body is an empty body.
+  const facts =
+    typeof data.title === "string" ? prFacts(data.title, typeof data.body === "string" ? data.body : "") : undefined;
   // Base branch: validated like every ref candidate (never partial garbage).
   const base = typeof data.base?.ref === "string" ? validRef(data.base.ref) : undefined;
   const prSha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
@@ -689,9 +724,10 @@ async function prHead(pr: {
   // The PR's size, only while the PR object describes the head being reviewed:
   // after a force-push the object (and its counts) lags the ref the sha was
   // taken from, and a stale size would refuse a digest that covered the new
-  // head in full.
+  // head in full. The title and body are facts about the PR, not the head —
+  // they ride along whenever the answer carried a title.
   const size = sha === prSha ? prSizeOf(data) : undefined;
-  return { ref, sha, base, ...(size ? { size } : {}), state };
+  return { ref, sha, base, ...(size ? { size } : {}), state, ...(facts ? { facts } : {}) };
 }
 
 /** `changed_files` / `additions` / `deletions` as a `PrSize`, when all three
@@ -704,4 +740,15 @@ export function prSizeOf(data: {
   const n = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x >= 0;
   if (!n(data.changed_files) || !n(data.additions) || !n(data.deletions)) return undefined;
   return { changedFiles: data.changed_files, additions: data.additions, deletions: data.deletions };
+}
+
+/** Cap the body at `PR_BODY_CAP` chars without splitting a surrogate pair (a
+ *  lone high surrogate renders as mojibake). Redaction is the artifact
+ *  builder's job (reading-diff.md item 7) — these are the raw facts. */
+function prFacts(title: string, body: string): PrFacts {
+  if (body.length <= PR_BODY_CAP) return { title, body, truncated: false };
+  let end = PR_BODY_CAP;
+  const last = body.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end--;
+  return { title, body: body.slice(0, end), truncated: true };
 }
