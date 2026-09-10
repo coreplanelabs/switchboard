@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.200.0](https://github.com/coreplanelabs/switchboard/compare/v1.19.0...v1.200.0) (2026-09-10)
+
+
+### Features
+
+* **resident:** the mirror mutex is a durable lease judged against the incarnation, and every engine step is an idempotent method a cycle can call twice ([#867](https://github.com/coreplanelabs/switchboard/issues/867)) ([d9bd940](https://github.com/coreplanelabs/switchboard/commit/d9bd940c53006b77979575a2e659c761e4a24d14))
+* **resident:** the refresh cycle runs as a cron-created Workflow instance behind a per-resident lifecycle flag, with the Workflows binding, its two cost meters and the instance's root span ([#870](https://github.com/coreplanelabs/switchboard/issues/870)) ([73482fb](https://github.com/coreplanelabs/switchboard/commit/73482fb64e26742f69358148d911b982a86ec4c9))
+
+
+### Bug fixes
+
+* **release:** the npm publish carries no provenance — npm accepts it from GitHub-hosted runners alone, and CI runs on Namespace ([#903](https://github.com/coreplanelabs/switchboard/issues/903)) ([fe8425a](https://github.com/coreplanelabs/switchboard/commit/fe8425a092861dfbf81e9f4db0dba7a440f0d276))
+* **release:** the npm publish turns provenance off by name — trusted publishing generates it by default, and npm takes it from GitHub-hosted runners alone ([#904](https://github.com/coreplanelabs/switchboard/issues/904)) ([9071b12](https://github.com/coreplanelabs/switchboard/commit/9071b12f6e313690395507bf3c7c37828e768c47))
+* **release:** the release token carries the workflows permission — the tag a release creates needs it since the history collapse ([#901](https://github.com/coreplanelabs/switchboard/issues/901)) ([9d65382](https://github.com/coreplanelabs/switchboard/commit/9d65382605bb55d704177384cc4cc609a1b93411))
+
+
+### Documentation
+
+* **core:** record 0029 is accepted — the retry policy counts six attempts and instance ids use the platform's alphabet, corrected before the flip ([#865](https://github.com/coreplanelabs/switchboard/issues/865)) ([5834f0c](https://github.com/coreplanelabs/switchboard/commit/5834f0c60ac5653f8663a8296440c285696fae92))
+* **providers:** OpenRouter as a documented example — the commented config block, the how-to paragraph and a test that the block loads and builds ([#866](https://github.com/coreplanelabs/switchboard/issues/866)) ([6e04cbb](https://github.com/coreplanelabs/switchboard/commit/6e04cbbff7cd070674e67d28eb85a74e8dd784bb))
+
 ## [1.19.2](https://github.com/coreplanelabs/switchboard/compare/v1.19.1...v1.19.2) (2026-09-10)
 
 
