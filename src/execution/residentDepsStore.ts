@@ -71,6 +71,22 @@ export function depsStagingPath(key: string, attempt: string, storeDir: string =
   return `${storeDir}/.staging-${key}-${attempt}`;
 }
 
+/** Both private dirs of one attempt: what a taker sweeps when it finds the
+ *  attempt's holder dead (its lease names the scratch tree; the staging dir
+ *  is the same attempt's, so the finished node_modules a dead commit script
+ *  was moving does not outlive it either). */
+export function depsAttemptPaths(key: string, attempt: string, storeDir: string = DEPS_STORE_DIR): string[] {
+  return [depsScratchPath(attempt, storeDir), depsStagingPath(key, attempt, storeDir)];
+}
+
+/** The attempt a scratch path was minted for, or undefined for any other path. */
+export function depsAttemptOfScratchPath(path: string, storeDir: string = DEPS_STORE_DIR): string | undefined {
+  const prefix = `${storeDir}/.scratch-`;
+  if (!path.startsWith(prefix)) return undefined;
+  const attempt = path.slice(prefix.length);
+  return attempt && !attempt.includes("/") ? attempt : undefined;
+}
+
 export type DepsMaterializationPlan =
   { action: "hit" } | { action: "join" } | { action: "restore" } | { action: "install" };
 

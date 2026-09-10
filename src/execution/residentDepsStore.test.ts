@@ -10,8 +10,12 @@ import {
   DEPS_STORE_DIR,
   depsBackupStorageKey,
   depsBackupsToDrop,
+  depsAttemptOfScratchPath,
+  depsAttemptPaths,
   depsEntryPath,
   depsCompletePath,
+  depsScratchPath,
+  depsStagingPath,
   depsInstallSemaphoreSize,
   depsScratchCloneArgv,
   depsStoreCommitScript,
@@ -83,6 +87,16 @@ describe("depsInstallSemaphoreSize (parallel installs up to the core count, neve
 });
 
 describe("the install scratch tree and the store commit", () => {
+  it("a dead attempt's paths are its scratch tree AND its staging dir, recovered from the scratch path its lease names; any other path names no attempt", () => {
+    const scratch = depsScratchPath("a1b2c3d4");
+    expect(depsAttemptOfScratchPath(scratch)).toBe("a1b2c3d4");
+    expect(depsAttemptPaths(KEY_A, "a1b2c3d4")).toEqual([scratch, depsStagingPath(KEY_A, "a1b2c3d4")]);
+    expect(depsAttemptOfScratchPath(depsStagingPath(KEY_A, "a1b2c3d4"))).toBeUndefined();
+    expect(depsAttemptOfScratchPath(depsEntryPath(KEY_A))).toBeUndefined();
+    expect(depsAttemptOfScratchPath(`${scratch}/node_modules`)).toBeUndefined();
+    expect(depsAttemptOfScratchPath("/workspace/deps/.scratch-")).toBeUndefined();
+  });
+
   it("scratch clone: shares the mirror's objects (no second copy of history) and checks out the key's sha detached", () => {
     const argv = depsScratchCloneArgv({
       mirrorDir: "/workspace/mirror",
