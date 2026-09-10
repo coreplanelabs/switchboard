@@ -3,6 +3,7 @@ import { headRefTipSha, preferRefTip } from "../execution/githubPulls.js";
 import { validRef } from "./residentAdmin.js";
 import type { PrCommitList } from "./headMoved.js";
 import { normalizeHead } from "./reviewedHead.js";
+import type { PrSize } from "./digestCoverage.js";
 
 // Repo/ref resolution for resident environments (docs/reference/specs/resident-repos.md
 // item 29): the
@@ -107,6 +108,12 @@ export interface RepoContext {
    *  Tells the review agent its diff base (docs/reference/specs/agent-review.md item 9);
    *  unset when unknown — the agent then uses origin/HEAD. */
   baseRef?: string;
+  /** The PR's size as GitHub reports it (`changed_files`, `additions`,
+   *  `deletions`, same REST call) — what the digest-coverage guard holds the
+   *  review's diff digest against (docs/reference/specs/agent-review.md item 15). Unset
+   *  when the fields were missing, or when the PR object lagged the head ref
+   *  after a force-push: its size then describes the OLD head. */
+  prSize?: PrSize;
   /** Set when the thread's bound PR was NOT usable for the post-step: it is
    *  closed/merged, or the fetch failed (network, non-2xx, malformed SHA).
    *  Lets the dispatcher say so in the thread instead of a silent Slack-only
@@ -505,6 +512,7 @@ export async function resolveRepoContext(
   // fallback for when the fetch fails (repo-only otherwise).
   let headSha: string | undefined;
   let baseRef: string | undefined;
+  let prSize: PrSize | undefined;
   if (s.pr && repo === s.pr.repo) {
     const head = await prHead(s.pr).catch(() => undefined);
     if (head?.ref) {
@@ -513,6 +521,7 @@ export async function resolveRepoContext(
     }
     headSha = head?.sha;
     baseRef = head?.base;
+    prSize = head?.size;
   }
 
   const out: RepoContext = {};
@@ -536,6 +545,7 @@ export async function resolveRepoContext(
     out.prFromMessage = true;
     if (headSha) out.headSha = headSha;
     if (baseRef) out.baseRef = baseRef;
+    if (prSize) out.prSize = prSize;
   } else if (repo && !s.pr) {
     const inherited = thread.pr;
     if (inherited && inherited.repo === repo) {
@@ -544,6 +554,7 @@ export async function resolveRepoContext(
         out.pr = inherited.number;
         out.headSha = head.sha;
         if (head.base) out.baseRef = head.base;
+        if (head.size) out.prSize = head.size;
       } else {
         out.prUnpostable = { number: inherited.number, reason: head.reason };
       }
@@ -559,10 +570,12 @@ export async function resolveRepoContext(
 async function openPrHeadSha(pr: {
   repo: string;
   number: number;
-}): Promise<{ sha: string; base?: string } | { reason: "closed" | "unreachable" }> {
+}): Promise<{ sha: string; base?: string; size?: PrSize } | { reason: "closed" | "unreachable" }> {
   const head = await prHead(pr).catch(() => undefined);
   if (head?.state === "closed") return { reason: "closed" };
-  if (head?.state === "open" && head.sha) return head.base ? { sha: head.sha, base: head.base } : { sha: head.sha };
+  if (head?.state === "open" && head.sha) {
+    return { sha: head.sha, ...(head.base ? { base: head.base } : {}), ...(head.size ? { size: head.size } : {}) };
+  }
   return { reason: "unreachable" };
 }
 
@@ -633,7 +646,7 @@ const COMPARE_FILES_CAP = 300;
 async function prHead(pr: {
   repo: string;
   number: number;
-}): Promise<{ ref?: string; sha?: string; base?: string; state?: "open" | "closed" } | undefined> {
+}): Promise<{ ref?: string; sha?: string; base?: string; size?: PrSize; state?: "open" | "closed" } | undefined> {
   const headers: Record<string, string> = {
     accept: "application/vnd.github+json",
     "user-agent": "switchboard",
@@ -649,6 +662,9 @@ async function prHead(pr: {
     state?: string;
     head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
     base?: { ref?: string };
+    changed_files?: unknown;
+    additions?: unknown;
+    deletions?: unknown;
   };
   // Base branch: validated like every ref candidate (never partial garbage).
   const base = typeof data.base?.ref === "string" ? validRef(data.base.ref) : undefined;
@@ -670,5 +686,22 @@ async function prHead(pr: {
     ref !== undefined
       ? preferRefTip(`${pr.repo}#${pr.number}`, prSha, await headRefTipSha(pr.repo, ref, headers), ref)
       : prSha;
-  return { ref, sha, base, state };
+  // The PR's size, only while the PR object describes the head being reviewed:
+  // after a force-push the object (and its counts) lags the ref the sha was
+  // taken from, and a stale size would refuse a digest that covered the new
+  // head in full.
+  const size = sha === prSha ? prSizeOf(data) : undefined;
+  return { ref, sha, base, ...(size ? { size } : {}), state };
+}
+
+/** `changed_files` / `additions` / `deletions` as a `PrSize`, when all three
+ *  are non-negative integers; undefined otherwise (never a partial size). */
+export function prSizeOf(data: {
+  changed_files?: unknown;
+  additions?: unknown;
+  deletions?: unknown;
+}): PrSize | undefined {
+  const n = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x >= 0;
+  if (!n(data.changed_files) || !n(data.additions) || !n(data.deletions)) return undefined;
+  return { changedFiles: data.changed_files, additions: data.additions, deletions: data.deletions };
 }

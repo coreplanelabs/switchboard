@@ -395,6 +395,7 @@ describe("afterReply — the reflection pass and the review post-step", () => {
       reviewHead: "a".repeat(40),
       observedHead: "a".repeat(40),
       verdict: undefined,
+      digest: undefined,
       carried: undefined,
       root: trace.root,
     };

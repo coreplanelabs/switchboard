@@ -14,6 +14,8 @@
 // Pure: same input → same text. Appended to the effective system prompt for a
 // `review` run whose RepoContext resolved a PR, on both execution paths.
 
+import type { PrSize } from "./digestCoverage.js";
+
 export interface ReviewTarget {
   repo: string;
   pr: number;
@@ -23,6 +25,9 @@ export interface ReviewTarget {
   headSha?: string;
   /** PR base branch, when known. */
   baseRef?: string;
+  /** The PR's size as GitHub reports it, when known: the agent's own reading
+   *  of the diff must cover this much (docs/reference/specs/agent-review.md item 15). */
+  size?: PrSize;
   /** true on the resident path (ready worktree), false on the sandbox path (clone). */
   resident: boolean;
   /** Resident path: absolute path of the thread's worktree (the cwd of every
@@ -46,8 +51,19 @@ export function reviewTargetBlock(t: ReviewTarget): string {
     `- Head branch: ${t.ref ?? "unknown (cross-fork PR or unresolved)"}`,
     `- Head commit: ${t.headSha ?? "unknown — Switchboard could not fetch it; a review of an unverifiable head is not posted"}`,
     `- Base branch: ${t.baseRef ?? "the repository's default branch"}`,
-    "",
   ];
+  // The change's true extent, from GitHub — so a diff or digest the agent
+  // reads that shows less is recognizably cut short (tool output is capped),
+  // never mistaken for a smaller change. A review whose digest covered less
+  // is refused by the digest-coverage guard.
+  if (t.size) {
+    lines.push(
+      `- Size (GitHub): ${t.size.changedFiles} ${t.size.changedFiles === 1 ? "file" : "files"}, +${t.size.additions}/−${t.size.deletions} — ` +
+        "the diff and digest you read must cover all of it; when they show less, the output was cut short: read the rest file by file (`git diff <base>...HEAD -- <path>`). " +
+        "Switchboard does not post a verdict whose digest covered less than this.",
+    );
+  }
+  lines.push("");
   if (t.resident) {
     // The worktree can BE at the PR head and the agent still stray: a first
     // command of `cd /workspace`, then `find / -name .git`, compares the

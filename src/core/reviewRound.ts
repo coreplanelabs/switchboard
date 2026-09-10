@@ -38,6 +38,8 @@ import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPo
 import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
 import { checkReviewedHead, normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
+import { checkDigestCoverage, type PrSize } from "./digestCoverage.js";
+import type { DigestReport } from "./diffDigest.js";
 import type { RepoContext } from "./repoContext.js";
 import type { RunEvent } from "./runEvents.js";
 import type { RunControl } from "./runRegistry/runControl.js";
@@ -243,7 +245,8 @@ export function makeSystemComposer(input: {
   /** The attached worktree path, when the attach answered one. */
   workspace: string | undefined;
   /** Set for a PR review round: the REVIEW TARGET block's coordinates. */
-  prTarget: { repo: string; pr: number; ref: string | undefined; baseRef: string | undefined } | undefined;
+  prTarget:
+    { repo: string; pr: number; ref: string | undefined; baseRef: string | undefined; size?: PrSize } | undefined;
   /** Pre-built advisory/context blocks; absent blocks leave the prompt untouched.
    *  `about` is the self-description (routing-and-config behavior 11), right
    *  after the config block — the same category of fact-about-yourself. */
@@ -272,6 +275,7 @@ export function makeSystemComposer(input: {
           ref: prTarget.ref,
           headSha: head.sha,
           baseRef: prTarget.baseRef,
+          ...(prTarget.size ? { size: prTarget.size } : {}),
           resident,
           ...(workspace ? { workspace } : {}),
           ...(head.verified ? { verifiedAtAttach: true } : {}),
@@ -537,10 +541,13 @@ export type ReviewPostOutcome = { posted: true } | { posted: false; reason: stri
 export async function runReviewPostStep(input: {
   agent: AgentDef;
   requestText: string;
-  repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable">;
+  repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize">;
   /** The pinned head and the workspace HEAD observed after the turn. */
   heads: { reviewHead: string | undefined; observedHead: string | undefined };
   verdict: ReviewVerdict | undefined;
+  /** The last diff digest the round's agent computed (`diff_digest` →
+   *  `onDigest`), or undefined when it never called the tool. */
+  digest: DigestReport | undefined;
   answer: string;
   carried: { reviewed: string; current: string; commits: number } | undefined;
   hardStopped: boolean;
@@ -605,6 +612,25 @@ export async function runReviewPostStep(input: {
         .reply(`ℹ️ Review not posted to ${where}: ${head.reason} — this verdict is Slack-only.`)
         .catch(() => {});
       skipReason = head.reason;
+      postTarget = null;
+    }
+  }
+  if (postTarget) {
+    // Digest-coverage guard (item 15): the head guard proved WHICH commit was
+    // reviewed; this one asks how much of its change the agent's digest
+    // covered. A digest that covered less than GitHub says the PR carries —
+    // or one that could not state its totals — means the review may not have
+    // read the whole change, and its verdict is not posted. Nothing to compare
+    // (no digest, no PR size) passes: the guard catches a digest that lied,
+    // it does not require one.
+    const where = `${postTarget.repo}#${postTarget.number}`;
+    const coverage = checkDigestCoverage({ digest: input.digest, pr: repoCtx.prSize });
+    if (!coverage.ok) {
+      console.log(`[review-post] ${logKey} skipped: ${coverage.reason} (${where})`);
+      await input
+        .reply(`ℹ️ Review not posted to ${where}: ${coverage.reason} — this verdict is Slack-only.`)
+        .catch(() => {});
+      skipReason = coverage.reason;
       postTarget = null;
     }
   }

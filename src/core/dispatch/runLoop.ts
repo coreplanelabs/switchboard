@@ -16,6 +16,7 @@ import type { McpToolsForRun } from "../../mcp/source.js";
 import { currentPrHeadSha, prCommitsSince, type RepoContext } from "../repoContext.js";
 import { PrDescriptionSchema, type PrDescription } from "../prDescription.js";
 import { parseVerdictInput, type ReviewVerdict } from "../reviewVerdict.js";
+import { parseDigestReport, type DigestReport } from "../diffDigest.js";
 import { settleReviewedHead, type makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "../codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
@@ -47,6 +48,8 @@ import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from
 export interface RunOutcome {
   answer: string;
   verdict: ReviewVerdict | undefined;
+  /** The review's last diff digest, for the post-step's coverage guard. */
+  digest: DigestReport | undefined;
   reviewHead: string | undefined;
   observedHead: string | undefined;
   carried: { reviewed: string; current: string; commits: number } | undefined;
@@ -286,6 +289,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     verdict = v;
     ledgerRun?.setState({ verdict: v });
   };
+  // The review's diff digest, set only through the diff_digest tool (the last
+  // call wins); the post-step holds its totals against the PR's size and
+  // refuses a verdict whose digest covered less. Restored like the verdict, so
+  // a resumed run keeps what its earlier generation digested.
+  let digest: DigestReport | undefined = parseDigestReport(restored.digest);
+  const onDigest = (d: DigestReport) => {
+    digest = d;
+    ledgerRun?.setState({ digest: d });
+  };
   // Coding PR description, set only through the structured
   // submit_pr_description tool (the last valid call wins — a resubmit after
   // a fix-up push supersedes the earlier one); the post-step below renders
@@ -356,6 +368,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     github: githubCapabilityFor(deps, msg.userId),
     agentName: agent.name,
     onVerdict,
+    onDigest,
     onPrDescription,
   };
   try {
@@ -680,6 +693,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   return {
     answer,
     verdict,
+    digest,
     reviewHead,
     observedHead,
     carried,

@@ -708,7 +708,13 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     workspace: binding?.workspace,
     prTarget:
       isPrReview && repoCtx.repo && repoCtx.pr !== undefined
-        ? { repo: repoCtx.repo, pr: repoCtx.pr, ref: repoCtx.ref, baseRef: repoCtx.baseRef }
+        ? {
+            repo: repoCtx.repo,
+            pr: repoCtx.pr,
+            ref: repoCtx.ref,
+            baseRef: repoCtx.baseRef,
+            ...(repoCtx.prSize ? { size: repoCtx.prSize } : {}),
+          }
         : undefined,
     blocks: {
       memory: memoryBlock,

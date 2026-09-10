@@ -19,6 +19,7 @@ import { postReviewComment, type ReviewCommentTarget } from "../../execution/git
 import { currentPrHeadSha, type RepoContext } from "../repoContext.js";
 import { runReviewPostStep } from "../reviewRound.js";
 import type { ReviewVerdict } from "../reviewVerdict.js";
+import type { DigestReport } from "../diffDigest.js";
 import { scheduleReflection } from "../memory/index.js";
 import { resolveChatActor } from "../authz/actor.js";
 import type { ChannelVisibility } from "../authz/types.js";
@@ -492,6 +493,9 @@ export interface AfterReplyContext {
   reviewHead: string | undefined;
   observedHead: string | undefined;
   verdict: ReviewVerdict | undefined;
+  /** The review's last diff digest (`diff_digest` → `onDigest`), for the
+   *  digest-coverage guard; undefined when the tool was never called. */
+  digest: DigestReport | undefined;
   carried: { reviewed: string; current: string; commits: number } | undefined;
   root: Span;
 }
@@ -520,6 +524,7 @@ export async function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): Promi
     reviewHead,
     observedHead,
     verdict,
+    digest,
     carried,
     root,
   } = ctx;
@@ -573,6 +578,7 @@ export async function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): Promi
       repoCtx,
       heads: { reviewHead, observedHead },
       verdict,
+      digest,
       answer,
       carried,
       hardStopped: stopped === "hard",

@@ -606,6 +606,63 @@ describe("PR base branch for the review target", () => {
   });
 });
 
+// Feature: docs/reference/specs/agent-review.md item 15 — the PR's size rides along
+// from the same GET so the post-step can hold the review's digest against it.
+describe("PR size for the digest-coverage guard", () => {
+  const SHA = "c".repeat(40);
+  const size = { changed_files: 41, additions: 2459, deletions: 579 };
+
+  it("an explicit PR carries prSize from changed_files/additions/deletions; an inherited PR too", async () => {
+    stubFetch({ body: { state: "open", head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } }, ...size } });
+    expect((await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), [])).prSize).toEqual({
+      changedFiles: 41,
+      additions: 2459,
+      deletions: 579,
+    });
+    stubFetch({ body: { state: "open", head: { sha: SHA, repo: { full_name: "acme/api" } }, ...size } });
+    const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/3" }];
+    expect((await resolveRepoContext(msg("re-review"), history)).prSize).toEqual({
+      changedFiles: 41,
+      additions: 2459,
+      deletions: 579,
+    });
+  });
+
+  it("a missing or non-integer field leaves prSize unset — never a partial size", async () => {
+    stubFetch({
+      body: {
+        state: "open",
+        head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } },
+        changed_files: 41,
+        additions: 2459,
+      },
+    });
+    expect((await resolveRepoContext(msg("https://github.com/acme/api/pull/3"), [])).prSize).toBeUndefined();
+    stubFetch({
+      body: {
+        state: "open",
+        head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } },
+        ...size,
+        deletions: "579",
+      },
+    });
+    expect((await resolveRepoContext(msg("https://github.com/acme/api/pull/3"), [])).prSize).toBeUndefined();
+  });
+
+  it("a PR object lagging the head ref (force-push) describes the OLD head: its size is dropped with it", async () => {
+    const TIP = "d".repeat(40);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    stubFetch(
+      { body: { head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } }, ...size } },
+      { body: { ref: "refs/heads/p1", object: { sha: TIP, type: "commit" } } },
+    );
+    const ctx = await resolveRepoContext(msg("https://github.com/acme/api/pull/3"), []);
+    expect(ctx.headSha).toBe(TIP);
+    expect(ctx.prSize).toBeUndefined();
+    log.mockRestore();
+  });
+});
+
 // Feature: docs/reference/specs/agent-review.md — the PR head SHA rides along with the PR
 // number so the posted review is pinned via commit_id.
 describe("PR head SHA for review pinning", () => {

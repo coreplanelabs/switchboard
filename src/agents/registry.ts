@@ -144,6 +144,15 @@ const REVIEW_VERDICT_INSTRUCTION = `VERDICT: before your final message, call the
 // once so the sandbox and resident prompts cannot drift apart on what counts.
 const REVIEW_SPEC_CHECK = `3. SPEC CONTRADICTION CHECK, when the repository has \`docs/reference/specs/\`: list the specs the change touches — \`npm run --silent specs:coverage -- --changed origin/<base>...HEAD\` (\`<base>\` is the PR's base branch) when the repository's package.json has that script, otherwise match the changed paths against each spec's \`- **Code**:\` / \`- **Tests**:\` header lines (a header path covers itself and everything beneath it). If the command fails for any reason — dependencies not installed, tsx missing, a cold checkout — fall back to matching the header lines by hand; never install dependencies or build to make it run. Then read ONLY those specs, never the whole specs tree — fold the reads into your gather batch where you can. For each touched spec, judge whether the diff contradicts a numbered behavior statement or a validation criterion: code that now does what the spec says it does not, a criterion whose named test the diff removed or retitled, a behavior the diff deleted that the spec still promises. A contradiction is a finding of severity \`minor\` or higher titled \`Spec contradiction — <spec file> item <n>: <what the code now does vs what the spec says>\`; a spec updated in the same diff to match the code is not a finding. A repository with no \`docs/reference/specs/\` has nothing to check — skip this step silently.`;
 
+// The whole change, or no verdict (docs/reference/specs/agent-review.md item 15;
+// distilled-diffs.md item 8) — one text for both review variants. Tool output
+// is capped, so a diff the agent reads can end early; a review that judged the
+// first files of an alphabetical diff and approved is the failure this closes.
+// The REVIEW TARGET block states the PR's size from GitHub and the digest
+// states its own totals, so a short read is recognizable — and the post-step
+// refuses a verdict whose digest covered less than the PR.
+const REVIEW_WHOLE_CHANGE = `   - READ THE WHOLE CHANGE: the REVIEW TARGET block states the PR's size as GitHub reports it (files, +/−) and \`diff_digest\` states the totals of what it covered — they must agree, and every file the digest lists must be in the diff you read. A tool output ending in \`...[truncated N chars]\` was cut short; when the digest or your diff shows fewer files or lines than the PR, read the rest file by file (\`git diff <base>...HEAD -- <path>\`) until every file is covered. Never judge from a partial diff: Switchboard does not post a verdict whose digest covered less than the PR.`;
+
 const REVIEW_SYSTEM = `You are Switchboard's code review agent, operating from a Slack request.
 
 You have bash and read_file tools in a workspace directory. Do not modify code, commit, or push — you are read-only by convention. Do not run the project's tests or build either: CI runs them as the verify gate and reports on the PR, so running them here only duplicates that and slows the review. Your job is to read the code.
@@ -152,7 +161,8 @@ Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your c
 
 1. GATHER, in 2-4 batched tool calls total:
    - \`gh pr view <ref> --json title,body,url,baseRefName\` and \`gh pr diff <ref>\` (the complete diff) in one command
-   - clone the repo and check out the PR branch
+   - clone the repo and check out the PR branch, then call the \`diff_digest\` tool to orient: per-file churn, totals, and risky-file flags (migrations/schema, auth/permission, whole-file deletions, lockfiles, very large files) so you know where to look hardest before you read a line
+${REVIEW_WHOLE_CHANGE}
    - in ONE command, print the full current contents of every changed source file, e.g.: \`gh pr diff <ref> --name-only | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
    - if the PR is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then design/simplification notes. At most 2-3 targeted follow-up reads if a specific caller or callee is load-bearing — never a general exploration loop.
@@ -181,6 +191,7 @@ Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your c
 1. GATHER, in 2-4 batched tool calls total:
    - \`origin/<base>\` (the PR's base branch, named in the REVIEW TARGET block) is already present in the clone — no fetch needed or allowed: \`git log --oneline origin/<base>..HEAD\` and \`git diff origin/<base>...HEAD\` (the complete diff) in one command
    - call the \`diff_digest\` tool to orient: it gives per-file churn, totals, and risky-file flags (migrations/schema, auth/permission, whole-file deletions, lockfiles, very large files) so you know where to look hardest before you read a line
+${REVIEW_WHOLE_CHANGE}
    - in ONE command, print the full current contents of every changed source file, e.g.: \`git diff --name-only origin/<base>...HEAD | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then design/simplification notes. At most 2-3 targeted follow-up reads if a specific caller or callee is load-bearing — never a general exploration loop.

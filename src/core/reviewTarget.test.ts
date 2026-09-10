@@ -88,6 +88,24 @@ describe("reviewTargetBlock", () => {
     );
   });
 
+  // docs/reference/specs/agent-review.md item 15 — the block states the PR's size
+  // from GitHub, so a diff or digest that shows less is recognizably cut short.
+  it("states the PR's size from GitHub with the read-the-rest rule when known; says nothing about size when unknown", () => {
+    const b = reviewTargetBlock({
+      ...full,
+      resident: true,
+      size: { changedFiles: 41, additions: 2459, deletions: 579 },
+    });
+    expect(b).toContain("Size (GitHub): 41 files, +2459/−579");
+    expect(b).toMatch(/cut short/);
+    expect(b).toMatch(/file by file/);
+    expect(b).toMatch(/does not post a verdict whose digest covered less/);
+    expect(
+      reviewTargetBlock({ ...full, resident: false, size: { changedFiles: 1, additions: 3, deletions: 0 } }),
+    ).toContain("Size (GitHub): 1 file, +3/−0");
+    expect(reviewTargetBlock({ ...full, resident: true })).not.toMatch(/Size \(GitHub\)/);
+  });
+
   it("is deterministic (same input, same text)", () => {
     expect(reviewTargetBlock({ ...full, resident: true })).toBe(reviewTargetBlock({ ...full, resident: true }));
   });

@@ -621,6 +621,7 @@ export async function dispatch(
     const {
       answer,
       verdict,
+      digest,
       observedHead,
       carried,
       prNote,
@@ -679,6 +680,7 @@ export async function dispatch(
       reviewHead: ran.reviewHead,
       observedHead,
       verdict,
+      digest,
       carried,
       root,
     });
