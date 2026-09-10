@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.19.0](https://github.com/coreplanelabs/switchboard/compare/v1.18.2...v1.19.0) (2026-09-10)
+
+
+### Features
+
+* **agents:** agents are data — general, coding, review, research, ship — with budgets, not hardcoded models ([729266c](https://github.com/coreplanelabs/switchboard/commit/729266c3c90a6bbccca21775c27ba25b4ac59364))
+* **channels:** Slack over Socket Mode, HTTP ingress, MCP ingress and the CLI — transports, not orchestrators ([c888b37](https://github.com/coreplanelabs/switchboard/commit/c888b372b9488720333039e08e6a451f611a4464))
+* **cli:** the published package — @coreplane/switchboard bundles the CLI and the deploy inputs it runs ([3cdb00c](https://github.com/coreplanelabs/switchboard/commit/3cdb00cbb70332bc55401bf0f04c8a7d819860b7))
+* **core:** the core contract — channels, providers, executors and agents as seams, one dispatcher ([ed50aef](https://github.com/coreplanelabs/switchboard/commit/ed50aef7b6686efea172a6585e9b9353020d118c))
+* **deploy:** the Workers, the deployment profile and the deploy CLI — Cloudflare is the one supported target ([25d60ea](https://github.com/coreplanelabs/switchboard/commit/25d60eaff8407d3a07a19032e6ff3e3a2791de94))
+* **execution:** local, E2B, Cloudflare sandbox and resident executors — tools never touch the host ([28bcbec](https://github.com/coreplanelabs/switchboard/commit/28bcbecd75dd05c2cfdc20aa83c8cab8e116567b))
+* **load:** the load harness — peak concurrency from the run store, synthetic threads against a resident or the console ([d00abed](https://github.com/coreplanelabs/switchboard/commit/d00abedaed6456f45fe167c0de6d041d75676f0b))
+* **providers:** Anthropic and OpenAI-compatible model providers behind one seam ([9dd2140](https://github.com/coreplanelabs/switchboard/commit/9dd21404c70769bcdd36df045f7aeb26f6de31c5))
+* **tools:** GitHub over the App credential, web fetch and search, external MCP servers, vendored skills ([767d927](https://github.com/coreplanelabs/switchboard/commit/767d9275d960a5ba7f493ee2ab5dbb28ab0adc0f))
+* **web:** the dashboard — run pages, the runs index, residents, costs and schedules, served from the bot's seed ([87f2e87](https://github.com/coreplanelabs/switchboard/commit/87f2e87cb7c18e176f7ef92cf366dd4e7963b6cf))
+
+
+### Documentation
+
+* **decisions:** twenty-eight architecture decision records and the plans that became them ([e2c90d0](https://github.com/coreplanelabs/switchboard/commit/e2c90d0a6cff18a135fe9a043f0e255b2f34c74b))
+* **specs:** the behavioral contract — one spec per feature, every criterion bound to the test that proves it ([a8751e7](https://github.com/coreplanelabs/switchboard/commit/a8751e721e9fb7965b04083074b50813e4310b0a))
+* the site and the guides — tutorials, how-tos, explanation and generated reference, in Diataxis voice ([cc8ce6b](https://github.com/coreplanelabs/switchboard/commit/cc8ce6b112d6174c90cabd4675b2d0b7119e02e7))
+
 ## [1.18.2](https://github.com/coreplanelabs/switchboard/compare/v1.18.1...v1.18.2) (2026-09-10)
 
 
