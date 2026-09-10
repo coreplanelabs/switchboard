@@ -4,6 +4,7 @@ import { ALL_ON, mountApp } from "../testing/mount";
 import { browser } from "../lib/browser";
 import type { Capabilities } from "@core/core/capabilities.js";
 import { formatClock, formatLocalIso } from "../lib/format";
+import { TERM_PAINT } from "../lib/termPaint";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
 import type { RunHistorySeed, RunLiveSeed } from "@core/channels/webSeed.js";
 import type { LiveFrame } from "@core/channels/liveView/sse.js";
@@ -157,14 +158,13 @@ describe("RunPage — the timeline (item 25)", () => {
     );
     expect(legend[0].attributes("title")).toContain("before the agent's first turn");
     // A swatch IS its segment: the same paint class.
-    expect(
-      legend.map((l) =>
-        l
-          .find(".swatch")
-          .classes()
-          .find((c) => c.startsWith("seg-")),
-      ),
-    ).toEqual(tl.findAll(".bar .seg").map((s) => s.classes().find((c) => c.startsWith("seg-"))));
+    const paintOf = (el: { classes(): string[] }) => el.classes().find((c) => c.startsWith("paint-"));
+    expect(legend.map((l) => paintOf(l.find(".swatch")))).toEqual(tl.findAll(".bar .seg").map(paintOf));
+    // …and the paint is TERM_PAINT's, one distinct class per word — thinking and in tools never share.
+    expect(legend.map((l) => paintOf(l.find(".swatch")))).toEqual(
+      legend.map((l) => TERM_PAINT[l.attributes("data-term") as keyof typeof TERM_PAINT]),
+    );
+    expect(new Set(tl.findAll(".bar .seg").map(paintOf)).size).toBe(3);
     expect(tl.find(".gloss").exists()).toBe(false); // the prose paragraph is gone; the words define themselves on hover
     // Longest steps: the heading carries the footnote; a tool step wears its command and links to its card.
     expect(tl.find(".ranked-head").text()).toBe("Longest steps");
@@ -932,6 +932,7 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find("#log .phase-head .glyph").text()).toBe("▾");
     expect(wrapper.find("#log .phase-head .what").text()).toBe("Getting ready · 2 steps"); // the bar's word
     expect(wrapper.find("#log .phase").attributes("data-phase")).toBe("getting_ready");
+    expect(wrapper.find("#log .phase-head .swatch").classes()).toContain(TERM_PAINT["getting ready"]); // …and its paint
     expect(wrapper.findAll("#log .phase .span").map((r) => r.find(".what").text())).toEqual([
       "reading the thread",
       "attaching the workspace",
@@ -977,6 +978,9 @@ describe("RunPage — live mode", () => {
     await wrapper.vm.$nextTick();
     expect(wrapper.find("#log .phase[data-phase='finishing_up'] .phase-head .what").text()).toBe(
       "Finishing up · 1 step",
+    );
+    expect(wrapper.find("#log .phase[data-phase='finishing_up'] .phase-head .swatch").classes()).toContain(
+      TERM_PAINT["finishing up"],
     );
     expect(wrapper.findAll("#log .phase .span").map((r) => r.find(".what").text())).toEqual(["posting the PR"]);
     es().emitMessage(

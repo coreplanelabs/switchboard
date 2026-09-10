@@ -25,14 +25,14 @@ function fmtBytes(n: number): string {
     <CallCard v-if="item.kind === 'call'" :call="item.call" />
     <div
       v-else-if="item.kind === 'quiet'"
-      class="quiet flex items-baseline gap-3 px-3 py-0.5 text-xs text-dimmed"
+      class="quiet flex items-baseline gap-3 pl-3 pr-(--sb-gutter) py-0.5 text-xs text-dimmed"
       :title="item.at !== undefined ? formatLocalIso(item.at) : undefined"
     >
       <span>{{ item.text }}</span>
     </div>
     <div
       v-else
-      class="skill flex items-baseline gap-2.5 px-3 py-0.5"
+      class="skill flex items-baseline gap-2.5 pl-3 pr-(--sb-gutter) py-0.5"
       :title="item.skill.at !== undefined ? formatLocalIso(item.skill.at) : undefined"
     >
       <span class="skillmark shrink-0 select-none text-xs">📚</span>

@@ -69,7 +69,7 @@ const firstCallAt = computed(() => {
     <!-- The head: ONE row — the turn's cost (or, with no turn, the prose
          itself) on the left, WHEN on the right; a wide gap keeps long text
          clear of the clock. -->
-    <div class="head flex items-baseline gap-x-6 pb-1.5 pr-3">
+    <div class="head flex items-baseline gap-x-6 pb-1.5 pr-(--sb-gutter)">
       <div class="min-w-0 flex-1">
         <div
           v-if="step.turn"
@@ -112,23 +112,28 @@ const firstCallAt = computed(() => {
       >
     </div>
     <!-- Prose that follows a cost head sits flush left under it. -->
-    <div v-if="step.turn && step.narration !== null" class="narration flex items-baseline gap-3 pb-1.5 pr-3">
+    <div
+      v-if="step.turn && step.narration !== null"
+      class="narration flex items-baseline gap-3 pb-1.5 pr-(--sb-gutter)"
+    >
       <MarkdownText :text="step.narration" />
     </div>
     <div
       v-else-if="step.turn && step.narration === null && !step.turn.facts.length"
-      class="narration flex items-baseline gap-3 pb-1.5 pr-3"
+      class="narration flex items-baseline gap-3 pb-1.5 pr-(--sb-gutter)"
     >
       <span class="nonar flex-1 font-sans text-sm italic text-dimmed">{{ step.note }}</span>
     </div>
 
-    <div class="calls flex flex-col gap-2 pr-3">
+    <!-- The cards run to the container's edge; their facts end on the page's
+         one gutter (the card pads for its own border). -->
+    <div class="calls flex flex-col gap-2">
       <StepItems v-if="!grouped" :items="step.items" />
       <details v-else class="grp" :open="step.groupOpen" :data-group-open="step.groupOpen ? '1' : '0'">
         <!-- The group's summary is a muted line, not a header: the cards are
              the work, this is their count as a reader says it. -->
         <summary
-          class="gsummary flex cursor-pointer list-none items-baseline gap-3 rounded-md px-3 py-1 text-xs text-dimmed hover:bg-accented/40 hover:text-muted focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
+          class="gsummary flex cursor-pointer list-none items-baseline gap-3 rounded-md pl-3 pr-(--sb-gutter) py-1 text-xs text-dimmed hover:bg-accented/40 hover:text-muted focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
           :title="typeof firstCallAt === 'number' ? `calls began ${formatLocalIso(firstCallAt)}` : undefined"
           @click.prevent="emit('toggleGroup')"
         >

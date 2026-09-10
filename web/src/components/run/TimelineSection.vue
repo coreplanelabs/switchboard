@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { browser } from "../../lib/browser";
 import { formatDuration } from "../../lib/format";
+import { TERM_PAINT } from "../../lib/termPaint";
 import type { BarSegment, TimelineVm } from "../../lib/timelineVm";
 
 // Where the time went (live-view item 25): the summary of THIS RUN as one
@@ -12,20 +13,12 @@ import type { BarSegment, TimelineVm } from "../../lib/timelineVm";
 //
 // The legend's words are the words the rows below use — `Getting ready` and
 // `Finishing up` head the phase groups, `thought …` heads every model turn,
-// the tool calls are the cards — so a reader can correlate the two.
+// the tool calls are the cards — so a reader can correlate the two. The paint
+// is `TERM_PAINT` (web/src/lib/termPaint.ts): one class per word, shared by
+// the segments, the swatches and the phase heads' markers.
 
 const props = defineProps<{ vm: TimelineVm; eventsHref?: string }>();
 const emit = defineEmits<{ reveal: [anchor: string] }>();
-
-const TERM_CLASS: Record<BarSegment["term"], string> = {
-  "getting ready": "seg-ready",
-  thinking: "seg-thinking",
-  "in tools": "seg-tools",
-  "finishing up": "seg-finishing",
-  "Switchboard overhead": "seg-overhead",
-  "not recorded": "seg-lost",
-  "not loaded": "seg-elided",
-};
 
 function segTitle(seg: BarSegment): string {
   return `${formatDuration(seg.ms, "clock")} ${seg.term}${seg.hatched ? " (in flight)" : ""}`;
@@ -39,7 +32,7 @@ function copyDebug(): void {
 <template>
   <section
     id="timeline"
-    class="block mb-4 rounded-lg border border-default bg-(--ui-bg-muted) px-3.5 py-3"
+    class="block mb-4 rounded-lg border border-default bg-(--ui-bg-muted) px-(--sb-gutter) py-3"
     data-testid="timeline"
   >
     <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
@@ -76,7 +69,7 @@ function copyDebug(): void {
           v-for="(seg, i) in vm.bar"
           :key="i"
           class="seg h-full"
-          :class="[TERM_CLASS[seg.term], seg.hatched ? 'hatched' : '']"
+          :class="[TERM_PAINT[seg.term], seg.hatched ? 'paint-hatched hatched' : '']"
           :style="{ width: `${seg.pct}%` }"
           :title="segTitle(seg)"
           :data-term="seg.term"
@@ -92,7 +85,7 @@ function copyDebug(): void {
           :title="item.definition"
           :data-term="item.term"
         >
-          <span class="swatch inline-block size-2 shrink-0 self-center rounded-[2px]" :class="TERM_CLASS[item.term]" />
+          <span class="swatch inline-block size-2 shrink-0 self-center rounded-[2px]" :class="TERM_PAINT[item.term]" />
           <span class="term text-muted">{{ item.term }}</span>
           <span class="ms tabular-nums text-toned">{{ item.text }}</span>
         </li>
@@ -127,35 +120,3 @@ function copyDebug(): void {
     </template>
   </section>
 </template>
-
-<style scoped>
-/* The bar's words, painted from the theme's own tokens — one colour per term,
-   the two loss terms and the residual visibly "not work" (striped or hollow),
-   the in-flight tail hatched over its bucket's colour. The legend's swatches
-   wear the same classes, so a swatch IS its segment. */
-.seg-ready {
-  background: var(--ui-info);
-}
-.seg-thinking {
-  background: var(--ui-primary);
-}
-.seg-tools {
-  background: var(--ui-success);
-}
-.seg-finishing {
-  background: var(--ui-secondary);
-}
-.seg-overhead {
-  background: repeating-linear-gradient(135deg, var(--ui-border-accented) 0 3px, transparent 3px 6px);
-}
-.seg-lost {
-  background: repeating-linear-gradient(135deg, var(--ui-warning) 0 3px, transparent 3px 6px);
-}
-.seg-elided {
-  box-shadow: inset 0 0 0 1px var(--ui-border-accented);
-  background: transparent;
-}
-.hatched {
-  background-image: repeating-linear-gradient(135deg, rgb(255 255 255 / 0.45) 0 2px, transparent 2px 5px);
-}
-</style>

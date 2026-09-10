@@ -10,7 +10,7 @@ defineProps<{ item: SpanRowVm }>();
 </script>
 
 <template>
-  <li :id="`span-${item.spanId}`" class="span flex items-baseline gap-2 py-0.5 text-xs text-muted">
+  <li :id="`span-${item.spanId}`" class="span flex items-baseline gap-2 py-0.5 pr-(--sb-gutter) text-xs text-muted">
     <span class="glyph select-none" :class="item.status === 'error' ? 'text-bad' : 'text-dimmed'">{{
       item.open ? "◌" : item.status === "error" ? "✗" : "◷"
     }}</span>
