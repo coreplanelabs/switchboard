@@ -7,6 +7,7 @@ import {
   checkPrTitle,
   migrationNoteProblems,
   nextMajor,
+  nextRelease,
 } from "../scripts/check-pr-title.mjs";
 
 // The title gate's decision. A PR title is the squash commit's subject and the
@@ -233,42 +234,51 @@ describe("a breaking title needs its migration note", () => {
     expect(migrationNoteProblems({ breaking: false, version: "1.11.0", migrationsDoc: undefined })).toEqual([]);
   });
 
-  it("while the release config pins the next version (`release-as`), a `!` title is refused: it cannot cut the major it declares", () => {
-    // Before the public launch the 1.x line moves by minors; a breaking cleanup
-    // ships under the pinned minor with its note under that heading.
-    const [problem, ...rest] = migrationNoteProblems({
+  it("nextRelease: under always-bump-minor a `!` cuts the next minor, under the default the next major", () => {
+    expect(nextRelease("1.13.0", "always-bump-minor")).toBe("1.14.0");
+    expect(nextRelease("1.13.2", "always-bump-minor")).toBe("1.14.0");
+    expect(nextRelease("1.13.0", undefined)).toBe("2.0.0");
+    expect(nextRelease("1.13.0", "default")).toBe("2.0.0");
+  });
+
+  it("under always-bump-minor the required section is the next minor", () => {
+    // The pre-launch line: every release bumps the minor, breaking or not, so
+    // the note lives under that minor and a `## 2.0.0` section does not count.
+    const minorDoc = "# Migration notes\n\n## 1.14.0\n\nThe `permissions` block …\n";
+    expect(
+      migrationNoteProblems({
+        breaking: true,
+        version: "1.13.0",
+        migrationsDoc: minorDoc,
+        versioning: "always-bump-minor",
+      }),
+    ).toEqual([]);
+    const [problem] = migrationNoteProblems({
       breaking: true,
       version: "1.13.0",
       migrationsDoc: doc,
-      releaseAs: "1.14.0",
+      versioning: "always-bump-minor",
     });
-    expect(rest).toEqual([]);
-    expect(problem).toContain("1.14.0");
-    expect(problem).toContain("release-please-config.json");
-    expect(problem).toContain("drop the `!`");
     expect(problem).toContain("## 1.14.0");
-  });
-
-  it("the pin does not touch a title without `!`", () => {
+    expect(problem).toContain("docs/reference/migrations.md");
     expect(
-      migrationNoteProblems({ breaking: false, version: "1.13.0", migrationsDoc: doc, releaseAs: "1.14.0" }),
+      migrationNoteProblems({
+        breaking: false,
+        version: "1.13.0",
+        migrationsDoc: doc,
+        versioning: "always-bump-minor",
+      }),
     ).toEqual([]);
   });
 
-  it("the repository's pin, when set, is ahead of the released version — a pin left behind after its release is cut fails here", () => {
-    const config = JSON.parse(readRoot("release-please-config.json")) as { "release-as"?: string };
-    const manifest = JSON.parse(readRoot(".release-please-manifest.json")) as Record<string, string>;
-    const released = manifest["."];
-    if (config["release-as"] === undefined) return;
-    const [pinMajor, pinMinor, pinPatch] = config["release-as"].split(".").map(Number);
-    const [relMajor, relMinor, relPatch] = released.split(".").map(Number);
-    const ahead =
-      pinMajor > relMajor ||
-      (pinMajor === relMajor && (pinMinor > relMinor || (pinMinor === relMinor && pinPatch > relPatch)));
-    expect(ahead, `release-as ${config["release-as"]} is not ahead of the released ${released}: remove the pin`).toBe(
-      true,
-    );
-    expect(pinMajor, "the pin holds the 1.x line: a major is cut only after the public launch").toBe(relMajor);
+  it("the repository's config bumps the minor on every release until the public launch", () => {
+    // Removing this line is the launch-day change: from then on a `!` is a major.
+    const config = JSON.parse(readRoot("release-please-config.json")) as { versioning?: string; "release-as"?: string };
+    expect(config.versioning).toBe("always-bump-minor");
+    expect(
+      config["release-as"],
+      "a pinned version would outlive its release; the strategy needs no pin",
+    ).toBeUndefined();
   });
 
   it("the repository's notes: one `## <version>` per release, newest first, every heading a version", () => {

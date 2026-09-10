@@ -13,7 +13,7 @@ gh api -X PATCH repos/OWNER/REPO \
   -F delete_branch_on_merge=true
 ```
 
-The title is the whole commit, so breaking changes are `feat(config)!: …` — after the public launch; while `release-please-config.json` pins the next version (`release-as`), the check refuses a `!` and the change ships as a minor.
+The title is the whole commit, so breaking changes are `feat(config)!: …`; until the public launch `release-please-config.json` says `versioning: always-bump-minor`, so every release, breaking or not, is the next minor.
 
 ## 2. The `title` check
 

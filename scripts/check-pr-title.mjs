@@ -17,10 +17,10 @@
 //     — the product's areas as the docs name them, plus the two scopes the
 //     bots write (`deps`, `main`);
 //   - a `!` title: docs/reference/migrations.md carries a `## <version>`
-//     section for the major the title will cut (package.json's version, major
-//     + 1 — bump-minor-pre-major is off in the release config); while the
-//     release config pins the next version (`release-as`), no title may
-//     carry `!` at all — the line moves by minors until the public launch.
+//     section for the release the title will cut — the next major under the
+//     default versioning strategy, the next minor while the release config
+//     says `versioning: always-bump-minor` (the pre-launch state: the 1.x
+//     line moves by minors whatever the titles say).
 //
 //   npm run check:pr-title -- "feat(slack): thread admission"   # one title
 //   PR_TITLE="…" npm run check:pr-title                          # what CI does
@@ -114,35 +114,42 @@ export function checkPrTitle(rawTitle, { types, scopes }) {
   return { ok: true, type, scope: scope ?? null, breaking: breaking === "!", description };
 }
 
-/** The version a breaking change releases as: the next major (the release config leaves bump-minor-pre-major off). */
-export function nextMajor(version) {
+function parseVersion(version) {
   const m = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version);
   if (!m) throw new Error(`"${version}" is not a version (expected major.minor.patch)`);
-  return `${Number(m[1]) + 1}.0.0`;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/** The version a breaking change releases as under the default strategy: the next major (bump-minor-pre-major is off). */
+export function nextMajor(version) {
+  const [major] = parseVersion(version);
+  return `${major + 1}.0.0`;
 }
 
 /**
- * Pure: a `!` title needs a `## <next major>` section in the migration notes;
- * anything else needs nothing. Presence is the whole test — the first
- * breaking PR of a cycle creates the section, later ones add their lines to
- * it, and the check cannot tell whose lines are there. `migrationsDoc` is the
- * notes file's text, or undefined when the file does not exist.
- *
- * While the release config pins the next version (`release-as`), a `!` title
- * is refused outright: the pin means the line moves by minors — before the
- * public launch the 1.x line is not spent on majors — and a title that
- * declares a major it cannot cut would put a BREAKING CHANGES entry under a
- * minor. The change ships without the `!`, its note under the pinned version's
- * heading.
+ * The version a breaking change releases as under the release config's
+ * versioning strategy: `always-bump-minor` (every release bumps the minor —
+ * the pre-launch line) → the next minor; anything else → the next major.
  */
-export function migrationNoteProblems({ breaking, version, migrationsDoc, releaseAs }) {
-  if (!breaking) return [];
-  if (releaseAs !== undefined) {
-    return [
-      `the next release is pinned to ${releaseAs} in release-please-config.json (\`release-as\`: no major before the public launch): drop the \`!\` and put the note under \`## ${releaseAs}\` in ${MIGRATIONS_PATH}`,
-    ];
+export function nextRelease(version, versioning) {
+  if (versioning === "always-bump-minor") {
+    const [major, minor] = parseVersion(version);
+    return `${major}.${minor + 1}.0`;
   }
-  const heading = `## ${nextMajor(version)}`;
+  return nextMajor(version);
+}
+
+/**
+ * Pure: a `!` title needs a `## <next release>` section in the migration
+ * notes — the next major under the default strategy, the next minor under
+ * `always-bump-minor`; anything else needs nothing. Presence is the whole test
+ * — the first breaking PR of a cycle creates the section, later ones add their
+ * lines to it, and the check cannot tell whose lines are there. `migrationsDoc`
+ * is the notes file's text, or undefined when the file does not exist.
+ */
+export function migrationNoteProblems({ breaking, version, migrationsDoc, versioning }) {
+  if (!breaking) return [];
+  const heading = `## ${nextRelease(version, versioning)}`;
   const present = (migrationsDoc ?? "").split("\n").some((l) => l.trim() === heading);
   if (present) return [];
   return [
@@ -182,14 +189,14 @@ function main() {
 
   let vocabulary;
   let version;
-  let releaseAs;
+  let versioning;
   try {
     const releaseConfig = JSON.parse(readFileSync("release-please-config.json", "utf8"));
     vocabulary = {
       types: allowedTypes(releaseConfig),
       scopes: allowedScopes(readFileSync(CODE_MAP_PATH, "utf8")),
     };
-    releaseAs = releaseConfig["release-as"];
+    versioning = releaseConfig.versioning;
     version = JSON.parse(readFileSync("package.json", "utf8")).version;
   } catch (err) {
     console.error(`check:pr-title — ${err instanceof Error ? err.message : String(err)}`);
@@ -202,7 +209,7 @@ function main() {
         breaking: verdict.breaking,
         version,
         migrationsDoc: existsSync(MIGRATIONS_PATH) ? readFileSync(MIGRATIONS_PATH, "utf8") : undefined,
-        releaseAs,
+        versioning,
       })
     : verdict.problems;
   if (verdict.ok && problems.length === 0) {

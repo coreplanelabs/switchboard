@@ -12,10 +12,12 @@ export type TitleVerdict =
   | { ok: false; problems: string[] };
 export function checkPrTitle(rawTitle: string | undefined | null, vocabulary: TitleVocabulary): TitleVerdict;
 export function nextMajor(version: string): string;
+/** The next release under the config's versioning strategy: next minor for `always-bump-minor`, else next major. */
+export function nextRelease(version: string, versioning: string | undefined): string;
 export function migrationNoteProblems(input: {
   breaking: boolean;
   version: string;
   migrationsDoc: string | undefined;
-  /** `release-as` from release-please-config.json when the next version is pinned; a `!` title is then refused. */
-  releaseAs?: string;
+  /** `versioning` from release-please-config.json; `always-bump-minor` makes the required heading the next minor. */
+  versioning?: string;
 }): string[];
