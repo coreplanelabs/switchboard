@@ -887,6 +887,9 @@ describe("the 1.2 line releases from its own branch and never deploys", () => {
     for (const attempt of attempts) {
       expect(attempt.with?.["config-file"]).toBe("${{ env.RP_CONFIG }}");
       expect(attempt.with?.["manifest-file"]).toBe("${{ env.RP_MANIFEST }}");
+      // Unset, the action reads both files from the default branch, where the
+      // v1.2 pair does not exist — the first v1.2 push failed exactly so.
+      expect(attempt.with?.["target-branch"]).toBe("${{ github.ref_name }}");
     }
   });
 
