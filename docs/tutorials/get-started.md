@@ -44,7 +44,7 @@ npm run cli -- ask "what can you do?"
 
 OpenSwitchboard reads credentials from the environment and from nowhere else; the process loads `.env` from the directory you run it in — the repo root here — and a variable your shell already exports wins over the file.
 
-**Without the clone, once the CLI is on npm.** The tree carries the same CLI as the package `@coreplane/switchboard` ([packaging](../reference/specs/packaging.md)), and the release workflow publishes it once the project turns publishing on. From that release, Parts 1 and 2 need no checkout: in an empty directory, `npx @coreplane/switchboard init --organization <org> --anthropic-key <your key>` writes the same two files and `npx @coreplane/switchboard ask "what can you do?"` answers the same way; `curl -fsSL https://openswitchboard.dev/install.sh | sh -s -- --organization <org> --anthropic-key <your key>` is the `init` line behind a Node version check (read [`install.sh`](https://openswitchboard.dev/install.sh) first if you would rather not pipe a download into your shell — the `npx` line is the same thing). Until the package is published those commands fail to resolve it, so this lesson is written for the checkout; Part 3 needs the checkout either way, because the deploy builds the bot's image from the tree.
+**Without the clone, once the CLI is on npm.** The tree carries the same CLI as the package `@coreplane/switchboard` ([packaging](../reference/specs/packaging.md)), and the release workflow publishes it once the project turns publishing on. From that release, Parts 1 and 2 need no checkout: in an empty directory, `npx @coreplane/switchboard init --organization <org> --anthropic-key <your key>` writes the same two files and `npx @coreplane/switchboard ask "what can you do?"` answers the same way; `curl -fsSL https://openswitchboard.dev/install.sh | sh -s -- --organization <org> --anthropic-key <your key>` is the `init` line behind a Node version check (read [`install.sh`](https://openswitchboard.dev/install.sh) first if you would rather not pipe a download into your shell — the `npx` line is the same thing). Until the package is published those commands fail to resolve it, so this lesson is written for the checkout; Part 3 needs the checkout for one step either way — the bot's image is built from the tree — while the rest of the deploy runs from any directory with the package ([Deploy](../how-to/deploy.md#deploying-from-the-package)).
 
 You will see a status line tick (`preparing workspace…`, then `thinking…`), and then the answer: the general agent introduces itself and the agents it can hand work to. That took one model call on the default model, `anthropic/claude-haiku-4-5`.
 
@@ -136,7 +136,7 @@ next:
   MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npm run cli -- deploy all
 ```
 
-The profile is ignored by git: it names your account and your hostnames, and the tree carries neither. `init` writes it only from the root of a checkout — the Worker templates and `deploy all` live there — and refuses anywhere else.
+The profile is ignored by git: it names your account and your hostnames, and the tree carries neither. `init` writes it where `deploy all` runs from: the root of a checkout, as here, or — with the CLI from npm — the directory you run it in, which becomes your operator directory, with the Worker configs rendered under `.switchboard/` there ([Deploy](../how-to/deploy.md#deploying-from-the-package)). The container image is neither and refuses.
 
 **Point the config at the state Worker.** `--force` rewrote `config/config.yaml` from the example, so the `runHistory` block from Part 1 is gone; add the one that names the state Worker's hostname instead, and the block that sends chat-set overrides there too. Both use the same bearer, `MEMORY_TOKEN`, by default:
 
@@ -171,7 +171,7 @@ npm run cli -- deploy secrets memory
 npm run cli -- deploy secrets bot
 ```
 
-**Deploy.** One command runs the plan: it checks that wrangler is logged in to the profile's account and that the tree is clean at `origin/main`, validates your config and pushes it to the state Worker as the document the bot reads at startup, deploys the state Worker, builds and deploys the bot's image, and then waits until the bot's `/healthz` answers from a container running this commit. It needs the state Worker's bearer in its own environment to push the config:
+**Deploy.** One command runs the plan: it checks that wrangler is logged in to the profile's account and that this checkout's tree is clean at `origin/main`, validates your config and pushes it to the state Worker as the document the bot reads at startup, deploys the state Worker, builds and deploys the bot's image, and then waits until the bot's `/healthz` answers from a container running this commit. It needs the state Worker's bearer in its own environment to push the config:
 
 ```bash
 MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npm run cli -- deploy all

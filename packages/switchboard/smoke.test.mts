@@ -1,5 +1,14 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -114,10 +123,21 @@ describe("the installed CLI", () => {
     expect(existsSync(join(work, ".env"))).toBe(false);
   });
 
-  it("`init` with --cloudflare refuses outside a checkout, naming it — the deploy still starts from a clone", () => {
+  it("`deploy plan` in a directory with no profile reads the shipped example profile and Worker templates, says the plan is the example's, and names the directory as the root", () => {
+    const work = join(tmp, "work");
+    const r = switchboard(work, "deploy", "plan");
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`Root: ${work} (the published package `);
+    expect(r.stdout).toContain("deploy/profile.example.json");
+    expect(r.stdout).toContain("memory");
+    expect(r.stdout).toContain("bot");
+  });
+
+  it("`init --cloudflare` in an empty directory writes the profile there and renders the Worker configs under .switchboard/ — no checkout, no install; `deploy plan` then plans that installation from that directory, naming no path of the package or the repository", () => {
     const work = join(tmp, "work-cf");
     mkdirSync(work);
-    const r = switchboard(
+    const account = "0123456789abcdef0123456789abcdef";
+    const init = switchboard(
       work,
       "init",
       "--organization",
@@ -125,21 +145,42 @@ describe("the installed CLI", () => {
       "--anthropic-key",
       "sk-test",
       "--cloudflare",
-      "0123456789abcdef0123456789abcdef",
+      account,
       "--zone",
       "example.com",
     );
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain("error (unavailable)");
-    expect(r.stderr).toContain("run init from the root of a checkout");
-    expect(existsSync(join(work, ".env"))).toBe(false);
-  });
+    expect(init.status, init.stderr).toBe(0);
+    expect(init.stdout).toContain("  deploy/profile.json");
+    expect(init.stdout).toContain("Worker configs from deploy/profile.json:");
+    expect(init.stdout).toContain("  written   .switchboard/deploy/cloudflare-memory/wrangler.jsonc");
+    expect(init.stdout).toContain("  written   .switchboard/deploy/cloudflare/wrangler.jsonc");
+    expect(init.stdout).toContain(`  npx ${facts.npmPackage} deploy secrets memory`);
+    expect(init.stdout).toContain(`npx ${facts.npmPackage} deploy all`);
+    // The operator's directory: the installation's files, and the work area — the shipped tree, stamped, no node_modules yet.
+    expect(readdirSync(work).sort()).toEqual([".env", ".switchboard", "config", "deploy"]);
+    expect(readdirSync(join(work, "deploy"))).toEqual(["profile.json"]);
+    const rendered = readFileSync(join(work, ".switchboard/deploy/cloudflare/wrangler.jsonc"), "utf8");
+    expect(rendered).toContain(`"account_id": "${account}"`);
+    expect(rendered).toContain('"pattern": "switchboard.example.com"');
+    expect(existsSync(join(work, ".switchboard/.materialised.json"))).toBe(true);
+    expect(existsSync(join(work, ".switchboard/package-lock.json"))).toBe(true);
+    expect(existsSync(join(work, ".switchboard/node_modules"))).toBe(false);
+    // Nothing was written into the installed package.
+    expect(existsSync(join(tmp, "install/node_modules", facts.npmPackage, "dist/assets/deploy/profile.json"))).toBe(
+      false,
+    );
 
-  it("`deploy plan` reads the shipped example profile and Worker templates and says the plan is the example's", () => {
-    const r = switchboard(join(tmp, "work"), "deploy", "plan");
-    expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toContain("deploy/profile.example.json");
-    expect(r.stdout).toContain("memory");
-    expect(r.stdout).toContain("bot");
+    const plan = switchboard(work, "deploy", "plan");
+    expect(plan.status, plan.stderr).toBe(0);
+    expect(plan.stdout).toContain(`Root: ${work} (the published package `);
+    expect(plan.stdout).toContain("Profile: deploy/profile.json;");
+    expect(plan.stdout).toContain("materialised under .switchboard/ — no git");
+    expect(plan.stdout).toContain("1. memory (switchboard-memory)");
+    expect(plan.stdout).toContain("2. bot (switchboard)");
+    expect(plan.stdout).not.toContain("origin/main");
+    // The installation's own profile, not the shipped example.
+    expect(plan.stdout).not.toContain("profile.example.json");
+    expect(plan.stdout).not.toContain("(example)");
+    for (const leak of [REPO_ROOT, "dist/assets", "node_modules"]) expect(plan.stdout).not.toContain(leak);
   });
 });

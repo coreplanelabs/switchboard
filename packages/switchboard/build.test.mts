@@ -1,17 +1,19 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { build } from "esbuild";
 import { describe, expect, it } from "vitest";
-import { ROOT_ASSETS, shippedAssets, shippedDeployAssets } from "./build.mts";
+import { WORKER_SPECS } from "../../src/deploy/plan.js";
+import { ROOT_ASSETS, shippedAssets, shippedDeployAssets, workerSourceFiles } from "./build.mts";
 
-// Feature: docs/reference/specs/packaging.md items 1–2 — what the package
+// Feature: docs/reference/specs/packaging.md items 1–2 and 7 — what the package
 // ships and what it depends on are both derived: the assets from what the
-// repository tracks under deploy/, the dependencies from what the bundled CLI
-// actually imports.
+// repository tracks under deploy/ plus the sources the Workers import, the
+// dependencies from what the bundled CLI actually imports.
 
 const PACKAGE_DIR = import.meta.dirname;
 const REPO_ROOT = resolve(PACKAGE_DIR, "..", "..");
 const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), "utf8");
+const readTree = async (rel: string) => (existsSync(join(REPO_ROOT, rel)) ? read(rel) : undefined);
 
 describe("shippedDeployAssets", () => {
   const tracked = [
@@ -44,12 +46,23 @@ describe("shippedDeployAssets", () => {
     ]);
   });
 
-  it("ignores paths outside deploy/ — the root assets are a separate, explicit list", () => {
+  it("ignores paths outside deploy/ — the root assets are a separate, explicit list, and the Worker sources come after them, each once", () => {
     expect(shippedDeployAssets(["src/cli.ts", "deploy/profile.example.json"])).toEqual(["deploy/profile.example.json"]);
     expect(shippedAssets(["deploy/profile.example.json"])).toEqual([...ROOT_ASSETS, "deploy/profile.example.json"]);
+    expect(
+      shippedAssets(
+        ["deploy/profile.example.json", "deploy/cloudflare-memory/worker.ts"],
+        ["src/core/runRecord.ts", "deploy/cloudflare-memory/worker.ts", "package.json"],
+      ),
+    ).toEqual([
+      ...ROOT_ASSETS,
+      "deploy/cloudflare-memory/worker.ts",
+      "deploy/profile.example.json",
+      "src/core/runRecord.ts",
+    ]);
   });
 
-  it("the root assets are the files init derives from, the marker the resolver looks for, and the bot image's own files", () => {
+  it("the root assets are the files init derives from, the marker the resolver looks for, the bot image's own files, and the manifest + lockfile a materialised Worker directory installs against", () => {
     expect(ROOT_ASSETS).toEqual([
       ".env.example",
       "config/config.example.yaml",
@@ -57,7 +70,31 @@ describe("shippedDeployAssets", () => {
       "Dockerfile",
       "docker-entrypoint.sh",
       ".dockerignore",
+      "package.json",
+      "package-lock.json",
     ]);
+  });
+});
+
+describe("workerSourceFiles", () => {
+  it("is the union of the Worker entries' relative-import closures under src/, sorted — the real four resolve completely and reach into src/", async () => {
+    const files = await workerSourceFiles(readTree);
+    expect(files.length).toBeGreaterThan(0);
+    expect(files).toEqual([...files].sort());
+    for (const f of files) expect(f).toMatch(/^src\//);
+    // The memory Worker's engine and the bot shim's schedule registry are the canonical shared imports.
+    expect(files).toContain("src/core/runRecord.ts");
+    expect(files).toContain("src/core/schedules.ts");
+    // Nothing under deploy/ is in the list: those ship as tracked deploy assets.
+    expect(files.some((f) => f.startsWith("deploy/"))).toBe(false);
+    expect(WORKER_SPECS.map((w) => w.entry).every((e) => e.startsWith("deploy/"))).toBe(true);
+  });
+
+  it("an entry whose import resolves to no file is an error naming the specifier — never a package shipped without a source", async () => {
+    const tree = new Map([["deploy/x/worker.ts", 'import { a } from "../../src/nowhere.js";\n']]);
+    await expect(workerSourceFiles(async (p) => tree.get(p), ["deploy/x/worker.ts"])).rejects.toThrow(
+      "deploy/x/worker.ts: imports that resolve to no file — ../../src/nowhere.js from deploy/x/worker.ts",
+    );
   });
 });
 

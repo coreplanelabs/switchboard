@@ -220,11 +220,23 @@ describe("planInit — the capability summary and the next commands", () => {
     ]);
   });
 
-  it("from the published npm package the next commands are the package's own ask and the bot from the image", () => {
+  it("from the published npm package the next commands are the package's own ask and the bot from the image; a profile adds the package's own deploy steps", () => {
     const plan = planned(minimal, { inCheckout: false, package: "@example/switchboard" });
     expect(plan.next).toEqual([
       'npx @example/switchboard ask "what can you do?"',
       'docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/example/switchboard:latest   # the bot, from the published image',
+    ]);
+    // The profile is written into the directory init runs in: from the package, that directory is where the deploy runs from.
+    const prod = planned(
+      { ...minimal, cloudflare: ACCOUNT, zone: "example.com" },
+      { inCheckout: false, package: "@example/switchboard" },
+    );
+    expect(prod.profile).toBe(true);
+    expect(prod.files.map((f) => f.path)).toEqual([ENV_PATH, CONFIG_PATH, PROFILE_PATH]);
+    expect(prod.next.slice(2)).toEqual([
+      "npx @example/switchboard deploy secrets memory",
+      "npx @example/switchboard deploy secrets bot",
+      'MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx @example/switchboard deploy all',
     ]);
   });
 
@@ -278,10 +290,10 @@ describe("planInit — refusals", () => {
     expect(refused({ ...minimal, model: "x", zone: "example.com" }).problems).toHaveLength(2);
   });
 
-  it("--cloudflare outside a checkout is unavailable: the profile and the Worker configs live in the repository", () => {
+  it("--cloudflare outside a checkout and not from the package (the container) is unavailable: the profile is written where deploy all runs from", () => {
     const r = refused({ ...minimal, cloudflare: ACCOUNT, zone: "example.com" }, { inCheckout: false });
     expect(r.code).toBe("unavailable");
-    expect(r.problems[0]).toMatch(/deploy\/profile\.json .*checkout/);
+    expect(r.problems[0]).toMatch(/deploy\/profile\.json .*checkout.*published npm package/);
   });
 
   it("an existing file is a conflict naming every file it would overwrite and --force; with --force the same files are planned", () => {

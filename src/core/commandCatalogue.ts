@@ -6,7 +6,7 @@ import type { AffectedReport } from "../deploy/affected.js";
 import type { LoadedProfile } from "../deploy/profile.js";
 import {
   computeAffectedOnHost,
-  hasNodeModules,
+  deployHostOnHost,
   hostDeployFiles,
   loadProfileOnHost,
   pushConfigOnHost,
@@ -214,7 +214,7 @@ export function buildCoreCommands(
           stream: (c) => process.stdout.write(c),
         }),
       restart: (plan) => runBotRestart(plan, { log: (l) => console.log(l), warn: (l) => console.error(l) }),
-      checkout: { hasNodeModules },
+      host: deployHostOnHost(),
       affected: wiring.affected ?? computeAffectedOnHost,
       profile: wiring.profile ?? loadProfileOnHost,
       files: hostDeployFiles,

@@ -45,3 +45,37 @@ export const PACKAGE_ROOT = located.root;
 
 /** True when this process runs from the published npm package rather than a checkout or the image. */
 export const RUNS_FROM_PUBLISHED_PACKAGE = located.kind === "assets";
+
+/** The identity of the tree the published package was built from, beside the marker in `dist/assets/`
+ *  (packages/switchboard/build.mts writes it): the package's version and the commit, so a deploy
+ *  from the package knows which commit it deploys without a checkout. Absent in a checkout and the image. */
+export const PACKAGE_SOURCE_FILE = "source.json";
+
+export interface PackageSource {
+  version: string;
+  /** The commit, `-dirty` suffixed when the package was built from a tree with uncommitted changes. */
+  commit: string;
+  builtAt: string;
+}
+
+/** Pure: the stamp's text, or the problem with it — never a guess at a version or a commit. */
+export function parsePackageSource(
+  text: string | undefined,
+): { ok: true; source: PackageSource } | { ok: false; problem: string } {
+  if (text === undefined) return { ok: false, problem: `${PACKAGE_SOURCE_FILE}: no such file in the package's assets` };
+  let raw: { version?: unknown; commit?: unknown; builtAt?: unknown } | null;
+  try {
+    raw = JSON.parse(text) as typeof raw;
+  } catch {
+    return { ok: false, problem: `${PACKAGE_SOURCE_FILE}: not JSON` };
+  }
+  const field = (key: "version" | "commit" | "builtAt"): string | undefined => {
+    const value = raw?.[key];
+    return typeof value === "string" && value !== "" ? value : undefined;
+  };
+  const [version, commit, builtAt] = [field("version"), field("commit"), field("builtAt")];
+  if (version === undefined) return { ok: false, problem: `${PACKAGE_SOURCE_FILE}: \`version\` is missing` };
+  if (commit === undefined) return { ok: false, problem: `${PACKAGE_SOURCE_FILE}: \`commit\` is missing` };
+  if (builtAt === undefined) return { ok: false, problem: `${PACKAGE_SOURCE_FILE}: \`builtAt\` is missing` };
+  return { ok: true, source: { version, commit, builtAt } };
+}

@@ -567,7 +567,8 @@ exports[`capability surfaces — minimal > web seeds: /runs (capabilities, reten
 `;
 
 exports[`deploy plan — what \`deploy plan\` prints > a bot-only profile is a one-step plan with no state Worker to push the config to 1`] = `
-"Profile: deploy/profile.bot-only.json (example); config: config/config.yaml (no state Worker in the profile — not pushed anywhere)
+"Root: /work/switchboard (a checkout)
+Profile: deploy/profile.bot-only.json (example); config: config/config.yaml (no state Worker in the profile — not pushed anywhere)
 Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD == origin/main; node_modules present in every dir
 WARNING profile: deploy/profile.bot-only.json is the EXAMPLE — this plan can be read, not deployed; write deploy/profile.json for a real installation
 Steps:
@@ -577,7 +578,8 @@ Steps:
 `;
 
 exports[`deploy plan — what \`deploy plan\` prints > the full example profile: every Worker, in the canonical order 1`] = `
-"Profile: deploy/profile.example.json (example); config: config/config.yaml → document "base" on https://switchboard-memory.example.com
+"Root: /work/switchboard (a checkout)
+Profile: deploy/profile.example.json (example); config: config/config.yaml → document "base" on https://switchboard-memory.example.com
 Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD == origin/main; node_modules present in every dir
 WARNING profile: deploy/profile.example.json is the EXAMPLE — this plan can be read, not deployed; write deploy/profile.json for a real installation
 Steps:

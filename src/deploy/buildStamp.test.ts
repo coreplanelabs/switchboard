@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { buildStamp, defineArgs, spawnOutcome, DEFINE_COMMIT, DEFINE_BUILT_AT } from "../../deploy/bin/build-stamp.mjs";
-import { buildId, injectedBuildStamp, resolveBuildStamp, UNKNOWN_COMMIT } from "./buildStamp.js";
+import {
+  buildStamp,
+  defineArgs,
+  spawnOutcome,
+  stampFromEnv,
+  DEFINE_COMMIT,
+  DEFINE_BUILT_AT,
+} from "../../deploy/bin/build-stamp.mjs";
+import { COMMIT_ENV, readBuildInfo } from "../../deploy/cloudflare/write-build.mjs";
+import { BUILD_COMMIT_ENV, buildId, injectedBuildStamp, resolveBuildStamp, UNKNOWN_COMMIT } from "./buildStamp.js";
 
 // Feature: docs/reference/specs/execution.md item 13 — every Worker script reports the
 // commit it was built from on its own /healthz, injected at deploy time. This
@@ -65,6 +73,33 @@ describe("injectedBuildStamp (no injection present)", () => {
     // Reading an undeclared identifier is a ReferenceError; only `typeof`
     // tolerates it. That this returns at all is the regression test.
     expect(injectedBuildStamp()).toEqual({ commit: UNKNOWN_COMMIT });
+  });
+});
+
+describe("the commit from the environment (a deploy from the published package has no tree to read)", () => {
+  const now = new Date("2026-09-04T19:02:01.000Z");
+  const commit = "161930af4597eb8bba9d9b72bd47ed93d6d8cf85";
+
+  it("build-stamp: SWITCHBOARD_BUILD_COMMIT set → that commit with the build time now; unset or blank → undefined, git decides", () => {
+    expect(stampFromEnv({ [DEFINE_COMMIT]: commit }, now)).toEqual({ commit, builtAt: "2026-09-04T19:02:01.000Z" });
+    expect(stampFromEnv({ [DEFINE_COMMIT]: ` ${commit}\n` }, now)?.commit).toBe(commit);
+    expect(stampFromEnv({}, now)).toBeUndefined();
+    expect(stampFromEnv({ [DEFINE_COMMIT]: "  " }, now)).toBeUndefined();
+  });
+
+  it("write-build: the same variable names the bot image's commit and git is never asked; without it the tree's commit and dirtiness are read", () => {
+    expect(COMMIT_ENV).toBe(DEFINE_COMMIT);
+    // The runner's spelling (src/, which the bot image carries) equals the scripts' (deploy/, which it does not).
+    expect(BUILD_COMMIT_ENV).toBe(DEFINE_COMMIT);
+    const asked: string[][] = [];
+    const git = (args: string[]) => {
+      asked.push(args);
+      return args[0] === "rev-parse" ? "abcdef0" : " M src/x.ts";
+    };
+    expect(readBuildInfo({ [COMMIT_ENV]: commit }, git).commit).toBe(commit);
+    expect(asked).toEqual([]);
+    expect(readBuildInfo({}, git).commit).toBe("abcdef0-dirty");
+    expect(asked.map((a) => a[0])).toEqual(["rev-parse", "status"]);
   });
 });
 

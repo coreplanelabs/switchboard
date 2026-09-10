@@ -103,7 +103,7 @@ const initOptions = z.object({
   cloudflare: account
     .optional()
     .describe(
-      "a Cloudflare account id: also write deploy/profile.json and render the Worker configs (needs --zone, and a checkout)",
+      "a Cloudflare account id: also write deploy/profile.json and render the Worker configs (needs --zone; from a checkout's root, or anywhere when this CLI is the published package)",
     ),
   zone: hostname.optional().describe("with --cloudflare: the zone the Worker hostnames live under"),
   name: workerName

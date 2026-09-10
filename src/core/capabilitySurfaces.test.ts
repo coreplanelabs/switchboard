@@ -284,7 +284,7 @@ describe("deploy plan — what `deploy plan` prints", () => {
     waitMaxMinutes: 10,
     pollSeconds: 60,
   });
-  const checkout = { hasNodeModules: () => true };
+  const checkout = { root: { mode: "checkout" as const, path: "/work/switchboard" }, hasNodeModules: () => true };
 
   it("the full example profile: every Worker, in the canonical order", () => {
     const plan = planDeploy(options(), checkout, example);

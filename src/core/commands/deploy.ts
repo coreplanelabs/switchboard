@@ -5,11 +5,12 @@ import {
   DEPLOY_ORDER,
   formatPlan,
   planDeploy,
-  type CheckoutProbe,
+  type DeployHost,
   type DeployOptions,
   type DeployPlan,
   type WorkerName,
 } from "../../deploy/plan.js";
+import { displayPath } from "../../deploy/operatorRoot.js";
 import type { LoadedProfile } from "../../deploy/profile.js";
 import { planRestart, type RestartPlan } from "../../deploy/restart.js";
 import {
@@ -62,13 +63,14 @@ export interface DeployCommandDeps {
     run(plan: DeployPlan): Promise<DeployRunResult>;
     /** `deploy restart`: POST the admin route, wait out a refusal, gate on a later `startedAt` (src/deploy/run.ts `runBotRestart`). */
     restart(plan: RestartPlan): Promise<RestartRunResult>;
-    /** The checkout the plan describes — which step dirs lack `node_modules` (`checks.nodeModulesMissing`). */
-    checkout: CheckoutProbe;
+    /** Where the deploy runs from — a checkout or the published package in the operator's directory (`plan.root`) —
+     *  and which step dirs lack their install (`checks.nodeModulesMissing`) (src/deploy/host.ts). */
+    host: DeployHost;
     /** `--affected`: which Workers this tree needs deployed, judged per Worker against what it serves (or `base`) — src/deploy/affected.ts over the host (src/deploy/run.ts `computeAffectedOnHost`). */
     affected(opts: { base?: string }): Promise<AffectedReport>;
     /** The installation the plan is for (src/deploy/profile.ts): `deploy/profile.json`, else the example — which `deploy all` refuses. Throws (→ `unavailable`) when the file is invalid. */
     profile(): Promise<LoadedProfile>;
-    /** `deploy init`'s file access, repo-relative: the templates and rendered configs under deploy/ (src/deploy/run.ts `hostDeployFiles`). */
+    /** `deploy init`'s file access by tree path: the templates (shipped) and rendered configs (the work area) under deploy/ (src/deploy/run.ts `hostDeployFiles`). */
     files: {
       read(path: string): Promise<string | undefined>;
       write(path: string, text: string): Promise<void>;
@@ -163,7 +165,7 @@ async function computePlan(
   const affected = options.affected
     ? await deps.deploy.affected(options.base !== undefined ? { base: options.base } : {})
     : undefined;
-  const plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.checkout, loaded);
+  const plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.host, loaded);
   if (plan.steps.length === 0 && !affected)
     throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
   return plan;
@@ -296,6 +298,7 @@ const initOptions = z.object({
 type InitStatus = "unchanged" | "written" | "stale" | "missing";
 interface InitOutput {
   profile: { origin: LoadedProfile["origin"]; path: string };
+  /** Each rendered file where it lands, relative to the root: `deploy/…` in a checkout, `.switchboard/deploy/…` from the package. */
   files: { path: string; status: InitStatus }[];
 }
 
@@ -336,7 +339,7 @@ export const deployInit = defineCommand({
         await deps.deploy.files.write(f.path, f.text);
         status = "written";
       }
-      files.push({ path: f.path, status });
+      files.push({ path: displayPath(deps.deploy.host.root.mode, f.path), status });
     }
     const drift = files.filter((f) => f.status === "stale" || f.status === "missing");
     if (drift.length > 0)
@@ -444,6 +447,7 @@ const secretsOptions = z.object({
 
 interface SecretsOutput {
   worker: WorkerName;
+  /** The Worker directory wrangler ran in, relative to the root (`.switchboard/deploy/…` from the package). */
   dir: string;
   /** Where the values were read from, with `<NAME>` for the secret — never a value. */
   source: string;
@@ -513,7 +517,7 @@ export const deploySecrets = defineCommand({
     }
     const output: SecretsOutput = {
       worker,
-      dir: plan.dir,
+      dir: displayPath(deps.deploy.host.root.mode, plan.dir),
       source: where,
       put: plan.puts,
       skippedOptional: plan.skippedOptional,

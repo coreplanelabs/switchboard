@@ -15,7 +15,7 @@ import {
   SANDBOX_CONTAINER_CLASS,
   WORKER_SPECS,
   workersFor,
-  type CheckoutProbe,
+  type DeployHost,
   type DeployOptions,
   type DeployPlan,
 } from "./plan.js";
@@ -46,9 +46,10 @@ const DEFAULTS: DeployOptions = {
   waitMaxMinutes: 30,
   pollSeconds: 60,
 };
-const installed: CheckoutProbe = { hasNodeModules: () => true };
-const plan = (opts: Partial<DeployOptions> = {}, checkout: CheckoutProbe = installed, loaded: LoadedProfile = LOADED) =>
-  planDeploy({ ...DEFAULTS, ...opts }, checkout, loaded);
+const HOST_ROOT = { mode: "checkout" as const, path: "/work/switchboard" };
+const installed: DeployHost = { root: HOST_ROOT, hasNodeModules: () => true };
+const plan = (opts: Partial<DeployOptions> = {}, host: DeployHost = installed, loaded: LoadedProfile = LOADED) =>
+  planDeploy({ ...DEFAULTS, ...opts }, host, loaded);
 
 describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
   it("is state Worker → bot → resident → sandbox, each once, each with its dir and command", () => {
@@ -333,11 +334,41 @@ describe("planDeploy", () => {
     });
   });
 
+  it("the plan carries and prints where it runs from: a checkout at its root, with the tree checks on", () => {
+    const p = plan();
+    expect(p.root).toEqual(HOST_ROOT);
+    const text = formatPlan(p);
+    expect(text.split("\n")[0]).toBe("Root: /work/switchboard (a checkout)");
+    expect(text).toContain("Checks: wrangler account = ");
+    expect(text).toContain("; clean tree; HEAD == origin/main; ");
+  });
+
+  it("from the published package there is no tree: both git checks are off whatever --allow-branch says, the root is the operator's directory at the package's version, and the text says the sources are the package's — never `origin/main`", () => {
+    const fromPackage: DeployHost = {
+      root: { mode: "package", path: "/srv/switchboard", version: "1.12.0" },
+      hasNodeModules: (dir) => dir === "deploy/cloudflare-memory",
+    };
+    const p = plan({}, fromPackage);
+    expect(p.checks).toMatchObject({ account: TEST_PROFILE.account, cleanTree: false, atOriginMain: false });
+    expect(plan({ allowBranch: true }, fromPackage).checks).toMatchObject({ cleanTree: false, atOriginMain: false });
+    expect(p.root).toEqual({ mode: "package", path: "/srv/switchboard", version: "1.12.0" });
+    // The steps themselves are the same steps: the same dirs, commands and gates.
+    expect(p.steps).toEqual(plan().steps);
+    const text = formatPlan(p);
+    expect(text.split("\n")[0]).toBe("Root: /srv/switchboard (the published package 1.12.0)");
+    expect(text).toContain(
+      `Checks: wrangler account = ${TEST_PROFILE.account}; Worker sources are the package's (version 1.12.0), materialised under .switchboard/ — no git; deploy/cloudflare, deploy/cloudflare-resident, deploy/cloudflare-sandbox not installed under .switchboard/ — the runner will \`npm ci\` them there first`,
+    );
+    expect(text).not.toContain("origin/main");
+    expect(text).not.toContain("clean tree");
+  });
+
   it("the node_modules check tells the truth: every planned dir is probed, the missing ones are named and the runner's `npm ci` announced", () => {
     expect(plan().checks.nodeModulesMissing).toEqual([]);
     expect(formatPlan(plan())).toContain("; node_modules present in every dir");
     const probed: string[] = [];
-    const partial: CheckoutProbe = {
+    const partial: DeployHost = {
+      root: HOST_ROOT,
       hasNodeModules: (dir) => {
         probed.push(dir);
         return dir === "deploy/cloudflare-memory" || dir === "deploy/cloudflare";

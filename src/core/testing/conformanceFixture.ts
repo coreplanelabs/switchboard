@@ -485,8 +485,8 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
           startedAt: "2026-08-30T10:00:41.000Z",
           waitedMs: 41_000,
         }),
-      // Probes of the checkout and the fleet, not executors: not recorded in `executed`.
-      checkout: { hasNodeModules: () => true },
+      // Probes of the host and the fleet, not executors: not recorded in `executed`.
+      host: { root: { mode: "checkout", path: "/work/switchboard" }, hasNodeModules: () => true },
       profile: async () => ({ profile: TEST_PROFILE, origin: "profile", path: "deploy/profile.json" }),
       // `deploy init`: every template is the fixture template and every rendered file is already its
       // render (so `--check` passes); a write is the command's effect and is recorded.

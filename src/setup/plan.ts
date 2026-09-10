@@ -117,12 +117,15 @@ export function planInit(answers: InitAnswers, templates: InitTemplates, world: 
   const problems = answerProblems(answers);
   if (problems.length > 0) return { ok: false, code: "invalid_input", problems };
   const wantsProfile = answers.cloudflare !== undefined;
-  if (wantsProfile && !world.inCheckout)
+  // The profile is written where `deploy all` runs from: the root of a checkout, or — from the
+  // published package — the directory init runs in, which becomes the operator's deploy directory.
+  // The container image is neither.
+  if (wantsProfile && !world.inCheckout && world.package === undefined)
     return {
       ok: false,
       code: "unavailable",
       problems: [
-        `${PROFILE_PATH} and the Worker configs live in the repository: run init from the root of a checkout to write them (the local files need no checkout)`,
+        `${PROFILE_PATH} and the Worker configs are written where \`deploy all\` runs from: the root of a checkout, or any directory when this CLI is the published npm package — not from here (the local files need neither)`,
       ],
     };
 
@@ -313,23 +316,29 @@ function profileFile(
 function nextCommands(world: InitWorld, profile: boolean): string[] {
   const image = `${world.image}:latest`;
   const bot = `docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ${image}`;
-  // From the npm package: `ask` is the same package; the bot process is not in it — that is the image.
-  if (world.package !== undefined)
-    return [`npx ${world.package} ask "what can you do?"`, `${bot}   # the bot, from the published image`];
+  const deploySteps = (cli: string) => [
+    `${cli} deploy secrets memory`,
+    `${cli} deploy secrets bot`,
+    `MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" ${cli} deploy all`,
+  ];
+  // From the npm package: `ask` and the deploy commands are the same package, run from this
+  // directory; the bot process is not in it — that is the image.
+  if (world.package !== undefined) {
+    const cli = `npx ${world.package}`;
+    return [
+      `${cli} ask "what can you do?"`,
+      `${bot}   # the bot, from the published image`,
+      ...(profile ? deploySteps(cli) : []),
+    ];
+  }
   if (!world.inCheckout)
     return [`docker run --rm -it --env-file .env -v "$PWD/config:/app/config:ro" ${image} ask "what can you do?"`, bot];
-  const next = [
+  return [
     'npm run cli -- ask "what can you do?"',
     "npx tsx src/index.ts",
     `docker compose up -d   # the same bot from the published image ${image}`,
+    ...(profile ? deploySteps("npm run cli --") : []),
   ];
-  if (profile)
-    next.push(
-      "npm run cli -- deploy secrets memory",
-      "npm run cli -- deploy secrets bot",
-      'MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npm run cli -- deploy all',
-    );
-  return next;
 }
 
 function definedOnly(env: Record<string, string | undefined>): Record<string, string> {

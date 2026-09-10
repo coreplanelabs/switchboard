@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { importSpecifiers, resolveImportCandidates } from "../deploy/affected.js";
 import { PACKAGE_ROOT } from "../packageRoot.js";
 
 // Feature: docs/reference/specs/init.md — the published image installs too:
@@ -48,6 +49,20 @@ describe("docker-entrypoint.sh", () => {
 
 describe("Dockerfile", () => {
   const dockerfile = readFileSync(join(PACKAGE_ROOT, "Dockerfile"), "utf8");
+
+  it("copies src/ alone for the bot's build, so no production module under src/ imports a file outside it — deploy/, packages/ and scripts/ are not in the image and `npm run build` there would fail on the missing file", () => {
+    expect(dockerfile).toMatch(/^COPY src \.\/src$/m);
+    const escaping: string[] = [];
+    for (const rel of readdirSync(join(PACKAGE_ROOT, "src"), { recursive: true, encoding: "utf8" })) {
+      if (!rel.endsWith(".ts") || rel.endsWith(".test.ts") || rel.split(sep).includes("testing")) continue;
+      const file = join("src", rel);
+      for (const spec of importSpecifiers(readFileSync(join(PACKAGE_ROOT, file), "utf8"))) {
+        const first = resolveImportCandidates(file, spec)[0];
+        if (first !== undefined && !first.startsWith("src/")) escaping.push(`${file} → ${spec}`);
+      }
+    }
+    expect(escaping).toEqual([]);
+  });
 
   it("installs the entrypoint as `switchboard` and has no CMD of its own — the entrypoint decides", () => {
     expect(dockerfile).toMatch(/^COPY --chmod=755 docker-entrypoint\.sh \/usr\/local\/bin\/switchboard$/m);
