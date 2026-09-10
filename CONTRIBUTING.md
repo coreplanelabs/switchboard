@@ -204,8 +204,9 @@ type(scope): what a reader can now do or expect
   minors: `release-please-config.json` pins the next version (`release-as`),
   the check refuses a `!` while the pin is set, and a change an installation
   must act on ships as a minor with its section under the pinned version in
-  the migration notes. A test holds the pin ahead of the released version, so
-  it cannot be left behind once its release is cut.
+  the migration notes. A test keeps the pin from falling behind the released
+  version (the release PR itself carries the two equal); after the release it
+  names is cut, the pin is moved to the next minor or removed.
 
 The `title` check enforces all of it on every PR — grammar, type list, scope
 list, the migration section behind a `!` — and gives the same verdict locally:
