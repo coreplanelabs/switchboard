@@ -18,7 +18,7 @@ npx tsx src/cli.ts <group> <verb> [args…] [--kebab-option value…] [--json]
 npx tsx src/cli.ts ask [--thread <key>] "<request>"
 ```
 
-Not a registered command — a **channel**, exactly like Slack, just printing to your terminal instead. Directives (`agent:`, `model:`, `effort:`) work identically. Use `--thread` to simulate a follow-up in an existing thread (stickiness applies).
+Not a registered command — a **channel**, exactly like Slack, just printing to your terminal instead. Directives (`agent:`, `model:`, `effort:`) work identically. Use `--thread` to simulate a follow-up in an existing thread (stickiness applies). The answer goes to stdout and nothing else does — the status lines and the process log (`[run] …`) go to stderr — and the process exits 1 when the run did not complete — a refused key, a failed tool — so a script can tell an answer from a failure.
 
 ```
 npx tsx src/cli.ts start
@@ -122,7 +122,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
-| `setup init [--organization <string>] [--anthropic-key <string>] [--openai-compatible <string>] [--model <string>] [--model-key <string>] [--slack-app-token <string>] [--slack-bot-token <string>] [--github-app-id <string>] [--github-installation-id <string>] [--github-private-key-file <string>] [--cloudflare <string>] [--zone <string>] [--name <string>] [--force] [--dry-run]` | The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run previews with secrets masked. | CLI only |
+| `setup init [--organization <string>] [--anthropic-key <string>] [--openai-compatible <string>] [--model <string>] [--model-key <string>] [--slack-app-token <string>] [--slack-bot-token <string>] [--github-app-id <string>] [--github-installation-id <string>] [--github-private-key-file <string>] [--cloudflare <string>] [--zone <string>] [--name <string>] [--force] [--dry-run]` | The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run writes nothing and previews with secrets masked, existing files or not. | CLI only |
 
 <!-- /generated:cli-commands -->
 

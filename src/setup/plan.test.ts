@@ -322,6 +322,22 @@ describe("planInit — refusals", () => {
   });
 });
 
+describe("the example `.env` is derived from", () => {
+  it("names every credential the accounts guide's table says the bot reads from its environment — commented out or not — so `init` has a line to fill and a reader finds the key where the docs sent them", () => {
+    const guide = readFileSync("docs/how-to/set-up-accounts.md", "utf8");
+    const table = guide.split("\n").filter((line) => line.startsWith("| ") && !line.startsWith("| Account"));
+    const documented = table.flatMap((row) => [...row.matchAll(/`([A-Z][A-Z0-9_]+)`/g)].map((m) => m[1]));
+    expect(documented).toContain("BRAVE_SEARCH_API_KEY");
+    // The Cloudflare token is the deploy tooling's (wrangler reads it), not the bot process's.
+    const botReads = documented.filter((name) => name !== "CLOUDFLARE_API_TOKEN");
+    const exampleNames = TEMPLATES.env
+      .split("\n")
+      .map((line) => /^(?:#\s*)?([A-Z][A-Z0-9_]*)=/.exec(line)?.[1])
+      .filter((name): name is string => name !== undefined);
+    for (const name of botReads) expect(exampleNames, `${name} has no line in .env.example`).toContain(name);
+  });
+});
+
 describe("renderEnv and maskedPreview", () => {
   const template = [
     "# Slack",

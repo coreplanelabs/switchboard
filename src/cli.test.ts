@@ -16,8 +16,10 @@ import { InMemoryRunStore } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "./core/capabilities.js";
 import {
+  askExitCode,
   bindBotConfig,
   CLI_CALLER,
+  ConsoleIO,
   cliCapabilities,
   loadBotConfig,
   missingBotConfig,
@@ -160,8 +162,12 @@ describe("parseCliArgv", () => {
     expect(parseCliArgv([], commands)).toEqual({ kind: "catalogue" });
     expect(parseCliArgv(["help"], commands)).toEqual({ kind: "catalogue" });
     expect(parseCliArgv(["--help"], commands)).toEqual({ kind: "catalogue" });
-    expect(parseCliArgv(["runs", "stop", "--help"], commands)).toEqual({ kind: "command-help", id: "runs.stop" });
-    const out = await runCli(commands, { kind: "command-help", id: "runs.stop" }, CLI_CALLER);
+    expect(parseCliArgv(["runs", "stop", "--help"], commands)).toEqual({
+      kind: "command-help",
+      id: "runs.stop",
+      spelled: "runs stop",
+    });
+    const out = await runCli(commands, { kind: "command-help", id: "runs.stop", spelled: "runs stop" }, CLI_CALLER);
     expect(out.exitCode).toBe(0);
     expect(out.stdout.split("\n")[1]).toBe("usage: runs stop <id> --mode <soft|hard>");
     const cat = await runCli(commands, { kind: "catalogue" }, CLI_CALLER);
@@ -241,6 +247,32 @@ describe("parseCliArgv — the `start` built-in (the bot process, not a registry
       "SIGINT",
     ])
       expect(out.stdout, fact).toContain(fact);
+  });
+});
+
+describe("askExitCode — what the `ask` process exits with (the ConsoleIO channel's receipt)", () => {
+  it("no run (a config reply such as `help`) or a completed run is 0; a run that ended failed or stopped is 1 — the code every failed command exits with", () => {
+    expect(askExitCode(undefined)).toBe(0);
+    expect(askExitCode({ id: "r1", status: "completed" })).toBe(0);
+    expect(askExitCode({ id: "r1", status: "failed" })).toBe(1);
+    expect(askExitCode({ id: "r1", status: "stopped_soft" })).toBe(1);
+    expect(askExitCode({ id: "r1", status: "stopped_hard" })).toBe(1);
+  });
+
+  it("ConsoleIO keeps the receipt the core hands it when the run finishes; none before", () => {
+    const io = new ConsoleIO();
+    expect(io.finished).toBeUndefined();
+    io.runFinished({ id: "r1", status: "failed" });
+    expect(io.finished).toEqual({ id: "r1", status: "failed" });
+  });
+
+  it("ConsoleIO writes the reply to the stream it is given — stdout in the process — never through console, which the ask process points at stderr", async () => {
+    const chunks: string[] = [];
+    const io = new ConsoleIO({
+      write: (chunk: string) => (chunks.push(chunk), true),
+    } as unknown as NodeJS.WritableStream);
+    await io.reply("four");
+    expect(chunks.join("")).toBe("\nfour\n");
   });
 });
 
@@ -467,8 +499,25 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
       id: "setup.init",
       input: { options: { organization: "acme", dryRun: true } },
     });
-    expect(parseCliArgv(["init", "--help"], commands)).toEqual({ kind: "command-help", id: "setup.init" });
-    expect(parseCliArgv(["init", "--bogus"], commands)).toMatchObject({ kind: "invalid", code: "invalid_input" });
+    // Its help and its usage hints name the command as typed: `init`, not the registry's `setup init`.
+    expect(parseCliArgv(["init", "--help"], commands)).toEqual({
+      kind: "command-help",
+      id: "setup.init",
+      spelled: "init",
+    });
+    const initHelp = await runCli(commands, { kind: "command-help", id: "setup.init", spelled: "init" }, CLI_CALLER);
+    expect(initHelp.stdout.split("\n")[1]).toMatch(/^usage: init \[--organization <string>\]/);
+    expect(initHelp.stdout).not.toContain("setup init");
+    expect(parseCliArgv(["init", "--bogus"], commands)).toMatchObject({
+      kind: "invalid",
+      code: "invalid_input",
+      error: expect.stringMatching(/^unknown option --bogus\nusage: init \[--organization/),
+    });
+    expect(parseCliArgv(["setup", "init", "--help"], commands)).toEqual({
+      kind: "command-help",
+      id: "setup.init",
+      spelled: "setup init",
+    });
     expect(USAGE).toContain("init [--option value…]");
     // The usage text spells the program the way it was started: the checkout's tsx form, else the bin's name.
     expect(programName("/repo/src/cli.ts")).toBe("npx tsx src/cli.ts");
@@ -477,7 +526,11 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     expect(programName(undefined)).toBe("switchboard");
     // Only a BARE `help` is the catalogue: `help show` is the registered command (the conformance suite found it unreachable).
     expect(parseCliArgv(["help", "show"], commands)).toMatchObject({ kind: "command", id: "help.show" });
-    expect(parseCliArgv(["help", "show", "--help"], commands)).toEqual({ kind: "command-help", id: "help.show" });
+    expect(parseCliArgv(["help", "show", "--help"], commands)).toEqual({
+      kind: "command-help",
+      id: "help.show",
+      spelled: "help show",
+    });
     expect(parseCliArgv(["env", "bootstrap", "--env", "uat", "--service", "api"], commands)).toMatchObject({
       kind: "command",
       id: "env.bootstrap",

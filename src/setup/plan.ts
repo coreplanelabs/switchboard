@@ -61,6 +61,7 @@ export interface InitTemplates {
 export interface InitWorld {
   /** Planned paths that already exist (relative to the working directory). */
   existing: ReadonlySet<string>;
+  /** An existing planned path is no conflict: `--force`, or a dry run that writes nothing. */
   force: boolean;
   /** True when the working directory is the repository root — where `deploy/` lives and `deploy all` runs. */
   inCheckout: boolean;

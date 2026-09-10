@@ -216,13 +216,19 @@ export function setDotted(target: Record<string, unknown>, path: string[], value
  * declared arguments in order; a trailing `rest` argument takes every remaining
  * token joined by single spaces. A rejection is `invalid` (code
  * `invalid_input`); its message names the flag or the argument, never a value,
- * and ends with the usage line.
+ * and ends with the usage line. `spelled` is the command's name as the caller
+ * typed it — `<group> <verb>` unless the surface offers another spelling (the
+ * CLI's `init`) — and is what the usage hint calls the command.
  */
-export function parseInvocation(cmd: CommandShape, tokens: readonly string[]): GrammarResult {
+export function parseInvocation(
+  cmd: CommandShape,
+  tokens: readonly string[],
+  spelled: string = chatForm(cmd.id),
+): GrammarResult {
   const invalid = (error: string): GrammarRejection => ({
     kind: "invalid",
     code: "invalid_input",
-    error: `${error}\nusage: ${usageLine(cmd)}`,
+    error: `${error}\nusage: ${usageLine(cmd, spelled)}`,
   });
   const shape = cmd.options?.shape ?? {};
   const positional: string[] = [];
@@ -279,8 +285,8 @@ export function parseInvocation(cmd: CommandShape, tokens: readonly string[]): G
   } else if (positional.length > declared.length) {
     return invalid(
       declared.length === 0
-        ? `${chatForm(cmd.id)} takes no arguments`
-        : `unexpected argument: ${chatForm(cmd.id)} takes at most ${declared.length}`,
+        ? `${spelled} takes no arguments`
+        : `unexpected argument: ${spelled} takes at most ${declared.length}`,
     );
   }
   const missing = declared.find((a, i) => args[i] === undefined && !acceptsUndefined(a.schema));
@@ -329,9 +335,11 @@ export function typeHint(schema: z.ZodType): string {
   return js.type ?? "value";
 }
 
-/** `runs stop <id> --mode <soft|hard>`; optional parts in brackets, free text as `<text…>`. */
-export function usageLine(cmd: CommandShape): string {
-  const parts = [chatForm(cmd.id)];
+/** `runs stop <id> --mode <soft|hard>`; optional parts in brackets, free text
+ *  as `<text…>`. `spelled` names the command as the caller typed it (default:
+ *  `<group> <verb>`; the CLI's one-word `init`). */
+export function usageLine(cmd: CommandShape, spelled: string = chatForm(cmd.id)): string {
+  const parts = [spelled];
   for (const arg of cmd.args ?? []) {
     const name = arg.rest ? `${arg.name}…` : arg.name;
     parts.push(acceptsUndefined(arg.schema) ? `[${name}]` : `<${name}>`);
@@ -367,11 +375,12 @@ export function helpRows(cmd: CommandShape): { arguments: HelpRow[]; options: He
 }
 
 /** The whole help for one command, terminal shape: description, usage, one
- *  column-aligned line per argument and option (zod `.describe()` texts). */
-export function helpText(cmd: CommandShape): string {
+ *  column-aligned line per argument and option (zod `.describe()` texts).
+ *  `spelled` names the command in the usage line as the caller typed it. */
+export function helpText(cmd: CommandShape, spelled: string = chatForm(cmd.id)): string {
   const rows = helpRows(cmd);
   const width = Math.max(0, ...[...rows.arguments, ...rows.options].map((r) => r.form.length));
-  const lines = [cmd.describe, `usage: ${usageLine(cmd)}`];
+  const lines = [cmd.describe, `usage: ${usageLine(cmd, spelled)}`];
   for (const [header, section] of [
     ["arguments:", rows.arguments],
     ["options:", rows.options],

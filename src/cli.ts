@@ -39,12 +39,15 @@
 // an unknown command, a malformed `ask`) or `invalid_input`, whether the
 // grammar refused the tail (`error (invalid_input): unknown option --x` + the
 // usage line) or the registry refused the parsed input (the same code every
-// surface returns for that fault); 1 the command (or dispatch) ran and failed
-// with any other code. The caller is
+// surface returns for that fault); 1 the command ran and failed with any other
+// code — or, for `ask`, the run did not complete (a provider refusal such as a
+// 401 on the key, a tool failure, a stop): a script can tell an answer from a
+// failure. The caller is
 // `cli:local` holding every scope — whoever can run this process can
 // already read the config and the data directory.
 
 import "./loadEnv.js";
+import { Console } from "node:console";
 import { existsSync } from "node:fs";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
@@ -61,14 +64,7 @@ import {
   type CommandInvoker,
   type InvokeErrorCode,
 } from "./core/commandRegistry.js";
-import {
-  catalogueText,
-  chatForm,
-  cliWords,
-  helpText,
-  parseInvocation,
-  type GrammarRejection,
-} from "./core/commandSurface.js";
+import { catalogueText, cliWords, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
 import { dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { startRequestRoot } from "./core/requestTrace.js";
 import { systemClock } from "./core/trace/clock.js";
@@ -80,7 +76,7 @@ import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
 import { residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
-import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
+import type { ChannelIO, RunReceipt, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
@@ -139,8 +135,8 @@ export const CLI_SHORTHANDS: Readonly<Record<string, string>> = { init: "setup.i
 export type CliInvocation =
   /** A registry command, bound by the shared grammar. */
   | { kind: "command"; id: string; input: CommandInput; json: boolean }
-  /** `<group> <verb> --help`: the command's derived help. */
-  | { kind: "command-help"; id: string }
+  /** `<group> <verb> --help`: the command's derived help, naming the command as typed (`spelled`: `runs stop`, or the shorthand `init`). */
+  | { kind: "command-help"; id: string; spelled: string }
   /** `help` / `--help` / no arguments: the catalogue. */
   | { kind: "catalogue" }
   /** The built-in harness: dispatch `text` on `threadKey`. */
@@ -172,7 +168,9 @@ export function parseCliArgv(
     return { kind: "catalogue" };
   if (argv[0] === "ask") return parseAsk(argv.slice(1), now);
   if (argv[0] === "start") return parseStart(argv.slice(1));
+  // A shorthand is the long form to the grammar; help and usage hints keep the word as typed.
   const shorthand = CLI_SHORTHANDS[argv[0]];
+  const spelledShort = shorthand === undefined ? undefined : argv[0];
   if (shorthand !== undefined) argv = [...cliWords(shorthand), ...argv.slice(1)];
   const json = argv.includes("--json");
   const rest = argv.filter((a) => a !== "--json");
@@ -180,16 +178,17 @@ export function parseCliArgv(
   if (!group || !verb || !WORD.test(group) || !WORD.test(verb))
     return { kind: "usage", error: `${USAGE}\n  expected <group> <verb>` };
   const id = `${group}.${verb}`;
+  const spelled = spelledShort ?? `${group} ${verb}`;
   const cmd = commands.get(id);
   if (!cmd || !CommandRegistry.exposedTo(cmd, "cli"))
     return {
       kind: "usage",
       error: `${USAGE}\n  unknown command: ${group} ${verb}\n\ncommands:\n${cliCatalogue(commands)}`,
     };
-  const bound = parseInvocation(cmd, tail);
+  const bound = parseInvocation(cmd, tail, spelled);
   switch (bound.kind) {
     case "help":
-      return { kind: "command-help", id };
+      return { kind: "command-help", id, spelled };
     case "invalid":
       return bound;
     case "invoke":
@@ -302,17 +301,32 @@ export async function runCli(
       return { exitCode: 0, stdout: startHelpText(PROGRAM), stderr: "" };
     case "command-help": {
       const cmd = commands.get(parsed.id);
-      return { exitCode: 0, stdout: cmd ? helpText(cmd) : `unknown command: ${chatForm(parsed.id)}`, stderr: "" };
+      return {
+        exitCode: 0,
+        stdout: cmd ? helpText(cmd, parsed.spelled) : `unknown command: ${parsed.spelled}`,
+        stderr: "",
+      };
     }
     case "command":
       return runCommand(commands, parsed, caller, opts);
   }
 }
 
-/** The harness channel: replies to stdout, status lines to stderr, no history (one-shot). */
-class ConsoleIO implements ChannelIO {
+/** The harness channel: the reply to `out` (stdout), status lines to stderr,
+ *  no history (one-shot). The reply is written to the stream directly, never
+ *  through `console` — the `ask` process points `console` at stderr so the
+ *  core's process log stays off stdout (`main`). */
+export class ConsoleIO implements ChannelIO {
+  /** The receipt of the run this request started, once it finished — undefined
+   *  before that, and forever when no run was started (a config reply such as
+   *  `help`, a refusal before a run existed). */
+  finished: RunReceipt | undefined;
+  constructor(private readonly out: NodeJS.WritableStream = process.stdout) {}
   async reply(text: string): Promise<void> {
-    console.log("\n" + text);
+    this.out.write("\n" + text + "\n");
+  }
+  runFinished(receipt: RunReceipt): void {
+    this.finished = receipt;
   }
   async status(initial: StatusUpdate): Promise<StatusHandle> {
     console.error(initial.title);
@@ -325,6 +339,14 @@ class ConsoleIO implements ChannelIO {
   async history(): Promise<[]> {
     return [];
   }
+}
+
+/** What the `ask` process exits with: 1 when the run it started ended in any
+ *  state but `completed` — the code a command that ran and failed exits with
+ *  (`exitCodeFor`), so a shell reads a refused key, a failed tool or a stop the
+ *  same way; 0 for an answer, and for a request that started no run. */
+export function askExitCode(finished: RunReceipt | undefined): 0 | 1 {
+  return finished === undefined || finished.status === "completed" ? 0 : 1;
 }
 
 /** The bot config, loaded on first use — `deploy.*`, `env.*`, `friction
@@ -530,6 +552,11 @@ async function main(): Promise<void> {
   }
 
   const { bot, mcpWiring } = wiring();
+  // The core writes its process log — `[run] …`, `[event] …`, `[done] …` — with
+  // `console.log`: in the bot that IS the container's log. Here stdout is the
+  // answer, so from this point every `console` line goes to stderr beside the
+  // status lines; the reply reaches stdout through `ConsoleIO`'s own stream.
+  globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
   const { config, runStore } = await bot();
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
@@ -572,14 +599,17 @@ async function main(): Promise<void> {
   // The request's root (docs/reference/specs/tracing.md): the CLI's receipt is now.
   const receivedAt = systemClock();
   const trace = startRequestRoot(deps, { channel: "cli", receivedAt });
+  const io = new ConsoleIO();
   await dispatch(
     deps,
     { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text, receivedAt },
-    new ConsoleIO(),
+    io,
     { trace },
   );
   // Wait for the record write to settle before exiting rather than dropping it.
   await runHistoryWriter.settled();
+  // The exit code is set, not forced: the process ends when its last write has drained.
+  process.exitCode = askExitCode(io.finished);
 }
 
 // Run only when invoked as a script (tsx/node src/cli.ts, the `switchboard`

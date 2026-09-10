@@ -213,6 +213,16 @@ describe("parseInvocation — the one grammar", () => {
       code: "invalid_input",
       error: expect.stringContaining("given twice"),
     });
+    // The words the caller typed for the command name the usage hint — a
+    // one-word spelling (`init` for `setup init`) shows as typed, never the id's.
+    expect(parseInvocation(stop, ["abc", "--bogus"], "stop")).toMatchObject({
+      kind: "invalid",
+      error: "unknown option --bogus\nusage: stop <id> --mode <soft|hard>",
+    });
+    expect(parseInvocation(propose, ["please"], "propose")).toMatchObject({
+      kind: "invalid",
+      error: expect.stringMatching(/^propose takes no arguments\nusage: propose /),
+    });
     expect(parseInvocation(stop, ["abc", "-m", "soft"])).toMatchObject({
       kind: "invalid",
       code: "invalid_input",
@@ -321,6 +331,12 @@ describe("help", () => {
     expect(usageLine(propose)).toBe(
       "friction propose [--dry-run] [--top <integer>] [--min-runs <integer>] [--repo <string>] [--models <object>]",
     );
+  });
+
+  it("usageLine and helpText name the command as the caller spelled it when told to — the shorthand's usage line reads `init …`, not `setup init …`", () => {
+    expect(usageLine(stop, "stop")).toBe("stop <id> --mode <soft|hard>");
+    expect(helpText(stop, "stop").split("\n")[1]).toBe("usage: stop <id> --mode <soft|hard>");
+    expect(helpText(stop, "stop").split("\n").slice(2)).toEqual(helpText(stop).split("\n").slice(2));
   });
 
   it("helpText lists the description, usage, arguments and options with their zod descriptions", () => {
