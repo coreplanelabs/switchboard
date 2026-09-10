@@ -20,6 +20,9 @@ export interface ReviewAbridgeDeps {
 export const POLL_INTERVAL_MS = 3000;
 /** Polls before the page stops waiting (the run's own budget is shorter). */
 export const MAX_POLLS = 200;
+/** Pages of the record the page reads before calling it stuck (the service
+ *  pages 500 events at most; a record is thousands of events at the outside). */
+export const MAX_PAGES = 50;
 
 export interface ReviewAbridge extends AbridgeControl {
   /** Stop polling — the page is going away. */
@@ -41,6 +44,11 @@ export function createReviewAbridge(
   const { fetch, delay } = { ...defaultDeps, ...deps };
   const control = reactive<{ state: AbridgeState }>({ state: { state: "absent" } });
   let disposed = false;
+  /** The last failure was the SERVER's `failed` state — a stored one, which
+   *  the command only recomputes on `force`. A transport or page-side failure
+   *  is retried without it: the command's idempotency answers a stored
+   *  artifact rather than spending a new model call. */
+  let serverFailed = false;
 
   async function post(force: boolean): Promise<Answer> {
     const res = await fetch("/api/review.abridge", {
@@ -54,23 +62,29 @@ export function createReviewAbridge(
     return body ?? {};
   }
 
-  /** Read the record page by page into the sink; true once a meat diff went by. */
-  async function readRecord(): Promise<boolean> {
+  /** Read the record page by page into the sink. `found` once a meat diff went
+   *  by; `stuck` when the cursor stood still or the pages ran past the bound;
+   *  `disposed` when the page went away mid-read — nothing reached the sink after. */
+  async function readRecord(): Promise<"found" | "missing" | "stuck" | "disposed"> {
     let found = false;
     let afterSeq: number | undefined;
-    for (;;) {
+    for (let pages = 0; pages < MAX_PAGES; pages++) {
       const query = `id=${encodeURIComponent(runId)}${afterSeq !== undefined ? `&after-seq=${afterSeq}` : ""}`;
       const res = await fetch(`/api/runs.events?${query}`, { credentials: "same-origin" });
+      if (disposed) return "disposed";
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const page = (await res.json()) as { events?: unknown[]; nextAfterSeq?: number };
+      if (disposed) return "disposed";
       for (const e of page.events ?? []) {
         sink(e);
         const o = e as { type?: unknown; artifact?: unknown; poweredBy?: unknown };
         if (o.type === "review_artifact" && o.artifact === "reading_diff" && o.poweredBy === "meat") found = true;
       }
-      if (typeof page.nextAfterSeq !== "number") return found;
+      if (typeof page.nextAfterSeq !== "number") return found ? "found" : "missing";
+      if (afterSeq !== undefined && page.nextAfterSeq <= afterSeq) return "stuck";
       afterSeq = page.nextAfterSeq;
     }
+    return "stuck";
   }
 
   async function run(force: boolean): Promise<void> {
@@ -78,6 +92,7 @@ export function createReviewAbridge(
       let answer = await post(force);
       for (let polls = 0; answer.state === "running"; polls++) {
         if (polls >= MAX_POLLS) {
+          serverFailed = false;
           control.state = { state: "failed", reason: "still running after the page stopped waiting; ask again later" };
           return;
         }
@@ -87,19 +102,32 @@ export function createReviewAbridge(
       }
       if (disposed) return;
       if (answer.state === "failed") {
+        serverFailed = true;
         control.state = {
           state: "failed",
           reason: typeof answer.reason === "string" ? answer.reason : "unknown reason",
         };
       } else if (answer.state === "done") {
-        control.state = (await readRecord())
-          ? { state: "done" }
-          : { state: "failed", reason: "the abridged diff did not appear on the run's record" };
+        const read = await readRecord();
+        if (read === "disposed") return;
+        serverFailed = false;
+        control.state =
+          read === "found"
+            ? { state: "done" }
+            : {
+                state: "failed",
+                reason:
+                  read === "stuck"
+                    ? "the run's record did not page to its end"
+                    : "the abridged diff did not appear on the run's record",
+              };
       } else {
+        serverFailed = false;
         control.state = { state: "failed", reason: `unexpected answer: ${String(answer.state)}` };
       }
     } catch (err) {
       if (disposed) return;
+      serverFailed = false;
       control.state = { state: "failed", reason: err instanceof Error ? err.message : String(err) };
     }
   }
@@ -110,9 +138,9 @@ export function createReviewAbridge(
     },
     start() {
       if (control.state.state === "running" || disposed) return;
-      const retry = control.state.state === "failed";
+      const force = control.state.state === "failed" && serverFailed;
       control.state = { state: "running" };
-      void run(retry);
+      void run(force);
     },
     dispose() {
       disposed = true;
