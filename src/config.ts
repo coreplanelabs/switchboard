@@ -100,11 +100,13 @@ export interface AppConfig {
    * The one authorization shape (docs/reference/specs/authorization.md item 9; see
    * docs/decisions/0007-authorization-policy-table.md): actor id (`slack:U…`,
    * `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
-   * `access:svc:<cn>`, `schedule:<name>`) → `{ actions, channels, repos }`, each
-   * a list of names or the explicit word `all`; an absent axis is the empty
-   * set. A `slack:` entry adds to the baseline every Slack user holds (the open
-   * chat commands, every unrestricted agent); a browser entry adds to every
-   * group's read; every other entry is exactly what it declares.
+   * `access:svc:<cn>`, `schedule:<name>`, or `<ns>:*` for everyone authenticated
+   * on a surface — `access:*` is the org Access admits) → `{ actions, channels,
+   * repos }`, each a list of names or the explicit word `all`; an absent axis is
+   * the empty set. A `slack:` entry adds to the baseline every Slack user holds
+   * (the open chat commands, every unrestricted agent); a browser entry adds to
+   * every group's read; every other entry is exactly what it declares; a
+   * surface entry is unioned into every actor of that surface on top of its own.
    * `ConfigStore.grantsFor` is the one lookup.
    */
   grants?: GrantsConfig;
@@ -743,7 +745,8 @@ export class ConfigStore {
   /** The one grants lookup: what `grants[<actorId>]` declares
    *  on top of its namespace's baseline (the chat `open` commands and every
    *  unrestricted agent for a Slack user, every group's read for a browser
-   *  session), else that baseline alone, else nothing. Attached to every
+   *  session), else that baseline alone, else nothing — unioned with the
+   *  surface's `<ns>:*` entry when config has one. Attached to every
    *  `Caller.actor`: the ONLY thing `authorize` reads about a caller. */
   grantsFor(actorId: string): Grants {
     return grantsIn(this.grants, actorId);
