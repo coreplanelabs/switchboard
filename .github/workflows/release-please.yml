@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   release-please:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-smidge
     # release-please writes with the App token, not GITHUB_TOKEN (see the header).
     permissions:
       contents: read
@@ -114,7 +114,7 @@ jobs:
     # Only where a production profile is configured (the repository variable);
     # a fork that never deploys from CI has no production to judge against.
     if: needs.release-please.outputs.prs_created == 'true' && needs.release-please.outputs.release_created != 'true' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     permissions:
       contents: read
       pull-requests: write
@@ -199,7 +199,7 @@ jobs:
     name: publish the ${{ matrix.image.name }} image
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     permissions:
       contents: read
       packages: write
@@ -294,7 +294,7 @@ jobs:
     name: publish the npm package
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true' && vars.SWITCHBOARD_PUBLISH_NPM == 'true'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     permissions:
       contents: read
       id-token: write

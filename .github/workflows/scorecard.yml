@@ -18,7 +18,7 @@ permissions: read-all
 jobs:
   visibility:
     name: is the repository public?
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-smidge
     outputs:
       public: ${{ steps.check.outputs.public }}
     steps:
@@ -37,7 +37,7 @@ jobs:
   analysis:
     name: scorecard analysis
     needs: visibility
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     # A job-level block REPLACES the workflow's `read-all`, so every read the
     # action needs must be named here. On a private repository the action's
     # GraphQL setup (ListCommits: commits with their pull requests, reviews and

@@ -45,7 +45,7 @@ jobs:
     # vendored skills, licenses, generated docs tables, spec proof bindings) so they do not each pay
     # an install.
     name: bot / ${{ matrix.check }}
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     strategy:
       fail-fast: false
       matrix:
@@ -69,7 +69,7 @@ jobs:
     # N shards; N is the length of the matrix and nothing else. A shard
     # reproduces locally as `npm test -- --shard=2/4`.
     name: bot / test ${{ matrix.shard }} of ${{ strategy.job-total }}
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     strategy:
       fail-fast: false
       matrix:
@@ -90,7 +90,7 @@ jobs:
     name: bot
     needs: [bot-checks, bot-tests]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-smidge
     env:
       NEEDS: ${{ toJSON(needs) }}
     steps:
@@ -99,7 +99,7 @@ jobs:
 
   web:
     name: web
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -112,7 +112,7 @@ jobs:
 
   docs:
     name: docs
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     env:
       WRANGLER_SEND_METRICS: "false"
     steps:
@@ -136,7 +136,7 @@ jobs:
     # directory, run the installed `switchboard`. A required check like the
     # others once the ruleset in docs/how-to/configure-the-repository.md is applied.
     name: package
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -154,7 +154,7 @@ jobs:
     # `deploy/<worker>` directories, and a check called `workers / deploy/…`
     # read as a deploy. Nothing here deploys; deploy-production.yml does.
     name: workers / verify ${{ matrix.worker }}
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     strategy:
       fail-fast: false
       matrix:
@@ -174,7 +174,7 @@ jobs:
     name: workers
     needs: [workers-each]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-smidge
     env:
       NEEDS: ${{ toJSON(needs) }}
     steps:
@@ -191,7 +191,7 @@ jobs:
     # The runner's own npm is enough to invoke the script; whatever runs inside
     # an image comes from its Dockerfile.
     name: image / build ${{ matrix.worker }}
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     strategy:
       fail-fast: false
       matrix:
@@ -205,7 +205,7 @@ jobs:
     name: image
     needs: [image-each]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-smidge
     env:
       NEEDS: ${{ toJSON(needs) }}
     steps:
@@ -225,7 +225,7 @@ jobs:
   deploy-targets:
     name: deploy targets
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -244,7 +244,7 @@ jobs:
     # Only after the site is proven to build, and only for main.
     needs: docs
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-mid
     # An assets-only Worker (deploy/cloudflare-docs/): no container, no Durable
     # Object, nothing that can be mid-rollout — which is why this one deploys on
     # every docs push, while the four runtime Workers deploy on the RELEASE
