@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.18.0](https://github.com/coreplanelabs/switchboard/compare/v1.17.0...v1.18.0) (2026-09-10)
+
+
+### Features
+
+* **docs:** the OpenSwitchboard mark — three planes, one message routed to two lanes — in the docs header, the favicon, the dashboard and the README ([#885](https://github.com/coreplanelabs/switchboard/issues/885)) ([665b622](https://github.com/coreplanelabs/switchboard/commit/665b622fb0c83b1a4c7320fb995a91de7deec6e1))
+* **init:** the installation lives in ~/.switchboard — no mkdir before init, and every command finds it from anywhere ([#882](https://github.com/coreplanelabs/switchboard/issues/882)) ([9ea1624](https://github.com/coreplanelabs/switchboard/commit/9ea1624ba79f1820a7d4b69cc8ff5780f0055e8c))
+* **web:** the run page reads in three seconds — facts bar under the header, the Reply first on a finished run, the request folded to three lines ([#880](https://github.com/coreplanelabs/switchboard/issues/880)) ([c85eec1](https://github.com/coreplanelabs/switchboard/commit/c85eec1f1855de14a05ceb45a616634ef78f29ee))
+
+
+### Documentation
+
+* **docs:** the Slack thread, captured — a real review run in the README as a recording and three stills ([#883](https://github.com/coreplanelabs/switchboard/issues/883)) ([cd2b78c](https://github.com/coreplanelabs/switchboard/commit/cd2b78ca1c4a1b846386f60abb98631a06916f16))
+
 ## [1.17.0](https://github.com/coreplanelabs/switchboard/compare/v1.16.0...v1.17.0) (2026-09-10)
 
 
