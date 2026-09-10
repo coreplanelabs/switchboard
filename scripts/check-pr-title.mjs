@@ -18,7 +18,9 @@
 //     bots write (`deps`, `main`);
 //   - a `!` title: docs/reference/migrations.md carries a `## <version>`
 //     section for the major the title will cut (package.json's version, major
-//     + 1 — bump-minor-pre-major is off in the release config).
+//     + 1 — bump-minor-pre-major is off in the release config); while the
+//     release config pins the next version (`release-as`), no title may
+//     carry `!` at all — the line moves by minors until the public launch.
 //
 //   npm run check:pr-title -- "feat(slack): thread admission"   # one title
 //   PR_TITLE="…" npm run check:pr-title                          # what CI does
@@ -125,9 +127,21 @@ export function nextMajor(version) {
  * breaking PR of a cycle creates the section, later ones add their lines to
  * it, and the check cannot tell whose lines are there. `migrationsDoc` is the
  * notes file's text, or undefined when the file does not exist.
+ *
+ * While the release config pins the next version (`release-as`), a `!` title
+ * is refused outright: the pin means the line moves by minors — before the
+ * public launch the 1.x line is not spent on majors — and a title that
+ * declares a major it cannot cut would put a BREAKING CHANGES entry under a
+ * minor. The change ships without the `!`, its note under the pinned version's
+ * heading.
  */
-export function migrationNoteProblems({ breaking, version, migrationsDoc }) {
+export function migrationNoteProblems({ breaking, version, migrationsDoc, releaseAs }) {
   if (!breaking) return [];
+  if (releaseAs !== undefined) {
+    return [
+      `the next release is pinned to ${releaseAs} in release-please-config.json (\`release-as\`: no major before the public launch): drop the \`!\` and put the note under \`## ${releaseAs}\` in ${MIGRATIONS_PATH}`,
+    ];
+  }
   const heading = `## ${nextMajor(version)}`;
   const present = (migrationsDoc ?? "").split("\n").some((l) => l.trim() === heading);
   if (present) return [];
@@ -168,11 +182,14 @@ function main() {
 
   let vocabulary;
   let version;
+  let releaseAs;
   try {
+    const releaseConfig = JSON.parse(readFileSync("release-please-config.json", "utf8"));
     vocabulary = {
-      types: allowedTypes(JSON.parse(readFileSync("release-please-config.json", "utf8"))),
+      types: allowedTypes(releaseConfig),
       scopes: allowedScopes(readFileSync(CODE_MAP_PATH, "utf8")),
     };
+    releaseAs = releaseConfig["release-as"];
     version = JSON.parse(readFileSync("package.json", "utf8")).version;
   } catch (err) {
     console.error(`check:pr-title — ${err instanceof Error ? err.message : String(err)}`);
@@ -185,6 +202,7 @@ function main() {
         breaking: verdict.breaking,
         version,
         migrationsDoc: existsSync(MIGRATIONS_PATH) ? readFileSync(MIGRATIONS_PATH, "utf8") : undefined,
+        releaseAs,
       })
     : verdict.problems;
   if (verdict.ok && problems.length === 0) {

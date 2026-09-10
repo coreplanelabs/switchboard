@@ -200,6 +200,12 @@ type(scope): what a reader can now do or expect
   the tree, not in the PR body, because the body never reaches the reader:
   release-please regenerates the release PR on every push and builds the notes
   from titles alone.
+- **Until the public launch, no title carries `!`.** The 1.x line moves by
+  minors: `release-please-config.json` pins the next version (`release-as`),
+  the check refuses a `!` while the pin is set, and a change an installation
+  must act on ships as a minor with its section under the pinned version in
+  the migration notes. A test holds the pin ahead of the released version, so
+  it cannot be left behind once its release is cut.
 
 The `title` check enforces all of it on every PR — grammar, type list, scope
 list, the migration section behind a `!` — and gives the same verdict locally:
@@ -227,9 +233,11 @@ commits accumulate into a release PR, and merging it tags the version, writes
 the changelog, publishes the release, and deploys production from CI — only the
 Workers the release actually changed, which the release PR lists in a comment
 before anyone merges it (every PR's `deploy targets` check shows the same for
-its own diff). A change an installation must act on is a major version: its
-title carries `!`, and [Migration notes](docs/reference/migrations.md) carries
-its section, written in the PR that broke it.
+its own diff). After the public launch a change an installation must act on is
+a major version: its title carries `!`, and
+[Migration notes](docs/reference/migrations.md) carries its section, written in
+the PR that broke it. Before the launch the same change is a minor under the
+pinned version, with the same section.
 
 ## Where things live
 

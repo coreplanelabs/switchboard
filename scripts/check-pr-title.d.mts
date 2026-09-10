@@ -16,4 +16,6 @@ export function migrationNoteProblems(input: {
   breaking: boolean;
   version: string;
   migrationsDoc: string | undefined;
+  /** `release-as` from release-please-config.json when the next version is pinned; a `!` title is then refused. */
+  releaseAs?: string;
 }): string[];

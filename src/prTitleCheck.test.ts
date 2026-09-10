@@ -233,6 +233,44 @@ describe("a breaking title needs its migration note", () => {
     expect(migrationNoteProblems({ breaking: false, version: "1.11.0", migrationsDoc: undefined })).toEqual([]);
   });
 
+  it("while the release config pins the next version (`release-as`), a `!` title is refused: it cannot cut the major it declares", () => {
+    // Before the public launch the 1.x line moves by minors; a breaking cleanup
+    // ships under the pinned minor with its note under that heading.
+    const [problem, ...rest] = migrationNoteProblems({
+      breaking: true,
+      version: "1.13.0",
+      migrationsDoc: doc,
+      releaseAs: "1.14.0",
+    });
+    expect(rest).toEqual([]);
+    expect(problem).toContain("1.14.0");
+    expect(problem).toContain("release-please-config.json");
+    expect(problem).toContain("drop the `!`");
+    expect(problem).toContain("## 1.14.0");
+  });
+
+  it("the pin does not touch a title without `!`", () => {
+    expect(
+      migrationNoteProblems({ breaking: false, version: "1.13.0", migrationsDoc: doc, releaseAs: "1.14.0" }),
+    ).toEqual([]);
+  });
+
+  it("the repository's pin, when set, is ahead of the released version — a pin left behind after its release is cut fails here", () => {
+    const config = JSON.parse(readRoot("release-please-config.json")) as { "release-as"?: string };
+    const manifest = JSON.parse(readRoot(".release-please-manifest.json")) as Record<string, string>;
+    const released = manifest["."];
+    if (config["release-as"] === undefined) return;
+    const [pinMajor, pinMinor, pinPatch] = config["release-as"].split(".").map(Number);
+    const [relMajor, relMinor, relPatch] = released.split(".").map(Number);
+    const ahead =
+      pinMajor > relMajor ||
+      (pinMajor === relMajor && (pinMinor > relMinor || (pinMinor === relMinor && pinPatch > relPatch)));
+    expect(ahead, `release-as ${config["release-as"]} is not ahead of the released ${released}: remove the pin`).toBe(
+      true,
+    );
+    expect(pinMajor, "the pin holds the 1.x line: a major is cut only after the public launch").toBe(relMajor);
+  });
+
   it("the repository's notes: one `## <version>` per release, newest first, every heading a version", () => {
     const headings = readRoot("docs/reference/migrations.md")
       .split("\n")
