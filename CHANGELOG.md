@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.1](https://github.com/coreplanelabs/switchboard/compare/v1.19.0...v1.19.1) (2026-09-10)
+
+
+### Bug fixes
+
+* **release:** the npm publish carries no provenance — npm accepts it from GitHub-hosted runners alone, and CI runs on Namespace ([#903](https://github.com/coreplanelabs/switchboard/issues/903)) ([fe8425a](https://github.com/coreplanelabs/switchboard/commit/fe8425a092861dfbf81e9f4db0dba7a440f0d276))
+* **release:** the release token carries the workflows permission — the tag a release creates needs it since the history collapse ([#901](https://github.com/coreplanelabs/switchboard/issues/901)) ([9d65382](https://github.com/coreplanelabs/switchboard/commit/9d65382605bb55d704177384cc4cc609a1b93411))
+
 ## [1.19.0](https://github.com/coreplanelabs/switchboard/compare/v1.18.2...v1.19.0) (2026-09-10)
 
 
