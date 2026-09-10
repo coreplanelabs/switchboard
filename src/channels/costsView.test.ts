@@ -21,6 +21,7 @@ function report(over: Partial<CostReport> = {}): CostReport {
     doStorageUsd: 0,
     workersUsd: 0,
     r2Usd: 0,
+    workflowsUsd: 0,
     cloudUsd: bot + 0.25,
     llmUsd: llm,
     total: bot + 0.25 + llm,
@@ -46,10 +47,17 @@ function report(over: Partial<CostReport> = {}): CostReport {
         doRows: 0,
         doStorage: 0,
         r2: 0,
+        workflows: 0,
       },
     },
     account: { cloudUsd },
-    attribution: { workers: ["switchboard"], containerApps: {}, durableObjectNamespaces: {}, r2Buckets: {} },
+    attribution: {
+      workers: ["switchboard"],
+      containerApps: {},
+      durableObjectNamespaces: {},
+      r2Buckets: {},
+      workflows: {},
+    },
     ...over,
   };
 }

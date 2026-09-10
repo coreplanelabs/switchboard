@@ -89,6 +89,9 @@ export interface AttrDomain {
   // the Workers' own roots (item 25): resident.watchdog, state.alarm
   residents: number;
   swept: number;
+  /** resident.refresh as a Workflow instance: the engine's instance id, an
+   *  identifier by the platform's own rule (never a repository name). */
+  instanceId: string;
 }
 
 export type SpanAttrKey = keyof AttrDomain;
@@ -109,6 +112,8 @@ const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "model",
 ]);
 const IDENTIFIER_RE = /^[A-Za-z0-9_./:@+-]{1,64}$/;
+/** A Workflow instance id: the platform's rule (`^[a-zA-Z0-9_][a-zA-Z0-9-_]*$`, at most 100). */
+const INSTANCE_ID_RE = /^[a-zA-Z0-9_][a-zA-Z0-9-_]{0,99}$/;
 
 /** Validate one attrs bag: known keys, value in domain, identifiers sanitized.
  *  Returns the offending keys (empty when valid); emitters and tests use it,
@@ -125,6 +130,7 @@ export function invalidAttrKeys(attrs: SpanAttrs): string[] {
     if (expected === "string") {
       if (typeof value !== "string") bad.push(key);
       else if (IDENTIFIER_KEYS.has(key as SpanAttrKey) && !IDENTIFIER_RE.test(value)) bad.push(key);
+      else if (key === "instanceId" && !INSTANCE_ID_RE.test(value)) bad.push(key);
     } else if (typeof value !== expected) {
       bad.push(key);
     } else if (typeof value === "number" && !Number.isFinite(value)) {
@@ -198,6 +204,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   abandonedRuns: "number",
   residents: "number",
   swept: "number",
+  instanceId: "string",
 };
 
 export const ATTR_KEYS: readonly SpanAttrKey[] = Object.keys(ATTR_TYPE) as SpanAttrKey[];
