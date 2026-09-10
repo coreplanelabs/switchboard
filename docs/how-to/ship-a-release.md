@@ -28,7 +28,7 @@ flowchart LR
 
 <!-- /generated:deploy-order -->
 
-The run also publishes the images as `ghcr.io/<owner>/<repo>` (bot), `-resident` and `-sandbox`, at `:<version>` and `:latest`, with provenance and an SBOM ([Deploy](deploy.md#run-the-container-yourself) verifies one). A third job publishes `@coreplane/switchboard` to npm only while the variable `SWITCHBOARD_PUBLISH_NPM` is `true`, on the run's own identity — npm trusts this workflow as the package's publisher, so no token is stored anywhere ([Configure the repository](configure-the-repository.md#5-repository-secrets-and-variables)).
+The run also publishes the images as `ghcr.io/<owner>/<repo>` (bot), `-resident` and `-sandbox`, at `:<version>` and `:latest`, with provenance and an SBOM ([Deploy](deploy.md#run-the-container-yourself) verifies one). A third job publishes `@coreplane/switchboard` to npm only for a release cut from the default branch and only while the variable `SWITCHBOARD_PUBLISH_NPM` is `true` — turn it off before merging a release PR and that release ships everything but the package — on the run's own identity — npm trusts this workflow as the package's publisher, so no token is stored anywhere ([Configure the repository](configure-the-repository.md#5-repository-secrets-and-variables)).
 
 ## Confirm it is live
 
