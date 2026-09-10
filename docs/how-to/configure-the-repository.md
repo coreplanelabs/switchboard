@@ -106,7 +106,12 @@ gh api -X PUT repos/OWNER/REPO/actions/permissions/workflow \
 
 ## 5. Repository secrets and variables
 
-Secrets: `CLOUDFLARE_DEPLOY_TOKEN`, `MEMORY_TOKEN`, `RESIDENT_READ_TOKEN`, optionally `SANDBOX_TOKEN`; `CLOUDFLARE_API_TOKEN` for the docs deploy ([Rotate a secret](rotate-a-secret.md)).
+Secrets: `CLOUDFLARE_DEPLOY_TOKEN`, `MEMORY_TOKEN`, `RESIDENT_READ_TOKEN`, optionally `SANDBOX_TOKEN`; `CLOUDFLARE_API_TOKEN` for the docs deploy ([Rotate a secret](rotate-a-secret.md)); and the GitHub App release-please acts as and the deploy reads your configuration repository with — its client ID and a private key (`.pem`), as `CONFIG_REPO_APP_CLIENT_ID` and `CONFIG_REPO_APP_PRIVATE_KEY`. Repository secrets, not a vault: they are encrypted at rest, never shown again, and an organization secret scoped to private repositories would vanish the day the repository goes public.
+
+```sh
+gh secret set CONFIG_REPO_APP_CLIENT_ID < client-id.txt
+gh secret set CONFIG_REPO_APP_PRIVATE_KEY < <your-app>.private-key.pem
+```
 
 ```sh
 gh variable set SWITCHBOARD_PUBLISH_NPM --body true

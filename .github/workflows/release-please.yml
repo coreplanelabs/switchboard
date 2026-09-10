@@ -24,8 +24,12 @@
 # opened with GITHUB_TOKEN gets `pull_request` runs that sit at
 # `action_required` until a person clicks "Approve and run" on every head; one
 # opened by the App runs its CI like any other PR, so the required checks
-# report and the release merges unattended. The App's credentials live in the
-# secrets manager the step below reads with OP_SERVICE_ACCOUNT_TOKEN; the token
+# report and the release merges unattended. The App's credentials are the
+# repository secrets CONFIG_REPO_APP_CLIENT_ID and CONFIG_REPO_APP_PRIVATE_KEY
+# (docs/how-to/configure-the-repository.md, section 5) — one App: release-please
+# acts as it here, and the deploy reads the configuration repository with it.
+# Nothing in CI reaches into a vault: an organization secret scoped to private
+# repositories disappears the day the repository goes public (it did). The token
 # minted here is scoped to this repository and to the two permissions
 # release-please needs.
 name: release-please
@@ -50,22 +54,12 @@ jobs:
       prs_created: ${{ steps.release.outcome == 'success' && steps.release.outputs.prs_created || steps.release-retry.outputs.prs_created }}
       pr: ${{ steps.release.outcome == 'success' && steps.release.outputs.pr || steps.release-retry.outputs.pr }}
     steps:
-      - name: load the App's credentials
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
-        with:
-          export-env: true
-          # Pin the op CLI the action installs (its default is "latest").
-          version: 2.39.0
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          APP_CLIENT_ID: op://CI/coreplane-bot/client-id
-          APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
       - name: mint the App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ env.APP_CLIENT_ID }}
-          private-key: ${{ env.APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}
           # No owner/repositories: the token is scoped to this repository.
           # contents for the release branch, tag and GitHub release;
           # pull-requests for the release PR and its labels.
@@ -149,21 +143,12 @@ jobs:
       # live /healthz) — it lives in the installation's configuration repository
       # (the SWITCHBOARD_DEPLOY_PROFILE variable), read with a read-only App
       # token minted for that repository alone.
-      - name: load the App's credentials
-        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
-        with:
-          export-env: true
-          version: 2.39.0
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          APP_CLIENT_ID: op://CI/coreplane-bot/client-id
-          APP_PRIVATE_KEY: op://CI/coreplane-bot/private-key
       - name: mint the App token that reads the configuration repository
         id: infra-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ env.APP_CLIENT_ID }}
-          private-key: ${{ env.APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}
           owner: ${{ vars.CONFIG_REPO_OWNER }}
           repositories: ${{ vars.CONFIG_REPO_NAME }}
           permission-contents: read
