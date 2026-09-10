@@ -1,6 +1,6 @@
 # Reference: CLI
 
-`npx tsx src/cli.ts` (or `npm run cli --`) is the operator toolbox — every registered command, plus one built-in for talking to the agent pipeline directly.
+`npx tsx src/cli.ts` (or `npm run cli --`) is the operator toolbox — every registered command, plus two built-ins: one for talking to the agent pipeline directly, one for running the bot.
 
 ## Form
 
@@ -12,13 +12,19 @@ npx tsx src/cli.ts <group> <verb> [args…] [--kebab-option value…] [--json]
 - `--json` prints the exact result the command produced, with no rendering — useful for scripting or for confirming what a chat/HTTP call would have gotten back.
 - `<group> help` and the bare `help` are derived automatically from the registry; there is no separate help text to maintain.
 
-## The one built-in: `ask`
+## The two built-ins: `ask` and `start`
 
 ```
 npx tsx src/cli.ts ask [--thread <key>] "<request>"
 ```
 
 Not a registered command — a **channel**, exactly like Slack, just printing to your terminal instead. Directives (`agent:`, `model:`, `effort:`) work identically. Use `--thread` to simulate a follow-up in an existing thread (stickiness applies).
+
+```
+npx tsx src/cli.ts start
+```
+
+Not a registered command either — the **bot process** itself, the one the container image runs: Slack over Socket Mode and, with `PORT` set, the HTTP server and the dashboard, until Ctrl-C. It reads `.env` and `config/config.yaml` from the directory you run it in; `start --help` lists everything it reads. From the published package it is `npx @coreplane/switchboard start` — the bot from an empty directory with no Docker.
 
 ## Every command
 

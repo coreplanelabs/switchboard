@@ -150,9 +150,15 @@ gh workflow run deploy-switchboard.yml -f targets=all   # the first time
 gh workflow run deploy-switchboard.yml                  # afterwards: only what is stale
 ```
 
-## Run the container yourself
+## Run the bot yourself
 
-Without the Workers every optional capability is off.
+Without the Workers every optional capability is off. From the directory `init` wrote, on any machine with Node:
+
+```bash
+npx @coreplane/switchboard start
+```
+
+The same bot as a container:
 
 ```bash
 docker run -d --name switchboard --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/coreplanelabs/switchboard:latest

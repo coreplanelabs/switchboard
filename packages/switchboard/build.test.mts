@@ -3,12 +3,13 @@ import { join, resolve } from "node:path";
 import { build } from "esbuild";
 import { describe, expect, it } from "vitest";
 import { WORKER_SPECS } from "../../src/deploy/plan.js";
-import { ROOT_ASSETS, shippedAssets, shippedDeployAssets, workerSourceFiles } from "./build.mts";
+import { ROOT_ASSETS, shippedAssets, shippedDeployAssets, webDistAssets, workerSourceFiles } from "./build.mts";
 
-// Feature: docs/reference/specs/packaging.md items 1–2 and 7 — what the package
-// ships and what it depends on are both derived: the assets from what the
-// repository tracks under deploy/ plus the sources the Workers import, the
-// dependencies from what the bundled CLI actually imports.
+// Feature: docs/reference/specs/packaging.md items 1–2, 7 and 8 — what the
+// package ships and what it depends on are both derived: the assets from what
+// the repository tracks under deploy/, the sources the Workers import and the
+// dashboard's build, the dependencies from what the bundled CLI actually
+// imports — the bot's entry included, since `start` runs it.
 
 const PACKAGE_DIR = import.meta.dirname;
 const REPO_ROOT = resolve(PACKAGE_DIR, "..", "..");
@@ -60,6 +61,27 @@ describe("shippedDeployAssets", () => {
       "deploy/profile.example.json",
       "src/core/runRecord.ts",
     ]);
+    // The dashboard's build rides in the same sorted tail, at its tree path.
+    expect(
+      shippedAssets(["deploy/profile.example.json"], [], ["web/dist/.vite/manifest.json", "web/dist/assets/main-A.js"]),
+    ).toEqual([
+      ...ROOT_ASSETS,
+      "deploy/profile.example.json",
+      "web/dist/.vite/manifest.json",
+      "web/dist/assets/main-A.js",
+    ]);
+  });
+
+  it("the dashboard's files ship under web/dist, every one, sorted; a listing without the Vite manifest is not a build and is refused naming the command that makes one", () => {
+    expect(webDistAssets(["assets/main-A.js", ".vite/manifest.json", "assets/main-B.css"])).toEqual([
+      "web/dist/.vite/manifest.json",
+      "web/dist/assets/main-A.js",
+      "web/dist/assets/main-B.css",
+    ]);
+    expect(() => webDistAssets(["assets/main-A.js"])).toThrow(
+      "web/dist has no .vite/manifest.json — it is not a build (npm run build -w web makes one)",
+    );
+    expect(() => webDistAssets([])).toThrow("not a build");
   });
 
   it("the root assets are the files init derives from, the marker the resolver looks for, the bot image's own files, and the manifest + lockfile a materialised Worker directory installs against", () => {
@@ -109,17 +131,27 @@ describe("the package manifest", () => {
   };
   const rootPkg = JSON.parse(read("package.json")) as { dependencies: Record<string, string> };
 
+  const bundled = build({
+    entryPoints: [join(REPO_ROOT, "src/cli.ts")],
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    packages: "external",
+    write: false,
+    metafile: true,
+    logLevel: "silent",
+  });
+
+  it("the bundle carries the bot process: the CLI's closure reaches src/index.ts and the Slack adapter, so `start` is the same process the image runs", async () => {
+    // The metafile keys inputs relative to esbuild's working directory (this package's).
+    const inputs = Object.keys((await bundled).metafile.inputs).map((p) => p.replace(/^(\.\.\/)+/, ""));
+    expect(inputs).toContain("src/index.ts");
+    expect(inputs).toContain("src/channels/slack.ts");
+    expect(inputs).toContain("src/channels/webAssets.ts");
+  });
+
   it("depends on exactly the npm packages the bundled CLI imports, at the root's ranges — nothing more, nothing missing", async () => {
-    const result = await build({
-      entryPoints: [join(REPO_ROOT, "src/cli.ts")],
-      bundle: true,
-      platform: "node",
-      format: "esm",
-      packages: "external",
-      write: false,
-      metafile: true,
-      logLevel: "silent",
-    });
+    const result = await bundled;
     const externals = new Set<string>();
     for (const input of Object.values(result.metafile.inputs)) {
       for (const imp of input.imports) {

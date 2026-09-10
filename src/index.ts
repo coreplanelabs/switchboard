@@ -7,9 +7,9 @@ import { createSlackApp } from "./channels/slack.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
-import { join } from "node:path";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
-import { loadWebAssets } from "./channels/webAssets.js";
+import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
+import { PACKAGE_ROOT } from "./packageRoot.js";
 import { makeShellRenderer } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
@@ -377,10 +377,13 @@ export async function runBot(): Promise<void> {
     const schedulesState = `${SCHEDULES.length} schedule(s) on /runs (${capabilities.schedules ? `firings from ${config.config.schedules?.worker?.baseUrl}` : "no firing store"}; cron identity ${cronArmed ? "armed" : "NOT in SWITCHBOARD_INGRESS_TOKENS — scheduled runs fail closed"})`;
     // The web app (web/): every HTML page is the shared shell + a JSON seed,
     // painted client-side by the Vue bundle served as hashed assets under
-    // /assets/*. The build is loaded once at startup — a missing build is a
-    // boot error (the Docker image builds it; local dev runs `npm run build`
-    // in web/ once, or points SWITCHBOARD_WEB_DIST elsewhere).
-    const webAssets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"));
+    // /assets/*. The build is loaded once at startup from `web/dist` under the
+    // package root — the checkout, `/app` in the image, the npm package's
+    // `dist/assets` — so `start` from the package has the dashboard wherever it
+    // runs; a missing build is a boot error (the Docker image and the package
+    // build it; local dev runs `npm run build` in web/ once, or points
+    // SWITCHBOARD_WEB_DIST elsewhere).
+    const webAssets = loadWebAssets(webDistDir(process.env, PACKAGE_ROOT));
     const shell = makeShellRenderer(webAssets.entry, capabilities);
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin

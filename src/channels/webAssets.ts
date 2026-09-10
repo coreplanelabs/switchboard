@@ -31,6 +31,19 @@ function contentTypeFor(path: string): string {
   return (dot === -1 ? undefined : CONTENT_TYPES[path.slice(dot)]) ?? "application/octet-stream";
 }
 
+/** Where the tree keeps the dashboard's built bundle, relative to the package
+ *  root: `web/dist` in a checkout (`npm run build -w web`), `/app/web/dist` in
+ *  the image (the Dockerfile copies it), `dist/assets/web/dist` in the npm
+ *  package (its build copies it — packages/switchboard/build.mts). */
+export const WEB_DIST_DIR = "web/dist";
+
+/** The directory the bot loads the bundle from: `SWITCHBOARD_WEB_DIST` when set (a
+ *  local build elsewhere), else `web/dist` under the package root (src/packageRoot.ts)
+ *  — never the working directory, which from the package is the operator's. */
+export function webDistDir(env: Record<string, string | undefined>, packageRoot: string): string {
+  return env.SWITCHBOARD_WEB_DIST ?? join(packageRoot, WEB_DIST_DIR);
+}
+
 export interface WebAssets {
   /** The entry's hashed js/css paths, for the shell. */
   entry: ShellAssets;

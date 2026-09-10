@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadWebAssets } from "./webAssets.js";
+import { loadWebAssets, WEB_DIST_DIR, webDistDir } from "./webAssets.js";
 
 /** A minimal Vite dist: manifest + entry js/css + a lazy chunk. */
 function fixtureDist(): string {
@@ -104,5 +104,17 @@ describe("loadWebAssets", () => {
     const res = fakeRes();
     assets.serve(req("/assets/main-AbC123.js?v=1"), res);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("webDistDir", () => {
+  it("is web/dist under the package root — the checkout, /app in the image, dist/assets in the npm package — never the working directory; SWITCHBOARD_WEB_DIST overrides it", () => {
+    expect(WEB_DIST_DIR).toBe("web/dist");
+    expect(webDistDir({}, "/repo")).toBe("/repo/web/dist");
+    expect(webDistDir({}, "/app")).toBe("/app/web/dist");
+    expect(webDistDir({}, "/x/node_modules/@scope/pkg/dist/assets")).toBe(
+      "/x/node_modules/@scope/pkg/dist/assets/web/dist",
+    );
+    expect(webDistDir({ SWITCHBOARD_WEB_DIST: "/elsewhere/dist" }, "/repo")).toBe("/elsewhere/dist");
   });
 });

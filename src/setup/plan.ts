@@ -332,13 +332,15 @@ function nextCommands(world: InitWorld, profile: boolean): string[] {
     ...workers.map((w) => `${cli} deploy secrets ${w}`),
     `MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" ${cli} deploy all`,
   ];
-  // From the npm package: `ask` and the deploy commands are the same package, run from this
-  // directory; the bot process is not in it — that is the image.
+  // From the npm package: `ask`, `start` — the bot, the same process the image runs — and the
+  // deploy commands are all the same package, run from this directory; the image is the one-line
+  // alternative for a machine that would rather run a container.
   if (world.package !== undefined) {
     const cli = `npx ${world.package}`;
     return [
       `${cli} ask "what can you do?"`,
-      `${bot}   # the bot, from the published image`,
+      `${cli} start`,
+      `${bot}   # the same bot from the published image`,
       ...(profile ? deploySteps(cli, ["memory", "bot", "resident", "sandbox"]) : []),
     ];
   }
@@ -346,7 +348,7 @@ function nextCommands(world: InitWorld, profile: boolean): string[] {
     return [`docker run --rm -it --env-file .env -v "$PWD/config:/app/config:ro" ${image} ask "what can you do?"`, bot];
   return [
     'npm run cli -- ask "what can you do?"',
-    "npx tsx src/index.ts",
+    "npm run dev",
     `docker compose up -d   # the same bot from the published image ${image}`,
     ...(profile ? deploySteps("npm run cli --", ["memory", "bot"]) : []),
   ];

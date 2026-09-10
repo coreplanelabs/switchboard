@@ -165,13 +165,13 @@ describe("setup.init — flags", () => {
       capabilities: { execution: "local", github: false, memory: false },
       next: [
         'npm run cli -- ask "what can you do?"',
-        "npx tsx src/index.ts",
+        "npm run dev",
         "docker compose up -d   # the same bot from the published image ghcr.io/example/switchboard:latest",
       ],
     });
     const wire = JSON.stringify(value) + renderText(setupInit, value!);
     expect(wire).not.toContain(KEY);
-    // From the published package the next `ask` is the package's own, and the bot is the image.
+    // From the published package the next `ask` and `start` are the package's own; the image is the alternative.
     const fromPackage = await invoke(bind({ inCheckout: false, package: "@example/switchboard" }), [
       "--organization",
       "acme",
@@ -180,7 +180,8 @@ describe("setup.init — flags", () => {
     ]);
     expect((fromPackage.ok ? (fromPackage.value as { next: string[] }) : undefined)?.next).toEqual([
       'npx @example/switchboard ask "what can you do?"',
-      'docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/example/switchboard:latest   # the bot, from the published image',
+      "npx @example/switchboard start",
+      'docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/example/switchboard:latest   # the same bot from the published image',
     ]);
     const text = renderText(setupInit, value!);
     expect(text).toContain("wrote:");

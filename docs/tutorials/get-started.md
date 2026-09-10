@@ -2,7 +2,7 @@
 
 By the end, OpenSwitchboard has answered you three times: in your terminal, in Slack, and from a production deployment on Cloudflare.
 
-**You need:** Node 24 and an Anthropic API key. Part 2 adds a Slack workspace where you may create an app, and Docker. Part 3 adds a Cloudflare account with a domain in it.
+**You need:** Node 24 and an Anthropic API key. Part 2 adds a Slack workspace where you may create an app. Part 3 adds a Cloudflare account with a domain in it.
 
 ## Part 1: an answer in your terminal
 
@@ -23,6 +23,8 @@ providers: anthropic
 capabilities: execution local · github off · memory off · run history off · …
 next:
   npx @coreplane/switchboard ask "what can you do?"
+  npx @coreplane/switchboard start
+  …
 ```
 
 `.env` holds your key and only you can read it; `config/config.yaml` is the example config with every optional block off. `init --help` lists every flag.
@@ -51,14 +53,11 @@ npx @coreplane/switchboard init --force --organization <org> --anthropic-key <ke
 
 ### Start the bot
 
-The bot is the published container image; the CLI does not carry it.
-
 ```bash
-docker run -d --name switchboard --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ghcr.io/coreplanelabs/switchboard:latest
-docker logs -f switchboard
+npx @coreplane/switchboard start
 ```
 
-You should see `switchboard running (providers: anthropic; default agent: general)`.
+You should see `switchboard running (providers: anthropic; default agent: general)`. This is the process the production container runs, over Slack's Socket Mode: no port, no Docker. Leave it running.
 
 ### Say something
 
@@ -74,7 +73,7 @@ You should see a 👀 reaction, a status card, and the answer in a thread. Reply
 
 Production is the bot as a container on Cloudflare plus a **state Worker** that keeps state across restarts.
 
-**You need:** a Cloudflare account, a domain (a *zone*) in it, and an API token for that account in `CLOUDFLARE_API_TOKEN` with the scopes [Set up accounts](../how-to/set-up-accounts.md) lists. Stop the local bot first: `docker rm -f switchboard`.
+**You need:** a Cloudflare account, a domain (a *zone*) in it, and an API token for that account in `CLOUDFLARE_API_TOKEN` with the scopes [Set up accounts](../how-to/set-up-accounts.md) lists. Stop the local bot first (Ctrl-C).
 
 ### Write the deployment profile
 

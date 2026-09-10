@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",
+    "@slack/bolt": "^5.1.0",
     "e2b": "^2.46.1",
     "mdast-util-from-markdown": "^2.0.3",
     "undici": "^8.10.2",
