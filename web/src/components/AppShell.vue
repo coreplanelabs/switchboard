@@ -12,6 +12,7 @@ import { useColorMode } from "@vueuse/core";
 import AppNav, { navSections, type NavSection } from "./AppNav.vue";
 import DocsLink, { DOCS_HREF, DOCS_ICON, DOCS_LABEL } from "./DocsLink.vue";
 import ThemeToggle from "./ThemeToggle.vue";
+import BrandMark from "./BrandMark.vue";
 import { browser } from "../lib/browser";
 import { useCapabilities } from "../lib/capabilities";
 
@@ -55,7 +56,7 @@ const menuItems = computed(() => [
   <div class="mx-auto max-w-[80rem] px-3 pb-16 pt-4 sm:px-5">
     <header class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-default pb-3">
       <slot name="leading" />
-      <h1 class="text-base font-semibold text-highlighted">{{ title }}</h1>
+      <h1 class="flex items-center gap-2 text-base font-semibold text-highlighted"><BrandMark />{{ title }}</h1>
       <slot name="status" />
       <span class="ml-auto flex items-center gap-4">
         <slot name="actions" />
