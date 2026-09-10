@@ -92,8 +92,8 @@
       "when": "CI only — the `bot` and `workers` gate jobs."
     },
     "check:lockfile": {
-      "does": "Every native package in the lockfile carries its Linux x64 and macOS arm64 variants.",
-      "when": "After any `npm install`; the fix is `rm -rf node_modules && npm install`."
+      "does": "Native packages carry Linux x64 and macOS arm64 variants; records mirror their `package.json`.",
+      "when": "After a manifest edit or `npm install`; failures name the fix."
     },
     "check:sandbox-pair": {
       "does": "Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag.",
