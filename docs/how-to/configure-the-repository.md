@@ -13,7 +13,7 @@ gh api -X PATCH repos/OWNER/REPO \
   -F delete_branch_on_merge=true
 ```
 
-The title is the whole commit, so breaking changes are `feat(config)!: …`.
+The title is the whole commit, so breaking changes are `feat(config)!: …` — after the public launch; while `release-please-config.json` pins the next version (`release-as`), the check refuses a `!` and the change ships as a minor.
 
 ## 2. The `title` check
 

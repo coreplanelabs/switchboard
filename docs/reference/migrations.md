@@ -1,10 +1,10 @@
 # Migration notes
 
-What an operator changes when a major version breaks something: one section per release, newest first, headed by the bare version (`## 2.0.0`). Each section is written in the pull requests that break — a title with `!` after its type — and the `title` check refuses such a PR until the section for the release it will cut exists; the first breaking PR of a cycle creates it, each later one adds its lines ([the rule](../../CONTRIBUTING.md#the-pr-title-is-the-changelog-line)). The changelog's **⚠ BREAKING CHANGES** entry says what broke; the section here says what to do about it.
+What an operator changes when a release breaks something: one section per such release, newest first, headed by the bare version (`## 1.14.0`). After the public launch a breaking change is a major — a title with `!` after its type — and the `title` check refuses such a PR until the section for the release it will cut exists; the first breaking PR of a cycle creates it, each later one adds its lines ([the rule](../../CONTRIBUTING.md#the-pr-title-is-the-changelog-line)). Until the launch the 1.x line moves by minors, the next release is pinned in `release-please-config.json`, no title carries `!`, and a breaking cleanup writes its section under the pinned version. The changelog's **⚠ BREAKING CHANGES** entry, when there is one, says what broke; the section here says what to do about it.
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
-## 2.0.0
+## 1.14.0
 
 - A `config.yaml` top-level key the document does not define — `permissions:` included — is an unknown key and fails the load by name; write who holds what as `grants` and what is closed as `restrict` ([authorization](authorization.md)).
 - A token entry's `scopes` in `SWITCHBOARD_INGRESS_TOKENS` is ignored like any field other than `subject` and `channel`; the token holds exactly its `grants.http:<subject>` / `grants.mcp:<subject>` entry ([Ingress tokens are credentials, not grants](authorization.md#ingress-tokens-are-credentials-not-grants)).
