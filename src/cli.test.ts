@@ -162,8 +162,12 @@ describe("parseCliArgv", () => {
     expect(parseCliArgv([], commands)).toEqual({ kind: "catalogue" });
     expect(parseCliArgv(["help"], commands)).toEqual({ kind: "catalogue" });
     expect(parseCliArgv(["--help"], commands)).toEqual({ kind: "catalogue" });
-    expect(parseCliArgv(["runs", "stop", "--help"], commands)).toEqual({ kind: "command-help", id: "runs.stop" });
-    const out = await runCli(commands, { kind: "command-help", id: "runs.stop" }, CLI_CALLER);
+    expect(parseCliArgv(["runs", "stop", "--help"], commands)).toEqual({
+      kind: "command-help",
+      id: "runs.stop",
+      spelled: "runs stop",
+    });
+    const out = await runCli(commands, { kind: "command-help", id: "runs.stop", spelled: "runs stop" }, CLI_CALLER);
     expect(out.exitCode).toBe(0);
     expect(out.stdout.split("\n")[1]).toBe("usage: runs stop <id> --mode <soft|hard>");
     const cat = await runCli(commands, { kind: "catalogue" }, CLI_CALLER);
@@ -486,8 +490,25 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
       id: "setup.init",
       input: { options: { organization: "acme", dryRun: true } },
     });
-    expect(parseCliArgv(["init", "--help"], commands)).toEqual({ kind: "command-help", id: "setup.init" });
-    expect(parseCliArgv(["init", "--bogus"], commands)).toMatchObject({ kind: "invalid", code: "invalid_input" });
+    // Its help and its usage hints name the command as typed: `init`, not the registry's `setup init`.
+    expect(parseCliArgv(["init", "--help"], commands)).toEqual({
+      kind: "command-help",
+      id: "setup.init",
+      spelled: "init",
+    });
+    const initHelp = await runCli(commands, { kind: "command-help", id: "setup.init", spelled: "init" }, CLI_CALLER);
+    expect(initHelp.stdout.split("\n")[1]).toMatch(/^usage: init \[--organization <string>\]/);
+    expect(initHelp.stdout).not.toContain("setup init");
+    expect(parseCliArgv(["init", "--bogus"], commands)).toMatchObject({
+      kind: "invalid",
+      code: "invalid_input",
+      error: expect.stringMatching(/^unknown option --bogus\nusage: init \[--organization/),
+    });
+    expect(parseCliArgv(["setup", "init", "--help"], commands)).toEqual({
+      kind: "command-help",
+      id: "setup.init",
+      spelled: "setup init",
+    });
     expect(USAGE).toContain("init [--option value…]");
     // The usage text spells the program the way it was started: the checkout's tsx form, else the bin's name.
     expect(programName("/repo/src/cli.ts")).toBe("npx tsx src/cli.ts");
@@ -496,7 +517,11 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
     expect(programName(undefined)).toBe("switchboard");
     // Only a BARE `help` is the catalogue: `help show` is the registered command (the conformance suite found it unreachable).
     expect(parseCliArgv(["help", "show"], commands)).toMatchObject({ kind: "command", id: "help.show" });
-    expect(parseCliArgv(["help", "show", "--help"], commands)).toEqual({ kind: "command-help", id: "help.show" });
+    expect(parseCliArgv(["help", "show", "--help"], commands)).toEqual({
+      kind: "command-help",
+      id: "help.show",
+      spelled: "help show",
+    });
     expect(parseCliArgv(["env", "bootstrap", "--env", "uat", "--service", "api"], commands)).toMatchObject({
       kind: "command",
       id: "env.bootstrap",

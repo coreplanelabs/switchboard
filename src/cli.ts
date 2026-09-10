@@ -63,14 +63,7 @@ import {
   type CommandInvoker,
   type InvokeErrorCode,
 } from "./core/commandRegistry.js";
-import {
-  catalogueText,
-  chatForm,
-  cliWords,
-  helpText,
-  parseInvocation,
-  type GrammarRejection,
-} from "./core/commandSurface.js";
+import { catalogueText, cliWords, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
 import { dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { startRequestRoot } from "./core/requestTrace.js";
 import { systemClock } from "./core/trace/clock.js";
@@ -141,8 +134,8 @@ export const CLI_SHORTHANDS: Readonly<Record<string, string>> = { init: "setup.i
 export type CliInvocation =
   /** A registry command, bound by the shared grammar. */
   | { kind: "command"; id: string; input: CommandInput; json: boolean }
-  /** `<group> <verb> --help`: the command's derived help. */
-  | { kind: "command-help"; id: string }
+  /** `<group> <verb> --help`: the command's derived help, naming the command as typed (`spelled`: `runs stop`, or the shorthand `init`). */
+  | { kind: "command-help"; id: string; spelled: string }
   /** `help` / `--help` / no arguments: the catalogue. */
   | { kind: "catalogue" }
   /** The built-in harness: dispatch `text` on `threadKey`. */
@@ -174,7 +167,9 @@ export function parseCliArgv(
     return { kind: "catalogue" };
   if (argv[0] === "ask") return parseAsk(argv.slice(1), now);
   if (argv[0] === "start") return parseStart(argv.slice(1));
+  // A shorthand is the long form to the grammar; help and usage hints keep the word as typed.
   const shorthand = CLI_SHORTHANDS[argv[0]];
+  const spelledShort = shorthand === undefined ? undefined : argv[0];
   if (shorthand !== undefined) argv = [...cliWords(shorthand), ...argv.slice(1)];
   const json = argv.includes("--json");
   const rest = argv.filter((a) => a !== "--json");
@@ -182,16 +177,17 @@ export function parseCliArgv(
   if (!group || !verb || !WORD.test(group) || !WORD.test(verb))
     return { kind: "usage", error: `${USAGE}\n  expected <group> <verb>` };
   const id = `${group}.${verb}`;
+  const spelled = spelledShort ?? `${group} ${verb}`;
   const cmd = commands.get(id);
   if (!cmd || !CommandRegistry.exposedTo(cmd, "cli"))
     return {
       kind: "usage",
       error: `${USAGE}\n  unknown command: ${group} ${verb}\n\ncommands:\n${cliCatalogue(commands)}`,
     };
-  const bound = parseInvocation(cmd, tail);
+  const bound = parseInvocation(cmd, tail, spelled);
   switch (bound.kind) {
     case "help":
-      return { kind: "command-help", id };
+      return { kind: "command-help", id, spelled };
     case "invalid":
       return bound;
     case "invoke":
@@ -304,7 +300,11 @@ export async function runCli(
       return { exitCode: 0, stdout: startHelpText(PROGRAM), stderr: "" };
     case "command-help": {
       const cmd = commands.get(parsed.id);
-      return { exitCode: 0, stdout: cmd ? helpText(cmd) : `unknown command: ${chatForm(parsed.id)}`, stderr: "" };
+      return {
+        exitCode: 0,
+        stdout: cmd ? helpText(cmd, parsed.spelled) : `unknown command: ${parsed.spelled}`,
+        stderr: "",
+      };
     }
     case "command":
       return runCommand(commands, parsed, caller, opts);

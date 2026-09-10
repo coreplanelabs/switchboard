@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { CLI_CALLER, parseCliArgv, runCli } from "../cli.js";
+import { CLI_CALLER, CLI_SHORTHANDS, parseCliArgv, runCli } from "../cli.js";
 import { callerFor } from "../channels/commandHttp.js";
 import { handleMcpRequest, toCaller } from "../channels/mcp.js";
 import { resolveChatActor } from "./authz/actor.js";
@@ -452,7 +452,11 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
     if (cmd.surfaces?.mcp === false) expect(tool).toBeUndefined();
     else expect(tool?.inputSchema).toEqual(jsonSchemaFor(cmd));
     if (cmd.surfaces?.cli !== false)
-      expect(parseCliArgv([...names.cli, "--help"], f.commands)).toEqual({ kind: "command-help", id: cmd.id });
+      expect(parseCliArgv([...names.cli, "--help"], f.commands)).toEqual({
+        kind: "command-help",
+        id: cmd.id,
+        spelled: names.chat,
+      });
     else expect(parseCliArgv([...names.cli, "--help"], f.commands).kind).toBe("usage");
     const chatParsed = parseChatCommand(`${names.chat} --help`, f.commands);
     if (cmd.surfaces?.chat !== false) expect(chatParsed?.kind).toBe("reply");
@@ -517,8 +521,26 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
       for (const flag of expectedFlags(cmd)) expect(text, `${where} names ${flag}`).toContain(flag);
       expect(text).toContain(cmd.describe);
     };
-    if (cmd.surfaces?.cli !== false)
-      check((await runCli(f.commands, { kind: "command-help", id: cmd.id }, CLI_CALLER)).stdout, "cli --help");
+    if (cmd.surfaces?.cli !== false) {
+      const names = toSurfaceNames(cmd.id);
+      const help = (await runCli(f.commands, { kind: "command-help", id: cmd.id, spelled: names.chat }, CLI_CALLER))
+        .stdout;
+      check(help, "cli --help");
+      // The usage line names the command as the surface exposes it: `<group>
+      // <verb>` for the long form, the bare word for a one-word spelling
+      // (`init`), the rest of the help identical.
+      expect(help.split("\n")[1], "cli --help usage").toMatch(new RegExp(`^usage: ${names.chat}( |$)`));
+      for (const [word, id] of Object.entries(CLI_SHORTHANDS)) {
+        if (id !== cmd.id) continue;
+        const parsed = parseCliArgv([word, "--help"], f.commands);
+        expect(parsed).toEqual({ kind: "command-help", id: cmd.id, spelled: word });
+        if (parsed.kind !== "command-help") throw new Error("unreachable");
+        const short = (await runCli(f.commands, parsed, CLI_CALLER)).stdout;
+        expect(short.split("\n")[1], `${word} --help usage`).toMatch(new RegExp(`^usage: ${word}( |$)`));
+        expect(short).not.toContain(names.chat);
+        expect(short.split("\n").slice(2)).toEqual(help.split("\n").slice(2));
+      }
+    }
     if (cmd.surfaces?.chat !== false) {
       const parsed = parseChatCommand(`${toSurfaceNames(cmd.id).chat} --help`, f.commands);
       expect(parsed?.kind).toBe("reply");
