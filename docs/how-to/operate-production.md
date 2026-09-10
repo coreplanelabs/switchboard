@@ -7,7 +7,7 @@ Production is four Cloudflare Workers ([Worker topology](../explanation/worker-t
 ## Before you start
 
 - A checkout at `origin/main` with `npm ci` run — or an operator directory with the published CLI ([Deploy](deploy.md#deploying-from-the-package)) — and the deployment profile in reach: `deploy/profile.json`, or `SWITCHBOARD_DEPLOY_PROFILE` naming where it lives — a path, `github://owner/repo/path@ref` read with `CONFIG_REPO_TOKEN`, or a secrets-manager reference.
-- A Cloudflare login for the profile's account, and no `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_ACCOUNT_ID` in the shell. `deploy all` strips the account id and refuses a token for another account with wrangler's own words, never silently replacing it with your login.
+- A Cloudflare login for the profile's account, and no `CLOUDFLARE_ACCOUNT_ID` in the shell. `CLOUDFLARE_API_TOKEN` only when it is a token for that account — required in `registry` image mode, where `deploy plan` and `deploy all` mint the account registry's credential from it ([Deploy](deploy.md#before-you-start)); `deploy all` strips the account id and refuses a token for another account with wrangler's own words, never silently replacing it with your login.
 - For `deploy restart` and the span log, an ingress bearer whose subject holds `deploy:write` or `trace:read` in `grants`.
 
 ## 1. Read what is running
