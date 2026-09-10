@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.13.0](https://github.com/coreplanelabs/switchboard/compare/v1.12.0...v1.13.0) (2026-09-10)
+
+
+### Features
+
+* **deploy:** an operator's repository deploys production from CI by calling the reusable deploy workflow ([#811](https://github.com/coreplanelabs/switchboard/issues/811)) ([87fb6a8](https://github.com/coreplanelabs/switchboard/commit/87fb6a887370ac18221bc29b9511c8215638a2a9))
+* **deploy:** deploy from any directory with the published CLI — the Worker directories are materialised from the package, no checkout needed ([#804](https://github.com/coreplanelabs/switchboard/issues/804)) ([4eca6e4](https://github.com/coreplanelabs/switchboard/commit/4eca6e4f3810dc9fb642f2f7442e159b4522e20e))
+* **deploy:** the release publishes three images, `deploy images` copies them into the account registry, and a profile deploys them instead of building ([#807](https://github.com/coreplanelabs/switchboard/issues/807)) ([6a76d0e](https://github.com/coreplanelabs/switchboard/commit/6a76d0e01516293533922ce107bc72f8d6b37126))
+
+
+### Documentation
+
+* **agents:** record 0026 keeps RBAC on the preset and caps the axes with admission boundaries that intersect per scope ([#801](https://github.com/coreplanelabs/switchboard/issues/801)) ([a47c6bc](https://github.com/coreplanelabs/switchboard/commit/a47c6bc46d888702de6061d3598e86015ae2e295))
+* **agents:** record 0026 names the seams its boundaries extend — the policy table keeps one question, the config layers gain an intersecting setting, the authorize stage gains a gate ([#803](https://github.com/coreplanelabs/switchboard/issues/803)) ([01ab8e7](https://github.com/coreplanelabs/switchboard/commit/01ab8e73a2b4f778f6e9bba1bb981a0def673fac))
+* **agents:** record 0026 orders the trace as resolve then gate and drops the last "admission" wording ([#805](https://github.com/coreplanelabs/switchboard/issues/805)) ([ebd7f51](https://github.com/coreplanelabs/switchboard/commit/ebd7f51df8274aa251003888193a3ade673e462c))
+* **agents:** record 0026 takes its acceptance-read edits — bundles defined, the budget directive named and never sticky, the sticky-label decision stated ([#808](https://github.com/coreplanelabs/switchboard/issues/808)) ([bb36b9a](https://github.com/coreplanelabs/switchboard/commit/bb36b9a36d2054fc0fcc07f1728f56a2abe121a6))
+* **deploy:** record 0028 — what a container image installs is a manifest per image class, rendered into the committed Dockerfile and extended by a registry-mode overlay that deploy images builds ([#810](https://github.com/coreplanelabs/switchboard/issues/810)) ([d71f815](https://github.com/coreplanelabs/switchboard/commit/d71f81523e1c362ce67e1b94765a83291d83492c))
+
 ## [1.12.0](https://github.com/coreplanelabs/switchboard/compare/v1.11.0...v1.12.0) (2026-09-09)
 
 
