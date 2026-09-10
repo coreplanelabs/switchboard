@@ -52,14 +52,14 @@ The dispatcher is the only place orchestration lives: it reads the message's dir
 
 | | You need | What it unlocks |
 |---|---|---|
-| **Required** | A Slack app (Socket Mode: a bot token and an app-level token) | The bot in your workspace. The CLI needs no Slack at all. |
 | **Required** | One model provider key — Anthropic, or any endpoint that speaks the OpenAI chat-completions shape (OpenAI, Groq, Ollama, vLLM) | Every agent. Models are named `<provider>/<model>` and switched per request, per person, or per channel. |
+| **For Slack** | A Slack app (Socket Mode: a bot token and an app-level token) | The bot in your workspace. The terminal needs none of it: the CLI is a channel too, and the quick start below runs without Slack. |
 | Optional | A GitHub App (or a repo-scoped personal token) | Agents read your repositories and manage issues; the coding agent pushes branches and opens pull requests. |
-| Optional | A Cloudflare account | The four Workers: durable memory, run history and config that survive restarts; always-warm repo environments; per-thread sandboxes for tools; Access in front of the dashboard; the spend page. |
+| Optional | A Cloudflare account | Production: the bot as a container behind a Worker, plus three more Workers — a state Worker (memory, run history and config that survive restarts), a resident Worker (always-warm checkouts of your repositories) and a sandbox Worker (a container per thread for tools); Cloudflare Access in front of the dashboard; the spend page. |
 | Optional | An E2B account | Per-thread micro-VMs for tool execution without Cloudflare. |
-| Optional | A Brave Search key | Web search for the research agent. |
+| Optional | A Brave Search key (`BRAVE_SEARCH_API_KEY`) | Web search for the research agent. Without it that one tool reports no search backend; every other agent is unaffected. |
 
-Everything optional is a capability computed once at startup: what is off is absent from `help`, the dashboard and the deploy plan, not merely disabled. The full matrix, with what each costs: [Turn features on and off](docs/how-to/turn-features-on-and-off.md).
+Every optional block of `config.yaml` is a capability computed once at startup: what is off is absent from `help`, the dashboard and the deploy plan, not merely disabled. The full matrix, with what each costs: [Turn features on and off](docs/how-to/turn-features-on-and-off.md); every account and where its credential goes: [Set up accounts](docs/how-to/set-up-accounts.md).
 
 ## Quick start
 
@@ -69,21 +69,20 @@ Node 24 (`.nvmrc` pins it; 22 or newer runs) and one provider key. Everything be
 git clone https://github.com/coreplanelabs/switchboard.git
 cd switchboard
 npm ci
-cp config/config.example.yaml config/config.yaml
-cp .env.example .env          # set ANTHROPIC_API_KEY, or another provider's key
-npx tsx src/cli.ts ask "what can you do?"
+npm run cli -- init --organization <your GitHub org> --anthropic-key <your key>
+npm run cli -- ask "what can you do?"
 ```
 
-That is the whole pipeline — directives, config layers, authorization, the agent loop — with the answer printed to your terminal. Add directives the way you would in Slack: `npx tsx src/cli.ts ask "model:anthropic/claude-opus-5 effort:high explain the config layers you resolve"`.
+`init` writes the two gitignored files the tree deliberately lacks — `.env` with your key (mode 600) and `config/config.yaml` with your organization and every optional block off — from their checked-in examples; the same two copies by hand (`cp config/config.example.yaml config/config.yaml`, `cp .env.example .env`, then edit) work too. `ask` runs the whole pipeline — directives, config layers, authorization, the agent loop — with the answer printed to your terminal. Add directives the way you would in Slack: `npm run cli -- ask "model:anthropic/claude-opus-5 effort:high explain the config layers you resolve"`.
 
-The clone is the install until the CLI is on npm. The tree carries it as the package `@coreplane/switchboard` — the same `src/cli.ts`, bundled with the files it reads — and the release workflow publishes it once the project turns publishing on; from that release, an empty directory is enough:
+The clone is the install until the CLI is on npm. The tree carries it as the package `@coreplane/switchboard` — the same CLI, bundled with the files it reads — and the release workflow publishes it once the project turns publishing on; from that release, an empty directory is enough:
 
 ```bash
 npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key <your key>
 npx @coreplane/switchboard ask "what can you do?"
 ```
 
-`curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init` behind a Node version check. The bot itself is the published container image, `ghcr.io/coreplanelabs/switchboard`.
+`curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init` behind a Node version check (that script insists on Node 24). The bot — the long-running process that holds the Slack connection — is the published container image, `ghcr.io/coreplanelabs/switchboard`.
 
 Next steps:
 

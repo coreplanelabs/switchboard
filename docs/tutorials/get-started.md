@@ -27,14 +27,14 @@ wrote:
   .env                  (mode 600)
   config/config.yaml
 providers: anthropic
-capabilities: execution local · github off · memory off · run history off · run ledger off · mcp off · costs off · schedules off · ingress off · residents off · dashboard auth none · docs off
+capabilities: execution local · github off · memory off · run history off · run ledger off · mcp off · costs off · schedules off · ingress off · residents off · dashboard auth none
 next:
   npm run cli -- ask "what can you do?"
   npx tsx src/index.ts
   docker compose up -d   # the same bot from the published image …
 ```
 
-Two things happened. `.env` holds your key on its `ANTHROPIC_API_KEY` line and nothing else that is real — every other placeholder from the example is commented out — and only you can read it (`ls -l .env` shows `-rw-------`). `config/config.yaml` is the example config with your organization, one provider, and every optional block still off; `init` loaded it through the same loader the bot uses and printed the result as the `capabilities` line. Run it on a terminal without the flags and it asks for each answer instead; run it again and it refuses to overwrite either file unless you say `--force`; `init --dry-run` shows both files with the secrets masked; `init --help` lists every flag, including the ones for an OpenAI-compatible endpoint, Slack and the GitHub App.
+Two things happened. `.env` holds your key on its `ANTHROPIC_API_KEY` line and nothing else that is real — every other placeholder from the example is commented out — and only you can read it (`ls -l .env` shows `-rw-------`). `config/config.yaml` is the example config with your organization, one provider, and every optional block still off; `init` loaded it through the same loader the bot uses and printed the result as the `capabilities` line. Run it on a terminal without the flags and it asks for each answer instead; run it again and it refuses to overwrite either file unless you say `--force`; `init --dry-run` shows both files with the secrets masked (once the files exist it needs `--force` too, since it is the same refusal); `init --help` lists every flag, including the ones for an OpenAI-compatible endpoint, Slack and the GitHub App.
 
 Now ask, as the output told you to. The CLI is a channel like Slack is: the same dispatcher, the same agents, printing to your terminal instead of a thread.
 
@@ -46,7 +46,7 @@ OpenSwitchboard reads credentials from the environment and from nowhere else; th
 
 **Without the clone, once the CLI is on npm.** The tree carries the same CLI as the package `@coreplane/switchboard` ([packaging](../reference/specs/packaging.md)), and the release workflow publishes it once the project turns publishing on. From that release, Parts 1 and 2 need no checkout: in an empty directory, `npx @coreplane/switchboard init --organization <org> --anthropic-key <your key>` writes the same two files and `npx @coreplane/switchboard ask "what can you do?"` answers the same way; `curl -fsSL https://openswitchboard.dev/install.sh | sh -s -- --organization <org> --anthropic-key <your key>` is the `init` line behind a Node version check (read [`install.sh`](https://openswitchboard.dev/install.sh) first if you would rather not pipe a download into your shell — the `npx` line is the same thing). Until the package is published those commands fail to resolve it, so this lesson is written for the checkout; Part 3 needs the checkout for one step either way — the bot's image is built from the tree — while the rest of the deploy runs from any directory with the package ([Deploy](../how-to/deploy.md#deploying-from-the-package)).
 
-You will see a status line tick (`preparing workspace…`, then `thinking…`), and then the answer: the general agent introduces itself and the agents it can hand work to. That took one model call on the default model, `anthropic/claude-haiku-4-5`.
+You will see a status line tick through the run's steps (`preparing workspace…`, `preparing the prompt…`, the model turn), and then the answer: the general agent introduces itself and the agents it can hand work to. That took one model call on the default model, `anthropic/claude-haiku-4-5`.
 
 **What `init` did for you, by hand.** The files it wrote are the two copies the manual path makes — `cp config/config.example.yaml config/config.yaml`, `cp .env.example .env`, then editing `organization:` in the first and the `ANTHROPIC_API_KEY` line in the second. Nothing about them is special: open either one, and change it, whenever you like.
 
