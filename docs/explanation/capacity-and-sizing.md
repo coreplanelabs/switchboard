@@ -1,37 +1,43 @@
 # Capacity and sizing
 
-Why the containers are the size they are, why "using the cores" means something unusual when the bot is one Node event loop, and why a resident's instance is chosen by how many threads share it and the disk they need.
+The bot is one Node event loop on the smallest instance; a resident is sized for sixteen threads sharing its vCPUs and disk; a cold sandbox is the largest predefined type.
 
-## One event loop in the bot; sixteen threads in a resident
+## One event loop in the bot
 
-The bot is a single Node process on a fraction of one vCPU. Node is single-threaded, so for the bot "using the cores" cannot mean parallelism; it means never serializing independent I/O: the runner executes a turn's side-effect-free tools concurrently; the dispatcher overlaps memory retrieval with repository resolution and workspace attach, coalesces status-card edits, and sends the answer before releasing the resident; the Slack adapter fetches a follow-up's thread once and downloads attachments concurrently; the HTTP server listens before the Slack handshake finishes; server-sent frames are serialized once per event and resumable. The bot runs on the smallest instance and grows only on evidence: the CPU it burns is redaction over tool output and JSON serialization, both paid once per event, and nothing has measured it CPU-bound.
+Node is single-threaded, so "using the cores" means never serializing independent I/O:
 
-A resident is the opposite shape: up to sixteen thread processes share its vCPUs, so its cores are for concurrent threads, not for one thread's parallelism, and the discipline is not to oversubscribe them with worker pools. The resident image sets `CI=1`, `VITEST_MAX_WORKERS=1` (and the thread and fork variants), one libuv thread per vCPU and a Node heap ceiling as environment defaults, so a repository's test runner runs one worker per thread instead of sizing its pool from the host's core count. A repository's own configuration still wins.
+- side-effect-free tools run concurrently;
+- memory retrieval overlaps repository resolution and workspace attach;
+- status-card edits are coalesced;
+- the answer is sent before the resident is released.
 
-## Why the resident's instance is the platform's ceiling
+The bot's CPU goes to redaction and JSON serialization, once per event. Nothing has measured it CPU-bound, so it runs on the smallest instance and grows only on evidence.
 
-Two platform ratios decide a resident's instance: memory is a fixed multiple of vCPUs, and disk a fixed multiple of memory. The CPU is the decision — one vCPU meant every thread's test run and the refresh cycle's install shared one core — and the vCPUs a resident needs then dictate the memory it pays for and unlock the disk it gets. vCPU is billed on use; memory and disk are billed on provisioned size while the container is awake, and a resident is effectively always on, so memory is the whole recurring cost and the vCPUs cost only while busy.
+## Sixteen threads in a resident
 
-One instance type serves every resident, sized for the largest onboarded repository and for sixteen threads sharing it: the image, the bare mirror, the warm checkout with its dependencies, the reserve the attach admission holds back (room to stage a snapshot plus a floor), then one more tree per concurrent thread. A thread whose branch shares the warm checkout's lockfile costs a hardlinked tree, a few hundred megabytes; a thread whose lockfile differs installs its own dependencies and costs the whole `node_modules` on top. So the instance size decides how many concurrent trees run warm, not whether the disk fills, and because the current instance is the largest the platform offers, the next step up is a second container, not a bigger one.
+A resident's cores are for concurrent threads, so worker pools must not oversubscribe them. The image's environment defaults set `CI=1`, `VITEST_MAX_WORKERS=1` (and the thread and fork variants), one libuv thread per vCPU and a Node heap ceiling; a repository's own configuration wins.
 
-That arithmetic is not prose. It lives in a unit test beside the resident Worker's config, measured against the parts it names, and fails the build — not the deploy — when the instance size in the template and the measured parts disagree. Anyone resizing a resident changes the test's inputs and reads what fits.
+## The instance is the platform's ceiling
 
-## Why disk is a budget, not a surprise
+Memory is a fixed multiple of vCPUs and disk of memory, so the vCPUs a resident needs dictate the memory it pays for and the disk it gets. vCPU bills on use, memory and disk on provisioned size while awake; a resident is always on, so memory is the recurring cost.
 
-A resident measures its disk on every refresh cycle and after every attach, and publishes the gauge on every surface (`repo list`, the residents index, the detail page). A new thread tree is admitted only under `free − reserve`: the coldest clean idle trees are evicted first; if that is not enough, the attach is refused with `disk-pressure`, the arithmetic goes on the status card, and the run goes cold. Running out of disk is a named decision with a number attached, never an error discovered by a failed write ([Onboard a repo](../how-to/onboard-a-repo.md)).
+One instance type serves every resident: image, bare mirror, warm checkout with dependencies, the attach admission's reserve, then one tree per concurrent thread. A tree sharing the warm checkout's lockfile is hardlinked (a few hundred megabytes); a different lockfile installs its own `node_modules`. The instance size decides how many trees run warm; the current one is the platform's largest, so the next step is a second container.
 
-The same budget decides the sizing question the other way round: when the dashboard shows `disk-pressure` refusals, the next instance step buys a known number of additional concurrent trees, and the load harness measures whether it was needed ([Run a load test](../how-to/run-a-load-test.md)).
+That arithmetic is a unit test beside the resident Worker's config; it fails the build when the template and the measured parts disagree.
 
-## Why the cold sandbox is the largest predefined type
+## Disk is a budget, not a surprise
 
-A cold per-thread sandbox is the third shape: one container, one thread, nothing warm. It clones, installs and checks a whole repository from scratch, so it is sized by the largest single command a cold thread must be able to run, not by the typical one — a large monorepo's typecheck alone needs more than 8 GiB, and the 2 vCPU / 8 GiB instance could not run it at all. The sandbox is therefore the platform's largest predefined type (`standard-4`, 4 vCPU / 12 GiB / 20 GB — a custom type can be no larger). Unlike a resident it is not always on: it sleeps after five idle minutes, so its memory is paid per active run and its vCPUs only while they are busy, and the larger instance costs nothing between runs. The template beside the sandbox Worker carries the number and the reasoning; a unit test pins it ([Execution and sandboxes](../reference/specs/execution.md), item 16).
+A resident measures its disk on every refresh cycle and attach, and shows the gauge on `repo list` and the dashboard. A new tree is admitted only under `free − reserve`: the coldest clean idle trees are evicted first; failing that, the attach is refused with `disk-pressure`, the arithmetic goes on the status card, and the run goes cold ([Onboard a repo](../how-to/onboard-a-repo.md)). Refusals on the dashboard mean the next instance step buys a known number of trees; the load harness measures whether it was needed ([Run a load test](../how-to/run-a-load-test.md)).
 
-## Why residents do not accumulate
+## The cold sandbox
 
-Each resident has a pool of OS users, one per concurrent thread; a run releases its user when it detaches. An hourly sweep releases clean idle trees, every refresh cycle reclaims worktrees whose branch is gone from the mirror or whose pull request is merged or closed, and an unused resident parks its refresh so the container sleeps and stops paying for memory. The fleet has a cap on warm residents; an admin onboarding over the cap can ask for the coldest eligible resident to be offboarded instead of being refused, per request and never by default.
+A cold sandbox clones, installs and checks a repository from scratch; a large monorepo's typecheck alone needs more than 8 GiB, so the sandbox is `standard-4` (4 vCPU / 12 GiB / 20 GB, the largest type). It sleeps after five idle minutes, so memory is paid per active run ([Execution and sandboxes](../reference/specs/execution.md), item 16).
 
-## See also
+## Residents do not accumulate
 
-- [Worker topology](worker-topology.md) — which container is which.
-- [Resident repositories](../reference/specs/resident-repos.md) — the contract: the pool, the budget, the sweep, the cap.
-- [One long-lived bot process plus Durable Objects](../decisions/0016-long-lived-process-not-serverless.md) — why there is a bot container to size at all.
+OS users are pooled, one per concurrent thread, released on detach. An hourly sweep releases clean idle trees; each refresh cycle reclaims worktrees whose branch is gone or whose pull request is closed; an unused resident parks its refresh and sleeps. The fleet caps warm residents; onboarding over the cap can, per request, offboard the coldest eligible resident instead.
+
+## Read next
+
+- [Resident repositories](../reference/specs/resident-repos.md) — the pool, the budget, the sweep, the cap.
+- [Decision 0016](../decisions/0016-long-lived-process-not-serverless.md) — why there is a bot container to size.
