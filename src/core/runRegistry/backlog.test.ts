@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RunEvent } from "../runEvents.js";
 import { MAX_EVENT_BYTES } from "../runRecord.js";
+import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { REPLAY_EVERYTHING } from "../runRegistry.js";
 import { DEFAULT_BACKLOG_LIMIT } from "./backlog.js";
 import { call, result, seq, spanEnd, testRegistry } from "./testing.js";
@@ -250,13 +251,13 @@ describe("RunRegistry — backlog bounds", () => {
       expect(resumed).toEqual([9, 10, 11, 12]);
     });
 
-    it("stepCount counts content events only and rides the summary and the snapshot", () => {
+    it("stepCount counts content events only and rides the summary and the snapshot; the summary is stamped with the span schema — a registry run is always timed", () => {
       const { reg } = testRegistry();
       const { id, token } = reg.create();
       reg.publish(id, call("$ x"));
       reg.publish(id, spanEnd("tool.bash"));
       reg.publish(id, result(true, "ok"));
-      expect(reg.getById(id)).toMatchObject({ eventCount: 3, stepCount: 2 });
+      expect(reg.getById(id)).toMatchObject({ eventCount: 3, stepCount: 2, schema: SPAN_SCHEMA });
       expect(reg.snapshot(id, token)).toMatchObject({ eventCount: 3, stepCount: 2 });
       expect(DEFAULT_BACKLOG_LIMIT).toBe(8000);
     });

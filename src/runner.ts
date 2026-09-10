@@ -920,8 +920,8 @@ function turnStopReason(r: CompletionResult["stopReason"]): "end_turn" | "tool_u
   return r === "end_turn" || r === "tool_use" || r === "max_tokens" ? r : "other";
 }
 
-/** Stamp the tool call's span on what the tool itself publishes (a skill load,
- *  a legacy MCP fact); events with no `spanId` field pass through. */
+/** Stamp the tool call's span on what the tool itself publishes (a skill
+ *  load); events with no `spanId` field pass through. */
 function withSpanId(e: RunEvent, spanId: string): RunEvent {
   switch (e.type) {
     case "tool_call":
@@ -929,7 +929,6 @@ function withSpanId(e: RunEvent, spanId: string): RunEvent {
     case "run_note":
     case "assistant":
     case "skill_use":
-    case "mcp_tool_use":
       return { ...e, spanId };
     default:
       return e;

@@ -20,40 +20,22 @@ const result = (id: string, at: number, ok = true, tool = "bash"): RunEvent => (
   at,
 });
 const answer = (at: number): RunEvent => ({ type: "answer", text: "ok", at });
-const turn = (startedAt: number, durationMs: number): RunEvent => ({
-  type: "turn",
-  startedAt,
-  durationMs,
-  stopReason: "tool_use",
-  usage: { inputTokens: 10, outputTokens: 5 },
-  at: startedAt + durationMs,
-});
 const spans = (events: RunEvent[]) => events.filter((e) => e.type === "span_start" || e.type === "span_end");
 const withSeq = (events: RunEvent[]): RunEvent[] => events.map((e, i) => ({ ...e, seq: i + 1 }));
 
-describe("normalizeSpans — legacy streams", () => {
-  it("a legacy `turn` becomes a model.turn span placed on its own stamps, carrying the usage as attrs; the turn event stays", () => {
-    const out = normalizeSpans([input(0), turn(0, 4_000), call("c1", 4_000), result("c1", 6_000), answer(9_000)]);
-    const turnSpans = spans(out).filter((e) => e.type !== "span_start" && "name" in e && e.name === "model.turn");
-    expect(turnSpans).toHaveLength(1);
-    expect(turnSpans[0]).toMatchObject({
-      type: "span_end",
-      spanId: "synth:1",
-      startedAt: 0,
-      durationMs: 4_000,
-      status: "ok",
-      attrs: { stopReason: "tool_use", inputTokens: 10, outputTokens: 5 },
-      at: 4_000,
-    });
-    expect(out.filter((e) => e.type === "turn")).toHaveLength(1);
-    // the end lands right after the turn event
-    const i = out.findIndex((e) => e.type === "turn");
-    expect(out[i + 1]).toMatchObject({ type: "span_end", name: "model.turn" });
-  });
-
-  it("a tool_call/tool_result pair becomes a tool.<name> span keyed by callId; an unpaired call stays open (a start with no end)", () => {
+describe("normalizeSpans — the twin rule", () => {
+  it("a tool_call/tool_result pair becomes a tool.<name> span keyed by callId, placed around the pair; an unpaired call stays open (a start with no end)", () => {
     const out = normalizeSpans([call("c1", 1_000), result("c1", 3_500, false), call("c2", 4_000)]);
-    const s = spansFromEvents(out, "run-1").filter((x) => x.name.startsWith("tool.")); // the gap rule adds a model.turn between them
+    expect(out.map((e) => e.type)).toEqual([
+      "span_start",
+      "tool_call",
+      "tool_result",
+      "span_end",
+      "span_start",
+      "tool_call",
+    ]);
+    expect(spans(out).filter((e) => e.name !== "tool.bash")).toEqual([]); // nothing but the pairs' twins
+    const s = spansFromEvents(out, "run-1");
     expect(s).toEqual([
       expect.objectContaining({
         spanId: "synth:c1",
@@ -69,24 +51,24 @@ describe("normalizeSpans — legacy streams", () => {
     expect(s[1].endedAt).toBeUndefined();
   });
 
-  it("legacy calls without a callId pair with results oldest-first per tool — the fold's own rule — so two concurrent same-tool calls both close", () => {
-    const legacyCall = (at: number, tool = "bash"): RunEvent => ({ type: "tool_call", tool, summary: "$ x", at });
-    const legacyResult = (at: number, tool = "bash"): RunEvent => ({
-      type: "tool_result",
-      tool,
-      ok: true,
-      summary: "ok",
-      at,
-    });
-    const s = spansFromEvents(
-      normalizeSpans([legacyCall(1_000), legacyCall(1_100), legacyResult(2_000), legacyResult(2_500)], { schema: 2 }),
-      "r",
-    ).filter((x) => x.name === "tool.bash");
-    expect(s.map((x) => [x.startedAt, x.endedAt])).toEqual([
-      [1_000, 2_000],
-      [1_100, 2_500],
+  it("a call with no callId or no stamp gets no span, and a result with no callId closes nothing — there is nothing to key or time it by", () => {
+    const unkeyed: RunEvent[] = [
+      { type: "tool_call", tool: "bash", summary: "$ x", at: 1_000 },
+      { type: "tool_result", tool: "bash", ok: true, summary: "ok", at: 2_000 },
+    ];
+    expect(normalizeSpans(unkeyed)).toEqual(unkeyed);
+    const unstamped: RunEvent[] = [
+      { type: "tool_call", tool: "bash", summary: "$ x", callId: "c1" },
+      { type: "tool_result", tool: "bash", ok: true, summary: "ok", callId: "c1" },
+    ];
+    expect(normalizeSpans(unstamped)).toEqual(unstamped);
+    // a keyed call whose result lost its id stays open
+    const out = normalizeSpans([
+      call("c1", 1_000),
+      { type: "tool_result", tool: "bash", ok: true, summary: "ok", at: 2_000 },
     ]);
-    expect(s.map((x) => x.spanId)).toEqual(["synth:0", "synth:1"]);
+    expect(spansFromEvents(out, "r")).toEqual([expect.objectContaining({ spanId: "synth:c1", startedAt: 1_000 })]);
+    expect(spansFromEvents(out, "r")[0].endedAt).toBeUndefined();
   });
 
   it("a callId that is not a plain token falls back to the content index for the id", () => {
@@ -94,29 +76,7 @@ describe("normalizeSpans — legacy streams", () => {
     expect(spansFromEvents(out, "r").map((s) => s.spanId)).toEqual(["synth:0"]);
   });
 
-  it("an mcp_tool_use becomes an mcp.<server>.<tool> span ending at the event's stamp", () => {
-    const mcp: RunEvent = {
-      type: "mcp_tool_use",
-      server: "vanta",
-      tool: "list",
-      ok: true,
-      durationMs: 700,
-      bytes: 120,
-      at: 5_000,
-    };
-    const s = spansFromEvents(normalizeSpans([mcp]), "r");
-    expect(s).toEqual([
-      expect.objectContaining({
-        name: "mcp.vanta.list",
-        startedAt: 4_300,
-        endedAt: 5_000,
-        durationMs: 700,
-        attrs: { ok: true, bytes: 120 },
-      }),
-    ]);
-  });
-
-  it("the gap rule fires only on a legacy stream with no turn record at all: previous result/input → next call/narration/answer", () => {
+  it("no span is ever synthesized for a model turn or a narrative event: a stream without model.turn spans has no model time", () => {
     const events = [
       input(0),
       call("c1", 3_000),
@@ -124,21 +84,8 @@ describe("normalizeSpans — legacy streams", () => {
       { type: "assistant", text: "hm", at: 6_000 } as RunEvent,
       answer(9_000),
     ];
-    const s = spansFromEvents(normalizeSpans(events), "r").filter((x) => x.name === "model.turn");
-    expect(s.map((x) => [x.startedAt, x.endedAt])).toEqual([
-      [0, 3_000],
-      [4_000, 6_000],
-    ]);
-    // with one turn event present the gap rule stays off
-    const withTurn = spansFromEvents(
-      normalizeSpans([input(0), turn(0, 1_000), call("c1", 3_000), result("c1", 4_000), answer(9_000)]),
-      "r",
-    );
-    expect(withTurn.filter((x) => x.name === "model.turn")).toHaveLength(1);
-    // on a schema-2 stream it never fires
-    expect(
-      spansFromEvents(normalizeSpans(events, { schema: 2 }), "r").filter((x) => x.name === "model.turn"),
-    ).toHaveLength(0);
+    const s = spansFromEvents(normalizeSpans(events), "r");
+    expect(s.map((x) => x.name)).toEqual(["tool.bash"]);
   });
 
   it("a synthesized span's parent is the innermost surviving run.agent span containing it; otherwise it is an orphan", () => {
@@ -151,10 +98,13 @@ describe("normalizeSpans — legacy streams", () => {
       status: "ok",
       at: 10_000,
     };
-    const out = normalizeSpans(
-      [agent, call("c1", 1_000), result("c1", 2_000), call("c2", 20_000), result("c2", 21_000)],
-      { schema: 2 },
-    );
+    const out = normalizeSpans([
+      agent,
+      call("c1", 1_000),
+      result("c1", 2_000),
+      call("c2", 20_000),
+      result("c2", 21_000),
+    ]);
     const s = spansFromEvents(out, "r");
     expect(s.find((x) => x.spanId === "synth:c1")?.parentSpanId).toBe("a1");
     expect(s.find((x) => x.spanId === "synth:c2")?.parentSpanId).toBeUndefined();
@@ -162,9 +112,10 @@ describe("normalizeSpans — legacy streams", () => {
 });
 
 describe("normalizeSpans — idempotence and the identity", () => {
-  it("running it twice adds nothing; a schema-2 stream whose pairs have twins is returned unchanged", () => {
-    const legacy = [input(0), turn(0, 1_000), call("c1", 1_000), result("c1", 2_000), answer(3_000)];
-    const once = normalizeSpans(legacy);
+  it("running it twice adds nothing; a stream whose pairs have twins is returned unchanged", () => {
+    const budgetCut = [input(0), call("c1", 1_000), result("c1", 2_000), answer(3_000)];
+    const once = normalizeSpans(budgetCut);
+    expect(once).not.toEqual(budgetCut);
     expect(normalizeSpans(once)).toEqual(once);
     const twinned: RunEvent[] = [
       { type: "span_start", spanId: "t1", name: "tool.bash", attrs: { callId: "c1" }, at: 1_000 },
@@ -181,7 +132,7 @@ describe("normalizeSpans — idempotence and the identity", () => {
         at: 2_000,
       },
     ];
-    expect(normalizeSpans(twinned, { schema: 2 })).toEqual(twinned);
+    expect(normalizeSpans(twinned)).toEqual(twinned);
   });
 
   it("never mutates its input", () => {

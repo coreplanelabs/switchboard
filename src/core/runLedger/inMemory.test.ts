@@ -48,7 +48,7 @@ const record = (id: string): RunRecord =>
     storedEventCount: 0,
     truncated: false,
     events: [],
-    diagnosis: { eventCount: 0, toolCalls: 0, hasTimings: false, byCategory: {}, findings: [], verdict: "none" },
+    diagnosis: { eventCount: 0, toolCalls: 0, byCategory: {}, findings: [], verdict: "none" },
   }) as unknown as RunRecord;
 
 describe("InMemoryRunLedger", () => {

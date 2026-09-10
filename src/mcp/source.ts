@@ -100,7 +100,7 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
         const tools = await this.discover(server, client, opts?.signal);
         return {
           outcome: { server: server.name, toolCount: tools.length } as McpServerOutcome,
-          tools: bridgeMcpTools(server, client, tools, { budget, now: this.now }),
+          tools: bridgeMcpTools(server, client, tools, { budget }),
         };
       } catch (err) {
         const reason = redactAndCap(err instanceof Error ? err.message : String(err), 160);

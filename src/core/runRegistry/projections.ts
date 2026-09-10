@@ -1,4 +1,5 @@
 import type { ChannelVisibility } from "../authz/types.js";
+import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import type { RunEvent, StopMode } from "../runEvents.js";
 import type { RunStatus } from "../runRecord.js";
 import type { RunState, SealedFrame } from "./state.js";
@@ -69,8 +70,9 @@ export interface RunSummary {
    *  reply attempt completed or the branch was abandoned; `replyOk` is
    *  tri-state — `true` a reply was attempted and delivered, `false` attempted
    *  and threw, absent none was made. `stepCount`: content events only (span
-   *  records excluded). `schema`: the record's stream schema (2 once spans are
-   *  emitted); absent is legacy. All omitted when absent. */
+   *  records excluded). `schema`: the stream schema — always `SPAN_SCHEMA` on a
+   *  registry summary (this runner emitted it); a STORED record absent it or
+   *  below it carries no timing. All omitted when absent. */
   receivedAt?: number;
   sealedAt?: number;
   replyOk?: boolean;
@@ -134,6 +136,7 @@ export function summaryOf(run: RunState): RunSummary {
     ...(run.status !== undefined ? { status: run.status } : {}),
     eventCount: run.eventCount,
     stepCount: run.stepCount,
+    schema: SPAN_SCHEMA, // a registry run is this runner's: spans carry its timing
     ...(run.activity !== undefined ? { activity: run.activity } : {}),
     ...(run.control.requested !== undefined
       ? { stop: { mode: run.control.requested, state: run.finished ? ("stopped" as const) : ("stopping" as const) } }

@@ -626,7 +626,7 @@ describe("run-visibility events", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    expect(events.filter((e) => e.type !== "turn")).toEqual([
+    expect(events).toEqual([
       {
         type: "tool_call",
         tool: "bash",
@@ -668,11 +668,7 @@ describe("run-visibility events", () => {
       toolContext: { executor: fakeExecutor, skills, agentName: "coding" },
       onEvent: (e) => events.push(e),
     });
-    expect(events.filter((e) => e.type !== "turn").map((e) => e.type)).toEqual([
-      "tool_call",
-      "skill_use",
-      "tool_result",
-    ]);
+    expect(events.map((e) => e.type)).toEqual(["tool_call", "skill_use", "tool_result"]);
     expect(events.find((e) => e.type === "skill_use")).toEqual({
       type: "skill_use",
       skill: "tdd",
@@ -732,7 +728,7 @@ describe("run-visibility events", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    const tools = events.filter((e) => e.type !== "turn");
+    const tools = events;
     expect(tools[0]).toMatchObject({ type: "tool_call", callId: "toolu_1" });
     expect(tools[1]).toMatchObject({ type: "tool_result", callId: "toolu_1" });
   });
@@ -873,7 +869,7 @@ describe("assistant text turns in the event stream", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    const seen = events.filter((e) => e.type !== "turn");
+    const seen = events;
     expect(seen.map((e) => e.type)).toEqual(["assistant", "tool_call", "tool_result"]);
     expect(seen[0]).toEqual({ type: "assistant", text: "Let me check the file.", at: expect.any(Number) });
   });
@@ -888,7 +884,7 @@ describe("assistant text turns in the event stream", () => {
       toolContext: { executor: fakeExecutor },
       onEvent: (e) => events.push(e),
     });
-    expect(events.filter((e) => e.type !== "turn").map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
+    expect(events.map((e) => e.type)).toEqual(["tool_call", "tool_result"]);
   });
 
   it("redacts secrets in assistant text but does not cap it", async () => {
@@ -1468,8 +1464,6 @@ describe("model turn and tool spans (docs/reference/specs/tracing.md)", () => {
       "💭 thought for 5.0s",
       "💭 thought for 5.0s",
     ]);
-    // no `turn` event anywhere
-    expect(all.some((e) => e.type === "turn")).toBe(false);
   });
 
   it("carries the provider's token usage as attrs when it reports one, and none when it does not", async () => {
@@ -2480,7 +2474,7 @@ describe("an answer written alongside a bookkeeping call (docs/reference/specs/r
       onEvent: (e) => events.push(e),
       ...extra,
     });
-    return { answer, seen: events.filter((e) => e.type !== "turn") };
+    return { answer, seen: events };
   };
 
   it("is the answer when the forced extra turn comes back empty — and it is not narrated too", async () => {

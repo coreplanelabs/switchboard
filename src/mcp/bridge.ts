@@ -9,7 +9,7 @@ import type { Span } from "../core/trace/types.js";
 // `RunnableTool` the runner can call like any built-in. Names are mechanical
 // and provider-safe; descriptions and results are treated as untrusted data;
 // `sideEffectFree` follows the server's annotations conservatively; every call
-// publishes an `mcp_tool_use` event.
+// is an `mcp.<server>.<tool>` span under the tool call's span.
 
 /** Anthropic's tool-name limit; OpenAI-compatible endpoints accept the same charset. */
 export const MCP_TOOL_NAME_MAX = 64;
@@ -40,7 +40,6 @@ export function untrustedDescriptionPrefix(server: string): string {
 export interface BridgeOptions {
   /** Shared across every bridged tool of ONE run: the per-run call budget. */
   budget: { calls: number };
-  now?: () => number;
 }
 
 /** A per-run budget object; hand the same one to every server's bridge. */
@@ -59,7 +58,6 @@ export function bridgeMcpTools(
 ): RunnableTool[] {
   const taken = new Set<string>();
   const seenRemote = new Set<string>();
-  const now = opts.now ?? Date.now;
   const unique = tools.filter((t) => {
     if (seenRemote.has(t.name)) return false;
     seenRemote.add(t.name);
@@ -84,24 +82,13 @@ export function bridgeMcpTools(
         opts.budget.calls++;
         // The remote call is one `mcp.<server>.<tool>` span under the tool
         // call's span (docs/reference/specs/tracing.md): ok and the result size as attrs,
-        // the failure classified (never the body). Without a span (CLI, a bare
-        // tool test) the legacy `mcp_tool_use` event carries the same facts.
+        // the failure classified (never the body). Without a span (a bare tool
+        // test) the call runs unrecorded.
         const call = async (span: Span | undefined): Promise<string> => {
-          const startedAt = now();
           let result: McpCallResult;
           try {
             result = await client.callTool(t.name, input ?? {}, { signal: ctx.signal });
           } catch (err) {
-            if (!span) {
-              ctx.publish?.({
-                type: "mcp_tool_use",
-                server: server.name,
-                tool: t.name,
-                ok: false,
-                durationMs: now() - startedAt,
-                bytes: 0,
-              });
-            }
             const message = err instanceof McpError ? err.message : err instanceof Error ? err.message : String(err);
             const failed = classifyError(
               new Error(`MCP ${server.name}/${t.name} failed: ${message}`, { cause: err }),
@@ -117,16 +104,6 @@ export function bridgeMcpTools(
           const clipped = clip(text, MCP_RESULT_CAP);
           const ok = result.isError !== true;
           const bytes = Buffer.byteLength(text, "utf8");
-          if (!span) {
-            ctx.publish?.({
-              type: "mcp_tool_use",
-              server: server.name,
-              tool: t.name,
-              ok,
-              durationMs: now() - startedAt,
-              bytes,
-            });
-          }
           const wrapped = wrapUntrusted(clipped);
           if (!ok) {
             const refused = classifyError(new Error(`MCP ${server.name}/${t.name} reported an error:\n${wrapped}`), {

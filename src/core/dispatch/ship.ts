@@ -14,7 +14,6 @@ import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { systemClock } from "../trace/index.js";
 import type { RunOwner } from "../trace/streamSpans.js";
 import type { RequestTrace } from "../requestTrace.js";
-import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { parseModelRef } from "../../providers/types.js";
 import { currentPrHeadSha, prCommitsSince, type RepoContext } from "../repoContext.js";
 import { postReviewComment } from "../../execution/githubComments.js";
@@ -251,7 +250,6 @@ export async function runShipBranch(
         diagnosis: analyzeRunFriction(startSnap.events, {
           finished: false,
           truncated: startSnap.truncated,
-          schema: SPAN_SCHEMA,
         }),
       }),
       { provisional: true },
@@ -454,7 +452,6 @@ export async function runShipBranch(
     const diagnosis = analyzeRunFriction(snap?.events ?? [], {
       finished: true,
       truncated: snap?.truncated ?? false,
-      schema: SPAN_SCHEMA,
       window: { start: trace.receivedAt, end: finishedAt },
     });
     shipDiagnosis = diagnosis;

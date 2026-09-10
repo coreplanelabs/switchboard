@@ -63,8 +63,8 @@ export interface RunRecord {
    *  reply attempt completed or the branch was abandoned; `replyOk` is
    *  tri-state — `true` a reply was attempted and delivered, `false` attempted
    *  and threw, absent none was made. `stepCount`: content events only (span
-   *  records excluded). `schema`: the record's stream schema (2 once spans are
-   *  emitted); absent is legacy. All omitted when absent. */
+   *  records excluded). `schema`: the record's stream schema (`SPAN_SCHEMA`);
+   *  a record absent it or below it carries no timing. All omitted when absent. */
   receivedAt?: number;
   sealedAt?: number;
   replyOk?: boolean;

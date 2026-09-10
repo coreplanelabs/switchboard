@@ -497,7 +497,6 @@ export function createLiveViewHandler(
         // a finished run's diagnosis here equals its record's shape.
         const diagnosis = analyzeRunFriction(snap.events, {
           finished: snap.finished,
-          schema: SPAN_SCHEMA,
           window: { start: snap.receivedAt ?? snap.startedAt, end: snap.finishedAt ?? now() },
         });
         res.writeHead(200, JSON_NO_STORE);
@@ -625,6 +624,12 @@ export function createLiveViewHandler(
       const view = found.value;
       audit({ route: route.kind === "page" ? "page" : "events", runId: route.id, identity: actor.id });
       if (route.kind === "page") {
+        // A STORED record from before span schema carries no timing (docs/reference/specs/tracing.md):
+        // it is handed over as stored, with no span set, and the page says so. Every
+        // registry and ledger view is stamped `SPAN_SCHEMA` where it is built, so only
+        // such a record reads as untimed here.
+        const timed = (view.schema ?? 0) >= SPAN_SCHEMA;
+        const events = view.events ?? [];
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
           deps.shell("Run", {
@@ -632,10 +637,11 @@ export function createLiveViewHandler(
             mode: "history",
             id: route.id,
             // The stored stream with the truncation made visible (AE11): the
-            // seed IS the stream on a history page — normalized first
-            // (docs/reference/specs/tracing.md), so a legacy record's `turn` and
-            // `mcp_tool_use` reach the fold as the spans a live run emits.
-            events: withOmittedMarkers(normalizeSpans(view.events ?? [], { schema: view.schema }), view.eventCount),
+            // seed IS the stream on a history page — normalized first on a
+            // span-schema record, so a pair whose twin the budget dropped gets
+            // it back.
+            events: withOmittedMarkers(timed ? normalizeSpans(events) : events, view.eventCount),
+            ...(timed ? {} : { untimed: true as const }),
             ...(view.status ? { status: view.status } : {}),
             eventCount: view.eventCount,
             startedAt: view.startedAt,

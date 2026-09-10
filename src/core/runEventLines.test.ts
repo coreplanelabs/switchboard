@@ -90,7 +90,7 @@ describe("parseRunEventLines", () => {
     expect(out.skipped).toBe(5);
   });
 
-  it("accepts the timeline events (`input`, `assistant`, `answer`) when they carry text, skips them otherwise; `turn` needs numeric timing", () => {
+  it("accepts the timeline events (`input`, `assistant`, `answer`) when they carry text, skips them otherwise", () => {
     const text = [
       '{"type":"input","text":"fix the bug","at":1}',
       '{"type":"assistant","text":"checking…","at":2}',
@@ -101,14 +101,6 @@ describe("parseRunEventLines", () => {
     const out = parseRunEventLines(text);
     expect(out.events.map((e) => e.type)).toEqual(["input", "assistant", "answer"]);
     expect(out.skipped).toBe(2);
-    const turns = parseRunEventLines(
-      [
-        '{"type":"turn","startedAt":1,"durationMs":5000,"stopReason":"tool_use","at":5001}',
-        '{"type":"turn","startedAt":"x","at":2}',
-      ].join("\n"),
-    );
-    expect(turns.events.map((e) => e.type)).toEqual(["turn"]);
-    expect(turns.skipped).toBe(1);
     // `run_meta` (live-view item 19) needs its agent; the model is optional (a
     // command run resolves none — docs/reference/specs/tracing.md) and so are the repo fields
     const metas = parseRunEventLines(

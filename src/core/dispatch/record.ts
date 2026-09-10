@@ -126,7 +126,7 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
     repo: summary.repo,
     finishedAt,
     status: "interrupted",
-    diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated, schema: SPAN_SCHEMA }),
+    diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated }),
   });
 }
 
@@ -174,7 +174,6 @@ export function reclaimedRunRecord(input: {
     diagnosis: analyzeRunFriction(events, {
       finished: status !== "interrupted",
       truncated: false,
-      schema: SPAN_SCHEMA,
       // A reclaimed run that did finish has its window: the row's start to the
       // finish the closing generation stamped.
       ...(status !== "interrupted" ? { window: { start: row.startedAt, end: finishedAt } } : {}),
@@ -268,7 +267,7 @@ export function assembleRunRecord(input: {
     eventCount: Math.max(snap?.eventCount ?? atFinish.length, seal?.eventCount ?? 0),
     storedEventCount: events.length,
     truncated: false,
-    schema: SPAN_SCHEMA, // the stream carries spans, never `turn` events (docs/reference/specs/tracing.md)
+    schema: SPAN_SCHEMA, // spans are the stream's timing record (docs/reference/specs/tracing.md)
     events,
     diagnosis: input.diagnosis,
     // What the run was last doing / how it ended, and where it came from — so the
@@ -337,7 +336,6 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
           diagnosis: analyzeRunFriction(startSnap.events, {
             finished: false,
             truncated: startSnap.truncated,
-            schema: SPAN_SCHEMA,
           }),
         }),
         { provisional: true },

@@ -37,7 +37,6 @@ const ZERO = { count: 0, durationMs: 0 };
 const diagnosis = () => ({
   eventCount: 0,
   toolCalls: 0,
-  hasTimings: false,
   byCategory: Object.fromEntries(FRICTION_CATEGORIES.map((c) => [c, ZERO])) as RunRecord["diagnosis"]["byCategory"],
   findings: [],
   verdict: "no friction detected",

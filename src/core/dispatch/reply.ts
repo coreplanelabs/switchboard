@@ -239,14 +239,10 @@ export function activityLine(e: RunEvent): string {
       return "context recorded";
     case "answer":
       return "answer ready";
-    case "turn":
-      return ""; // legacy stored records only; a live run's thought line rides the runner's progress note
     case "run_meta":
       return "run context recorded"; // published straight to the registry too — never arrives here
     case "skill_use":
       return `📚 skill ${e.skill} loaded`;
-    case "mcp_tool_use":
-      return `🔌 ${e.server}/${e.tool} ${e.ok ? "ok" : "failed"} (${e.durationMs} ms)`;
     case "review_artifact":
       return "reading diff ready"; // published straight to the registry — never arrives here
     case "pr_description":

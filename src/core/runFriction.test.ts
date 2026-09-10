@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { RunEvent } from "./runEvents.js";
 import {
   analyzeRunFriction,
@@ -13,14 +13,40 @@ import {
 // Streams below are synthetic: one per friction category, plus edges.
 
 const T0 = 1_700_000_000_000;
-const call = (tool: string, summary: string, at?: number): RunEvent => ({ type: "tool_call", tool, summary, at });
+// The pair key the runner stamps on both halves: `call` mints a `callId`, and
+// `result` takes the oldest open one of its tool — the runner's own order — so
+// a fixture reads as call/result prose while every pair is keyed like a real
+// stream (a pair without a key gets no span, hence no duration).
+let nextCallId = 0;
+const openCallIds = new Map<string, string[]>();
+beforeEach(() => {
+  nextCallId = 0;
+  openCallIds.clear();
+});
+const call = (tool: string, summary: string, at?: number): RunEvent => {
+  const callId = `c${++nextCallId}`;
+  openCallIds.set(tool, [...(openCallIds.get(tool) ?? []), callId]);
+  return { type: "tool_call", tool, summary, callId, at };
+};
 const result = (tool: string, ok: boolean, summary: string, at?: number, infra?: true): RunEvent => ({
   type: "tool_result",
   tool,
   ok,
   summary,
+  callId: openCallIds.get(tool)?.shift() ?? `orphan${++nextCallId}`,
   at,
   ...(infra ? { infra } : {}),
+});
+/** One model call as the runner records it: a `model.turn` span end. */
+const turnSpan = (spanId: string, startedAt: number, durationMs: number, stopReason = "tool_use"): RunEvent => ({
+  type: "span_end",
+  spanId,
+  name: "model.turn",
+  startedAt,
+  durationMs,
+  status: "ok",
+  attrs: { stopReason },
+  at: startedAt + durationMs,
 });
 const note = (kind: Extract<RunEvent, { type: "run_note" }>["kind"], summary: string, at?: number): RunEvent => ({
   type: "run_note",
@@ -41,7 +67,6 @@ describe("analyzeRunFriction — empty / untimed input", () => {
     const d = analyzeRunFriction([]);
     expect(d.eventCount).toBe(0);
     expect(d.toolCalls).toBe(0);
-    expect(d.hasTimings).toBe(false);
     expect(d.runMs).toBeUndefined();
     expect(d.toolTimeMs).toBeUndefined();
     expect(d.findings).toEqual([]);
@@ -57,14 +82,13 @@ describe("analyzeRunFriction — empty / untimed input", () => {
     expect(d.verdict).toMatch(/no friction/i);
   });
 
-  it("untimed events (legacy stream) still classify failures/retries, with no durations", () => {
+  it("untimed events (a hand-written capture) still classify failures/retries, with no durations", () => {
     const d = analyzeRunFriction([
       call("bash", "$ npm test"),
       result("bash", false, "1 failing"),
       call("bash", "$ npm test"),
       result("bash", true, "all passing"),
     ]);
-    expect(d.hasTimings).toBe(false);
     expect(d.runMs).toBeUndefined();
     expect(categories(d)).toEqual(["failed_tool", "retry"]);
     for (const f of d.findings) expect(f.durationMs).toBeUndefined();
@@ -296,32 +320,37 @@ describe("analyzeRunFriction — per-category classification", () => {
   });
 });
 
-describe("analyzeRunFriction — slow_model_turn (the time between a result and the model's next move)", () => {
+describe("analyzeRunFriction — slow_model_turn (the model.turn spans)", () => {
   // A run of 1850 s wall clock with 50 s of tool time across 35 tool calls once
   // got the verdict "no friction detected" — every gap was the model thinking
-  // for 2–4 min between one-line greps. The analyzer must see it.
+  // for 2–4 min between one-line greps. The analyzer must see it: model time is
+  // the `model.turn` spans the runner records, one per completion, each ending
+  // right before what the completion produced.
   const input: RunEvent = { type: "input", text: "fix the thing", at: T0 };
 
-  it("flags a model turn (tool_result → next tool_call) at or past the threshold; under it is not flagged", () => {
+  it("flags a model turn at or past the threshold; under it is not flagged; each turn names what it produced", () => {
     const d = analyzeRunFriction([
       input,
-      ...bash("ls", T0 + 5_000, 1_000), // first turn: 5 s of thinking
-      ...bash("cat a.ts", T0 + 6_000 + 60_000, 1_000), // 60 s gap → flagged at the default threshold
-      ...bash("cat b.ts", T0 + 67_000 + 59_999, 1_000), // just under → not flagged
+      turnSpan("m1", T0, 5_000), // first turn: 5 s of thinking
+      ...bash("ls", T0 + 5_000, 1_000),
+      turnSpan("m2", T0 + 6_000, 60_000), // flagged at the default threshold
+      ...bash("cat a.ts", T0 + 66_000, 1_000),
+      turnSpan("m3", T0 + 67_000, 59_999), // just under → not flagged
+      ...bash("cat b.ts", T0 + 126_999, 1_000),
     ]);
     expect(categories(d)).toEqual(["slow_model_turn"]);
     const [f] = d.findings;
     expect(f.severity).toBe("medium");
     expect(f.durationMs).toBe(60_000);
     expect(f.summary).toMatch(/1m 00s/);
-    expect(f.summary).toContain("$ cat a.ts"); // anchored to the call the turn produced
-    expect(f.eventIndex).toBe(3);
+    expect(f.summary).toContain("$ cat a.ts"); // anchored to its own span end, naming the call it produced
+    expect(f.eventIndex).toBe(4);
     expect(d.modelTimeMs).toBe(5_000 + 60_000 + 59_999);
   });
 
   it("≥2× the threshold is high severity; the threshold is configurable", () => {
     const d = analyzeRunFriction(
-      [input, ...bash("ls", T0 + 20_000, 1_000), ...bash("pwd", T0 + 21_000 + 9_000, 1_000)],
+      [input, turnSpan("m1", T0, 20_000), ...bash("ls", T0 + 20_000, 1_000), turnSpan("m2", T0 + 21_000, 9_000)],
       { slowModelTurnMs: 10_000 },
     );
     expect(d.findings.map((f) => [f.category, f.severity])).toEqual([
@@ -329,30 +358,43 @@ describe("analyzeRunFriction — slow_model_turn (the time between a result and 
     ]);
   });
 
-  it("narration ends the turn: a slow think that produces `assistant` text is one finding, not one per following tool row", () => {
+  it("a narrating completion is one turn: a slow think that produces `assistant` text is one finding naming the narration, not one per following tool row", () => {
     const d = analyzeRunFriction([
       input,
       ...bash("ls", T0 + 1_000, 1_000),
-      { type: "assistant", text: "Now I understand. Let me check more.", at: T0 + 2_000 + 90_000 },
-      ...bash("cat a.ts", T0 + 92_000 + 10, 1_000), // the call rides the same completion (10 ms later)
-      ...bash("cat b.ts", T0 + 93_010 + 10, 1_000),
+      turnSpan("m1", T0 + 2_000, 90_000),
+      { type: "assistant", text: "Now I understand. Let me check more.", at: T0 + 92_000 },
+      ...bash("cat a.ts", T0 + 92_010, 1_000), // the call rides the same completion (10 ms later)
+      ...bash("cat b.ts", T0 + 93_020, 1_000),
     ]);
     expect(categories(d)).toEqual(["slow_model_turn"]);
     expect(d.findings[0].eventIndex).toBe(3);
     expect(d.findings[0].durationMs).toBe(90_000);
+    expect(d.findings[0].summary).toBe("model turn took 1m 30s before: (narration)");
   });
 
-  it("the final answer is the last model turn; runner notes between a result and the next call do not split the turn", () => {
+  it("the final answer is the last model turn's product; a stream without model.turn spans has no model time and no slow turn, whatever the gaps", () => {
     const d = analyzeRunFriction([
       input,
       ...bash("ls", T0 + 1_000, 1_000),
       note("wrap_up", "3 min left", T0 + 30_000),
-      { type: "answer", text: "done", at: T0 + 2_000 + 120_000 },
+      turnSpan("m1", T0 + 2_000, 120_000, "end_turn"),
+      { type: "answer", text: "done", at: T0 + 122_000 },
     ]);
     const slow = d.findings.filter((f) => f.category === "slow_model_turn");
     expect(slow).toHaveLength(1);
     expect(slow[0].durationMs).toBe(120_000);
     expect(slow[0].summary).toMatch(/answer/);
+    // The same content with no turn spans: a two-minute silence between the
+    // result and the answer is not the model's time — nothing recorded it.
+    const gaps = analyzeRunFriction([
+      input,
+      ...bash("ls", T0 + 1_000, 1_000),
+      note("wrap_up", "3 min left", T0 + 30_000),
+      { type: "answer", text: "done", at: T0 + 122_000 },
+    ]);
+    expect(gaps.findings.filter((f) => f.category === "slow_model_turn")).toEqual([]);
+    expect(gaps.modelTimeMs).toBeUndefined();
   });
 
   it("untimed streams never produce slow_model_turn and carry no modelTimeMs", () => {
@@ -370,7 +412,8 @@ describe("analyzeRunFriction — slow_model_turn (the time between a result and 
     const d = analyzeRunFriction([
       input,
       ...bash("ls", T0 + 1_000, 1_000),
-      ...bash("cat a.ts", T0 + 2_000 + 180_000, 2_000), // 3 min think, 2 s tool
+      turnSpan("m1", T0 + 2_000, 180_000), // 3 min think, 2 s tool
+      ...bash("cat a.ts", T0 + 182_000, 2_000),
     ]);
     expect(d.verdict).toMatch(/slow model turns dominated: 1 finding, 3m 00s/);
     expect(d.verdict).toMatch(/of run time/);
@@ -387,7 +430,6 @@ describe("analyzeRunFriction — aggregation and verdict", () => {
     ]);
     expect(d.runMs).toBe(10_000);
     expect(d.toolTimeMs).toBe(3_000);
-    expect(d.hasTimings).toBe(true);
   });
 
   it("an unpaired trailing tool_call (run died mid-tool) is reported as an infra failure, not ignored", () => {
@@ -447,7 +489,9 @@ describe("formatFrictionReport", () => {
   it("renders the verdict, totals, a per-category table, and each finding on one line", () => {
     const d = analyzeRunFriction([
       ...bash("pnpm install", T0, 70_000),
+      turnSpan("m1", T0 + 70_000, 1_000),
       ...bash("npm test", T0 + 71_000, 3_000, false, "2 failing"),
+      turnSpan("m2", T0 + 74_000, 1_000),
       ...bash("npm test", T0 + 75_000, 3_000, true, "pass"),
     ]);
     const text = formatFrictionReport(d);
@@ -455,7 +499,7 @@ describe("formatFrictionReport", () => {
     expect(text).toMatch(/events: 6/);
     expect(text).toMatch(/tool calls: 3/);
     expect(text).toMatch(/run: 1m 18s/);
-    expect(text).toMatch(/tool time: 1m 16s · model time: 2s/); // 1 s + 1 s between the paired calls
+    expect(text).toMatch(/tool time: 1m 16s · model time: 2s/); // the two turn spans between the paired calls
     // The table and the finding lines print the human labels, the column sized to the longest.
     expect(text).toMatch(/slow model turns\s+0\s+-/);
     expect(text).toMatch(/the repo's setup\/install\s+1\s+1m 10s/);
@@ -512,27 +556,21 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
     expect(analyzeRunFriction(events.filter((e) => e.type !== "context"))).toEqual(d);
   });
 
-  it("a `turn` (the model call's receipt) is not a step: excluded from eventCount, but its timestamp still bounds the run like `answer` does", () => {
+  it("a `model.turn` span is not a step: excluded from eventCount, and — timing, not content — its stamp never moves the stream's clock", () => {
     const events: RunEvent[] = [
       { type: "input", text: "please run the tests", at: T0 },
-      { type: "turn", startedAt: T0, durationMs: 900, stopReason: "tool_use", at: T0 + 900 },
+      turnSpan("m1", T0, 900),
       ...bash("npm test", T0 + 1000, 2000),
-      {
-        type: "turn",
-        startedAt: T0 + 3000,
-        durationMs: 6000,
-        stopReason: "end_turn",
-        usage: { inputTokens: 10, outputTokens: 2 },
-        at: T0 + 9000,
-      },
+      turnSpan("m2", T0 + 3000, 6000, "end_turn"),
+      { type: "answer", text: "done", at: T0 + 9000 },
     ];
     const d = analyzeRunFriction(events);
     expect(d.eventCount).toBe(2);
     expect(d.runMs).toBe(9000);
     expect(d.toolCalls).toBe(1);
-    // A legacy stream WITH turn receipts is timed by them (docs/reference/specs/tracing.md
-    // item 14): model time is the receipts' own durations, not the gaps.
-    expect(d.modelTimeMs).toBe(900 + 6000);
+    expect(d.modelTimeMs).toBe(900 + 6000); // the spans' own durations
+    // Without the answer the clock ends at the tool result, not at the turn span.
+    expect(analyzeRunFriction(events.slice(0, -1)).runMs).toBe(3000);
   });
 
   it("a stream of only `context` events has no timings and zero events", () => {
@@ -541,7 +579,6 @@ describe("analyzeRunFriction — narrative events are not steps; `context` is in
       { type: "context", text: "assistant: hello", at: T0 + 100 },
     ]);
     expect(d.eventCount).toBe(0);
-    expect(d.hasTimings).toBe(false);
     expect(d.runMs).toBeUndefined();
   });
 });
@@ -613,7 +650,7 @@ describe("analyzeRunFriction — span records are invisible to counts and to the
 
   // Feature: docs/reference/specs/tracing.md — a stream timed by `model.turn` spans takes
   // model time from them, never from the result→call gap as well.
-  it("model.turn span ends are the model time on a span-timed stream: summed, flagged past the threshold at the span's index, and the gap rule is silent", () => {
+  it("model.turn span ends are the model time: summed, flagged past the threshold at the span's index, never the result→call gap", () => {
     const turn = (spanId: string, startedAt: number, durationMs: number, stopReason = "tool_use") =>
       ({
         type: "span_end",
@@ -720,7 +757,7 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
   const WINDOW = { start: T0, end: T0 + 252_000 };
 
   it("with a finished window: runMs is the window, model and tool time are the spans' sums, and the shape partitions the window (identity holds)", () => {
-    const d = analyzeRunFriction(traced(), { finished: true, schema: 2, window: WINDOW });
+    const d = analyzeRunFriction(traced(), { finished: true, window: WINDOW });
     expect(d.runMs).toBe(252_000);
     expect(d.modelTimeMs).toBe(155_000);
     expect(d.toolTimeMs).toBe(55_000);
@@ -746,18 +783,18 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
   });
 
   it("without a window (a stdin capture) there is no shape and runMs is first→last over the content; live (unfinished) with a window there is no shape either", () => {
-    const capture = analyzeRunFriction(traced(), { finished: true, schema: 2 });
+    const capture = analyzeRunFriction(traced(), { finished: true });
     expect(capture.shape).toBeUndefined();
     expect(capture.runMs).toBe(252_000 - 30_000); // input → answer
     expect(capture.modelTimeMs).toBe(155_000);
-    const live = analyzeRunFriction(traced(), { finished: false, schema: 2, window: WINDOW });
+    const live = analyzeRunFriction(traced(), { finished: false, window: WINDOW });
     expect(live.shape).toBeUndefined();
     expect(live.runMs).toBe(252_000);
   });
 
   it("a live read: an open model turn runs to the window's end and counts as thinking so far", () => {
     const events = traced().slice(0, 6); // through the first turn's start — no end yet
-    const d = analyzeRunFriction(events, { finished: false, schema: 2, window: { start: T0, end: T0 + 92_000 } });
+    const d = analyzeRunFriction(events, { finished: false, window: { start: T0, end: T0 + 92_000 } });
     expect(d.modelTimeMs).toBe(60_000); // T0+32 s → T0+92 s
     expect(d.findings.map((f) => f.category)).toEqual(["slow_model_turn"]);
   });
@@ -771,12 +808,12 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
     ];
     const asCommand = analyzeRunFriction(events, {
       finished: true,
-      schema: 2,
+
       owner: "command",
       window: { start: T0, end: T0 + 22_000 },
     });
     expect(asCommand.shape).toMatchObject({ toolsMs: 20_000, gettingReadyMs: 0, overheadMs: 2_000 });
-    const asAgent = analyzeRunFriction(events, { finished: true, schema: 2, window: { start: T0, end: T0 + 22_000 } });
+    const asAgent = analyzeRunFriction(events, { finished: true, window: { start: T0, end: T0 + 22_000 } });
     expect(asAgent.shape).toMatchObject({ toolsMs: 0, gettingReadyMs: 20_000 });
   });
 
@@ -825,7 +862,7 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
   });
 
   it("the report: the shape line under the totals; `tool calls`/`tool time` only when a tool ran; `model time` only when the model turned", () => {
-    const text = formatFrictionReport(analyzeRunFriction(traced(), { finished: true, schema: 2, window: WINDOW }));
+    const text = formatFrictionReport(analyzeRunFriction(traced(), { finished: true, window: WINDOW }));
     expect(text).toContain("run: 4m 12s · tool time: 55s · model time: 2m 35s");
     expect(text).toContain(
       "shape: 30s getting ready · 2m 35s thinking · 55s in tools · 8s finishing up · 4s Switchboard overhead",
@@ -837,67 +874,33 @@ describe("analyzeRunFriction — the window, the shape and the span set (docs/re
           ...span("c", "run.command", T0, 2_000, { command: "friction.report" }),
           { type: "answer", text: "…", at: T0 + 2_000 },
         ],
-        { finished: true, schema: 2, owner: "command", window: { start: T0, end: T0 + 2_000 } },
+        { finished: true, owner: "command", window: { start: T0, end: T0 + 2_000 } },
       ),
     );
     expect(command).not.toMatch(/tool calls:|tool time:|model time:/);
     expect(command).toMatch(/^verdict: no friction detected\nevents: 0 · run: 2s\nshape: 2s \(one bucket\)/);
   });
 
-  it("differential: a legacy record (turn receipts, tool pairs, an mcp_tool_use) is timed by its normalized spans — model time from the receipts, tool time from the pairs", () => {
-    const legacy: RunEvent[] = [
-      { type: "input", text: "look", at: T0, seq: 1 },
-      { type: "turn", startedAt: T0, durationMs: 40_000, stopReason: "tool_use", at: T0 + 40_000, seq: 2 },
-      { type: "tool_call", tool: "bash", summary: "$ grep -r x", callId: "c1", at: T0 + 41_000, seq: 3 },
-      { type: "tool_result", tool: "bash", ok: true, summary: "3 hits", callId: "c1", at: T0 + 43_000, seq: 4 },
-      { type: "turn", startedAt: T0 + 44_000, durationMs: 70_000, stopReason: "tool_use", at: T0 + 114_000, seq: 5 },
-      {
-        type: "tool_call",
-        tool: "mcp__linear__search",
-        summary: "mcp__linear__search",
-        callId: "c2",
-        at: T0 + 115_000,
-        seq: 6,
-      },
-      {
-        type: "mcp_tool_use",
-        server: "linear",
-        tool: "search",
-        ok: true,
-        durationMs: 1_500,
-        bytes: 200,
-        at: T0 + 116_500,
-        seq: 7,
-      },
-      {
-        type: "tool_result",
-        tool: "mcp__linear__search",
-        ok: true,
-        summary: "2 issues",
-        callId: "c2",
-        at: T0 + 117_000,
-        seq: 8,
-      },
-      { type: "turn", startedAt: T0 + 118_000, durationMs: 3_000, stopReason: "end_turn", at: T0 + 121_000, seq: 9 },
-      { type: "answer", text: "done", at: T0 + 121_000, seq: 10 },
-    ];
-    const d = analyzeRunFriction(legacy, { finished: true, window: { start: T0 - 5_000, end: T0 + 125_000 } });
-    // Before spans the gap rule read 41 s + 72 s + 4 s of "model time"; the receipts say 40 + 70 + 3.
-    expect(d.modelTimeMs).toBe(113_000);
-    expect(d.toolTimeMs).toBe(2_000 + 2_000);
-    expect(d.findings.map((f) => [f.category, f.eventIndex, f.durationMs, f.summary])).toEqual([
-      ["slow_model_turn", 5, 70_000, "model turn took 1m 10s before: mcp__linear__search"],
-    ]);
-    expect(d.shape).toEqual({
-      windowMs: 130_000,
-      gettingReadyMs: 0,
-      thinkingMs: 113_000,
-      toolsMs: 4_000,
-      finishingUpMs: 0,
-      overheadMs: 13_000,
-      notRecordedMs: 0,
-      notLoadedMs: 0,
-    });
-    expect(d.eventCount).toBe(4); // the two pairs; the receipts, the MCP fact and the narrative are not steps
+  it("differential: a record whose tool.* twins the budget dropped is timed like the full stream — the pair's own stamps give the span back; a record with no spans at all times nothing", () => {
+    const full = analyzeRunFriction(traced(), { finished: true, window: WINDOW });
+    const twinless = traced().filter(
+      (e) => !((e.type === "span_start" || e.type === "span_end") && e.name === "tool.bash"),
+    );
+    const d = analyzeRunFriction(twinless, { finished: true, window: WINDOW });
+    expect(d.modelTimeMs).toBe(full.modelTimeMs);
+    expect(d.toolTimeMs).toBe(full.toolTimeMs);
+    expect(d.shape).toEqual(full.shape);
+    expect(d.findings.map((f) => [f.category, f.durationMs, f.summary])).toEqual(
+      full.findings.map((f) => [f.category, f.durationMs, f.summary]),
+    );
+    // A stored record from before spans (no span records, `model.turn` included)
+    // is a content stream: the classification, the window, no model time.
+    const untimed = traced().filter((e) => e.type !== "span_start" && e.type !== "span_end");
+    const u = analyzeRunFriction(untimed, { finished: true, window: WINDOW });
+    expect(u.runMs).toBe(252_000);
+    expect(u.modelTimeMs).toBeUndefined();
+    expect(u.toolTimeMs).toBe(55_000); // the pair's own stamps
+    expect(u.findings.map((f) => f.category)).toEqual(["slow_tool"]);
+    expect(d.eventCount).toBe(2); // the one pair; spans and the narrative are not steps
   });
 });

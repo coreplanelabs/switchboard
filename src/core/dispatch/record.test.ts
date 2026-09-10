@@ -13,7 +13,6 @@ import { getAgent } from "../../agents/registry.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { analyzeRunFriction } from "../runFriction.js";
-import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import type { ResumeContext } from "./admission.js";
 
 // Feature: docs/reference/specs/run-history.md — the records the drain deadline
@@ -207,7 +206,7 @@ describe("registerFinishRecord — the finish record, written by the drain after
       repoCtx: { repo: "acme/api" },
       finishedAt: snap.finishedAt!,
       status: "completed",
-      diagnosis: analyzeRunFriction(snap.events, { finished: true, truncated: false, schema: SPAN_SCHEMA }),
+      diagnosis: analyzeRunFriction(snap.events, { finished: true, truncated: false }),
       root: trace.root,
       ledgerRun: undefined,
     });

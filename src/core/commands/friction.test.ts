@@ -36,12 +36,21 @@ import {
 
 let t = 0;
 const at = (ms: number) => (t += ms);
-const call = (summary: string): RunEvent => ({ type: "tool_call", tool: "bash", summary, at: at(10) });
+// Each pair is keyed the way the runner stamps it (`callId` on both halves), so
+// the analyzer times it; `call` mints the id and `result` takes the oldest open one.
+let nextCallId = 0;
+const openCallIds: string[] = [];
+const call = (summary: string): RunEvent => {
+  const callId = `c${++nextCallId}`;
+  openCallIds.push(callId);
+  return { type: "tool_call", tool: "bash", summary, callId, at: at(10) };
+};
 const result = (ok: boolean, summary: string, ms: number): RunEvent => ({
   type: "tool_result",
   tool: "bash",
   ok,
   summary,
+  callId: openCallIds.shift() ?? `orphan${++nextCallId}`,
   at: at(ms),
 });
 const lockfileEvents = () => {
