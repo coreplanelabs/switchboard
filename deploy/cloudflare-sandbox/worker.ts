@@ -32,7 +32,6 @@ import {
   fleetBusyExecAnswer,
   isContainerStarting,
   isFleetBusyError,
-  legacyContainerError,
   thrownShape,
   thrownText,
 } from "../../src/execution/sandboxErrors.js";
@@ -47,12 +46,6 @@ import sandboxPkg from "./package.json" with { type: "json" };
  *  `check:sandbox-pair` holds equal to the Dockerfile's image tag, so it is
  *  also the version a container on the CURRENT image reports. */
 const SDK_PIN: string = sandboxPkg.dependencies["@cloudflare/sandbox"];
-
-/** How long the one-shot heal waits for `destroy()` before retrying anyway.
- *  `destroy()` is unbounded: if the Containers control plane hangs, every
- *  coalesced caller hangs with it until the Durable Object is evicted, and
- *  the SDK's own docs tell callers who need a bound to race it. */
-const LEGACY_DESTROY_WAIT_MS = 10_000;
 
 export class SwitchboardSandbox extends Sandbox {
   // Idle lifetime of a thread's container (the SDK's own default is 10 min on
@@ -82,8 +75,9 @@ export class SwitchboardSandbox extends Sandbox {
   // hang until eviction, a fresh placement during a gradual wave can land on
   // the old image again (the incident's DO was brand new), and the
   // healthy-but-not-running state after a destroy takes the SDK's stale-state
-  // path, which can `ctx.abort()` the DO. The exec path below heals instead,
-  // once, when a command actually hits the legacy shape.
+  // path, which can `ctx.abort()` the DO. A command that fails on a skewed
+  // instance is named by `thrownText` with the rollout hint; the one-wave
+  // rollout (`rollout_step_percentage: 100`) keeps the window to seconds.
   override async onStart(): Promise<void> {
     await super.onStart();
     const v = await this.client.utils.getVersion().catch(() => "unknown");
@@ -97,62 +91,9 @@ export class SwitchboardSandbox extends Sandbox {
   override async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
     return withActivityKeepalive(
       () => this.renewActivityTimeout(),
-      () => this.execHealingLegacyContainer(command, options),
+      () => super.exec(command, options),
       EXEC_KEEPALIVE_INTERVAL_MS,
     );
-  }
-
-  /** `super.exec`, retried ONCE after a `destroy()` when the failure is the
-   *  legacy-container shape (`legacyContainerError`: the base `SandboxError`
-   *  with an empty message, no code and the old server's `{error}` body — a
-   *  0.3.x server answering the 0.12.x client's `/api/execute` with a 400 it
-   *  cannot parse). That 400 is pre-dispatch, so the command never ran and
-   *  re-sending it is safe by construction. `destroy()` drops this thread's
-   *  container so the Durable Object's next request gets one from the current
-   *  image. It can hang, so it is raced against LEGACY_DESTROY_WAIT_MS — and
-   *  the retry runs ONLY when the destroy finished inside that window: a retry
-   *  over a still-pending destroy would be disconnected by its own heal. A
-   *  destroy that fails or times out is logged and the original legacy error
-   *  propagates for `thrownText` to name; so does a second legacy failure. A
-   *  command concurrently pending on the same DO would be disconnected with
-   *  the SDK's destroy text, which the recycle shapes cover (item 9). The
-   *  match is shape-based (see `legacyContainerError`), which is why the heal
-   *  is bounded to one destroy and one retry per exec. */
-  private async execHealingLegacyContainer(command: string, options?: ExecOptions): Promise<ExecResult> {
-    try {
-      return await super.exec(command, options);
-    } catch (err) {
-      if (!legacyContainerError(err)) throw err;
-      console.warn(
-        `sandbox.legacy-container exec failed with the legacy-image shape (SandboxError, empty message, {error} body) — destroying this instance and retrying once`,
-      );
-      if (!(await this.destroyWithin(LEGACY_DESTROY_WAIT_MS))) throw err;
-      return await super.exec(command, options);
-    }
-  }
-
-  /** `destroy()` bounded by `waitMs`: true when it completed in time, false
-   *  when it failed or is still pending (logged either way). */
-  private async destroyWithin(waitMs: number): Promise<boolean> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<false>((r) => {
-      timer = setTimeout(() => r(false), waitMs);
-    });
-    const done = this.destroy().then(
-      () => true as const,
-      (e: unknown) => {
-        console.warn(`sandbox.legacy-container destroy failed: ${thrownText(thrownShape(e))}`);
-        return false as const;
-      },
-    );
-    const result = await Promise.race([done, timedOut]);
-    if (timer !== undefined) clearTimeout(timer);
-    if (result === false) {
-      console.warn(
-        `sandbox.legacy-container destroy did not finish within ${waitMs / 1000}s — not retrying over a pending destroy; the legacy error propagates`,
-      );
-    }
-    return result;
   }
 
   // A fence from the 0.3.x days, kept until a live container-restart receipt
@@ -424,9 +365,8 @@ function streamExec(
           root.end("error");
           const shape = thrownShape(err);
           // The text that leaves the Worker is never empty (item 3): a
-          // message-less SDK error — the legacy-image 400 after the one-shot
-          // heal above failed too — is named, with the rollout hint.
-          // The classifiers below still read the raw `shape`.
+          // message-less SDK error is named, with the rollout hint. The
+          // classifiers below still read the raw `shape`.
           const raw = thrownText(shape);
           // A full fleet (docs/reference/specs/execution.md item 14): session creation
           // failed because no container instance was free, so the command

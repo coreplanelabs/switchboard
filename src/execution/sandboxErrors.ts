@@ -157,29 +157,3 @@ export function thrownText(shape: ThrownShape): string {
     "while a Worker/image rollout is in progress — retry in a minute"
   );
 }
-
-/** The shape a 0.12.x client produces against a 0.3.x container: the
- *  base `SandboxError` — not one of its typed subclasses — whose message is
- *  empty and whose `code` is undefined, carrying the old server's body as
- *  `errorResponse` with a non-empty `error` string and NO `message` (the
- *  0.3.x handlers answered `{error: "…"}`; every 0.12.x body has `message`
- *  and a `code`). The 400 is pre-dispatch, so a command that failed this way
- *  never ran. Matched INSIDE the Durable Object (the Worker's
- *  `SwitchboardSandbox` subclass), where the prototype, the `code` getter and
- *  `errorResponse` are intact; `SandboxError` itself is not exported by the
- *  package, so `instanceof Error` + the name stands in for the class. The
- *  match is SHAPE-based, not provenance-based: a future message-less body from
- *  something other than an old image would match too — which is why the heal
- *  that acts on it is bounded to one destroy and one retry per exec. */
-export function legacyContainerError(err: unknown): boolean {
-  if (!(err instanceof Error) || err.name !== "SandboxError" || err.message !== "") return false;
-  if ((err as { code?: unknown }).code !== undefined) return false;
-  const body = (err as { errorResponse?: { error?: unknown; message?: unknown } }).errorResponse;
-  return (
-    typeof body === "object" &&
-    body !== null &&
-    typeof body.error === "string" &&
-    body.error.length > 0 &&
-    body.message === undefined
-  );
-}
