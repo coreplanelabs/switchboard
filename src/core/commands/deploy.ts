@@ -593,15 +593,22 @@ const imagesOptions = z.object({
     ),
 });
 
-interface ImagesOutput {
-  version: string;
-  account: string;
-  images: { kind: string; source: string; target: string; status: ImageStatus }[];
-}
+/** What `deploy images` did, by the profile's image mode: a `build` profile references no published
+ *  copy, so there is nothing to copy and nothing was read; a `registry` profile's rows say which copy
+ *  was present and which was made (or would be). */
+type ImagesOutput =
+  | { mode: "build"; account: string; images: [] }
+  | {
+      mode: "registry";
+      version: string;
+      account: string;
+      images: { kind: string; source: string; target: string; status: ImageStatus }[];
+    };
 
 /** The output rows for a plan: every image present, or every image with the status the copies got. */
 function imagesOutput(plan: ImagesPlan, copied: ImageStatus): ImagesOutput {
   return {
+    mode: "registry",
     version: plan.version,
     account: plan.account,
     images: plan.images.map((i) => ({
@@ -623,6 +630,8 @@ export const deployImages = defineCommand({
     "Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so `registry`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. Needs Docker where it runs.",
   render: (output) => {
     const o = output as unknown as ImagesOutput;
+    if (o.mode === "build")
+      return "images: build — the profile's Workers build their images with wrangler at deploy time; nothing to copy";
     const copied = o.images.filter((i) => i.status !== "present").length;
     return [
       ...o.images.map(
@@ -639,8 +648,12 @@ export const deployImages = defineCommand({
         "unavailable",
         `${loaded.path} is the example profile — write deploy/profile.json for this installation before copying images into its registry`,
       );
-    const published = await publishedImages(deps);
     const account = loaded.profile.account;
+    // A profile that builds its images with wrangler references none of the published copies: nothing
+    // to copy, said rather than refused, with the registry unread and Docker unprobed — so a caller
+    // (the reusable deploy workflow) runs this before every deploy and the profile decides.
+    if (loaded.profile.images !== "registry") return { mode: "build", account, images: [] } as unknown as JsonValue;
+    const published = await publishedImages(deps);
     const before = await deps.deploy.images.registry(account);
     if ("error" in before) throw new CommandError("unavailable", `cannot read the account registry — ${before.error}`);
     const plan = planImageCopies(published, account, before.value);
