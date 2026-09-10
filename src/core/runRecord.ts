@@ -502,8 +502,12 @@ export function utf8ByteLength(s: string): number {
 }
 
 /** The free-text field an event carries: `text` (input/context/assistant/answer) or `summary`
- *  (tool/note events). Undefined when the event has neither. */
+ *  (tool/note events). Undefined when the event has neither — and for a
+ *  `review_artifact`, whose payload is its `diff` (capped by its producer at
+ *  READING_DIFF_CAP, above this cap by design) and whose `summary` is one
+ *  line: shrinking the line would never make the event fit, only lose it. */
 function textField(e: Record<string, unknown>): "text" | "summary" | undefined {
+  if (e.type === "review_artifact") return undefined;
   if (typeof e.text === "string") return "text";
   if (typeof e.summary === "string") return "summary";
   return undefined;

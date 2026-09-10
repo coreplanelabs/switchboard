@@ -110,7 +110,24 @@ export interface GithubApi {
   commentIssue(repo: string, number: number, body: string): Promise<{ url: string }>;
   /** Permanent. GitHub exposes this only over GraphQL (`deleteIssue`). */
   deleteIssue(repo: string, number: number): Promise<void>;
+  /** The unified diff of `base...head` as GitHub renders it (`Accept:
+   *  application/vnd.github.diff`) — the abridged reading diff's complete
+   *  input (docs/reference/specs/reading-diff.md item 6). Read up to `maxChars`
+   *  (default `COMPARE_DIFF_MAX_CHARS`) and no further: `complete: false`
+   *  says the diff went on past the cap. GitHub itself answers 406 for a
+   *  comparison too large to render as a diff (a `GithubApiError`). */
+  compareDiff(repo: string, base: string, head: string, maxChars?: number): Promise<CompareDiff>;
 }
+
+export interface CompareDiff {
+  diff: string;
+  /** False when the diff was longer than the cap and was cut there. */
+  complete: boolean;
+}
+
+/** The most of a compare diff the bot reads: about ten times the recorded
+ *  artifact's cap — beyond it no model abridges the change usefully anyway. */
+export const COMPARE_DIFF_MAX_CHARS = 1_200_000;
 
 /** Thrown for every non-success GitHub answer; `status` lets a tool word 404s
  *  ("outside the installation, or no such path") apart from the rest. */
@@ -146,6 +163,7 @@ export type GithubRoute =
   | "issue_create"
   | "issue_update"
   | "issue_comment_create"
+  | "compare"
   | "graphql"
   | "app_installation_token";
 
@@ -312,6 +330,20 @@ export class RestGithubApi implements GithubApi {
       }));
     }
     return { issue, comments };
+  }
+
+  async compareDiff(repo: string, base: string, head: string, maxChars = COMPARE_DIFF_MAX_CHARS): Promise<CompareDiff> {
+    const res = await this.request(
+      "read",
+      "GET",
+      "compare",
+      `/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+      undefined,
+      "application/vnd.github.diff",
+    );
+    // One char past the cap tells "cut here" from "exactly this long".
+    const text = await readTextCapped(res, maxChars + 1);
+    return text.length > maxChars ? { diff: text.slice(0, maxChars), complete: false } : { diff: text, complete: true };
   }
 
   async createIssue(repo: string, input: NewIssueInput): Promise<IssueSummary> {
@@ -489,6 +521,9 @@ export interface InMemoryRepo {
   defaultBranch?: string;
   private?: boolean;
   description?: string | null;
+  /** Seeded comparisons by `base...head`: the diff text, or the HTTP status
+   *  GitHub would answer (406 for a diff too large to render). */
+  compares?: Record<string, string | { status: number }>;
 }
 
 /** The test double and the second implementation: a map of repos with files
@@ -660,5 +695,16 @@ export class InMemoryGithubApi implements GithubApi {
     if (idx < 0) throw new GithubApiError(404, `GitHub GET /repos/${repo}/issues/${number} failed: HTTP 404 Not Found`);
     r.issues.splice(idx, 1);
     this.deleted.push(`${repo.toLowerCase()}#${number}`);
+  }
+
+  async compareDiff(repo: string, base: string, head: string, maxChars = COMPARE_DIFF_MAX_CHARS): Promise<CompareDiff> {
+    const seeded = this.repo(repo).compares?.[`${base}...${head}`];
+    const path = `/repos/${repo}/compare/${base}...${head}`;
+    if (seeded === undefined) throw new GithubApiError(404, `GitHub GET ${path} failed: HTTP 404 Not Found`);
+    if (typeof seeded !== "string")
+      throw new GithubApiError(seeded.status, `GitHub GET ${path} failed: HTTP ${seeded.status}`);
+    return seeded.length > maxChars
+      ? { diff: seeded.slice(0, maxChars), complete: false }
+      : { diff: seeded, complete: true };
   }
 }

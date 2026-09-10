@@ -26,6 +26,7 @@ export const ALL_ON: Capabilities = {
   schedules: true,
   github: true,
   ingress: true,
+  readingDiffAbridge: true,
   dashboardAuth: "access",
 };
 

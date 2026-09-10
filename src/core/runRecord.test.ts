@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { analyzeRunFriction, FRICTION_CATEGORIES } from "./runFriction.js";
 import type { RunEvent } from "./runEvents.js";
 import {
+  capEvent,
   DEFAULT_RETENTION_POLICY,
   MAX_EVENT_BYTES,
   MAX_RECORD_BYTES,
@@ -575,5 +576,25 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
     expect(
       isRunVisibilityFilter({ kind: "channels-in", channelIds: Array.from({ length: 1001 }, (_, i) => `c${i}`) }),
     ).toBe(false);
+  });
+});
+
+// Feature: docs/reference/specs/reading-diff.md item 8 — a reading-diff artifact's
+// payload is its `diff`, capped by its producer above the per-event cap by
+// design; its `summary` is one line. The event cap must leave both alone.
+describe("capEvent on a review_artifact", () => {
+  it("does not shrink the summary of an oversized artifact — the diff is the producer's to cap", () => {
+    const event: RunEvent = {
+      type: "review_artifact",
+      artifact: "reading_diff",
+      poweredBy: "meat",
+      baseRef: "main",
+      diff: "x".repeat(MAX_EVENT_BYTES + 10),
+      truncated: false,
+      summary: "one line about the change",
+    };
+    const capped = capEvent(event, MAX_EVENT_BYTES);
+    expect(capped.event).toBe(event);
+    expect(capped.bytes).toBeGreaterThan(MAX_EVENT_BYTES);
   });
 });

@@ -55,6 +55,7 @@ import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 import { CLI_ACTOR } from "./core/authz/actor.js";
 import { ALL_CAPABILITIES, capabilitiesFrom, type Capabilities } from "./core/capabilities.js";
+import { meatOnPath } from "./core/meatProcess.js";
 import {
   CommandError,
   CommandRegistry,
@@ -450,7 +451,7 @@ export function cliCapabilities(
   if (parseConfigLocation(configPath).kind !== "file") return ALL_CAPABILITIES;
   if (!(opts.exists ?? existsSync)(configPath)) return ALL_CAPABILITIES;
   try {
-    return capabilitiesFrom((opts.load ?? loadAppConfig)(configPath), env, secrets);
+    return capabilitiesFrom((opts.load ?? loadAppConfig)(configPath), env, secrets, { meatBinary: meatOnPath(env) });
   } catch {
     return ALL_CAPABILITIES;
   }
@@ -570,7 +571,9 @@ async function main(): Promise<void> {
   // What is on in this process (src/core/capabilities.ts): the CLI's `ask`
   // resolves it once from the same config the bot would, so a run started here
   // carries the same prompt blocks and card notes as one started in Slack.
-  const capabilities = capabilitiesFrom(config.config, publicEnv(), processSecrets);
+  const capabilities = capabilitiesFrom(config.config, publicEnv(), processSecrets, {
+    meatBinary: meatOnPath(publicEnv()),
+  });
   // Every optional subsystem is a real implementation or its Null Object
   // (docs/reference/specs/routing-and-config.md item 16), as in the bot. The CLI has no
   // run ledger: a one-shot process reclaims and resumes nothing.

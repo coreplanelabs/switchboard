@@ -955,6 +955,42 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "review:write",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "review.abridge",
+    "options": [
+      {
+        "name": "model",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "force",
+        "required": false,
+        "type": "boolean",
+      },
+      {
+        "name": "wait",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "runs:read",
     "args": [
       {

@@ -28,7 +28,6 @@ export const DISPLAY_NAMES = {
   "run.agent": "the agent loop",
   "run.command": "the command",
   "run.reading_diff": "reading the diff (in parallel)",
-  "run.reading_diff.upgrade": "upgrading the diff (in parallel)",
   "run.settle_reviewed_head": "re-checking the moved branch",
   "run.description_turn": "asking for the PR description",
   "run.observe_workspace": "checking the workspace",

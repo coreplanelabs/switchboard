@@ -50,6 +50,12 @@ One table per group. "Who can run it" is what the authorization policy decides f
 | `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>]` | List runs (live and persisted, newest first) — metadata only, never message text. | admins |
 | `runs stop <id> --mode <soft\|hard>` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor. | admins |
 
+### `review`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `review abridge <id> [--model <string>] [--force] [--wait]` | Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed. | admins |
+
 ### `friction`
 
 | Command | What it does | Who can run it |

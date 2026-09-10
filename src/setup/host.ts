@@ -6,6 +6,7 @@ import { Writable } from "node:stream";
 import { dirname, join, resolve } from "node:path";
 import { PROFILE_EXAMPLE_PATH } from "../deploy/profile.js";
 import { PACKAGE_ROOT, RUNS_FROM_PUBLISHED_PACKAGE } from "../packageRoot.js";
+import { meatOnPath } from "../core/meatProcess.js";
 import type { InitTemplates, PlannedFile } from "./plan.js";
 
 // `switchboard init`, the host half: the templates come from the PACKAGE (the
@@ -137,6 +138,7 @@ export function hostSetupIO(cwd: string = process.cwd()) {
     // The name to run `ask` as next — only when this process IS the published package.
     package: () => (RUNS_FROM_PUBLISHED_PACKAGE ? publishedPackage() : undefined),
     env: process.env,
+    meatBinary: meatOnPath(process.env),
     prompt: ttyPrompter(),
   };
 }

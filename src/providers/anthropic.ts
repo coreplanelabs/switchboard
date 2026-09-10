@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Effort } from "../effort.js";
-import { processSecrets } from "../secrets.js";
+import { processSecrets, type Secret, type Secrets } from "../secrets.js";
 import type {
   ChatMessage,
   CompletionRequest,
@@ -14,15 +14,32 @@ import type {
 /** The slice of the SDK client the provider uses — injectable for tests. */
 export type AnthropicClientLike = Pick<Anthropic, "messages">;
 
+/** The env var the SDK itself reads when a provider block names none. */
+export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
+
+/** The Anthropic credential this process spends — THE one getter. The
+ *  provider's client reads its key here, and so does everything else that
+ *  spends against the same account (the `readingDiffAbridge` capability and
+ *  meat's abridging call in src/core/meatProcess.ts): the first `type:
+ *  anthropic` provider block's `apiKeyEnv` (default `ANTHROPIC_API_KEY`, the
+ *  SDK's own), as a `Secret` from the process's secrets — revealed only where
+ *  it crosses a boundary. Undefined when no Anthropic provider is configured
+ *  or its variable is unset — callers fail by name. */
+export function anthropicApiKey(providers: Record<string, ProviderConfig>, secrets: Secrets): Secret | undefined {
+  const cfg = Object.values(providers).find((p) => p.type === "anthropic");
+  if (!cfg) return undefined;
+  return secrets.named(cfg.apiKeyEnv ?? ANTHROPIC_API_KEY_ENV);
+}
+
 export class AnthropicProvider implements Provider {
   readonly name: string;
   private client: AnthropicClientLike;
 
   constructor(name: string, cfg: ProviderConfig, client?: AnthropicClientLike) {
     this.name = name;
-    const apiKey = cfg.apiKeyEnv ? processSecrets.named(cfg.apiKeyEnv) : undefined;
-    // Falls back to ANTHROPIC_API_KEY / ambient credentials when apiKeyEnv is unset.
-    // The key is revealed into the SDK's constructor and held nowhere else here.
+    const apiKey = anthropicApiKey({ [name]: cfg }, processSecrets);
+    // Falls back to the SDK's ambient credentials when nothing is set. The key
+    // is revealed into the SDK's constructor and held nowhere else here.
     this.client = client ?? new Anthropic(apiKey ? { apiKey: apiKey.reveal() } : {});
   }
 

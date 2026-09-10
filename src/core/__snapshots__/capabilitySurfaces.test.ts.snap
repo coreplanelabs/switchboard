@@ -52,6 +52,10 @@ exports[`capability axis — a capability turning on changes exactly the command
     "execution",
     "residents",
   ],
+  "review.abridge": [
+    "runHistory",
+    "readingDiffAbridge",
+  ],
   "schedule.list": [
     "schedules",
   ],
@@ -77,6 +81,7 @@ commands:
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
   runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+  review abridge       — Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed.
   friction report      — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
   friction propose     — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
   friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
@@ -130,6 +135,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "repo.rebuild",
   "repo.reconfigure",
   "repo.test",
+  "review.abridge",
   "runs.events",
   "runs.friction",
   "runs.get",
@@ -164,6 +170,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "repo_rebuild",
   "repo_reconfigure",
   "repo_test",
+  "review_abridge",
   "runs_events",
   "runs_friction",
   "runs_get",
@@ -195,6 +202,8 @@ exports[`capability surfaces — cloud-full > help on chat 1`] = `
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
 • \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+*review*
+• \`review abridge\` — Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed.
 *friction*
 • \`friction report\` — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
 • \`friction propose\` — Run the self-improvement step: cluster recent friction, dedupe against open issues, file the top proposals as labeled issues.
@@ -239,6 +248,7 @@ exports[`capability surfaces — cloud-full > web seeds: /runs (capabilities, re
     "ingress": true,
     "mcp": true,
     "memory": true,
+    "readingDiffAbridge": true,
     "residents": true,
     "runHistory": true,
     "runLedger": true,
@@ -415,6 +425,7 @@ exports[`capability surfaces — local-full > web seeds: /runs (capabilities, re
     "ingress": true,
     "mcp": true,
     "memory": true,
+    "readingDiffAbridge": false,
     "residents": false,
     "runHistory": true,
     "runLedger": false,
@@ -552,6 +563,7 @@ exports[`capability surfaces — minimal > web seeds: /runs (capabilities, reten
     "ingress": false,
     "mcp": false,
     "memory": false,
+    "readingDiffAbridge": false,
     "residents": false,
     "runHistory": false,
     "runLedger": false,

@@ -1,4 +1,4 @@
-import { ALL_CAPABILITIES, NO_CAPABILITIES, type Capabilities } from "../capabilities.js";
+import { ALL_CAPABILITIES, NO_CAPABILITIES, type Capabilities, type HostFacts } from "../capabilities.js";
 
 // Three installations, as configurations (docs/reference/specs/capabilities.md item 4):
 // the config.yaml and the environment that PRODUCE each `Capabilities` value
@@ -21,7 +21,9 @@ export interface CapabilityFixture {
   yaml: string;
   /** The process environment the config's `*Env` names point at, plus the env-only switches. */
   env: Readonly<Record<string, string>>;
-  /** What `capabilitiesFrom(yaml, env)` must compute. */
+  /** What the host has (the meat binary on PATH); absent → nothing. */
+  host?: Readonly<HostFacts>;
+  /** What `capabilitiesFrom(yaml, env, host)` must compute. */
   capabilities: Readonly<Capabilities>;
 }
 
@@ -84,6 +86,7 @@ mcp:
     schedules: false,
     github: true,
     ingress: true,
+    readingDiffAbridge: false, // no `meat` on this laptop's PATH
     dashboardAuth: "none",
   },
 };
@@ -137,6 +140,8 @@ costs:
     ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com",
     ACCESS_AUD: "a".repeat(64),
   },
+  // The bot image ships meat, so a cloud deployment has it on PATH.
+  host: { meatBinary: true },
   capabilities: ALL_CAPABILITIES,
 };
 

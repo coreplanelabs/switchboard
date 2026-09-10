@@ -147,9 +147,45 @@ describe("capabilitiesFrom — every axis, on and off", () => {
     expect(caps({}, { ...access, ACCESS_DEV_BYPASS: "1" }).dashboardAuth).toBe("access");
   });
 
+  // Feature: docs/reference/specs/reading-diff.md item 1 / capabilities.md item 1 — the
+  // abridged reading diff is on iff the host has the binary, the Anthropic
+  // provider has its credential, and the switch is not `off` (env override included).
+  it("readingDiffAbridge: the meat binary (a host fact handed in), the provider's credential through the one getter, and a provider that is not off — any one missing is off", () => {
+    // The credential rides in `secrets`, the switch's env override in `env`, the binary in `host`.
+    const with_ = (config: Partial<AppConfig>, env: Record<string, string>, host?: { meatBinary: boolean }) =>
+      capabilitiesFrom({ ...BASE, ...config }, env, secretsFrom(env), host).readingDiffAbridge;
+    const on = { ANTHROPIC_API_KEY: "sk" };
+    expect(with_({}, on, { meatBinary: true })).toBe(true);
+    expect(with_({}, on)).toBe(false); // no host fact → no binary
+    expect(with_({}, on, { meatBinary: false })).toBe(false);
+    expect(with_({}, {}, { meatBinary: true })).toBe(false); // credential unset
+    expect(
+      with_(
+        { providers: { ant: { type: "anthropic", apiKeyEnv: "MY_KEY" } } },
+        { MY_KEY: "k", ANTHROPIC_API_KEY: "" },
+        { meatBinary: true },
+      ),
+    ).toBe(true); // the provider's own apiKeyEnv, not a fixed name
+    expect(with_({ review: { readingDiff: { provider: "off" } } }, on, { meatBinary: true })).toBe(false);
+    // meat (auto) and git (on demand) are both "on"
+    expect(with_({ review: { readingDiff: { provider: "meat" } } }, on, { meatBinary: true })).toBe(true);
+    // the env override counts like config
+    expect(with_({}, { ...on, SWITCHBOARD_READING_DIFF: "off" }, { meatBinary: true })).toBe(false);
+  });
+
   it("the full configuration reaches ALL_CAPABILITIES — the two fixtures are real states, not shapes", () => {
-    const full = caps(
+    const FULL_ENV = {
+      ANTHROPIC_API_KEY: "sk",
+      MEMORY_TOKEN: "t",
+      CF_ANALYTICS_TOKEN: "t",
+      GH_TOKEN: "ghp",
+      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "ci" } }),
+      ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com",
+      ACCESS_AUD: "a".repeat(64),
+    };
+    const full = capabilitiesFrom(
       {
+        ...BASE,
         execution: { type: "cloudflare", url: "https://sb.example", resident: { baseUrl: "https://res.example" } },
         memory: { enabled: true },
         runHistory: { worker: STATE },
@@ -157,14 +193,9 @@ describe("capabilitiesFrom — every axis, on and off", () => {
         mcp: {},
         costs: COSTS,
       },
-      {
-        MEMORY_TOKEN: "t",
-        CF_ANALYTICS_TOKEN: "t",
-        GH_TOKEN: "ghp",
-        SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ tok: { subject: "ci" } }),
-        ACCESS_TEAM_DOMAIN: "acme.cloudflareaccess.com",
-        ACCESS_AUD: "a".repeat(64),
-      },
+      FULL_ENV,
+      secretsFrom(FULL_ENV),
+      { meatBinary: true },
     );
     expect(full).toEqual(ALL_CAPABILITIES);
     expect(Object.keys(full).sort()).toEqual(Object.keys(NO_CAPABILITIES).sort());

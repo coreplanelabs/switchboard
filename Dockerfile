@@ -41,6 +41,18 @@ COPY deploy/cloudflare-docs/package.json ./deploy/cloudflare-docs/
 COPY packages/switchboard/package.json ./packages/switchboard/
 RUN npm ci --omit=dev --workspaces=false --include-workspace-root
 
+# meat (meat.dev): the abridged "reading diff" a PR review can carry
+# (docs/reference/specs/reading-diff.md). It runs HERE, on the bot host, over a
+# diff the bot fetches, with the bot's own Anthropic credential — never inside a
+# resident or sandbox, which is why neither execution image installs it. A
+# static Go binary (CGO off: bookworm-built, runs on this slim base without a
+# libc match) from a pinned commit of boldsoftware/meat: the project publishes
+# no release assets, and `@latest` would make the binary a property of the
+# build date — the pnpm lesson in src/deploy/imagePins.test.ts. Bumping the sha
+# is a reviewable commit; src/deploy/botImageMeat.test.ts holds this shape.
+FROM docker.io/library/golang:1.27.1-bookworm AS meat
+RUN CGO_ENABLED=0 go install meat.dev/cmd/meat@f39f41dfe7b5b37a12b35fdfbaecc7e779855bd3
+
 FROM node:24-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates \
@@ -50,6 +62,11 @@ RUN apt-get update \
        > /etc/apt/sources.list.d/github-cli.list \
   && apt-get update && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
+
+# The one binary the meat stage built; `meat -h` exits 0 and proves the static
+# binary runs on this base (`command -v` is the probe the host runner uses).
+COPY --from=meat /go/bin/meat /usr/local/bin/meat
+RUN command -v meat >/dev/null && meat -h >/dev/null 2>&1
 
 # Non-root user; agents run bash with this user's (container-scoped) permissions.
 RUN useradd -m -u 1001 switchboard

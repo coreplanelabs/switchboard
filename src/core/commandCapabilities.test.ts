@@ -67,6 +67,7 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "memory.forget": (c) => c.memory,
   "friction.report": (c) => c.runHistory,
   "friction.propose": (c) => c.runHistory,
+  "review.abridge": (c) => c.runHistory && c.readingDiffAbridge,
   "repo.list": (c) => c.residents,
   "repo.onboard": (c) => c.residents,
   "repo.offboard": (c) => c.residents,

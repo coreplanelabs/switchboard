@@ -337,7 +337,7 @@ describe("createRunTimeline — skill_use", () => {
   });
 });
 
-describe("createRunTimeline — review_artifact (docs/reference/specs/reading-diff.md item 5)", () => {
+describe("createRunTimeline — review_artifact (docs/reference/specs/reading-diff.md item 11)", () => {
   it("folds a review_artifact to nothing — the panel renders it, the step story does not change shape", () => {
     const t = createRunTimeline();
     t.push(call("bash", "$ ls"));

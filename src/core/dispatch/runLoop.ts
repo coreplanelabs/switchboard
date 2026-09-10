@@ -243,16 +243,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // can always tell the difference.
   const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
 
-  // Reading-diff artifacts (docs/reference/specs/reading-diff.md): a PR review run gets
-  // the change as a reviewer reads it, produced CONCURRENTLY with the review
-  // by the run's own executor (read-only commands; the resident runs execs
-  // beside the model's) and published straight to the registry like the
-  // other dispatcher facts. The git BASELINE is guaranteed: the dispatcher
-  // joins it before the answer publish below (a join on a seconds-long
-  // command started here — never a timeout race). meat, when configured, is
-  // an UPGRADE artifact under its own runtime budget, never awaited: it
-  // lands iff it finishes within the review (a later publish is dropped by
-  // the registry's finished-run rule, and the baseline still stands).
+  // The reading-diff baseline (docs/reference/specs/reading-diff.md item 4): a PR review
+  // run gets the change as a reviewer reads it — the full git diff, produced
+  // CONCURRENTLY with the review by the run's own executor (a read-only
+  // command; the resident runs it beside the model's) and published straight
+  // to the registry like the other dispatcher facts. Guaranteed: the
+  // dispatcher joins it before the answer publish below (a join on a
+  // seconds-long command started here — never a timeout race). The ABRIDGED
+  // diff is not this run's business: it is produced on the bot host after the
+  // record is durable (reviewAbridge.ts — on demand, or automatically with
+  // `provider: meat` through the run-history writer's persist hook).
   let readingDiffBaseline: Promise<boolean> | undefined;
   let descriptionArtifact: Promise<boolean> | undefined;
   if (agent.name === "review" && repoCtx.pr !== undefined) {
@@ -265,26 +265,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       repoCtx,
       publish: (e) => registry.publish(run.id, e),
     });
-    // Two background spans (docs/reference/specs/tracing.md): concurrent with the loop,
+    // One background span (docs/reference/specs/tracing.md): concurrent with the loop,
     // structure for the partition, never a counted term — started under the
-    // root inside `startReviewReadingDiff`, so each diff's exec is a child.
-    const started = startReviewReadingDiff({
+    // root inside `startReviewReadingDiff`, so the diff's exec is its child.
+    readingDiffBaseline = startReviewReadingDiff({
       executor,
       cfg: deps.config.config.review?.readingDiff,
       env: publicEnv(),
       baseRef: repoCtx.baseRef,
       publish: (e) => registry.publish(run.id, e),
       parent: root,
-    });
-    readingDiffBaseline = started.baseline.then((published) => {
+    }).baseline.then((published) => {
       console.log(`[reading-diff] ${msg.threadKey} baseline ${published ? "published" : "none"}`);
       return published;
     });
-    const upgrade = started.upgrade;
-    if (upgrade)
-      void upgrade.then((published) => {
-        console.log(`[reading-diff] ${msg.threadKey} meat ${published ? "published" : "did not land"}`);
-      });
   }
 
   let answer: string;
@@ -615,8 +609,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // reply sent.
     // Join the reading-diff BASELINE so it is in the record before finish()
     // (which drops later publishes). This is a join on the git command fired
-    // at run start, not a timeout: by now it finished minutes ago. The meat
-    // upgrade is deliberately NOT awaited — see the comment at the start.
+    // at run start, not a timeout: by now it finished minutes ago.
     const baseline = readingDiffBaseline;
     if (baseline) await root.span("run.reading_diff_join", () => baseline);
     const description = descriptionArtifact;

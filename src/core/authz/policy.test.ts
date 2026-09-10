@@ -113,6 +113,13 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.noGrants, command("runs.stop")],
     ],
   },
+  // `review abridge` spends an Opus call: admins and holders of the grant by name; never a chat baseline.
+  ...commandRow(
+    "review:write",
+    "review.abridge",
+    [A.admin],
+    [A.chatUser, A.member, A.token, A.noGrants, A.dispatchOnly],
+  ),
   // `friction report` is what every Slack user holds; a token holding only run scopes is not admitted.
   ...commandRow(
     "friction:read",

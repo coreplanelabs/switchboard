@@ -491,6 +491,8 @@ export function withCallerToken<T>(value: T, callerId: string): T {
 export const FIXTURE = {
   liveRun: "live-1",
   persistedRun: "fin-1",
+  /** A finished PR review that recorded a git reading diff — what `review abridge` needs. */
+  reviewRun: "rev-1",
   repo: "acme/api",
   channel: "slack:C1",
   /** The caller's own memory record; the only user scope a caller can reach is its own. */
@@ -542,6 +544,10 @@ export const COMMAND_FIXTURES: Readonly<Record<string, { hints?: SampleHints; ba
   "memory.forget": {
     hints: { id: FIXTURE.ownMemoryRecord },
     why: "the record must exist in the CALLER's own scope — the generic `id` hint is a run id",
+  },
+  "review.abridge": {
+    hints: { id: FIXTURE.reviewRun },
+    why: "the run must be a finished PR review that recorded a git reading diff — the generic `id` hint is a live coding run",
   },
   "deploy.restart": {
     hints: { only: "bot" },

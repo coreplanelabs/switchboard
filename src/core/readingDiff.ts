@@ -6,45 +6,52 @@ import type { ExecTraceOptions } from "../execution/executor.js";
 
 // The reading diff (docs/reference/specs/reading-diff.md): every PR review run publishes a
 // `review_artifact` event carrying the change as a reviewer would read it —
-// either the full `git diff` or meat.dev's abridged "reading diff" (the
-// conceptual meat of the change, style/noise dropped). Which one is a
-// config/env switch; the system functions identically either way — the only
-// difference is the artifact's `poweredBy` (and meat's one-line summary). meat
-// is an external Go binary that makes its OWN model calls from the execution
-// environment (it needs ANTHROPIC_API_KEY there, and an Opus-class model —
-// measured on a real PR: Opus 4.8 kept 45 % in 96 s; Sonnet 5 kept 87 % in
-// 240 s, barely abridging), so every meat failure — binary missing, key
-// missing, API error, bad output — falls back to the git provider with the
-// reason recorded on the artifact.
+// the full `git diff`, produced by the run's own executor concurrently with
+// the review and joined before the answer, so every review's record carries
+// one deterministically. This module is that BASELINE. The abridged reading
+// diff (meat.dev's "conceptual meat" of the change) is a second artifact on the
+// same record, produced AFTER the review on the bot host — reviewAbridge.ts,
+// on demand (`review abridge <id>`) or automatically when
+// `review.readingDiff.provider` is `meat`. Nothing here runs meat, and no
+// execution container ever sees the Anthropic credential.
 
 export type ReadingDiffProviderName = "git" | "meat";
 
 /** `AppConfig.review.readingDiff` — the deploy-level switch. */
 export interface ReadingDiffConfig {
-  /** `git` (default): the full diff. `meat`: git PLUS meat.dev's abridged
-   *  reading diff as an upgrade artifact. `off`: no artifact is produced (the
-   *  run page's on-the-fly command remains the way to get one — roadmap). */
+  /** `git` (default): the full diff on every review; the abridged one on
+   *  demand. `meat`: git PLUS an automatic abridged diff once the record is
+   *  durable (one Opus-class call per review). `off`: no artifact is produced,
+   *  so there is nothing to abridge either. */
   provider?: "git" | "meat" | "off";
-  /** meat's `-model` (e.g. `claude-opus-4-8`). Omit for meat's built-in default. */
+  /** meat's `-model`. Default `claude-opus-5` — an Opus-class model is the
+   *  measured minimum for a diff that is actually abridged. */
   meatModel?: string;
-  /** meat's own runtime budget in seconds (the producer's bound, enforced with
-   *  `timeout` around the command — never a wait in the pipeline). Default 240. */
+  /** meat's own runtime budget in seconds, enforced on the host process (the
+   *  child is killed past it; a `failed` state, never a wait in a review). Default 240. */
   meatTimeoutS?: number;
 }
 
 export interface ResolvedReadingDiff {
   provider: ReadingDiffProviderName;
+  /** Set whenever `provider` is `meat`. */
   meatModel?: string;
   meatTimeoutS: number;
 }
 
 export const MEAT_TIMEOUT_S_DEFAULT = 240;
 
+/** meat's `-model` when config names none. Measured on a real PR: Opus 4.8
+ *  kept 45 % in 96 s with everything kept load-bearing; Sonnet 5 kept 87 % in
+ *  240 s, barely abridging — an Opus-class model is the floor. */
+export const MEAT_MODEL_DEFAULT = "claude-opus-5";
+
 /** Config + env → the effective choice, or null for off. The env override
  *  (`SWITCHBOARD_READING_DIFF=git|meat|off`) beats config so an operator can
  *  flip providers on a deployed bot without a config rebuild; an unrecognized
  *  env value is ignored. Absent everything → `git`: the artifact costs one git
- *  command and the panel can rely on it existing. */
+ *  command and the panel can rely on it existing. With `meat`, `meatModel`
+ *  falls back to `MEAT_MODEL_DEFAULT`. */
 export function resolveReadingDiff(
   cfg: ReadingDiffConfig | undefined,
   env: Record<string, string | undefined>,
@@ -57,26 +64,17 @@ export function resolveReadingDiff(
     typeof cfg?.meatTimeoutS === "number" && cfg.meatTimeoutS > 0
       ? Math.floor(cfg.meatTimeoutS)
       : MEAT_TIMEOUT_S_DEFAULT;
-  return { provider: choice, meatTimeoutS: timeout, ...(cfg?.meatModel ? { meatModel: cfg.meatModel } : {}) };
+  const meatModel = cfg?.meatModel || (choice === "meat" ? MEAT_MODEL_DEFAULT : undefined);
+  return { provider: choice, meatTimeoutS: timeout, ...(meatModel ? { meatModel } : {}) };
 }
 
-/** The one shell command per provider. The range is `origin/<base>...HEAD`
+/** The one shell command of the baseline. The range is `origin/<base>...HEAD`
  *  (base falls back to the repository's default branch via `origin/HEAD`),
  *  quoted into one inert token; `--end-of-options` keeps a hostile ref from
  *  being parsed as a git option (same discipline as `diff_digest`). */
-export function readingDiffCommand(
-  provider: ReadingDiffProviderName,
-  baseRef: string | undefined,
-  meatModel?: string,
-  meatTimeoutS = MEAT_TIMEOUT_S_DEFAULT,
-): string {
+export function readingDiffCommand(baseRef: string | undefined): string {
   const range = shellQuote(`origin/${baseRef ?? "HEAD"}...HEAD`);
-  if (provider === "git") return `git diff --no-color --end-of-options ${range}`;
-  // meat's runtime bound is enforced HERE, on the producer (coreutils timeout;
-  // exit 124 is the executors' documented timeout convention) — the pipeline
-  // never waits on meat, so this is the only clock meat answers to.
-  const meat = meatModel ? `meat -json -model ${shellQuote(meatModel)} ${range}` : `meat -json ${range}`;
-  return `timeout ${Math.floor(meatTimeoutS)} ${meat}`;
+  return `git diff --no-color --end-of-options ${range}`;
 }
 
 export interface MeatResult {
@@ -88,7 +86,7 @@ export interface MeatResult {
 
 /** meat's `-json` wire shape (`{smart_diff, summary, input_tokens,
  *  output_tokens, elision}`). Anything else — a shell error line, non-JSON,
- *  JSON without `smart_diff` — throws with a reason the fallback records. */
+ *  JSON without `smart_diff` — throws with a reason the caller records. */
 export function parseMeatJson(raw: string): MeatResult {
   const text = raw.trim();
   if (text === "") throw new Error("meat produced no output");
@@ -118,7 +116,7 @@ export function capDiff(diff: string, cap = READING_DIFF_CAP): { diff: string; t
   if (diff.length <= cap) return { diff, truncated: false };
   // Never split a surrogate pair at the cut (a lone high surrogate renders as
   // mojibake); secrets cannot be split here because redaction runs BEFORE the
-  // cap (`sanitize` below — the redact-then-cap order redactAndCap documents).
+  // cap (`sanitizeArtifactText` — the redact-then-cap order redactAndCap documents).
   let end = cap;
   const last = diff.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end--;
@@ -127,24 +125,22 @@ export function capDiff(diff: string, cap = READING_DIFF_CAP): { diff: string; t
 }
 
 /** The stream's hygiene contract (`RunRegistry` publishes events as-is): every
- *  string that leaves this module for the stream is control-stripped and
+ *  string that leaves for the stream or the record is control-stripped and
  *  redacted FIRST, capped after — a diff of a PR that accidentally commits a
- *  credential must not carry it onto the run page or the record. */
-function sanitize(text: string): string {
+ *  credential must not carry it onto the run page or the record. Shared with
+ *  the host-side abridger (reviewAbridge.ts), whose artifact reaches the same
+ *  record. */
+export function sanitizeArtifactText(text: string): string {
   return redactSecrets(stripAnsi(text));
 }
 
 /** What `produceReadingDiff` yields — the payload of the `review_artifact`
  *  event minus the event envelope. */
 export interface ReadingDiffArtifact {
-  poweredBy: ReadingDiffProviderName;
+  poweredBy: "git";
   baseRef: string;
   diff: string;
   truncated: boolean;
-  /** meat's one-line summary of the change (meat only). */
-  summary?: string;
-  /** meat's own model usage for the abridging call(s) (meat only). */
-  meatTokens?: { input: number; output: number };
 }
 
 function firstLine(s: string): string {
@@ -157,39 +153,28 @@ function failedOutput(out: string): boolean {
   return /^(exit \d+|exit [A-Z]+|fatal|error):/i.test(out.trimStart());
 }
 
-/** The dispatcher's one call (docs/reference/specs/reading-diff.md item 4). Guarantees by
- *  construction, no waits in the pipeline:
- *  - `baseline`: the git artifact, produced concurrently from run start and
- *    published as soon as it exists. The dispatcher JOINS this promise before
- *    the answer publish — a join on a seconds-long command started minutes
- *    earlier, so every PR review's record carries a reading diff
- *    deterministically. Resolves `true` iff published; never rejects.
- *  - `upgrade` (provider `meat` only): meat's abridged artifact, produced
- *    concurrently under meat's OWN runtime budget (`timeout` in the command)
- *    and published the moment it is done. The dispatcher never awaits it: meat
- *    lands iff it finishes within the review — a late publish is dropped by
- *    the registry's finished-run rule, and the baseline still stands. */
+/** The dispatcher's one call (docs/reference/specs/reading-diff.md item 4): the git
+ *  baseline, produced concurrently from run start and published as soon as it
+ *  exists. The dispatcher JOINS this promise before the answer publish — a
+ *  join on a seconds-long command started minutes earlier, so every PR
+ *  review's record carries a reading diff deterministically. Resolves `true`
+ *  iff published; never rejects. `off` → resolves false, nothing runs. */
 export function startReviewReadingDiff(args: {
   executor: { exec(command: string, opts?: ExecTraceOptions): Promise<string> };
   cfg: ReadingDiffConfig | undefined;
   env: Record<string, string | undefined>;
   baseRef: string | undefined;
   publish: (event: RunEvent) => void;
-  /** The request's root: each production becomes a `run.reading_diff` /
-   *  `run.reading_diff.upgrade` background span under it, `outcome` saying
-   *  whether it published, and the diff's exec is that span's child
-   *  (docs/reference/specs/tracing.md item 18). Absent, nothing is measured. */
+  /** The request's root: the production becomes a `run.reading_diff`
+   *  background span under it, `outcome` saying whether it published, and the
+   *  diff's exec is that span's child (docs/reference/specs/tracing.md item 18).
+   *  Absent, nothing is measured. */
   parent?: Span;
-}): { baseline: Promise<boolean>; upgrade?: Promise<boolean> } {
-  const resolved = resolveReadingDiff(args.cfg, args.env);
-  if (!resolved) return { baseline: Promise.resolve(false) };
-  const produce = async (provider: ReadingDiffProviderName, span: Span | undefined): Promise<boolean> => {
+}): { baseline: Promise<boolean> } {
+  if (!resolveReadingDiff(args.cfg, args.env)) return { baseline: Promise.resolve(false) };
+  const produce = async (span: Span | undefined): Promise<boolean> => {
     try {
-      const artifact = await produceReadingDiff(
-        args.executor,
-        { provider, baseRef: args.baseRef, meatModel: resolved.meatModel, meatTimeoutS: resolved.meatTimeoutS },
-        span,
-      );
+      const artifact = await produceReadingDiff(args.executor, { baseRef: args.baseRef }, span);
       if (!artifact) return false;
       args.publish({ type: "review_artifact", artifact: "reading_diff", ...artifact, at: systemClock() });
       return true;
@@ -197,55 +182,31 @@ export function startReviewReadingDiff(args: {
       return false;
     }
   };
-  const publishArtifact = (provider: ReadingDiffProviderName): Promise<boolean> => {
-    if (!args.parent) return produce(provider, undefined);
-    const baseline = provider === "git";
-    return args.parent.span(baseline ? "run.reading_diff" : "run.reading_diff.upgrade", async (span) => {
-      const published = await produce(provider, span);
-      span.setAttrs({ outcome: published ? "published" : baseline ? "none" : "did_not_land" });
-      return published;
-    });
-  };
+  if (!args.parent) return { baseline: produce(undefined) };
   return {
-    baseline: publishArtifact("git"),
-    ...(resolved.provider === "meat" ? { upgrade: publishArtifact("meat") } : {}),
+    baseline: args.parent.span("run.reading_diff", async (span) => {
+      const published = await produce(span);
+      span.setAttrs({ outcome: published ? "published" : "none" });
+      return published;
+    }),
   };
 }
 
-/** Produce ONE provider's reading diff with the run's own executor (read-only
- *  commands in the run's workspace). Any failure — meat missing, its key
- *  missing, a git error, an empty diff — yields null, never a throw into the
- *  run that owns the executor; the baseline/upgrade split above is what keeps
- *  an artifact guaranteed. */
+/** Produce the git reading diff with the run's own executor (a read-only
+ *  command in the run's workspace). Any failure — a git error, an executor
+ *  throw, an empty diff — yields null, never a throw into the run that owns
+ *  the executor. */
 export async function produceReadingDiff(
   executor: { exec(command: string, opts?: ExecTraceOptions): Promise<string> },
-  opts: { provider: ReadingDiffProviderName; baseRef: string | undefined; meatModel?: string; meatTimeoutS?: number },
+  opts: { baseRef: string | undefined },
   /** The production's own span; the executor's `exec.exec` hangs under it. */
   span?: Span,
 ): Promise<ReadingDiffArtifact | null> {
   const baseRef = opts.baseRef ?? "HEAD";
   try {
-    const out = await executor.exec(
-      readingDiffCommand(opts.provider, opts.baseRef, opts.meatModel, opts.meatTimeoutS),
-      span ? { span } : undefined,
-    );
-    if (opts.provider === "meat") {
-      const meat = parseMeatJson(out); // throws → null below (the baseline covers)
-      const capped = capDiff(sanitize(meat.diff));
-      return {
-        poweredBy: "meat",
-        baseRef,
-        diff: capped.diff,
-        truncated: capped.truncated,
-        // meat's summary is model prose generated FROM the diff — same hygiene.
-        ...(meat.summary ? { summary: sanitize(meat.summary) } : {}),
-        ...(meat.inputTokens !== undefined && meat.outputTokens !== undefined
-          ? { meatTokens: { input: meat.inputTokens, output: meat.outputTokens } }
-          : {}),
-      };
-    }
+    const out = await executor.exec(readingDiffCommand(opts.baseRef), span ? { span } : undefined);
     if (out.trim() === "" || failedOutput(out)) return null;
-    const capped = capDiff(sanitize(out));
+    const capped = capDiff(sanitizeArtifactText(out));
     return { poweredBy: "git", baseRef, diff: capped.diff, truncated: capped.truncated };
   } catch {
     return null;

@@ -68,6 +68,9 @@ export interface InitWorld {
   inCheckout: boolean;
   /** The process environment: a variable set here wins over `.env`, as the loader's rule says. */
   env: Record<string, string | undefined>;
+  /** The `meat` binary resolves on this host's PATH (`meatOnPath`) — the host fact the
+   *  `readingDiffAbridge` capability reads; absent → no. */
+  meatBinary?: boolean;
   /** `project.json`'s `image` — what the next commands run outside a checkout. */
   image: string;
   /** The published npm package this CLI runs from, when it does — `project.json`'s `package`; undefined in a checkout or the image. */
@@ -151,7 +154,7 @@ export function planInit(answers: InitAnswers, templates: InitTemplates, world: 
   // wins over the file, exactly as `loadEnvFileIfPresent` leaves the process.
   const config = parseAppConfigText(files[1].text);
   const env = { ...parseEnv(files[0].text), ...definedOnly(world.env) };
-  const capabilities = capabilitiesFrom(config, env, secretsFrom(env));
+  const capabilities = capabilitiesFrom(config, env, secretsFrom(env), { meatBinary: world.meatBinary ?? false });
   return {
     ok: true,
     files,

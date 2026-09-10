@@ -6752,20 +6752,12 @@ describe("reading-diff artifact on review runs", () => {
     expect(artifacts[0].seq!).toBeLessThan(answerSeq); // in the record, not after finish
   });
 
-  it("meat provider, meat fast → the git baseline AND the meat upgrade are both in the record", async () => {
-    const { registry, deps } = reviewRun("meat", async () => JSON.stringify({ smart_diff: "abridged", summary: "s" }));
-    const { io } = fakeIO();
-    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
-    const powered = registry
-      .snapshotById("r1")!
-      .events.filter((e) => e.type === "review_artifact")
-      .map((e) => (e.type === "review_artifact" && e.artifact === "reading_diff" ? e.poweredBy : "?"))
-      .sort();
-    expect(powered).toEqual(["git", "meat"]);
-  });
-
-  it("meat provider, meat hanging → the run completes with the git baseline only; the reply is never held for meat", async () => {
-    const { registry, deps } = reviewRun("meat", () => new Promise<string>(() => {})); // meat never returns
+  it("meat provider → the run still records ONLY the git baseline and never runs meat in its executor; the abridging is the host's, after persistence", async () => {
+    const commands: string[] = [];
+    const { registry, deps } = reviewRun("meat", async (cmd) => {
+      commands.push(cmd);
+      return JSON.stringify({ smart_diff: "abridged", summary: "s" });
+    });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     expect(replies.some((r) => r.includes("looks correct"))).toBe(true); // the review replied
@@ -6773,6 +6765,7 @@ describe("reading-diff artifact on review runs", () => {
     expect(
       artifacts.map((e) => (e.type === "review_artifact" && e.artifact === "reading_diff" ? e.poweredBy : "?")),
     ).toEqual(["git"]);
+    expect(commands).toEqual([]); // no meat command ever reached the run's executor
   });
 
   it("SWITCHBOARD_READING_DIFF=off → a review publishes no artifact", async () => {

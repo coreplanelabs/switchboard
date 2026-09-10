@@ -40,6 +40,20 @@ defaults:
   # efforts:
   #   coding: medium
 
+# PR reviews and the reading diff (docs/reference/specs/reading-diff.md). Every
+# review records its full `git diff`; the ABRIDGED version (meat.dev, run on
+# the bot host over the complete diff GitHub serves, with this bot's own
+# Anthropic key) is on demand — `review abridge <run id>`, grant `review:write`
+# — unless `provider: meat` makes it automatic after every review's record is
+# written (one Opus-class call per review; meat caches by model + diff). `off`
+# records no reading diff at all. `SWITCHBOARD_READING_DIFF=git|meat|off` in
+# the environment overrides `provider` on a deployed bot. Needs `runHistory`.
+# review:
+#   readingDiff:
+#     provider: git                # git (default) | meat | off
+#     meatModel: claude-opus-5     # meat's -model; Opus-class is the floor that actually abridges
+#     meatTimeoutS: 240            # meat's own budget on the host; past it the abridging fails by name
+
 # Static per-channel defaults (channel ID -> scope). Runtime overrides set via
 # "config set channel ..." are stored in data/overrides.json and win over these.
 # channels:

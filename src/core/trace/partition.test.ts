@@ -127,16 +127,17 @@ describe("partition", () => {
     expect(asAgent).toMatchObject({ toolsMs: 0, gettingReadyMs: 4_000, overheadMs: 2_000 });
   });
 
-  it("an open root and an open background upgrade are never a loss; background-only time is overhead and reported", () => {
+  it("an open root and an open background span are never a loss; background-only time is overhead and reported", () => {
+    // Two productions of the one background name: a closed one and one still open.
     const spans = [
       span("request", 0, undefined, undefined, "root"),
       span("run.reading_diff", 0, 4_000, "root"),
-      span("run.reading_diff.upgrade", 1_000, undefined, "root"),
+      span("run.reading_diff", 1_000, undefined, "root", "bg-2"),
       span("dispatch.compose", 4_000, 6_000, "root"),
     ];
     const p = partition(spans, { window: { start: 0, end: 8_000 }, owner: "agent", finished: true, losses: [] });
     identity(p);
-    // reading_diff covers 0..4 s alone; the open upgrade runs to the window end and covers 6..8 s alone.
+    // the first covers 0..4 s alone; the open one runs to the window end and covers 6..8 s alone.
     expect(p).toMatchObject({ gettingReadyMs: 2_000, overheadMs: 6_000, notRecordedMs: 0, backgroundOnlyMs: 6_000 });
   });
 
