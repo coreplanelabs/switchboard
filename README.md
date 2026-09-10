@@ -4,6 +4,10 @@
 
 Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.
 
+<p align="center">
+  <img alt="A review in a Slack thread: the mention, the status card ticking through the run's steps, then the verdict with its findings." src="docs/public/slack/run.gif" width="395">
+</p>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/public/screenshots/run-page-dark.png">
   <img alt="A finished run's page on the dashboard." src="docs/public/screenshots/run-page-light.png" width="100%">
