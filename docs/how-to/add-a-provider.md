@@ -19,7 +19,7 @@ providers:
     apiKeyEnv: GROQ_API_KEY
 ```
 
-A local server is the same shape; Ollama, for example:
+An aggregator is the same shape too: the example config carries a commented OpenRouter block, and [Configure your defaults](configure-your-defaults.md) says what the compatible adapter does not do for it. A local server is the same shape; Ollama, for example:
 
 ```yaml
 providers:
