@@ -210,8 +210,6 @@ describe("classifyPath", () => {
       "LICENSE",
       "NOTICE",
       "docker-compose.yml",
-      // A host manifest the tree no longer carries; its deletion in a diff must not roll the fleet.
-      "fly.toml",
       "tsconfig.scripts.json",
       "release-please-config.json",
       ".release-please-manifest.json",
@@ -220,15 +218,16 @@ describe("classifyPath", () => {
       ".prettierrc.json",
       ".prettierignore",
       "eslint.config.mjs",
-      // One root lockfile: a per-workspace one in a diff is the retired file disappearing.
-      "deploy/cloudflare-resident/package-lock.json",
-      "web/package-lock.json",
-      "docs/package-lock.json",
     ]) {
       expect(classifyPath(p), p).toMatchObject({ kind: "inert" });
     }
     // The root lockfile is nobody's whole-file input: it is judged per Worker by workspace.
     expect(classifyPath("package-lock.json")).toEqual({ kind: "unclassified" });
+    // It is the ONLY lockfile: one under a Worker's directory is that Worker's input like any other file there.
+    expect(classifyPath("deploy/cloudflare-resident/package-lock.json")).toEqual({
+      kind: "input",
+      workers: ["resident"],
+    });
   });
 
   it("a Worker's own directory, its wrangler config and Dockerfile are its inputs; the bot's image inputs are the root Dockerfile, .dockerignore, package files, tsconfigs, src/, web/ and skills/ — never config/, which the bot reads from the state Worker", () => {
