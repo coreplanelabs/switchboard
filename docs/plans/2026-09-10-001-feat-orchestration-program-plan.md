@@ -249,7 +249,7 @@ Five phases, in dependency order; the harness track runs in parallel with the re
   4. Post the numbers on the tracker. A failure of test 1 or 2 stops the resident track at a plan record that names the alternative.
 - **Test scenarios**:
   - Happy path: a 10-minute step completes inside a single attempt with the command's exit recorded.
-  - Failure path: a resident Worker deploy during the step yields a classified error and the retry completes the cycle within the five-attempt window.
+  - Failure path: a resident Worker deploy during the step yields a classified error and the retry completes the cycle within the six-attempt retry window (R6).
   - Edge: the step's timeout is set to 30 minutes and the platform accepts it.
 - **Verification**: the three numbers are on the tracker and each assumption in the Planning Contract is marked confirmed or refuted.
 
@@ -330,7 +330,7 @@ Five phases, in dependency order; the harness track runs in parallel with the re
   - Wake with a current snapshot: the `restore` plan returns `done` and the attach proceeds without a transfer.
   - Two cold wakes of the same snapshot on one day create two instances; a concurrent attach during a wake joins the running one rather than creating a second.
   - Rebuild after `down`: snapshots discarded, provision steps run, `warm` written.
-  - Failure path: a provision step fails five times and the row reads `down` with the step's reason.
+  - Failure path: a provision step exhausts its six attempts and the row reads `down` with the step's reason.
 - **Verification**: onboard, wake and rebuild each receipted live on one resident with the instance ids on the tracker; `resident-repos.md` items rebound.
 
 ### U7. Live receipt: a resident deploy mid-refresh
