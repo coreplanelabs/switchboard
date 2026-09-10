@@ -35,10 +35,9 @@
 # Two release lines share this workflow (docs/reference/specs/release-and-deploy.md
 # item 28): `main` is the 1.1x line and `v1.2` the 1.2 line, released as 1.200.0
 # and up from its own config and manifest files so the two pins never meet.
-# Only `main` deploys production, tags `:latest`, publishes npm `latest` and
-# judges its release PR against production; a `v1.2` release publishes its
-# images at `:<version>` alone and, when publishing is on, the package under
-# npm's `next` tag.
+# Only `main` deploys production, tags `:latest`, publishes the npm package (the
+# default-branch switch on publish-npm) and judges its release PR against
+# production; a `v1.2` release publishes its images at `:<version>` alone.
 name: release-please
 
 on:
