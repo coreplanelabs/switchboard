@@ -3,7 +3,14 @@ import { join, resolve } from "node:path";
 import { build } from "esbuild";
 import { describe, expect, it } from "vitest";
 import { WORKER_SPECS } from "../../src/deploy/plan.js";
-import { ROOT_ASSETS, shippedAssets, shippedDeployAssets, webDistAssets, workerSourceFiles } from "./build.mts";
+import {
+  packageReadme,
+  ROOT_ASSETS,
+  shippedAssets,
+  shippedDeployAssets,
+  webDistAssets,
+  workerSourceFiles,
+} from "./build.mts";
 
 // Feature: docs/reference/specs/packaging.md items 1–2, 7 and 8 — what the
 // package ships and what it depends on are both derived: the assets from what
@@ -177,5 +184,47 @@ describe("the package manifest", () => {
 
   it("is publishable: no `private` flag — publishing is gated by the release workflow's switch and npm's trusted-publisher settings, not by the manifest", () => {
     expect(pkg.private).toBeUndefined();
+  });
+});
+
+describe("packageReadme", () => {
+  const repo = "https://github.com/acme/widget";
+
+  it("makes relative images absolute on raw.githubusercontent.com at HEAD — src, srcset and markdown images — and leaves absolute ones alone", () => {
+    const out = packageReadme(
+      '<img src="docs/a.svg" alt=""> <source srcset="docs/b.svg"> ![c](docs/c.png) <img src="https://x.example/d.png">',
+      repo,
+    );
+    expect(out).toBe(
+      '<img src="https://raw.githubusercontent.com/acme/widget/HEAD/docs/a.svg" alt=""> <source srcset="https://raw.githubusercontent.com/acme/widget/HEAD/docs/b.svg"> ![c](https://raw.githubusercontent.com/acme/widget/HEAD/docs/c.png) <img src="https://x.example/d.png">',
+    );
+  });
+
+  it("makes relative links absolute on github.com at blob/HEAD; absolute URLs, anchors, mailto and a badge's nested image stay as they are, a badge's own relative target moves", () => {
+    const out = packageReadme(
+      "[Get started](docs/tutorials/get-started.md) · [site](https://openswitchboard.dev) · [top](#quick-start) · [mail](mailto:a@b.c) · [![CI](https://ci.example/badge.svg)](https://ci.example/run) · [![License](https://b.example/l.svg)](LICENSE) · [Apache-2.0](LICENSE)",
+      repo,
+    );
+    expect(out).toBe(
+      "[Get started](https://github.com/acme/widget/blob/HEAD/docs/tutorials/get-started.md) · [site](https://openswitchboard.dev) · [top](#quick-start) · [mail](mailto:a@b.c) · [![CI](https://ci.example/badge.svg)](https://ci.example/run) · [![License](https://b.example/l.svg)](https://github.com/acme/widget/blob/HEAD/LICENSE) · [Apache-2.0](https://github.com/acme/widget/blob/HEAD/LICENSE)",
+    );
+  });
+
+  it("drops every generated region whole and keeps the prose around it", () => {
+    const out = packageReadme(
+      "Before ([flow](docs/x.md)).\n\n<!-- generated:four-seams · npm run docs:gen -->\n\n```mermaid\nflowchart LR\n```\n\n<!-- /generated:four-seams -->\n\n## After\n",
+      repo,
+    );
+    expect(out).toBe("Before ([flow](https://github.com/acme/widget/blob/HEAD/docs/x.md)).\n\n\n## After\n");
+  });
+
+  it("the repository's own README comes out with no relative target left and no mermaid", () => {
+    const facts = JSON.parse(read("project.json")) as { repository: string };
+    const out = packageReadme(read("README.md"), facts.repository);
+    expect(out).toMatch(/^# OpenSwitchboard$/m);
+    for (const m of out.matchAll(/\]\(([^)\s]+)\)/g)) expect(m[1]).toMatch(/^(https?:|#|mailto:)/);
+    for (const m of out.matchAll(/\b(?:src|srcset)="([^"]+)"/g)) expect(m[1]).toMatch(/^https?:/);
+    expect(out).not.toContain("```mermaid");
+    expect(out).not.toContain("generated:");
   });
 });

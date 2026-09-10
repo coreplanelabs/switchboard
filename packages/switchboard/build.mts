@@ -17,6 +17,8 @@
 //                    (src/channels/webAssets.ts `webDistDir`); plus source.json, the version
 //                    and commit this build came from (src/packageRoot.ts `parsePackageSource`)
 //   LICENSE          a copy of the repository's, so the tarball carries the license text
+//   README.md        the repository's README with its relative links and images made absolute
+//                    (`packageReadme`), so the npm page reads as GitHub does; both are gitignored here
 // src/packageRoot.ts finds dist/assets/ beside the bundle by its project.json.
 //
 //   npm run build -w packages/switchboard
@@ -153,6 +155,35 @@ function packageSource(): PackageSource {
   return { version: pkg.version, ...stamp };
 }
 
+/** The package's README is the repository's — one text, so the npm page reads as GitHub does. npm renders
+ *  the tarball's README with no tree behind it, so every relative link and image is made absolute against
+ *  the repository on GitHub (`blob/HEAD` for links, `raw.githubusercontent.com/…/HEAD` for `src`, `srcset`
+ *  and markdown images; absolute URLs, anchors and mailto: are left alone), and the generated diagram
+ *  regions (`<!-- generated:… -->` … `<!-- /generated:… -->`) are dropped: npm renders no mermaid, and the
+ *  prose around each region keeps its link to the docs page that does. */
+export function packageReadme(readme: string, repository: string): string {
+  const repo = repository.replace(/\/+$/, "");
+  const blob = (path: string) => `${repo}/blob/HEAD/${path}`;
+  const raw = (path: string) =>
+    `${repo.replace("https://github.com/", "https://raw.githubusercontent.com/")}/HEAD/${path}`;
+  const relative = (target: string) => !/^(https?:|mailto:|#|\/)/.test(target);
+  return (
+    readme
+      .replace(/<!-- generated:[\s\S]*?<!-- \/generated:[^>]*-->\n?/g, "")
+      .replace(/\b(src|srcset)="([^"]+)"/g, (m, attr: string, target: string) =>
+        relative(target) ? `${attr}="${raw(target)}"` : m,
+      )
+      .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt: string, target: string) =>
+        relative(target) ? `![${alt}](${raw(target)})` : m,
+      )
+      .replace(/(^|[^!])\[([^\]]*)\]\(([^)\s]+)\)/g, (m, before: string, text: string, target: string) =>
+        relative(target) ? `${before}[${text}](${blob(target)})` : m,
+      )
+      // A badge: a link whose text is an image — `[![alt](img)](target)` — the pass above cannot reach its target.
+      .replace(/\)\]\(([^)\s]+)\)/g, (m, target: string) => (relative(target) ? `)](${blob(target)})` : m))
+  );
+}
+
 async function main(): Promise<void> {
   const nodeMajor = readFileSync(join(REPO_ROOT, ".nvmrc"), "utf8").trim();
   rmSync(DIST, { recursive: true, force: true });
@@ -179,6 +210,11 @@ async function main(): Promise<void> {
   const source = packageSource();
   writeFileSync(join(ASSETS_DIR, PACKAGE_SOURCE_FILE), `${JSON.stringify(source, null, 2)}\n`);
   copyFileSync(join(REPO_ROOT, "LICENSE"), join(PACKAGE_DIR, "LICENSE"));
+  const facts = JSON.parse(readFileSync(join(REPO_ROOT, "project.json"), "utf8")) as { repository: string };
+  writeFileSync(
+    join(PACKAGE_DIR, "README.md"),
+    packageReadme(readFileSync(join(REPO_ROOT, "README.md"), "utf8"), facts.repository),
+  );
   console.log(
     `built dist/cli.js (node ${nodeMajor}) and ${assets.length} asset(s) under dist/assets/ from ${source.commit} (version ${source.version})`,
   );

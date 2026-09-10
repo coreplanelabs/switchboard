@@ -24,3 +24,4 @@ deploy/*/wrangler.jsonc
 
 # The npm package's build copies the repository's LICENSE beside its manifest so the tarball carries it.
 packages/switchboard/LICENSE
+packages/switchboard/README.md
