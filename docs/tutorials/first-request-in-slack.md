@@ -16,14 +16,14 @@ Three things happen, in order:
 sequenceDiagram
     participant You
     participant Slack
-    participant Switchboard
+    participant OpenSwitchboard
 
     You->>Slack: @switchboard what's a lateral join?
-    Slack->>Switchboard: message event
-    Switchboard->>Slack: 👀 reaction — "got it"
-    Switchboard->>Slack: status card: "thinking…"
-    Note over Switchboard: reads, answers, no tools needed
-    Switchboard->>Slack: reply in-thread
+    Slack->>OpenSwitchboard: message event
+    OpenSwitchboard->>Slack: 👀 reaction — "got it"
+    OpenSwitchboard->>Slack: status card: "thinking…"
+    Note over OpenSwitchboard: reads, answers, no tools needed
+    OpenSwitchboard->>Slack: reply in-thread
 ```
 
 The 👀 reaction is your receipt that the request landed. If you never see it, the bot did not get the message; check that it is in the channel. The status card is one message edited in place as the agent works, so a long request never fills the channel with progress notes.

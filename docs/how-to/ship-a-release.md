@@ -21,10 +21,16 @@ A Worker is deployed when one of its inputs changed since the commit it serves: 
 
 Merging tags the version, publishes the GitHub release, and runs the deploy in the only safe order, for exactly the Workers marked **deploy**:
 
+<!-- generated:deploy-order · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
+
 ```mermaid
 flowchart LR
-    A["1 · memory<br/>(state Worker — Durable Object<br/>migrations land before anything writes)"] --> B["2 · bot"] --> C["3 · resident"] --> D["4 · sandbox"]
+    W1[["memory<br/>the state Worker"]] --> W2[["bot"]] --> W3[["resident"]] --> W4[["sandbox"]]
 ```
+
+<!-- /generated:deploy-order -->
+
+The state Worker goes first because its Durable Object migrations must land before the bot writes to them; the rest follow the bot because they consume bearers the bot's config names ([Worker topology](../explanation/worker-topology.md#why-the-deploy-order-follows-from-this)).
 
 The same run publishes the three container images to GitHub Container Registry — the bot's as `ghcr.io/<owner>/<repo>`, the resident's and the sandbox's as that name plus `-resident` and `-sandbox`, each at `:<version>` and `:latest` with a build-provenance attestation and an SBOM — for the local loop, for an installation that deploys published images instead of building them ([Deploy](deploy.md#5-deploy-images--copy-the-releases-images-registry-mode)), and for anyone running the container outside Cloudflare ([Deploy](deploy.md#running-the-container-somewhere-else) says how to verify one). Our own deploy does not consume them: its profile builds the same Dockerfiles with wrangler at deploy time, so the two jobs neither wait on nor fail with each other. A third job can publish the CLI to npm as `@coreplane/switchboard` at the same version, with provenance — what `npx @coreplane/switchboard init` will fetch. It is off until publishing is deliberately turned on, behind two levers so that no release publishes by accident: the package manifest carries `"private": true` (npm refuses to publish it from anywhere; `npm pack` still works, which is what the smoke test uses), and the job runs only when the repository variable `SWITCHBOARD_PUBLISH_NPM` is `true`. Publishing starts with a reviewed pull request that removes `private: true` from `packages/switchboard/package.json` — the visible, historical record of the decision — plus, once, `gh variable set SWITCHBOARD_PUBLISH_NPM --body true` and the `NPM_TOKEN` secret ([Configure the repository](configure-the-repository.md#5-repository-secrets-and-variables)). A release with the switch off carries one `npm publish is off` notice; the images and the deploy publish regardless.
 

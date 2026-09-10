@@ -10,10 +10,10 @@ A command is a typed function definition, not a handler wired into four places b
 flowchart TB
     DEF["defineCommand({<br/>  id: 'runs.stop',<br/>  args: [runId],          — positional, zod-typed<br/>  options: { mode },      — camelCase, zod-typed<br/>  scope: 'runs:write',<br/>  handler: (input, caller) => …<br/>})"]
 
-    DEF -->|derives| CHAT["Chat grammar<br/>runs stop &lt;id&gt; --mode soft"]
-    DEF -->|derives| CLI["CLI argv<br/>npm run cli -- runs stop &lt;id&gt; --mode soft"]
-    DEF -->|derives| HTTP["HTTP<br/>POST /api/runs.stop"]
-    DEF -->|derives| MCP["MCP tool<br/>runs_stop, JSON Schema input"]
+    DEF -->|"derives"| CHAT["Chat grammar<br/>runs stop &lt;id&gt; --mode soft"]
+    DEF -->|"derives"| CLI["CLI argv<br/>npm run cli -- runs stop &lt;id&gt; --mode soft"]
+    DEF -->|"derives"| HTTP["HTTP<br/>POST /api/runs.stop"]
+    DEF -->|"derives"| MCP["MCP tool<br/>runs_stop, JSON Schema input"]
 ```
 
 The schema for `args` and `options` is the single source of truth for what a valid call looks like, the generated `--help` text, the MCP tool's `inputSchema`, and the validation error every surface gives on a bad call. Nobody writes a second copy of "runId is required" for the HTTP route. The reference tables on this site are derived from the same definitions, by a generator CI checks ([Reference](../reference/README.md)).

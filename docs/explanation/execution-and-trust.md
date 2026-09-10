@@ -16,15 +16,16 @@ flowchart TB
     end
 
     subgraph rp ["Resident plane — a second, isolated credential domain"]
-        RW["Resident Worker<br/>own GitHub App key<br/>mints 1h repo-scoped tokens"]
+        RW[["Resident Worker<br/>own GitHub App key<br/>mints 1h repo-scoped tokens"]]
         RD["Resident: repo X<br/>root-owned mirror, per-thread worktrees<br/>one OS user each"]
     end
 
-    BOT -->|"tool call, per request"| S1 & S2
-    BOT -->|"operator bearer, per tool call"| RW --> RD
-    S1 & S2 -->|"git push"| GH["GitHub"]
-    RD -->|"git push, per-attach credential file"| GH
-    BOT -->|"opens/edits the PR — App token"| GH
+    GH(["GitHub"])
+    BOT -->|"per tool call"| S1 & S2
+    BOT -->|"operator bearer · per tool call"| RW --> RD
+    S1 & S2 -->|"git push"| GH
+    RD -->|"git push · per-attach credential file"| GH
+    BOT -->|"App token · opens and edits the PR"| GH
 ```
 
 **The control plane (the bot)** is always on and deliberately the least dangerous thing in the system to compromise. It holds Slack and model provider keys — enough to read and answer messages — and, with sandboxed or resident execution, never a repository-write credential. Compromising the bot process gets you a chatty assistant, not a way to push code.

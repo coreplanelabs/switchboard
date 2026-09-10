@@ -6,15 +6,15 @@ OpenSwitchboard is built by the same kind of agents it runs. This page is the lo
 
 ```mermaid
 flowchart LR
-  spec[Spec row<br/>criterion + proof] --> test[Failing test]
-  test --> impl[Implementation<br/>to green]
-  impl --> verify["npm run fix<br/>npm run verify"]
-  verify --> pr[PR<br/>conventional title,<br/>body is a Tour]
-  pr --> review[agent:review<br/>in the open]
-  review -->|findings| impl
-  review -->|LGTM| merge[Squash merge<br/>title = commit]
-  merge --> release[release-please<br/>release PR]
-  release --> deploy[CI deploys the<br/>affected Workers]
+    SPEC["Spec row<br/>criterion + proof"] --> TEST["Failing test"]
+    TEST --> IMPL["Implementation<br/>to green"]
+    IMPL --> VERIFY["npm run fix<br/>npm run verify"]
+    VERIFY --> PR["PR<br/>conventional title,<br/>body is a Tour"]
+    PR --> REVIEW["agent:review<br/>in the open"]
+    REVIEW -->|"findings"| IMPL
+    REVIEW -->|"LGTM"| MERGE["Squash merge<br/>title = commit"]
+    MERGE --> RELEASE["release-please<br/>release PR"]
+    RELEASE --> DEPLOY["CI deploys the<br/>affected Workers"]
 ```
 
 **1. The spec says what should be true.** Every behavior has a row in a feature spec under `docs/reference/specs/`: the criterion, and the proof that holds it — a named test (`file::describe::it`), a written procedure an agent runs against the live system, or an honest `[gap]`. A change starts by writing or editing that row. The spec is the contract, so a spec that describes code that no longer exists is a bug, and the same PR that changes the code changes the spec.

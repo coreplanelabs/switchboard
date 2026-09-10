@@ -2,29 +2,34 @@
 
 Every entry point — a Slack mention, a CLI `ask`, an HTTP or MCP dispatch — reduces to the same four seams, in the same order, handled by the same code. There is exactly one orchestrator; everything else plugs into it.
 
+<!-- generated:four-seams · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
+
 ```mermaid
 flowchart LR
-    subgraph channels ["Channel — pure transport"]
-        SL["Slack"]
-        CLI["CLI ask"]
-        FUT["HTTP / MCP dispatch"]
+    subgraph channel ["Channel — how a request arrives"]
+        C1["Slack"]
+        C2["CLI"]
+        C3["HTTP · MCP"]
     end
-
-    D{"Core dispatcher<br/>the ONLY place orchestration lives"}
-
-    subgraph providers ["Provider — the model"]
-        P["anthropic / openai-compatible"]
+    D{"Dispatcher<br/>directives · config layers · authorization"}
+    subgraph agent ["Agent — what runs"]
+        AG["general · coding · review · ship · research"]
     end
-
-    subgraph exec ["Executor — where tools run"]
-        E["local / sandbox / resident"]
+    subgraph provider ["Provider — the model"]
+        P["Anthropic · OpenAI-compatible"]
     end
-
-    SL & CLI & FUT -->|"IncomingMessage"| D
-    D <-->|"complete()"| P
-    D <-->|"bash / read / write"| E
-    D -->|"reply"| SL & CLI & FUT
+    subgraph executor ["Executor — where tools run"]
+        E["local · sandbox · resident"]
+    end
+    C1 & C2 & C3 -->|"message"| D
+    D -->|"runs"| AG
+    AG <-->|"complete"| P
+    AG <-->|"bash · read · write"| E
 ```
+
+<!-- /generated:four-seams -->
+
+The reply travels the same path back, through the dispatcher to the channel that asked.
 
 ## What each seam refuses to know about the others
 

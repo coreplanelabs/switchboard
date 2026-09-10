@@ -30,9 +30,6 @@ web/src/pages/costs.test.ts	expect(w.find('table.data td[title="2026-08-27"]').e
 web/src/pages/scheduled.test.ts	traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
 web/src/pages/scheduled.test.ts	expect(w.find(".trace").attributes("title")).toBe("trace 4bf92f3577b34da6a3ce929d0e0e4736");
 
-# `#111` is a CSS colour in a mermaid style line.
-docs/explanation/how-switchboard-improves-itself.md	style HUMAN fill:#fde68a,stroke:#b45309,color:#111
-
 # `#42` is an issue in the example repo `acme/api`, the fixture name the tests use.
 docs/how-to/configure-your-defaults.md	@switchboard agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix issue #42
 docs/reference/slack-commands.md	Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.

@@ -16,8 +16,8 @@ Why a long-lived process plus Durable Objects, rather than a serverless runtime,
 ## The whole picture
 
 ```mermaid
-flowchart TD
-    subgraph channels ["Channel adapters — pure transport"]
+flowchart TB
+    subgraph channels ["Channel — how a request arrives"]
         SL["Slack<br/>Socket Mode websocket"]
         CLI["CLI ask"]
         ING["HTTP ingress · MCP"]
@@ -27,28 +27,28 @@ flowchart TD
     CR["Command registry<br/>one definition → chat · CLI · HTTP · MCP"]
     RUN["Agent loop"]
 
-    subgraph providers ["Providers"]
+    subgraph providers ["Provider — the model"]
         A["anthropic"]
         O["openai-compatible"]
     end
 
-    subgraph exec ["Executors"]
+    subgraph exec ["Executor — where tools run"]
         LX["local"]
         EX["e2b · cloudflare sandbox"]
         RX["resident"]
     end
 
     SW[("State Worker<br/>memory · run history · schedule firings · config documents")]
-    RW["Resident Worker<br/>mirror · warm checkout · thread worktrees · snapshots"]
+    RW[["Resident Worker<br/>mirror · warm checkout · thread worktrees · snapshots"]]
 
-    SL & CLI & ING --> D
+    SL & CLI & ING -->|"message"| D
     CR --> D
-    D --> RUN
-    RUN --> A & O
-    RUN --> LX & EX & RX
-    RX --> RW
+    D -->|"runs"| RUN
+    RUN <-->|"complete"| A & O
+    RUN <-->|"bash · read · write"| LX & EX & RX
+    RX -->|"bearer"| RW
     D -->|"memory · run record after the reply · overrides"| SW
-    CR -.->|reads| SW
+    CR -.->|"reads"| SW
 ```
 
 Three facts about the state Worker's side of that picture. Every finished run is built into a record at finish and written *after* the reply, retried and drain-tracked, so a slow history write never delays an answer ([Runs: live, then remembered](runs-live-and-history.md)). The run history's Durable Object owns the retention policy — `retentionDays`, `maxRuns`, `maxBytes`, applied identically by the bot and the Worker through one shared module — and sweeps on an alarm. And the chat-set config overrides (`config set`, `config instructions`) persist there too when `runtimeOverrides.worker` names it; without a Worker they go to a file under `data/`, which an ephemeral-disk host loses on restart.
@@ -56,27 +56,27 @@ Three facts about the state Worker's side of that picture. Every finished run is
 ## How they talk to each other
 
 ```mermaid
-flowchart TD
+flowchart TB
     BOT["Bot<br/>Slack + model keys only<br/>no GH_TOKEN, no tool execution"]
 
     STATE[("State Worker<br/>ConfigDO · MemoryDO<br/>RunHistoryDO · ScheduleDO")]
-    RESIDENT["Resident Worker<br/>own GitHub App key<br/>mints 1h repo-scoped tokens"]
-    SANDBOX["Sandbox Worker<br/>proxy only, no persistent state"]
+    RESIDENT[["Resident Worker<br/>own GitHub App key<br/>mints 1h repo-scoped tokens"]]
+    SANDBOX[["Sandbox Worker<br/>proxy only, no persistent state"]]
 
-    RDO[("Per-repo Durable Object<br/>mirror + warm checkout<br/>+ per-thread worktrees")]
-    SDO[("Per-thread sandbox container")]
-    GH["GitHub"]
+    RDO[("Per-repo Durable Object<br/>mirror · warm checkout<br/>per-thread worktrees")]
+    SDO["Per-thread sandbox container"]
+    GH(["GitHub"])
 
-    BOT -->|"MEMORY_TOKEN<br/>read/write config, memory, runs"| STATE
-    BOT -->|"RESIDENT_OPERATOR_TOKEN<br/>attach / exec / read / write"| RESIDENT
-    BOT -->|"RESIDENT_ADMIN_TOKEN<br/>onboard / offboard / rebuild"| RESIDENT
-    BOT -->|"SANDBOX_TOKEN<br/>per-thread exec"| SANDBOX
-    BOT -->|"App token — opens/edits the PR"| GH
+    BOT -->|"bearer MEMORY_TOKEN<br/>read and write config, memory, runs"| STATE
+    BOT -->|"bearer RESIDENT_OPERATOR_TOKEN<br/>attach · exec · read · write"| RESIDENT
+    BOT -->|"bearer RESIDENT_ADMIN_TOKEN<br/>onboard · offboard · rebuild"| RESIDENT
+    BOT -->|"bearer SANDBOX_TOKEN<br/>per-thread exec"| SANDBOX
+    BOT -->|"App token · opens and edits the PR"| GH
 
     RESIDENT --> RDO
     SANDBOX --> SDO
-    RDO -->|"git push, per-attach credential file"| GH
-    SDO -->|"git push, GH_TOKEN in the sandbox"| GH
+    RDO -->|"git push · per-attach credential file"| GH
+    SDO -->|"git push · GH_TOKEN in the sandbox"| GH
 ```
 
 Four things worth sitting with:
@@ -91,10 +91,14 @@ Four things worth sitting with:
 
 ## Why the deploy order follows from this
 
+<!-- generated:deploy-order · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
+
 ```mermaid
 flowchart LR
-    M["memory<br/>(state Worker)"] --> B["bot"] --> R["resident"] --> S["sandbox"]
+    W1[["memory<br/>the state Worker"]] --> W2[["bot"]] --> W3[["resident"]] --> W4[["sandbox"]]
 ```
+
+<!-- /generated:deploy-order -->
 
 The state Worker goes first because its Durable Object migrations must exist before the bot writes to them; deploying the bot against a state Worker that has not migrated is a live 500, not a graceful degrade. Resident and sandbox follow the bot because they consume bearer tokens the bot's config names; there is no correctness reason they cannot go first, but a Worker deploy swaps the isolate under any resident or sandbox work in flight, so doing it right after the bot keeps what gets interrupted small.
 

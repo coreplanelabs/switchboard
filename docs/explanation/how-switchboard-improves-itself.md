@@ -10,24 +10,21 @@ That narrowing is a safety boundary, not an unfinished feature. A self-modifying
 
 ```mermaid
 flowchart TB
-    RUN["Agent run<br/>(coding, review, ship, general…)"]
+    RUN["Agent run<br/>general · coding · review · ship · research"]
     OBS["Observe<br/>run-event stream:<br/>tool calls, results, timings,<br/>budget and infra notes"]
     DIAG["Diagnose<br/>analyzeRunFriction<br/>slow tools, failed tools, retries,<br/>installs, wrap-up, budget hits"]
-    MEM["Remember<br/>diagnosis stored with the run record<br/>(RunHistoryDO)"]
+    MEM["Remember<br/>diagnosis stored with the run record<br/>RunHistoryDO"]
     CLUS["Cluster<br/>same friction in ≥2 distinct runs<br/>→ ranked pattern"]
     PROP["Propose<br/>GitHub issue per pattern:<br/>evidence + suggested fix,<br/>deduped by marker"]
     HUMAN{{"Human triage"}}
-    FIX["Fix<br/>hand-written, or agent:coding /<br/>agent:ship pointed at the issue"]
+    FIX["Fix<br/>hand-written, or agent:coding<br/>or agent:ship pointed at the issue"]
 
     RUN --> OBS --> DIAG --> MEM --> CLUS --> PROP --> HUMAN
-    HUMAN -->|accept| FIX -->|next runs have less friction| RUN
-    HUMAN -->|close| PROP
-
-    style HUMAN fill:#fde68a,stroke:#b45309,color:#111
-    style FIX stroke-dasharray: 5 5
+    HUMAN -.->|"accept"| FIX -.->|"next runs have less friction"| RUN
+    HUMAN -.->|"close"| PROP
 ```
 
-Everything left of the human gate is automatic. *Fix* is dashed because OpenSwitchboard does not perform it; the loop closes only when a person acts on the issue.
+Everything up to the human gate is automatic. The arrows out of it are dashed because OpenSwitchboard does not follow them: the loop closes only when a person acts on the issue.
 
 ## Where each piece runs
 
@@ -53,16 +50,16 @@ flowchart TB
         SDO[("ScheduleDO<br/>firing records for the<br/>/runs Scheduled panel")]
     end
 
-    GH["GitHub Issues<br/>label: self-improvement<br/>marker: an HTML comment<br/>naming the pattern key"]
+    GH(["GitHub Issues<br/>label: self-improvement<br/>marker: an HTML comment<br/>naming the pattern key"])
 
     SLACK & CLI & API & CRON --> CMD
-    DISP -->|after every run: the run record, diagnosis included| HDO
+    DISP -->|"after every run: the run record, diagnosis included"| HDO
     CMD --> LEDGER
-    LEDGER -->|list recent runs| HDO
+    LEDGER -->|"list recent runs"| HDO
     LEDGER --> PURE
-    PURE -->|fresh proposals| TRACKER -->|create issue| GH
-    TRACKER -->|list open labeled issues for dedupe| GH
-    CRON -.->|firing outcome| SDO
+    PURE -->|"fresh proposals"| TRACKER -->|"create issue"| GH
+    TRACKER -->|"list open labeled issues for dedupe"| GH
+    CRON -.->|"firing outcome"| SDO
 ```
 
 Two facts worth holding onto:
@@ -112,7 +109,7 @@ flowchart LR
     E2["Run B event<br/>$ cd ~/repo; npm test 2>/dev/null<br/>→ ok, 38 s"]
     F1["Finding<br/>slow_tool · 41 s · medium"]
     F2["Finding<br/>slow_tool · 38 s · medium"]
-    SIG["Signature<br/>drop cd / tail / redirects / flags<br/>keep ordered program heads<br/>both runs → <b>slow_tool:npm test</b>"]
+    SIG["Signature<br/>drop cd / tail / redirects / flags<br/>keep ordered program heads<br/>both runs → slow_tool:npm test"]
     PAT["Pattern<br/>key seen in ≥2 distinct runs<br/>runs ↓ · peak severity ↓ · time ↓"]
     ISSUE["Issue<br/>[friction] slow tool call recurs in 8 of 109 runs: npm test<br/>Pattern · Evidence table · Suggested fix · Provenance<br/>hidden marker: switchboard-friction-pattern: slow_tool:npm test"]
 

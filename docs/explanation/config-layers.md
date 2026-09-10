@@ -3,12 +3,12 @@
 Three different people reasonably want to control the same knob — which agent runs, which model answers, how hard it thinks — at three different scopes, and none of them should have to coordinate with the others to get their way locally. OpenSwitchboard resolves each knob independently through six layers, the most specific winning:
 
 ```mermaid
-flowchart TD
-    RQ["Request — this message's directives"] -->|unset?| TH
-    TH["Thread — sticky, derived from history"] -->|unset?| US
-    US["User — your own config set me"] -->|unset?| CH
-    CH["Channel — config set channel"] -->|unset?| DF
-    DF["Installation defaults — config.yaml"] -->|unset?| AG
+flowchart TB
+    RQ["Request — this message's directives"] -->|"unset?"| TH
+    TH["Thread — sticky, derived from history"] -->|"unset?"| US
+    US["User — your own config set me"] -->|"unset?"| CH
+    CH["Channel — config set channel"] -->|"unset?"| DF
+    DF["Installation defaults — config.yaml"] -->|"unset?"| AG
     AG["Agent's own floor — built into its definition"]
 ```
 

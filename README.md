@@ -17,32 +17,32 @@ Mention it in Slack and an agent reviews the PR, ships the fix, or answers the q
 
 Every request crosses the same four seams, in the same order, whichever way it arrived. Each seam is an interface with more than one implementation, so a new platform, model, sandbox or agent is a new implementation, never a special case.
 
+<!-- generated:four-seams · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
+
 ```mermaid
 flowchart LR
     subgraph channel ["Channel — how a request arrives"]
-        SL["Slack"]
-        CLI["CLI"]
-        HTTP["HTTP / MCP"]
+        C1["Slack"]
+        C2["CLI"]
+        C3["HTTP · MCP"]
     end
-
     D{"Dispatcher<br/>directives · config layers · authorization"}
-
     subgraph agent ["Agent — what runs"]
         AG["general · coding · review · ship · research"]
     end
-
     subgraph provider ["Provider — the model"]
-        P["Anthropic · any OpenAI-compatible endpoint"]
+        P["Anthropic · OpenAI-compatible"]
     end
-
     subgraph executor ["Executor — where tools run"]
-        E["bot host · per-thread sandbox · always-warm repo"]
+        E["local · sandbox · resident"]
     end
-
-    SL & CLI & HTTP --> D --> AG
-    AG -->|"complete()"| P
-    AG -->|"bash · read · write"| E
+    C1 & C2 & C3 -->|"message"| D
+    D -->|"runs"| AG
+    AG <-->|"complete"| P
+    AG <-->|"bash · read · write"| E
 ```
+
+<!-- /generated:four-seams -->
 
 The reply travels the same path back: the agent's answer and its status updates go through the dispatcher to whichever channel asked.
 
