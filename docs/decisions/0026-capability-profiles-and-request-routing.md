@@ -1,6 +1,6 @@
 ---
 title: A run is a capability profile over three axes, named agents become presets, and a routing stage picks the profile
-status: proposed
+status: accepted
 date: 2026-09-09
 pattern: Strategy as data + a routing filter in the pipeline; the policy table keeps one question, the config layers gain an intersecting setting, the authorize stage gains a gate
 ---
