@@ -70,6 +70,7 @@ import { buildCoreCommands } from "./core/commandCatalogue.js";
 import { accessActor, createCommandHttpHandler, isCommandPath, serviceTokenAllowed } from "./channels/commandHttp.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
+import { claimEntry } from "./invokedAsScript.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -88,7 +89,14 @@ const sampleProcessMetrics = startProcessMetrics();
  *  their start already cover a write that misses this window. */
 const INTERRUPTED_WRITE_BUDGET_MS = 10_000;
 
-async function main() {
+/**
+ * The bot process: Slack over Socket Mode, the HTTP server when `PORT` is set,
+ * until a signal drains it. Resolves once the socket is up; the process then
+ * lives on its open handles. Run by this module as a script (`node
+ * dist/index.js`, the image's no-argument entrypoint, `npm run dev`) and by the
+ * CLI's `start` (src/cli.ts) — the same process from the same directory.
+ */
+export async function runBot(): Promise<void> {
   for (const v of ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]) {
     if (!process.env[v]) {
       console.error(`Missing required env var ${v}`);
@@ -909,7 +917,12 @@ async function main() {
   process.on("SIGINT", () => void drain("SIGINT"));
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Run only as the process's entry (`node dist/index.js`, `npm run dev`, the
+// image's no-argument entrypoint) — never when imported, and never as the second
+// main of a process the CLI already claimed (its bundle inlines this module).
+if (claimEntry(import.meta.url)) {
+  runBot().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

@@ -34,8 +34,7 @@
 // already read the config and the data directory.
 
 import "./loadEnv.js";
-import { existsSync, realpathSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { existsSync } from "node:fs";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
@@ -75,6 +74,7 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
+import { claimEntry } from "./invokedAsScript.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 
@@ -492,23 +492,10 @@ async function main(): Promise<void> {
   await runHistoryWriter.settled();
 }
 
-/** True when this module is the script Node was started with — through a
- *  symlink too (the `switchboard` bin npm links to `dist/cli.js`: `argv[1]` is
- *  the link, `import.meta.url` the target), never when merely imported. */
-function invokedAsScript(): boolean {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  try {
-    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
-  } catch {
-    return false;
-  }
-}
-
 // Run only when invoked as a script (tsx/node src/cli.ts, the `switchboard`
 // bin, the container's entrypoint), never on import (the parsing helpers above
 // are unit-tested).
-if (invokedAsScript()) {
+if (claimEntry(import.meta.url)) {
   main().catch((err) => {
     // `ask` without a bot config: the same one-line refusal the commands give, not a stack.
     console.error(err instanceof CommandError ? errorLine(err.code, err.message) : err);
