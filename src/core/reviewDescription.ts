@@ -88,7 +88,7 @@ export function parsedPrDescriptionArtifact(
 export const SUBMITTED_LOOKUP_LIMIT = 10;
 
 /** The submitted description a coding run published for exactly this PR at
- *  exactly this head, from the run store (docs/reference/specs/run-history.md item 42):
+ *  exactly this head, from the run store (docs/reference/specs/run-history.md item 43):
  *  the repo's newest records first (`list` filtered by repo — the review is
  *  authorized for that repo and reads no other), each record's events newest
  *  first, the first `submitted` `pr_description` artifact whose repo, PR and
