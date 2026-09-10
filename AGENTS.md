@@ -48,7 +48,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run fix` | Regenerates every generated artifact and repairs lint and formatting. | Before committing; whenever `check:consistency` reports drift. |
 | `npm run deploy:gen` | Renders each Worker's gitignored `wrangler.jsonc` from its template and the profile in force. | `test`, each Worker's `verify` and `deploy all` run it; by hand before `wrangler dev`. |
 | `npm run deploy:check` | The rendered `wrangler.jsonc` files match `deploy:gen`. | When one looks hand-edited; change the template. |
-| `npm run check:lockfile` | Every native package in the lockfile carries its Linux x64 and macOS arm64 variants. | After any `npm install`; the fix is `rm -rf node_modules && npm install`. |
+| `npm run check:lockfile` | Native packages carry Linux x64 and macOS arm64 variants; records mirror their `package.json`. | After a manifest edit or `npm install`; failures name the fix. |
 | `npm run check:sandbox-pair` | Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag. | After bumping either half of a pair. |
 | `npm run check:pr-title` | Judges one PR title as the changelog line it becomes: grammar, type, scope, the migration note behind `!`. | `-- "feat(scope): …"` before opening a PR; CI's `title` check runs it. |
 | `npm run check:project-facts` | Every copy of the project's names, repository, docs URL and contact address equals `project.json`; its description, topics and npm package fit their rules. | After editing `project.json` or a community file; part of `check:consistency`. |
