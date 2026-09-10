@@ -1,7 +1,7 @@
 import { html as diff2html, parse as parseDiff } from "diff2html";
 import type { DiffFile } from "diff2html/lib/types";
 
-// The reading diff as files (docs/reference/specs/reading-diff.md item 6): the pure half of
+// The reading diff as files (docs/reference/specs/reading-diff.md item 12): the pure half of
 // the two-column view. diff2html parses the unified diff into files and
 // renders each file's hunks; this module names what the file list and the
 // diff view both need about a file — its status, its counts, the one key both
@@ -34,13 +34,19 @@ export function fileStatus(file: Pick<DiffFile, "isNew" | "isDeleted" | "isRenam
   return "modified";
 }
 
+/** The key both columns address a file by: the new path, or the old one for
+ *  a deletion. */
+function pathOf(file: DiffFile): string {
+  return fileStatus(file) === "deleted" ? file.oldName : file.newName;
+}
+
 /** Split a unified diff into the files the panel lists and renders. A diff
  *  with nothing parseable yields no files (the view shows the empty state). */
 export function parseFiles(diff: string): DiffFileEntry[] {
   return parseDiff(diff).map((file) => {
     const status = fileStatus(file);
     return {
-      path: status === "deleted" ? file.oldName : file.newName,
+      path: pathOf(file),
       ...(status === "renamed" && file.oldName !== file.newName ? { from: file.oldName } : {}),
       status,
       added: file.addedLines,
@@ -55,6 +61,13 @@ export function parseFiles(diff: string): DiffFileEntry[] {
  *  of an abridged diff says how many of the full diff's files it kept). */
 export function countFiles(diff: string): number {
   return parseDiff(diff).length;
+}
+
+/** The paths a diff carries, by the same key `parseFiles` uses, without
+ *  rendering — what a Tour step is placed against (in the shown diff, only in
+ *  the full one, or in neither). */
+export function filePaths(diff: string): string[] {
+  return parseDiff(diff).map(pathOf);
 }
 
 /** The directory and the name, for a list that dims the one and keeps the other. */

@@ -19,7 +19,7 @@ This is the data half of the coding agent's PR description ([agent-coding.md](ag
 
 ## Roadmap (gaps)
 
-- `[gap]` **The panel renderer.** The run page renders the same object beside the reading diff (the review-panel work), never a second authoring path — the `pr_description` run event carries the coding run's object and the `review_artifact` `pr_description` ([reading-diff.md](reading-diff.md) item 7) carries it — submitted or parsed — on every PR review.
+None open. The panel renderer is [reading-diff.md](reading-diff.md) item 12: the run page renders the same object beside the reading diff from the `review_artifact` `pr_description` every PR review carries (item 7) — never a second authoring path.
 
 ## Validation criteria
 
@@ -51,4 +51,4 @@ This is the data half of the coding agent's PR description ([agent-coding.md](ag
 | 6: the golden renders and parses back equal — tldr, whatWhy, tour with each anchor's render sha, remaining, decisions, risks, validation; the title is not in the body; a small description round-trips (empty Remaining, multi-paragraph description, single-line anchor, cell unescaping) with the decision's trailing period as the lossy part | `[unit]` `src/core/prDescription.test.ts::parsePrDescriptionMarkdown — the inverse of the renderer::golden round trip…`, `::a small description round-trips too…` |
 | 6: a body without the shape never throws — first paragraph as tldr, empty tour, `complete: false`, problems naming the missing sections; the house shape without `## TL;DR` / Risks (CRLF) parses its Tour and names exactly the missing sections | `[unit]` `::a body without the shape never throws…`, `::a hand-written body in the house shape…` |
 | 6: step strictness — no bare github permalink, a non-github link, a traversing path or `to < from` is a problem and dropped; a short sha and `#L<a>` accepted; a `##` inside a fence is not a section; a percent-encoded path is decoded, a malformed escape is a problem; a duplicate section keeps the first; an unrecognized Remaining line is a problem | `[unit]` `::step strictness…`, `::a percent-encoded path is decoded…` |
-| Panel renderer | `[gap]` (roadmap) |
+| Panel renderer: the run page's review panel renders the object — TL;DR, Tour, Remaining — from the review's `pr_description` artifact | `[unit]` `web/src/modules/pr-review/prReview.test.ts::the PR description in the panel::*`, `web/src/pages/runPage.test.ts::PR-review panel wiring::a seeded pr_description renders in the panel…` |

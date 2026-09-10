@@ -1,4 +1,4 @@
-// The pr-review module's OWN input contract (docs/reference/specs/reading-diff.md item 6).
+// The pr-review module's OWN input contract (docs/reference/specs/reading-diff.md item 12).
 //
 // This folder is deliberately self-contained — no imports from the app's lib/,
 // pages/, or the runs domain — so the whole module can be lifted into another
@@ -31,18 +31,74 @@ export interface ReadingDiff {
   summary?: string;
 }
 
+/** Where a Tour step points: a path and an inclusive 1-based line range on
+ *  the new side, plus the head the anchor was rendered at when known. */
+export interface TourAnchor {
+  path: string;
+  from: number;
+  to: number;
+  /** 7–40 hex. Compared with the reviewed head: a step anchored at another
+   *  head may point at lines that have since moved. */
+  sha?: string;
+}
+
+/** One step of the PR description's Tour, reader-first: what the change is,
+ *  the explanation, an optional pointer at what to scrutinize, the code. */
+export interface TourStep {
+  title: string;
+  description: string;
+  lookFor?: string;
+  anchor: TourAnchor;
+}
+
+/** The PR's description as the panel renders it — the host projects its own
+ *  description object (submitted or parsed from the PR body) onto this. */
+export interface PrDescriptionData {
+  /** The PR's title: the header's text. */
+  title: string;
+  tldr?: string;
+  /** The "What & why" prose, when the host could separate it from the body. */
+  whatWhy?: string;
+  tour: TourStep[];
+  /** The touched files the Tour did not cover, one note each. */
+  remaining: { path: string; note: string }[];
+  /** `submitted`: the typed object the PR was opened from; `parsed`: read back
+   *  from the PR body, possibly short of sections. */
+  origin: "submitted" | "parsed";
+  /** Nothing missing or malformed. */
+  complete: boolean;
+  /** The body was cut before it was read. */
+  truncated: boolean;
+  /** The head the description was produced at (7–40 hex). */
+  headSha?: string;
+}
+
 /** Everything the panel renders. */
 export interface PrReviewData {
   pr: PrRef;
   readingDiffs: ReadingDiff[];
-  /** The PR's title when the host knows it (a description artifact); the
-   *  header falls back to `owner/repo#N` otherwise. */
-  title?: string;
+  /** The PR's description when the host knows it; the header names the PR
+   *  by its title then, and the left column opens on the TL;DR and the Tour. */
+  description?: PrDescriptionData;
+}
+
+/** The abridging of the full diff, when the host can ask for one: `absent`
+ *  offers the button, `running` shows the wait, `failed` names the reason and
+ *  offers a retry; `done` renders nothing — the abridged diff has arrived in
+ *  `readingDiffs` by then and the tabs take over. The host owns the request
+ *  and the polling; the panel only renders the state and calls `start`. */
+export type AbridgeState =
+  { state: "absent" } | { state: "running" } | { state: "done" } | { state: "failed"; reason: string };
+
+export interface AbridgeControl {
+  readonly state: AbridgeState;
+  /** Start the abridging — or retry it after a failure. */
+  start(): void;
 }
 
 /** The header's title text: the PR's own title, else its reference. */
-export function panelTitle(data: Pick<PrReviewData, "pr" | "title">): string {
-  if (data.title) return data.title;
+export function panelTitle(data: Pick<PrReviewData, "pr" | "description">): string {
+  if (data.description?.title) return data.description.title;
   if (data.pr.repo && data.pr.number !== undefined) return `${data.pr.repo}#${data.pr.number}`;
   return data.pr.repo ?? "PR review";
 }

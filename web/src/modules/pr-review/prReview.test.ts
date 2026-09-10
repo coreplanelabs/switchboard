@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { h } from "vue";
+import { h, reactive } from "vue";
 import PrReviewPanel from "./PrReviewPanel.vue";
 import ReadingDiffView from "./ReadingDiffView.vue";
 import viewSource from "./ReadingDiffView.vue?raw";
@@ -7,11 +7,12 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { mountApp } from "../../testing/mount";
-import { currentFileAt, parseFiles, rowsInRange, splitPath } from "./files";
+import { currentFileAt, filePaths, parseFiles, rowsInRange, splitPath } from "./files";
+import { anchorLabel, originNote, placementOf, staleAnchor, staleExplanation } from "./tour";
 import { panelTitle, poweredByExplanation, preferredDiff, prLinks, truncatedExplanation } from "./types";
-import type { PrReviewData, ReadingDiff } from "./types";
+import type { AbridgeState, PrDescriptionData, PrReviewData, ReadingDiff } from "./types";
 
-// Feature: docs/reference/specs/reading-diff.md item 6 — the pr-review module renders the
+// Feature: docs/reference/specs/reading-diff.md item 12 — the pr-review module renders the
 // change as a reviewer reads it, from props alone (the module is liftable; the
 // host adapts its own data). These tests drive the panel purely through
 // PrReviewData fixtures — no seeds, no streams.
@@ -44,6 +45,47 @@ const squash = (s: string) => s.replace(/\s+/g, "");
 const data = (over: Partial<PrReviewData> = {}): PrReviewData => ({
   pr: { repo: "acme/api", number: 42, headSha: "e".repeat(40), baseRef: "main" },
   readingDiffs: [gitDiff, meatDiff],
+  ...over,
+});
+
+/** A description with a Tour over `manyFiles`: a step the abridged diff keeps,
+ *  one only the full diff carries, one past every diff, one anchored at an
+ *  older head. */
+const desc = (over: Partial<PrDescriptionData> = {}): PrDescriptionData => ({
+  title: "Retry webhook deliveries",
+  tldr: "The TL;DR.",
+  whatWhy: "Because a flaky receiver loses the event.",
+  tour: [
+    {
+      title: "The marker",
+      description: "Renames the marker constant so the reader sees the new one.",
+      lookFor: "the new name",
+      anchor: { path: "src/a.ts", from: 2, to: 3, sha: "e".repeat(40) },
+    },
+    {
+      title: "A new module",
+      description: "Adds b.",
+      anchor: { path: "src/b.ts", from: 1, to: 2, sha: "e".repeat(40) },
+    },
+    {
+      title: "Past the cap",
+      description: "Not in any diff.",
+      anchor: { path: "src/zzz.ts", from: 1, to: 2, sha: "e".repeat(40) },
+    },
+    {
+      title: "Moved lines",
+      description: "Anchored at an older push.",
+      anchor: { path: "src/a.ts", from: 1, to: 1, sha: "d".repeat(40) },
+    },
+  ],
+  remaining: [
+    { path: "docs/new.md", note: "renamed" },
+    { path: "nowhere.md", note: "past the cap" },
+  ],
+  origin: "parsed",
+  complete: false,
+  truncated: false,
+  headSha: "e".repeat(40),
   ...over,
 });
 
@@ -93,7 +135,9 @@ describe("the labels' explanations (tooltips)", () => {
 
 describe("panelTitle", () => {
   it("is the PR's title when known, else its reference, else the repo, else a generic label", () => {
-    expect(panelTitle({ pr: { repo: "acme/api", number: 42 }, title: "Retry webhooks" })).toBe("Retry webhooks");
+    expect(panelTitle({ pr: { repo: "acme/api", number: 42 }, description: desc({ title: "Retry webhooks" }) })).toBe(
+      "Retry webhooks",
+    );
     expect(panelTitle({ pr: { repo: "acme/api", number: 42 } })).toBe("acme/api#42");
     expect(panelTitle({ pr: { repo: "acme/api" } })).toBe("acme/api");
     expect(panelTitle({ pr: {} })).toBe("PR review");
@@ -179,7 +223,7 @@ describe("PrReviewPanel", () => {
   });
 
   it("a known PR title becomes the header; the close control appears only for a closable host and emits close", async () => {
-    const w = mountApp(PrReviewPanel, { props: { data: data({ title: "Retry webhook deliveries" }), closable: true } });
+    const w = mountApp(PrReviewPanel, { props: { data: data({ description: desc() }), closable: true } });
     expect(w.find('[data-testid="pr-title"]').text()).toBe("Retry webhook deliveries");
     await w.find('[data-testid="panel-close"]').trigger("click");
     expect(w.findComponent(PrReviewPanel).emitted("close")).toHaveLength(1);
@@ -442,6 +486,325 @@ describe("ReadingDiffView.scrollTo(path, fromLine, toLine)", () => {
     expect(view.scrollToFile("gone.ts")).toBe(true);
     expect(scrollTo).toHaveBeenCalledTimes(1);
     expect(view.scrollToFile("nope")).toBe(false);
+    w.unmount();
+  });
+});
+
+describe("the Tour's pure helpers", () => {
+  it("anchorLabel is path:from–to, one number for a single line", () => {
+    expect(anchorLabel({ path: "src/a.ts", from: 31, to: 40 })).toBe("src/a.ts:31–40");
+    expect(anchorLabel({ path: "src/a.ts", from: 7, to: 7 })).toBe("src/a.ts:7");
+  });
+
+  it("staleAnchor: differs from the reviewed head — a prefix of it is the same head; an unknown sha on either side is not stale", () => {
+    const head = "e".repeat(40);
+    expect(staleAnchor({ path: "a", from: 1, to: 1, sha: head }, head)).toBe(false);
+    expect(staleAnchor({ path: "a", from: 1, to: 1, sha: "eeeeeee" }, head)).toBe(false);
+    expect(staleAnchor({ path: "a", from: 1, to: 1, sha: "d".repeat(40) }, head)).toBe(true);
+    expect(staleAnchor({ path: "a", from: 1, to: 1 }, head)).toBe(false);
+    expect(staleAnchor({ path: "a", from: 1, to: 1, sha: "d".repeat(40) }, undefined)).toBe(false);
+    expect(staleExplanation("d".repeat(40), "e".repeat(40))).toBe(
+      "anchored at ddddddd, the review is at eeeeeee; lines may have moved",
+    );
+  });
+
+  it("originNote: a parsed, incomplete description says so, and that there is no Tour when there is none; submitted or complete says nothing", () => {
+    expect(originNote(desc())).toBe("description read from the PR body");
+    expect(originNote(desc({ tour: [] }))).toBe("description read from the PR body; no Tour");
+    expect(originNote(desc({ complete: true }))).toBeUndefined();
+    expect(originNote(desc({ origin: "submitted" }))).toBeUndefined();
+  });
+
+  it("placementOf: in the shown diff, only in the full one, or in neither", () => {
+    const shown = new Set(["src/a.ts"]);
+    const full = new Set(["src/a.ts", "src/b.ts"]);
+    expect(placementOf("src/a.ts", shown, full)).toBe("shown");
+    expect(placementOf("src/b.ts", shown, full)).toBe("full");
+    expect(placementOf("src/zzz.ts", shown, full)).toBe("absent");
+  });
+
+  it("filePaths names a diff's files by the same key parseFiles uses, without rendering", () => {
+    expect(filePaths(manyFiles)).toEqual(["src/a.ts", "src/b.ts", "docs/new.md", "gone.ts", "img.png"]);
+    expect(filePaths("")).toEqual([]);
+  });
+});
+
+describe("the PR description in the panel", () => {
+  it("no description → no description block and no Tour: the file list starts at the top", () => {
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff] }) } });
+    expect(w.find('[data-testid="pr-description"]').exists()).toBe(false);
+    expect(w.find('[data-testid="tour"]').exists()).toBe(false);
+    expect(w.find('[data-testid="file-list"]').element.firstElementChild?.classList.contains("files")).toBe(true);
+    w.unmount();
+  });
+
+  it("the description block: the TL;DR in the clamp, What & why after it, the origin note for a parsed incomplete description; a complete one carries no note; a Tour-less description renders the block alone", () => {
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    const block = w.find('[data-testid="pr-description"]');
+    // the app's ExpandableText, folded to five lines over the column's ground
+    expect((block.find(".expandable .body").element as HTMLElement).style.getPropertyValue("--expandable-lines")).toBe(
+      "5",
+    );
+    expect((block.find(".expandable").element as HTMLElement).style.getPropertyValue("--expandable-surface")).toBe(
+      "var(--ui-bg)",
+    );
+    expect(block.find(".expandable [data-testid='description-tldr']").text()).toBe("The TL;DR.");
+    expect(block.find(".expandable [data-testid='description-what-why']").text()).toBe(
+      "Because a flaky receiver loses the event.",
+    );
+    expect(block.find("h4").text()).toBe("What & why");
+    expect(block.find('[data-testid="description-origin"]').text()).toBe("description read from the PR body");
+    // the block precedes the Tour, which precedes the files
+    const order = w
+      .find('[data-testid="file-list"]')
+      .findAll('[data-testid="pr-description"], [data-testid="tour"], .files h3')
+      .map((e) => e.attributes("data-testid") ?? e.text());
+    expect(order).toEqual(["pr-description", "tour", "Files 5"]);
+    w.unmount();
+
+    const complete = mountApp(PrReviewPanel, {
+      props: { data: data({ readingDiffs: [manyDiff], description: desc({ origin: "submitted", complete: true }) }) },
+    });
+    expect(complete.find('[data-testid="description-origin"]').exists()).toBe(false);
+    complete.unmount();
+
+    const tourless = mountApp(PrReviewPanel, {
+      props: {
+        data: data({ readingDiffs: [manyDiff], description: desc({ tour: [], remaining: [], whatWhy: undefined }) }),
+      },
+    });
+    expect(tourless.find('[data-testid="pr-description"]').exists()).toBe(true);
+    expect(tourless.find("h4").exists()).toBe(false);
+    expect(tourless.find('[data-testid="tour"]').exists()).toBe(false);
+    expect(tourless.find('[data-testid="description-origin"]').text()).toBe(
+      "description read from the PR body; no Tour",
+    );
+    tourless.unmount();
+  });
+
+  it("the Tour lists every step — number, title, description, Look for, the anchor in mono — with its placement against the shown and the full diff, and the stale badge on a step anchored at another head", () => {
+    const w = mountApp(PrReviewPanel, {
+      props: { data: data({ readingDiffs: [manyDiff, meatDiff], description: desc() }) },
+    });
+    expect(squash(w.find('[data-testid="tour"] h3').text())).toBe("Tour·4steps");
+    const steps = w.findAll('[data-testid="tour-step"]');
+    expect(steps).toHaveLength(4);
+    expect(steps.map((s) => s.attributes("data-placement"))).toEqual(["shown", "full", "absent", "shown"]);
+    expect(steps[0].find(".step-number").text()).toBe("1");
+    expect(steps[0].find(".step-title").text()).toBe("The marker");
+    expect(steps[0].find(".step-title").classes()).toContain("font-medium");
+    expect(steps[0].find(".step-description").text()).toBe(
+      "Renames the marker constant so the reader sees the new one.",
+    );
+    expect(steps[0].find(".step-description").classes()).toContain("line-clamp-2");
+    expect(steps[0].find(".step-look-for").text()).toBe("Look for: the new name");
+    expect(steps[1].find(".step-look-for").exists()).toBe(false);
+    expect(steps[0].find(".step-anchor").text()).toBe("src/a.ts:2–3");
+    expect(steps[0].find(".step-anchor").classes()).toContain("font-mono");
+    expect(steps[1].find('[data-testid="tour-step-note"]').text()).toBe("not in the reading diff · open full diff");
+    expect(steps[2].find('[data-testid="tour-step-note"]').text()).toBe("not in this diff");
+    expect(steps[0].find('[data-testid="tour-step-note"]').exists()).toBe(false);
+    // the stale badge, with its explanation as the accessible name and a tooltip trigger
+    expect(steps.map((s) => s.find('[data-testid="tour-step-stale"]').exists())).toEqual([false, false, false, true]);
+    const badge = steps[3].find('[data-testid="tour-step-stale"]');
+    expect(badge.attributes("aria-label")).toBe("anchored at ddddddd, the review is at eeeeeee; lines may have moved");
+    expect(badge.attributes("data-state")).toBe("closed");
+    w.unmount();
+  });
+
+  it("clicking a step in the shown diff lights its lines, scrolls to them, makes the step active (aria-current, unclamped description) and its file current", async () => {
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    const scrollTo = vi.fn();
+    (w.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo = scrollTo;
+    const steps = () => w.findAll('[data-testid="tour-step"]');
+    expect(steps()[1].attributes("aria-current")).toBeUndefined();
+    await steps()[1].trigger("click");
+    await w.vm.$nextTick();
+    expect(steps()[1].attributes("aria-current")).toBe("step");
+    expect(steps()[1].classes()).toContain("is-active");
+    expect(steps()[1].find(".step-description").classes()).not.toContain("line-clamp-2");
+    expect(w.findAll("tr.is-focus").map((r) => r.text().replace(/\s+/g, " ").trim())).toEqual([
+      "1 + export const b = 1;",
+      "2 + export const c = 2;",
+    ]);
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+    expect(w.findAll('[data-testid="file-entry"]')[1].attributes("aria-current")).toBe("true");
+    // another step moves the light and the active mark
+    await steps()[0].trigger("click");
+    await w.vm.$nextTick();
+    expect(steps()[0].attributes("aria-current")).toBe("step");
+    expect(steps()[1].attributes("aria-current")).toBeUndefined();
+    expect(w.findAll("tr.is-focus")).toHaveLength(3);
+    w.unmount();
+  });
+
+  it("a step whose file only the full diff carries switches to the full diff, then scrolls; a step whose lines the abridged diff dropped does the same", async () => {
+    const w = mountApp(PrReviewPanel, {
+      props: { data: data({ readingDiffs: [manyDiff, meatDiff], description: desc() }) },
+    });
+    const stub = () => ((w.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo = vi.fn());
+    stub();
+    expect(w.find('[data-testid="pr-facts"]').text()).toContain("reading diff · meat");
+    await w.findAll('[data-testid="tour-step"]')[1].trigger("click");
+    await w.vm.$nextTick();
+    await w.vm.$nextTick();
+    expect(w.find('[data-testid="pr-facts"]').text()).toContain("full diff · git");
+    expect(w.findAll('[data-testid="tour-step"]')[1].attributes("aria-current")).toBe("step");
+    expect(w.findAll("tr.is-focus")).toHaveLength(2);
+    // every step is now in the shown (full) diff except the one past the cap
+    expect(w.findAll('[data-testid="tour-step"]').map((s) => s.attributes("data-placement"))).toEqual([
+      "shown",
+      "shown",
+      "absent",
+      "shown",
+    ]);
+    w.unmount();
+
+    const dropped = mountApp(PrReviewPanel, {
+      props: { data: data({ readingDiffs: [manyDiff, meatDiff], description: desc() }) },
+    });
+    (dropped.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo = vi.fn();
+    // step 1 is src/a.ts 2–3: the abridged hunk keeps only line 1 of that file
+    await dropped.findAll('[data-testid="tour-step"]')[0].trigger("click");
+    await dropped.vm.$nextTick();
+    await dropped.vm.$nextTick();
+    expect(dropped.find('[data-testid="pr-facts"]').text()).toContain("full diff · git");
+    expect(dropped.findAll("tr.is-focus")).toHaveLength(3);
+    dropped.unmount();
+  });
+
+  it("a step absent from every diff is muted and inert; a Tour whose every anchor is missing still lists every step, all muted; a step whose lines no diff carries lands on the file and says so", async () => {
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    const scrollTo = vi.fn();
+    (w.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo = scrollTo;
+    const absent = w.findAll('[data-testid="tour-step"]')[2];
+    expect(absent.classes()).toContain("is-muted");
+    await absent.trigger("click");
+    await w.vm.$nextTick();
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(w.findAll('[data-testid="tour-step"]')[2].attributes("aria-current")).toBeUndefined();
+    w.unmount();
+
+    const gone = mountApp(PrReviewPanel, {
+      props: {
+        data: data({
+          readingDiffs: [manyDiff],
+          description: desc({
+            tour: desc().tour.map((s) => ({ ...s, anchor: { ...s.anchor, path: "elsewhere/" + s.anchor.path } })),
+          }),
+        }),
+      },
+    });
+    const steps = gone.findAll('[data-testid="tour-step"]');
+    expect(steps).toHaveLength(4);
+    expect(steps.every((s) => s.classes().includes("is-muted"))).toBe(true);
+    expect(steps.every((s) => s.attributes("data-placement") === "absent")).toBe(true);
+    gone.unmount();
+
+    const moved = mountApp(PrReviewPanel, {
+      props: {
+        data: data({
+          readingDiffs: [manyDiff],
+          description: desc({ tour: [{ ...desc().tour[0], anchor: { path: "src/a.ts", from: 400, to: 410 } }] }),
+        }),
+      },
+    });
+    const movedScroll = vi.fn();
+    (moved.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo = movedScroll;
+    await moved.find('[data-testid="tour-step"]').trigger("click");
+    await moved.vm.$nextTick();
+    expect(moved.find('[data-testid="tour-step"]').attributes("aria-current")).toBe("step");
+    expect(moved.find('[data-testid="tour-step-note"]').text()).toBe("lines not in this diff");
+    expect(moved.findAll("tr.is-focus")).toHaveLength(0);
+    expect(movedScroll).toHaveBeenCalledTimes(1); // the file, at least
+    moved.unmount();
+  });
+
+  it("Remaining changes list path and note; a path opens its file the same way (switching to the full diff when needed); a path in no diff is muted", async () => {
+    const w = mountApp(PrReviewPanel, {
+      props: { data: data({ readingDiffs: [manyDiff, meatDiff], description: desc() }) },
+    });
+    const scrollTo = vi.fn();
+    (w.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo = scrollTo;
+    expect(w.find('[data-testid="tour-remaining"] h4').text()).toBe("Remaining changes");
+    const entries = w.findAll('[data-testid="tour-remaining-entry"]');
+    expect(entries.map((e) => squash(e.text()))).toEqual(["docs/new.md—renamed", "nowhere.md—pastthecap"]);
+    expect(entries[0].find("button").classes()).toContain("font-mono");
+    expect(entries[1].find("button").classes()).toContain("is-muted");
+    await entries[0].find("button").trigger("click");
+    await w.vm.$nextTick();
+    await w.vm.$nextTick();
+    expect(w.find('[data-testid="pr-facts"]').text()).toContain("full diff · git");
+    expect(w.findAll('[data-testid="file-entry"]')[2].attributes("aria-current")).toBe("true");
+    expect((w.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo).toHaveBeenCalled();
+    w.unmount();
+  });
+
+  it("steps are native buttons — Enter and Space activate them — with a visible focus ring", () => {
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    for (const s of w.findAll('[data-testid="tour-step"]')) {
+      expect(s.element.tagName).toBe("BUTTON");
+      expect(s.attributes("type")).toBe("button");
+      expect(s.classes()).toContain("focus-visible:ring-2");
+    }
+    w.unmount();
+  });
+});
+
+describe("the abridge control", () => {
+  /** A host's control as the test drives it: the state is written from outside. */
+  const control = (state: AbridgeState = { state: "absent" }) => reactive({ state, start: vi.fn() });
+
+  it("without a control nothing renders (the deployment cannot abridge); with both producers nothing renders either", () => {
+    const off = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [gitDiff] }) } });
+    expect(off.find('[data-testid^="abridge"]').exists()).toBe(false);
+    off.unmount();
+    const both = mountApp(PrReviewPanel, { props: { data: data(), abridge: control() } });
+    expect(both.find('[data-testid^="abridge"]').exists()).toBe(false);
+    both.unmount();
+  });
+
+  it("absent: the Abridge with meat button, with a tooltip saying what it does and what it costs; a click starts", async () => {
+    const c = control();
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [gitDiff] }), abridge: c } });
+    const button = w.find('[data-testid="abridge-button"]');
+    expect(button.text()).toBe("Abridge with meat");
+    expect(button.attributes("data-state")).toBe("closed"); // a tooltip trigger
+    await button.trigger("click");
+    expect(c.start).toHaveBeenCalledTimes(1);
+    w.unmount();
+  });
+
+  it("running: a spinner and the wait note, no button; failed: the reason and a Retry that starts again", async () => {
+    const running = mountApp(PrReviewPanel, {
+      props: { data: data({ readingDiffs: [gitDiff] }), abridge: control({ state: "running" }) },
+    });
+    expect(running.find('[data-testid="abridge-running"]').text()).toContain("Abridging… usually 1–3 minutes");
+    expect(running.find('[data-testid="abridge-running"] .animate-spin').exists()).toBe(true);
+    expect(running.find('[data-testid="abridge-button"]').exists()).toBe(false);
+    running.unmount();
+
+    const c = control({ state: "failed", reason: "meat exited 1: no credential" });
+    const failed = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [gitDiff] }), abridge: c } });
+    expect(failed.find('[data-testid="abridge-failed"]').text()).toContain("meat exited 1: no credential");
+    await failed.find('[data-testid="abridge-retry"]').trigger("click");
+    expect(c.start).toHaveBeenCalledTimes(1);
+    failed.unmount();
+  });
+
+  it("done: the meat artifact arriving on the data replaces the control with the tabs, the reading diff selected", async () => {
+    const live = reactive(data({ readingDiffs: [gitDiff] }));
+    const c = control({ state: "running" });
+    const w = mountApp(PrReviewPanel, { props: { data: live, abridge: c } });
+    expect(w.find('[data-testid="abridge-running"]').exists()).toBe(true);
+    expect(w.find('[data-testid="diff-tabs"]').exists()).toBe(false);
+    live.readingDiffs.push(meatDiff);
+    c.state = { state: "done" };
+    await w.vm.$nextTick();
+    await w.vm.$nextTick();
+    expect(w.find('[data-testid^="abridge"]').exists()).toBe(false);
+    expect(w.find('[data-testid="diff-tabs"]').exists()).toBe(true);
+    expect(w.find('[data-testid="pr-facts"]').text()).toContain("reading diff · meat");
     w.unmount();
   });
 });
