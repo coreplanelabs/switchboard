@@ -173,9 +173,14 @@ jobs:
           CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
 
   # Only when this push IS the release (the release PR merged): the ordinary
-  # merge to main that merely updates the release PR deploys nothing.
+  # merge to main that merely updates the release PR deploys nothing. The deploy
+  # waits for the three image publishes: production runs its Workers from the
+  # release's published images (`images: registry` in the profile), so `deploy
+  # all` copies `ghcr.io/…:<version>` into the account registry — an image that
+  # is still publishing would be a copy of nothing. A failed publish leg leaves
+  # `deploy` skipped, and the release is finished by rerunning the failed jobs.
   deploy:
-    needs: release-please
+    needs: [release-please, publish-image]
     if: needs.release-please.outputs.release_created == 'true'
     uses: ./.github/workflows/deploy-production.yml
     permissions:
@@ -186,9 +191,10 @@ jobs:
 
   # The same release publishes the three images (docs/reference/specs/release-and-deploy.md
   # item 21), one leg per image: each Dockerfile from the context its
-  # `check:image` proves on every PR and wrangler builds on this project's own
-  # deploy. Independent of `deploy`: that deploy builds the Dockerfiles and never
-  # pulls these images, so neither job waits on or fails with the other. The
+  # `check:image` proves on every PR. `deploy` waits for this job: production
+  # copies these images into the account registry rather than building the
+  # Dockerfiles (release-and-deploy.md item 25), so a release deploys the very
+  # bytes it published, and only once they exist. The
   # image names are derived from the repository — a fork publishes under its own
   # owner without editing this file — and lowercased, since a registry path must
   # be and a GitHub owner need not be; the suffixes are the ones
