@@ -62,9 +62,15 @@ jobs:
           private-key: ${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}
           # No owner/repositories: the token is scoped to this repository.
           # contents for the release branch, tag and GitHub release;
-          # pull-requests for the release PR and its labels.
+          # pull-requests for the release PR and its labels;
+          # workflows because creating the release creates its tag, and GitHub
+          # refuses an App-minted ref whose commits carry workflow files unless
+          # the token holds `workflows` — since the history collapse every tag's
+          # commits do ("Resource not accessible by integration" on create-a-release
+          # with contents + pull-requests alone; 201 with this, verified by probe).
           permission-contents: write
           permission-pull-requests: write
+          permission-workflows: write
       # Two attempts, because GitHub refuses the release-branch ref update now and
       # then — the identical call succeeded minutes later with nothing changed on
       # our side (no rule, no permission, no incident), and the action reports only

@@ -718,6 +718,16 @@ describe("the production deploy is one reusable workflow", () => {
     expect(mint.with?.["private-key"]).toBe("${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}");
   });
 
+  it("the release token is minted with contents, pull-requests AND workflows write — the tag a release creates carries workflow files, and GitHub refuses that ref to an App token without `workflows`", () => {
+    const wf = parse(read(".github/workflows/release-please.yml")) as Workflow;
+    const mint = wf.jobs["release-please"].steps.find((s) => s.uses?.startsWith("actions/create-github-app-token@"))!;
+    expect(mint.with).toMatchObject({
+      "permission-contents": "write",
+      "permission-pull-requests": "write",
+      "permission-workflows": "write",
+    });
+  });
+
   it("no workflow reaches into a vault: no 1Password action, no `op://` reference, no OP_SERVICE_ACCOUNT_TOKEN — an org secret scoped to private repositories vanished the day the repository went public", () => {
     const dir = new URL(".github/workflows/", `file://${root}`);
     for (const f of readdirSync(dir).filter((n) => /\.ya?ml$/.test(n))) {
