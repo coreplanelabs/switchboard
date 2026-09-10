@@ -255,19 +255,24 @@ describe("a breaking title needs its migration note", () => {
     ).toEqual([]);
   });
 
-  it("the repository's pin, when set, is ahead of the released version — a pin left behind after its release is cut fails here", () => {
+  it("the repository's pin, when set, is never behind the released version and never a major — the release PR itself carries pin == manifest", () => {
+    // release-please's release PR bumps the manifest to the pinned version
+    // before the release exists, so on that PR the two are equal and the suite
+    // must stay green; a pin BEHIND the manifest is one release-please can no
+    // longer cut. Removing a pin after its release is the owner's step.
     const config = JSON.parse(readRoot("release-please-config.json")) as { "release-as"?: string };
     const manifest = JSON.parse(readRoot(".release-please-manifest.json")) as Record<string, string>;
     const released = manifest["."];
     if (config["release-as"] === undefined) return;
     const [pinMajor, pinMinor, pinPatch] = config["release-as"].split(".").map(Number);
     const [relMajor, relMinor, relPatch] = released.split(".").map(Number);
-    const ahead =
-      pinMajor > relMajor ||
-      (pinMajor === relMajor && (pinMinor > relMinor || (pinMinor === relMinor && pinPatch > relPatch)));
-    expect(ahead, `release-as ${config["release-as"]} is not ahead of the released ${released}: remove the pin`).toBe(
-      true,
-    );
+    const behind =
+      pinMajor < relMajor ||
+      (pinMajor === relMajor && (pinMinor < relMinor || (pinMinor === relMinor && pinPatch < relPatch)));
+    expect(
+      behind,
+      `release-as ${config["release-as"]} is behind the released ${released}: move or remove the pin`,
+    ).toBe(false);
     expect(pinMajor, "the pin holds the 1.x line: a major is cut only after the public launch").toBe(relMajor);
   });
 
