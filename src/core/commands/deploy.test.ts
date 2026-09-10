@@ -1113,9 +1113,10 @@ describe("deploy.config", () => {
 });
 
 // Feature: docs/reference/specs/release-and-deploy.md items 25–26 — `deploy images`
-// copies the release's images into the account registry once per version, and in
-// `registry` mode `deploy plan` / `deploy all` refuse a step whose image is not
-// there. The host half is injected; nothing here opens a socket or runs wrangler.
+// copies the release's images into the account registry once per version; in
+// `registry` mode `deploy plan` reports which of a plan's images are there and
+// `deploy all` copies the missing ones itself before it deploys. The host half is
+// injected; nothing here opens a socket or runs wrangler.
 describe("deploy.images", () => {
   const ACCOUNT = TEST_PROFILE.account;
   const REGISTRY: LoadedProfile = { profile: TEST_REGISTRY_PROFILE, origin: "profile", path: "deploy/profile.json" };
@@ -1423,7 +1424,7 @@ describe("deploy.plan / deploy.all in registry mode", () => {
       io,
     );
 
-  it("probes the account registry once and plans with every step's image present — the plan says so and `deploy all` runs it", async () => {
+  it("probes the account registry once and plans with every step's image present — the plan says so and `deploy all` runs it, copying nothing", async () => {
     let probes = 0;
     const io = listing(["switchboard", "switchboard-resident", "switchboard-sandbox"]);
     const counted: ImagesHostIO = { ...io, registry: async (a) => (probes++, io.registry(a)) };
@@ -1446,10 +1447,14 @@ describe("deploy.plan / deploy.all in registry mode", () => {
       ],
     });
     expect(probes).toBe(1);
-    expect(renderText(commands.get("deploy.plan")!, res.value)).toContain("Images: registry (version 1.2.3)");
+    expect(renderText(commands.get("deploy.plan")!, res.value)).toContain(
+      "Images: registry (version 1.2.3) — 3 of 3 present —",
+    );
     const all = await commands.invoke("deploy.all", {}, cli);
     expect(all.ok).toBe(true);
+    expect(all.ok && (all.value as { copied: unknown[] }).copied).toEqual([]);
     expect(plans).toHaveLength(1);
+    expect(probes).toBe(2);
   });
 
   it("from the package root the same registry-mode plan probes the same listing and plans the same references — the images are registry copies, nothing is built from the package's directories", async () => {
@@ -1484,21 +1489,150 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     expect(text).not.toContain("Dockerfile");
   });
 
-  it("refuses — plan and all alike, nothing run — when a planned step's image is missing, naming the image and `deploy images`; a step without a container needs no image", async () => {
-    const io = listing(["switchboard"]);
-    const { commands, plans } = planWith(io);
-    for (const id of ["deploy.plan", "deploy.all"]) {
-      const res = await commands.invoke(id, {}, cli);
-      expect(res, id).toMatchObject({ ok: false, error: "unavailable" });
-      expect(res.ok ? "" : res.message).toBe(
-        `refusing — the account registry has no image for resident (registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3), sandbox (registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:1.2.3); run \`deploy images\` first: it copies the release's images at version 1.2.3 into the account registry`,
-      );
-    }
+  /** A registry that fills as copies land: `copy` records the call and adds the tag; the credential answers as told. */
+  function copying(present: string[], credential: { ok: true } | { ok: false; problem: string } = { ok: true }) {
+    const tags = new Map(present.map((name) => [name, new Set(["1.2.3"])]));
+    const copies: string[] = [];
+    let listings = 0;
+    let minted = 0;
+    const io: ImagesHostIO = {
+      registry: async () => {
+        listings++;
+        return { value: [...tags.entries()].map(([name, t]) => ({ name, tags: [...t] })) };
+      },
+      credential: async () => {
+        minted++;
+        return credential;
+      },
+      copy: async (copy) => {
+        copies.push(`${copy.kind}: ${copy.source} → ${copy.target}`);
+        tags.set(copy.name, new Set([...(tags.get(copy.name) ?? []), copy.version]));
+        return { ok: true, report: { digest: `sha256:${copy.name}`, blobs: 3, uploaded: 3, bytes: 30 } };
+      },
+    };
+    return { io, copies, listings: () => listings, minted: () => minted };
+  }
+  const ran = async (plan: DeployPlan): Promise<DeployRunResult> => ({
+    kind: "ran",
+    ok: true,
+    results: plan.steps.map((s) => ({ name: s.name, script: s.script, live: "n/a", status: "deployed" })),
+    notAttempted: [],
+  });
+
+  it("`deploy plan` reports which of the plan's images are missing and refuses nothing — the line counts them and says `deploy all` copies the rest; a step without a container needs no image", async () => {
+    const h = copying(["switchboard"]);
+    const { commands, plans } = planWith(h.io);
+    const res = await commands.invoke("deploy.plan", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect((res.value as unknown as DeployPlan).images).toMatchObject({
+      mode: "registry",
+      images: [
+        { kind: "bot", present: true },
+        { kind: "resident", present: false },
+        { kind: "sandbox", present: false },
+      ],
+    });
+    const text = renderText(commands.get("deploy.plan")!, res.value);
+    expect(text).toContain("Images: registry (version 1.2.3) — 1 of 3 present; deploy all copies the rest —");
+    expect(text).toContain(`resident: registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3 (missing)`);
+    expect(text).not.toContain("MISSING");
+    // Read-only: the plan copies nothing and mints nothing, whatever is missing.
+    expect(h.copies).toEqual([]);
+    expect(h.minted()).toBe(0);
     expect(plans).toEqual([]);
     const memoryOnly = await commands.invoke("deploy.plan", { options: { only: "memory" } }, cli);
-    expect(memoryOnly.ok).toBe(true);
-    const botOnly = await commands.invoke("deploy.plan", { options: { only: "bot" } }, cli);
-    expect(botOnly.ok).toBe(true);
+    if (!memoryOnly.ok) throw new Error(memoryOnly.message);
+    expect(renderText(commands.get("deploy.plan")!, memoryOnly.value)).toContain(
+      "Images: registry (version 1.2.3) — no step has a container",
+    );
+  });
+
+  it("`deploy all` copies the images its steps lack before anything deploys — the credential first, each copy in order, the listing read back — and hands the runner a plan with every image present, saying what it copied", async () => {
+    const h = copying(["switchboard"]);
+    const { commands, plans } = planWith(h.io, REGISTRY, ran);
+    const res = await commands.invoke("deploy.all", {}, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(h.copies).toEqual([
+      `resident: ghcr.io/example/switchboard-resident:1.2.3 → registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3`,
+      `sandbox: ghcr.io/example/switchboard-sandbox:1.2.3 → registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:1.2.3`,
+    ]);
+    expect(h.minted()).toBe(1);
+    // The listing before (the plan) and after (the proof); the plan the runner gets is built on the proof, not probed again.
+    expect(h.listings()).toBe(2);
+    expect(plans).toHaveLength(1);
+    expect(plans[0].images).toMatchObject({
+      mode: "registry",
+      images: [
+        { kind: "bot", present: true },
+        { kind: "resident", present: true },
+        { kind: "sandbox", present: true },
+      ],
+    });
+    expect(plans[0].dryRun).toBe(false);
+    expect(res.value).toMatchObject({
+      copied: [
+        { kind: "resident", target: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3` },
+        { kind: "sandbox", target: `registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:1.2.3` },
+      ],
+    });
+    const text = renderText(commands.get("deploy.all")!, res.value);
+    expect(text.split("\n")[0]).toBe(
+      `copied into the account registry: resident ← ghcr.io/example/switchboard-resident:1.2.3, sandbox ← ghcr.io/example/switchboard-sandbox:1.2.3`,
+    );
+    expect(text).toContain("deployed and live");
+    // Only the planned steps' images are copied: `--only memory,bot` with the bot present copies nothing and mints nothing.
+    const narrow = copying(["switchboard"]);
+    const { commands: narrowed } = planWith(narrow.io, REGISTRY, ran);
+    const only = await narrowed.invoke("deploy.all", { options: { only: "memory,bot" } }, cli);
+    expect(only.ok).toBe(true);
+    expect(narrow.copies).toEqual([]);
+    expect(narrow.minted()).toBe(0);
+    expect(narrow.listings()).toBe(1);
+    expect(only.ok && (only.value as { copied: unknown[] }).copied).toEqual([]);
+  });
+
+  it("`deploy all --dry-run` computes the plan and the copies it would make, then stops: nothing copied, nothing deployed, and the render says so", async () => {
+    const h = copying(["switchboard"]);
+    const { commands, plans } = planWith(h.io, REGISTRY, ran);
+    const res = await commands.invoke("deploy.all", { options: { dryRun: true } }, cli);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.value).toMatchObject({
+      results: [],
+      copied: [],
+      wouldCopy: [{ kind: "resident" }, { kind: "sandbox" }],
+    });
+    expect((res.value as unknown as { plan: DeployPlan }).plan.dryRun).toBe(true);
+    expect(h.copies).toEqual([]);
+    expect(h.minted()).toBe(0);
+    expect(plans).toEqual([]);
+    const text = renderText(commands.get("deploy.all")!, res.value);
+    expect(text).toContain(
+      `would copy into the account registry: resident ← ghcr.io/example/switchboard-resident:1.2.3, sandbox ← ghcr.io/example/switchboard-sandbox:1.2.3`,
+    );
+    expect(text).toContain("(dry run — nothing copied, nothing deployed)");
+    expect(text).toContain("Images: registry (version 1.2.3) — 1 of 3 present; deploy all copies the rest");
+    // `deploy plan` takes no --dry-run: it is one.
+    expect(Object.keys(deployPlan.options!.shape)).not.toContain("dryRun");
+    expect(Object.keys(deployAll.options!.shape)).toContain("dryRun");
+  });
+
+  it("a copy `deploy all` cannot make stops it before anything deploys: the token's missing Containers Edit by name, or the failed image, the transfer's problem and what was not attempted", async () => {
+    const forbidden = copying(["switchboard"], { ok: false, problem: containersEditProblem() });
+    const denied = planWith(forbidden.io, REGISTRY, ran);
+    const refused = await denied.commands.invoke("deploy.all", {}, cli);
+    expect(refused).toMatchObject({ ok: false, error: "unavailable" });
+    expect(refused.ok ? "" : refused.message).toBe(containersEditProblem());
+    expect(forbidden.copies).toEqual([]);
+    expect(denied.plans).toEqual([]);
+    const failing = copying(["switchboard"]);
+    failing.io.copy = async (copy) => ({ ok: false, problem: `reading ${copy.source}'s manifest failed — HTTP 404` });
+    const stopped = planWith(failing.io, REGISTRY, ran);
+    const failed = await stopped.commands.invoke("deploy.all", {}, cli);
+    expect(failed).toMatchObject({ ok: false, error: "unavailable" });
+    expect(failed.ok ? "" : failed.message).toBe(
+      `copying the resident image (ghcr.io/example/switchboard-resident:1.2.3 → registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3) failed — reading ghcr.io/example/switchboard-resident:1.2.3's manifest failed — HTTP 404; stopping — sandbox not attempted`,
+    );
+    expect(stopped.plans).toEqual([]);
   });
 
   it("a registry that cannot be read is `unavailable` with wrangler's words; the example profile is never probed and its plan reads `not probed`", async () => {
@@ -1525,7 +1659,9 @@ describe("deploy.plan / deploy.all in registry mode", () => {
         { kind: "sandbox", present: undefined },
       ],
     });
-    expect(renderText(onExample.commands.get("deploy.plan")!, fromExample.value)).toContain("(not probed)");
+    expect(renderText(onExample.commands.get("deploy.plan")!, fromExample.value)).toContain(
+      "Images: registry (version 1.2.3) — not probed (the example profile) —",
+    );
   });
 
   it("build mode (the default, this project's own) never probes the registry and plans each Dockerfile", async () => {

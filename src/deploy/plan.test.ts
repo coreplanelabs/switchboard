@@ -659,7 +659,7 @@ describe("classifyDeployOutput", () => {
 // Feature: docs/reference/specs/release-and-deploy.md items 25–26 — the plan says where
 // each step's container image comes from. `build`: the Dockerfile wrangler builds.
 // `registry`: the account registry reference at the version, and whether the
-// registry holds it — the commands refuse a missing one — or `undefined` when it
+// registry holds it — `deploy all` copies a missing one — or `undefined` when it
 // was not probed (the example profile, which nothing deploys).
 describe("the plan's images", () => {
   const REGISTRY: LoadedProfile = { profile: TEST_REGISTRY_PROFILE, origin: "profile", path: "deploy/profile.json" };
@@ -682,7 +682,7 @@ describe("the plan's images", () => {
     expect(formatPlanImages(plan({ only: ["memory"] }).images)).toBe("Images: build — no step has a container");
   });
 
-  it("in registry mode names each image step's account-registry reference at the version and whether the listing holds it; a missing one reads MISSING and names `deploy images`", () => {
+  it("in registry mode names each image step's account-registry reference at the version and whether the listing holds it; the line counts the present ones and says `deploy all` copies the rest", () => {
     const listing = [
       { name: "switchboard", tags: ["1.2.3"] },
       { name: "switchboard-resident", tags: ["1.2.2"] },
@@ -698,10 +698,23 @@ describe("the plan's images", () => {
       ],
     });
     const text = formatPlan(p);
-    expect(text).toContain("Images: registry (version 1.2.3) —");
+    expect(text).toContain("Images: registry (version 1.2.3) — 1 of 3 present; deploy all copies the rest — ");
     expect(text).toContain(`bot: registry.cloudflare.com/${account}/switchboard:1.2.3 (present)`);
-    expect(text).toContain(
-      `resident: registry.cloudflare.com/${account}/switchboard-resident:1.2.3 (MISSING — run \`deploy images\`)`,
+    expect(text).toContain(`resident: registry.cloudflare.com/${account}/switchboard-resident:1.2.3 (missing)`);
+    const all = [
+      ...listing,
+      { name: "switchboard-resident", tags: ["1.2.3"] },
+      { name: "switchboard-sandbox", tags: ["1.2.3"] },
+    ];
+    expect(
+      formatPlanImages(
+        plan({}, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES, registry: all }).images,
+      ),
+    ).toContain("Images: registry (version 1.2.3) — 3 of 3 present — bot: ");
+    expect(
+      formatPlanImages(plan({}, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES }).images),
+    ).toBe(
+      `Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/${account}/switchboard:1.2.3, resident: registry.cloudflare.com/${account}/switchboard-resident:1.2.3, sandbox: registry.cloudflare.com/${account}/switchboard-sandbox:1.2.3`,
     );
     // Only the planned steps' images are judged: `--only memory` needs none.
     expect(
@@ -727,6 +740,8 @@ describe("the plan's images", () => {
       version: "1.2.3",
       images: [{ kind: "bot", ref: `registry.cloudflare.com/${account}/switchboard:1.2.3`, present: undefined }],
     });
-    expect(formatPlan(p)).toContain(`bot: registry.cloudflare.com/${account}/switchboard:1.2.3 (not probed)`);
+    expect(formatPlan(p)).toContain(
+      `Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/${account}/switchboard:1.2.3`,
+    );
   });
 });

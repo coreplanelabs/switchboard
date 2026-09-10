@@ -39,6 +39,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0027 | [Published images are copied into each installation's Cloudflare registry once per version, never pulled at runtime](../decisions/0027-images-copied-into-the-account-registry.md) | Artifact promotion | accepted | 2026-09-09 |
 | 0028 | [What a container image installs is a manifest per image class, rendered into the committed Dockerfile and extended by an operator overlay that deploy images builds](../decisions/0028-image-manifest.md) | Generated artifact (gen + check) over a declarative manifest; artifact promotion for the operator overlay | proposed | 2026-09-10 |
 | 0029 | [Durable Objects are the store and never the scheduler, Cloudflare Workflows schedules the multi-step lifecycles, and the agent loop stays in a container](../decisions/0029-durable-objects-store-workflows-schedule.md) | Durable execution for the lifecycles around the loop, never for the loop; one order for four converging tracks | proposed | 2026-09-10 |
+| 0030 | [deploy all copies the images it needs into the account registry itself, over HTTPS, and the operator's whole deploy is one command](../decisions/0030-deploy-all-copies-the-images-it-needs.md) | Artifact promotion, folded into the one deploy command | accepted | 2026-09-10 |
 
 <!-- /generated:decision-records -->
 

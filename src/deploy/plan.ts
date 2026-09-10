@@ -408,8 +408,8 @@ export interface DeployHost {
 /** The plan's image section: in `build` mode each step's Dockerfile, built by wrangler at deploy
  *  time; in `registry` mode each step's reference into the account registry at the version and
  *  whether the registry holds it — `undefined` when the registry was not probed (the example
- *  profile, which nothing deploys). A step whose image is absent cannot deploy: `deploy plan` and
- *  `deploy all` refuse, naming `deploy images` (src/core/commands/deploy.ts). */
+ *  profile, which nothing deploys). A step whose image is absent cannot deploy: `deploy plan`
+ *  reports it, and `deploy all` copies it before the plan runs (src/core/commands/deploy.ts). */
 export type PlanImages =
   | { mode: "build"; images: { kind: ImageKind; dockerfile: string }[] }
   | { mode: "registry"; version: string; images: { kind: ImageKind; ref: string; present: boolean | undefined }[] };
@@ -575,17 +575,20 @@ export function formatPlan(plan: DeployPlan): string {
 }
 
 /** The plan's `Images:` line: the mode, and per step's image what it deploys — and, in registry
- *  mode, whether the account registry holds it (`missing` is what the commands refuse on). */
+ *  mode, how many the account registry holds (`deploy all` copies the missing ones) or that it was
+ *  not probed (the example profile). */
 export function formatPlanImages(images: PlanImages): string {
   if (images.mode === "build")
     return images.images.length === 0
       ? "Images: build — no step has a container"
       : `Images: build — wrangler builds ${images.images.map((i) => `${i.kind}: ${i.dockerfile}`).join(", ")} at deploy time`;
-  const state = (present: boolean | undefined) =>
-    present === undefined ? "not probed" : present ? "present" : "MISSING — run `deploy images`";
-  return images.images.length === 0
-    ? `Images: registry (version ${images.version}) — no step has a container`
-    : `Images: registry (version ${images.version}) — ${images.images.map((i) => `${i.kind}: ${i.ref} (${state(i.present)})`).join(", ")}`;
+  const head = `Images: registry (version ${images.version})`;
+  if (images.images.length === 0) return `${head} — no step has a container`;
+  if (images.images.some((i) => i.present === undefined))
+    return `${head} — not probed (the example profile) — ${images.images.map((i) => `${i.kind}: ${i.ref}`).join(", ")}`;
+  const present = images.images.filter((i) => i.present).length;
+  const count = `${present} of ${images.images.length} present${present < images.images.length ? "; deploy all copies the rest" : ""}`;
+  return `${head} — ${count} — ${images.images.map((i) => `${i.kind}: ${i.ref} (${i.present ? "present" : "missing"})`).join(", ")}`;
 }
 
 /** ANSI colour sequences (ESC `[` … `m`), built from the code point so the regex literal carries no control character. */

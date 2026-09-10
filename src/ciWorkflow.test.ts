@@ -751,7 +751,7 @@ describe("the production deploy is one reusable workflow", () => {
     ]);
   });
 
-  it("`deploy images` runs before the plan — a registry-mode plan refuses a Worker whose copy is absent — unless `copy-images` is `never`", () => {
+  it("`deploy images` runs before the plan — a pre-warm; `deploy all` would copy the same images itself — unless `copy-images` is `never`", () => {
     const copy = steps.find((s) => /deploy images/.test(s.run ?? ""))!;
     expect(copy.if).toBe("inputs.copy-images != 'never'");
     expect(lines(copy)).toEqual(["$CLI deploy images"]);

@@ -23,13 +23,15 @@
 #
 # Images (`copy-images`): a profile whose Workers run the images the release
 # published (`images: registry`) needs them copied into its account's registry
-# once per version — `deploy images`, run here BEFORE the plan, since a
-# registry-mode plan refuses a Worker whose copy is absent. The profile decides,
-# not this file: the command copies what a `registry` profile lacks and answers
-# a `build` profile (this repository's own, which wrangler builds at deploy
-# time) with nothing to copy, reading nothing. `auto` (the default) runs it;
-# `never` skips it. GitHub's runners carry Docker, which the copy needs, so
-# nothing is installed for it.
+# once per version. `deploy all` copies what its Workers lack by itself; the
+# `deploy images` step here, BEFORE the plan, pre-warms the registry so the
+# plan reads `present` and the deploy step is the deploy alone. The profile
+# decides, not this file: the command copies what a `registry` profile lacks
+# and answers a `build` profile (this repository's own, which wrangler builds at
+# deploy time) with nothing to copy, reading nothing. `auto` (the default) runs
+# it; `never` skips it and leaves the copy to `deploy all`. The copy is a
+# registry-to-registry transfer over HTTPS: nothing is installed for it, and
+# the Cloudflare token needs Containers Edit.
 #
 # A busy bot is not busy (docs/reference/specs/release-and-deploy.md item 13). Since the
 # run ledger's handoff (run-history item 39) the bot hands its runs to the next
@@ -110,7 +112,7 @@ on:
         type: string
         default: ""
       copy-images:
-        description: "`auto` (default): run `deploy images` before the plan — it copies what a `registry`-mode profile lacks and does nothing for a `build`-mode one; `never`: skip it"
+        description: "`auto` (default): run `deploy images` before the plan — it copies what a `registry`-mode profile lacks and does nothing for a `build`-mode one; `never`: skip it and leave the copy to `deploy all`"
         type: string
         default: auto
     secrets:
@@ -303,9 +305,10 @@ jobs:
           echo "args=$args" >> "$GITHUB_OUTPUT"
           echo "deploy all $args"
       # Once per version, before the plan: the release's images into the account
-      # registry (pull from the public registry, push with wrangler — the runner's
-      # Docker does both). The profile decides — a `build`-mode profile has nothing
-      # to copy and nothing is read — and a copy already present is skipped by name.
+      # registry, registry to registry over HTTPS. `deploy all` below would make
+      # the same copy itself; running it here first lets the plan read `present`.
+      # The profile decides — a `build`-mode profile has nothing to copy and
+      # nothing is read — and a copy already present is skipped by name.
       - name: copy the release's images into the account registry
         if: inputs.copy-images != 'never'
         env:
