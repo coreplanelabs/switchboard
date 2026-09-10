@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.200.0](https://github.com/coreplanelabs/switchboard/compare/v1.15.0...v1.200.0) (2026-09-10)
+
+
+### Features
+
+* **authz:** a grant for everyone on a surface — access:* and slack:* entries union with a person's own ([#873](https://github.com/coreplanelabs/switchboard/issues/873)) ([4b46c57](https://github.com/coreplanelabs/switchboard/commit/4b46c57166e7ec715cf48983bce30ceeb2d10a74))
+* **commands:** the process says which build it runs — `status show` on every surface, and the About block names it ([#878](https://github.com/coreplanelabs/switchboard/issues/878)) ([af9c754](https://github.com/coreplanelabs/switchboard/commit/af9c754927a5fed5fdf4665d35a73a73cdf6dc56))
+* **docs:** the OpenSwitchboard mark — three planes, one message routed to two lanes — in the docs header, the favicon, the dashboard and the README ([#885](https://github.com/coreplanelabs/switchboard/issues/885)) ([665b622](https://github.com/coreplanelabs/switchboard/commit/665b622fb0c83b1a4c7320fb995a91de7deec6e1))
+* **init:** the installation lives in ~/.switchboard — no mkdir before init, and every command finds it from anywhere ([#882](https://github.com/coreplanelabs/switchboard/issues/882)) ([9ea1624](https://github.com/coreplanelabs/switchboard/commit/9ea1624ba79f1820a7d4b69cc8ff5780f0055e8c))
+* **resident:** the mirror mutex is a durable lease judged against the incarnation, and every engine step is an idempotent method a cycle can call twice ([#867](https://github.com/coreplanelabs/switchboard/issues/867)) ([2c26ccd](https://github.com/coreplanelabs/switchboard/commit/2c26ccdc2b196812179bfe9cf93876593b1a884f))
+* **resident:** the refresh cycle runs as a cron-created Workflow instance behind a per-resident lifecycle flag, with the Workflows binding, its two cost meters and the instance's root span ([#870](https://github.com/coreplanelabs/switchboard/issues/870)) ([648c526](https://github.com/coreplanelabs/switchboard/commit/648c526d7cab196c34e413b16c61a69fe32abe63))
+* **web:** the run page reads in three seconds — facts bar under the header, the Reply first on a finished run, the request folded to three lines ([#880](https://github.com/coreplanelabs/switchboard/issues/880)) ([c85eec1](https://github.com/coreplanelabs/switchboard/commit/c85eec1f1855de14a05ceb45a616634ef78f29ee))
+
+
+### Bug fixes
+
+* **init:** the package README says what init does now — writes to ~/.switchboard, no mkdir, every command from anywhere ([#888](https://github.com/coreplanelabs/switchboard/issues/888)) ([58d02b2](https://github.com/coreplanelabs/switchboard/commit/58d02b2297da81119293ff0ecdd6984ad8e8c22a))
+* **release:** the published bot image carries its build identity — the live gate can hold on a registry-mode deploy ([#890](https://github.com/coreplanelabs/switchboard/issues/890)) ([ecc607b](https://github.com/coreplanelabs/switchboard/commit/ecc607bb99322caac0d750715b175f036c969979))
+* **web:** each time bucket has its own color, and every timestamp ends on one right edge ([#874](https://github.com/coreplanelabs/switchboard/issues/874)) ([62be6d0](https://github.com/coreplanelabs/switchboard/commit/62be6d00e15db9a136dc41d15362a742380b2ba1))
+* **web:** the Tour holds still and jumps clearly — no hover growth, a persistent highlight, and a truncated diff says so instead of "not in this diff" ([#871](https://github.com/coreplanelabs/switchboard/issues/871)) ([2af293f](https://github.com/coreplanelabs/switchboard/commit/2af293fae967738ea66e5d433dbf9234151d5032))
+
+
+### Documentation
+
+* **core:** record 0029 is accepted — the retry policy counts six attempts and instance ids use the platform's alphabet, corrected before the flip ([#865](https://github.com/coreplanelabs/switchboard/issues/865)) ([924fcf3](https://github.com/coreplanelabs/switchboard/commit/924fcf3381fcaa12257b9f5943e57358912c59a1))
+* **docs:** the Slack thread, captured — a real review run in the README as a recording and three stills ([#883](https://github.com/coreplanelabs/switchboard/issues/883)) ([cd2b78c](https://github.com/coreplanelabs/switchboard/commit/cd2b78ca1c4a1b846386f60abb98631a06916f16))
+* **providers:** OpenRouter as a documented example — the commented config block, the how-to paragraph and a test that the block loads and builds ([#866](https://github.com/coreplanelabs/switchboard/issues/866)) ([0e58766](https://github.com/coreplanelabs/switchboard/commit/0e587668b62f8fcf99d5a6bbb5410ec221bd9f80))
+
 ## [1.18.0](https://github.com/coreplanelabs/switchboard/compare/v1.17.0...v1.18.0) (2026-09-10)
 
 
