@@ -458,16 +458,17 @@ describe("parseIngressTokens — a token is a credential, its rights are config'
     expect(cfg.tokens).toEqual({ t: { subject: "ci", channel: "ops" }, u: { subject: "alice" } });
   });
 
-  it("the retired `scopes` field is kept out of the identity and warned about by subject — the entry stays usable, never widened", () => {
+  it("a field other than subject/channel (`scopes`, say) is ignored, silently: the identity is exactly { subject, channel? } and nothing is logged", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const cfg = parseIngressTokens({
-      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ legacy: { subject: "ci", scopes: ["dispatch", "runs:read"] } }),
+      SWITCHBOARD_INGRESS_TOKENS: JSON.stringify({ t: { subject: "ci", scopes: ["dispatch", "runs:read"] } }),
     });
-    expect(cfg.tokens).toEqual({ legacy: { subject: "ci" } });
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toContain('subject "ci"');
-    expect(String(warn.mock.calls[0][0])).not.toContain("legacy");
+    expect(cfg.tokens).toEqual({ t: { subject: "ci" } });
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
     warn.mockRestore();
+    error.mockRestore();
   });
 });
 
