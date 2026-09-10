@@ -38,6 +38,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0026 | [A run is a capability profile over three axes, named agents become presets, and a routing stage picks the profile](../decisions/0026-capability-profiles-and-request-routing.md) | Strategy as data + a routing filter in the pipeline; the policy table keeps one question, the config layers gain an intersecting setting, the authorize stage gains a gate | proposed | 2026-09-09 |
 | 0027 | [Published images are copied into each installation's Cloudflare registry once per version, never pulled at runtime](../decisions/0027-images-copied-into-the-account-registry.md) | Artifact promotion | accepted | 2026-09-09 |
 | 0028 | [What a container image installs is a manifest per image class, rendered into the committed Dockerfile and extended by an operator overlay that deploy images builds](../decisions/0028-image-manifest.md) | Generated artifact (gen + check) over a declarative manifest; artifact promotion for the operator overlay | proposed | 2026-09-10 |
+| 0029 | [Durable Objects are the store and never the scheduler, Cloudflare Workflows schedules the multi-step lifecycles, and the agent loop stays in a container](../decisions/0029-durable-objects-store-workflows-schedule.md) | Durable execution for the lifecycles around the loop, never for the loop; one order for four converging tracks | proposed | 2026-09-10 |
 
 <!-- /generated:decision-records -->
 
