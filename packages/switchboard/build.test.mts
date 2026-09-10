@@ -173,12 +173,12 @@ describe("the package manifest", () => {
     }
   });
 
-  it("runs on the Node the tree pins (.nvmrc), names the bundled CLI as the `switchboard` bin, ships only dist/, and would publish public with provenance", () => {
+  it("runs on the Node the tree pins (.nvmrc), names the bundled CLI as the `switchboard` bin, ships only dist/, and would publish public", () => {
     const pinned = read(".nvmrc").trim();
     expect(pkg.engines.node).toBe(`>=${pinned}`);
     expect(pkg.bin).toEqual({ switchboard: "dist/cli.js" });
     expect(pkg.files).toEqual(["dist"]);
-    // Public by config; provenance is the workflow's call (only while the repository is public), not the manifest's.
+    // Public by config; no provenance — npm takes it from GitHub-hosted runners alone, and CI runs on Namespace (release-please.yml).
     expect(pkg.publishConfig).toEqual({ access: "public" });
   });
 

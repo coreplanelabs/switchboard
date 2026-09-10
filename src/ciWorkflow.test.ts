@@ -468,12 +468,12 @@ describe("the release publishes the npm package", () => {
   // (docs/reference/specs/packaging.md item 5): gated on release-please
   // reporting a release like the image job, `id-token: write` for npm's trusted
   // publishing (the run's OIDC identity is the credential — no token, nothing
-  // expires) and nothing more, the package built by its own script, and
-  // `--provenance` only while the repository is public.
+  // expires) and nothing more, the package built by its own script, and no
+  // `--provenance`: npm takes provenance from GitHub-hosted runners alone, and
+  // this project's CI runs on Namespace runners.
   const file = ".github/workflows/release-please.yml";
   const workflow = parse(read(file)) as Workflow & { permissions?: Record<string, string> };
-  const PUBLISH_LINE =
-    "npm publish --workspace packages/switchboard --access public ${{ github.event.repository.private == false && '--provenance' || '' }}";
+  const PUBLISH_LINE = "npm publish --workspace packages/switchboard --access public";
   const publish = Object.entries(workflow.jobs).filter(([, job]) =>
     job.steps?.some((s) => /^npm publish\b/.test(s.run?.trim() ?? "")),
   );
@@ -528,15 +528,15 @@ describe("the release publishes the npm package", () => {
     });
   });
 
-  it("upgrades npm to a trusted-publishing release, installs from the lockfile, builds the package with its own script, and publishes it public — with provenance only while the repository is public", () => {
+  it("upgrades npm to a trusted-publishing release, installs from the lockfile, builds the package with its own script, and publishes it public — without provenance, which npm accepts from GitHub-hosted runners alone", () => {
     expect(runs()).toEqual([
       "npm install -g npm@11.19.1",
       "npm ci",
       "npm run build -w packages/switchboard",
       PUBLISH_LINE,
     ]);
-    // npm signs provenance for public sources alone: the flag is an expression on the repository's visibility.
-    expect(PUBLISH_LINE).toContain("${{ github.event.repository.private == false && '--provenance' || '' }}");
+    // No provenance flag anywhere in the job: the registry rejects a bundle from a self-hosted runner (422).
+    for (const s of job.steps) expect(s.run ?? "", "a step asks for provenance").not.toContain("provenance");
     // Node from .nvmrc; no registry-url — setup-node would write an .npmrc naming an auth token this job does not have.
     const setup = job.steps.find((s) => s.uses?.startsWith("actions/setup-node@"))!;
     expect(setup.with?.["node-version-file"]).toBe(".nvmrc");
