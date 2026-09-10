@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Secret } from "../secrets.js";
-import { MEAT_BINARY, meatOnHost, type MeatHost } from "./meatProcess.js";
+import { MEAT_BINARY, meatOnHost, meatOnPath, type MeatHost } from "./meatProcess.js";
 
 // Feature: docs/reference/specs/reading-diff.md item 6 — meat runs in the BOT
 // process over a unified diff on its stdin, with exactly the environment the
@@ -113,6 +113,22 @@ describe("meatOnHost", () => {
       expect(r.reason).not.toMatch(/ghp_A{36}/);
       expect(r.reason).toContain("«redacted");
     }
+  });
+});
+
+// The host fact behind the `readingDiffAbridge` capability: `command -v meat`, asked once.
+describe("meatOnPath", () => {
+  it("is true when an executable meat is in a PATH entry, false for a non-executable, an empty PATH, or none", () => {
+    const withMeat = fakeMeat("exit 0");
+    const without = mkdtempSync(join(tmpdir(), "swb-no-meat-"));
+    const notExecutable = mkdtempSync(join(tmpdir(), "swb-meat-noexec-"));
+    writeFileSync(join(notExecutable, MEAT_BINARY), "#!/bin/sh\n");
+    chmodSync(join(notExecutable, MEAT_BINARY), 0o644);
+    expect(meatOnPath({ PATH: `${without}:${withMeat}` })).toBe(true);
+    expect(meatOnPath({ PATH: without })).toBe(false);
+    expect(meatOnPath({ PATH: notExecutable })).toBe(false);
+    expect(meatOnPath({ PATH: "" })).toBe(false);
+    expect(meatOnPath({})).toBe(false);
   });
 });
 

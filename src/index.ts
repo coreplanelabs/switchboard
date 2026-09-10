@@ -40,6 +40,7 @@ import { buildRunStore, FileRunStore, NullRunStore, retentionPolicyOf } from "./
 import { createRunsService } from "./core/runsService.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { autoAbridgeOnPersist, reviewAbridgerFromConfig } from "./core/reviewAbridge.js";
+import { meatOnPath } from "./core/meatProcess.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
 import { createLedgerWriteThrough, mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
 import { reclaimRuns, startReclaimSweep, closeReclaimed, type ReclaimOutcome } from "./core/boot.js";
@@ -129,7 +130,9 @@ export async function runBot(): Promise<void> {
   // What is on in this process (src/core/capabilities.ts): resolved ONCE, here,
   // from the config and the environment; every surface below reads this value
   // and none re-derives a capability from `config`.
-  const capabilities = capabilitiesFrom(config.config, publicEnv(), processSecrets);
+  const capabilities = capabilitiesFrom(config.config, publicEnv(), processSecrets, {
+    meatBinary: meatOnPath(publicEnv()),
+  });
   console.log(`[capabilities] ${JSON.stringify(capabilities)}`);
   const providers = new ProviderRegistry(config.config.providers);
   // Bundled skills (docs/reference/specs/skills.md): loaded once from the seeded `skills/` dir and shared
@@ -196,16 +199,17 @@ export async function runBot(): Promise<void> {
   // on this host over the stored record. `review abridge` (the catalogue below)
   // and `provider: meat` (the persist hook here) share it, so a run has one
   // running/failed state whichever way it was asked for.
-  const abridger = capabilities.runHistory
-    ? reviewAbridgerFromConfig(
-        () => config.config,
-        runStore,
-        processSecrets,
-        publicEnv(),
-        "./data",
-        (m) => console.warn(m),
-      )
-    : undefined;
+  const abridger =
+    capabilities.runHistory && capabilities.readingDiffAbridge
+      ? reviewAbridgerFromConfig(
+          () => config.config,
+          runStore,
+          processSecrets,
+          publicEnv(),
+          "./data",
+          (m) => console.warn(m),
+        )
+      : undefined;
   const autoAbridge = autoAbridgeOnPersist(
     () => abridger,
     () => config.config.review?.readingDiff,

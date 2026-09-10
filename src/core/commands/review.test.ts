@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ALL_GRANTS } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
-import { ALL_CAPABILITIES } from "../capabilities.js";
+import { ALL_CAPABILITIES, type Capabilities } from "../capabilities.js";
 import { CommandRegistry, UNTRUSTED_OPEN, wrapUntrusted, type Caller, type JsonValue } from "../commandRegistry.js";
 import { ReviewAbridger } from "../reviewAbridge.js";
 import { RunRegistry } from "../runRegistry.js";
@@ -9,7 +9,7 @@ import { InMemoryRunStore } from "../runStore.js";
 import { createRunsService } from "../runsService.js";
 import { fakeAbridger, NOW, PLANTED_TEXT, record, REVIEW_DIFF, reviewRecord } from "../testing/conformanceFixture.js";
 import {
-  NO_ABRIDGER_MESSAGE,
+  ABRIDGE_OFF_MESSAGE,
   abridgeOutput,
   registerReviewCommands,
   renderAbridge,
@@ -129,12 +129,12 @@ describe("review.abridge", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("no abridger (history off) is unavailable with the standard sentence", async () => {
+  it("no abridger (the capability's Null Object) is unavailable, naming the three facts and run history", async () => {
     const { invoke } = await setup({ abridger: async () => undefined });
     expect(await invoke({ args: ["rev-1"] })).toMatchObject({
       ok: false,
       error: "unavailable",
-      message: NO_ABRIDGER_MESSAGE,
+      message: ABRIDGE_OFF_MESSAGE,
     });
   });
 
@@ -208,13 +208,18 @@ describe("review.abridge", () => {
     );
   });
 
-  it("is hidden when run history is off", () => {
-    const off = new CommandRegistry<ReviewCommandDeps>({
-      audit: () => {},
-      capabilities: { ...ALL_CAPABILITIES, runHistory: false },
-    });
-    registerReviewCommands(off);
-    expect(off.get("review.abridge")).toBeUndefined();
+  it("is hidden when run history is off, and when the readingDiffAbridge capability is off — present only with both", () => {
+    const under = (caps: Partial<Capabilities>) => {
+      const registry = new CommandRegistry<ReviewCommandDeps>({
+        audit: () => {},
+        capabilities: { ...ALL_CAPABILITIES, ...caps },
+      });
+      registerReviewCommands(registry);
+      return registry.get("review.abridge");
+    };
+    expect(under({ runHistory: false })).toBeUndefined();
+    expect(under({ readingDiffAbridge: false })).toBeUndefined();
+    expect(under({})).toBeDefined();
     expect(ReviewAbridger).toBeDefined();
   });
 });

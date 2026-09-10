@@ -180,6 +180,9 @@ export function buildCoreCommands(
   // PUBLIC environment (PATH, HOME) and the one credential the getter reveals.
   const abridger = once(async (): Promise<ReviewAbridger | undefined> => {
     if (wiring.abridger) return wiring.abridger();
+    // The capability's Null Object: off → undefined, and the command's
+    // `unavailable` names why (it is hidden before that on every surface).
+    if (wiring.capabilities && !wiring.capabilities.readingDiffAbridge) return undefined;
     const store = await runStore();
     const config = await cfg();
     return store

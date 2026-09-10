@@ -1,9 +1,11 @@
 import type { AppConfig } from "../config.js";
 import { parseMcpSettings } from "../mcp/config.js";
+import { anthropicApiKey } from "../providers/anthropic.js";
 import { parseCostsConfig } from "./costs.js";
 import { resolveDashboardAuthMode, type DashboardAuthMode } from "./dashboardAuthConfig.js";
 import { parseIngressTokenMap } from "./ingressTokens.js";
 import type { EnvRecord, Secrets } from "../secrets.js";
+import { resolveReadingDiff } from "./readingDiff.js";
 
 // What is ON in this process — Fowler's feature toggles, resolved ONCE at
 // startup (src/index.ts, src/cli.ts) from the config and the environment, and
@@ -42,6 +44,11 @@ export interface Capabilities {
   github: boolean;
   /** The HTTP and MCP ingress surfaces: `SWITCHBOARD_INGRESS_TOKENS` names at least one bearer. */
   ingress: boolean;
+  /** The abridged reading diff (`review abridge`, `provider: meat` —
+   *  docs/reference/specs/reading-diff.md): the `meat` binary resolves on the bot
+   *  host's PATH, the Anthropic provider's credential is set, and
+   *  `review.readingDiff.provider` (or its env override) is not `off`. */
+  readingDiffAbridge: boolean;
   /**
    * The dashboard auth strategy that gates the dashboards (docs/reference/specs/access-gate.md):
    * `config.dashboard.auth` when set; else `access` when a Cloudflare Access app
@@ -66,6 +73,7 @@ export const ALL_CAPABILITIES: Readonly<Capabilities> = Object.freeze({
   schedules: true,
   github: true,
   ingress: true,
+  readingDiffAbridge: true,
   dashboardAuth: "access",
 });
 
@@ -81,8 +89,19 @@ export const NO_CAPABILITIES: Readonly<Capabilities> = Object.freeze({
   schedules: false,
   github: false,
   ingress: false,
+  readingDiffAbridge: false,
   dashboardAuth: "none",
 });
+
+/** What the computation needs to know about the HOST beyond config and env —
+ *  probed once by the caller (`meatOnPath` in src/core/meatProcess.ts) and
+ *  handed in, so this module stays pure. Absent → nothing found. */
+export interface HostFacts {
+  /** The `meat` binary resolves on PATH. */
+  meatBinary: boolean;
+}
+
+export const NO_HOST_FACTS: Readonly<HostFacts> = Object.freeze({ meatBinary: false });
 
 const DEFAULT_STATE_TOKEN_ENV = "MEMORY_TOKEN";
 
@@ -99,7 +118,12 @@ function workerReachable(worker: { baseUrl?: string; tokenEnv?: string } | undef
  * malformed `costs` or `mcp` block — so a bad config is a startup error here as
  * it is there, never a capability silently read as off.
  */
-export function capabilitiesFrom(config: AppConfig, env: EnvRecord, secrets: Secrets): Capabilities {
+export function capabilitiesFrom(
+  config: AppConfig,
+  env: EnvRecord,
+  secrets: Secrets,
+  host: Readonly<HostFacts> = NO_HOST_FACTS,
+): Capabilities {
   const runHistory = config.runHistory;
   const runHistoryOn =
     runHistory !== undefined && (runHistory.store === "file" || workerReachable(runHistory.worker, secrets));
@@ -121,6 +145,12 @@ export function capabilitiesFrom(config: AppConfig, env: EnvRecord, secrets: Sec
         secrets.get("GITHUB_APP_INSTALLATION_ID") !== undefined) ||
       secrets.get("GH_TOKEN") !== undefined,
     ingress: ingress.ok && Object.keys(ingress.tokens).length > 0,
+    // The same three facts `reviewAbridgerFromConfig` and `meatOnHost` act on:
+    // the binary, the credential (the one getter), the switch (env override included).
+    readingDiffAbridge:
+      host.meatBinary &&
+      anthropicApiKey(config.providers, secrets) !== undefined &&
+      resolveReadingDiff(config.review?.readingDiff, env) !== null,
     dashboardAuth: resolveDashboardAuthMode(config.dashboard?.auth, accessConfigured),
   };
 }

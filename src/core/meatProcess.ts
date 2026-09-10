@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { accessSync, constants } from "node:fs";
+import { delimiter, join } from "node:path";
 import type { Secret } from "../secrets.js";
 import { redactSecrets } from "./runEvents.js";
 import { MEAT_MODEL_DEFAULT, parseMeatJson, type MeatResult } from "./readingDiff.js";
@@ -21,6 +23,23 @@ import { MEAT_MODEL_DEFAULT, parseMeatJson, type MeatResult } from "./readingDif
 export const MEAT_BINARY = "meat";
 
 export { MEAT_MODEL_DEFAULT };
+
+/** The host probe behind the `readingDiffAbridge` capability (src/core/capabilities.ts):
+ *  does `meat` resolve as an executable on the given PATH — what `command -v
+ *  meat` answers, asked once at startup. An unset PATH is a no. */
+export function meatOnPath(env: { PATH?: string }, binary = MEAT_BINARY): boolean {
+  return (env.PATH ?? "")
+    .split(delimiter)
+    .filter((dir) => dir !== "")
+    .some((dir) => {
+      try {
+        accessSync(join(dir, binary), constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+}
 
 /** meat's stderr is kept to this many chars for the failure reason. */
 const STDERR_CAP = 4_000;

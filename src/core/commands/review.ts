@@ -43,7 +43,9 @@ import { runResource, type RunsService } from "../runsService.js";
 
 export interface ReviewCommandDeps {
   review: {
-    /** Absent → `unavailable` (no run history, so nothing to abridge into). */
+    /** Absent → `unavailable` naming the three facts the `readingDiffAbridge`
+     *  capability reads (the Null Object of an off deployment; the command is
+     *  normally hidden before it gets here). */
     abridger(): Promise<ReviewAbridger | undefined>;
     runs(): Promise<RunsService>;
   };
@@ -53,8 +55,11 @@ const defineCommand = commandDefiner<ReviewCommandDeps>();
 
 const runId = z.string().regex(RUN_ID_PATTERN);
 
-export const NO_ABRIDGER_MESSAGE =
-  "Run history is not configured in this deployment (`runHistory`), so there is no stored review to abridge.";
+/** The defence-in-depth answer when the abridger is absent at call time — the
+ *  `readingDiffAbridge` capability normally HIDES the command instead
+ *  (capabilities.md item 2); this names the three facts the capability reads. */
+export const ABRIDGE_OFF_MESSAGE =
+  "The abridged reading diff is off in this deployment: it needs the `meat` binary on the bot host, the Anthropic provider's credential, `review.readingDiff.provider` not `off`, and run history to store it.";
 
 /** The artifact summary as JSON: each declared field, present only when set
  *  (an `undefined` key would vanish on the wire and differ between surfaces);
@@ -119,7 +124,7 @@ async function abridgerOf(deps: ReviewCommandDeps): Promise<ReviewAbridger> {
   } catch (err) {
     throw new CommandError("unavailable", err instanceof Error ? err.message : String(err));
   }
-  if (!abridger) throw new CommandError("unavailable", NO_ABRIDGER_MESSAGE);
+  if (!abridger) throw new CommandError("unavailable", ABRIDGE_OFF_MESSAGE);
   return abridger;
 }
 
@@ -141,7 +146,9 @@ function refused(err: unknown): never {
 
 export const reviewAbridge = defineCommand({
   id: "review.abridge",
-  enabledWhen: (caps) => caps.runHistory,
+  // Hidden unless the abridging can happen here (the binary, the credential,
+  // the switch) AND there is a record to append to.
+  enabledWhen: (caps) => caps.runHistory && caps.readingDiffAbridge,
   args: [{ name: "id", schema: runId, describe: "run id of a finished PR review" }],
   options: z.object({
     model: z

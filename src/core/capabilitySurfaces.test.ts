@@ -200,7 +200,9 @@ describe("capability fixtures — real configurations", () => {
   it.each(CAPABILITY_FIXTURES)(
     "$name: its config.yaml and env produce its Capabilities through capabilitiesFrom (the round trip)",
     (fx: CapabilityFixture) => {
-      expect(capabilitiesFrom(parseAppConfigText(fx.yaml), fx.env, secretsFrom(fx.env))).toEqual(fx.capabilities);
+      expect(capabilitiesFrom(parseAppConfigText(fx.yaml), fx.env, secretsFrom(fx.env), fx.host)).toEqual(
+        fx.capabilities,
+      );
     },
   );
 
