@@ -112,7 +112,9 @@ The same `runs list` from Part 1 now shows this run too, with `slack:` in its ch
 
 Production is the bot as a container on Cloudflare, with a **state Worker** beside it so that config, run history and chat-set overrides survive the container's restarts. Those two are the smallest deployment that behaves like production; the sandbox and resident Workers are optional additions described in [Deploy](../how-to/deploy.md).
 
-**Before you start:** a Cloudflare account, a domain (a *zone*) in it, `npx wrangler login` run once in `deploy/cloudflare` against that account, and Docker running — the bot's image is built on your machine.
+**Two ways to get there.** The one you keep is a workflow in a repository of yours that calls this project's reusable deploy workflow: on a GitHub runner, with the published CLI, it copies the release's images into your Cloudflare account and runs the same `deploy all` — no clone, and no Docker on your machine ([Deploy from your CI](../how-to/deploy.md#deploy-from-your-ci)). It needs the profile and the secrets the steps below create, so this lesson deploys by hand from the checkout first, every step visible; the workflow runs those same steps for you from then on.
+
+**Before you start:** a Cloudflare account, a domain (a *zone*) in it, `npx wrangler login` run once in `deploy/cloudflare` against that account, and — for the by-hand deploy from a checkout — Docker running, since the bot's image is built on your machine (the workflow builds nothing: it deploys the images the release published).
 
 **Write the deployment profile and render the Worker configs.** One more `init`, with your account id and your zone. It writes `deploy/profile.json` — the bot as `switchboard.<zone>` and the state Worker as `switchboard-memory.<zone>` (`--name` changes the stem) — and, because the profile is now there, renders every Worker's `wrangler.jsonc` from the template beside it, the way `deploy init` does:
 
@@ -190,5 +192,5 @@ The JSON names the commit the container was built from, whether it is draining, 
 You have OpenSwitchboard in your terminal, in Slack, and in production, and every one of those was the same pipeline. What to read next depends on which of the three you care about:
 
 - **Slack**: [Your first request in Slack](first-request-in-slack.md) for what else a thread can do, then [Configure your defaults](../how-to/configure-your-defaults.md).
-- **Production**: [Deploy](../how-to/deploy.md) for the optional Workers, the release workflow that deploys for you, and rotating a secret; [Set up accounts](../how-to/set-up-accounts.md) for the GitHub App that lets the coding agent open pull requests — `init --github-app-id … --github-installation-id … --github-private-key-file …` puts its three values in `.env`.
+- **Production**: [Deploy](../how-to/deploy.md) for the optional Workers, the workflow your own repository calls to deploy from CI, the release workflow that deploys this project, and rotating a secret; [Set up accounts](../how-to/set-up-accounts.md) for the GitHub App that lets the coding agent open pull requests — `init --github-app-id … --github-installation-id … --github-private-key-file …` puts its three values in `.env`.
 - **The design**: [Architecture](../explanation/architecture.md), then [Security model](../explanation/security-model.md).

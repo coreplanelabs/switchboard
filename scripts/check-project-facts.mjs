@@ -35,6 +35,8 @@ export const CHECKED_FILES = [
   "docs/reference/specs/docs-site.md",
   "src/core/docsLink.ts",
   "docker-compose.yml",
+  // The reusable deploy names the published package in `package` mode (a caller has no checkout to read it from).
+  ".github/workflows/deploy-production.yml",
 ];
 
 /** The npm package's manifest: parsed like package.json, never scanned as prose. */
