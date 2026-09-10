@@ -4,6 +4,10 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
+## 1.15.0
+
+- Run records written before span schema 2 (no `schema` field, or a lower one) show no timing: the run page's Timeline reads `no timing data` with no shape, and their stored friction diagnosis stands as written; the transcript, the call cards and `runs get`/`runs events` are unchanged. Nothing to edit — leave them, and they age out with `runHistory.retentionDays`. The `turn` and `mcp_tool_use` event kinds are gone; a saved JSONL capture that carries them is analyzed by `friction analyze` with those lines skipped and counted, and its model time comes from `model.turn` spans only.
+
 ## 1.14.0
 
 - A `config.yaml` top-level key the document does not define — `permissions:` included — is an unknown key and fails the load by name; write who holds what as `grants` and what is closed as `restrict` ([authorization](authorization.md)).
