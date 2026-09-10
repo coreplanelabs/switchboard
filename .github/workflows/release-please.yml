@@ -98,8 +98,8 @@ jobs:
       # A skipped job has no log, so the one line saying why the package was not
       # published lives here, on the release that would have published it.
       - name: npm publish is off
-        if: always() && (steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created) == 'true' && vars.SWITCHBOARD_PUBLISH_NPM != 'true'
-        run: echo "::notice title=npm publish is off::this release does not publish the npm package — set the repository variable SWITCHBOARD_PUBLISH_NPM to true (with the package's trusted publisher naming this repository) to turn the publish-npm job on."
+        if: always() && (steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created) == 'true' && (vars.SWITCHBOARD_PUBLISH_NPM != 'true' || github.ref != format('refs/heads/{0}', github.event.repository.default_branch))
+        run: echo "::notice title=npm publish is off::this release does not publish the npm package — the publish-npm job runs only for a release cut from the default branch (this one is ${{ github.ref_name }}) with the repository variable SWITCHBOARD_PUBLISH_NPM set to true (it is '${{ vars.SWITCHBOARD_PUBLISH_NPM }}') and the package's trusted publisher naming this repository."
 
   # The release PR carries its deploy plan (docs/reference/specs/release-and-deploy.md
   # item 8). Posted from HERE, on the push to main that opened or updated the
@@ -314,7 +314,13 @@ jobs:
   publish-npm:
     name: publish the npm package
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true' && vars.SWITCHBOARD_PUBLISH_NPM == 'true'
+    # Two switches: the repository variable (per release — turn it off before
+    # merging a release PR and that release does not publish; the notice above
+    # says so on the run) and the branch (per line — only a release cut from the
+    # default branch publishes, so a release line on a branch this workflow also
+    # runs on — named in `on.push.branches`, as `v1.2`'s copy names itself — can
+    # be tagged and shipped to the registry without ever reaching npm).
+    if: needs.release-please.outputs.release_created == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && vars.SWITCHBOARD_PUBLISH_NPM == 'true'
     runs-on: namespace-profile-mid
     permissions:
       contents: read

@@ -115,7 +115,7 @@ gh variable set CONFIG_REPO_OWNER --body "OWNER"
 gh variable set CONFIG_REPO_NAME --body "CONFIG-REPO"
 ```
 
-npm publishing uses no token. Once, before turning the variable on: an admin of the npm org publishes a placeholder `0.0.0` of the package from an empty directory (`npm init --scope=@OWNER -y`, `npm pkg set name=… version=0.0.0`, `npm publish --access public`), then on the package's npm settings adds a **Trusted Publisher**: GitHub Actions, this repository, workflow file `release-please.yml`. From then on every release publishes with the workflow's own identity; provenance is attached once the repository is public.
+npm publishing uses no token. Once, before turning the variable on: an admin of the npm org publishes a placeholder `0.0.0` of the package from an empty directory (`npm init --scope=@OWNER -y`, `npm pkg set name=… version=0.0.0`, `npm publish --access public`), then on the package's npm settings adds a **Trusted Publisher**: GitHub Actions, this repository, workflow file `release-please.yml`. From then on every release cut from the default branch publishes with the workflow's own identity; provenance is attached once the repository is public. A release line on another branch never publishes to npm; to skip one release, set the variable to `false` before merging its release PR (the run says so in a notice).
 
 ### Approve on the agent's LGTM
 

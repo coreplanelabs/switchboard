@@ -484,7 +484,7 @@ describe("the release publishes the npm package", () => {
     expect(publish.map(([id]) => id)).toEqual(["publish-npm"]);
     expect(needsOf(job)).toEqual(["release-please"]);
     expect(job.if).toBe(
-      "needs.release-please.outputs.release_created == 'true' && vars.SWITCHBOARD_PUBLISH_NPM == 'true'",
+      "needs.release-please.outputs.release_created == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && vars.SWITCHBOARD_PUBLISH_NPM == 'true'",
     );
   });
 
@@ -512,8 +512,11 @@ describe("the release publishes the npm package", () => {
       },
     ]);
     const off = workflow.jobs["release-please"].steps.find((s) => s.name === "npm publish is off")!;
+    // The notice fires when EITHER switch is off: the variable, or a release cut off the default branch.
     expect(off.if).toContain("vars.SWITCHBOARD_PUBLISH_NPM != 'true'");
+    expect(off.if).toContain("github.ref != format('refs/heads/{0}', github.event.repository.default_branch)");
     expect(off.if).toContain("release_created");
+    expect(off.run).toContain("${{ github.ref_name }}");
     expect(off.run).toContain("::notice");
     expect(off.run).toContain("SWITCHBOARD_PUBLISH_NPM");
   });
