@@ -98,6 +98,8 @@ function scrollToFile(path: string): boolean {
 }
 
 const FOCUS_CLASS = "is-focus";
+/** Where the first lit row lands, as a fraction of the column's height from the top. */
+const LANDING = 0.3;
 let focused: Element[] = [];
 function clearFocus(): void {
   for (const row of focused) row.classList.remove(FOCUS_CLASS);
@@ -128,9 +130,13 @@ async function scrollTo(path: string, fromLine: number, toLine: number): Promise
     await nextTick();
   }
   const first = focused[0];
-  // Leave the file's sticky header and one line of room above the range.
+  // The range lands in the upper third of the column — not at the very top,
+  // where the file's sticky header would cover it and nothing above it gives
+  // the reader its context — and never under the header when the column is
+  // too short for that.
   const headerHeight = section.querySelector("header")?.getBoundingClientRect().height ?? 0;
-  const top = first.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - headerHeight - 24;
+  const room = Math.max(headerHeight + 24, Math.round(el.clientHeight * LANDING));
+  const top = first.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - room;
   el.scrollTo({ top: Math.max(0, top) });
   return true;
 }
@@ -334,11 +340,34 @@ defineExpose({ scrollTo, scrollToFile });
   word-break: break-all;
 }
 
-/* A line range a Tour step (or scrollTo) pointed at. */
+/* A line range a Tour step (or scrollTo) pointed at: an accent bar down the
+ * left and a tint laid OVER the row's own colour (a background image, so an
+ * added or deleted line keeps its hue under it), held until the next jump.
+ * On arrival a second, cell-filling inset shadow pulses once from strong to
+ * clear — a cue the eye catches from anywhere in the column, never the only
+ * cue. Two shadows in both keyframes, so the list interpolates in every
+ * engine (no registered custom property to depend on). */
 .d2h-host tr.is-focus td {
-  box-shadow: inset 3px 0 0 var(--ui-primary, currentColor);
+  --pr-review-focus: color-mix(in srgb, var(--pr-review-mark) 14%, transparent);
+  box-shadow:
+    inset 3px 0 0 var(--pr-review-mark),
+    inset 0 0 0 100vmax transparent;
+  background-image: linear-gradient(var(--pr-review-focus), var(--pr-review-focus));
+  animation: pr-review-arrive 900ms ease-out;
 }
 .d2h-host tr.is-focus td.d2h-code-linenumber {
   color: var(--ui-text-highlighted);
+}
+@keyframes pr-review-arrive {
+  from {
+    box-shadow:
+      inset 3px 0 0 var(--pr-review-mark),
+      inset 0 0 0 100vmax color-mix(in srgb, var(--pr-review-mark) 40%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .d2h-host tr.is-focus td {
+    animation: none;
+  }
 }
 </style>

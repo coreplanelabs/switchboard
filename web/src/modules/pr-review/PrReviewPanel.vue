@@ -109,6 +109,9 @@ const fullPaths = computed(() => {
   const git = tabs.value[gitTab.value];
   return git ? new Set(filePaths(git.diff)) : shownPaths.value;
 });
+/** The fullest diff on record was cut at its cap: a file no diff carries may
+ *  lie past the cut, so a step there says "beyond", never "not in this diff". */
+const fullTruncated = computed(() => (tabs.value[gitTab.value] ?? shown.value)?.truncated === true);
 const activeStep = ref<number | null>(null);
 const missedStep = ref<number | null>(null);
 watch(description, () => {
@@ -312,7 +315,9 @@ const wrap = ref(false);
     </header>
 
     <div v-if="shown" class="body flex min-h-0 flex-1">
-      <aside class="hidden w-[17.5rem] shrink-0 overflow-y-auto border-r border-default md:block">
+      <!-- Wide enough that a two-line step title and a path with its file
+           name read at a glance; the column never squeezes for the diff. -->
+      <aside class="hidden w-[19rem] shrink-0 overflow-y-auto border-r border-default md:block">
         <FileList :files="files" :current="current" :viewed="viewed" @select="select" @toggle-viewed="toggleViewed">
           <template #description>
             <slot name="description">
@@ -327,6 +332,8 @@ const wrap = ref(false);
                 :remaining="description.remaining"
                 :shown-paths="shownPaths"
                 :full-paths="fullPaths"
+                :full-truncated="fullTruncated"
+                :pr="data.pr"
                 :reviewed-sha="data.pr.headSha ?? description.headSha"
                 :active="activeStep"
                 :missed="missedStep"
@@ -357,11 +364,15 @@ const wrap = ref(false);
 </template>
 
 <style>
-/* The two hues every part of the panel shares — the list's counts and icons,
- * the diff's tints; the host may retune them on `.pr-review-panel`. */
+/* The three hues every part of the panel shares — the list's counts and
+ * icons, the diff's tints, and the mark a Tour jump leaves on its rows and
+ * its step; the host may retune them on `.pr-review-panel`. The mark is a
+ * third hue on purpose: a range of added lines lit in the insertion green
+ * would vanish into them. */
 .pr-review-panel {
   --pr-review-ins: var(--ui-success, #1a7f37);
   --pr-review-del: var(--ui-error, #c93c37);
+  --pr-review-mark: var(--ui-info, #0969da);
 }
 .pr-review-panel .text-ins {
   color: var(--pr-review-ins);

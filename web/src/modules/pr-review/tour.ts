@@ -1,4 +1,4 @@
-import type { PrDescriptionData, TourAnchor } from "./types";
+import type { PrDescriptionData, TourAnchor, TourStep } from "./types";
 
 // The Tour's pure half (docs/reference/specs/reading-diff.md item 12): how a step's anchor
 // reads, whether it points into the head under review, where its file sits
@@ -33,12 +33,37 @@ export function originNote(description: Pick<PrDescriptionData, "origin" | "comp
     : "description read from the PR body";
 }
 
-/** Where a step's file is: in the diff on screen, only in the full diff
- *  (the abridgement dropped it), or in neither (past the cap, or moved). */
-export type Placement = "shown" | "full" | "absent";
+/** Where a step's file is: in the diff on screen; only in the full diff (the
+ *  abridgement dropped it); in neither while the recorded full diff was cut at
+ *  its cap (`beyond` — the file may well be in the PR, past the cut: GitHub
+ *  has it); or in neither with the whole diff on record (`absent` — the step
+ *  names a path the change does not touch). */
+export type Placement = "shown" | "full" | "beyond" | "absent";
 
-export function placementOf(path: string, shown: ReadonlySet<string>, full: ReadonlySet<string>): Placement {
+export function placementOf(
+  path: string,
+  shown: ReadonlySet<string>,
+  full: ReadonlySet<string>,
+  fullTruncated = false,
+): Placement {
   if (shown.has(path)) return "shown";
   if (full.has(path)) return "full";
-  return "absent";
+  return fullTruncated ? "beyond" : "absent";
+}
+
+/** The muted note beside a step's anchor: where the jump goes when the shown
+ *  diff cannot take it, or that nothing can. `linked` says the beyond note
+ *  ends in a link; `missed` that the file is here but the lines are not. */
+export function placementNote(placement: Placement, linked: boolean, missed: boolean): string | undefined {
+  if (placement === "full") return "not in the reading diff · open full diff";
+  if (placement === "beyond")
+    return linked ? "beyond the recorded diff · open on GitHub ↗" : "beyond the recorded diff";
+  if (placement === "absent") return "not in this diff";
+  return missed ? "lines not in this diff" : undefined;
+}
+
+/** The tooltip over a step's prose — the title and the description whole,
+ *  for the two-line clamps that hold the list still. */
+export function stepTip(step: Pick<TourStep, "title" | "description">): string {
+  return step.description ? `${step.title} — ${step.description}` : step.title;
 }

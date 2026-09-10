@@ -425,7 +425,7 @@ const REVIEW_STREAM = normalizeSpans([
   // open the left column, the Tour's steps jump the diff. The steps cover every
   // placement the panel draws: two the abridged diff keeps, one only the full
   // diff carries (the sender's tests), one anchored at the previous push (the
-  // stale badge), one past the capped diff (muted).
+  // stale badge), one past the cut of the capped full diff (a GitHub link).
   {
     type: "review_artifact",
     artifact: "pr_description",
