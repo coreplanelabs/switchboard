@@ -28,11 +28,18 @@
 # secrets manager the step below reads with OP_SERVICE_ACCOUNT_TOKEN; the token
 # minted here is scoped to this repository and to the two permissions
 # release-please needs.
+# Two release lines share this workflow (docs/reference/specs/release-and-deploy.md
+# item 28): `main` is the 1.1x line and `v1.2` the 1.2 line, released as 1.200.0
+# and up from its own config and manifest files so the two pins never meet.
+# Only `main` deploys production, tags `:latest`, publishes npm `latest` and
+# judges its release PR against production; a `v1.2` release publishes its
+# images at `:<version>` alone and, when publishing is on, the package under
+# npm's `next` tag.
 name: release-please
 
 on:
   push:
-    branches: [main]
+    branches: [main, v1.2]
 
 permissions:
   contents: read
@@ -44,6 +51,10 @@ jobs:
     permissions:
       contents: read
     # Whichever attempt succeeded speaks (the first when it did; else the retry).
+    # The line's own config and manifest (the header): `v1.2` never reads main's pin.
+    env:
+      RP_CONFIG: ${{ github.ref == 'refs/heads/v1.2' && 'release-please-config.v1.2.json' || 'release-please-config.json' }}
+      RP_MANIFEST: ${{ github.ref == 'refs/heads/v1.2' && '.release-please-manifest.v1.2.json' || '.release-please-manifest.json' }}
     outputs:
       release_created: ${{ steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created }}
       tag_name: ${{ steps.release.outcome == 'success' && steps.release.outputs.tag_name || steps.release-retry.outputs.tag_name }}
@@ -81,15 +92,15 @@ jobs:
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+          config-file: ${{ env.RP_CONFIG }}
+          manifest-file: ${{ env.RP_MANIFEST }}
       - id: release-retry
         if: steps.release.outcome == 'failure'
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+          config-file: ${{ env.RP_CONFIG }}
+          manifest-file: ${{ env.RP_MANIFEST }}
       - name: the first attempt failed
         # `always()`: without a status function GitHub ANDs `success()` in, and
         # this step would be skipped exactly when the retry failed too.
@@ -113,7 +124,7 @@ jobs:
     needs: release-please
     # Only where a production profile is configured (the repository variable);
     # a fork that never deploys from CI has no production to judge against.
-    if: needs.release-please.outputs.prs_created == 'true' && needs.release-please.outputs.release_created != 'true' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
+    if: github.ref == 'refs/heads/main' && needs.release-please.outputs.prs_created == 'true' && needs.release-please.outputs.release_created != 'true' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -173,10 +184,11 @@ jobs:
           CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
 
   # Only when this push IS the release (the release PR merged): the ordinary
-  # merge to main that merely updates the release PR deploys nothing.
+  # merge to main that merely updates the release PR deploys nothing. And only
+  # on `main`: a `v1.2` release is cut and published, never deployed from here.
   deploy:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: github.ref == 'refs/heads/main' && needs.release-please.outputs.release_created == 'true'
     uses: ./.github/workflows/deploy-production.yml
     permissions:
       contents: read
@@ -224,6 +236,21 @@ jobs:
         run: |
           echo "name=ghcr.io/${GITHUB_REPOSITORY,,}${SUFFIX}" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      # `:latest` follows the 1.1x line: the local loop pulls it, and a 1.2xx
+      # release must not move it. On `v1.2` the version tag is the only tag.
+      - name: the tags this line publishes
+        id: tags
+        env:
+          NAME: ${{ steps.image.outputs.name }}
+          VERSION: ${{ steps.image.outputs.version }}
+          LATEST: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          {
+            echo 'tags<<EOF'
+            echo "${NAME}:${VERSION}"
+            if [ "$LATEST" = "true" ]; then echo "${NAME}:latest"; fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -238,9 +265,7 @@ jobs:
           # same build `check:image -w deploy/<worker>` proves on every PR.
           context: ${{ matrix.image.context }}
           push: true
-          tags: |
-            ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}
-            ${{ steps.image.outputs.name }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
           # SLSA provenance and an SPDX SBOM, attached to the image index in the
           # registry (`docker buildx imagetools inspect <image> --format '{{ json .Provenance }}'`).
           provenance: mode=max
@@ -308,6 +333,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run build -w packages/switchboard
-      - run: npm publish --workspace packages/switchboard --provenance --access public
+      # `latest` follows the 1.1x line; a 1.2xx version publishes under `next`.
+      - run: npm publish --workspace packages/switchboard --provenance --access public --tag ${{ github.ref == 'refs/heads/main' && 'latest' || 'next' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
