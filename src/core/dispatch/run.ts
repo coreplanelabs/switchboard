@@ -28,6 +28,7 @@ import type { AdmissionDeps, ResumeContext } from "./admission.js";
 import type { AuthorizeDeps } from "./authorize.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { RecordDeps } from "./record.js";
+import { processSecrets } from "../../secrets.js";
 
 /** What the run stage reads off the dispatcher's dependencies: the tools'
  *  capabilities (the GitHub API and the per-user write gate), the GitHub seams
@@ -225,7 +226,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
  *  same hosts instead of paying a fresh DNS+TCP+TLS handshake per fetch — and a
  *  per-run Agent was never closed, so its keep-alive sockets accumulated. */
 let sharedWeb: ReturnType<typeof makeWebCapability> | undefined;
-export const webCapability = () => (sharedWeb ??= makeWebCapability(process.env));
+export const webCapability = () => (sharedWeb ??= makeWebCapability(processSecrets));
 
 /** The `github_*` tools' capability for one run (docs/reference/specs/github-tools.md):
  *  the process-wide REST client on the App credential (or the injected test

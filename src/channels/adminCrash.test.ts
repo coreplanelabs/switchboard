@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { Secret } from "../secrets.js";
 import { handleAdminCrash } from "./adminCrash.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 
@@ -8,7 +9,10 @@ import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 // `deploy restart` (a `deploy:write` bearer), answered before the process
 // exits hard (PID 1 cannot SIGKILL itself; the exit is the same event).
 
-const TOKENS = JSON.stringify({ "tok-deployer": { subject: "ops" }, "tok-reader": { subject: "reader" } });
+const TOKENS = new Secret(
+  JSON.stringify({ "tok-deployer": { subject: "ops" }, "tok-reader": { subject: "reader" } }),
+  "SWITCHBOARD_INGRESS_TOKENS",
+);
 // Config's grants for the tokens' `http:<subject>` actors: only ops holds deploy:write.
 const GRANTS: Record<string, Grants> = {
   "http:ops": { actions: new Set(["deploy:write"]), channels: new Set(), repos: new Set() },
@@ -25,7 +29,7 @@ function request(method: string, authorization?: string) {
   return { req, res, writes };
 }
 
-function harness(over: { tokens?: string | undefined } = {}) {
+function harness(over: { tokens?: Secret | undefined } = {}) {
   const killed: string[] = [];
   const deferred: (() => void)[] = [];
   const logs: string[] = [];

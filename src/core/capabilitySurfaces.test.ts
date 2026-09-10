@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import { AGENTS } from "../agents/registry.js";
 import { CLI_CALLER, runCli } from "../cli.js";
 import { parseAppConfigText } from "../config.js";
@@ -199,7 +200,7 @@ describe("capability fixtures — real configurations", () => {
   it.each(CAPABILITY_FIXTURES)(
     "$name: its config.yaml and env produce its Capabilities through capabilitiesFrom (the round trip)",
     (fx: CapabilityFixture) => {
-      expect(capabilitiesFrom(parseAppConfigText(fx.yaml), fx.env)).toEqual(fx.capabilities);
+      expect(capabilitiesFrom(parseAppConfigText(fx.yaml), fx.env, secretsFrom(fx.env))).toEqual(fx.capabilities);
     },
   );
 

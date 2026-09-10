@@ -2,6 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import type { AppConfig } from "../config.js";
 import { parseAccessConfig } from "../channels/accessAuth.js";
 import { resolveDashboardAuthMode } from "./dashboardAuthConfig.js";
@@ -26,7 +27,7 @@ const STATE = { baseUrl: "https://state.example" };
 const COSTS = { cloudflareAccountId: "acct", groups: { sb: { workers: ["switchboard"] } } };
 
 const caps = (config: Partial<AppConfig> = {}, env: NodeJS.ProcessEnv = {}): Capabilities =>
-  capabilitiesFrom({ ...BASE, ...config }, env);
+  capabilitiesFrom({ ...BASE, ...config }, env, secretsFrom(env));
 
 describe("capabilitiesFrom — every axis, on and off", () => {
   it("a bare config in an empty environment is the minimal installation: everything off, tools on the bot host, the dashboard local-only", () => {
@@ -66,8 +67,8 @@ describe("capabilitiesFrom — every axis, on and off", () => {
     for (const c of cases) {
       const got = caps({ runHistory: c.runHistory }, c.env);
       const label = JSON.stringify(c);
-      expect(got.runHistory, label).toBe(buildRunStore(c.runHistory, c.env, deps) !== null);
-      expect(got.runLedger, label).toBe(buildRunLedger(c.runHistory, c.env) !== null);
+      expect(got.runHistory, label).toBe(buildRunStore(c.runHistory, secretsFrom(c.env), deps) !== null);
+      expect(got.runLedger, label).toBe(buildRunLedger(c.runHistory, secretsFrom(c.env)) !== null);
     }
     expect(caps({ runHistory: { store: "file" } })).toMatchObject({ runHistory: true, runLedger: false });
     expect(caps({ runHistory: { worker: STATE } }, { MEMORY_TOKEN: "t" })).toMatchObject({
@@ -102,7 +103,7 @@ describe("capabilitiesFrom — every axis, on and off", () => {
     ];
     for (const c of cases) {
       expect(caps({ schedules: c.schedules }, c.env).schedules, JSON.stringify(c)).toBe(
-        buildScheduleStore(c.schedules, c.env, () => {}) !== undefined,
+        buildScheduleStore(c.schedules, secretsFrom(c.env), () => {}) !== undefined,
       );
     }
     expect(caps({ schedules: { worker: STATE } }, { MEMORY_TOKEN: "t" }).schedules).toBe(true);

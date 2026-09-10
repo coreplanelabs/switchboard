@@ -20,7 +20,8 @@ import {
   type GrantsTable,
   type RestrictConfig,
 } from "./core/authz/grants.js";
-import { ConfigDocumentClient, parseConfigLocation, stateWorkerFromEnv } from "./configDocument.js";
+import { ConfigDocumentClient, parseConfigLocation, stateWorkerFrom } from "./configDocument.js";
+import type { EnvRecord, Secrets } from "./secrets.js";
 import type { Grants } from "./core/authz/types.js";
 import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
 import { AGENTS } from "./agents/registry.js";
@@ -410,14 +411,18 @@ export interface ResolvedRequest {
  *  startup error, never a silent fall back to the ephemeral file. */
 export function overridesBackingFor(
   config: AppConfig,
-  opts: { overridesPath: string; env: Record<string, string | undefined>; fetch?: typeof fetch },
+  opts: { overridesPath: string; secrets: Secrets; fetch?: typeof fetch },
 ): OverridesBacking {
   const worker = config.runtimeOverrides?.worker;
   if (!worker) return new FileOverridesBacking(opts.overridesPath);
   const tokenEnv = worker.tokenEnv ?? "MEMORY_TOKEN";
-  const token = opts.env[tokenEnv];
+  const token = opts.secrets.named(tokenEnv);
   if (!token) throw new Error(`runtimeOverrides.worker is configured but ${tokenEnv} is not set`);
-  return new WorkerOverridesBacking({ baseUrl: worker.baseUrl, token, ...(opts.fetch ? { fetch: opts.fetch } : {}) });
+  return new WorkerOverridesBacking({
+    baseUrl: worker.baseUrl,
+    token: token.reveal(),
+    ...(opts.fetch ? { fetch: opts.fetch } : {}),
+  });
 }
 
 /** Parse + validate config YAML text; throws naming the first fatal finding. */
@@ -442,15 +447,15 @@ export function loadAppConfig(configPath: string): AppConfig {
  */
 export async function loadAppConfigFrom(
   location: string,
-  opts: { env: Record<string, string | undefined>; warn: (message: string) => void; fetch?: typeof fetch },
+  opts: { env: EnvRecord; secrets: Secrets; warn: (message: string) => void; fetch?: typeof fetch },
 ): Promise<AppConfig> {
   const parsed = parseConfigLocation(location);
   if (parsed.kind === "file") return loadAppConfig(parsed.path);
-  const worker = stateWorkerFromEnv(opts.env);
+  const worker = stateWorkerFrom(opts.env, opts.secrets);
   if (!worker.ok) throw new Error(`SWITCHBOARD_CONFIG=${location}: ${worker.problem}`);
   const client = new ConfigDocumentClient({
     baseUrl: worker.baseUrl,
-    token: worker.token,
+    token: worker.token.reveal(),
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
   const read = await client.readBase(parsed.key);
@@ -480,7 +485,10 @@ export async function openConfigStore(
   configPath: string,
   opts: {
     overridesPath: string;
-    env: Record<string, string | undefined>;
+    /** The public environment (`STATE_WORKER_URL` for a `state://` location). */
+    env: EnvRecord;
+    /** The credentials: the state Worker bearer the location and `runtimeOverrides.worker` read. */
+    secrets: Secrets;
     warn?: (message: string) => void;
     fetch?: typeof fetch;
   } & ConfigStoreOptions,
@@ -488,6 +496,7 @@ export async function openConfigStore(
   const warn = opts.warn ?? ((m: string) => console.warn(m));
   const config = await loadAppConfigFrom(configPath, {
     env: opts.env,
+    secrets: opts.secrets,
     warn,
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });

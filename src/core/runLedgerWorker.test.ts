@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import type { ChatMessage } from "../providers/types.js";
 import { buildRunLedger, WorkerRunLedger } from "./runLedgerWorker.js";
 import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest } from "./runLedger/types.js";
@@ -175,11 +176,11 @@ describe("WorkerRunLedger", () => {
 describe("buildRunLedger — the client for the configured history (run-history item 35)", () => {
   const worker = { baseUrl: "https://memory.example.com" };
   it("is null with history off, on a host-disk store, without a Worker URL, or without the bearer", () => {
-    expect(buildRunLedger(undefined, { MEMORY_TOKEN: "t" })).toBeNull();
-    expect(buildRunLedger({ store: "file", worker }, { MEMORY_TOKEN: "t" })).toBeNull();
-    expect(buildRunLedger({}, { MEMORY_TOKEN: "t" })).toBeNull();
-    expect(buildRunLedger({ worker }, {})).toBeNull();
-    expect(buildRunLedger({ worker }, { MEMORY_TOKEN: "  " })).toBeNull();
+    expect(buildRunLedger(undefined, secretsFrom({ MEMORY_TOKEN: "t" }))).toBeNull();
+    expect(buildRunLedger({ store: "file", worker }, secretsFrom({ MEMORY_TOKEN: "t" }))).toBeNull();
+    expect(buildRunLedger({}, secretsFrom({ MEMORY_TOKEN: "t" }))).toBeNull();
+    expect(buildRunLedger({ worker }, secretsFrom({}))).toBeNull();
+    expect(buildRunLedger({ worker }, secretsFrom({ MEMORY_TOKEN: "  " }))).toBeNull();
   });
 
   it("builds a Worker client on the configured URL and bearer env (the default MEMORY_TOKEN or the configured name)", async () => {
@@ -188,13 +189,13 @@ describe("buildRunLedger — the client for the configured history (run-history 
       calls.push({ url: String(url), auth: new Headers(init?.headers).get("authorization") });
       return new Response(JSON.stringify({ runs: [] }), { status: 200 });
     }) as typeof fetch;
-    const byDefault = buildRunLedger({ worker }, { MEMORY_TOKEN: "tok-a" }, { fetch: fetchImpl });
+    const byDefault = buildRunLedger({ worker }, secretsFrom({ MEMORY_TOKEN: "tok-a" }), { fetch: fetchImpl });
     expect(byDefault).toBeInstanceOf(WorkerRunLedger);
     await byDefault!.listLive();
     expect(calls.at(-1)).toEqual({ url: "https://memory.example.com/runs/live", auth: "Bearer tok-a" });
     const byName = buildRunLedger(
       { worker: { ...worker, tokenEnv: "LEDGER_TOKEN" } },
-      { LEDGER_TOKEN: "tok-b" },
+      secretsFrom({ LEDGER_TOKEN: "tok-b" }),
       { fetch: fetchImpl },
     );
     await byName!.listLive();

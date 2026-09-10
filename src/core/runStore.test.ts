@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import { DEFAULT_RETENTION_POLICY, type RunListOptions, type RunRecord } from "./runRecord.js";
 import type { RunEvent } from "./runEvents.js";
@@ -413,7 +414,7 @@ describe("buildRunStore", () => {
   };
 
   it("unconfigured → null (history off), no timer", () => {
-    expect(buildRunStore(undefined, {}, deps())).toBeNull();
+    expect(buildRunStore(undefined, secretsFrom({}), deps())).toBeNull();
     expect(timers).toEqual([]);
     expect(warnings).toEqual([]);
   });
@@ -421,7 +422,7 @@ describe("buildRunStore", () => {
   it("store: file → FileRunStore under <dataDir>/runs with a 6 h sweep timer (unref'd) that unlinks expired files", async () => {
     const d = deps();
     const clock = { now: NOW };
-    const store = buildRunStore({ store: "file", retentionDays: 30 }, {}, { ...d, now: () => clock.now });
+    const store = buildRunStore({ store: "file", retentionDays: 30 }, secretsFrom({}), { ...d, now: () => clock.now });
     expect(store).toBeInstanceOf(FileRunStore);
     await store!.put(record("a", NOW));
     expect(existsSync(join(d.dataDir, "runs", "a.json"))).toBe(true);
@@ -436,7 +437,11 @@ describe("buildRunStore", () => {
   it("worker without its bearer → null + a warning naming the env var", () => {
     const d = deps();
     expect(
-      buildRunStore({ store: "worker", worker: { baseUrl: "https://state.example", tokenEnv: "RUNS_TOKEN" } }, {}, d),
+      buildRunStore(
+        { store: "worker", worker: { baseUrl: "https://state.example", tokenEnv: "RUNS_TOKEN" } },
+        secretsFrom({}),
+        d,
+      ),
     ).toBeNull();
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("RUNS_TOKEN");
@@ -445,9 +450,9 @@ describe("buildRunStore", () => {
 
   it("worker with its bearer → WorkerRunStore (default env MEMORY_TOKEN), no timer", () => {
     const d = deps();
-    expect(buildRunStore({ worker: { baseUrl: "https://state.example" } }, { MEMORY_TOKEN: "tok" }, d)).toBeInstanceOf(
-      WorkerRunStore,
-    );
+    expect(
+      buildRunStore({ worker: { baseUrl: "https://state.example" } }, secretsFrom({ MEMORY_TOKEN: "tok" }), d),
+    ).toBeInstanceOf(WorkerRunStore);
     expect(warnings).toEqual([]);
     expect(timers).toEqual([]);
   });

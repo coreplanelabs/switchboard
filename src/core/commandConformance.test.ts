@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import { z } from "zod";
 import { CLI_CALLER, CLI_SHORTHANDS, parseCliArgv, runCli } from "../cli.js";
 import { callerFor } from "../channels/commandHttp.js";
@@ -169,7 +170,7 @@ describe("command conformance — catalogue fences", () => {
     const f = await fixture();
     const real = buildCoreCommands(freshConfig().store, new InMemoryRunStore(), {
       registry: new RunRegistry(),
-      env: { MEMORY_TOKEN: PLANTED_ENV_SECRET },
+      secrets: secretsFrom({ MEMORY_TOKEN: PLANTED_ENV_SECRET }),
       dataDir: CONFIG_DIR,
       warn: () => {},
       frictionLedger: new RunStoreFrictionLedger(new InMemoryRunStore()),

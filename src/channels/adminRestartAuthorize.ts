@@ -15,12 +15,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { authorizeRestart, authorizeRestartSubject, RESTART_SUBJECT_HEADER } from "../deploy/restart.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
+import type { Secret } from "../secrets.js";
 
 export interface AdminRestartAuthorizeDeps {
   /** Grants by actor id (`ConfigStore.grantsFor`): the bearer's `http:<subject>` must hold `deploy:write`. */
   grantsFor: GrantsLookup;
-  /** `SWITCHBOARD_INGRESS_TOKENS` as the process sees it. */
-  tokens: string | undefined;
+  /** The `SWITCHBOARD_INGRESS_TOKENS` secret as the process sees it. */
+  tokens: Secret | undefined;
   log?: (line: string) => void;
 }
 
@@ -44,7 +45,7 @@ export function handleAdminRestartAuthorize(
   const auth =
     subject !== undefined
       ? authorizeRestartSubject(subject, deps.grantsFor)
-      : authorizeRestart(req.headers.authorization, deps.tokens, deps.grantsFor);
+      : authorizeRestart(req.headers.authorization, deps.tokens?.reveal(), deps.grantsFor);
   if (!auth.ok) {
     (deps.log ?? console.warn)(`[admin/restart/authorize] ${auth.status} — ${auth.reason}`);
     json(auth.status, { ok: false, error: auth.reason });

@@ -4,6 +4,7 @@ import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 import { systemClock } from "../core/trace/clock.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
 import type { Span } from "../core/trace/types.js";
+import { processSecrets, type Secret } from "../secrets.js";
 
 // GitHub App authentication: the idiomatic org-owned bot identity.
 // No machine user, no seat, no long-lived PAT. The bot holds the app's
@@ -16,7 +17,9 @@ import type { Span } from "../core/trace/types.js";
 // COMMAND (resolveEnvs), never once per run — so a command that starts on a
 // token always finishes on it, however long the run has been going.
 //
-// Env vars (all three required to activate; otherwise GH_TOKEN is used as-is):
+// Secrets (all three required to activate; otherwise GH_TOKEN is used as-is),
+// each read through src/secrets.ts and revealed only into the JWT, the mint URL
+// and the Authorization header:
 //   GITHUB_APP_ID               numeric app id
 //   GITHUB_APP_PRIVATE_KEY      PEM; literal "\n" sequences are unescaped
 //   GITHUB_APP_INSTALLATION_ID  from the install URL: .../installations/<id>
@@ -81,10 +84,16 @@ const cache = new Map<GithubTokenScope, CachedToken>();
  *  credentials`. A command that STARTS on a token must FINISH on it. */
 export const TOKEN_REUSE_MARGIN_MS = BASH_TIMEOUT_MAX_MS + 5 * 60_000;
 
+/** The App triple, wrapped; undefined unless all three are set. */
+function appCredentials(): { appId: Secret; privateKey: Secret; installationId: Secret } | undefined {
+  const appId = processSecrets.get("GITHUB_APP_ID");
+  const privateKey = processSecrets.get("GITHUB_APP_PRIVATE_KEY");
+  const installationId = processSecrets.get("GITHUB_APP_INSTALLATION_ID");
+  return appId && privateKey && installationId ? { appId, privateKey, installationId } : undefined;
+}
+
 export function githubAppConfigured(): boolean {
-  return Boolean(
-    process.env.GITHUB_APP_ID && process.env.GITHUB_APP_PRIVATE_KEY && process.env.GITHUB_APP_INSTALLATION_ID,
-  );
+  return appCredentials() !== undefined;
 }
 
 /**
@@ -100,7 +109,8 @@ export function githubAppConfigured(): boolean {
  */
 export async function resolveGithubToken(scope: GithubTokenScope = "write", span?: Span): Promise<string | null> {
   if (githubAppConfigured()) return mintInstallationToken(scope, span);
-  return process.env.GH_TOKEN ?? null;
+  // Revealed here: the caller's contract is the credential itself (a sandbox env, a header).
+  return processSecrets.get("GH_TOKEN")?.reveal() ?? null;
 }
 
 /** The GitHub user this process acts as: what its commits, PRs and comments are attributed to. */
@@ -132,10 +142,9 @@ export function resolveGithubIdentity(): Promise<GithubIdentity | undefined> {
 }
 
 async function lookupIdentity(): Promise<GithubIdentity | undefined> {
-  if (githubAppConfigured()) {
-    const appId = process.env.GITHUB_APP_ID!;
-    const privateKey = process.env.GITHUB_APP_PRIVATE_KEY!.replace(/\\n/g, "\n");
-    const app = (await githubJson("https://api.github.com/app", appJwt(appId, privateKey))) as { slug?: string };
+  const credentials = appCredentials();
+  if (credentials) {
+    const app = (await githubJson("https://api.github.com/app", appJwt(credentials))) as { slug?: string };
     if (typeof app.slug !== "string" || app.slug === "") throw new Error("GET /app answered without a slug");
     const login = `${app.slug}[bot]`;
     const user = (await githubJson(
@@ -145,8 +154,9 @@ async function lookupIdentity(): Promise<GithubIdentity | undefined> {
     if (typeof user.id !== "number") throw new Error(`GET /users/${login} answered without an id`);
     return { login: typeof user.login === "string" ? user.login : login, id: user.id };
   }
-  if (process.env.GH_TOKEN) {
-    const user = (await githubJson("https://api.github.com/user", process.env.GH_TOKEN)) as {
+  const staticToken = processSecrets.get("GH_TOKEN");
+  if (staticToken) {
+    const user = (await githubJson("https://api.github.com/user", staticToken.reveal())) as {
       login?: string;
       id?: number;
     };
@@ -185,15 +195,14 @@ async function mintCore(scope: GithubTokenScope, span?: Span): Promise<string> {
     return cached.token;
   }
 
-  const appId = process.env.GITHUB_APP_ID!;
-  const installationId = process.env.GITHUB_APP_INSTALLATION_ID!;
-  const privateKey = process.env.GITHUB_APP_PRIVATE_KEY!.replace(/\\n/g, "\n");
+  const credentials = appCredentials();
+  if (!credentials) throw new Error("GitHub App token mint: the App is not configured");
 
   // A read-scoped token requests a permissions subset; the write scope omits
   // the field to receive the full installation grant (unchanged behavior).
   const body = scope === "read" ? JSON.stringify({ permissions: READ_ONLY_PERMISSIONS }) : undefined;
   const headers: Record<string, string> = {
-    authorization: `Bearer ${appJwt(appId, privateKey)}`,
+    authorization: `Bearer ${appJwt(credentials)}`,
     accept: "application/vnd.github+json",
     "user-agent": "switchboard",
   };
@@ -202,7 +211,7 @@ async function mintCore(scope: GithubTokenScope, span?: Span): Promise<string> {
   // One `github.rest` child under the mint (never a `traceparent`: GitHub is not one of our hosts).
   const res = await tracedFetch(
     span,
-    `https://api.github.com/app/installations/${installationId}/access_tokens`,
+    `https://api.github.com/app/installations/${credentials.installationId.reveal()}/access_tokens`,
     { method: "POST", headers, ...(body ? { body } : {}) },
     { route: "app_installation_token", name: "github.rest" },
   );
@@ -217,15 +226,18 @@ async function mintCore(scope: GithubTokenScope, span?: Span): Promise<string> {
   return data.token;
 }
 
-/** Short-lived RS256 JWT proving we are the app (max 10 min per GitHub docs). */
-function appJwt(appId: string, privateKey: string): string {
+/** Short-lived RS256 JWT proving we are the app (max 10 min per GitHub docs). The
+ *  key and the id are revealed here, into the signer and the claims, and nowhere else. */
+function appJwt(credentials: { appId: Secret; privateKey: Secret }): string {
   const now = Math.floor(systemClock() / 1000);
   const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   // iat backdated 60s to absorb clock drift
-  const payload = b64url(JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId }));
+  const payload = b64url(JSON.stringify({ iat: now - 60, exp: now + 540, iss: credentials.appId.reveal() }));
   const signer = createSign("RSA-SHA256");
   signer.update(`${header}.${payload}`);
-  const signature = signer.sign(privateKey).toString("base64url");
+  // A PEM pasted into an env file arrives with literal "\n" sequences; unescape them.
+  const pem = credentials.privateKey.reveal().replace(/\\n/g, "\n");
+  const signature = signer.sign(pem).toString("base64url");
   return `${header}.${payload}.${signature}`;
 }
 

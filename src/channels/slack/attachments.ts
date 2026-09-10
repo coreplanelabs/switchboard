@@ -4,6 +4,7 @@
 
 import { extname } from "node:path";
 import type { DocumentAttachment, ImageAttachment } from "../../core/types.js";
+import { processSecrets } from "../../secrets.js";
 
 // Attachment ingestion. Only image types every provider accepts; Slack file
 // downloads need the files:read bot scope.
@@ -229,9 +230,9 @@ async function downloadSlackFile(
   label: string,
   isLoginPage: (contentType: string) => boolean,
 ): Promise<Buffer | undefined> {
-  const token = process.env.SLACK_BOT_TOKEN;
+  const token = processSecrets.get("SLACK_BOT_TOKEN");
   try {
-    const res = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+    const res = await fetch(url, { headers: token ? { authorization: `Bearer ${token.reveal()}` } : {} });
     if (!res.ok || isLoginPage(res.headers.get("content-type") ?? "")) {
       console.error(`[files] download failed for ${label}: HTTP ${res.status}`);
       return undefined;

@@ -3,6 +3,7 @@ import { parseMcpSettings } from "../mcp/config.js";
 import { parseCostsConfig } from "./costs.js";
 import { resolveDashboardAuthMode, type DashboardAuthMode } from "./dashboardAuthConfig.js";
 import { parseIngressTokenMap } from "./ingressTokens.js";
+import type { EnvRecord, Secrets } from "../secrets.js";
 
 // What is ON in this process — Fowler's feature toggles, resolved ONCE at
 // startup (src/index.ts, src/cli.ts) from the config and the environment, and
@@ -89,8 +90,8 @@ const present = (value: string | undefined): boolean => typeof value === "string
 
 /** A `{ baseUrl, tokenEnv? }` Worker reference the env can honour: the URL is
  *  named and its bearer is set (the rule every state-Worker builder applies). */
-function workerReachable(worker: { baseUrl?: string; tokenEnv?: string } | undefined, env: NodeJS.ProcessEnv): boolean {
-  return present(worker?.baseUrl) && present(env[worker?.tokenEnv ?? DEFAULT_STATE_TOKEN_ENV]);
+function workerReachable(worker: { baseUrl?: string; tokenEnv?: string } | undefined, secrets: Secrets): boolean {
+  return present(worker?.baseUrl) && secrets.named(worker?.tokenEnv ?? DEFAULT_STATE_TOKEN_ENV) !== undefined;
 }
 
 /**
@@ -98,12 +99,12 @@ function workerReachable(worker: { baseUrl?: string; tokenEnv?: string } | undef
  * malformed `costs` or `mcp` block — so a bad config is a startup error here as
  * it is there, never a capability silently read as off.
  */
-export function capabilitiesFrom(config: AppConfig, env: NodeJS.ProcessEnv): Capabilities {
+export function capabilitiesFrom(config: AppConfig, env: EnvRecord, secrets: Secrets): Capabilities {
   const runHistory = config.runHistory;
   const runHistoryOn =
-    runHistory !== undefined && (runHistory.store === "file" || workerReachable(runHistory.worker, env));
+    runHistory !== undefined && (runHistory.store === "file" || workerReachable(runHistory.worker, secrets));
   const costs = parseCostsConfig(config.costs);
-  const ingress = parseIngressTokenMap(env.SWITCHBOARD_INGRESS_TOKENS);
+  const ingress = parseIngressTokenMap(secrets.get("SWITCHBOARD_INGRESS_TOKENS")?.reveal());
   const accessConfigured = present(env.ACCESS_TEAM_DOMAIN) && present(env.ACCESS_AUD);
   return {
     execution: config.execution?.type ?? "local",
@@ -112,11 +113,13 @@ export function capabilitiesFrom(config: AppConfig, env: NodeJS.ProcessEnv): Cap
     runHistory: runHistoryOn,
     runLedger: runHistoryOn && runHistory?.store !== "file",
     mcp: parseMcpSettings(config.mcp) !== undefined,
-    costs: costs !== undefined && present(env[costs.cloudflareTokenEnv]),
-    schedules: workerReachable(config.schedules?.worker, env),
+    costs: costs !== undefined && secrets.named(costs.cloudflareTokenEnv) !== undefined,
+    schedules: workerReachable(config.schedules?.worker, secrets),
     github:
-      (present(env.GITHUB_APP_ID) && present(env.GITHUB_APP_PRIVATE_KEY) && present(env.GITHUB_APP_INSTALLATION_ID)) ||
-      present(env.GH_TOKEN),
+      (secrets.get("GITHUB_APP_ID") !== undefined &&
+        secrets.get("GITHUB_APP_PRIVATE_KEY") !== undefined &&
+        secrets.get("GITHUB_APP_INSTALLATION_ID") !== undefined) ||
+      secrets.get("GH_TOKEN") !== undefined,
     ingress: ingress.ok && Object.keys(ingress.tokens).length > 0,
     dashboardAuth: resolveDashboardAuthMode(config.dashboard?.auth, accessConfigured),
   };

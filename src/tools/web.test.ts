@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Secret, secretsFrom } from "../secrets.js";
 import type { ToolContext } from "./workspace.js";
 import {
   BlockedUrlError,
@@ -515,13 +516,17 @@ describe("BraveWebSearch adapter", () => {
       expect((init?.headers as Record<string, string>)["X-Subscription-Token"]).toBe("key123");
       return fakeResponse({ json: { web: { results: [{ title: "Cat", url: "https://cats", description: "meow" }] } } });
     });
-    const results = await new BraveWebSearch("key123", fetchSpy).search("cats", { count: 3 });
+    const results = await new BraveWebSearch(new Secret("key123", "BRAVE_SEARCH_API_KEY"), fetchSpy).search("cats", {
+      count: 3,
+    });
     expect(results).toEqual([{ title: "Cat", url: "https://cats", snippet: "meow" }]);
   });
 
   it("throws on non-200", async () => {
     const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ status: 429 }));
-    await expect(new BraveWebSearch("k", fetchSpy).search("x")).rejects.toThrow(/429/);
+    await expect(new BraveWebSearch(new Secret("k", "BRAVE_SEARCH_API_KEY"), fetchSpy).search("x")).rejects.toThrow(
+      /429/,
+    );
   });
 });
 
@@ -552,8 +557,10 @@ describe("toolset + agent wiring", () => {
 
 describe("makeWebCapability", () => {
   it("selects Brave when a key is present, Null otherwise", () => {
-    expect(makeWebCapability({ BRAVE_SEARCH_API_KEY: "k" }, vi.fn()).search).toBeInstanceOf(BraveWebSearch);
-    expect(makeWebCapability({}, vi.fn()).search).toBeInstanceOf(NullWebSearch);
+    expect(makeWebCapability(secretsFrom({ BRAVE_SEARCH_API_KEY: "k" }), vi.fn()).search).toBeInstanceOf(
+      BraveWebSearch,
+    );
+    expect(makeWebCapability(secretsFrom({}), vi.fn()).search).toBeInstanceOf(NullWebSearch);
   });
 
   it("NullWebSearch throws WebSearchUnavailableError", async () => {

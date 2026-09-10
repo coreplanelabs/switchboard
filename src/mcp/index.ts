@@ -1,5 +1,6 @@
 import type { ConfigStore } from "../config.js";
 import { makeWebCapability } from "../tools/web.js";
+import type { Secrets } from "../secrets.js";
 import type { FetchLike } from "./client.js";
 import { StreamableHttpMcpClient } from "./client.js";
 import { parseMcpSettings } from "./config.js";
@@ -82,7 +83,7 @@ export interface McpWiring {
  */
 export function buildMcp(
   config: ConfigStore,
-  env: Record<string, string | undefined>,
+  secrets: Secrets,
   opts: {
     publicBaseUrl?: string;
     secretsPath?: string;
@@ -94,35 +95,35 @@ export function buildMcp(
   const settings = parseMcpSettings(config.config.mcp);
   if (!settings) return { unavailable: MCP_OFF_MESSAGE };
   const worker = config.config.runtimeOverrides?.worker;
-  let secrets: McpSecretStore;
+  let store: McpSecretStore;
   if (worker) {
     const tokenEnv = worker.tokenEnv ?? "MEMORY_TOKEN";
-    const token = env[tokenEnv];
+    const token = secrets.named(tokenEnv);
     if (!token) throw new Error(`runtimeOverrides.worker is configured but ${tokenEnv} is not set`);
-    secrets = new WorkerMcpSecretStore({
+    store = new WorkerMcpSecretStore({
       baseUrl: worker.baseUrl,
-      token,
+      token: token.reveal(),
       ...(opts.fetch ? { fetch: opts.fetch } : {}),
     });
   } else {
-    secrets = new FileMcpSecretStore(settings.secretsPath ?? opts.secretsPath ?? "./data/mcp-secrets.json");
+    store = new FileMcpSecretStore(settings.secretsPath ?? opts.secretsPath ?? "./data/mcp-secrets.json");
   }
-  const rawKey = env[settings.credentialKeyEnv];
+  const rawKey = secrets.named(settings.credentialKeyEnv);
   let key: CredentialKey | undefined;
-  if (rawKey) key = importCredentialKey(rawKey);
+  if (rawKey) key = importCredentialKey(rawKey.reveal());
   else
     opts.warn?.(
       `${settings.credentialKeyEnv} is not set — bearer MCP servers without tokenEnv cannot be added or used until it is (openssl rand -base64 32)`,
     );
-  const webFetch = makeWebCapability(env).fetch;
+  const webFetch = makeWebCapability(secrets).fetch;
   const service = new McpService({
     config,
-    secrets,
+    secrets: store,
     key,
     factory: httpMcpClientFactory(webFetch),
     fetch: webFetch,
     publicBaseUrl: opts.publicBaseUrl,
-    env,
+    bearers: secrets,
     resolveEmail: opts.resolveEmail,
   });
   return { source: service.source, service };

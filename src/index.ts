@@ -71,6 +71,7 @@ import { accessActor, createCommandHttpHandler, isCommandPath, serviceTokenAllow
 import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
 import { claimEntry } from "./invokedAsScript.js";
+import { processSecrets, publicEnv } from "./secrets.js";
 
 const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
 const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
@@ -98,7 +99,7 @@ const INTERRUPTED_WRITE_BUDGET_MS = 10_000;
  */
 export async function runBot(): Promise<void> {
   for (const v of ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]) {
-    if (!process.env[v]) {
+    if (!processSecrets.get(v)) {
       console.error(`Missing required env var ${v}`);
       process.exit(1);
     }
@@ -112,21 +113,22 @@ export async function runBot(): Promise<void> {
   // and POST /mcp below. What a token's bearer may do is config's `grants`
   // entry for `http:<subject>` / `mcp:<subject>` (one authorization model,
   // docs/reference/specs/authorization.md).
-  const auth = parseIngressTokens(process.env);
+  const auth = parseIngressTokens(processSecrets);
   // Runtime overrides (`config set …`) live where `runtimeOverrides.worker`
   // says — the state Worker's ConfigDO in prod, so a container restart keeps
   // them (docs/reference/specs/routing-and-config.md item 12); the JSON file otherwise.
   // The command groups are what an Access browser session's implicit reads span.
   const config = await openConfigStore(CONFIG_PATH, {
     overridesPath: OVERRIDES_PATH,
-    env: process.env,
+    env: publicEnv(),
+    secrets: processSecrets,
     commandGroups: coreCommandGroups(),
   });
   console.log(`[config] runtime overrides: ${config.overridesLocation()}`);
   // What is on in this process (src/core/capabilities.ts): resolved ONCE, here,
   // from the config and the environment; every surface below reads this value
   // and none re-derives a capability from `config`.
-  const capabilities = capabilitiesFrom(config.config, process.env);
+  const capabilities = capabilitiesFrom(config.config, publicEnv(), processSecrets);
   console.log(`[capabilities] ${JSON.stringify(capabilities)}`);
   const providers = new ProviderRegistry(config.config.providers);
   // Bundled skills (docs/reference/specs/skills.md): loaded once from the seeded `skills/` dir and shared
@@ -143,7 +145,7 @@ export async function runBot(): Promise<void> {
   // Access-gated connect page work off ONE service, and its servers are the
   // per-run tool source. Requester emails come from Slack once the app exists.
   let slackEmailLookup: ((userId: string) => Promise<string | undefined>) | undefined;
-  const mcpWiring = buildMcp(config, process.env, {
+  const mcpWiring = buildMcp(config, processSecrets, {
     publicBaseUrl: process.env.PUBLIC_BASE_URL,
     resolveEmail: (userId) => (slackEmailLookup ? slackEmailLookup(userId) : Promise.resolve(undefined)),
     warn: (m) => console.warn(`[mcp] ${m}`),
@@ -161,7 +163,8 @@ export async function runBot(): Promise<void> {
   // otherwise an in-process store with a loud warning (a restart loses it).
   // Disabled (default) → the NullMemoryStore: nothing read, nothing written.
   const memory =
-    buildMemoryStore(config.config.memory, process.env, (m) => console.warn(`[memory] ${m}`)) ?? new NullMemoryStore();
+    buildMemoryStore(config.config.memory, processSecrets, (m) => console.warn(`[memory] ${m}`)) ??
+    new NullMemoryStore();
   // Run history (docs/reference/specs/run-history.md): the durable store every finished run's record lands in.
   // With `runHistory` unconfigured (or misconfigured — buildRunStore warned) it
   // is the NullRunStore → history off, live-only as before. The friction ledger
@@ -184,7 +187,7 @@ export async function runBot(): Promise<void> {
     `[trace] internal hosts (trace context travels to these only): ${hosts.hosts.length > 0 ? hosts.hosts.join(", ") : "none"}`,
   );
   const runStore =
-    buildRunStore(runHistoryCfg, process.env, {
+    buildRunStore(runHistoryCfg, processSecrets, {
       dataDir: "./data",
       warn: (m) => console.warn(`[run-history] ${m}`),
     }) ?? new NullRunStore();
@@ -207,7 +210,7 @@ export async function runBot(): Promise<void> {
   // pick it up. Worker-backed history only: a file store has no ledger, and a
   // process without one carries the null write-through (nothing claimed).
   const generation = mintGeneration();
-  const ledgerClient = capabilities.runLedger ? buildRunLedger(runHistoryCfg, process.env) : null;
+  const ledgerClient = capabilities.runLedger ? buildRunLedger(runHistoryCfg, processSecrets) : null;
   const runLedger = ledgerClient
     ? createLedgerWriteThrough({
         ledger: ledgerClient,
@@ -260,7 +263,7 @@ export async function runBot(): Promise<void> {
   // residents, or without the admin bearer — the null client carrying the
   // reason, which the residents dash and `repo list` render as their 503.
   const residentAdmin = capabilities.residents
-    ? residentAdminFromConfig(config, process.env)
+    ? residentAdminFromConfig(config, processSecrets)
     : new NullResidentAdminClient();
   const residentAdminClient =
     "unavailable" in residentAdmin ? new NullResidentAdminClient(residentAdmin.unavailable) : residentAdmin;
@@ -306,11 +309,11 @@ export async function runBot(): Promise<void> {
   // Scheduled firings are recorded on the state Worker's ScheduleDO;
   // `schedule list` and the /runs "Scheduled" panel read the same store.
   const scheduleStore =
-    buildScheduleStore(config.config.schedules, process.env, (m) => console.warn(`[schedules] ${m}`)) ??
+    buildScheduleStore(config.config.schedules, processSecrets, (m) => console.warn(`[schedules] ${m}`)) ??
     new NullScheduleStore();
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
-    env: process.env,
+    secrets: processSecrets,
     dataDir: "./data",
     warn: (m) => console.warn(m),
     capabilities,
@@ -383,7 +386,7 @@ export async function runBot(): Promise<void> {
     // runs; a missing build is a boot error (the Docker image and the package
     // build it; local dev runs `npm run build` in web/ once, or points
     // SWITCHBOARD_WEB_DIST elsewhere).
-    const webAssets = loadWebAssets(webDistDir(process.env, PACKAGE_ROOT));
+    const webAssets = loadWebAssets(webDistDir(publicEnv(), PACKAGE_ROOT));
     const shell = makeShellRenderer(webAssets.entry, capabilities);
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
@@ -403,17 +406,19 @@ export async function runBot(): Promise<void> {
     // the Cloudflare token the null service has no group and the page says so
     // (503). Access-gated below alongside /runs and /residents.
     const costsCfg = parseCostsConfig(config.config.costs);
-    const anthropicAdminKey = costsCfg ? process.env[costsCfg.anthropicAdminKeyEnv] : undefined;
+    // Both keys are revealed into their source's constructor and held nowhere else here.
+    const anthropicAdminKey = costsCfg ? processSecrets.named(costsCfg.anthropicAdminKeyEnv) : undefined;
+    const cloudflareToken = costsCfg ? processSecrets.named(costsCfg.cloudflareTokenEnv) : undefined;
     const costsService =
-      capabilities.costs && costsCfg
+      capabilities.costs && costsCfg && cloudflareToken
         ? createCostsService(
             costsCfg,
             new CloudflareGraphqlUsageSource({
               accountId: costsCfg.cloudflareAccountId,
-              token: process.env[costsCfg.cloudflareTokenEnv]!,
+              token: cloudflareToken.reveal(),
             }),
             anthropicAdminKey
-              ? new AnthropicCostReportSource({ adminKey: anthropicAdminKey })
+              ? new AnthropicCostReportSource({ adminKey: anthropicAdminKey.reveal() })
               : new NullLlmCostSource(),
           )
         : new NullCostsService();
@@ -435,7 +440,7 @@ export async function runBot(): Promise<void> {
     // re-verify it here, fail-closed — even if the edge rule is ever
     // misconfigured or a client spoofs the header. ACCESS_* stay the env inputs
     // of that strategy; null means Access is not configured.
-    const accessConfig = parseAccessConfig(process.env);
+    const accessConfig = parseAccessConfig(publicEnv());
     // ── live view on RunsService ─────────────────────────────────────────────
     // Live run view + run history: GET /runs (index; ?all=1
     // adds finished/persisted runs) + /runs/:id (page) + /runs/:id/events (SSE).
@@ -481,7 +486,7 @@ export async function runBot(): Promise<void> {
     const dashboardAuth = buildDashboardVerifier({
       dashboard: config.config.dashboard,
       access: accessConfig,
-      env: process.env,
+      secrets: processSecrets,
       verify: accessVerify,
       publicBaseUrl,
     });
@@ -524,7 +529,7 @@ export async function runBot(): Promise<void> {
       // The Worker holds the token map; the grants are this config's.
       if (path === RESTART_AUTHORIZE_PATH) {
         handleAdminRestartAuthorize(req, res, {
-          tokens: process.env.SWITCHBOARD_INGRESS_TOKENS,
+          tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
           grantsFor: (id) => config.grantsFor(id),
         });
         return;
@@ -535,7 +540,7 @@ export async function runBot(): Promise<void> {
       // what this process's roots recorded, at every level, filtered.
       if (path === TRACE_LOG_PATH) {
         handleAdminTraceLog(req, res, {
-          tokens: process.env.SWITCHBOARD_INGRESS_TOKENS,
+          tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
           grantsFor: (id) => config.grantsFor(id),
           spanLog,
         });
@@ -543,7 +548,7 @@ export async function runBot(): Promise<void> {
       }
       if (path === "/admin/crash") {
         handleAdminCrash(req, res, {
-          tokens: process.env.SWITCHBOARD_INGRESS_TOKENS,
+          tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
           grantsFor: (id) => config.grantsFor(id),
           generation: capabilities.runLedger ? generation : undefined,
         });

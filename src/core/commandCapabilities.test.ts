@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { secretsFrom } from "../secrets.js";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { CLI_CALLER, cliCatalogue, parseCliArgv, runCli } from "../cli.js";
 import { ConfigStore } from "../config.js";
@@ -43,7 +44,7 @@ function catalogue(capabilities: Capabilities): CommandInvoker {
   const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"));
   return buildCoreCommands(config, null, {
     registry: new RunRegistry(),
-    env: {},
+    secrets: secretsFrom({}),
     dataDir: dir,
     warn: () => {},
     audit: () => {},

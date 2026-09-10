@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Secret } from "../secrets.js";
 import {
   catchUpDelayNote,
   classifyMessage,
@@ -476,7 +477,7 @@ describe("SlackIO.status — status budget", () => {
   });
 
   it("createStatusClient builds a WebClient that rejects rate-limited calls instead of pausing and retrying", () => {
-    const c = createStatusClient("xoxb-test") as unknown as {
+    const c = createStatusClient(new Secret("xoxb-test", "SLACK_BOT_TOKEN")) as unknown as {
       rejectRateLimitedCalls: boolean;
       retryConfig: { retries: number };
     };

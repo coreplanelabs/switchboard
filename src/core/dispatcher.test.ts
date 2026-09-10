@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { processSecrets } from "../secrets.js";
 import { ConfigStore } from "../config.js";
 import { MAX_INSTRUCTIONS_LENGTH } from "../config/validate.js";
 import type { ProviderRegistry } from "../providers/registry.js";
@@ -85,7 +86,7 @@ type TestDeps = CoreDeps & {
 function wireCommands(deps: TestDeps): { invoked: string[] } {
   const bound = buildCoreCommands(deps.config, null, {
     registry: deps.runRegistry ?? new RunRegistry(),
-    env: process.env,
+    secrets: processSecrets,
     dataDir: deps.dataDir ?? mkdtempSync(join(tmpdir(), "swb-dispatch-cmds-")),
     warn: () => {},
     audit: () => {},
@@ -95,7 +96,7 @@ function wireCommands(deps: TestDeps): { invoked: string[] } {
     residentAdmin: () => deps.residentAdmin,
     // Never the network: an onboard here falls back to the npm table (and says so).
     repoInspector: async () => ({ ok: false, reason: "not inspected in tests" }),
-    operations: (caller) => deps.operations ?? defaultOperations(deps.config, process.env, caller),
+    operations: (caller) => deps.operations ?? defaultOperations(deps.config, processSecrets, caller),
   });
   deps.invoked = [];
   const invoked = deps.invoked;
@@ -140,7 +141,7 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   const deps: TestDeps = {
     config,
     providers,
-    capabilities: capabilitiesFrom(config.config, process.env),
+    capabilities: capabilitiesFrom(config.config, process.env, processSecrets),
     residentFleet: NO_FLEET,
     memory: new NullMemoryStore(),
     mcp: new NullMcpToolSource(),

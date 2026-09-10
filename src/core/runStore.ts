@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, sta
 import { join, resolve } from "node:path";
 import type { RunEvent } from "./runEvents.js";
 import type { TraceOptions } from "./trace/types.js";
+import type { Secrets } from "../secrets.js";
 import {
   applyRetention,
   clampListLimit,
@@ -445,7 +446,7 @@ export interface BuildRunStoreDeps {
  */
 export function buildRunStore(
   cfg: RunHistoryConfig | undefined,
-  env: Record<string, string | undefined>,
+  secrets: Secrets,
   deps: BuildRunStoreDeps,
 ): RunStore | null {
   if (!cfg) return null;
@@ -464,7 +465,7 @@ export function buildRunStore(
     return null;
   }
   const tokenEnv = worker.tokenEnv ?? DEFAULT_RUN_STORE_TOKEN_ENV;
-  const token = env[tokenEnv]?.trim();
+  const token = secrets.named(tokenEnv);
   if (!token) {
     deps.warn(
       `runHistory.worker is configured but ${tokenEnv} is unset — run history is off. Set ${tokenEnv} to the state Worker's bearer.`,
@@ -473,7 +474,7 @@ export function buildRunStore(
   }
   return new WorkerRunStore({
     baseUrl: worker.baseUrl,
-    token,
+    token: token.reveal(),
     storeKey: RUN_STORE_KEY,
     policy,
     policyUpdatedAt: now(),

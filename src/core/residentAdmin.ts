@@ -2,6 +2,7 @@ import type { ConfigStore } from "../config.js";
 import { sanitizeResidentBody } from "../execution/residentText.js";
 import { tracedFetch } from "./trace/tracedFetch.js";
 import type { Span } from "./trace/types.js";
+import { processSecrets, type Secrets } from "../secrets.js";
 
 // The resident Worker's admin plane, as the bot sees it: the client for
 // the `/onboard`, `/offboard`, `/reconfigure`, `/rebuild`, `/residents` routes
@@ -132,7 +133,7 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
  *  none: no `execution.resident.baseUrl`, or its bearer env var unset. */
 export function residentAdminFromConfig(
   config: ConfigStore,
-  env: Record<string, string | undefined> = process.env,
+  secrets: Secrets = processSecrets,
 ): ResidentAdminClient | { unavailable: string } {
   const resident = config.config.execution?.resident;
   if (!resident?.baseUrl) {
@@ -141,9 +142,9 @@ export function residentAdminFromConfig(
     };
   }
   const tokenEnv = resident.adminTokenEnv ?? "RESIDENT_ADMIN_TOKEN";
-  const token = env[tokenEnv];
+  const token = secrets.named(tokenEnv);
   if (!token) return { unavailable: `Repo management needs the resident admin bearer — \`${tokenEnv}\` is not set.` };
-  return makeResidentAdminClient(resident.baseUrl, token);
+  return makeResidentAdminClient(resident.baseUrl, token.reveal());
 }
 
 // ---- validators -----------------------------------------------------------------
