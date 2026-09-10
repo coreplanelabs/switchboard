@@ -148,7 +148,7 @@ Slice one: the renderer, both manifests expressing today's Dockerfiles (identica
 
 ## Sources
 
-- record 0027, `0027-images-copied-into-the-account-registry.md`, which lands with the image-registry pull request (linked here once merged; the docs build refuses a link to a file the tree does not hold yet), [0021](0021-records-are-immutable-specs-are-checked.md), [0023](0023-one-production-target.md).
+- [0027](0027-images-copied-into-the-account-registry.md), [0021](0021-records-are-immutable-specs-are-checked.md), [0023](0023-one-production-target.md).
 - Specs: [release-and-deploy](../reference/specs/release-and-deploy.md) items 16, 17, 20, 21, 24, 25; [execution](../reference/specs/execution.md) items 1, 6, 16, 17.
 - The Docker-engine change's size measurement (320 to 492 MB) and the live probes of the production sandbox, 2026-09-09.
 - Cloudflare Containers limits and architecture pages; the Sandbox SDK Dockerfile reference; the Ubuntu jammy package index for `chromium-browser`.

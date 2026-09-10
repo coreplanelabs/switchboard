@@ -211,6 +211,23 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "action": "deploy:write",
     "args": [],
     "effect": "write",
+    "id": "deploy.images",
+    "options": [
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "write",
     "id": "deploy.init",
     "options": [
       {

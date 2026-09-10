@@ -8,6 +8,7 @@ import { makeShellRenderer } from "../channels/webShell.js";
 import { retentionSentence, SEED_ELEMENT_ID, type RunsIndexSeed, type ScheduledSeed } from "../channels/webSeed.js";
 import { DEPLOY_ORDER, formatPlan, planDeploy, type DeployOptions, type WorkerName } from "../deploy/plan.js";
 import { parseProfile, PROFILE_EXAMPLE_PATH, type LoadedProfile } from "../deploy/profile.js";
+import { TEST_PUBLISHED_IMAGES } from "../deploy/testing/profile.js";
 import { ALL_CAPABILITIES, capabilitiesFrom, NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
 import { CAPABILITY_KEYS, dependsOn, isEnabled, visibleUnder, withOn } from "./capabilityGating.js";
 import { invokeChatCommand, parseChatCommand } from "./commandChat.js";
@@ -287,13 +288,13 @@ describe("deploy plan — what `deploy plan` prints", () => {
   const checkout = { root: { mode: "checkout" as const, path: "/work/switchboard" }, hasNodeModules: () => true };
 
   it("the full example profile: every Worker, in the canonical order", () => {
-    const plan = planDeploy(options(), checkout, example);
+    const plan = planDeploy(options(), checkout, example, { mode: "registry", published: TEST_PUBLISHED_IMAGES });
     expect(plan.steps.map((s) => s.name)).toEqual(DEPLOY_ORDER);
     expect(formatPlan(plan)).toMatchSnapshot();
   });
 
   it("a bot-only profile is a one-step plan with no state Worker to push the config to", () => {
-    const plan = planDeploy(options(), checkout, botOnly);
+    const plan = planDeploy(options(), checkout, botOnly, { mode: "registry", published: TEST_PUBLISHED_IMAGES });
     expect(plan.steps.map((s) => s.name)).toEqual(["bot"]);
     expect(plan.config.stateWorkerUrl).toBeUndefined();
     expect(formatPlan(plan)).toMatchSnapshot();

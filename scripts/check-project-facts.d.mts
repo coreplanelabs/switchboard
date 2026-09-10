@@ -9,8 +9,10 @@ export interface ProjectFacts {
   description: string;
   organization: string;
   repository: string;
-  /** The container image every release publishes: `ghcr.io/<owner>/<repo>`, the repository path lowercased. */
+  /** The bot's container image, which every release publishes: `ghcr.io/<owner>/<repo>`, the repository path lowercased. */
   image: string;
+  /** The three images a release publishes: the bot's is `image`; the resident's and the sandbox's are `image` plus `-resident` / `-sandbox`. */
+  images: { bot: string; resident: string; sandbox: string };
   docs: string;
   /** The repository's GitHub topics: 1–20 of `[a-z0-9-]{1,50}`. */
   topics: string[];

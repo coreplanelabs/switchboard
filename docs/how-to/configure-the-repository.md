@@ -132,7 +132,7 @@ gh secret set NPM_TOKEN            # paste the token on stdin
 gh variable set SWITCHBOARD_PUBLISH_NPM --body true
 ```
 
-Without the token the job fails on its own; the image and the deploy publish regardless of either. The manifest's `"private": true` is the second lever: npm refuses to publish while it is there, and removing it is a reviewed pull request ([Ship a release](ship-a-release.md#3-merge-the-release-pr)).
+Without the token the job fails on its own; the images and the deploy publish regardless of either. The manifest's `"private": true` is the second lever: npm refuses to publish while it is there, and removing it is a reviewed pull request ([Ship a release](ship-a-release.md#3-merge-the-release-pr)).
 
 Where the installation's deployment profile lives is a repository **variable**, not a line in a workflow, so the tree names no installation:
 

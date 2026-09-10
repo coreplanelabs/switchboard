@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // Where the files the CLI ships with are read from (docs/reference/specs/packaging.md):
@@ -78,4 +78,41 @@ export function parsePackageSource(
   if (commit === undefined) return { ok: false, problem: `${PACKAGE_SOURCE_FILE}: \`commit\` is missing` };
   if (builtAt === undefined) return { ok: false, problem: `${PACKAGE_SOURCE_FILE}: \`builtAt\` is missing` };
   return { ok: true, source: { version, commit, builtAt } };
+}
+
+/**
+ * Pure over `read`: the version this code runs as where there is no `source.json`
+ * — a checkout or the image — the `version` of the nearest `package.json` at or
+ * above the package root (the root's own there; the published package's manifest
+ * two levels above `dist/assets/`, though from the package `source.json` is the
+ * identity that counts: src/deploy/host.ts `cliVersionOnHost`). It is the version
+ * `deploy images` copies and `registry` mode references: the images a release
+ * published carry the same number as the CLI that release published. Throws,
+ * naming the start, when no manifest above carries a version.
+ */
+export function locatePackageVersion(
+  root: string,
+  read: (path: string) => string | undefined = (path) => (existsSync(path) ? readFileSync(path, "utf8") : undefined),
+): string {
+  for (let dir = root; ; dir = dirname(dir)) {
+    const text = read(join(dir, "package.json"));
+    if (text !== undefined) {
+      let version: unknown;
+      try {
+        version = (JSON.parse(text) as { version?: unknown }).version;
+      } catch {
+        version = undefined;
+      }
+      if (typeof version === "string" && version !== "") return version;
+    }
+    if (dirname(dir) === dir) break;
+  }
+  throw new Error(`no package.json with a version at or above ${root}`);
+}
+
+let version: string | undefined;
+/** The version this process runs as (`locatePackageVersion` over the package root), read once. */
+export function packageVersion(): string {
+  version ??= locatePackageVersion(PACKAGE_ROOT);
+  return version;
 }

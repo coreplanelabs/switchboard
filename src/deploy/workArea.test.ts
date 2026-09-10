@@ -10,6 +10,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { WorkerKind } from "./profile.js";
+import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "./testing/profile.js";
+import { renderTemplate, templateView } from "./wranglerTemplate.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureWorkArea,
@@ -133,13 +136,28 @@ describe("imageBuiltOutsideDir", () => {
     ).toBeUndefined();
   });
 
-  it("finds the bot's template as building from the repository and the resident's and sandbox's as their own", () => {
-    const read = (dir: string) =>
-      readFileSync(join(import.meta.dirname, "../../deploy", dir, "wrangler.template.jsonc"), "utf8");
-    expect(imageBuiltOutsideDir(read("cloudflare"))).toBe("../../Dockerfile");
-    expect(imageBuiltOutsideDir(read("cloudflare-resident"))).toBeUndefined();
-    expect(imageBuiltOutsideDir(read("cloudflare-sandbox"))).toBeUndefined();
-    expect(imageBuiltOutsideDir(read("cloudflare-memory"))).toBeUndefined();
+  it("finds the bot's template, rendered in `build` mode, as building from the repository and the resident's and sandbox's as their own; rendered in `registry` mode none builds anything — the images are registry references", () => {
+    const rendered = (kind: WorkerKind, profile = TEST_PROFILE) => {
+      const template = readFileSync(
+        join(import.meta.dirname, "../../deploy", dirs[kind], "wrangler.template.jsonc"),
+        "utf8",
+      );
+      const r = renderTemplate(template, templateView(profile, kind, TEST_PUBLISHED_IMAGES)!);
+      if (!r.ok) throw new Error(r.problems.join("; "));
+      return r.text;
+    };
+    const dirs = {
+      bot: "cloudflare",
+      resident: "cloudflare-resident",
+      sandbox: "cloudflare-sandbox",
+      memory: "cloudflare-memory",
+    };
+    expect(imageBuiltOutsideDir(rendered("bot"))).toBe("../../Dockerfile");
+    expect(imageBuiltOutsideDir(rendered("resident"))).toBeUndefined();
+    expect(imageBuiltOutsideDir(rendered("sandbox"))).toBeUndefined();
+    expect(imageBuiltOutsideDir(rendered("memory"))).toBeUndefined();
+    for (const kind of ["bot", "resident", "sandbox"] as const)
+      expect(imageBuiltOutsideDir(rendered(kind, TEST_REGISTRY_PROFILE)), kind).toBeUndefined();
   });
 });
 

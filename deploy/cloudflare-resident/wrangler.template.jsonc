@@ -35,10 +35,13 @@
   "containers": [
     {
       "class_name": "ResidentDO",
-      // Extends docker.io/cloudflare/sandbox:<version>. The image tag MUST
-      // match the @cloudflare/sandbox version in package.json EXACTLY (no
-      // 'latest' tag exists) — bump both together.
-      "image": "./Dockerfile",
+      // The profile's image mode decides (src/deploy/images.ts): `build` renders
+      // ./Dockerfile, built by wrangler at deploy time; `registry` renders the
+      // release's published image as copied into this account's registry by
+      // `deploy images`. The Dockerfile extends docker.io/cloudflare/sandbox:<version>,
+      // whose tag MUST match the @cloudflare/sandbox version in package.json
+      // EXACTLY (no 'latest' tag exists) — bump both together.
+      "image": "{{image}}",
       // Custom 4 vCPU / 12 GiB / 20 GB — the platform's custom-type ceiling
       // (the same shape as standard-4, kept in object form so the sizing test
       // can read it). This ONE type is every resident's container (one DO per

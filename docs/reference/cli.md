@@ -104,6 +104,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 | `deploy init [--check]` | Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the `deploy:check` gate). | CLI only |
 | `deploy secrets <memory\|bot\|resident\|sandbox> [--only <string>]` | Put a Worker's secrets from the deployment profile's secretsSource (a directory of &lt;NAME&gt; files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into `wrangler secret put`; none is ever printed. | CLI only |
 | `deploy config [--source <string>]` | Push the bot's config to the state Worker as the `base` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until `deploy restart`. | CLI only |
+| `deploy images [--dry-run]` | Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so `registry`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. Needs Docker where it runs. | CLI only |
 
 ### `env`
 

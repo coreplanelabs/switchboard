@@ -1,6 +1,15 @@
 import { z } from "zod";
 import type { AffectedReport } from "../../deploy/affected.js";
 import {
+  planImageCopies,
+  publishedImagesFrom,
+  registryHas,
+  type ImagesPlan,
+  type ImageStatus,
+  type PublishedImages,
+} from "../../deploy/images.js";
+import type { ImagesHostIO } from "../../deploy/imagesHost.js";
+import {
   CONFIG_DOCUMENT_KEY,
   DEPLOY_ORDER,
   formatPlan,
@@ -8,6 +17,7 @@ import {
   type DeployHost,
   type DeployOptions,
   type DeployPlan,
+  type ImagesInput,
   type WorkerName,
 } from "../../deploy/plan.js";
 import { displayPath } from "../../deploy/operatorRoot.js";
@@ -79,6 +89,12 @@ export interface DeployCommandDeps {
     secrets: SecretsHostIO;
     /** `deploy config`: read the source, validate, push the `base` document to the state Worker (src/deploy/run.ts `pushConfigOnHost`). */
     pushConfig(opts: { source: string; stateWorkerUrl: string; key: string }): Promise<ConfigPushOutcome>;
+    /** `deploy images` (and `deploy plan` in `registry` mode): the account registry's listing, whether Docker is
+     *  here, one image copy (src/deploy/imagesHost.ts). */
+    images: ImagesHostIO;
+    /** The version this CLI runs as (src/packageRoot.ts `packageVersion`): the images a release published carry
+     *  it, so it is what `deploy images` copies and what `registry`-mode configs reference. */
+    cliVersion(): string;
   };
 }
 
@@ -165,9 +181,24 @@ async function computePlan(
   const affected = options.affected
     ? await deps.deploy.affected(options.base !== undefined ? { base: options.base } : {})
     : undefined;
-  const plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.host, loaded);
+  const plan = planDeploy(
+    toOptions(options, dryRun, affected),
+    deps.deploy.host,
+    loaded,
+    await imagesInput(loaded, deps),
+  );
   if (plan.steps.length === 0 && !affected)
     throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
+  // Fail closed: a `registry`-mode step whose image is not in the account registry would deploy a
+  // Worker whose container cannot start. The plan says which, and the fix is one command.
+  if (plan.images.mode === "registry") {
+    const missing = plan.images.images.filter((i) => i.present === false);
+    if (missing.length > 0)
+      throw new CommandError(
+        "unavailable",
+        `refusing — the account registry has no image for ${missing.map((i) => `${i.kind} (${i.ref})`).join(", ")}; run \`deploy images\` first: it copies the release's images at version ${plan.images.version} into the account registry`,
+      );
+  }
   return plan;
 }
 
@@ -178,6 +209,29 @@ async function loadProfile(deps: DeployCommandDeps): Promise<LoadedProfile> {
   } catch (err) {
     throw new CommandError("unavailable", `deployment profile: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** The release's images this CLI deploys — project.json's `images` through the file access, at this
+ *  CLI's own version (the only one the rendered configs can reference) — or `unavailable` naming the
+ *  facts file. */
+async function publishedImages(deps: DeployCommandDeps): Promise<PublishedImages> {
+  const published = publishedImagesFrom(await deps.deploy.files.read(PROJECT_FACTS_FILE), deps.deploy.cliVersion());
+  if (!published.ok) throw new CommandError("unavailable", published.problem);
+  return published.images;
+}
+
+/** What the planner needs to say where each step's image comes from. `build` mode needs nothing (the
+ *  Dockerfiles are static, and a facts file without `images` is no concern of a checkout that builds).
+ *  `registry` mode reads the published images and probes the account registry — for a real profile,
+ *  never for the example (a placeholder account has no registry, and nothing deploys from the example). */
+async function imagesInput(loaded: LoadedProfile, deps: DeployCommandDeps): Promise<ImagesInput> {
+  if (loaded.profile.images !== "registry") return { mode: "build" };
+  const published = await publishedImages(deps);
+  if (loaded.origin === "example") return { mode: "registry", published };
+  const registry = await deps.deploy.images.registry(loaded.profile.account);
+  if ("error" in registry)
+    throw new CommandError("unavailable", `cannot read the account registry — ${registry.error}`);
+  return { mode: "registry", published, registry: registry.value };
 }
 
 const planJson = (plan: DeployPlan): JsonValue => plan as unknown as JsonValue;
@@ -320,13 +374,16 @@ export const deployInit = defineCommand({
     const templates = new Map<string, string | undefined>();
     for (const t of [...workerConfigTargets(loaded.profile), SITE_CONFIG_TARGET])
       templates.set(t.templatePath, await deps.deploy.files.read(t.templatePath));
-    const rendered = renderWorkerConfigs(loaded.profile, (path) => templates.get(path));
-    // The docs site is the project's, not a Worker of the installation: its script name and
-    // hostname come from project.json, and only the account comes from the profile.
-    const site = renderSiteConfig(loaded.profile, await deps.deploy.files.read(PROJECT_FACTS_FILE), (path) =>
-      templates.get(path),
-    );
-    const problems = [...(rendered.ok ? [] : rendered.problems), ...(site.ok ? [] : site.problems)];
+    // project.json gives the Workers their images (in `registry` mode, at this CLI's version) and
+    // the docs site its name and host — the site is the project's, not a Worker of the installation,
+    // so only the account comes from the profile.
+    const facts = await deps.deploy.files.read(PROJECT_FACTS_FILE);
+    const published = publishedImagesFrom(facts, deps.deploy.cliVersion());
+    const rendered = published.ok
+      ? renderWorkerConfigs(loaded.profile, (path) => templates.get(path), published.images)
+      : { ok: false as const, problems: [published.problem] };
+    const site = renderSiteConfig(loaded.profile, facts, (path) => templates.get(path));
+    const problems = [...new Set([...(rendered.ok ? [] : rendered.problems), ...(site.ok ? [] : site.problems)])];
     if (!rendered.ok || !site.ok)
       throw new CommandError("unavailable", `cannot render the Worker configs —\n  - ${problems.join("\n  - ")}`);
     const files: InitOutput["files"] = [];
@@ -359,7 +416,7 @@ async function writeWorkerConfig(loaded: LoadedProfile, worker: WorkerName, deps
   const target = workerConfigTargets(loaded.profile).find((t) => t.kind === worker);
   if (!target) throw new CommandError("unavailable", `${loaded.path}: the profile has no ${worker} Worker`);
   const template = await deps.deploy.files.read(target.templatePath);
-  const rendered = renderWorkerConfig(loaded.profile, worker, () => template);
+  const rendered = renderWorkerConfig(loaded.profile, worker, () => template, await publishedImages(deps));
   if (!rendered.ok)
     throw new CommandError(
       "unavailable",
@@ -526,6 +583,98 @@ export const deploySecrets = defineCommand({
   },
 });
 
+/** No `--version`: the rendered configs reference this CLI's own version and nothing else, so a copy at
+ *  another version would satisfy no deploy. Another release's images are copied by that release's CLI. */
+const imagesOptions = z.object({
+  dryRun: flag
+    .optional()
+    .describe(
+      "say which images the account registry already holds at the version and which would be copied; nothing is pulled or pushed",
+    ),
+});
+
+interface ImagesOutput {
+  version: string;
+  account: string;
+  images: { kind: string; source: string; target: string; status: ImageStatus }[];
+}
+
+/** The output rows for a plan: every image present, or every image with the status the copies got. */
+function imagesOutput(plan: ImagesPlan, copied: ImageStatus): ImagesOutput {
+  return {
+    version: plan.version,
+    account: plan.account,
+    images: plan.images.map((i) => ({
+      kind: i.kind,
+      source: i.source,
+      target: i.target,
+      status: i.present ? "present" : copied,
+    })),
+  };
+}
+
+export const deployImages = defineCommand({
+  id: "deploy.images",
+  options: imagesOptions,
+  action: "deploy:write",
+  effect: "write",
+  surfaces: { chat: false, mcp: false, http: false },
+  describe:
+    "Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so `registry`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. Needs Docker where it runs.",
+  render: (output) => {
+    const o = output as unknown as ImagesOutput;
+    const copied = o.images.filter((i) => i.status !== "present").length;
+    return [
+      ...o.images.map(
+        (i) =>
+          `${i.status.padEnd(10)} ${i.kind.padEnd(8)} ${i.target}${i.status === "present" ? "" : ` ← ${i.source}`}`,
+      ),
+      `version ${o.version} on account ${o.account}: ${o.images.length - copied} present, ${copied} ${o.images.some((i) => i.status === "would copy") ? "to copy (dry run — nothing pulled or pushed)" : "copied"}`,
+    ].join("\n");
+  },
+  handler: async ({ options, deps }) => {
+    const loaded = await loadProfile(deps);
+    if (loaded.origin === "example")
+      throw new CommandError(
+        "unavailable",
+        `${loaded.path} is the example profile — write deploy/profile.json for this installation before copying images into its registry`,
+      );
+    const published = await publishedImages(deps);
+    const account = loaded.profile.account;
+    const before = await deps.deploy.images.registry(account);
+    if ("error" in before) throw new CommandError("unavailable", `cannot read the account registry — ${before.error}`);
+    const plan = planImageCopies(published, account, before.value);
+    if (options.dryRun) return imagesOutput(plan, "would copy") as unknown as JsonValue;
+    if (plan.copy.length === 0) return imagesOutput(plan, "copied") as unknown as JsonValue;
+    // Docker is the one thing this command needs that the rest of the CLI does not; refused before
+    // anything is pulled, naming where it is.
+    const docker = await deps.deploy.images.docker();
+    if (!docker.ok) throw new CommandError("unavailable", docker.problem);
+    for (const [i, copy] of plan.copy.entries()) {
+      const r = await deps.deploy.images.copy(copy, account);
+      if (r.code !== 0) {
+        const rest = plan.copy.slice(i + 1).map((c) => c.kind);
+        const said = wranglerFailureLine(r.output);
+        throw new CommandError(
+          "unavailable",
+          `copying the ${copy.kind} image (${copy.source} → ${copy.target}) failed (exit ${r.code}); stopping — ${rest.length > 0 ? rest.join(", ") : "nothing"} not attempted${said ? `. ${said}` : ""}`,
+        );
+      }
+    }
+    // A push that returned 0 is not the proof; the registry listing it afterwards is.
+    const after = await deps.deploy.images.registry(account);
+    if ("error" in after)
+      throw new CommandError("unavailable", `pushed, but cannot read the account registry back — ${after.error}`);
+    const unlisted = plan.copy.filter((c) => !registryHas(after.value, c.name, c.version));
+    if (unlisted.length > 0)
+      throw new CommandError(
+        "unavailable",
+        `pushed ${plan.copy.map((c) => c.target).join(", ")}, but the account registry does not list ${unlisted.map((c) => c.target).join(", ")} afterwards`,
+      );
+    return imagesOutput(plan, "copied") as unknown as JsonValue;
+  },
+});
+
 export const deployCommands: readonly CommandDef<DeployCommandDeps>[] = [
   deployPlan,
   deployAll,
@@ -533,6 +682,7 @@ export const deployCommands: readonly CommandDef<DeployCommandDeps>[] = [
   deployInit,
   deploySecrets,
   deployConfig,
+  deployImages,
 ] as unknown as CommandDef<DeployCommandDeps>[];
 
 export function registerDeployCommands<D extends DeployCommandDeps>(registry: CommandRegistry<D>): void {

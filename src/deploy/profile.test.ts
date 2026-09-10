@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { EXAMPLE_ACCOUNT, isExampleProfile, parseProfile, PROFILE_EXAMPLE_PATH, profileUrls } from "./profile.js";
+import {
+  EXAMPLE_ACCOUNT,
+  IMAGE_MODES,
+  isExampleProfile,
+  parseProfile,
+  PROFILE_EXAMPLE_PATH,
+  profileUrls,
+} from "./profile.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 
 // The deployment profile: where an installation runs, as data the code reads
@@ -132,5 +139,27 @@ describe("profileUrls", () => {
     expect(Object.keys(u).sort()).toEqual(
       ["baseUrl", "botAdminRestartUrl", "healthUrl", "publicBaseUrl", "stateWorkerUrl"].sort(),
     );
+  });
+});
+
+// Feature: docs/reference/specs/release-and-deploy.md item 25 — where the container
+// images come from is the profile's `images`: `build` (absent means build — the
+// checkout, and this project's own production, deploy what they build) or
+// `registry` (the release's images, copied into the account registry).
+describe("the profile's image mode", () => {
+  it("defaults to `build` when absent, keeps `registry` when named, and refuses anything else by field", () => {
+    const { images: _images, ...without } = TEST_PROFILE;
+    const absent = parseProfile(without);
+    expect(absent.ok && absent.profile.images).toBe("build");
+    const registry = parseProfile({ ...TEST_PROFILE, images: "registry" });
+    expect(registry.ok && registry.profile.images).toBe("registry");
+    expect(IMAGE_MODES).toEqual(["build", "registry"]);
+    const bad = parseProfile({ ...TEST_PROFILE, images: "dockerhub" });
+    expect(bad.ok ? [] : bad.problems).toEqual([expect.stringMatching(/^images: /)]);
+  });
+
+  it("the committed example says `registry` — the shape an installation deploying published images copies", () => {
+    const example = parseProfile(read(PROFILE_EXAMPLE_PATH));
+    expect(example.ok && example.profile.images).toBe("registry");
   });
 });

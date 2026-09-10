@@ -35,11 +35,12 @@ import {
 import { parseAppConfigText } from "../config.js";
 import { baseConfigDocument, ConfigDocumentClient, STATE_WORKER_TOKEN_ENV } from "../configDocument.js";
 import { BUILD_COMMIT_ENV } from "./buildStamp.js";
-import { ensureWorkAreaOnHost, OPERATOR_ROOT, packageSourceOnHost } from "./host.js";
+import { cliVersionOnHost, ensureWorkAreaOnHost, OPERATOR_ROOT, packageSourceOnHost } from "./host.js";
 import { assetPath, installationPath, workPath, type OperatorRoot } from "./operatorRoot.js";
 import { imageBuiltOutsideDir, readWorkAreaState, type WorkAreaOutcome } from "./workArea.js";
 import { RENDERED_FILE } from "./wranglerTemplate.js";
 import { parseConfigSource, readConfigSource, type ConfigSourceIO } from "./configSource.js";
+import { publishedImagesFrom, type PublishedImages } from "./images.js";
 import {
   isExampleProfile,
   parseProfile,
@@ -49,7 +50,7 @@ import {
   type LoadedProfile,
 } from "./profile.js";
 import { classifyRestartResponse, type RestartPlan } from "./restart.js";
-import { renderWorkerConfigs } from "./wranglerTemplate.js";
+import { PROJECT_FACTS_FILE, renderWorkerConfigs } from "./wranglerTemplate.js";
 import {
   containerAppId,
   decideSandboxLive,
@@ -126,8 +127,9 @@ export interface DeployRunnerIO {
 }
 
 /** Spawn a command, stream its output, and collect it. `unset` removes env
- *  vars for the child (the `env -u` of the README commands). */
-function run(
+ *  vars for the child (the `env -u` of the README commands). Exported for the
+ *  other host halves (src/deploy/imagesHost.ts) so every spawn has one shape. */
+export function run(
   cmd: string,
   args: string[],
   opts: { cwd: string; unset?: readonly string[]; set?: Record<string, string>; stream?: (chunk: string) => void },
@@ -250,13 +252,17 @@ function packageModeProblems(plan: DeployPlan): string[] {
     problems.push(
       `${OPERATOR_ROOT.workArea} does not hold the package's version ${plan.root.version ?? "?"} — re-run; the work area is materialised before the checks`,
     );
-  for (const step of plan.steps) {
-    const rendered = workerDir(`${step.dir}/${RENDERED_FILE}`);
-    const image = existsSync(rendered) ? imageBuiltOutsideDir(readFileSync(rendered, "utf8")) : undefined;
-    if (image)
-      problems.push(
-        `${step.name}: its image builds from ${image} — outside ${step.dir}, from the repository's own sources, which the package does not carry; deploy the ${step.name} Worker from a checkout`,
-      );
+  // Only a `build`-mode plan builds anything: in `registry` mode every image is a reference into the
+  // account registry (src/deploy/images.ts), and the plan already refused a missing one.
+  if (plan.images.mode === "build") {
+    for (const step of plan.steps) {
+      const rendered = workerDir(`${step.dir}/${RENDERED_FILE}`);
+      const image = existsSync(rendered) ? imageBuiltOutsideDir(readFileSync(rendered, "utf8")) : undefined;
+      if (image)
+        problems.push(
+          `${step.name}: its image builds from ${image} — outside ${step.dir}, from the repository's own sources, which the package does not carry; deploy the ${step.name} Worker from a checkout, or switch the profile to \`"images": "registry"\` and run \`deploy images\``,
+        );
+    }
   }
   return problems;
 }
@@ -364,7 +370,9 @@ export async function renderWorkerConfigsOnHost(
   writeFile: (path: string, text: string) => void | Promise<void> = (path, text) => hostDeployFiles.write(path, text),
 ): Promise<string[]> {
   const loaded = await loadProfileOnHost(env);
-  const rendered = renderWorkerConfigs(loaded.profile, (path) => readShipped(path));
+  const published = publishedImagesOnHost();
+  if (!published.ok) return [published.problem];
+  const rendered = renderWorkerConfigs(loaded.profile, (path) => readShipped(path), published.images);
   if (!rendered.ok) return rendered.problems;
   for (const f of rendered.files) await writeFile(f.path, f.text);
   io.log(`[deploy:all] rendered ${rendered.files.length} Worker config(s) from ${loaded.path}`);
@@ -375,6 +383,17 @@ export async function renderWorkerConfigsOnHost(
 function readShipped(path: string): string | undefined {
   const abs = assetPath(OPERATOR_ROOT, path);
   return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
+}
+
+/**
+ * The images this CLI deploys or copies (src/deploy/images.ts `PublishedImages`):
+ * the three names from the shipped `project.json`, and the version this CLI runs
+ * as (src/deploy/host.ts `cliVersionOnHost`) — a release publishes its images
+ * and its CLI under one number, in either root. A facts file without the names
+ * is a problem naming it, not a guess.
+ */
+export function publishedImagesOnHost(): { ok: true; images: PublishedImages } | { ok: false; problem: string } {
+  return publishedImagesFrom(readShipped(PROJECT_FACTS_FILE), cliVersionOnHost());
 }
 
 /**

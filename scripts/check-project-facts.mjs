@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The project's identity — its name and the name a reader sees, where it
-// lives, where its docs are, who to write to, the image and the npm package it
+// lives, where its docs are, who to write to, the images and the npm package it
 // publishes, how it describes itself — is stated once in project.json and
 // copied by hand into the files that need it in prose: the community files,
 // the README (its first heading, its badges), the docs site's Worker route, the
@@ -161,6 +161,24 @@ export function factsProblems(facts, files) {
   const publishedImage = `ghcr.io${repoPath.toLowerCase()}`;
   if (facts.image !== publishedImage)
     say("project.json", `image is "${facts.image}", the release workflow publishes ${publishedImage}`);
+  // The same workflow publishes the resident's and the sandbox's images under
+  // the bot's name plus the Worker's suffix (its matrix), and `images` records
+  // all three for the deploy tooling — held to that rule, never typed freely.
+  const publishedImages = {
+    bot: publishedImage,
+    resident: `${publishedImage}-resident`,
+    sandbox: `${publishedImage}-sandbox`,
+  };
+  const images = typeof facts.images === "object" && facts.images !== null ? facts.images : undefined;
+  if (images === undefined)
+    say("project.json", "images is missing — { bot, resident, sandbox }: `image` plus each Worker's suffix");
+  else
+    for (const [kind, want] of Object.entries(publishedImages)) {
+      const have = images[kind];
+      if (have === undefined) say("project.json", `images.${kind} is missing, the release workflow publishes ${want}`);
+      else if (have !== want)
+        say("project.json", `images.${kind} is "${have}", the release workflow publishes ${want}`);
+    }
 
   const compose = files["docker-compose.yml"];
   if (compose !== undefined) {

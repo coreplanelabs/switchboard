@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ConfigSourceIO } from "./configSource.js";
 import { EXAMPLE_ACCOUNT, PROFILE_ENV, PROFILE_EXAMPLE_PATH, PROFILE_PATH } from "./profile.js";
-import { deployFiles, loadProfileOnHost, renderWorkerConfigsOnHost } from "./run.js";
+import { deployFiles, loadProfileOnHost, publishedImagesOnHost, renderWorkerConfigsOnHost } from "./run.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 import { ensureWorkArea, WORK_AREA_STAMP } from "./workArea.js";
 import { renderWorkerConfigs, workerConfigTargets } from "./wranglerTemplate.js";
@@ -167,7 +167,13 @@ describe("renderWorkerConfigsOnHost", () => {
     ).toEqual([]);
     expect(lines).toEqual([`[deploy:all] rendered 4 Worker config(s) from ${PROFILE_EXAMPLE_PATH}`]);
     const example = await loadProfileOnHost(env);
-    const rendered = renderWorkerConfigs(example.profile, (p) => (existsSync(p) ? readFileSync(p, "utf8") : undefined));
+    const published = publishedImagesOnHost();
+    if (!published.ok) throw new Error(published.problem);
+    const rendered = renderWorkerConfigs(
+      example.profile,
+      (p) => (existsSync(p) ? readFileSync(p, "utf8") : undefined),
+      published.images,
+    );
     if (!rendered.ok) throw new Error(rendered.problems.join("; "));
     expect([...written.keys()]).toEqual(workerConfigTargets(example.profile).map((t) => t.outputPath));
     for (const f of rendered.files) expect(written.get(f.path), f.path).toBe(f.text);

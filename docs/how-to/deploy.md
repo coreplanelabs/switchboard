@@ -17,7 +17,7 @@ Deploys run in one order — memory, bot, resident, sandbox — because the stat
 
 ## Before you start
 
-- A Cloudflare account and a domain (a *zone*) in it: every Worker gets a hostname under it. `npx wrangler login` done once for that account, and Docker running — the bot's, resident's and sandbox's images build where `deploy all` runs.
+- A Cloudflare account and a domain (a *zone*) in it: every Worker gets a hostname under it. `npx wrangler login` done once for that account. Docker running, once: either where `deploy all` runs (the profile's `images: "build"` — the bot's, resident's and sandbox's images build there) or where `deploy images` runs (`images: "registry"` — the release's published images are copied into your account's registry once per version, and `deploy all` then builds nothing; [step 5](#5-deploy-images--copy-the-releases-images-registry-mode)).
 - No `CLOUDFLARE_API_TOKEN` in your shell unless it is a token for this account: wrangler prefers a token over your login, and a token for another account is refused, never silently swapped.
 - The Slack app and one provider key from [Get started](../tutorials/get-started.md), and the GitHub App if the coding agent should open pull requests ([Set up accounts](set-up-accounts.md)).
 - A `config/config.yaml` whose blocks point at the Workers you are about to deploy — `runtimeOverrides.worker` and `runHistory.worker` at the state Worker's hostname, `memory.worker` if you want memory, `execution.resident.baseUrl` and `execution.type: cloudflare` with `execution.url` for the resident and sandbox Workers.
@@ -37,8 +37,9 @@ For any other shape, `deploy/profile.example.json` is the template:
 cp deploy/profile.example.json deploy/profile.json
 ```
 
-Fill in `account` (your Cloudflare account id) and `zone` (a domain in that account), give each Worker you want a hostname under that zone, and delete the Workers you do not want — a profile with only `bot` and `memory` yields a two-step plan. Two optional fields:
+Fill in `account` (your Cloudflare account id) and `zone` (a domain in that account), give each Worker you want a hostname under that zone, and delete the Workers you do not want — a profile with only `bot` and `memory` yields a two-step plan. The other fields:
 
+- `images` — where the bot's, resident's and sandbox's container images come from. `"registry"` (what the example says): the images every release publishes, copied once per version into your account's Cloudflare registry by [`deploy images`](#5-deploy-images--copy-the-releases-images-registry-mode) and referenced from there — no Docker where `deploy all` runs, and every container start pulls from Cloudflare's own cached registry. `"build"` (the default when the field is absent): each Worker's Dockerfile, built by wrangler where `deploy all` runs — a checkout's shape, and how this project's own production deploys. Why the copy rather than a direct pull from GitHub's registry: [the decision record](../decisions/0027-images-copied-into-the-account-registry.md).
 - `configSource` — where `deploy all` and `deploy config` read the bot's runtime config: a path (the default, `config/config.yaml`), `github://owner/repo/path@ref` read with `CONFIG_REPO_TOKEN`, or a 1Password reference `op://Vault/Item/field` read with `OP_SERVICE_ACCOUNT_TOKEN`. The image never carries config.
 - `secretsSource` — where `deploy secrets` reads values: a directory of files named after the secrets (`~/.secrets/switchboard` when absent) or a 1Password item `op://Vault/Item` with one field per secret name.
 - `access` — the Cloudflare Access application in front of the dashboards, as `{ "teamDomain": "<team>.cloudflareaccess.com", "aud": "<the application's AUD tag>" }`. Omit it and the dashboards refuse every remote caller until you add one.
@@ -88,14 +89,27 @@ MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx tsx src/cli.ts dep
 
 The config is read from the profile's `configSource` (or `--source <path|github://…|op://…>`) and validated before anything is pushed; an unreadable source, a config that does not validate, or a missing `MEMORY_TOKEN` refuses with the reason. A running container keeps the config it started with, so a change pushed on its own goes live on a restart: [Operate production](operate-production.md#3-change-the-config-without-a-release).
 
-## 5. `deploy all` — the whole plan, in order
+## 5. `deploy images` — copy the release's images (registry mode)
+
+With `"images": "registry"` in the profile, the Workers deploy the images the release published rather than building them. Cloudflare's Containers pull from Cloudflare's own registry (cached, pre-fetched), not from GitHub's, so the images are copied into your account once per version:
+
+```bash
+npx tsx src/cli.ts deploy images --dry-run   # which of the three the account registry already holds
+npx tsx src/cli.ts deploy images             # pull, tag, `wrangler containers push` the missing ones
+```
+
+For each of the bot, resident and sandbox images at this CLI's version — the only version the rendered configs reference, so there is no flag to copy another release; run that release's CLI — the command asks the account registry whether it already holds `registry.cloudflare.com/<account>/<name>:<version>` and skips it if so; otherwise it pulls `ghcr.io/<owner>/<repo>[-resident|-sandbox]:<version>`, tags it under the bare name and pushes it with wrangler, then lists the registry again and refuses unless every copy appears. It needs Docker where it runs — a CI runner has one; a laptop without it is refused before anything is pulled, naming the reusable deploy workflow as the place to run it — and the account's credential with the Containers scope. Run it once per release, before `deploy all`; a second run finds everything `present` and copies nothing. In `registry` mode `deploy plan` and `deploy all` check the same listing and refuse a Worker whose image is missing, naming this command.
+
+Our own production stays on `"images": "build"`: this repository's release builds the same Dockerfiles with wrangler at deploy time, so this step does not exist there.
+
+## 6. `deploy all` — the whole plan, in order
 
 ```bash
 npx tsx src/cli.ts deploy plan        # what it would do — nothing executed
 MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx tsx src/cli.ts deploy all
 ```
 
-`deploy all` first checks: wrangler's login is the profile's account (or `CLOUDFLARE_API_TOKEN` verifies against it — a token for another account is refused with wrangler's own words, never silently swapped for your login), from a checkout that the tree is clean and `HEAD` is `origin/main` (`--allow-branch` relaxes only that; from an operator directory there is no tree — the Worker sources are the package's, at its version), and the credential can do what the selected Workers need (`wrangler containers list`, `wrangler r2 bucket list`). It reads and validates the config, deploys the state Worker, pushes the config document, deploys the bot and **waits until the bot is live** — `/healthz` answered by a container that is not draining and reports the deployed commit — then the resident and sandbox Workers with their own preflights and live gates. Docker must be running: the bot's image (and the resident's and sandbox's) is built where the command runs.
+`deploy all` first checks: wrangler's login is the profile's account (or `CLOUDFLARE_API_TOKEN` verifies against it — a token for another account is refused with wrangler's own words, never silently swapped for your login), from a checkout that the tree is clean and `HEAD` is `origin/main` (`--allow-branch` relaxes only that; from an operator directory there is no tree — the Worker sources are the package's, at its version), and the credential can do what the selected Workers need (`wrangler containers list`, `wrangler r2 bucket list`). It reads and validates the config, deploys the state Worker, pushes the config document, deploys the bot and **waits until the bot is live** — `/healthz` answered by a container that is not draining and reports the deployed commit — then the resident and sandbox Workers with their own preflights and live gates. The plan's `Images:` line says where each Worker's container comes from: in `build` mode Docker must be running where the command runs (the bot's image, and the resident's and sandbox's, are built there); in `registry` mode nothing is built and the line says whether each image is present in the account registry.
 
 Bearers the run needs in its own environment: `MEMORY_TOKEN` when the bot is a step (the config push); one of `RESIDENT_ADMIN_TOKEN` / `RESIDENT_OPERATOR_TOKEN` / `RESIDENT_READ_TOKEN` when the resident is (its preflight reads the fleet); `SANDBOX_TOKEN` when the sandbox is (its live gate probes `/exec`).
 
@@ -126,9 +140,9 @@ What is there afterwards:
 - **`.switchboard/`**: the work area the deploy commands own. It holds a copy of the tree the package shipped — each Worker's directory (its `wrangler.template.jsonc`, `worker.ts`, `package.json`, Dockerfile), the sources under `src/` those Workers import, the deploy scripts, and the repository's `package.json` and `package-lock.json` — plus what the commands produce: each Worker's rendered `wrangler.jsonc` beside its template (`deploy init` prints `written .switchboard/deploy/<worker>/wrangler.jsonc`) and, once `deploy secrets` or `deploy all` has run wrangler for a Worker, its `node_modules`, installed with `npm ci --workspace deploy/<worker>` against the shipped lockfile — the versions the release was tested with, never what your machine resolved that day. A stamp, `.materialised.json`, records the CLI version the copy came from and the Workers installed; a CLI at another version starts the work area over. Nothing is ever written inside the installed package, and a `.switchboard/` the CLI did not stamp is refused, not deleted.
 - **No git.** In a checkout `deploy all` refuses a dirty tree or a `HEAD` off `origin/main`; from the package there is no tree to check, and the commit every Worker is stamped with — what the live gates compare `/healthz` against — is the one the package was built from.
 
-Two things still need more than the package. Docker: the resident's and sandbox's images are built where `deploy all` runs, from the Dockerfiles in their materialised directories, exactly as from a checkout. And the bot: its image is the repository's root `Dockerfile`, built from `src/`, `web/` and the toolchain, which the package does not carry — so from an operator directory `deploy all` refuses the bot step up front, naming this, rather than rolling the state Worker and then failing. Until the profile can point the bot at the image every release already publishes (`ghcr.io/<owner>/<repo>`), deploy the bot from a checkout; the memory, resident and sandbox Workers deploy from the package today.
+The images are where the profile's `images` mode matters most. With `"images": "registry"` (the example's shape) nothing is built from the package: [`deploy images`](#5-deploy-images--copy-the-releases-images-registry-mode) copies the release's three images into your account registry once per version — it runs wrangler in the materialised bot directory, so the work area is brought up first — and every Worker, the bot included, deploys the copy. With `"images": "build"` the resident's and sandbox's images are built where `deploy all` runs, from the Dockerfiles in their materialised directories, exactly as from a checkout — but the bot's image is the repository's root `Dockerfile`, built from `src/`, `web/` and the toolchain, which the package does not carry, so `deploy all` refuses the bot step up front, naming this and the `registry` mode as the way out, rather than rolling the state Worker and then failing.
 
-## 6. Onboard the first repository
+## 7. Onboard the first repository
 
 Repositories are onboarded at runtime from chat, never at deploy time:
 
@@ -152,14 +166,14 @@ docker compose up -d
 docker compose logs -f
 ```
 
-Every release publishes that image to GitHub Container Registry as `ghcr.io/<owner>/<repo>:<version>` and `:latest` — the owner and name are the repository's, lowercased — built from the root `Dockerfile` with a build-provenance attestation and an SBOM attached. `docker compose pull` fetches it; `docker compose build` builds the same Dockerfile locally under the same name, and `up` runs whichever is present. Before you run an image you did not build, check that it came from this repository's release workflow and nothing else:
+Every release publishes that image to GitHub Container Registry as `ghcr.io/<owner>/<repo>:<version>` and `:latest` — the owner and name are the repository's, lowercased — built from the root `Dockerfile` with a build-provenance attestation and an SBOM attached; the resident's and the sandbox's images publish beside it as `ghcr.io/<owner>/<repo>-resident` and `ghcr.io/<owner>/<repo>-sandbox`, the ones a `registry`-mode deployment copies ([step 5](#5-deploy-images--copy-the-releases-images-registry-mode)). `docker compose pull` fetches the bot's; `docker compose build` builds the same Dockerfile locally under the same name, and `up` runs whichever is present. Before you run an image you did not build, check that it came from this repository's release workflow and nothing else:
 
 ```bash
 gh attestation verify oci://ghcr.io/<owner>/<repo>:<version> --owner <owner>
 docker buildx imagetools inspect ghcr.io/<owner>/<repo>:<version> --format '{{ json .SBOM }}'
 ```
 
-The first resolves the tag to its digest and checks the signed attestation against the workflow that built it; the second prints the SBOM. Production on Cloudflare does not pull this image — wrangler builds the same Dockerfile at deploy time — so a release that failed to publish still deploys, and the image is yours to run without the Workers.
+The first resolves the tag to its digest and checks the signed attestation against the workflow that built it; the second prints the SBOM. This project's own production does not pull these images — its profile is in `build` mode and wrangler builds the same Dockerfiles at deploy time — so a release that failed to publish still deploys there, and the image is yours to run without the Workers.
 
 There is no state Worker in this shape: overrides and run history (with `runHistory.store: file`) live on the volume, tools run on the container with `execution.type: local`, and the dashboards serve loopback callers only. Nothing else is built or tested as a host — the deploy tooling, the secrets path and these pages are Cloudflare's.
 

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,6 +8,8 @@ import {
   PACKAGE_ROOT_MARKER,
   PACKAGE_SOURCE_FILE,
   parsePackageSource,
+  locatePackageVersion,
+  packageVersion,
   RUNS_FROM_PUBLISHED_PACKAGE,
 } from "./packageRoot.js";
 
@@ -106,5 +108,39 @@ describe("this module's own root", () => {
   it("in the checkout the root is the repository (src/ two levels up) and nothing is published", () => {
     expect(PACKAGE_ROOT).toBe(join(import.meta.dirname, ".."));
     expect(RUNS_FROM_PUBLISHED_PACKAGE).toBe(false);
+  });
+});
+
+// The version this code runs as — what `deploy images` copies and `registry`
+// mode references by default — is the nearest package.json's above the package
+// root: the checkout's (and the image's) own, or the published package's
+// manifest two levels above dist/assets/.
+describe("locatePackageVersion", () => {
+  it("reads `version` from the nearest package.json at or above the root: the checkout's own, the package manifest two levels above dist/assets/", () => {
+    const repo = tmp();
+    marker(repo);
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", version: "3.4.5" }));
+    expect(locatePackageVersion(repo)).toBe("3.4.5");
+    const pkg = tmp();
+    marker(join(pkg, "dist", "assets"));
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@acme/x", version: "6.7.8" }));
+    expect(locatePackageVersion(join(pkg, "dist", "assets"))).toBe("6.7.8");
+  });
+
+  it("skips a manifest without a version (or one that is not JSON) and keeps climbing; nothing above throws naming the start", () => {
+    const read = (files: Record<string, string>) => (path: string) => files[path];
+    expect(
+      locatePackageVersion("/a/b/c", read({ "/a/b/c/package.json": "{}", "/a/package.json": '{"version":"1.0.0"}' })),
+    ).toBe("1.0.0");
+    expect(
+      locatePackageVersion("/a/b", read({ "/a/b/package.json": "{ nope", "/a/package.json": '{"version":"2.0.0"}' })),
+    ).toBe("2.0.0");
+    expect(() => locatePackageVersion("/a/b", read({}))).toThrow("no package.json with a version at or above /a/b");
+  });
+
+  it("this checkout's version is the root package.json's — the number the release moves", () => {
+    const root = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as { version: string };
+    expect(packageVersion()).toBe(root.version);
+    expect(packageVersion()).toMatch(/^\d+\.\d+\.\d+/);
   });
 });
