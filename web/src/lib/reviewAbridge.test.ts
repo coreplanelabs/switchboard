@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createReviewAbridge, MAX_POLLS } from "./reviewAbridge";
+import { createReviewAbridge, MAX_PAGES, MAX_POLLS } from "./reviewAbridge";
 
 // Feature: docs/reference/specs/reading-diff.md item 12 — the host's half of the panel's
 // "Abridge with meat" control: one POST starts (or resumes) the abridging, the
@@ -79,7 +79,7 @@ describe("createReviewAbridge", () => {
     expect(b.state).toEqual({ state: "failed", reason: "the abridged diff did not appear on the run's record" });
   });
 
-  it("failed carries the reason; a retry after a failure sends force: true", async () => {
+  it("failed carries the reason; a retry after the SERVER's failure sends force: true (a stored failure is only retried on request)", async () => {
     const { fetch, calls } = fakeFetch([
       json({ id: "run-1", state: "failed", reason: "meat exited 1: no credential", at: 2 }),
       json({ id: "run-1", state: "running", startedAt: 3 }),
@@ -92,6 +92,72 @@ describe("createReviewAbridge", () => {
     expect(a.state).toEqual({ state: "running" });
     await flush();
     expect(JSON.parse(String(calls[1].init?.body))).toEqual({ id: "run-1", force: true });
+  });
+
+  it("a retry after a transport or page-side failure sends no force — the server's idempotency answers a stored artifact instead of spending a new call", async () => {
+    const { fetch, calls } = fakeFetch([
+      { status: 503, body: null },
+      json({ id: "run-1", state: "done", reused: true }),
+      json({ events: [meatArtifact] }),
+    ]);
+    const a = createReviewAbridge("run-1", vi.fn(), { fetch, delay: vi.fn(async () => {}) });
+    a.start();
+    await flush();
+    expect(a.state).toEqual({ state: "failed", reason: "HTTP 503" });
+    a.start();
+    await flush();
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ id: "run-1" });
+    expect(a.state).toEqual({ state: "done" });
+  });
+
+  it("paging the record is bounded: a cursor that does not advance, or more than MAX_PAGES pages, is a named failure — never a loop", async () => {
+    const stuck = fakeFetch([
+      json({ id: "run-1", state: "done" }),
+      json({ events: [{ type: "answer", text: "x" }], nextAfterSeq: 5 }),
+      json({ events: [{ type: "answer", text: "y" }], nextAfterSeq: 5 }),
+      json({ events: [], nextAfterSeq: 5 }),
+    ]);
+    const a = createReviewAbridge("run-1", vi.fn(), { fetch: stuck.fetch, delay: vi.fn(async () => {}) });
+    a.start();
+    await flush();
+    expect(a.state).toEqual({ state: "failed", reason: "the run's record did not page to its end" });
+    expect(stuck.calls).toHaveLength(3); // the POST, the first page, the page whose cursor stood still
+
+    const endless = fakeFetch([
+      json({ id: "run-1", state: "done" }),
+      ...Array.from({ length: MAX_PAGES + 5 }, (_, i) => json({ events: [], nextAfterSeq: i + 1 })),
+    ]);
+    const b = createReviewAbridge("run-1", vi.fn(), { fetch: endless.fetch, delay: vi.fn(async () => {}) });
+    b.start();
+    await flush();
+    expect(b.state).toEqual({ state: "failed", reason: "the run's record did not page to its end" });
+    expect(endless.calls).toHaveLength(1 + MAX_PAGES);
+  });
+
+  it("dispose mid-page: no frame reaches the sink after it, no further page is fetched, the state is left alone", async () => {
+    let releasePage: ((r: Response) => void) | undefined;
+    const calls: string[] = [];
+    const sink = vi.fn();
+    const fetch = vi.fn(async (url: string) => {
+      calls.push(url);
+      if (url === "/api/review.abridge")
+        return { ok: true, status: 200, json: async () => ({ id: "run-1", state: "done" }) } as Response;
+      return new Promise<Response>((r) => (releasePage = r));
+    }) as unknown as typeof globalThis.fetch;
+    const a = createReviewAbridge("run-1", sink, { fetch, delay: vi.fn(async () => {}) });
+    a.start();
+    await flush();
+    expect(calls).toEqual(["/api/review.abridge", "/api/runs.events?id=run-1"]);
+    a.dispose();
+    releasePage?.({
+      ok: true,
+      status: 200,
+      json: async () => ({ events: [meatArtifact], nextAfterSeq: 9 }),
+    } as Response);
+    await flush();
+    expect(sink).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(2);
+    expect(a.state).toEqual({ state: "running" });
   });
 
   it("a non-2xx answer fails with the body's error (else the status); a thrown fetch fails with its message; an unknown state fails too", async () => {
