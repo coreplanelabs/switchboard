@@ -14,6 +14,7 @@ import type { ToolContext } from "../../tools/workspace.js";
 import type { Span } from "../trace/types.js";
 import { runAgent } from "../../runner.js";
 import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdict } from "../reviewVerdict.js";
+import type { DigestReport } from "../diffDigest.js";
 import { normalizeHead } from "../reviewedHead.js";
 import {
   attachRoundWorkspace,
@@ -130,6 +131,11 @@ export async function runShipReviewChild(
   }
   let settled: Awaited<ReturnType<typeof settleReviewedHead>> | undefined;
   let verdict: ReviewVerdict | undefined;
+  // The round's diff digest (diff_digest → onDigest), for the post-step's
+  // coverage guard. Ship holds no PR size for the round — the PR's facts were
+  // read at preflight and every fix round moves them — so the guard here
+  // refuses only a digest that could not state its totals.
+  let digest: DigestReport | undefined;
   try {
     let verified = false;
     const guard = await guardAttachedHead({
@@ -156,6 +162,9 @@ export async function runShipReviewChild(
       agentName: spec.agent.name,
       onVerdict: (v) => {
         verdict = v;
+      },
+      onDigest: (d) => {
+        digest = d;
       },
     };
     const composeSystem = makeSystemComposer({
@@ -240,6 +249,7 @@ export async function runShipReviewChild(
     repoCtx: { repo: entry.repo, pr: prNumber },
     heads: { reviewHead: settled.reviewHead, observedHead: settled.observedHead },
     verdict: settled.verdict,
+    digest,
     answer: settled.answer,
     carried: settled.carried,
     hardStopped: hardStopped(),

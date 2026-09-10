@@ -1817,13 +1817,13 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const deps1 = makeDeps(REMOTE_YAML_FIXTURE, coding);
     deps1.resolveRepoContext = () => ({ repo: "acme/api", pr: 42, headSha: "e".repeat(40) });
     await dispatch(deps1, msg("agent:coding fix acme/api#42", "slack:UADMIN"), fakeIO().io);
-    expect(coding.requests[0].system ?? "").not.toContain("REVIEW TARGET");
+    expect(coding.requests[0].system ?? "").not.toContain("REVIEW TARGET (resolved by Switchboard");
 
     const review = capturingProvider();
     const deps2 = makeDeps(REMOTE_YAML_FIXTURE, review);
     deps2.resolveRepoContext = () => ({ repo: "acme/api" });
     await dispatch(deps2, msg("agent:review look at acme/api", "slack:UADMIN"), fakeIO().io);
-    expect(review.requests[0].system ?? "").not.toContain("REVIEW TARGET");
+    expect(review.requests[0].system ?? "").not.toContain("REVIEW TARGET (resolved by Switchboard");
   });
 
   it("the per-thread fallback path keeps the agent's own system prompt (regression)", async () => {

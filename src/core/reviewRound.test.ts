@@ -324,6 +324,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       repoCtx: { repo: "acme/api", pr: 42 },
       heads: { reviewHead: HEAD, observedHead: HEAD },
       verdict,
+      digest: undefined,
       answer,
       carried: undefined,
       hardStopped: false,
@@ -346,6 +347,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       repoCtx: { repo: "acme/api", pr: 42 },
       heads: { reviewHead: HEAD, observedHead: HEAD },
       verdict,
+      digest: undefined,
       answer,
       carried: undefined,
       hardStopped: false,
@@ -367,6 +369,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       repoCtx: { repo: "acme/api", pr: 42 },
       heads: { reviewHead: HEAD, observedHead: OTHER },
       verdict,
+      digest: undefined,
       answer,
       carried: undefined,
       hardStopped: false,
@@ -388,6 +391,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       repoCtx: { repo: "acme/api", pr: 42 },
       heads: { reviewHead: HEAD, observedHead: HEAD },
       verdict,
+      digest: undefined,
       answer,
       carried: undefined,
       hardStopped: false,
@@ -410,6 +414,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       repoCtx: { repo: "acme/api", pr: 42 },
       heads: { reviewHead: HEAD, observedHead: HEAD },
       verdict,
+      digest: undefined,
       answer,
       carried: undefined,
       hardStopped: true,
@@ -421,5 +426,90 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     expect(h.posts).toHaveLength(0);
     expect(h.replies).toHaveLength(0);
     expect(out).toMatchObject({ posted: false });
+  });
+
+  // Feature: docs/reference/specs/agent-review.md item 15 — the digest-coverage
+  // guard. A 41-file PR whose digest covered 13 files was approved; the head
+  // guard could not see it (the head was right), so the post-step now holds the
+  // digest's totals against the PR's size from GitHub.
+  describe("digest-coverage guard (item 15)", () => {
+    const prSize = { changedFiles: 41, additions: 2459, deletions: 579 };
+    const base = (h: ReturnType<typeof harness>) => ({
+      agent: AGENTS.review,
+      requestText: "review acme/api#42",
+      repoCtx: { repo: "acme/api", pr: 42, prSize },
+      heads: { reviewHead: HEAD, observedHead: HEAD },
+      verdict,
+      answer,
+      carried: undefined,
+      hardStopped: false,
+      post: h.post,
+      fetchPrHead: async () => HEAD,
+      reply: h.reply,
+      logKey: "t",
+    });
+
+    it("a digest that covered less than the PR → no post, the thread told 'digest covered N of M files', the outcome carries the reason", async () => {
+      const h = harness();
+      const out = await runReviewPostStep({
+        ...base(h),
+        digest: { complete: true, base: "origin/main", totals: { files: 13, additions: 144, deletions: 53 } },
+      });
+      expect(h.posts).toHaveLength(0);
+      expect(h.replies).toHaveLength(1);
+      expect(h.replies[0]).toContain("Review not posted to acme/api#42");
+      expect(h.replies[0]).toContain("digest covered 13 of 41 files");
+      expect(h.replies[0]).toContain("Slack-only");
+      expect(out).toMatchObject({ posted: false });
+      expect((out as { reason: string }).reason).toContain("digest covered 13 of 41 files");
+    });
+
+    it("a digest that could not state its totals (its listing was cut) → no post, the reason named", async () => {
+      const h = harness();
+      const out = await runReviewPostStep({
+        ...base(h),
+        digest: { complete: false, base: "origin/main", reason: "the file listing exceeded the executor's output cap" },
+      });
+      expect(h.posts).toHaveLength(0);
+      expect(h.replies[0]).toContain("exceeded the executor's output cap");
+      expect(out).toMatchObject({ posted: false });
+    });
+
+    it("a digest that matches the PR posts as usual, pinned to the head", async () => {
+      const h = harness();
+      const out = await runReviewPostStep({
+        ...base(h),
+        digest: { complete: true, base: "origin/main", totals: { files: 41, additions: 2459, deletions: 579 } },
+      });
+      expect(h.posts).toHaveLength(1);
+      expect(h.posts[0].target).toMatchObject({ commitId: HEAD });
+      expect(h.replies).toHaveLength(0);
+      expect(out).toEqual({ posted: true });
+    });
+
+    it("no digest, or no PR size to compare against → nothing to hold the review to; it posts", async () => {
+      const h = harness();
+      await runReviewPostStep({ ...base(h), digest: undefined });
+      await runReviewPostStep({
+        ...base(h),
+        repoCtx: { repo: "acme/api", pr: 42 },
+        digest: { complete: true, base: "origin/main", totals: { files: 13, additions: 144, deletions: 53 } },
+      });
+      expect(h.posts).toHaveLength(2);
+      expect(h.replies).toHaveLength(0);
+    });
+
+    it("the head guard is asked first: a strayed head is refused as a head mismatch, whatever the digest says", async () => {
+      const h = harness();
+      await runReviewPostStep({
+        ...base(h),
+        heads: { reviewHead: HEAD, observedHead: "f".repeat(40) },
+        digest: { complete: true, base: "origin/main", totals: { files: 13, additions: 144, deletions: 53 } },
+      });
+      expect(h.posts).toHaveLength(0);
+      expect(h.replies).toHaveLength(1);
+      expect(h.replies[0]).toContain("is not the PR head");
+      expect(h.replies[0]).not.toContain("digest covered");
+    });
   });
 });

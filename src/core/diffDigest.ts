@@ -1,10 +1,20 @@
-// Pure diff distiller: a unified git diff in, a compact human-readable digest
-// out. No I/O, no process, no platform SDK — string -> string — so it is
-// trivially unit-testable and provider/channel-agnostic. The diff_digest tool
-// (src/tools/workspace.ts) runs `git diff` through the Executor seam and renders
-// its output with this function; the coding agent puts the digest in a PR body
-// (a distilled summary, not the raw diff) and the review agent uses it to
-// orient before analyzing. Feature: docs/reference/specs/distilled-diffs.md.
+// Pure diff distiller: git's per-file statistics in, a compact human-readable
+// digest out. No I/O, no process, no platform SDK — strings -> string — so it
+// is trivially unit-testable and provider/channel-agnostic. The diff_digest
+// tool (src/tools/workspace.ts) runs `git diff --numstat` and
+// `git diff --name-status` over the merge-base range through the Executor seam
+// and renders their output with this function; the coding agent shapes its PR
+// description from the digest and the review agent orients with it.
+// Feature: docs/reference/specs/distilled-diffs.md.
+//
+// Why statistics and not the unified diff: every Executor caps a command's
+// output (`truncate`, 120k chars), and a unified diff of a mid-sized PR is
+// larger than that. A digest parsed from the capped text silently counted the
+// first files in `git diff`'s alphabetical order and nothing after them — a
+// 41-file PR digested as 13 files, and a review approved on that. The stat
+// formats cost one line per file, so the digest covers every file however
+// large the change; the tool still refuses to state totals when even that
+// output was cut.
 
 type FileStatus = "modified" | "added" | "deleted" | "renamed" | "binary";
 
@@ -14,6 +24,25 @@ interface FileEntry {
   dels: number;
   status: FileStatus;
   reasons: string[];
+}
+
+/** The digest's own totals — what the review post-step compares with the
+ *  PR's `changed_files` / `additions` / `deletions` from GitHub. */
+export interface DigestTotals {
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
+/** What the diff_digest tool reports to the run that owns it, once per call
+ *  (the last call wins): the range it digested and either its totals or the
+ *  reason it could not state them. */
+export type DigestReport =
+  { complete: true; base: string; totals: DigestTotals } | { complete: false; base: string; reason: string };
+
+export interface Digest {
+  text: string;
+  totals: DigestTotals;
 }
 
 // Lockfiles are matched by exact basename (lowercased). Churn in a lockfile is
@@ -79,24 +108,11 @@ function decodeGitQuoted(s: string): string {
   return Buffer.from(bytes).toString("utf8");
 }
 
-// Strip git's a//b/ (and w//i//c//o/) path prefixes and surrounding quotes;
-// "/dev/null" (new/deleted side) resolves to no path.
-function stripPrefix(raw: string): string {
-  if (raw === "/dev/null") return "";
-  let s = raw;
-  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) s = decodeGitQuoted(s.slice(1, -1));
-  if (/^[abciwo]\//.test(s)) s = s.slice(2);
+/** A path as git printed it: unquoted when it needed no quoting, else decoded. */
+function unquotePath(raw: string): string {
+  const s = raw.trim();
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) return decodeGitQuoted(s.slice(1, -1));
   return s;
-}
-
-// Old + new paths from the "diff --git a/OLD b/NEW" header (used for renames /
-// binaries that carry no ---/+++ lines). Both sides matter for risk scoring.
-function pathsFromHeader(line: string): { old: string; new: string } {
-  const rest = line.slice("diff --git ".length);
-  const m = /^a\/(.+) b\/(.+)$/.exec(rest);
-  if (m) return { old: m[1], new: m[2] };
-  const only = stripPrefix(rest.split(" ")[0] ?? "");
-  return { old: only, new: only };
 }
 
 // Risk is assessed against BOTH the new and old paths: a risky file renamed to
@@ -116,70 +132,92 @@ function riskReasons(entry: FileEntry, paths: string[]): string[] {
   return reasons;
 }
 
-interface Acc {
-  header: string;
-  pathPlus: string;
-  pathMinus: string;
-  status: FileStatus;
+/** One `--numstat` line: `<adds>\t<dels>\t<path>`, with `-\t-` for a binary
+ *  file. The path is git's compact rename form (`dir/{old => new}`) when the
+ *  file moved — the name-status line beside it carries both sides plainly. */
+interface NumstatLine {
   adds: number;
   dels: number;
-  inHunk: boolean;
+  binary: boolean;
+  path: string;
 }
 
-function finalize(a: Acc): FileEntry {
-  const header = pathsFromHeader(a.header);
-  // Prefer the new-side path for display; keep the old side for risk scoring.
-  const newPath = a.pathPlus || header.new || "(unknown)";
-  const oldPath = a.pathMinus || header.old || newPath;
-  const entry: FileEntry = { path: newPath, adds: a.adds, dels: a.dels, status: a.status, reasons: [] };
-  entry.reasons = riskReasons(entry, [newPath, oldPath]);
-  return entry;
-}
-
-function parse(diff: string): FileEntry[] {
-  const files: FileEntry[] = [];
-  let cur: Acc | null = null;
-
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("diff --git ")) {
-      if (cur) files.push(finalize(cur));
-      cur = { header: line, pathPlus: "", pathMinus: "", status: "modified", adds: 0, dels: 0, inHunk: false };
-      continue;
-    }
-    if (!cur) continue; // ignore any preamble before the first file block
-
-    if (line.startsWith("@@")) {
-      cur.inHunk = true;
-      continue;
-    }
-    if (!cur.inHunk) {
-      // Metadata region: status markers and the ---/+++ path header live here.
-      if (line.startsWith("new file mode")) cur.status = "added";
-      else if (line.startsWith("deleted file mode")) cur.status = "deleted";
-      else if (line.startsWith("rename from ") || line.startsWith("rename to ")) cur.status = "renamed";
-      else if (line.startsWith("Binary files ") && line.endsWith(" differ")) {
-        if (cur.status === "modified") cur.status = "binary";
-      } else if (line.startsWith("+++ ")) cur.pathPlus = stripPrefix(line.slice(4).trim());
-      else if (line.startsWith("--- ")) cur.pathMinus = stripPrefix(line.slice(4).trim());
-      // A malformed block may carry +/- content lines with no @@ header — count
-      // them too, so counts survive a broken hunk header.
-      else if (line.startsWith("+")) cur.adds++;
-      else if (line.startsWith("-")) cur.dels++;
-      continue;
-    }
-    // Inside a hunk: count content adds/dels.
-    if (line.startsWith("+")) cur.adds++;
-    else if (line.startsWith("-")) cur.dels++;
+function parseNumstat(text: string): NumstatLine[] {
+  const out: NumstatLine[] = [];
+  for (const line of text.split("\n")) {
+    const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
+    if (!m) continue;
+    const binary = m[1] === "-" || m[2] === "-";
+    out.push({
+      adds: binary ? 0 : Number(m[1]),
+      dels: binary ? 0 : Number(m[2]),
+      binary,
+      path: unquotePath(m[3]),
+    });
   }
-  if (cur) files.push(finalize(cur));
-  return files;
+  return out;
 }
 
-/** Distill a unified git diff into a compact digest: totals, per-file
- *  +adds/-dels (largest churn first), and a risky-files section. */
-export function distillDiff(unifiedDiff: string): string {
-  const files = parse(unifiedDiff ?? "");
-  if (files.length === 0) return "Diff digest — no changes (empty diff).";
+/** One `--name-status` line: `<X>[score]\t<path>` or, for a rename/copy,
+ *  `R<score>\t<old>\t<new>`. */
+interface NameStatusLine {
+  status: FileStatus;
+  oldPath: string;
+  newPath: string;
+}
+
+function parseNameStatus(text: string): NameStatusLine[] {
+  const out: NameStatusLine[] = [];
+  for (const line of text.split("\n")) {
+    const m = /^([A-Z])\d*\t(.+)$/.exec(line);
+    if (!m) continue;
+    const parts = m[2].split("\t").map(unquotePath);
+    const code = m[1];
+    if (code === "R" || code === "C") {
+      const [oldPath, newPath] = parts;
+      // A copy (`C`) is a new file at its new path — the source is unchanged —
+      // so it reads as added; its old path still counts for risk scoring.
+      out.push({
+        status: code === "R" ? "renamed" : "added",
+        oldPath: oldPath ?? "",
+        newPath: newPath ?? oldPath ?? "",
+      });
+      continue;
+    }
+    const p = parts[0] ?? "";
+    out.push({ status: code === "A" ? "added" : code === "D" ? "deleted" : "modified", oldPath: p, newPath: p });
+  }
+  return out;
+}
+
+/** The two listings, zipped: git emits both over the same diff queue in the
+ *  same order, so the i-th name-status line describes the i-th numstat line.
+ *  A numstat line with no partner (the listings disagree — a malformed line)
+ *  keeps its own path text and counts as modified rather than being dropped. */
+function parse(numstat: string, nameStatus: string): FileEntry[] {
+  const stats = parseNumstat(numstat);
+  const names = parseNameStatus(nameStatus);
+  const aligned = stats.length === names.length;
+  return stats.map((s, i) => {
+    const n = aligned ? names[i] : undefined;
+    const newPath = n?.newPath || s.path;
+    const oldPath = n?.oldPath || newPath;
+    const status: FileStatus =
+      s.binary && (n?.status ?? "modified") === "modified" ? "binary" : (n?.status ?? "modified");
+    const entry: FileEntry = { path: newPath, adds: s.adds, dels: s.dels, status, reasons: [] };
+    entry.reasons = riskReasons(entry, [newPath, oldPath]);
+    return entry;
+  });
+}
+
+/** Distill `git diff --numstat` and `git diff --name-status` output for one
+ *  range into a compact digest — totals, per-file +adds/-dels (largest churn
+ *  first), a risky-files section — plus the totals as data. */
+export function distillDiffStats(numstat: string, nameStatus: string): Digest {
+  const files = parse(numstat ?? "", nameStatus ?? "");
+  if (files.length === 0) {
+    return { text: "Diff digest — no changes (empty diff).", totals: { files: 0, additions: 0, deletions: 0 } };
+  }
 
   const totalAdds = files.reduce((n, f) => n + f.adds, 0);
   const totalDels = files.reduce((n, f) => n + f.dels, 0);
@@ -201,5 +239,25 @@ export function distillDiff(unifiedDiff: string): string {
     for (const f of risky) lines.push(`  ${f.path} — ${f.reasons.join(", ")}`);
   }
 
-  return lines.join("\n");
+  return { text: lines.join("\n"), totals: { files: files.length, additions: totalAdds, deletions: totalDels } };
+}
+
+/** A `DigestReport` read back from a run ledger row (a resumed run): the shape
+ *  is re-validated, never trusted as-is. Anything malformed → undefined. */
+export function parseDigestReport(value: unknown): DigestReport | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.base !== "string") return undefined;
+  if (v.complete === true) {
+    const t = v.totals as Record<string, unknown> | undefined;
+    const n = (x: unknown) => typeof x === "number" && Number.isInteger(x) && x >= 0;
+    if (!t || !n(t.files) || !n(t.additions) || !n(t.deletions)) return undefined;
+    return {
+      complete: true,
+      base: v.base,
+      totals: { files: t.files as number, additions: t.additions as number, deletions: t.deletions as number },
+    };
+  }
+  if (v.complete === false && typeof v.reason === "string") return { complete: false, base: v.base, reason: v.reason };
+  return undefined;
 }
