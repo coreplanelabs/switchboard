@@ -23,6 +23,19 @@ export interface TourStep {
   anchor: TourAnchor;
 }
 
+/** A Tour anchor with the sha its permalink was rendered at — what a reader
+ *  gets back from a rendered body (or from a submitted object at the head it
+ *  was rendered for), so a surface can tell whether the anchors are at the
+ *  head it is looking at. */
+export interface RenderedTourAnchor extends TourAnchor {
+  sha: string;
+}
+
+/** A Tour step whose anchor carries its render sha. Assignable to `TourStep`. */
+export interface RenderedTourStep extends TourStep {
+  anchor: RenderedTourAnchor;
+}
+
 export interface PrDescription {
   /** The PR title's single source. Metadata for the PR's own title field —
    *  never rendered into the body (GitHub shows the title itself). */

@@ -14,14 +14,15 @@ import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../exec
 import type { ChatMessage, Provider } from "../../providers/types.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import { currentPrHeadSha, prCommitsSince, type RepoContext } from "../repoContext.js";
-import { PrDescriptionSchema, type PrDescription } from "../prDescription.js";
+import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";
 import { parseVerdictInput, type ReviewVerdict } from "../reviewVerdict.js";
 import { parseDigestReport, type DigestReport } from "../diffDigest.js";
 import { settleReviewedHead, type makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "../codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
 import { startReviewReadingDiff } from "../readingDiff.js";
-import { isSpanRecord, redactSecrets, type RunEvent } from "../runEvents.js";
+import { startReviewDescription } from "../reviewDescription.js";
+import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
 import type { RunStatus } from "../runRecord.js";
@@ -253,7 +254,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // lands iff it finishes within the review (a later publish is dropped by
   // the registry's finished-run rule, and the baseline still stands).
   let readingDiffBaseline: Promise<boolean> | undefined;
+  let descriptionArtifact: Promise<boolean> | undefined;
   if (agent.name === "review" && repoCtx.pr !== undefined) {
+    // The PR's description as data (docs/reference/specs/reading-diff.md item 7): the
+    // object a coding run submitted for this head when the run store has one,
+    // else the body GitHub holds parsed back. A store read, so it is joined
+    // before the answer like the baseline below — never awaited here.
+    descriptionArtifact = startReviewDescription({
+      store: deps.runStore,
+      repoCtx,
+      publish: (e) => registry.publish(run.id, e),
+    });
     // Two background spans (docs/reference/specs/tracing.md): concurrent with the loop,
     // structure for the partition, never a counted term — started under the
     // root inside `startReviewReadingDiff`, so each diff's exec is a child.
@@ -608,6 +619,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // upgrade is deliberately NOT awaited — see the comment at the start.
     const baseline = readingDiffBaseline;
     if (baseline) await root.span("run.reading_diff_join", () => baseline);
+    const description = descriptionArtifact;
+    if (description) await root.span("run.pr_description_join", () => description);
     // Typed-output boundary (docs/reference/specs/llm-output.md item 5): the answer is
     // canonicalized ONCE here, so the event text, the channel reply, the
     // GitHub post, and memory all read one Markdown dialect; the model's raw
@@ -705,22 +718,4 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     checklistCheckedOff,
     releaseWorkspace,
   };
-}
-
-/** The `pr_description` event's payload: every string LEAF passed through
- *  `redactSecrets` by a generic deep walk — numbers/booleans ride unchanged,
- *  structure preserved — so a field added to the schema (or a secret smuggled
- *  into an anchor path) can never dodge redaction by being missed in a
- *  hand-walk. */
-export function redactPrDescription(d: PrDescription): PrDescription {
-  return redactStringLeaves(d) as PrDescription;
-}
-
-function redactStringLeaves(value: unknown): unknown {
-  if (typeof value === "string") return redactSecrets(value);
-  if (Array.isArray(value)) return value.map(redactStringLeaves);
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, redactStringLeaves(v)]));
-  }
-  return value;
 }

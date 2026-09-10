@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../execution/githubPulls.js";
+import { parsePrDescription, renderPrDescriptionMarkdown } from "./prDescription.js";
 import type { RunEvent } from "./runEvents.js";
 import {
   observeCodingWorkspace,
@@ -93,6 +95,74 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).toContain("https://github.com/acme/api/pull/7");
     // A binding ref already resolved the base — the GitHub last resort never fires.
     expect(fetchRepoInfo).not.toHaveBeenCalled();
+  });
+
+  // Feature: docs/reference/specs/reading-diff.md item 7 — the Tour as data is persisted at
+  // its source: the object the body was rendered from lands on the coding
+  // run's stream as a `submitted` pr_description artifact, right after
+  // `pr_opened`, with the PR number GitHub answered and the head the anchors
+  // were rendered at.
+  it("the golden description → a `submitted` pr_description artifact right after pr_opened: the PR number GitHub answered, the render head on every anchor, the rendered body, complete", async () => {
+    const golden = parsePrDescription(
+      JSON.parse(readFileSync(new URL("./testing/goldenTour.description.json", import.meta.url), "utf8")),
+    );
+    const spy = openSpy({ number: 329, htmlUrl: "https://github.com/acme/api/pull/329", created: false });
+    const events: RunEvent[] = [];
+    await runCodingPrPostStep({
+      observed: observation(),
+      description: golden,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: undefined },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      publish: (e) => events.push(e),
+      logKey: "t",
+    });
+    expect(events.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    const artifact = events[1];
+    if (artifact.type !== "review_artifact" || artifact.artifact !== "pr_description") throw new Error("no artifact");
+    expect(artifact).toMatchObject({
+      origin: "submitted",
+      repo: "acme/api",
+      pr: 329,
+      headSha: HEAD,
+      title: golden.title,
+      tldr: golden.tldr,
+      body: renderPrDescriptionMarkdown(golden, { repo: "acme/api", headSha: HEAD }),
+      remaining: golden.remaining,
+      decisions: golden.decisions,
+      complete: true,
+      problems: [],
+      truncated: false,
+      at: expect.any(Number),
+    });
+    expect(artifact.tour).toEqual(golden.tour.map((s) => ({ ...s, anchor: { ...s.anchor, sha: HEAD } })));
+    expect(spy.calls[0].body).toBe(artifact.body); // the body on GitHub and the body in the record are one rendering
+  });
+
+  it("no PR opened (open throws, or nothing to open) → no pr_description artifact", async () => {
+    const events: RunEvent[] = [];
+    await runCodingPrPostStep({
+      observed: observation(),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: undefined },
+      openPullRequest: openSpy(new Error("boom")).fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      publish: (e) => events.push(e),
+      logKey: "t",
+    });
+    await runCodingPrPostStep({
+      observed: observation({ remoteHead: undefined }),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: undefined },
+      openPullRequest: openSpy().fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      publish: (e) => events.push(e),
+      logKey: "t",
+    });
+    expect(events.filter((e) => e.type === "review_artifact")).toEqual([]);
   });
 
   it("the base falls to the PR's true base ref first (a fix round repushes the PR's own head branch)", async () => {

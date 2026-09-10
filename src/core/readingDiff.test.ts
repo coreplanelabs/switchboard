@@ -271,7 +271,9 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
     });
     expect(await started.baseline).toBe(true);
     expect(await started.upgrade).toBe(true);
-    const powered = published.map((e) => (e.type === "review_artifact" ? e.poweredBy : "?")).sort();
+    const powered = published
+      .map((e) => (e.type === "review_artifact" && e.artifact === "reading_diff" ? e.poweredBy : "?"))
+      .sort();
     expect(powered).toEqual(["git", "meat"]);
   });
 

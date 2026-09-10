@@ -74,6 +74,7 @@ function setup(userId: string) {
     config,
     runLedger: new NullLedgerWriteThrough("gen-T", new NullRunStore()),
     runHistoryWriter: writer,
+    runStore: new NullRunStore(),
     githubApi: new InMemoryGithubApi(),
     memory: new NullMemoryStore(),
     providers: { get: () => ({}) as never } as never,

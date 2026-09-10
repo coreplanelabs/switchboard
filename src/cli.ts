@@ -599,6 +599,7 @@ async function main(): Promise<void> {
     mcp,
     memory,
     runHistoryWriter,
+    runStore,
     runLedger: new NullLedgerWriteThrough(mintGeneration(), runStore),
     threadsElsewhere: new ThreadsElsewhere(),
     commands,

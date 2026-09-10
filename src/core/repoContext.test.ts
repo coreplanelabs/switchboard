@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { prCommitsSince, repoFromThread, resolveRepoContext } from "./repoContext.js";
+import { PR_BODY_CAP, prCommitsSince, repoFromThread, resolveRepoContext } from "./repoContext.js";
 
 // Feature: docs/reference/specs/resident-repos.md item 29 — repo/ref resolution BEFORE the
 // model turn: explicit signals in the current message (owner/name slug,
@@ -660,6 +660,52 @@ describe("PR size for the digest-coverage guard", () => {
     expect(ctx.headSha).toBe(TIP);
     expect(ctx.prSize).toBeUndefined();
     log.mockRestore();
+  });
+});
+
+// Feature: docs/reference/specs/reading-diff.md item 7 — the PR's title and body come off
+// the same REST call as its head, so a review run can publish the description
+// as data without a second fetch. Facts, capped, never a reason to fail the
+// resolution.
+describe("PR title and body for the description artifact", () => {
+  const SHA = "c".repeat(40);
+  const head = { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } };
+
+  it("an explicit PR carries prDescription { title, body, truncated: false }; a null body is an empty body", async () => {
+    stubFetch({ body: { state: "open", title: "Fix the gate", body: "## TL;DR\n\nx", head } });
+    const ctx = await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), []);
+    expect(ctx.prDescription).toEqual({ title: "Fix the gate", body: "## TL;DR\n\nx", truncated: false });
+    stubFetch({ body: { state: "open", title: "No body", body: null, head } });
+    expect((await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), [])).prDescription).toEqual({
+      title: "No body",
+      body: "",
+      truncated: false,
+    });
+  });
+
+  it("the body is capped at PR_BODY_CAP chars with truncated: true, never splitting a surrogate pair", async () => {
+    const long = "a".repeat(PR_BODY_CAP - 1) + "😀" + "b".repeat(10);
+    stubFetch({ body: { state: "open", title: "Long", body: long, head } });
+    const ctx = await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), []);
+    expect(ctx.prDescription?.truncated).toBe(true);
+    expect(ctx.prDescription?.body).toBe("a".repeat(PR_BODY_CAP - 1)); // the pair after the cut is dropped whole
+    expect(ctx.prDescription?.body.length).toBeLessThanOrEqual(PR_BODY_CAP);
+  });
+
+  it("an inherited PR carries prDescription too; a non-string title (no facts) or a failed fetch leaves it unset", async () => {
+    stubFetch({ body: { state: "open", title: "Inherited", body: "b", base: { ref: "main" }, head: { sha: SHA } } });
+    const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/3" }];
+    const inherited = await resolveRepoContext(msg("re-review"), history);
+    expect(inherited.pr).toBe(3);
+    expect(inherited.prDescription).toEqual({ title: "Inherited", body: "b", truncated: false });
+    stubFetch({ body: { state: "open", head } }); // no title in the answer
+    expect(
+      (await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), [])).prDescription,
+    ).toBeUndefined();
+    stubFetch({ reject: "fetch failed" });
+    const failed = await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), []);
+    expect(failed.pr).toBe(3);
+    expect(failed.prDescription).toBeUndefined();
   });
 });
 

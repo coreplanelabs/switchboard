@@ -64,6 +64,7 @@ import {
   type RepoShipInfo,
 } from "../execution/githubPulls.js";
 import { encodeGithubPathSegments, renderPrDescriptionMarkdown, type PrDescription } from "./prDescription.js";
+import { submittedPrDescriptionArtifact } from "./reviewDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { parseExitPrefix, type RunEvent } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
@@ -391,6 +392,15 @@ export async function runCodingPrPostStep(input: {
         url: opened.htmlUrl,
         number: opened.number,
         created: opened.created,
+        at: systemClock(),
+      });
+      // The description as data, persisted at its source (reading-diff.md item
+      // 7): the same object the body was rendered from, with the head it was
+      // rendered at, so a review of this head can carry the exact Tour instead
+      // of parsing the body back.
+      input.publish({
+        type: "review_artifact",
+        ...submittedPrDescriptionArtifact(prDescription, { repo, pr: opened.number, headSha, body }),
         at: systemClock(),
       });
       return opened.created

@@ -98,6 +98,7 @@ function setup() {
     config,
     runLedger: ledger,
     runHistoryWriter: new NullRunHistoryWriter(),
+    runStore: new NullRunStore(),
     githubApi: new InMemoryGithubApi(),
   };
   const message = msg("agent:coding fix it");

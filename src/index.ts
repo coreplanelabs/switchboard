@@ -294,6 +294,7 @@ export async function runBot(): Promise<void> {
     mcp,
     memory,
     runHistoryWriter,
+    runStore,
     threadsElsewhere,
     runLedger,
   };
