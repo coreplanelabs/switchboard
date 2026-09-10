@@ -11,7 +11,7 @@ Merge the release PR and confirm the new commit is live on every Worker it touch
 
 You do not deploy. Every merge lands in the one open release PR (`chore(main): release <version>`).
 
-The 1.2 line is the same loop on the `v1.2` branch: its merges land in that branch's own release PR (`chore(v1.2): release 1.2xx.x`), its releases are 1.200.0 and up (the public name is "1.2"), and merging one publishes the images at `:<version>` only and, when publishing is on, the package under npm's `next` tag. It deploys nothing: production follows `main` alone, and the line lands on `main` once, as 2.0.0, when its release moment comes ([Migration notes](../reference/migrations.md)).
+The 1.2 line is the same loop on the `v1.2` branch: its merges land in that branch's own release PR (`chore(v1.2): release 1.2xx.x`), its releases are 1.200.0 and up (the public name is "1.2"), and merging one publishes the images at `:<version>` only and never the package (publishing follows the default branch). It deploys nothing: production follows `main` alone, and the line lands on `main` once, as 2.0.0, when its release moment comes ([Migration notes](../reference/migrations.md)).
 
 ## Read the plan on the release PR
 

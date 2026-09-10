@@ -474,9 +474,8 @@ describe("the release publishes the npm package", () => {
   // `--provenance` only while the repository is public.
   const file = ".github/workflows/release-please.yml";
   const workflow = parse(read(file)) as Workflow & { permissions?: Record<string, string> };
-  // The dist-tag follows the line (item 28): `latest` on main, `next` on v1.2.
   const PUBLISH_LINE =
-    "npm publish --workspace packages/switchboard --access public ${{ github.event.repository.private == false && '--provenance' || '' }} --tag ${{ github.ref == 'refs/heads/main' && 'latest' || 'next' }}";
+    "npm publish --workspace packages/switchboard --access public ${{ github.event.repository.private == false && '--provenance' || '' }}";
   const publish = Object.entries(workflow.jobs).filter(([, job]) =>
     job.steps?.some((s) => /^npm publish\b/.test(s.run?.trim() ?? "")),
   );
@@ -932,7 +931,7 @@ describe("the 1.2 line releases from its own branch and never deploys", () => {
     expect(release.jobs["release-pr-deploy-targets"].if).toContain(`${onMain} && `);
   });
 
-  it("`:latest` and npm's `latest` follow main; a v1.2 release publishes its version tag alone and the package under `next`", () => {
+  it("`:latest` follows main; a v1.2 release publishes its version tag alone and never the package", () => {
     const publish = release.jobs["publish-image"];
     const tags = publish.steps.find((s) => (s as Step & { id?: string }).id === "tags")!;
     expect((tags as Step & { env?: Record<string, string> }).env?.LATEST).toBe(
@@ -941,7 +940,8 @@ describe("the 1.2 line releases from its own branch and never deploys", () => {
     expect(tags.run).toContain('if [ "$LATEST" = "true" ]; then echo "${NAME}:latest"; fi');
     const build = publish.steps.find((s) => s.uses?.startsWith("docker/build-push-action@"))!;
     expect(build.with?.tags).toBe("${{ steps.tags.outputs.tags }}");
-    const npm = release.jobs["publish-npm"].steps.find((s) => s.run?.startsWith("npm publish"))!;
-    expect(npm.run).toContain(`--tag \${{ ${onMain} && 'latest' || 'next' }}`);
+    // The package is published from the default branch only (item 23), so a
+    // v1.2 release never publishes it and no dist-tag rule is needed here.
+    expect(release.jobs["publish-npm"].if).toContain("github.event.repository.default_branch");
   });
 });
