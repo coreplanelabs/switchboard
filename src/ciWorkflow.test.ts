@@ -370,6 +370,18 @@ describe("the release publishes the bot image", () => {
     expect(build.with).not.toHaveProperty("file"); // the context's own Dockerfile, the one wrangler (and compose) build
   });
 
+  it("the bot's leg writes build.json from the release commit between the checkout and the build — the stamp /healthz serves and the live gate compares; the Worker legs stamp at deploy time", () => {
+    const stamp = job.steps.find((s) => s.run?.trim() === "node deploy/cloudflare/write-build.mjs");
+    expect(stamp, "no step runs deploy/cloudflare/write-build.mjs").toBeDefined();
+    expect(stamp!.if).toBe("matrix.image.name == 'bot'");
+    expect((stamp as Step & { env?: Record<string, string> }).env).toEqual({
+      SWITCHBOARD_BUILD_COMMIT: "${{ github.sha }}",
+    });
+    const at = (s: Step) => job.steps.indexOf(s);
+    expect(at(stamp!)).toBeGreaterThan(at(step("actions/checkout@")!));
+    expect(at(stamp!)).toBeLessThan(at(step("docker/build-push-action@")!));
+  });
+
   it("names each image from the repository, lowercased, plus the leg's suffix — never from a literal owner", () => {
     // Outside comments, `ghcr.io/` appears only followed by the lowercased repository variable and the suffix.
     const code = text
