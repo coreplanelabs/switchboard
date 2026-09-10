@@ -92,7 +92,7 @@ async function list(
 }
 
 describe("memory.list", () => {
-  it("memory disabled → `unavailable` with the legacy sentence, the store untouched", async () => {
+  it("memory disabled → `unavailable` with the golden sentence, the store untouched", async () => {
     const store = seeded();
     store.list = async () => {
       throw new Error("must not be called");

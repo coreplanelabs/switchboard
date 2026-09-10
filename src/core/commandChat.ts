@@ -29,8 +29,8 @@ import type { Span } from "./trace/types.js";
 // only when it starts with `<group> <verb>` for an id that is registered AND
 // exposed to chat (plus the one word `help`, the chat spelling of `help show`).
 // Everything else — prose, an unknown verb, a mid-sentence mention — is null,
-// and the dispatcher carries on. Since phase 4b there is no legacy chat parser
-// left: this is the ONLY thing that turns chat text into a command. Natural
+// and the dispatcher carries on. This is the ONLY thing that turns chat text
+// into a command. Natural
 // language is never recognized here (never guess); the dispatcher's
 // `recognizeOperation` translates its few conservative forms INTO a registry
 // invocation (`repo.test` / `repo.build`) instead of executing anything itself.

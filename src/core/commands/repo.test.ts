@@ -21,9 +21,8 @@ import { createTracer } from "../trace/tracer.js";
 // (phase 4b): the whole `repo.*` group as registry commands — `repo.list` (open,
 // `repo:read`), the mutating verbs `onboard/offboard/reconfigure/rebuild`
 // (`repoManager`, `repo:write`), and the deterministic ops `test/build`
-// (`agentRun` + canUseRepo, `repo:exec`). Text replies are the pre-migration
-// chat replies (golden strings captured from the legacy handlers before they
-// were removed); flags are the derived grammar (`--ref`, `--test "…"`).
+// (`agentRun` + canUseRepo, `repo:exec`). Text replies are golden strings;
+// flags are the derived grammar (`--ref`, `--test "…"`).
 
 const ok = (data: Record<string, unknown>, status = 200): ResidentAdminResponse => ({ status, data });
 
@@ -231,7 +230,7 @@ describe("repo.list", () => {
     );
   });
 
-  it("no resident configured, a non-200 route answer, and a transport failure are `unavailable` with the legacy text", async () => {
+  it("no resident configured, a non-200 route answer, and a transport failure are `unavailable` with the golden text", async () => {
     const unconfigured = bind({
       admin: {
         unavailable: "Resident repo environments aren't configured — set `execution.resident.baseUrl` in config.yaml.",

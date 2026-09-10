@@ -80,8 +80,8 @@ type TestDeps = CoreDeps & {
  *  store read LAZILY (a test may set them after `makeDeps`); ledger, tracker,
  *  and run registry at wiring time (tests that set those call `wireCommands`
  *  again) — plus an invoke spy, so a test can assert which registry command a
- *  message reached. Every `makeDeps` wires it once: since phase 4b there is no
- *  chat command outside the registry. */
+ *  message reached. Every `makeDeps` wires it once: there is no chat command
+ *  outside the registry. */
 function wireCommands(deps: TestDeps): { invoked: string[] } {
   const bound = buildCoreCommands(deps.config, null, {
     registry: deps.runRegistry ?? new RunRegistry(),
@@ -281,8 +281,7 @@ describe("dispatch", () => {
 
 // The answer path is deterministic: one model call, the answer replied
 // verbatim through `io.reply` — no model ever sits between the run record and
-// a surface (docs/reference/specs/llm-output.md item 7; an earlier flag-gated structuring
-// pass was retired).
+// a surface (docs/reference/specs/llm-output.md item 7).
 describe("answer reply path", () => {
   it("sends the answer verbatim via reply, with exactly one model call", async () => {
     const provider = capturingProvider();
@@ -6473,9 +6472,8 @@ describe("run history write path", () => {
 
 // Feature: docs/reference/specs/command-registry.md (chat adapter) / docs/reference/specs/routing-and-config.md
 // item 10 — the registry chat parse is the LAST text-only fast path:
-// as the whole of stage A, before io.history()/recognizeOperation.
-// Since phase 4b EVERY chat command is registry-owned; nothing is reserved
-// for a legacy parser (there is none).
+// as the whole of stage A, before io.history()/recognizeOperation. EVERY
+// chat command is registry-owned; the adapter is the only chat parser.
 describe("registry chat commands in the fast-path chain", () => {
   function withCommands(deps: TestDeps) {
     const reg = new RunRegistry({ genId: () => "live0001", genToken: () => "tok-secret" });
@@ -6541,7 +6539,7 @@ describe("registry chat commands in the fast-path chain", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("every repo verb is the registry's: `repo onboard x` is the schema's named refusal (no resident call), `repo onboard acme/api` and `repo list` invoke — nothing is reserved for a legacy parser", async () => {
+  it("every repo verb is the registry's: `repo onboard x` is the schema's named refusal (no resident call), `repo onboard acme/api` and `repo list` invoke — the registry's adapter is the only chat parser", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     const admin: ResidentAdminClient = {

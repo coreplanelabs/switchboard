@@ -201,7 +201,7 @@ function fakeReqRes(method: string, url: string, headers: IncomingHttpHeaders = 
   };
 }
 
-/** An unlisted Access browser session holds every group's read (the legacy translation). */
+/** An unlisted Access browser session holds every group's read (its baseline). */
 const BROWSER_GRANTS = { commandGroups: coreCommandGroups() };
 
 const httpRow: AdapterRow = {

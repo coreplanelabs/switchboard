@@ -32,8 +32,7 @@ import {
 // commands — the same step the chat command has always run, now reachable on
 // every surface, with the chat gates unchanged (`report` open, `propose` =
 // repo managers) and explicit `friction:read` / `friction:write` scopes for
-// machine callers. Golden text below is the pre-migration chat reply, captured
-// verbatim from the legacy handler before it was removed.
+// machine callers. The golden text below is the chat reply, verbatim.
 
 let t = 0;
 const at = (ms: number) => (t += ms);
@@ -165,7 +164,7 @@ describe("friction.report", () => {
     );
   });
 
-  it("without a ledger is `unavailable` with the legacy message; a bad limit names the field only", async () => {
+  it("without a ledger is `unavailable` with the golden message; a bad limit names the field only", async () => {
     const { commands } = bind();
     const res = await commands.invoke("friction.report", {}, mcp("friction:read"));
     expect(res).toMatchObject({ ok: false, error: "unavailable", status: 503, message: NO_LEDGER_MESSAGE });
@@ -341,7 +340,7 @@ describe("friction.propose", () => {
     ).toMatchObject({ ok: false, error: "invalid_input" });
   });
 
-  it("`repo` overrides the configured target; without either it is `unavailable` with the legacy hint", async () => {
+  it("`repo` overrides the configured target; without either it is `unavailable` with the golden hint", async () => {
     const { commands, tracker } = bind({ ledger: ledgerDep(await seededLedger()), config: async () => undefined });
     expect(await commands.invoke("friction.propose", {}, mcp("friction:write"))).toMatchObject({
       ok: false,

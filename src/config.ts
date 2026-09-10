@@ -251,7 +251,7 @@ export class FileOverridesBacking implements OverridesBacking {
   constructor(path: string) {
     this.path = resolve(path);
   }
-  /** Synchronous under the hood so the legacy `new ConfigStore(config, path)` can load it inline. */
+  /** Synchronous under the hood so `new ConfigStore(config, path)` can load it inline. */
   loadSync(): Overrides | undefined {
     return existsSync(this.path) ? (JSON.parse(readFileSync(this.path, "utf8")) as Overrides) : undefined;
   }

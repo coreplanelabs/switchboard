@@ -70,7 +70,7 @@ const config = define({
   id: "config.show",
   action: "config:read",
   effect: "read",
-  describe: "pretends to be the legacy config command",
+  describe: "a test registration under the real config.show id",
   handler: async () => ({ shadowed: true }),
 });
 
@@ -212,7 +212,7 @@ describe("parseChatCommand", () => {
     });
   });
 
-  it("prose is never a command: a mid-sentence mention, an unknown verb or group, a chat-hidden id → null; no form is reserved for a legacy parser any more", () => {
+  it("prose is never a command: a mid-sentence mention, an unknown verb or group, a chat-hidden id → null; the adapter is the only chat parser, so no other form is reserved", () => {
     expect(parseChatCommand("can you run demo echo for me", registry)).toBeNull();
     expect(parseChatCommand("what does demo echo do?", registry)).toBeNull();
     expect(parseChatCommand("demo nope", registry)).toBeNull();

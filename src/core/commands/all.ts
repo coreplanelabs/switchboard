@@ -14,10 +14,10 @@ import { registerSetupCommands, type SetupCommandDeps } from "./setup.js";
 // Every command the bot registers, and the deps object they are bound to.
 // Bound ONCE per process by `buildCoreCommands` (src/core/commandCatalogue.ts)
 // — the one binding the bot (src/index.ts) and the CLI (src/cli.ts) share — so
-// HTTP, MCP, CLI, and chat all expose the same catalogue. Since phase 4b
-// this IS every command there is: no legacy chat parser, no standalone CLI. A
-// new command group adds its deps slice here and its `register*` call below; no
-// adapter changes.
+// HTTP, MCP, CLI, and chat all expose the same catalogue. This IS every
+// command there is: the registry's adapters are the only chat parser and the
+// only CLI. A new command group adds its deps slice here and its `register*`
+// call below; no adapter changes.
 
 export type CoreCommandDeps = HelpCommandDeps &
   ConfigCommandDeps &

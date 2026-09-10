@@ -63,7 +63,7 @@ function configDeps(config: ConfigStore) {
   };
 }
 
-/** The Caller the chat adapter resolves for a Slack person under this config (its grants are the legacy keys translated). */
+/** The Caller the chat adapter resolves for a Slack person under this config (grants from `grantsFor`). */
 const chat = (config: ConfigStore, userId: string, channelId = "slack:CX"): Caller =>
   chatCallerFor({ userId, channelId, threadKey: `${channelId}:1.0` }, config);
 const mcp = (...actions: string[]): Caller => callerWith("mcp", "mcp:alice", actions);
@@ -257,7 +257,7 @@ describe("config set", () => {
     expect(EFFORT_LEVELS.length).toBeGreaterThan(3);
   });
 
-  it("the legacy `key=value` spelling is rejected as `invalid_input` (the grammar is `--key value`), and `instructions` is its own command", async () => {
+  it("a `key=value` spelling is rejected as `invalid_input` (the grammar is `--key value`), and `instructions` is its own command", async () => {
     const commands = bind(store());
     expect(parseInvocation(commands.get("config.set")!, ["me", "agent=review"])).toMatchObject({
       kind: "invalid",
