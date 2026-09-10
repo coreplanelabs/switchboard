@@ -1,24 +1,33 @@
 # Check spend
 
-Read what the installation is costing, per day and per group, from the dashboard or from a script.
+Read what the installation costs, per day and per group, on the dashboard or from a script.
 
-## Before you start
+**You need:**
 
-- A `costs` block in `config.yaml` naming the Cloudflare account and the groups of Workers, containers and Durable Objects to price, plus `CF_ANALYTICS_TOKEN` (Account Analytics: Read). Optionally `ANTHROPIC_ADMIN_KEY` for model spend. Without the block, **Costs** is not in the header and `/costs` answers 503 ([Turn features on and off](turn-features-on-and-off.md)).
-- The dashboard's identity gate admits you ([Dashboard routes](../reference/dashboard-routes.md)).
+- A `costs` block in `config.yaml`: the Cloudflare account and the groups of Workers, containers and Durable Objects to price.
+- `CF_ANALYTICS_TOKEN` (Account Analytics: Read); optionally `ANTHROPIC_ADMIN_KEY` for model spend.
+- A dashboard session.
 
-## 1. Open the dashboard
+Without the block, **Costs** is not in the header and `/costs` answers 503.
 
-`/costs` shows daily spend for every configured group. Nothing is estimated or cached: each load prices live from Cloudflare's billing data and, when the admin key is set, from Anthropic's.
+## Open the dashboard
 
-## 2. Narrow to one group
+Open `/costs`: daily spend for every configured group. Each load prices live from Cloudflare's billing data and, with the admin key, Anthropic's; nothing is estimated or cached.
 
-`/costs/<group>` is one group's page.
+## Narrow to one group
 
-## 3. Script it
+Open `/costs/<group>`.
 
-`/costs/<group>.json` is the same data, machine-readable, behind the same gate. Send the credential the installation's `dashboard.auth` strategy expects: a service token under Access, the bearer under `token`.
+## Script it
 
-## What you did
+Fetch `/costs/<group>.json`: the same data, machine-readable, behind the same gate. Send what the installation's `dashboard.auth` strategy expects:
 
-You read the installation's spend by group and know the JSON twin to alert on. The figures cost two read-only API tokens; nothing is stored.
+| `dashboard.auth` | Send |
+|---|---|
+| `access` | a service token |
+| `token` | the bearer |
+
+## Next
+
+- [Turn features on and off](turn-features-on-and-off.md): the `costs` block and its tokens.
+- [Dashboard routes](../reference/dashboard-routes.md): the three `/costs` routes and their auth.

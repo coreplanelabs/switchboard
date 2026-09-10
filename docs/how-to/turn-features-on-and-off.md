@@ -1,45 +1,40 @@
 # Turn features on and off
 
-Run exactly the OpenSwitchboard you need — a Slack bot with one provider on a laptop, or the full four-Worker deployment — and know, before you change a block of `config.yaml`, what will appear, what will disappear, and what it will cost to run.
+Add one `config.yaml` block and its env vars, restart, and that capability's commands, dashboard section and Worker appear together.
 
-Everything optional is a **capability**: computed once when the process starts, from `config.yaml` and the environment, and read by every surface. A capability that is off is not a feature that answers "unavailable"; it is a feature that is not there. Its commands are absent from `help`, from the CLI and MCP catalogues and from `/api`; its dashboard section is not in the nav; the agent's own account of itself does not mention it; `deploy plan` does not list its Worker. Turn it on and all of that appears at once, from one change.
+**You need:** `config.yaml`, its environment, and a way to make a change live (restart; on Cloudflare `deploy config` then `deploy restart`, see [Operate production](operate-production.md)).
 
-## Before you start
+## Pick a shape
 
-- Access to the installation's `config.yaml` and its environment, and a way to make a change live: a restart locally, `deploy config` then `deploy restart` on Cloudflare ([Operate production](operate-production.md)).
-- Each row below names the env vars its capability needs; a missing one fails fast, by name, at startup.
-
-## 1. Pick the shape nearest to you
-
-Each of these is a complete `config.yaml` plus an environment, kept as a test fixture the suite round-trips through the capability computation, so they cannot drift from the rules below. Copy the nearest one from [`src/core/testing/capabilityFixtures.ts`](../../src/core/testing/capabilityFixtures.ts) and turn things on one block at a time.
+Copy the nearest fixture from [`src/core/testing/capabilityFixtures.ts`](../../src/core/testing/capabilityFixtures.ts).
 
 | Shape | What is on | Start here |
 |---|---|---|
-| **minimal** | Slack and one provider. Tools run on the bot host. No Access, so the dashboards serve loopback callers only (`dashboardAuth: none`). Nothing optional. | [Run it locally](../tutorials/run-it-locally.md) is this configuration |
-| **local-full** | Everything a laptop can turn on: memory (in-process), run history on disk, GitHub via `GH_TOKEN`, an `mcp` block, one ingress bearer, a local docs URL. No Workers, so no residents, costs, schedules or ledger, and execution stays `local`. | Add blocks to the minimal config; the [configuration reference](../reference/configuration.md) has each one's off-state |
-| **cloud-full** | Everything on: the four Workers, tools in a Cloudflare sandbox, resident repositories, memory, run history and the ledger on the state Worker, MCP, costs, schedules, the GitHub App, ingress, Access. | [Deploy](deploy.md), then [Operate production](operate-production.md) |
+| **minimal** | Slack and one provider; tools on the bot host; `dashboardAuth: none` (loopback only) | [Run it locally](../tutorials/run-it-locally.md) |
+| **local-full** | minimal + in-process memory, run history on disk, `GH_TOKEN`, an `mcp` block, one ingress bearer, a local docs URL. No Workers, so no residents, costs, schedules or ledger | Add blocks to minimal ([Configuration](../reference/configuration.md)) |
+| **cloud-full** | Four Workers: sandbox execution, residents, durable memory, run history, ledger, MCP, costs, schedules, GitHub App, ingress, Access | [Deploy](deploy.md), then [Operate production](operate-production.md) |
 
-## 2. Add the block that turns a capability on
+## Add the block
 
-| Capability | Turn it on | What appears | What disappears when off | What it costs |
+| Capability | Turn it on | On | Off | Cost |
 |---|---|---|---|---|
-| `execution` | `execution.type: local` (default) · `e2b` + `E2B_API_KEY` · `cloudflare` + `execution.url` + `SANDBOX_TOKEN` | Where every `bash` call actually runs. `cloudflare` puts each thread's tools in its own sandbox container; `local` runs them on the bot host | Nothing is hidden: `local` is a real mode. What changes is trust: with `local`, anyone who can reach the coding agent can run commands on the host ([Execution and trust](../explanation/execution-and-trust.md)) | `cloudflare`: the sandbox Worker (`deploy/cloudflare-sandbox/`) and its container image, billed per running instance; `e2b`: an E2B account |
-| `residents` | `execution.resident.baseUrl` + `RESIDENT_OPERATOR_TOKEN` (runs) and `RESIDENT_ADMIN_TOKEN` (`repo …`) | The `repo` commands; the **Residents** dashboard section and `/residents`; the resident paragraph in the agent's self-description; a warm environment per onboarded repository ([Onboard a repo](onboard-a-repo.md)) | Every request clones cold into a per-thread workspace; the status card no longer notes "not onboarded as a resident" | The resident Worker (`deploy/cloudflare-resident/`): one Durable Object and one container per onboarded repository, an R2 bucket for snapshots — the most expensive thing OpenSwitchboard runs |
-| `memory` | `memory.enabled: true`; durable with `memory.worker.baseUrl` + `MEMORY_TOKEN` | The `memory` commands; the background-memory block on every model turn; the reflection pass after a run | Model input is byte-identical to a build without memory | Nothing extra on a laptop (in-process store, lost on restart; the log says so); durable memory needs the state Worker (`deploy/cloudflare-memory/`) |
-| `runHistory` | `runHistory.store: file`, or `runHistory.worker.baseUrl` + `MEMORY_TOKEN` | Finished runs stay readable on `/runs?all=1` and through `runs get` and `runs events` for `retentionDays`; `friction report` has runs to read; the retention sentence on `/runs` names the window | Finished runs are evicted about a minute after they end; the `/runs` toggle says so | `file`: host disk under `data/runs/` (ephemeral on Cloudflare Containers); `worker`: the state Worker's `RunHistoryDO` |
-| `runLedger` | Run history on the state Worker (a `worker`, not `file`) | A live run survives a bot restart: the next container reclaims it, a follow-up steers into it, `/runs` lists runs from every bot generation ([Runs: live, then remembered](../explanation/runs-live-and-history.md)) | A restart mid-run loses the run; its card is closed as interrupted | Included in the state Worker |
-| `mcp` | An `mcp` block (`credentialKeyEnv`, default `MCP_CREDENTIAL_KEY`, 32 bytes base64) | The `mcp` commands; `mcp__<server>__<tool>` tools on runs; the one-time connect page; the MCP line in the runtime-config block ([Connect an MCP server](connect-an-mcp-server.md)) | No external tools; servers listed under `mcpServers` in any tier are never connected | Nothing extra locally (sealed credentials in `data/mcp-secrets.json`); with `runtimeOverrides.worker` they live on the state Worker |
-| `costs` | A `costs` block + `CF_ANALYTICS_TOKEN` (Account Analytics: Read); optional `ANTHROPIC_ADMIN_KEY` | The **Costs** dashboard section, `/costs` and `/costs/<group>.json` ([Check spend](check-spend.md)) | The section is not in the nav; `/costs` answers 503 | Read-only API tokens; priced live, nothing stored |
-| `schedules` | `schedules.worker.baseUrl` + `MEMORY_TOKEN`; the shim's cron identity in `SWITCHBOARD_INGRESS_TOKENS` with a `grants.http:cron` entry | Firing history on the **Scheduled** tab and in `schedule list`: when each job last ran, its outcome, a link to the run | The tab lists the schedules with no firing history | The state Worker's `ScheduleDO`; the bot Worker's cron triggers |
-| `github` | The App triple `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`, or a personal `GH_TOKEN` | The `github_*` tools (repository reads, issue writes) for the agents that carry them; the coding agent's push and PR; `friction propose` filing issues | Agents answer from the conversation and the web only; the coding agent cannot open a PR | A GitHub App (recommended: scoped, rotates) or one personal token |
-| `ingress` | `SWITCHBOARD_INGRESS_TOKENS`, a JSON map of bearer → `{ subject, channel? }`, each subject granted in `grants.http:<subject>` / `mcp:<subject>` | `POST /ingress` and the MCP server at `/mcp`: CI, cron and other agents drive OpenSwitchboard without Slack ([HTTP](../reference/dashboard-routes.md), [MCP](connect-an-mcp-server.md)) | Both routes refuse every bearer; Slack and the CLI are the only ways in | Nothing: a token is a string you mint |
-| `dashboardAuth` | `dashboard.auth` in `config.yaml`, or the default: `access` when `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD` are set (a Cloudflare Access application in front of the bot's hostname), else `none`. `token` needs `dashboard.token.actor` and the bearer in `DASHBOARD_TOKEN` (or the env var `dashboard.token.env` names) | `access`: the dashboards for anyone your Access policy admits, service tokens for machines. `token`: the dashboards and `/api/*` for whatever sends the bearer (a proxy, curl, a script) as the one configured actor. `none`: the dashboards for loopback callers of a localhost deployment only | Nothing is ever open: `none` refuses every remote caller, and an explicit `none` on a public `PUBLIC_BASE_URL` refuses to start ([Dashboard routes](../reference/dashboard-routes.md)) | Cloudflare Access (the free tier covers small teams); `token` and `none` cost nothing |
+| `execution` | `execution.type: local` (default) · `e2b` + `E2B_API_KEY` · `cloudflare` + `execution.url` + `SANDBOX_TOKEN` | Where `bash` runs. `cloudflare`: one sandbox container per thread; `local`: the bot host | Nothing hidden. `local` lets anyone who reaches the coding agent run commands on the host ([Execution and trust](../explanation/execution-and-trust.md)) | `cloudflare`: the sandbox Worker (`deploy/cloudflare-sandbox/`), billed per running instance; `e2b`: an E2B account |
+| `residents` | `execution.resident.baseUrl` + `RESIDENT_OPERATOR_TOKEN` (runs) + `RESIDENT_ADMIN_TOKEN` (`repo …`) | `repo` commands; **Residents** section and `/residents`; a warm environment per onboarded repository ([Onboard a repo](onboard-a-repo.md)) | Every request clones cold into a per-thread workspace | The resident Worker (`deploy/cloudflare-resident/`): one Durable Object and one container per repository, an R2 bucket. The most expensive capability |
+| `memory` | `memory.enabled: true`; durable with `memory.worker.baseUrl` + `MEMORY_TOKEN` | `memory` commands; background-memory block on every turn; reflection pass after a run | Model input byte-identical to a build without memory | Laptop: nothing (in-process, lost on restart); durable: the state Worker (`deploy/cloudflare-memory/`) |
+| `runHistory` | `runHistory.store: file`, or `runHistory.worker.baseUrl` + `MEMORY_TOKEN` | Finished runs stay on `/runs?all=1`, `runs get` and `runs events` for `retentionDays`; `friction report` has runs to read | Finished runs evicted about a minute after they end | `file`: host disk under `data/runs/` (ephemeral on Cloudflare Containers); `worker`: the state Worker's `RunHistoryDO` |
+| `runLedger` | Run history on the state Worker (`worker`, not `file`) | A live run survives a bot restart; a follow-up steers into it; `/runs` lists every bot generation | A restart mid-run loses the run; its card closes as interrupted | Included in the state Worker |
+| `mcp` | An `mcp` block (`credentialKeyEnv`, default `MCP_CREDENTIAL_KEY`, 32 bytes base64) | `mcp` commands; `mcp__<server>__<tool>` tools on runs; the one-time connect page ([Connect an MCP server](connect-an-mcp-server.md)) | No external tools; `mcpServers` entries never connect | Local: sealed credentials in `data/mcp-secrets.json`; with `runtimeOverrides.worker`: the state Worker |
+| `costs` | A `costs` block + `CF_ANALYTICS_TOKEN` (Account Analytics: Read); optional `ANTHROPIC_ADMIN_KEY` | **Costs** section, `/costs`, `/costs/<group>.json` ([Check spend](check-spend.md)) | `/costs` answers 503 | Read-only API tokens; nothing stored |
+| `schedules` | `schedules.worker.baseUrl` + `MEMORY_TOKEN`; the cron identity in `SWITCHBOARD_INGRESS_TOKENS` with a `grants.http:cron` entry | Firing history on the **Scheduled** tab and in `schedule list` | Schedules listed, no firing history | The state Worker's `ScheduleDO`; the bot Worker's cron triggers |
+| `github` | `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`, or a personal `GH_TOKEN` | `github_*` tools; the coding agent's push and PR; `friction propose` files issues | Agents answer from the conversation and the web; no PRs | A GitHub App (recommended: scoped, rotates) or one personal token |
+| `ingress` | `SWITCHBOARD_INGRESS_TOKENS`: JSON map bearer → `{ subject, channel? }`, each subject granted in `grants.http:<subject>` / `mcp:<subject>` | `POST /ingress` and the MCP server at `/mcp` | Both routes refuse every bearer | Nothing |
+| `dashboardAuth` | `dashboard.auth`; default `access` when `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD` are set, else `none`. `token` needs `dashboard.token.actor` and `DASHBOARD_TOKEN` (or the env var `dashboard.token.env` names) | `access`: anyone your Access policy admits, service tokens for machines. `token`: dashboards and `/api/*` for the bearer as one actor. `none`: loopback callers only | `none` refuses every remote caller; an explicit `none` on a public `PUBLIC_BASE_URL` refuses to start | Cloudflare Access (free tier covers small teams); `token` and `none`: nothing |
 
-The `MEMORY_TOKEN` rows share one Worker: `memory.worker`, `runHistory.worker`, `schedules.worker` and `runtimeOverrides.worker` all name the state Worker (`deploy/cloudflare-memory/`) with the same bearer. Deploy it once and four capabilities are a config block away ([Worker topology](../explanation/worker-topology.md)).
+`memory.worker`, `runHistory.worker`, `schedules.worker` and `runtimeOverrides.worker` all name the state Worker, same `MEMORY_TOKEN`; deploy it once.
 
-## 3. Know which commands you just turned on
+## Check which commands you turned on
 
-This table is generated from the command registry. Every command declares the capability it needs on its own definition, and `npm run docs:check` fails when this table and the code disagree. A command listed under two capabilities is on when either gives it a backend (`repo test` runs against a resident or on the local host), so a row says what a command depends on, not everything it requires.
+A command under two capabilities is on when either gives it a backend.
 
 <!-- generated:capability-commands · npm run docs:gen — generated from the code, do not edit by hand -->
 
@@ -61,16 +56,18 @@ The other 20 commands are on in every installation.
 
 <!-- /generated:capability-commands -->
 
-## 4. Restart and confirm
+## Restart and confirm
 
-The bot logs the value it computed at startup: `[capabilities] {"execution":"local","residents":false,…}`. Every dashboard page carries the same value in its seed, which is how the nav knows which sections exist. If a command you expect is missing from `help`, that line says why before you read any config.
+You should see, in the startup log:
 
-## What you did
+```
+[capabilities] {"execution":"local","residents":false,…}
+```
 
-You chose a shape, added the block that turns a capability on, and read the startup line that confirms it. The exact rules — what each block switches, what an off-state renders — are the contract in [Capabilities](../reference/specs/capabilities.md); why capabilities are computed once and every off-state is a null object is [the decision record](../decisions/0018-capabilities-computed-once-null-objects.md).
+A missing env var fails fast, by name; if a command is missing from `help`, this says why.
 
-## See also
+## Next
 
-- [Configuration](../reference/configuration.md) — every block, what it does, what happens when it is absent.
-- [Worker topology](../explanation/worker-topology.md) — which Worker owns which capability.
-- [Execution and trust](../explanation/execution-and-trust.md) — why `execution` is the one capability about safety rather than features.
+- [Capabilities](../reference/specs/capabilities.md): the contract per block and off-state.
+- [Configuration](../reference/configuration.md): every block.
+- [Worker topology](../explanation/worker-topology.md): which Worker owns which capability.
