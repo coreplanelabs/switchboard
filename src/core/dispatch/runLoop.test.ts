@@ -76,6 +76,7 @@ function setup(answer: string | Error) {
     config,
     runLedger: new NullLedgerWriteThrough("gen-T", new NullRunStore()),
     runHistoryWriter: writer,
+    runStore: new NullRunStore(),
     githubApi: new InMemoryGithubApi(),
   };
   const message = msg("hello there");

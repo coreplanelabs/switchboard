@@ -50,6 +50,7 @@ import { InMemoryFrictionLedger, RunStoreFrictionLedger, type FrictionLedger } f
 import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
+import type { RepoContext } from "./repoContext.js";
 import { isRunRecord, type RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
@@ -145,6 +146,7 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
     memory: new NullMemoryStore(),
     mcp: new NullMcpToolSource(),
     runHistoryWriter: new NullRunHistoryWriter(),
+    runStore: new NullRunStore(),
     runLedger: new NullLedgerWriteThrough("test-gen", new NullRunStore()),
     threadsElsewhere: new ThreadsElsewhere(),
     dataDir: dir,
@@ -6690,7 +6692,11 @@ describe("registry chat commands in the fast-path chain", () => {
 // `review_artifact` reading diff into its own stream (before the answer, so it
 // lands in the run record); a coding run never does, and `off` disables it.
 describe("reading-diff artifact on review runs", () => {
-  function reviewRun(env: string | undefined, meatExec?: (cmd: string) => Promise<string>) {
+  function reviewRun(
+    env: string | undefined,
+    meatExec?: (cmd: string) => Promise<string>,
+    ctxOver: Partial<RepoContext> = {},
+  ) {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
     if (env === undefined) vi.stubEnv("SWITCHBOARD_READING_DIFF", "");
@@ -6704,6 +6710,7 @@ describe("reading-diff artifact on review runs", () => {
       pr: 42,
       headSha: "e".repeat(40),
       baseRef: "main",
+      ...ctxOver,
     });
     deps.postReviewComment = vi.fn(async () => {});
     const fake = {
@@ -6774,11 +6781,150 @@ describe("reading-diff artifact on review runs", () => {
     expect(registry.snapshotById("r1")!.events.filter((e) => e.type === "review_artifact")).toEqual([]);
   });
 
-  it("a coding run publishes no artifact", async () => {
-    const { registry, deps } = reviewRun(undefined);
+  it("a coding run publishes no artifact — neither the diff nor the PR description it did not open", async () => {
+    const { registry, deps } = reviewRun(undefined, undefined, { prDescription: PR_FACTS });
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding fix https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     expect(registry.snapshotById("r1")!.events.filter((e) => e.type === "review_artifact")).toEqual([]);
+  });
+
+  // Feature: docs/reference/specs/reading-diff.md item 7 — beside the diff, a PR review
+  // carries the PR's description as data: the object a coding run submitted for
+  // the reviewed head when the run store holds one, else the body parsed back.
+  const REVIEWED = "e".repeat(40);
+  const PR_BODY = [
+    "## TL;DR",
+    "",
+    `Two sentences, one of them holding ghp_${"a".repeat(30)}.`,
+    "",
+    "## Tour",
+    "",
+    "### 1. The gate",
+    "",
+    "Closes on a bad token.",
+    "",
+    `https://github.com/acme/api/blob/${REVIEWED}/src/gate.ts#L10-L20`,
+    "",
+    "### 2. Remaining changes",
+    "",
+    "- none — every touched file is covered by a step above",
+  ].join("\n");
+  const PR_FACTS = { title: "Fix the gate", body: PR_BODY, truncated: false };
+  function storedSubmitted(headSha: string): RunRecord {
+    const events: RunEvent[] = [
+      {
+        type: "review_artifact",
+        artifact: "pr_description",
+        origin: "submitted",
+        repo: "acme/api",
+        pr: 42,
+        headSha,
+        title: "Fix the gate (submitted)",
+        body: "## TL;DR\n\nsubmitted",
+        tldr: "submitted",
+        tour: [
+          { title: "The gate", description: "d", anchor: { path: "src/gate.ts", from: 10, to: 20, sha: headSha } },
+        ],
+        remaining: [],
+        decisions: [{ title: "Fail closed", rationale: "safer" }],
+        complete: true,
+        problems: [],
+        truncated: false,
+        at: 1,
+        seq: 1,
+      },
+    ];
+    return {
+      id: "coding-run",
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:UADMIN",
+      threadKey: "slack:C1:9",
+      channelVisibility: "public",
+      repo: "acme/api",
+      startedAt: Date.now() - 5000, // inside the store's retention window
+      finishedAt: Date.now() - 1000,
+      status: "completed",
+      eventCount: 1,
+      storedEventCount: 1,
+      truncated: false,
+      events: events as RunRecord["events"],
+      diagnosis: analyzeRunFriction(events),
+    };
+  }
+  const descriptionArtifacts = (registry: RunRegistry) =>
+    registry
+      .snapshotById("r1")!
+      .events.filter((e) => e.type === "review_artifact" && e.artifact === "pr_description")
+      .map((e) => (e.type === "review_artifact" && e.artifact === "pr_description" ? e : undefined)!);
+
+  it("no submitted object in the store → the PR body is parsed into the artifact before the answer, redacted, the reviewed head beside the anchors", async () => {
+    const { registry, deps } = reviewRun(undefined, undefined, { prDescription: PR_FACTS });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    const [artifact, ...rest] = descriptionArtifacts(registry);
+    expect(rest).toEqual([]);
+    expect(artifact).toMatchObject({
+      origin: "parsed",
+      repo: "acme/api",
+      pr: 42,
+      headSha: REVIEWED,
+      title: "Fix the gate",
+      tldr: "Two sentences, one of them holding «redacted-github-token».",
+      tour: [
+        {
+          title: "The gate",
+          description: "Closes on a bad token.",
+          anchor: { path: "src/gate.ts", from: 10, to: 20, sha: REVIEWED },
+        },
+      ],
+      remaining: [],
+      complete: false, // the body has no What & why / Decisions / Risks / Validation
+      truncated: false,
+    });
+    expect(artifact.body).not.toContain("ghp_");
+    const events = registry.snapshotById("r1")!.events;
+    const answerSeq = events.find((e) => e.type === "answer")?.seq ?? -1;
+    expect(artifact.seq!).toBeLessThan(answerSeq); // joined before the answer: in the record
+    expect(events.filter((e) => e.type === "review_artifact")).toHaveLength(2); // the diff is still there
+  });
+
+  it("the store holds the submitted object for the reviewed head → it is published instead of the parse, re-stamped, naming the coding run", async () => {
+    const { registry, deps } = reviewRun(undefined, undefined, { prDescription: PR_FACTS });
+    const store = new InMemoryRunStore();
+    await store.put(storedSubmitted(REVIEWED));
+    deps.runStore = store;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    const [artifact, ...rest] = descriptionArtifacts(registry);
+    expect(rest).toEqual([]);
+    expect(artifact).toMatchObject({
+      origin: "submitted",
+      fromRunId: "coding-run",
+      title: "Fix the gate (submitted)",
+      tldr: "submitted",
+      decisions: [{ title: "Fail closed", rationale: "safer" }],
+      complete: true,
+    });
+    expect(artifact.at).not.toBe(1);
+  });
+
+  it("the store's submitted object is for ANOTHER head → the body is parsed (anchors at a stale head are not passed off as this head's)", async () => {
+    const { registry, deps } = reviewRun(undefined, undefined, { prDescription: PR_FACTS });
+    const store = new InMemoryRunStore();
+    await store.put(storedSubmitted("d".repeat(40)));
+    deps.runStore = store;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    expect(descriptionArtifacts(registry).map((a) => a.origin)).toEqual(["parsed"]);
+  });
+
+  it("no PR facts (the head fetch failed) and nothing stored → the review carries the diff but no description artifact", async () => {
+    const { registry, deps } = reviewRun(undefined);
+    const { io } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    expect(descriptionArtifacts(registry)).toEqual([]);
+    expect(registry.snapshotById("r1")!.events.filter((e) => e.type === "review_artifact")).toHaveLength(1);
   });
 });
 

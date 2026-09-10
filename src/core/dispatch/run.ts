@@ -20,6 +20,7 @@ import type { McpToolsForRun } from "../../mcp/source.js";
 import type { RepoContext } from "../repoContext.js";
 import type { PrCommitList } from "../headMoved.js";
 import { REPLAY_EVERYTHING, type RunHandle, type RunRegistry } from "../runRegistry.js";
+import type { RunStore } from "../runStore.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
@@ -41,6 +42,14 @@ export interface RunDeps
     Pick<AuthorizeDeps, "fetchPrHead">,
     Pick<ProvisionDeps, "skills"> {
   config: ConfigStore;
+  /**
+   * The durable store of finished runs, READ by a review run for the PR
+   * description a coding run submitted for the head it reviews
+   * (docs/reference/specs/reading-diff.md item 7). The same store `runHistoryWriter`
+   * writes; `NullRunStore` in a process without run history (routing-and-config
+   * item 16: a Null Object, never a branch), so the lookup simply finds nothing.
+   */
+  runStore: RunStore;
   /**
    * The GitHub API behind the `github_*` tools (docs/reference/specs/github-tools.md).
    * Absent → the production REST client on the App credential; tests inject an
