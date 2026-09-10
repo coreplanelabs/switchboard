@@ -391,14 +391,16 @@ describe("the release publishes the bot image", () => {
     const names = [...code.matchAll(/ghcr\.io\/([^\s"']+)/g)].map((m) => m[1]);
     expect(names.length).toBeGreaterThan(0);
     for (const name of names) expect(name).toBe("${GITHUB_REPOSITORY,,}${SUFFIX}");
+    // The tags come from the `tags` step (item 28): `:<version>` on every line,
+    // `:latest` only on main — the 1.2-line tests hold that step's shape.
     const build = step("docker/build-push-action@")!;
-    const tags = String(build.with?.tags)
-      .split("\n")
-      .filter((t) => t.trim());
-    expect(tags).toEqual([
-      "${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}",
-      "${{ steps.image.outputs.name }}:latest",
-    ]);
+    expect(build.with?.tags).toBe("${{ steps.tags.outputs.tags }}");
+    const tagsStep = job.steps.find((s) => (s as Step & { id?: string }).id === "tags")!;
+    expect(tagsStep.run).toContain('echo "${NAME}:${VERSION}"');
+    expect((tagsStep as Step & { env?: Record<string, string> }).env).toMatchObject({
+      NAME: "${{ steps.image.outputs.name }}",
+      VERSION: "${{ steps.image.outputs.version }}",
+    });
     // The version tag is the release tag without its `v`, from release-please's output; the suffix is the leg's.
     const name = job.steps.find((s) => (s as Step & { id?: string }).id === "image")!;
     expect(name.run).toContain("version=${TAG#v}");
@@ -901,5 +903,75 @@ describe("the production deploy is one reusable workflow", () => {
     expect(call.uses).toBe("./.github/workflows/deploy-production.yml");
     expect(call.with).toEqual({ targets: "affected" });
     expect(call.secrets).toBe("inherit");
+  });
+});
+
+describe("the 1.2 line releases from its own branch and never deploys", () => {
+  // Two release lines share release-please.yml (docs/reference/specs/release-and-deploy.md
+  // item 28): `main` is the 1.1x line, `v1.2` the 1.2 line. The 1.2 line reads
+  // its own config and manifest so the two `release-as` pins never meet, and
+  // everything that means "production" — the deploy, the `:latest` image tag,
+  // npm's `latest`, the release PR's plan against production — stays on main.
+  const release = parse(read(".github/workflows/release-please.yml")) as Workflow & {
+    on: { push: { branches: string[] } };
+  };
+  const releaseJob = release.jobs["release-please"] as Job & { env?: Record<string, string> };
+  const onMain = "github.ref == 'refs/heads/main'";
+
+  it("ci.yml, codeql.yml and release-please.yml run on pushes to main and v1.2", () => {
+    const pushBranches = (file: string) =>
+      (parse(read(file)) as { on: { push: { branches: string[] } } }).on.push.branches;
+    for (const file of [
+      ".github/workflows/ci.yml",
+      ".github/workflows/codeql.yml",
+      ".github/workflows/release-please.yml",
+    ]) {
+      expect(pushBranches(file), file).toEqual(["main", "v1.2"]);
+    }
+  });
+
+  it("the release job reads the line's own config and manifest — v1.2's files on v1.2, main's otherwise — in both attempts", () => {
+    expect(releaseJob.env).toEqual({
+      RP_CONFIG:
+        "${{ github.ref == 'refs/heads/v1.2' && 'release-please-config.v1.2.json' || 'release-please-config.json' }}",
+      RP_MANIFEST:
+        "${{ github.ref == 'refs/heads/v1.2' && '.release-please-manifest.v1.2.json' || '.release-please-manifest.json' }}",
+    });
+    const attempts = releaseJob.steps.filter((s) => s.uses?.startsWith("googleapis/release-please-action@"));
+    expect(attempts).toHaveLength(2);
+    for (const attempt of attempts) {
+      expect(attempt.with?.["config-file"]).toBe("${{ env.RP_CONFIG }}");
+      expect(attempt.with?.["manifest-file"]).toBe("${{ env.RP_MANIFEST }}");
+    }
+  });
+
+  it("v1.2's config pins the first release to 1.200.0 and otherwise equals main's config; its manifest starts at the branch's baseline", () => {
+    const main = JSON.parse(read("release-please-config.json")) as Record<string, unknown>;
+    const line = JSON.parse(read("release-please-config.v1.2.json")) as Record<string, unknown>;
+    expect(line["release-as"]).toBe("1.200.0");
+    const { "release-as": _a, ...mainRest } = main;
+    const { "release-as": _b, ...lineRest } = line;
+    expect(lineRest).toEqual(mainRest);
+    const manifest = JSON.parse(read(".release-please-manifest.v1.2.json")) as Record<string, string>;
+    expect(Object.keys(manifest)).toEqual(["."]);
+    expect(manifest["."]).toMatch(/^1\.\d+\.\d+$/);
+  });
+
+  it("production follows main alone: the deploy and the release PR's plan against production are gated on the main ref", () => {
+    expect(release.jobs.deploy.if).toBe(`${onMain} && needs.release-please.outputs.release_created == 'true'`);
+    expect(release.jobs["release-pr-deploy-targets"].if).toContain(`${onMain} && `);
+  });
+
+  it("`:latest` and npm's `latest` follow main; a v1.2 release publishes its version tag alone and the package under `next`", () => {
+    const publish = release.jobs["publish-image"];
+    const tags = publish.steps.find((s) => (s as Step & { id?: string }).id === "tags")!;
+    expect((tags as Step & { env?: Record<string, string> }).env?.LATEST).toBe(
+      "${{ github.ref == 'refs/heads/main' }}",
+    );
+    expect(tags.run).toContain('if [ "$LATEST" = "true" ]; then echo "${NAME}:latest"; fi');
+    const build = publish.steps.find((s) => s.uses?.startsWith("docker/build-push-action@"))!;
+    expect(build.with?.tags).toBe("${{ steps.tags.outputs.tags }}");
+    const npm = release.jobs["publish-npm"].steps.find((s) => s.run?.startsWith("npm publish"))!;
+    expect(npm.run).toContain(`--tag \${{ ${onMain} && 'latest' || 'next' }}`);
   });
 });
