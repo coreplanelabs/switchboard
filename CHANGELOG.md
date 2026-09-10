@@ -1,5 +1,42 @@
 # Changelog
 
+## [1.14.0](https://github.com/coreplanelabs/switchboard/compare/v1.13.0...v1.14.0) (2026-09-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** retired configuration shapes are unknown keys, not mapped refusals ([#842](https://github.com/coreplanelabs/switchboard/issues/842))
+
+### Features
+
+* **cli:** switchboard start runs the bot from the package — Slack from your laptop with no Docker ([#847](https://github.com/coreplanelabs/switchboard/issues/847)) ([713bc34](https://github.com/coreplanelabs/switchboard/commit/713bc3461ef746644aa1f18466daa5952bbbf03d))
+* **deploy:** `deploy all` copies the release's images into the account registry itself, over HTTPS — the operator's deploy is one command and needs no Docker ([#818](https://github.com/coreplanelabs/switchboard/issues/818)) ([a6f0fcd](https://github.com/coreplanelabs/switchboard/commit/a6f0fcd437921a7582c755a546209b9d59a2d9a5))
+
+
+### Bug fixes
+
+* **process:** check:lockfile catches a root record that drifted from package.json, and the Phase 7–9 review follow-ups close ([#849](https://github.com/coreplanelabs/switchboard/issues/849)) ([af4e286](https://github.com/coreplanelabs/switchboard/commit/af4e2868ea7152267338fbc95ed9594672284467))
+* **process:** the release pin may equal the manifest — the release PR carries both at the pinned version ([#850](https://github.com/coreplanelabs/switchboard/issues/850)) ([4f15507](https://github.com/coreplanelabs/switchboard/commit/4f155070c209f0b6eebb9e1e0bfc023e7e4db9b3))
+
+
+### Documentation
+
+* **agents:** record 0026 is accepted — the capability-profile design is the baseline for slice one, filed against release 1.13.0 ([#815](https://github.com/coreplanelabs/switchboard/issues/815)) ([cf01774](https://github.com/coreplanelabs/switchboard/commit/cf0177403794835ef16327a689a63d90bcc138bf))
+* **core:** record 0029 — Durable Objects are the store and never the scheduler, Cloudflare Workflows schedules the resident lifecycle and later ship, and the agent loop stays in a container ([#812](https://github.com/coreplanelabs/switchboard/issues/812)) ([44548be](https://github.com/coreplanelabs/switchboard/commit/44548be93ee20fb4134847cfe98836b3b0cc9e84))
+* **core:** the orchestration program plan — record 0029 as one ledger on the v1.2 board and the 1.2 line: residents on Workflows, the ship coordinator, the harness track, the inherited follow-ups ([#820](https://github.com/coreplanelabs/switchboard/issues/820)) ([ac931c7](https://github.com/coreplanelabs/switchboard/commit/ac931c7d7b1bbb139e46d64232537ec0d844dfc3))
+* **core:** the orchestration program plan names the 1.2 line's branch v1.2, matching the board and the public name ([#841](https://github.com/coreplanelabs/switchboard/issues/841)) ([1ab8703](https://github.com/coreplanelabs/switchboard/commit/1ab8703b1cc6a11f3211d769e14cacd140596c5d))
+* **core:** the orchestration program plan's U2 and U6 test scenarios count six attempts, matching R6 ([#838](https://github.com/coreplanelabs/switchboard/issues/838)) ([7f768f3](https://github.com/coreplanelabs/switchboard/commit/7f768f31ca2b998a87d2ba822806cb22021ee8dc))
+* **docs:** README and Get started say what the commands do, and every diagram shares one visual system ([#816](https://github.com/coreplanelabs/switchboard/issues/816)) ([da1cb68](https://github.com/coreplanelabs/switchboard/commit/da1cb68f87803e1bae39498fbb1ec8b51f2a5ce7))
+* **docs:** the explanation pages say the same in half the words ([#840](https://github.com/coreplanelabs/switchboard/issues/840)) ([d5605c0](https://github.com/coreplanelabs/switchboard/commit/d5605c0cae86bd7ff666bc51bf75afffb41917b6))
+* **docs:** the landing hero image is eager and single-source, the residents frame fits its rows ([#844](https://github.com/coreplanelabs/switchboard/issues/844)) ([315ea50](https://github.com/coreplanelabs/switchboard/commit/315ea5005170f127f1a1b692bbb8a4733461e77b))
+* **docs:** the landing page redesigned — one grotesk, large pictures, statements instead of paragraphs ([#843](https://github.com/coreplanelabs/switchboard/issues/843)) ([6c39f68](https://github.com/coreplanelabs/switchboard/commit/6c39f68280ac199c7886b1efb7b8a222ba80aa50))
+* the guides lead with the npm package and say half as much ([#839](https://github.com/coreplanelabs/switchboard/issues/839)) ([f48f7bc](https://github.com/coreplanelabs/switchboard/commit/f48f7bccc00936af0f0c34912f0772d0d12d3177))
+
+
+### Refactoring
+
+* **core:** retired configuration shapes are unknown keys, not mapped refusals ([#842](https://github.com/coreplanelabs/switchboard/issues/842)) ([17c9821](https://github.com/coreplanelabs/switchboard/commit/17c9821907ff7185e81ddeaa3a0408be6d06068e))
+
 ## [1.13.0](https://github.com/coreplanelabs/switchboard/compare/v1.12.0...v1.13.0) (2026-09-10)
 
 
