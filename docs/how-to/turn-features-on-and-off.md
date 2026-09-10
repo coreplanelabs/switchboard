@@ -30,6 +30,20 @@ Copy the nearest fixture from [`src/core/testing/capabilityFixtures.ts`](../../s
 | `ingress` | `SWITCHBOARD_INGRESS_TOKENS`: JSON map bearer → `{ subject, channel? }`, each subject granted in `grants.http:<subject>` / `mcp:<subject>` | `POST /ingress` and the MCP server at `/mcp` | Both routes refuse every bearer | Nothing |
 | `dashboardAuth` | `dashboard.auth`; default `access` when `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD` are set, else `none`. `token` needs `dashboard.token.actor` and `DASHBOARD_TOKEN` (or the env var `dashboard.token.env` names) | `access`: anyone your Access policy admits, service tokens for machines. `token`: dashboards and `/api/*` for the bearer as one actor. `none`: loopback callers only | `none` refuses every remote caller; an explicit `none` on a public `PUBLIC_BASE_URL` refuses to start | Cloudflare Access (free tier covers small teams); `token` and `none`: nothing |
 
+### Abridged reading diffs (meat)
+
+Every PR review already records its full `git diff`. `review abridge <run id>` (chat, CLI, `POST /api/review.abridge`; needs `review:write`) adds [meat.dev](https://github.com/boldsoftware/meat)'s abridged version — run on the bot host over the complete diff GitHub serves for the PR, with the bot's own Anthropic key — and stores it on the run; ask again and the stored one is answered. To have it happen on every review, set:
+
+```yaml
+review:
+  readingDiff:
+    provider: meat # git (default): on demand only · off: no reading diff at all
+    meatModel: claude-opus-5 # the default; an Opus-class model is the floor that actually abridges
+    meatTimeoutS: 240
+```
+
+Cost: one Opus-class call per review (meat caches by model + diff, so a repeat is free). It never delays the review: the abridging runs after the record is written, and a restart mid-run simply leaves the run to be abridged on demand. Needs `runHistory` (the record it is appended to) and the GitHub App or `GH_TOKEN` (the compare diff; a whole recorded diff is the fallback). `SWITCHBOARD_READING_DIFF=git|meat|off` overrides `provider` on a deployed bot.
+
 `memory.worker`, `runHistory.worker`, `schedules.worker` and `runtimeOverrides.worker` all name the state Worker, same `MEMORY_TOKEN`; deploy it once.
 
 ## Check which commands you turned on

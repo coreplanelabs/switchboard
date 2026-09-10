@@ -16,7 +16,7 @@ import {
   type ReviewCommandDeps,
 } from "./review.js";
 
-// Feature: docs/reference/specs/reading-diff.md item 8 — `review abridge <id>`: the
+// Feature: docs/reference/specs/reading-diff.md item 9 — `review abridge <id>`: the
 // registry command over the ONE abridge path. What it decides: who may ask
 // (the `review:write` row; the run must be visible to the caller), how the
 // state is answered (`running` marker, `done` summary, `failed` reason,

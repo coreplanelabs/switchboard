@@ -4,15 +4,21 @@ import { COMPARE_DIFF_MAX_CHARS, GithubApiError, RestGithubApi, type GithubApi }
 import { githubAppConfigured } from "../execution/githubApp.js";
 import { anthropicApiKey } from "../providers/anthropic.js";
 import type { EnvRecord, Secrets } from "../secrets.js";
-import { MEAT_MODEL_DEFAULT, meatOnHost, type MeatRun, type MeatRunResult } from "./meatProcess.js";
-import { capDiff, resolveReadingDiff, sanitizeArtifactText, type ReadingDiffConfig } from "./readingDiff.js";
+import { meatOnHost, type MeatRun, type MeatRunResult } from "./meatProcess.js";
+import {
+  MEAT_MODEL_DEFAULT,
+  capDiff,
+  resolveReadingDiff,
+  sanitizeArtifactText,
+  type ReadingDiffConfig,
+} from "./readingDiff.js";
 import { redactSecrets, type RunEvent } from "./runEvents.js";
 import { fitRecordToBudget, storedEventSeqs, type RunRecord } from "./runRecord.js";
 import type { RunStore } from "./runStore.js";
 import { systemClock } from "./trace/clock.js";
 
 // The abridged reading diff, produced on the BOT HOST after a review has
-// finished (docs/reference/specs/reading-diff.md items 5–8). ONE path:
+// finished (docs/reference/specs/reading-diff.md items 5–10). ONE path:
 // `ReviewAbridger.abridge` is what the `review abridge` command and the
 // `provider: meat` auto mode both call, with the same inputs, so a review's
 // abridged diff is the same whichever way it was asked for (meat caches by the
@@ -36,8 +42,11 @@ import { systemClock } from "./trace/clock.js";
 
 export type AbridgeInput = "github-compare" | "recorded";
 
-/** The `review_artifact` event variant. */
-export type ReviewArtifactEvent = Extract<RunEvent, { type: "review_artifact" }>;
+/** The reading-diff `review_artifact` event variant (the `pr_description` kind is item 7's). */
+export type ReviewArtifactEvent = Extract<RunEvent, { type: "review_artifact"; artifact: "reading_diff" }>;
+
+const isReadingDiff = (e: RunEvent): e is ReviewArtifactEvent =>
+  e.type === "review_artifact" && e.artifact === "reading_diff";
 
 /** What a done state carries about the stored artifact — everything but the diff
  *  itself, which lives on the record (`runs events`). */
@@ -97,11 +106,11 @@ export interface AbridgerDeps {
 }
 
 export function meatArtifactOf(record: RunRecord): ReviewArtifactEvent | undefined {
-  return record.events.find((e): e is ReviewArtifactEvent => e.type === "review_artifact" && e.poweredBy === "meat");
+  return record.events.find((e): e is ReviewArtifactEvent => isReadingDiff(e) && e.poweredBy === "meat");
 }
 
 export function gitArtifactOf(record: RunRecord): ReviewArtifactEvent | undefined {
-  return record.events.find((e): e is ReviewArtifactEvent => e.type === "review_artifact" && e.poweredBy === "git");
+  return record.events.find((e): e is ReviewArtifactEvent => isReadingDiff(e) && e.poweredBy === "git");
 }
 
 function summarize(a: ReviewArtifactEvent): AbridgeArtifactSummary {
@@ -157,10 +166,7 @@ export class ReviewAbridger {
     if (failed && !req.force) return { state: "failed", ...failed };
     const git = gitArtifactOf(record);
     if (!git)
-      throw new AbridgeRefusal(
-        "conflict",
-        `run ${req.runId} carries no reading diff — only PR review runs record one`,
-      );
+      throw new AbridgeRefusal("conflict", `run ${req.runId} carries no reading diff — only PR review runs record one`);
     const startedAt = this.deps.clock();
     const model = req.model ?? this.deps.defaultModel();
     this.failures.delete(req.runId);
@@ -281,7 +287,7 @@ export class ReviewAbridger {
   }
 }
 
-/** Finished records gain events by exactly one path (run-history.md item 43):
+/** Finished records gain events by exactly one path (run-history.md item 44):
  *  a whole-record rewrite through `put` that only a `review_artifact` uses.
  *  Re-read (the record may have moved), drop a previous meat artifact (a force
  *  replaces, never accumulates), stamp the next `seq` after every existing
@@ -295,7 +301,7 @@ async function appendReviewArtifact(
 ): Promise<ReviewArtifactEvent> {
   const record = await store.get(runId);
   if (!record) throw new Error("the run's record is gone — nothing to append to");
-  const kept = record.events.filter((e) => !(e.type === "review_artifact" && e.poweredBy === "meat"));
+  const kept = record.events.filter((e) => !(isReadingDiff(e) && e.poweredBy === "meat"));
   const replaced = kept.length !== record.events.length;
   const seq = Math.max(0, ...storedEventSeqs(record.events), ...record.events.map((e) => e.seq ?? 0)) + 1;
   const event: ReviewArtifactEvent = { type: "review_artifact", artifact: "reading_diff", ...artifact, at, seq };
@@ -305,7 +311,8 @@ async function appendReviewArtifact(
     eventCount: record.eventCount + (replaced ? 0 : 1),
     storedEventCount: kept.length + 1,
   });
-  if (!next.events.includes(event)) throw new Error("the record has no room for the abridged diff within its byte budget");
+  if (!next.events.includes(event))
+    throw new Error("the record has no room for the abridged diff within its byte budget");
   const put = await store.put(next);
   if (!put.stored) throw new Error("the run's record fell outside the retention window; nothing was stored");
   return event;

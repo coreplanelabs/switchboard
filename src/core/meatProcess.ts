@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { Secret } from "../secrets.js";
 import { redactSecrets } from "./runEvents.js";
-import { parseMeatJson, type MeatResult } from "./readingDiff.js";
+import { MEAT_MODEL_DEFAULT, parseMeatJson, type MeatResult } from "./readingDiff.js";
 
 // meat.dev on the BOT host (docs/reference/specs/reading-diff.md items 5–6). The
 // abridged reading diff is one child process per production: `meat -json -model
@@ -20,9 +20,7 @@ import { parseMeatJson, type MeatResult } from "./readingDiff.js";
 /** The binary's name on PATH; the bot image installs it at /usr/local/bin. */
 export const MEAT_BINARY = "meat";
 
-/** meat's `-model` when config names none: an Opus-class model, the measured
- *  minimum for a diff that is actually abridged (readingDiff.ts). */
-export const MEAT_MODEL_DEFAULT = "claude-opus-5";
+export { MEAT_MODEL_DEFAULT };
 
 /** meat's stderr is kept to this many chars for the failure reason. */
 const STDERR_CAP = 4_000;

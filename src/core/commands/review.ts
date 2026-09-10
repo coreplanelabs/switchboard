@@ -23,7 +23,7 @@ import { runResource, type RunsService } from "../runsService.js";
 
 // The `review.*` registrations: `review abridge <id> [--model m] [--force]
 // [--wait]` asks for a finished PR review's ABRIDGED reading diff
-// (docs/reference/specs/reading-diff.md item 8) — meat.dev run on the bot host over the
+// (docs/reference/specs/reading-diff.md item 9) — meat.dev run on the bot host over the
 // complete diff, appended to the run's stored record. The command is a thin
 // wrapper over `ReviewAbridger.abridge`, the ONE path `provider: meat` auto
 // mode also takes; nothing about the input, the model, or the artifact is

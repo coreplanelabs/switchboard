@@ -579,7 +579,7 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
   });
 });
 
-// Feature: docs/reference/specs/reading-diff.md item 7 — a reading-diff artifact's
+// Feature: docs/reference/specs/reading-diff.md item 8 — a reading-diff artifact's
 // payload is its `diff`, capped by its producer above the per-event cap by
 // design; its `summary` is one line. The event cap must leave both alone.
 describe("capEvent on a review_artifact", () => {

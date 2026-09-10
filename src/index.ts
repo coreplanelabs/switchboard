@@ -39,6 +39,7 @@ import { selectFrictionLedger } from "./core/frictionLedger.js";
 import { buildRunStore, FileRunStore, NullRunStore, retentionPolicyOf } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
+import { autoAbridgeOnPersist, reviewAbridgerFromConfig } from "./core/reviewAbridge.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
 import { createLedgerWriteThrough, mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
 import { reclaimRuns, startReclaimSweep, closeReclaimed, type ReclaimOutcome } from "./core/boot.js";
@@ -191,11 +192,33 @@ export async function runBot(): Promise<void> {
       dataDir: "./data",
       warn: (m) => console.warn(`[run-history] ${m}`),
     }) ?? new NullRunStore();
+  // The ONE abridger of this process (docs/reference/specs/reading-diff.md item 5): meat
+  // on this host over the stored record. `review abridge` (the catalogue below)
+  // and `provider: meat` (the persist hook here) share it, so a run has one
+  // running/failed state whichever way it was asked for.
+  const abridger = capabilities.runHistory
+    ? reviewAbridgerFromConfig(
+        () => config.config,
+        runStore,
+        processSecrets,
+        publicEnv(),
+        "./data",
+        (m) => console.warn(m),
+      )
+    : undefined;
+  const autoAbridge = autoAbridgeOnPersist(
+    () => abridger,
+    () => config.config.review?.readingDiff,
+    publicEnv(),
+  );
   const runHistoryWriter = capabilities.runHistory
     ? createRunHistoryWriter({
         store: runStore,
         warn: (m) => console.warn(m),
-        onPersisted: (id) => defaultRunRegistry.markPersisted(id),
+        onPersisted: (id) => {
+          defaultRunRegistry.markPersisted(id);
+          autoAbridge(id);
+        },
       })
     : new NullRunHistoryWriter();
   console.log(
@@ -319,6 +342,7 @@ export async function runBot(): Promise<void> {
     warn: (m) => console.warn(m),
     capabilities,
     runs: runsService,
+    abridger: () => abridger,
     frictionLedger,
     tracker: deps.issueTracker,
     memory: () => memory,

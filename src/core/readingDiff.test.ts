@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MEAT_MODEL_DEFAULT,
   READING_DIFF_CAP,
   capDiff,
   parseMeatJson,
@@ -13,10 +14,10 @@ import { recordingSink } from "./testing/recordingSink.js";
 import { createTracer } from "./trace/tracer.js";
 
 // Feature: docs/reference/specs/reading-diff.md — every PR review run carries a
-// `review_artifact` reading diff. The git BASELINE is guaranteed (the
-// dispatcher joins it before the answer); meat, when configured, is an
-// unawaited UPGRADE artifact under its own runtime budget — it lands iff it
-// finishes within the review. No timeout races anywhere in the pipeline.
+// `review_artifact` reading diff: the git BASELINE, produced by the run's own
+// executor and joined by the dispatcher before the answer. The abridged diff
+// is reviewAbridge.ts's, after the review, on the bot host — nothing here runs
+// meat; `provider: meat` only decides that the abridging happens automatically.
 
 describe("resolveReadingDiff (config + env)", () => {
   it("defaults to git with meat's default runtime budget when nothing is configured", () => {
@@ -29,11 +30,21 @@ describe("resolveReadingDiff (config + env)", () => {
       meatModel: "claude-opus-4-8",
       meatTimeoutS: 300,
     });
+    expect(resolveReadingDiff({ provider: "off" }, {})).toBeNull();
+  });
+
+  it("meat without a model is Opus — the measured floor for a diff that is actually abridged; git names no model", () => {
+    expect(MEAT_MODEL_DEFAULT).toBe("claude-opus-5");
     expect(resolveReadingDiff({ provider: "meat", meatTimeoutS: -5 }, {})).toEqual({
       provider: "meat",
+      meatModel: "claude-opus-5",
       meatTimeoutS: 240,
     });
-    expect(resolveReadingDiff({ provider: "off" }, {})).toBeNull();
+    expect(resolveReadingDiff({ provider: "git", meatModel: "claude-opus-4-8" }, {})).toEqual({
+      provider: "git",
+      meatModel: "claude-opus-4-8",
+      meatTimeoutS: 240,
+    });
   });
 
   it("SWITCHBOARD_READING_DIFF overrides config: git | meat | off", () => {
@@ -43,6 +54,7 @@ describe("resolveReadingDiff (config + env)", () => {
     });
     expect(resolveReadingDiff({ provider: "off" }, { SWITCHBOARD_READING_DIFF: "meat" })).toEqual({
       provider: "meat",
+      meatModel: "claude-opus-5",
       meatTimeoutS: 240,
     });
     expect(resolveReadingDiff({ provider: "git" }, { SWITCHBOARD_READING_DIFF: "off" })).toBeNull();
@@ -55,25 +67,20 @@ describe("resolveReadingDiff (config + env)", () => {
 });
 
 describe("readingDiffCommand", () => {
-  it("git: a full diff against origin/<base>, option injection closed", () => {
-    expect(readingDiffCommand("git", "main")).toBe("git diff --no-color --end-of-options 'origin/main...HEAD'");
+  it("a full diff against origin/<base>, option injection closed", () => {
+    expect(readingDiffCommand("main")).toBe("git diff --no-color --end-of-options 'origin/main...HEAD'");
   });
 
   it("no base ref → origin/HEAD (the repository's default branch)", () => {
-    expect(readingDiffCommand("git", undefined)).toBe("git diff --no-color --end-of-options 'origin/HEAD...HEAD'");
-  });
-
-  it("meat: bounded by its own `timeout` (the producer's clock — the pipeline never waits on meat), -json, the pinned model, the same quoted range", () => {
-    expect(readingDiffCommand("meat", "main", "claude-opus-4-8", 300)).toBe(
-      "timeout 300 meat -json -model 'claude-opus-4-8' 'origin/main...HEAD'",
-    );
-    expect(readingDiffCommand("meat", "main")).toBe("timeout 240 meat -json 'origin/main...HEAD'");
+    expect(readingDiffCommand(undefined)).toBe("git diff --no-color --end-of-options 'origin/HEAD...HEAD'");
   });
 
   it("a hostile base ref is quoted into one inert token", () => {
-    expect(readingDiffCommand("git", "x; rm -rf /")).toBe(
-      "git diff --no-color --end-of-options 'origin/x; rm -rf /...HEAD'",
-    );
+    expect(readingDiffCommand("x; rm -rf /")).toBe("git diff --no-color --end-of-options 'origin/x; rm -rf /...HEAD'");
+  });
+
+  it("never names meat — no execution container runs it", () => {
+    expect(readingDiffCommand("main")).not.toContain("meat");
   });
 });
 
@@ -115,58 +122,25 @@ describe("capDiff", () => {
 describe("produceReadingDiff", () => {
   const exec = (impl: (cmd: string) => string | Promise<string>) => ({ exec: async (cmd: string) => impl(cmd) });
 
-  it("git provider: one git command → a git-powered artifact", async () => {
+  it("one git command → a git-powered artifact", async () => {
     const a = await produceReadingDiff(
       exec((cmd) => (cmd.startsWith("git diff") ? "diff --git a/f b/f\n+x" : "?")),
-      { provider: "git", baseRef: "main" },
+      { baseRef: "main" },
     );
     expect(a).toEqual({ poweredBy: "git", baseRef: "main", diff: "diff --git a/f b/f\n+x", truncated: false });
-  });
-
-  it("meat provider: meat's smart diff, summary, and token counts ride the artifact", async () => {
-    const a = await produceReadingDiff(
-      exec((cmd) =>
-        cmd.includes("meat")
-          ? JSON.stringify({ smart_diff: "abridged", summary: "s", input_tokens: 9, output_tokens: 3 })
-          : "raw",
-      ),
-      { provider: "meat", baseRef: "main", meatModel: "claude-opus-4-8" },
-    );
-    expect(a).toMatchObject({ poweredBy: "meat", diff: "abridged", summary: "s", meatTokens: { input: 9, output: 3 } });
-  });
-
-  it("meat failing (missing binary, timeout's exit 124, bad JSON) yields null — the git BASELINE artifact is the fallback, structurally", async () => {
-    expect(
-      await produceReadingDiff(
-        exec(() => "exit 127: zsh: command not found: meat"),
-        { provider: "meat", baseRef: "main" },
-      ),
-    ).toBeNull();
-    expect(
-      await produceReadingDiff(
-        exec(() => "exit 124: "),
-        { provider: "meat", baseRef: "main" },
-      ),
-    ).toBeNull();
-    expect(
-      await produceReadingDiff(
-        exec(() => "not json at all"),
-        { provider: "meat", baseRef: "main" },
-      ),
-    ).toBeNull();
   });
 
   it("a git failure yields null (no artifact, never a throw into the run)", async () => {
     const a = await produceReadingDiff(
       exec(() => "fatal: ambiguous argument 'origin/gone...HEAD'"),
-      { provider: "git", baseRef: "gone" },
+      { baseRef: "gone" },
     );
     expect(a).toBeNull();
     const b = await produceReadingDiff(
       exec(() => {
         throw new Error("sandbox dead");
       }),
-      { provider: "git", baseRef: "main" },
+      { baseRef: "main" },
     );
     expect(b).toBeNull();
   });
@@ -175,7 +149,7 @@ describe("produceReadingDiff", () => {
     expect(
       await produceReadingDiff(
         exec(() => ""),
-        { provider: "git", baseRef: "main" },
+        { baseRef: "main" },
       ),
     ).toBeNull();
   });
@@ -183,7 +157,7 @@ describe("produceReadingDiff", () => {
   it("caps the diff and marks truncation", async () => {
     const a = await produceReadingDiff(
       exec(() => "diff --git\n" + "y".repeat(READING_DIFF_CAP + 100)),
-      { provider: "git", baseRef: "main" },
+      { baseRef: "main" },
     );
     expect(a?.truncated).toBe(true);
   });
@@ -191,31 +165,15 @@ describe("produceReadingDiff", () => {
   // The artifact goes straight into the run stream, which the registry
   // publishes as-is — so this module owns the stream's
   // hygiene: control-strip + redact FIRST, cap after, on every string.
-  it("redacts secrets and strips ANSI from the diff before it can reach the stream — git and meat alike, meat's summary included", async () => {
+  it("redacts secrets and strips ANSI from the diff before it can reach the stream", async () => {
     const secret = "ghp_" + "A".repeat(36);
     const git = await produceReadingDiff(
       exec(() => `diff --git a/.env b/.env\n+[31mGITHUB_TOKEN=${secret}[m`),
-      { provider: "git", baseRef: "main" },
+      { baseRef: "main" },
     );
     expect(git?.diff).not.toContain(secret);
     expect(git?.diff).toContain("«redacted");
-    expect(git?.diff).not.toContain("[31m");
-
-    const meat = await produceReadingDiff(
-      exec((cmd) =>
-        cmd.includes("meat")
-          ? JSON.stringify({
-              smart_diff: `+token=${secret}`,
-              summary: `adds ${secret} to .env`,
-              input_tokens: 1,
-              output_tokens: 1,
-            })
-          : "unused",
-      ),
-      { provider: "meat", baseRef: "main" },
-    );
-    expect(meat?.diff).not.toContain(secret);
-    expect(meat?.summary).not.toContain(secret);
+    expect(git?.diff).not.toContain("[31m");
   });
 
   it("never splits a surrogate pair at the cap", async () => {
@@ -223,7 +181,7 @@ describe("produceReadingDiff", () => {
     const body = "d".repeat(READING_DIFF_CAP - 1) + emoji + "tail";
     const a = await produceReadingDiff(
       exec(() => body),
-      { provider: "git", baseRef: "main" },
+      { baseRef: "main" },
     );
     expect(a?.truncated).toBe(true);
     const cut = a!.diff.slice(0, a!.diff.indexOf("…"));
@@ -231,10 +189,10 @@ describe("produceReadingDiff", () => {
   });
 });
 
-describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade)", () => {
+describe("startReviewReadingDiff (the baseline, guaranteed)", () => {
   const exec = (impl: (cmd: string) => string | Promise<string>) => ({ exec: async (cmd: string) => impl(cmd) });
 
-  it("git provider: the baseline publishes the stamped envelope, resolves true, and there is no upgrade", async () => {
+  it("publishes the stamped envelope and resolves true", async () => {
     const published: RunEvent[] = [];
     const started = startReviewReadingDiff({
       executor: exec(() => "diff --git a/f b/f\n+x"),
@@ -243,7 +201,6 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
       baseRef: "main",
       publish: (e) => published.push(e),
     });
-    expect(started.upgrade).toBeUndefined();
     expect(await started.baseline).toBe(true);
     expect(published).toEqual([
       {
@@ -258,49 +215,39 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
     ]);
   });
 
-  it("meat provider: the git baseline AND the meat upgrade each publish; readers prefer meat", async () => {
+  it("provider meat: the run still produces ONLY the git baseline — one command, no meat; the abridging is the host's, after the record is durable", async () => {
+    const commands: string[] = [];
     const published: RunEvent[] = [];
     const started = startReviewReadingDiff({
-      executor: exec((cmd) =>
-        cmd.includes("meat") ? JSON.stringify({ smart_diff: "abridged", summary: "s" }) : "diff --git a/f b/f\n+x",
-      ),
+      executor: exec((cmd) => {
+        commands.push(cmd);
+        return "diff --git a/f b/f\n+x";
+      }),
       cfg: { provider: "meat" },
       env: {},
       baseRef: "main",
       publish: (e) => published.push(e),
     });
     expect(await started.baseline).toBe(true);
-    expect(await started.upgrade).toBe(true);
-    const powered = published
-      .map((e) => (e.type === "review_artifact" && e.artifact === "reading_diff" ? e.poweredBy : "?"))
-      .sort();
-    expect(powered).toEqual(["git", "meat"]);
+    expect(commands).toEqual(["git diff --no-color --end-of-options 'origin/main...HEAD'"]);
+    expect(
+      published.map((e) => (e.type === "review_artifact" && e.artifact === "reading_diff" ? e.poweredBy : "?")),
+    ).toEqual(["git"]);
+    expect(started).not.toHaveProperty("upgrade");
   });
 
-  it("a hanging meat never blocks the baseline — meat lands iff it finishes (the pipeline has no waits)", async () => {
+  it("off (config or env) → baseline false, nothing published, nothing run", async () => {
     const published: RunEvent[] = [];
-    const started = startReviewReadingDiff({
-      executor: exec((cmd) => (cmd.includes("meat") ? new Promise<string>(() => {}) : "diff --git a/f b/f\n+x")),
-      cfg: { provider: "meat" },
-      env: {},
-      baseRef: "main",
-      publish: (e) => published.push(e),
-    });
-    expect(await started.baseline).toBe(true); // resolves while meat still hangs
-    expect(published.filter((e) => e.type === "review_artifact")).toHaveLength(1);
-  });
-
-  it("off (config or env) → baseline false, no upgrade, nothing published", async () => {
-    const published: RunEvent[] = [];
+    let ran = 0;
     const a = startReviewReadingDiff({
-      executor: exec(() => "d"),
+      executor: exec(() => (ran++, "d")),
       cfg: { provider: "off" },
       env: {},
       baseRef: "main",
       publish: (e) => published.push(e),
     });
     const b = startReviewReadingDiff({
-      executor: exec(() => "d"),
+      executor: exec(() => (ran++, "d")),
       cfg: undefined,
       env: { SWITCHBOARD_READING_DIFF: "off" },
       baseRef: "main",
@@ -308,8 +255,8 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
     });
     expect(await a.baseline).toBe(false);
     expect(await b.baseline).toBe(false);
-    expect(a.upgrade).toBeUndefined();
     expect(published).toEqual([]);
+    expect(ran).toBe(0);
   });
 
   it("a production failure resolves false — never rejects into the run", async () => {
@@ -327,7 +274,6 @@ describe("startReviewReadingDiff (baseline guaranteed, meat an unawaited upgrade
       publish: (e) => published.push(e),
     });
     await expect(started.baseline).resolves.toBe(false);
-    await expect(started.upgrade!).resolves.toBe(false);
     expect(published).toEqual([]);
   });
 });
@@ -342,19 +288,19 @@ describe("reading diff spans (docs/reference/specs/tracing.md items 17/18)", () 
       },
     };
     const span = createTracer({ clock: () => 1 }).start("run.reading_diff", { sinks: [] });
-    await produceReadingDiff(executor, { provider: "git", baseRef: "main" }, span);
-    await produceReadingDiff(executor, { provider: "git", baseRef: "main" });
+    await produceReadingDiff(executor, { baseRef: "main" }, span);
+    await produceReadingDiff(executor, { baseRef: "main" });
     expect(seen).toEqual([span, undefined]);
   });
 
-  it("under a root, the baseline is a run.reading_diff child and the upgrade a run.reading_diff.upgrade child, each with its outcome and each diff's exec under its own span; without a root the same result and no span", async () => {
+  it("under a root, the baseline is a run.reading_diff child with its outcome and the diff's exec under it; without a root the same result and no span", async () => {
     const log = recordingSink();
     const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
     const execSpans: string[] = [];
     const executor = {
-      exec: async (cmd: string, opts?: { span?: { name: string } }) => {
+      exec: async (_cmd: string, opts?: { span?: { name: string } }) => {
         execSpans.push(opts?.span?.name ?? "none");
-        return cmd.startsWith("git diff") ? "diff --git a/f b/f\n+x" : "exit 127: meat: command not found";
+        return "diff --git a/f b/f\n+x";
       },
     };
     const published: RunEvent[] = [];
@@ -367,15 +313,10 @@ describe("reading diff spans (docs/reference/specs/tracing.md items 17/18)", () 
       parent: root,
     });
     expect(await started.baseline).toBe(true);
-    expect(await started.upgrade).toBe(false);
-    const ends = log.ends
-      .map((e) => [e.name, e.parentSpanId, e.attrs] as const)
-      .sort((a, b) => a[0].localeCompare(b[0]));
-    expect(ends).toEqual([
+    expect(log.ends.map((e) => [e.name, e.parentSpanId, e.attrs] as const)).toEqual([
       ["run.reading_diff", root.id, { outcome: "published" }],
-      ["run.reading_diff.upgrade", root.id, { outcome: "did_not_land" }],
     ]);
-    expect([...execSpans].sort()).toEqual(["run.reading_diff", "run.reading_diff.upgrade"]);
+    expect(execSpans).toEqual(["run.reading_diff"]);
     expect(published.map((e) => e.type)).toEqual(["review_artifact"]);
     const bare = startReviewReadingDiff({
       executor,
@@ -386,6 +327,21 @@ describe("reading diff spans (docs/reference/specs/tracing.md items 17/18)", () 
     });
     expect(await bare.baseline).toBe(true);
     expect(execSpans.at(-1)).toBe("none");
-    expect(log.ends).toHaveLength(2);
+    expect(log.ends).toHaveLength(1);
+  });
+
+  it("a baseline that produces nothing ends its span with outcome none", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
+    const started = startReviewReadingDiff({
+      executor: { exec: async () => "" },
+      cfg: undefined,
+      env: {},
+      baseRef: "main",
+      publish: () => {},
+      parent: root,
+    });
+    expect(await started.baseline).toBe(false);
+    expect(log.ends.map((e) => [e.name, e.attrs])).toEqual([["run.reading_diff", { outcome: "none" }]]);
   });
 });

@@ -6,7 +6,7 @@ const ROOT = resolve(import.meta.dirname, "../..");
 const BOT = readFileSync(resolve(ROOT, "Dockerfile"), "utf8");
 const EXECUTION_IMAGES = ["deploy/cloudflare-resident/Dockerfile", "deploy/cloudflare-sandbox/Dockerfile"] as const;
 
-// Feature: docs/reference/specs/reading-diff.md item 7 — meat.dev's binary lives in
+// Feature: docs/reference/specs/reading-diff.md item 6 — meat.dev's binary lives in
 // the BOT image only. The abridged reading diff is produced on the bot host over
 // a diff the bot fetches, with the bot's own Anthropic credential, so no
 // execution container (resident or sandbox) ever needs the binary or the key.

@@ -42,7 +42,7 @@ describe("analyzeRunFriction — skill_use is invisible to friction", () => {
     expect(b.runMs).toBe(a.runMs);
   });
 
-  // docs/reference/specs/reading-diff.md items 5 and 7 — both review artifacts are side
+  // docs/reference/specs/reading-diff.md items 11 and 7 — both review artifacts are side
   // facts published by the dispatcher outside the model loop: neither is a
   // step, a tool call, or a turn boundary.
   it("a review_artifact — the reading diff and the pr_description alike — is invisible to friction", () => {

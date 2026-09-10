@@ -8,13 +8,18 @@ import {
   autoAbridgeOnPersist,
   meatArtifactOf,
   type AbridgerDeps,
+  type ReviewArtifactEvent,
 } from "./reviewAbridge.js";
 import type { RunEvent } from "./runEvents.js";
 import { analyzeRunFriction } from "./runFriction.js";
+
+/** The reading-diff artifacts of a record's events (the `pr_description` kind is not one). */
+const isReadingDiff = (e: RunEvent): e is ReviewArtifactEvent =>
+  e.type === "review_artifact" && e.artifact === "reading_diff";
 import type { RunRecord } from "./runRecord.js";
 import { InMemoryRunStore } from "./runStore.js";
 
-// Feature: docs/reference/specs/reading-diff.md items 5–8 — ONE abridge path on
+// Feature: docs/reference/specs/reading-diff.md items 5–10 — ONE abridge path on
 // the bot host: `ReviewAbridger.abridge` is what the `review abridge` command
 // and `provider: meat` auto mode both call. Its input is the complete diff
 // from GitHub's compare endpoint, the recorded git artifact only as an
@@ -144,7 +149,7 @@ describe("ReviewAbridger.abridge — the one path", () => {
     });
     expect(stored.eventCount).toBe(5);
     expect(stored.storedEventCount).toBe(5);
-    expect(stored.events.filter((e) => e.type === "review_artifact").map((e) => e.poweredBy)).toEqual(["git", "meat"]);
+    expect(stored.events.filter(isReadingDiff).map((e) => e.poweredBy)).toEqual(["git", "meat"]);
   });
 
   it("is idempotent: a second call answers the stored artifact as done/reused without spending; --force recomputes and REPLACES it", async () => {
@@ -166,7 +171,7 @@ describe("ReviewAbridger.abridge — the one path", () => {
     expect(h.meat.runs).toHaveLength(2);
     expect(h.meat.runs[1].model).toBe("claude-sonnet-5");
     const stored = (await h.store.get("r1"))!;
-    const artifacts = stored.events.filter((e) => e.type === "review_artifact");
+    const artifacts = stored.events.filter(isReadingDiff);
     expect(artifacts.map((e) => e.poweredBy)).toEqual(["git", "meat"]); // replaced, not accumulated
     // The replacement takes the NEXT stamp after every event the record ever held
     // (the replaced one included), so an `afterSeq` cursor that saw 5 sees 6.
