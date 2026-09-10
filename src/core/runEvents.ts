@@ -1,7 +1,47 @@
 // Types only, and from the zod-free module deliberately: this file is part of
 // the node-free contract the memory Worker and web app compile with their own
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
-import type { PrDescription } from "./prDescriptionTypes.js";
+import type { PrDescription, RenderedTourStep } from "./prDescriptionTypes.js";
+
+/** The `pr_description` review artifact minus the event envelope
+ *  (docs/reference/specs/reading-diff.md item 7). */
+export interface PrDescriptionArtifact {
+  artifact: "pr_description";
+  /** `submitted`: the typed object a coding run submitted — exact and complete;
+   *  `parsed`: read back from the PR body GitHub holds, with `problems` naming
+   *  what the body did not carry in the renderer's shape. (Not named `source`:
+   *  the `input` event's `source` is an object, and a literal-typed twin here
+   *  would make `source` a discriminant of the whole union.) */
+  origin: "submitted" | "parsed";
+  repo: string;
+  pr: number;
+  /** The PR head the artifact was produced at: the render head for `submitted`,
+   *  the reviewed head for `parsed`. Compare with each anchor's `sha` to know
+   *  whether a step points into the head being looked at. */
+  headSha?: string;
+  /** The coding run a review run copied a `submitted` artifact from. */
+  fromRunId?: string;
+  title: string;
+  /** The body as rendered (submitted) or as GitHub holds it (parsed), capped. */
+  body: string;
+  tldr?: string;
+  tour: RenderedTourStep[];
+  remaining: { path: string; note: string }[];
+  decisions: { title: string; rationale: string }[];
+  /** Nothing missing or malformed — always true for `submitted`. */
+  complete: boolean;
+  problems: string[];
+  /** The body was cut at the cap before parsing. */
+  truncated: boolean;
+}
+
+/** The artifact on the stream. An interface, not an intersection, so the
+ *  union below stays discriminable on `type` for every object literal. */
+export interface PrDescriptionArtifactEvent extends PrDescriptionArtifact {
+  type: "review_artifact";
+  seq?: number;
+  at?: number;
+}
 
 // Run visibility (docs/reference/specs/run-visibility.md): a typed stream of what an agent is doing —
 // tool calls and their (redacted, summarized) results — emitted by the runner.
@@ -357,6 +397,17 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
+  /** The PR's description as data (docs/reference/specs/reading-diff.md item 7): the TL;DR,
+   *  the Tour's steps with their anchors (each carrying the sha its permalink
+   *  was rendered at), the Remaining-changes list and the decisions, so the run
+   *  page's panel can render a collapsed description and a Tour that jumps to
+   *  files and lines in the diff. Two sources, one shape: a coding run publishes
+   *  its `submitted` object when the post-step opens or edits the PR (beside
+   *  `pr_opened`); a review run copies that object when one exists for the head
+   *  it reviews, else `parsed` reads the body GitHub holds back through the
+   *  inverse parser. Every string is control-stripped and redacted like the
+   *  reading diff. Additive: unknown → ignored. */
+  | PrDescriptionArtifactEvent
   /** A coding run's accepted `PrDescription` (docs/reference/specs/pr-description.md): the
    *  typed object the run submitted through `submit_pr_description`, as
    *  validated — the same object the dispatcher renders the GitHub body from,

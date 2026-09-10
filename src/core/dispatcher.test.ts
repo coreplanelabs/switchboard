@@ -6751,7 +6751,7 @@ describe("reading-diff artifact on review runs", () => {
     const powered = registry
       .snapshotById("r1")!
       .events.filter((e) => e.type === "review_artifact")
-      .map((e) => (e.type === "review_artifact" ? e.poweredBy : "?"))
+      .map((e) => (e.type === "review_artifact" && e.artifact === "reading_diff" ? e.poweredBy : "?"))
       .sort();
     expect(powered).toEqual(["git", "meat"]);
   });
@@ -6762,7 +6762,9 @@ describe("reading-diff artifact on review runs", () => {
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     expect(replies.some((r) => r.includes("looks correct"))).toBe(true); // the review replied
     const artifacts = registry.snapshotById("r1")!.events.filter((e) => e.type === "review_artifact");
-    expect(artifacts.map((e) => (e.type === "review_artifact" ? e.poweredBy : "?"))).toEqual(["git"]);
+    expect(
+      artifacts.map((e) => (e.type === "review_artifact" && e.artifact === "reading_diff" ? e.poweredBy : "?")),
+    ).toEqual(["git"]);
   });
 
   it("SWITCHBOARD_READING_DIFF=off → a review publishes no artifact", async () => {

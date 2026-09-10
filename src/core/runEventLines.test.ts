@@ -159,6 +159,33 @@ describe("parseRunEventLines", () => {
     expect(skipped).toBe(1);
   });
 
+  it("accepts a `pr_description` review_artifact (known origin, repo, pr, title, body, tour array), skips it otherwise", () => {
+    const ok = {
+      type: "review_artifact",
+      artifact: "pr_description",
+      origin: "parsed",
+      repo: "acme/api",
+      pr: 42,
+      title: "t",
+      body: "b",
+      tour: [],
+      remaining: [],
+      decisions: [],
+      complete: false,
+      problems: ["no `## Tour` section"],
+      truncated: false,
+      at: 1,
+    };
+    const badOrigin = { ...ok, origin: "guessed" };
+    const noTour = { ...ok, tour: "none" };
+    const noPr = { ...ok, pr: "42" };
+    const { events, skipped } = parseRunEventLines(
+      [ok, badOrigin, noTour, noPr].map((e) => JSON.stringify(e)).join("\n"),
+    );
+    expect(events).toEqual([ok]);
+    expect(skipped).toBe(3);
+  });
+
   it("accepts `pr_description` when it carries an object description, skips a string or null one", () => {
     const ok = { type: "pr_description", description: { title: "Fix the gate" }, at: 1 };
     const badString = { type: "pr_description", description: "not an object" };

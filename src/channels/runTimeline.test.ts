@@ -345,6 +345,30 @@ describe("createRunTimeline — review_artifact (docs/reference/specs/reading-di
     ).toEqual([]);
     expect(t.steps()[0].calls).toHaveLength(1); // untouched
   });
+
+  it("folds a pr_description artifact to nothing too (reading-diff.md item 7) — the panel's material, not a step", () => {
+    const t = createRunTimeline();
+    t.push(call("bash", "$ ls"));
+    expect(
+      t.push({
+        type: "review_artifact",
+        artifact: "pr_description",
+        origin: "parsed",
+        repo: "acme/api",
+        pr: 42,
+        title: "t",
+        body: "b",
+        tour: [],
+        remaining: [],
+        decisions: [],
+        complete: false,
+        problems: [],
+        truncated: false,
+        at: 1,
+      }),
+    ).toEqual([]);
+    expect(t.steps()[0].calls).toHaveLength(1);
+  });
 });
 
 describe("createRunTimeline — run_meta (item 19)", () => {

@@ -244,8 +244,8 @@ export function activityLine(e: RunEvent): string {
       return "run context recorded"; // published straight to the registry too — never arrives here
     case "skill_use":
       return `📚 skill ${e.skill} loaded`;
-    case "review_artifact":
-      return "reading diff ready"; // published straight to the registry — never arrives here
+    case "review_artifact": // published straight to the registry — never arrives here
+      return e.artifact === "pr_description" ? "PR description ready" : "reading diff ready";
     case "pr_description":
       return "PR description recorded"; // published straight to the registry — never arrives here
     case "pr_opened":
