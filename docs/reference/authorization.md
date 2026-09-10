@@ -43,11 +43,25 @@ Keyed by platform-namespaced actor id. Three axes, each a list of names or the e
 | `schedule:<name>` (a cron firing) | what the schedule registry declares for it | **replaces** the declaration |
 | `cli:local` | everything | — (the local operator is always an admin) |
 
+### Everyone on a surface — `<ns>:*`
+
+```yaml
+grants:
+  access:*:                         # every Cloudflare Access browser session: the org, granted once
+    actions: all
+    channels: all
+    repos: all
+  slack:*:                          # every workspace member the bot hears
+    actions: [runs:read]
+```
+
+A key `slack:*`, `http:*`, `mcp:*` or `access:*` is a **surface entry**: the same three axes, held by every actor that authenticated on that surface. Who may authenticate there is decided elsewhere (Access admits the org, Slack the workspace, the token maps the credentials), so the set is one an operator already trusts. An actor's grants are the **union** of its own entry (or its baseline) and its surface entry — a person listed for extra rights keeps what everyone holds, and a personal entry never narrows the surface entry. `access:*` is browser sessions only: an `access:svc:` service token is a named credential and holds exactly its own entry. A surface entry is not an actor — `adminsHint` names people, never `slack:*`.
+
 Never a baseline, held only by a grant (or `all`): `config:write` (`config set/clear/instructions channel`, channel-tier MCP servers), `repo:write` (`repo onboard/offboard/reconfigure/rebuild`, `friction propose`, forgetting shared memories, org-tier MCP servers), every `runs:*` action, every `*:exec`, `dispatch`, `deploy:write`, `trace:read` (the bot's span log, `GET /admin/trace/log`). **No entry with `actions: all` means nobody is an admin** — the fail-closed default; `adminsHint` (the "ask …" in a 🚫 reply) names whoever holds it.
 
 ### Validation
 
-The load fails, naming the entry and field, on an unknown id prefix (`slack:`, `http:`, `mcp:`, `access:`, `schedule:` are the vocabulary), a misspelled `all`, an unknown axis, or a block that is not a mapping. Nothing is ever widened to recover from a typo. `grants` and `restrict` are the only authorization keys `config.yaml` has: any other top-level key — `permissions`, a misspelling — is unknown and fails the load by name.
+The load fails, naming the entry and field, on an unknown id prefix (`slack:`, `http:`, `mcp:`, `access:`, `schedule:` are the vocabulary), a misspelled `all`, an unknown axis, or a block that is not a mapping. `*` is only ever a whole surface: a partial subject (`slack:U*`) and `schedule:*`, `access:svc:*`, `agent:*`, `cli:*` are refused by name — schedules and service tokens are individually named identities, an agent derives its grants from its principal, the CLI holds everything. Nothing is ever widened to recover from a typo. `grants` and `restrict` are the only authorization keys `config.yaml` has: any other top-level key — `permissions`, a misspelling — is unknown and fails the load by name.
 
 ## `restrict`
 

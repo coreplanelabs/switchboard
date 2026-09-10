@@ -87,6 +87,21 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     );
   });
 
+  it("Slack user nobody listed, with a `slack:*` entry → the surface entry on top of the baseline; a listed user holds both", () => {
+    const everyone = parseGrantsConfig({
+      "slack:*": { actions: ["runs:read"], channels: ["slack:C1"] },
+      "slack:UMGR": { actions: ["repo:write"] },
+    });
+    if (!everyone.ok) throw new Error(everyone.errors.join("; "));
+    const withSurface = (id: string) => grantsFor(id, { ...source, grants: everyone.grants });
+    expect(resolveActor({ surface: "slack", subjectId: "UNOBODY" }, withSurface).grants).toEqual(
+      grants({ actions: set(...CHAT_OPEN_ACTIONS, "runs:read"), channels: set("slack:C1") }),
+    );
+    expect(resolveActor({ surface: "slack", subjectId: "UMGR" }, withSurface).grants).toEqual(
+      grants({ actions: set(...CHAT_OPEN_ACTIONS, "runs:read", "repo:write"), channels: set("slack:C1") }),
+    );
+  });
+
   it("Slack user granted repo:write → repo:write + friction:write on top of the baseline", () => {
     const a = resolveActor({ surface: "slack", subjectId: "UMGR" }, lookup);
     expect(a.grants).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS, "repo:write", "friction:write") }));

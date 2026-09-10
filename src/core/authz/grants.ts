@@ -3,11 +3,12 @@ import { hasAction } from "./authorize.js";
 import { NO_GRANTS, type Grants, type GrantSet } from "./types.js";
 
 // Grants: WHAT an actor may do, from config's one shape —
-// the native `grants` block (one entry per platform-namespaced actor id) — plus
-// `restrict`, which names the agents and repos that are CLOSED unless a grant
-// covers them. Everything not restricted is open to everyone who can reach the
-// bot; a grant only ever adds. Pure: no I/O, no decisions — nothing here says
-// whether an action is allowed; that is `authorize`.
+// the native `grants` block (one entry per platform-namespaced actor id, or
+// `<ns>:*` for every actor authenticated on a surface) — plus `restrict`, which
+// names the agents and repos that are CLOSED unless a grant covers them.
+// Everything not restricted is open to everyone who can reach the bot; a grant
+// only ever adds. Pure: no I/O, no decisions — nothing here says whether an
+// action is allowed; that is `authorize`.
 
 /** Every grant, on every axis. What admins and the local CLI hold. */
 export const ALL_GRANTS: Grants = Object.freeze({ actions: "all", channels: "all", repos: "all" });
@@ -16,6 +17,26 @@ export const ALL_GRANTS: Grants = Object.freeze({ actions: "all", channels: "all
  *  configurable (the local CLI always holds everything) and `agent:` actors
  *  derive their grants from their principal, so neither is listed. */
 export const GRANT_ACTOR_PREFIXES = ["slack", "http", "mcp", "access", "schedule"] as const;
+
+/** The surfaces whose every authenticated actor may be granted at once with one
+ *  `<ns>:*` entry: who may authenticate there is decided elsewhere (Cloudflare
+ *  Access admits the org, Slack the workspace, the token maps the credentials),
+ *  so "everyone on this surface" is a set an operator already trusts. Not here:
+ *  `schedule:` (a schedule is an individually named job the registry declares),
+ *  `access:svc:` (a service token is a named credential, not a browser session —
+ *  `access:*` never reaches one), and the unconfigurable `cli:` and `agent:`. */
+export const SURFACE_GRANT_PREFIXES = ["slack", "http", "mcp", "access"] as const;
+
+/** The `<ns>:*` key for the surface `actorId` authenticated on — `slack:*` for
+ *  `slack:U…`, `access:*` for a browser `access:<sub>` — or undefined when its
+ *  namespace has none (`access:svc:`, `schedule:`, `cli:`, `agent:`, unknown). */
+export function surfaceKeyFor(actorId: string): string | undefined {
+  if (actorId.startsWith("access:svc:")) return undefined;
+  const colon = actorId.indexOf(":");
+  if (colon <= 0 || colon === actorId.length - 1) return undefined;
+  const ns = actorId.slice(0, colon);
+  return (SURFACE_GRANT_PREFIXES as readonly string[]).includes(ns) ? `${ns}:*` : undefined;
+}
 
 /** The action that lets an actor run agent `<name>` — checked only for a
  *  RESTRICTED agent (`restrict.agents`); every other agent is open. */
@@ -80,7 +101,10 @@ function hasKnownPrefix(actorId: string): boolean {
 }
 
 /** Validate a raw `grants` block and build its table. Every problem names the
- *  actor id (and the axis) it is about; nothing is silently dropped or widened. */
+ *  actor id (and the axis) it is about; nothing is silently dropped or widened.
+ *  `*` is only ever a whole surface (`surfaceKeyFor`): a partial subject
+ *  (`slack:U*`) would be a pattern the lookup cannot honour, and `schedule:*`,
+ *  `access:svc:*`, `agent:*`, `cli:*` name namespaces no surface entry covers. */
 export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw))
     return { ok: false, errors: ["grants must be a mapping of actor id → { actions, channels, repos }"] };
@@ -88,6 +112,12 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
   const grants = new Map<string, Grants>();
   for (const [actorId, entry] of Object.entries(raw as Record<string, unknown>)) {
     const where = `grants["${actorId}"]`;
+    if (actorId.includes("*") && surfaceKeyFor(actorId) !== actorId) {
+      errors.push(
+        `${where}: "*" only ever stands for a whole surface — one of ${SURFACE_GRANT_PREFIXES.map((p) => `${p}:*`).join(", ")} (every actor authenticated there); a subject is never a pattern, and schedule:, access:svc:, agent: and cli: ids are named one by one`,
+      );
+      continue;
+    }
     if (!hasKnownPrefix(actorId)) {
       errors.push(
         `${where}: actor ids are platform-namespaced — one of ${GRANT_ACTOR_PREFIXES.map((p) => `${p}:`).join(", ")} followed by the subject`,
@@ -203,8 +233,13 @@ export interface GrantsSource {
 }
 
 export interface GrantsTable {
-  /** Every actor the config or the schedule registry names, with its baseline unioned in. */
+  /** Every actor the config or the schedule registry names, with its baseline unioned in. Never a `*` key. */
   grants: Map<string, Grants>;
+  /** The `<ns>:*` entries by key: what every actor authenticated on that surface
+   *  holds beyond its baseline, unioned into each of them at lookup — never
+   *  replacing an actor's own entry, never listed as an actor (a surface is not
+   *  someone `adminsHint` can name). */
+  surfaces: Map<string, Grants>;
   /** What every `slack:` user holds, listed or not: the open chat commands and `agent:run:<name>` for every unrestricted agent. */
   everyone: Grants;
   /** What every Access browser session (`access:<sub>`, never `access:svc:`) holds: each registered group's read. */
@@ -226,6 +261,7 @@ export function namespaceBaseline(actorId: string, table: Pick<GrantsTable, "eve
 /** The whole table — what `ConfigStore` builds once at load. A native `slack:`
  *  or browser entry ADDS to its namespace's baseline (a grant never takes the
  *  open commands away); every other entry is exactly what it declares. A
+ *  `<ns>:*` entry is kept apart as a surface entry (`grantsIn` unions it in). A
  *  schedule's registry-declared grants are its floor, replaced whole by a native
  *  entry for the same `schedule:<name>` (the registry is a default, not a
  *  second config shape). */
@@ -237,21 +273,29 @@ export function grantsTable(source: GrantsSource): GrantsTable {
     browserReads: { ...NO_GRANTS, actions: browserReadActions(source.commandGroups ?? []) },
   };
   const grants = new Map<string, Grants>();
-  for (const [id, g] of source.grants ?? []) grants.set(id, unionGrants(g, namespaceBaseline(id, baselines)));
+  const surfaces = new Map<string, Grants>();
+  for (const [id, g] of source.grants ?? []) {
+    if (surfaceKeyFor(id) === id) surfaces.set(id, g);
+    else grants.set(id, unionGrants(g, namespaceBaseline(id, baselines)));
+  }
   for (const schedule of source.schedules ?? []) {
     if (source.grants?.has(schedule.id)) continue;
     grants.set(schedule.id, schedule.grants);
   }
-  return { grants, ...baselines, restrict };
+  return { grants, surfaces, ...baselines, restrict };
 }
 
-/** One actor's grants from a built table: its entry (baseline included); else
- *  the baseline its namespace inherits; else `NO_GRANTS` (fail-closed). */
+/** One actor's grants from a built table: the UNION of its entry (baseline
+ *  included; else the baseline its namespace inherits) and its surface's `*`
+ *  entry — a personal entry never narrows what everyone on the surface holds.
+ *  Nothing on any axis → `NO_GRANTS` (fail-closed); an id no surface owns has
+ *  no `*` entry to inherit. */
 export function grantsIn(table: GrantsTable, actorId: string): Grants {
-  const listed = table.grants.get(actorId);
-  if (listed) return listed;
-  const baseline = namespaceBaseline(actorId, table);
-  return isEmpty(baseline) ? NO_GRANTS : baseline;
+  const own = table.grants.get(actorId) ?? namespaceBaseline(actorId, table);
+  const surfaceKey = surfaceKeyFor(actorId);
+  const surface = surfaceKey === undefined ? undefined : table.surfaces.get(surfaceKey);
+  const effective = surface === undefined ? own : unionGrants(own, surface);
+  return isEmpty(effective) ? NO_GRANTS : effective;
 }
 
 /** `grantsIn` over a table built on the spot — for callers without a `ConfigStore`. */

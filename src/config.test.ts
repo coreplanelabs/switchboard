@@ -390,6 +390,47 @@ describe("grantsFor — the grants the policy table decides on", () => {
     const s = store(YAML_FIXTURE.replace(/grants:[\s\S]*$/m, ""));
     expect(s.canManageRepos("slack:URANDOM")).toBe(false);
   });
+
+  it("a surface entry alone: `access:*` gives every browser session the entry — the org Access admits, granted once; a service token is not a browser session", async () => {
+    const s = storeWith(withGrants(`  "access:*": { actions: all, channels: all, repos: all }\n`), {
+      commandGroups: ["runs", "friction"],
+    });
+    expect(s.grantsFor("access:anyone@example.com")).toEqual(ALL_GRANTS);
+    expect(s.grantsFor("access:svc:anyone")).toBe(NO_GRANTS);
+    expect(holds(s, "slack:URANDOM", "runs:read")).toBe(false);
+  });
+
+  it("surface + personal entry: the union — UDEV's own grant adds to `slack:*`, and an entry narrower than the surface entry does not narrow it", async () => {
+    const s = store(withGrants(`  "slack:*": { actions: [runs:read, agent:run:coding], channels: [slack:C1] }\n`));
+    // Unlisted: baseline + the surface entry.
+    expect(holds(s, "slack:URANDOM", "runs:read")).toBe(true);
+    expect(holds(s, "slack:URANDOM", "agent:run:coding")).toBe(true);
+    expect(s.grantsFor("slack:URANDOM").channels).toEqual(new Set(["slack:C1"]));
+    expect(holds(s, "slack:URANDOM", "config:write")).toBe(false);
+    // Listed with only agent:run:coding — narrower than the surface entry — still holds runs:read and the channel.
+    expect(holds(s, "slack:UDEV", "runs:read")).toBe(true);
+    expect(s.grantsFor("slack:UDEV").channels).toEqual(new Set(["slack:C1"]));
+    // Listed with more: both.
+    const more = store(
+      withGrants(`  "slack:*": { actions: [runs:read] }\n`).replace(
+        '"slack:UDEV": { actions: [agent:run:coding] }',
+        '"slack:UDEV": { actions: [agent:run:coding], channels: [slack:C2] }',
+      ),
+    );
+    expect([holds(more, "slack:UDEV", "runs:read"), holds(more, "slack:UDEV", "agent:run:coding")]).toEqual([
+      true,
+      true,
+    ]);
+    expect(more.grantsFor("slack:UDEV").channels).toEqual(new Set(["slack:C2"]));
+    expect(more.canRunAgent("slack:UDEV", "coding")).toBe(true);
+    expect(more.canRunAgent("slack:URANDOM", "coding")).toBe(false);
+  });
+
+  it("adminsHint names people, never a surface: `slack:*` holding everything makes everyone an admin, and the hint still points at UADMIN", async () => {
+    const s = store(withGrants(`  "slack:*": { actions: all, channels: all, repos: all }\n`));
+    expect(s.grantsFor("slack:URANDOM")).toEqual(ALL_GRANTS);
+    expect(s.adminsHint()).toBe("<@slack:UADMIN>");
+  });
 });
 
 // Feature: docs/reference/specs/routing-and-config.md behavior 9 — per-scope custom
@@ -501,6 +542,16 @@ describe("grants config — the one shape", () => {
       /grants\["slack:UA"\]: unknown field agents/,
     );
     expect(() => load(YAML_FIXTURE.replace(/grants:[\s\S]*$/, "grants: [a]\n"))).toThrow(/grants must be a mapping/);
+  });
+
+  it("`*` is only ever a whole surface: a partial subject (slack:U*), schedule:*, access:svc:* and agent:* fail the load naming the id", () => {
+    for (const id of ["slack:U*", "schedule:*", "access:svc:*", "agent:*"]) {
+      expect(() => load(withGrants(`  "${id}":\n    actions: all\n`)), id).toThrow(
+        new RegExp(
+          `config\\.yaml: grants\\["${id.replace(/\*/g, "\\*")}"\\].*slack:\\*, http:\\*, mcp:\\*, access:\\*`,
+        ),
+      );
+    }
   });
 
   it("the permission helpers answer from the grants table: adminsHint names the `all` holders, they manage repos and edit channel config, an unlisted user does neither", () => {

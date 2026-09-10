@@ -1,10 +1,10 @@
 # Restrict who can do what
 
-Name the admins, close the agents and repositories that need a grant, and give machines exactly what they hold.
+Name the admins, grant the org, close what needs a grant, and give machines exactly what they hold.
 
-**You need:** `config.yaml`, a way to make it live (restart; on Cloudflare `deploy config` then `deploy restart`), and the ids (`slack:U…`; `config show` prints yours).
+**You need:** `config.yaml`, a way to make it live (restart; on Cloudflare `deploy config` then `deploy restart`), and the ids (`config show` prints yours).
 
-`grants` says what each actor holds; `restrict` closes agents and repositories to the ungranted. Without either, everything is open and nobody holds the gated actions below.
+`grants` says what each actor holds; `restrict` closes agents and repositories to the ungranted.
 
 ## Name an admin
 
@@ -17,6 +17,18 @@ grants:
 ```
 
 Without an `all` entry nobody is admin and every gated command is refused.
+
+## Everyone in the org
+
+```yaml
+grants:
+  access:*:                             # every Access browser session
+    actions: all
+    channels: all
+    repos: all
+```
+
+Access already decides who may log in, so `access:*` is the org, granted once; `slack:*`, `http:*`, `mcp:*` work the same. A person's own entry adds to it, never narrows it.
 
 ## Close an agent
 
@@ -40,7 +52,7 @@ grants:
     repos: [acme/payments]              # … on the `repos` axis
 ```
 
-Unlisted repositories stay open to anyone allowed the coding agent; slugs are case-insensitive.
+Unlisted repositories stay open; slugs are case-insensitive.
 
 ## Allow channel configuration
 
@@ -60,7 +72,7 @@ grants:
     actions: [repo:write, friction:write]   # friction propose files issues
 ```
 
-Gates `repo onboard`, `offboard`, `reconfigure` and `rebuild` (billable compute); `repo list` is open.
+Gates `repo onboard`/`offboard`/`reconfigure`/`rebuild` (billable compute); `repo list` is open.
 
 ## Grant the machine surfaces
 
@@ -72,15 +84,12 @@ grants:
   access:svc:ops-bot:                   # Access service token (its common_name)
     actions: [runs:read, runs:write, friction:read]
     channels: all
-  http:ci:                              # ingress token subject over /ingress …
-    actions: [dispatch, runs:read]
-  mcp:ci:                               # … same subject over MCP
+  http:ci:                              # ingress token subject (`mcp:ci` over MCP)
     actions: [dispatch, runs:read]
 ```
 
 - Access browser sessions hold every group's `read`; writes need a grant.
-- Service and ingress tokens hold exactly their entry; unlisted ones cannot `dispatch`.
-- `SWITCHBOARD_INGRESS_TOKENS` only identifies: `{ "<token>": { "subject": "ci" } }`.
+- Service and ingress tokens hold exactly their entry; unlisted ones cannot `dispatch`. `SWITCHBOARD_INGRESS_TOKENS` only identifies.
 
 ## Check it
 
@@ -95,7 +104,7 @@ Every refusal names the missing grant and who can give it.
 ```yaml
 restrict:
   agents: [coding, ship]
-  repos: [acme/payments]                # only this repo is restricted
+  repos: [acme/payments]
 grants:
   slack:U0100FOUNDER:
     actions: all
@@ -104,8 +113,6 @@ grants:
   slack:U0456DEV:
     actions: [agent:run:coding, agent:run:ship, config:write, repo:write, friction:write]
     repos: [acme/payments]
-  slack:U0457DEV:
-    actions: [agent:run:coding]
 ```
 
 Everything unnamed stays open: `review`, `research`, `general`, other repositories.

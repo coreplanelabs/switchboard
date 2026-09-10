@@ -83,18 +83,28 @@ defaults:
 #
 # `grants`: what ANY actor holds, in one shape, keyed by its platform-namespaced
 # id — `slack:U…`, `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
-# `access:svc:<common_name>`, `schedule:<name>`. Each entry has up to three
+# `access:svc:<common_name>`, `schedule:<name>` — or by a whole surface,
+# `<ns>:*`: `access:*` is every Cloudflare Access browser session (the org,
+# granted once instead of enumerated), `slack:*` every workspace member the bot
+# hears, `http:*` / `mcp:*` every ingress token. Each entry has up to three
 # axes; every axis is a list of names or the explicit word `all`, and an ABSENT
 # axis is the empty set (fail-closed). A `slack:` user holds the open chat
 # commands and every unrestricted agent whether listed or not — an entry ADDS to
 # that; an Access browser session holds every group's read the same way;
 # credentials (`http:`, `mcp:`, `access:svc:`) hold exactly their entry and an
-# unlisted one holds nothing, not even `dispatch`. `config:write` (channel
-# config), `repo:write` (repo onboard/offboard/…, friction propose) and every
-# `runs:*` are never a baseline: nobody holds them until granted, and nobody is
-# an admin without an `all` entry. An unknown id prefix or a misspelled `all`
-# fails the load, as does any top-level key this file does not document.
+# unlisted one holds nothing, not even `dispatch`. A surface entry is unioned
+# into every actor of its surface on top of its own entry — a person's entry
+# never narrows it; `access:*` never reaches an `access:svc:` token. `config:write`
+# (channel config), `repo:write` (repo onboard/offboard/…, friction propose) and
+# every `runs:*` are never a baseline: nobody holds them until granted, and
+# nobody is an admin without an `all` entry. An unknown id prefix, a misspelled
+# `all` or a `*` that is not a whole surface (`slack:U*`, `schedule:*`,
+# `agent:*`) fails the load, as does any top-level key this file does not document.
 # grants:
+#   access:*:                         # everyone in the org: every Access browser session
+#     actions: all                    # holds everything — the org-wide pattern
+#     channels: all
+#     repos: all
 #   slack:U0ADMIN:                    # an admin, spelled out
 #     actions: all
 #     channels: all
