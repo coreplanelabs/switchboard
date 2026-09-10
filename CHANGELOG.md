@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.2](https://github.com/coreplanelabs/switchboard/compare/v1.18.1...v1.18.2) (2026-09-10)
+
+
+### Bug fixes
+
+* **cli:** the package ships the repository README — the npm page reads the same as GitHub ([#895](https://github.com/coreplanelabs/switchboard/issues/895)) ([c281d44](https://github.com/coreplanelabs/switchboard/commit/c281d44c78e96433c35f7bbf0ec9423585376c21))
+
 ## [1.18.1](https://github.com/coreplanelabs/switchboard/compare/v1.18.0...v1.18.1) (2026-09-10)
 
 
