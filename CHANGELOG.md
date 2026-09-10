@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.16.0](https://github.com/coreplanelabs/switchboard/compare/v1.15.0...v1.16.0) (2026-09-10)
+
+
+### Features
+
+* **authz:** a grant for everyone on a surface — access:* and slack:* entries union with a person's own ([#873](https://github.com/coreplanelabs/switchboard/issues/873)) ([4b46c57](https://github.com/coreplanelabs/switchboard/commit/4b46c57166e7ec715cf48983bce30ceeb2d10a74))
+
+
+### Bug fixes
+
+* **web:** each time bucket has its own color, and every timestamp ends on one right edge ([#874](https://github.com/coreplanelabs/switchboard/issues/874)) ([62be6d0](https://github.com/coreplanelabs/switchboard/commit/62be6d00e15db9a136dc41d15362a742380b2ba1))
+* **web:** the Tour holds still and jumps clearly — no hover growth, a persistent highlight, and a truncated diff says so instead of "not in this diff" ([#871](https://github.com/coreplanelabs/switchboard/issues/871)) ([2af293f](https://github.com/coreplanelabs/switchboard/commit/2af293fae967738ea66e5d433dbf9234151d5032))
+
 ## [1.15.0](https://github.com/coreplanelabs/switchboard/compare/v1.14.0...v1.15.0) (2026-09-10)
 
 
