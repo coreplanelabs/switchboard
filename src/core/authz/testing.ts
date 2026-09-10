@@ -16,6 +16,7 @@ export const COMMAND_GROUPS = [
   "schedule",
   "deploy",
   "help",
+  "status",
   "env",
   "setup",
 ] as const;

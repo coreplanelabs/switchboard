@@ -513,6 +513,16 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
       commands: () => s.commands(),
     },
+    status: {
+      snapshot: () => ({
+        version: "0.0.0-test",
+        commit: "0123456789abcdef0123456789abcdef01234567",
+        builtAt: "2026-01-01T00:00:00.000Z",
+        startedAt: NOW,
+        inFlight: 1,
+        draining: false,
+      }),
+    },
     config: {
       describeConfig: async (c, u) => s.config.describeConfig(c, u),
       scopes: async (c, u) => s.config.scopes(c, u),

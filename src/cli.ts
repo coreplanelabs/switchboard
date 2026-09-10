@@ -51,7 +51,7 @@ import { Console } from "node:console";
 import { existsSync } from "node:fs";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
-import { buildCoreCommands } from "./core/commandCatalogue.js";
+import { buildCoreCommands, unstampedStatus } from "./core/commandCatalogue.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 import { CLI_ACTOR } from "./core/authz/actor.js";
 import { ALL_CAPABILITIES, capabilitiesFrom, type Capabilities } from "./core/capabilities.js";
@@ -598,6 +598,8 @@ async function main(): Promise<void> {
     providers,
     capabilities,
     residentFleet,
+    // The CLI's own identity for the About block: its package version, no stamp.
+    build: (({ version, commit }) => ({ version, commit }))(unstampedStatus()),
     skills,
     mcp,
     memory,

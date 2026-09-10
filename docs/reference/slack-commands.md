@@ -34,6 +34,12 @@ One table per group. "Who can run it" is what the authorization policy decides f
 |---|---|---|
 | `help show` | What Switchboard can do: agents, per-request directives, and every chat command. | anyone |
 
+### `status`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `status show` | Which build this process runs: version, commit, when it was built and started, runs in flight, draining. | anyone |
+
 ### `config`
 
 | Command | What it does | Who can run it |

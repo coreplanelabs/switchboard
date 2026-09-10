@@ -1253,5 +1253,19 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
       "cli",
     ],
   },
+  {
+    "action": "status:read",
+    "args": [],
+    "effect": "read",
+    "id": "status.show",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
 ]
 `;

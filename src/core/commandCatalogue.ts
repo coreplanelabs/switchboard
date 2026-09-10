@@ -32,6 +32,8 @@ import {
 import type { Capabilities } from "./capabilities.js";
 import { publicEnv, type Secrets } from "../secrets.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
+import type { StatusSnapshot } from "./commands/status.js";
+import { packageVersion } from "../packageRoot.js";
 import { selectFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
 import type { MemoryStore } from "./memory/types.js";
 import { MCP_OFF_MESSAGE, type McpService } from "../mcp/service.js";
@@ -102,6 +104,21 @@ export interface CoreCommandWiring {
    *  the full catalogue, what a test or the docs generator asks for. */
   capabilities?: Capabilities;
   now?: () => number;
+  /** What `status show` reports. The bot hands the live facts `/healthz` serves
+   *  (build stamp, start, in-flight, draining); default: this package's version,
+   *  no stamp, nothing in flight — what a CLI or a test process truthfully is. */
+  status?: () => StatusSnapshot;
+}
+
+/** The snapshot of a process nobody stamped: a checkout's CLI, a test. */
+export function unstampedStatus(): StatusSnapshot {
+  let version = "unknown";
+  try {
+    version = packageVersion();
+  } catch {
+    // no package.json above the root: `unknown` is the truth
+  }
+  return { version, commit: "unknown", inFlight: 0, draining: false };
 }
 
 /** Default Operations backend, mirroring executor selection's config reads:
@@ -245,6 +262,7 @@ export function buildCoreCommands(
       cliVersion: cliVersionOnHost,
     },
     env: { bootstrap: bootstrapOnHost },
+    status: { snapshot: () => (wiring.status ?? unstampedStatus)() },
     // `setup init` writes the operator's working directory — the one the CLI runs in.
     setup: hostSetupIO(),
   };

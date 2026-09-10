@@ -19,7 +19,7 @@ One decision, `authorize(actor, action, resource) → allow | deny(reason)`, ove
 
    | Actor id | Baseline (held listed or not) | A `grants` entry … |
    |---|---|---|
-   | `slack:U…` | `{ actions: CHAT_OPEN_ACTIONS + agent:run:<name> for every agent not under restrict.agents }` — `help:read, config:read, repo:read, friction:read, memory:read, mcp:read, schedule:read, memory:write, mcp:write` | adds to it |
+   | `slack:U…` | `{ actions: CHAT_OPEN_ACTIONS + agent:run:<name> for every agent not under restrict.agents }` — `help:read, status:read, config:read, repo:read, friction:read, memory:read, mcp:read, schedule:read, memory:write, mcp:write` | adds to it |
    | `access:<sub>` | `{ actions: every <group>:read }` (the groups the store is handed at startup) | adds to it |
    | `access:svc:<cn>`, `http:<subject>`, `mcp:<subject>` | nothing (`NO_GRANTS`) | is exactly what it holds — `dispatch` included |
    | `schedule:<name>` | the registry's declared grants (`self-improvement`: `{ actions: {friction:read, friction:write}, channels: all }`) | replaces them whole |

@@ -21,7 +21,7 @@ import { memoryContextBlock, type MemoryStore } from "../memory/index.js";
 import { skillGuidanceBlock, type SkillStore } from "../../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource, type McpToolsForRun } from "../../mcp/source.js";
 import { configAwarenessBlock } from "../configAwareness.js";
-import { selfDescriptionBlock } from "../selfDescription.js";
+import { selfDescriptionBlock, type BuildFacts } from "../selfDescription.js";
 import { customInstructionsBlock } from "../customInstructions.js";
 import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
@@ -59,6 +59,10 @@ export interface ProvisionDeps
    *  background so the About block names the Worker's number, never a constant
    *  (routing-and-config item 11). `NO_FLEET` without residents. */
   residentFleet: ResidentFleetFacts;
+  /** The version and commit this process runs (index.ts: the package version and the image's
+   *  build stamp), named in the About block so "what are you running?" is answered from fact.
+   *  Absent in a process with nothing to say about itself (tests). */
+  build?: BuildFacts;
   /**
    * Cross-session memory store (docs/decisions/0017-memory-off-by-default.md). When `config.memory.enabled`
    * is true the dispatcher retrieves scope-relevant records from this store
@@ -677,6 +681,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     deps.config.config.organization,
     deps.capabilities,
     deps.residentFleet.cap(),
+    deps.build,
   );
 
   // Custom instructions: the requester's user text + this
