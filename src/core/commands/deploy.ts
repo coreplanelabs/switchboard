@@ -97,8 +97,9 @@ export interface DeployCommandDeps {
     /** `deploy images` (and `deploy plan` / `deploy all` in `registry` mode): the account registry's listing, the
      *  credential the copy pushes with, one image copy over HTTPS (src/deploy/imagesHost.ts). */
     images: ImagesHostIO;
-    /** The version this CLI runs as (src/packageRoot.ts `packageVersion`): the images a release published carry
-     *  it, so it is what `deploy images` copies and what `registry`-mode configs reference. */
+    /** The version this CLI runs as (src/deploy/host.ts `cliVersionOnHost`: the root `package.json`'s in a checkout,
+     *  `source.json`'s from the published package): the images a release published carry it, so it is what the copy
+     *  moves and what `registry`-mode configs reference. */
     cliVersion(): string;
   };
 }

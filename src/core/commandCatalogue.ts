@@ -3,6 +3,7 @@ import { AGENTS } from "../agents/registry.js";
 import { bootstrapOnHost } from "../agentEnv/host.js";
 import type { ConfigStore } from "../config.js";
 import type { AffectedReport } from "../deploy/affected.js";
+import { cliVersionOnHost } from "../deploy/host.js";
 import { systemClock } from "./trace/clock.js";
 import type { LoadedProfile } from "../deploy/profile.js";
 import {
@@ -16,7 +17,6 @@ import {
 } from "../deploy/run.js";
 import { imagesHostIO } from "../deploy/imagesHost.js";
 import { hostSecretsIO } from "../deploy/secretsHost.js";
-import { packageVersion } from "../packageRoot.js";
 import { hostSetupIO } from "../setup/host.js";
 import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
@@ -224,7 +224,7 @@ export function buildCoreCommands(
       secrets: hostSecretsIO,
       pushConfig: pushConfigOnHost,
       images: imagesHostIO({ log: (l) => console.log(l), now: wiring.now ?? systemClock }),
-      cliVersion: packageVersion,
+      cliVersion: cliVersionOnHost,
     },
     env: { bootstrap: bootstrapOnHost },
     // `setup init` writes the operator's working directory — the one the CLI runs in.
