@@ -1,72 +1,67 @@
 # Run it locally
 
-By the end of this lesson OpenSwitchboard has answered a question on your own machine, run an agent with a directive, and shown you the run it recorded — all from the terminal, with no Slack workspace. It is for a developer who has a model provider API key and wants to see the pipeline work before connecting anything else.
+By the end, you run OpenSwitchboard from a checkout of the repository, ask it a question, connect it to Slack, and pass the check every change must pass. This is the contributor's loop; to use the product, [Get started](get-started.md) needs no checkout.
 
-## What you need
+**You need:** Node 24 (`.nvmrc` pins it; 22 or newer runs), git, and an Anthropic API key.
 
-- Node 24 (`.nvmrc` pins it; 22 or newer runs).
-- An Anthropic API key. Any provider works later; this lesson uses the one the example config names first.
-- Ten minutes.
-
-## 1. Clone and install
+## Clone and install
 
 ```bash
-git clone <repository-url> switchboard && cd switchboard
+git clone https://github.com/coreplanelabs/switchboard.git
+cd switchboard
 npm ci
-npm run cli -- init --organization <your GitHub org> --anthropic-key <your key>
 ```
 
-`init` writes `.env` (mode 600, your key on its line) and `config/config.yaml` from the checked-in examples and prints what is on; the process loads `.env` at startup (a variable your shell exports wins). Nothing else is required to start: every optional block in `config.yaml` is commented out, and off means absent, not degraded ([Turn features on and off](../how-to/turn-features-on-and-off.md)).
+One lockfile covers the bot, the dashboard, the docs site, the Workers and the CLI package.
 
-## 2. Ask it something
+## Write the local files
 
 ```bash
-npm run cli -- ask "what tools do you have available right now?"
+npm run cli -- init --organization <org> --anthropic-key <key>
 ```
 
-The answer prints to your terminal. This ran the same pipeline a Slack message would: parse the directives, resolve the config, run the agent, deliver the reply. `ask` is a channel in its own right, one that prints instead of posting.
+You should see:
 
-## 3. Steer it with a directive
+```
+wrote:
+  .env                  (mode 600)
+  config/config.yaml
+providers: anthropic
+```
+
+`npm run cli --` is the checkout's spelling of the published CLI; the same code ships as `@coreplane/switchboard`.
+
+## Ask
 
 ```bash
 npm run cli -- ask "agent:review model:anthropic/claude-opus-5 what would you look for in a PR that touches auth middleware?"
 ```
 
-`agent:` and `model:` are the same directives you would type after a Slack mention; `effort:low` would make the turn faster. `--thread <key>` before the text makes the next `ask` a follow-up in that thread, with the same stickiness a Slack thread has.
+`agent:` and `model:` are the directives a Slack mention takes; `--thread <key>` before the text makes the next `ask` a follow-up.
 
-## 4. Keep the runs
+## Connect it to Slack
 
-A run is live-only until you say otherwise, and a CLI process ends with its run. Open `config/config.yaml`, find the commented `runHistory` block, and turn on the file store:
-
-```yaml
-runHistory:
-  store: file
-```
-
-Now every `ask` writes its record to `data/runs/` when it finishes.
-
-## 5. Read a run back
+Create the app and its two tokens as in [Get started](get-started.md), then:
 
 ```bash
-npm run cli -- ask "in one line, what is a lateral join?"
-npm run cli -- runs list --status all
+npm run cli -- init --force --organization <org> --anthropic-key <key> --slack-app-token <xapp-token> --slack-bot-token <xoxb-token>
+npm run dev
 ```
 
-The list is the same registry the Slack status card and the dashboard read. Take the run's full id (`runs list --status all --json` prints it) and:
+You should see `switchboard running (providers: anthropic; default agent: general)`. This is the process the container runs, from source.
+
+## Change something and check it
 
 ```bash
-npm run cli -- runs get <id>
-npm run cli -- runs events <id>
+npx vitest run --changed origin/main   # the tests your change touches
+npm run fix                            # regenerate, lint, format
+npm run verify                         # everything CI runs, ~4 min
 ```
 
-The first is the record; the second is its event stream, tool calls and results included.
-
-## What you built
-
-A working OpenSwitchboard with one provider and the terminal as its channel, and the habit of reading a run's record after it finishes. Nothing here is undone by adding Slack: the same config and the same runs carry over.
+`verify` is the one gate; nothing lives only in CI.
 
 ## Next
 
-- Connect Slack and a GitHub App: [Set up accounts](../how-to/set-up-accounts.md).
-- Understand what just ran: [How a request flows](../explanation/how-a-request-flows.md).
-- Change the code and run the checks: [Contributing](../../CONTRIBUTING.md).
+- [Contributing](../../CONTRIBUTING.md): how a change is made, the PR title rule, releases.
+- [How a request flows](../explanation/how-a-request-flows.md): what `ask` just ran.
+- [Code map](../reference/code-map.md): where things are.
