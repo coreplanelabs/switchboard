@@ -13,6 +13,7 @@ declare module 'vue' {
   export interface GlobalComponents {
     AppNav: typeof import('./src/components/AppNav.vue')['default']
     AppShell: typeof import('./src/components/AppShell.vue')['default']
+    BrandMark: typeof import('./src/components/BrandMark.vue')['default']
     CallCard: typeof import('./src/components/run/CallCard.vue')['default']
     CostChart: typeof import('./src/components/costs/CostChart.vue')['default']
     DocsLink: typeof import('./src/components/DocsLink.vue')['default']

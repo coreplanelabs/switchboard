@@ -6,8 +6,10 @@
 //     and the residents index (the fleet's worst resident, server-rendered from
 //     the seed: the page is a snapshot with no live feed, so the shell is the
 //     truth — `residentsFleetTone`).
-//   - the MARK — a neutral rounded square for every other page (scheduled, a
+//   - the MARK — the project's mark for every other page (scheduled, a
 //     resident's detail, costs, the 404): "this tab is switchboard", no claim.
+//     Three planes, one message routed to two lanes; the same drawing as
+//     docs/public/favicon.svg and the dashboard header's BrandMark.
 // Shipped as `data:` URIs the pages set on their <link rel="icon"> (no
 // external asset); the raw mark SVG also answers `GET /favicon.ico`, the
 // fallback every page without an inline icon link gets. Node-free and
@@ -16,7 +18,12 @@
 export function faviconSvg(fill: string): string {
   return `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='${fill}'/></svg>`;
 }
-const FAVICON_MARK_SVG = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='2' y='2' width='12' height='12' rx='3.5' fill='#6e7681'/></svg>`;
+const FAVICON_MARK_SVG =
+  `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><g transform='translate(0 2)' stroke-linejoin='round' stroke-linecap='round' stroke-width='5'>` +
+  `<polygon points='32,30 59,43 32,56 5,43' fill='none' stroke='#15151a'/><polygon points='32,17 59,30 32,43 5,30' fill='#15151a' stroke='#15151a'/>` +
+  `<polygon points='32,4 59,17 32,30 5,17' fill='#fafaf7' stroke='#15151a'/><path d='M32 17 L32 30 L19 37 M32 30 L45 37' fill='none' stroke='#1a7f37'/>` +
+  `<circle cx='32' cy='17' r='5' fill='#1a7f37' stroke='#fafaf7' stroke-width='3'/><circle cx='19' cy='37' r='5' fill='#1a7f37' stroke='#15151a' stroke-width='3'/>` +
+  `<circle cx='45' cy='37' r='5' fill='#1a7f37' stroke='#15151a' stroke-width='3'/></g></svg>`;
 /** What `GET /favicon.ico` serves: the neutral mark. */
 export const FAVICON_ICO_SVG = FAVICON_MARK_SVG;
 const dataUri = (svg: string): string => `data:image/svg+xml,${encodeURIComponent(svg)}`;

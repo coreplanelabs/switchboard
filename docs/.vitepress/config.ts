@@ -138,6 +138,10 @@ export default defineConfig({
     return { title: project.displayName };
   },
   themeConfig: {
+    // The mark beside the site name: three planes, one message routed to two
+    // lanes — the same drawing as docs/public/favicon.svg and the dashboard's
+    // BrandMark. One file per scheme, since an <img> cannot inherit currentColor.
+    logo: { light: "/logo-light.svg", dark: "/logo-dark.svg", alt: "" },
     // "Get started" is the first-time reader's path: Home → Get started → a
     // running `ask`, three clicks. The other four entries are the Diataxis
     // kinds, each landing on that kind's index page.
