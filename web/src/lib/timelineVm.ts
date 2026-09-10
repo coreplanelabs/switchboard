@@ -18,9 +18,9 @@ import { formatDuration } from "./format";
 // the run's shape from its spans and stamps alone, on the header's own window
 // so the lede's total IS the header's total. Pure: the page hands in the span
 // set, the loss intervals, the window, the phase and the delivery stamps, and
-// paints what comes back. One vocabulary with the card and the friction report
-// — getting ready, thinking, in tools, finishing up, Switchboard overhead — and
-// never a raw span name outside `debug`.
+// paints what comes back. One vocabulary with the card, the friction report
+// and the log's own rows — getting ready, thinking, in tools, finishing up,
+// Switchboard overhead — and never a raw span name outside `debug`.
 
 export type TimelinePhase = "live" | "delivering" | "ended";
 
@@ -41,6 +41,10 @@ export interface TimelineInput {
   /** The record predates span schema (`RunHistorySeed.untimed`): no shape is
    *  computed and the note says so. */
   untimed?: boolean;
+  /** The collapsed headline of the call card a tool span decorates, by call
+   *  id — the Longest steps name a tool step by its command (`$ npm test`),
+   *  falling back to the display table when the page knows no card. */
+  callTitle?: (callId: string) => string | undefined;
 }
 
 export interface BarSegment {
@@ -53,14 +57,28 @@ export interface BarSegment {
 }
 
 export interface RankedItem {
-  /** From the display table — never a raw span name. */
+  /** The step's name as its row reads: a tool step's command when the page
+   *  knows the card, else the display table — never a raw span name. */
   label: string;
   /** The step's own time: its in-window duration minus the union of its children's. */
   ms: number;
   facts: string[];
+  /** The id of the row the step is on the page — `call-<callId>` for a tool
+   *  step, `span-<spanId>` otherwise — what the link scrolls to. */
+  anchor: string;
+}
+
+/** One row of the legend under the bar: a term, its printed time, and what
+ *  the term means (the hover). The same numbers as the bar, in the same order. */
+export interface LegendItem {
+  term: PrintedTerm;
+  text: string;
+  definition: string;
 }
 
 export interface TimelineVm {
+  /** The header's total — the one number the legend's items sum to. */
+  total: string;
   /** `4m 12s — 34s getting ready · …`, or `40s — getting ready` below the gate, or the total alone. */
   lede: string;
   /** `currently thinking 1m 26s` / `currently delivering` / `delivered in 2s` / `reply failed` / "". */
@@ -71,10 +89,10 @@ export interface TimelineVm {
   openStep: string;
   /** The queued captions, from a minute. */
   captions: string[];
-  /** The gate: the bar, the gloss and the ranked list are shown together. */
+  /** The gate: the bar, its legend and the ranked list are shown together. */
   shown: boolean;
   bar: BarSegment[];
-  gloss: string;
+  legend: LegendItem[];
   ranked: RankedItem[];
   rankedNote: string;
   /** A record with no root: `getting ready: not recorded (too large)`. */
@@ -83,10 +101,18 @@ export interface TimelineVm {
   debug: unknown;
 }
 
-export const GLOSS =
-  "getting ready = finding the repo, checking out, loading tools · finishing up = posting the PR, checking the workspace · Switchboard overhead = orchestration between steps, and moments when only a background read was running";
-export const RANKED_NOTE =
-  "Ranked by each step's own time, its children excluded — the buckets above count every instant once.";
+/** What each word of the bar means — the legend item's hover. */
+export const TERM_DEFINITIONS: Record<PrintedTerm, string> = {
+  "getting ready": "before the agent's first turn: reading the thread, finding the repo, checking out, loading tools",
+  thinking: "the model's turns — from a request to the model until its reply came back",
+  "in tools": "the commands and tool calls the model ran",
+  "finishing up": "after the agent's last turn: posting the PR, checking the workspace",
+  "Switchboard overhead":
+    "orchestration between steps, and moments when only a background read was running — the time no step claims",
+  "not recorded": "a stretch of the run the record does not carry",
+  "not loaded": "a stretch of the run this page did not load — the record has the full shape",
+};
+export const RANKED_NOTE = "Ranked by each step's own time, its children excluded — the bar counts every instant once.";
 export const CURRENTLY_DELIVERING = "currently delivering";
 export const NO_ROOT_NOTE = "getting ready: not recorded (too large)";
 /** A record written before span schema: the one neutral empty state. */
@@ -128,18 +154,26 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
   if (input.untimed) {
     // A record from before span schema: the header's total and the one note;
     // no shape is read from whatever the record carries.
-    const empty = { current, openStep, captions: [], gloss: GLOSS, rankedNote: RANKED_NOTE, debug };
-    return { ...empty, lede: total, shown: false, bar: [], ranked: [], note: NO_TIMING_NOTE };
+    const empty = { total, current, openStep, captions: [], rankedNote: RANKED_NOTE, debug };
+    return { ...empty, lede: total, shown: false, bar: [], legend: [], ranked: [], note: NO_TIMING_NOTE };
   }
   const captions = [
     queuedCaption("before", numberAttr(root, "queuedBeforeMs")),
     queuedCaption("behind", numberAttr(root, "queuedBehindMs")),
   ].filter((c): c is string => c !== undefined);
-  const base = { current, openStep, captions, gloss: GLOSS, rankedNote: RANKED_NOTE, debug };
+  const base = { total, current, openStep, captions, rankedNote: RANKED_NOTE, debug };
   if (!root) {
     // A record whose root was never stored, or a live page before its first
     // frame: the header's total, and on a record the one word for the missing setup.
-    return { ...base, lede: total, shown: false, bar: [], ranked: [], note: finished ? NO_ROOT_NOTE : "" };
+    return {
+      ...base,
+      lede: total,
+      shown: false,
+      bar: [],
+      legend: [],
+      ranked: [],
+      note: finished ? NO_ROOT_NOTE : "",
+    };
   }
   const termText = (term: PrintedTerm): string =>
     term === "not recorded"
@@ -153,12 +187,21 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
     : p.windowMs > 0
       ? `${total} — ${termText(dominantTerm(p))}`
       : total;
+  const legend: LegendItem[] = shown
+    ? printed.items.map(({ term, s }) => ({
+        term,
+        text: formatDuration(s * 1000, "clock"),
+        definition:
+          term === "not recorded" && input.truncated ? `${TERM_DEFINITIONS[term]} (too large)` : TERM_DEFINITIONS[term],
+      }))
+    : [];
   return {
     ...base,
     lede,
     shown,
     bar: shown ? barOf(p, open) : [],
-    ranked: shown ? ranked(spans, root, owner, window) : [],
+    legend,
+    ranked: shown ? ranked(spans, root, owner, window, input.callTitle) : [],
     note: "",
   };
 }
@@ -263,9 +306,17 @@ function barOf(p: Partition, open: OpenCounted | undefined): BarSegment[] {
 }
 
 /** Up to three steps by their own time — the in-window duration minus the union
- *  of their children's — the root and background subtrees excluded, ties by
- *  earlier start. */
-function ranked(spans: readonly SpanRecord[], root: SpanRecord, owner: RunOwner, window: Window): RankedItem[] {
+ *  of their children's — the root, the agent loop and background subtrees
+ *  excluded, ties by earlier start. A tool step is named by its card's command
+ *  when the page knows the card, and anchored to that card; every other step
+ *  to its row. */
+function ranked(
+  spans: readonly SpanRecord[],
+  root: SpanRecord,
+  owner: RunOwner,
+  window: Window,
+  callTitle: TimelineInput["callTitle"],
+): RankedItem[] {
   const byId = new Map(spans.map((s) => [s.spanId, s]));
   const childrenOf = new Map<string, SpanRecord[]>();
   for (const s of spans) {
@@ -280,7 +331,10 @@ function ranked(spans: readonly SpanRecord[], root: SpanRecord, owner: RunOwner,
   ];
   const items: Array<RankedItem & { startedAt: number }> = [];
   for (const s of spans) {
-    if (s === root || classOf(s.name, owner) === undefined || underBackground(s, byId, owner)) continue;
+    // The root and the agent loop are the page's structure, not steps a reader
+    // can go to (neither has a row); their own time is the overhead term.
+    if (s === root || s.name === "run.agent") continue;
+    if (classOf(s.name, owner) === undefined || underBackground(s, byId, owner)) continue;
     const [a, b] = clip(s);
     if (b <= a) continue;
     const children = (childrenOf.get(s.spanId) ?? [])
@@ -289,10 +343,18 @@ function ranked(spans: readonly SpanRecord[], root: SpanRecord, owner: RunOwner,
       .filter(([x, y]) => y > x);
     const own = b - a - unionLength(children);
     if (own <= 0) continue;
-    items.push({ label: displayNameOf(s.name), ms: own, facts: factsOf(s), startedAt: s.startedAt });
+    const callId = s.name.startsWith("tool.") && typeof s.attrs.callId === "string" ? s.attrs.callId : undefined;
+    const title = callId ? callTitle?.(callId) : undefined;
+    items.push({
+      label: title ?? displayNameOf(s.name),
+      ms: own,
+      facts: factsOf(s),
+      anchor: callId ? `call-${callId}` : `span-${s.spanId}`,
+      startedAt: s.startedAt,
+    });
   }
   items.sort((x, y) => y.ms - x.ms || x.startedAt - y.startedAt);
-  return items.slice(0, 3).map(({ label, ms, facts }) => ({ label, ms, facts }));
+  return items.slice(0, 3).map(({ label, ms, facts, anchor }) => ({ label, ms, facts, anchor }));
 }
 
 function unionLength(intervals: Array<[number, number]>): number {

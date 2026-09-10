@@ -14,7 +14,10 @@ import { createLossTracker, foldSpanRecord } from "@core/core/normalizeSpans.js"
 import { isSpanRecord, type RunEvent } from "@core/core/runEvents.js";
 import type { LossInterval } from "@core/core/trace/partition.js";
 import type { SpanRecord } from "@core/core/trace/types.js";
+import { classOf } from "@core/core/trace/streamSpans.js";
+import { reviewPostOptedOut } from "@core/core/reviewPost.js";
 import { formatDuration } from "./format";
+import { githubPrUrl, githubRepoUrl } from "./githubLinks";
 import { wallNow } from "./wallClock";
 
 // The run page's view model: the ONE fold for seeded history and live frames
@@ -70,6 +73,8 @@ export interface CallItemVm {
 export type StepItem = CallItemVm | QuietVm | SkillVm;
 
 export interface TurnVm {
+  /** The turn's own span — the anchor the timeline's Longest steps scroll to. */
+  spanId: string;
   label: string;
   /** The chip reads "5m 04s" — label minus the "Thought for " prefix. */
   chip: string;
@@ -82,6 +87,9 @@ export interface TurnVm {
   /** True when this turn's model differs from the model the run had before
    *  it (the previous stamped turn's, else `run_meta`'s) — the head flags it. */
   switched: boolean;
+  /** The head names its model only where a reader learns something: the first
+   *  head of the run, and every switch. A run on one model says it once. */
+  showModel: boolean;
   at?: number;
 }
 
@@ -139,35 +147,55 @@ export interface FollowUpVm {
   input: RequestVm;
 }
 
-/** The setup spans folded under one head (docs/reference/specs/live-view.md item 25):
- *  `slack.receive`, every `dispatch.*` step and the attach's grafted resident
- *  steps. Open while the run is still setting up; closes on its own when the
- *  agent loop starts (so a record opens closed), unless the reader toggled it. */
-export interface SetupGroupVm {
-  kind: "setup";
+/** The two bookend phases of the timeline's bar, as groups of rows under one
+ *  head each (docs/reference/specs/live-view.md item 25) — named with the bar's own
+ *  words so a reader can correlate the two. `getting_ready`: `slack.receive`,
+ *  every `dispatch.*` step and the attach's grafted resident steps; open while
+ *  the run sets up, closed on its own when the agent loop starts. `finishing_up`:
+ *  the post-loop steps the bar counts as finishing up; closed when delivery
+ *  begins or the run ends. A reader's toggle wins from then on. */
+export type Phase = "getting_ready" | "finishing_up";
+
+export interface PhaseGroupVm {
+  kind: "phase";
+  phase: Phase;
   key: string;
   rows: SpanRowVm[];
   open: boolean;
 }
 
-export type LogItem = StepVm | TurnRowVm | NoteVm | FollowUpVm | SpanRowVm | SetupGroupVm;
+export type LogItem = StepVm | TurnRowVm | NoteVm | FollowUpVm | SpanRowVm | PhaseGroupVm;
 
-/** A setup span: the receipt and the dispatcher's steps before the loop, the
- *  attach's grafts included; `run.*` and `post.*` rows stand on their own. */
-export function isSetupSpan(name: string): boolean {
-  return name === "slack.receive" || name.startsWith("dispatch.");
+/** Which phase group a streamed span row belongs to, if any: the receipt and
+ *  the dispatcher's steps before the loop (the attach's grafts included) are
+ *  getting ready; the steps `classOf` counts as finishing up are finishing up.
+ *  Everything else (`run.*` bodies, `post.*` delivery, `ship.round`) stands on
+ *  its own. */
+export function phaseOfSpan(name: string): Phase | undefined {
+  if (name === "slack.receive" || name.startsWith("dispatch.")) return "getting_ready";
+  const cls = classOf(name, "agent");
+  return cls?.kind === "counted" && cls.bucket === "finishing_up" ? "finishing_up" : undefined;
 }
 
-/** The head's text: how many steps and, once every one has ended, their span
- *  from the first start to the last end. */
-export function setupHeadText(group: Pick<SetupGroupVm, "rows">): string {
+/** The spans that ARE the page rather than a row on it: the request (the page)
+ *  and the agent loop (the steps). Neither draws a row. */
+export function isStructuralSpan(name: string): boolean {
+  return name === "request" || name === "run.agent";
+}
+
+export const PHASE_WORD: Record<Phase, string> = { getting_ready: "Getting ready", finishing_up: "Finishing up" };
+
+/** The head's text: the phase's word (the bar's), how many steps and, once
+ *  every one has ended, their span from the first start to the last end. */
+export function phaseHeadText(group: Pick<PhaseGroupVm, "rows" | "phase">): string {
   const n = group.rows.length;
   const steps = `${n} step${n === 1 ? "" : "s"}`;
+  const word = PHASE_WORD[group.phase];
   if (n === 0 || group.rows.some((r) => r.open || r.at === undefined || r.durationMs === undefined))
-    return `Setup · ${steps}`;
+    return `${word} · ${steps}`;
   const start = Math.min(...group.rows.map((r) => r.at!));
   const end = Math.max(...group.rows.map((r) => r.at! + r.durationMs!));
-  return `Setup · ${steps} · ${formatDuration(Math.max(0, end - start), "precise")}`;
+  return `${word} · ${steps} · ${formatDuration(Math.max(0, end - start), "precise")}`;
 }
 
 export interface RequestVm {
@@ -183,6 +211,8 @@ export interface MetaVm {
   repo?: string;
   ref?: string;
   pr?: number;
+  /** The PR head the run was resolved at (7–40 hex, as the fold verified it). */
+  headSha?: string;
 }
 
 export interface ContextTurnVm {
@@ -191,9 +221,18 @@ export interface ContextTurnVm {
   text: string;
 }
 
-export interface AnswerVm {
+/** What the run sent back: the `answer` event — a review's verdict, a coding
+ *  run's PR note, the general agent's answer. The page's word is Reply. */
+export interface ReplyVm {
   text: string;
   at?: number;
+}
+
+/** The coding post-step's PR, as the `pr_opened` event recorded it. */
+export interface PrOpenedVm {
+  url: string;
+  number: number;
+  created: boolean;
 }
 
 export interface RunPageModel {
@@ -204,7 +243,9 @@ export interface RunPageModel {
     meta: MetaVm | null;
     context: ContextTurnVm[];
     log: LogItem[];
-    answer: AnswerVm | null;
+    reply: ReplyVm | null;
+    /** The PR the coding post-step opened or edited, once the stream said so. */
+    prOpened: PrOpenedVm | null;
     /** True until the first painted change of any kind. */
     placeholder: boolean;
     allOpen: boolean;
@@ -242,13 +283,23 @@ export interface RunPageModel {
    *  the run is waiting on right now, or null while the model is thinking. */
   pendingCall(): CallVm | null;
   /** Flush a held model turn as its own row (the page calls this at `end`: a
-   *  run that ended without an answer still shows its last turn). */
+   *  run that ended without a reply still shows its last turn). */
   flushPendingTurn(note: string): void;
+  /** The run is over (`end`, or a seeded record): every phase head the reader
+   *  did not touch closes — nothing is in progress under them any more. */
+  closePhases(): void;
   setAllOpen(open: boolean): void;
   toggleGroup(step: StepVm): void;
-  /** The reader opens or closes the Setup head; from then on it stays as they left it. */
-  toggleSetup(group: SetupGroupVm): void;
+  /** The reader opens or closes a phase head; from then on it stays as they left it. */
+  togglePhase(group: PhaseGroupVm): void;
   toggleCall(call: CallVm): void;
+  /** Make the row behind an anchor (`call-<id>` / `span-<id>`, the ids the
+   *  page stamps) visible: the group or phase head that folds it opens, as a
+   *  reader's own toggle would. Returns false for an anchor no row carries. */
+  reveal(anchor: string): boolean;
+  /** The collapsed headline of a call card, by call id — what the timeline
+   *  names a tool step by (`$ npm test`, not `bash`). */
+  callHeadline(callId: string): string | undefined;
   markStopping(mode: "soft" | "hard"): void;
   /** True when the call's tags open it by default (failed/infra, or ?open=). */
   opensByDefault(tags: string[]): boolean;
@@ -283,25 +334,79 @@ export function elidedText(range: ReplayElidedRange): string {
   return `${n} ${n === 1 ? "event" : "events"} not loaded (${span}) — the record has them`;
 }
 
-function turnVm(change: Extract<TimelineChange, { kind: "turn" }>, modelBefore: string | null): TurnVm {
+function turnVm(
+  change: Extract<TimelineChange, { kind: "turn" }>,
+  modelBefore: string | null,
+  modelShownBefore: boolean,
+): TurnVm {
   // The model that took the turn: the stamp when the event carries one, else
   // the model the run was on — a stream from before per-turn stamps still
-  // names its `run_meta` model on every head. A bare stamp that names the
-  // model the run was on (v0.4.0 stamped bare ids) keeps the fuller ref.
+  // names its `run_meta` model. A bare stamp that names the model the run was
+  // on (v0.4.0 stamped bare ids) keeps the fuller ref.
   const same = !!change.model && modelBefore !== null && sameModel(change.model, modelBefore);
   const model = same ? (modelBefore as string) : (change.model ?? modelBefore ?? undefined);
+  // A switch is a change from a KNOWN model; the first stamped turn of a
+  // run whose meta never named one is not a switch.
+  const switched = !!change.model && modelBefore !== null && !same;
   return {
+    spanId: change.spanId,
     label: change.label,
     chip: change.label.replace(/^Thought for /, ""),
     quick: change.durationMs < 60_000,
     durationMs: change.durationMs,
     facts: change.facts,
     ...(model ? { model } : {}),
-    // A switch is a change from a KNOWN model; the first stamped turn of a
-    // run whose meta never named one is not a switch.
-    switched: !!change.model && modelBefore !== null && !same,
+    switched,
+    showModel: !!model && (!modelShownBefore || switched),
     at: change.at,
   };
+}
+
+/** The muted line a step's group summary reads — the tally as a reader says
+ *  it. Every state: all succeeded; some failed (`failed` is the tool's own
+ *  failure, `sandbox error` the executor's); some still running; nothing
+ *  settled yet. Successes are implied unless they are the only news. */
+export function callSummary(t: { n: number; ok: number; bad: number; infra: number; running: number }): string {
+  const calls = `${t.n} tool call${t.n === 1 ? "" : "s"}`;
+  if (t.n === 0) return "no tool calls";
+  if (t.ok === t.n) return `${calls}, all succeeded`;
+  if (t.running === t.n) return `${calls}, all running`;
+  const parts: string[] = [];
+  if (t.bad) parts.push(`${t.bad} failed`);
+  if (t.infra) parts.push(`${t.infra} sandbox error${t.infra === 1 ? "" : "s"}`);
+  if (t.running) parts.push(`${t.running} still running`);
+  return `${calls}, ${parts.join(", ")}`;
+}
+
+/** What the Reply is, from the run's facts alone — never from its text:
+ *  a review's verdict (for the PR the run was resolved against; `Slack only`
+ *  when the request opted out of the GitHub post — the same parser the
+ *  dispatcher decides with, so page and bot agree), a coding run's pull
+ *  request (opened, or an existing one updated, from `pr_opened`), a command
+ *  run's output, otherwise the general agent's answer. The record carries no
+ *  fact about whether a verdict reached GitHub (the post-step runs after the
+ *  seal), so the caption says what the verdict is FOR, not where it landed. */
+export function replyCaption(input: { meta: MetaVm | null; requestText: string; prOpened: PrOpenedVm | null }): {
+  text: string;
+  href?: string;
+} {
+  const { meta, prOpened } = input;
+  const repo = meta?.repo && githubRepoUrl(meta.repo) ? meta.repo : undefined;
+  if (meta?.agent === "review") {
+    if (reviewPostOptedOut(input.requestText)) return { text: "verdict, Slack only" };
+    if (repo && meta.pr !== undefined) {
+      const href = githubPrUrl(repo, meta.pr);
+      return href ? { text: `verdict for ${repo}#${meta.pr}`, href } : { text: "verdict" };
+    }
+    return { text: "verdict" };
+  }
+  if (meta?.agent === "coding" && prOpened) {
+    const what = prOpened.created ? "pull request opened" : "pull request updated";
+    const href = repo ? githubPrUrl(repo, prOpened.number) : undefined;
+    return href ? { text: `${what} ${repo}#${prOpened.number}`, href } : { text: what };
+  }
+  if (meta?.agent === "command") return { text: "output" };
+  return { text: "answer" };
 }
 
 function callVm(call: TimelineCall, open: boolean): CallVm {
@@ -333,7 +438,8 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     meta: null,
     context: [],
     log: [],
-    answer: null,
+    reply: null,
+    prOpened: null,
     placeholder: true,
     allOpen: false,
     stopMode: null,
@@ -352,15 +458,19 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   const stepVms = new Map<number, StepVm>();
   const spanRows = new Map<string, SpanRowVm>();
-  // The one Setup group of the log, once a setup span arrived; `setupToggled`
-  // records that the reader decided its state, so the agent loop's start no
-  // longer closes it.
-  let setupGroup: SetupGroupVm | null = null;
-  let setupToggled = false;
+  /** Which phase group each span row sits under, for `reveal`. */
+  const phaseOfRow = new Map<string, PhaseGroupVm>();
+  // One group per phase, once its first span arrived; `toggled` records that
+  // the reader decided its state, so nothing closes it on its own any more.
+  const phaseGroups = new Map<Phase, { group: PhaseGroupVm; toggled: boolean }>();
   const callVms = new Map<string, CallVm>();
+  /** The step each call card sits in, for `reveal`. */
+  const stepOfCall = new Map<string, StepVm>();
   /** Quiet calls (update_status) render once; their results only refresh the tally. */
   const quietIds = new Set<string>();
   let pendingTurn: TurnVm | null = null;
+  /** A head has named the run's model: later heads on the same model stay quiet. */
+  let modelShown = false;
   let lastStepIndex = -1;
   let keySeq = 0;
   const key = (prefix: string) => `${prefix}-${keySeq++}`;
@@ -438,6 +548,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     }
     const c = reactive(callVm(call, state.allOpen || opensByDefault(call.tags)));
     callVms.set(call.id, c);
+    stepOfCall.set(call.id, vm);
     vm.items.push({ kind: "call", call: c });
     refreshGroup(vm);
   }
@@ -459,7 +570,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     if (vm) refreshGroup(vm);
   }
 
-  /** A turn with no step after it (the answer's own thinking, or the run
+  /** A turn with no step after it (the reply's own thinking, or the run
    *  ended mid-thought): its own row, `note` saying what came of it. */
   function flushTurn(note: string): void {
     if (!pendingTurn) return;
@@ -491,7 +602,8 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         return;
       case "turn":
         flushTurn("");
-        pendingTurn = turnVm(change, state.model);
+        pendingTurn = turnVm(change, state.model, modelShown);
+        if (pendingTurn.model) modelShown = true;
         // A stamp names the run's model from here on — unless it is a bare id
         // for the model already known by its fuller ref, which stays.
         if (change.model && !(state.model !== null && sameModel(change.model, state.model))) state.model = change.model;
@@ -506,7 +618,11 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
           ...(change.repo ? { repo: change.repo } : {}),
           ...(change.ref ? { ref: change.ref } : {}),
           ...(change.pr !== undefined ? { pr: change.pr } : {}),
+          ...(change.headSha ? { headSha: change.headSha } : {}),
         };
+        return;
+      case "pr_opened":
+        state.prOpened = { url: change.url, number: change.number, created: change.created };
         return;
       case "skill":
         stepFor(change.step).items.push({ kind: "skill", skill: change.skill });
@@ -530,6 +646,15 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
         state.log.push({ kind: "note", key: key("note"), replay: true, text: change.text });
         return;
       case "span": {
+        // The request and the agent loop are the page's own structure — the
+        // one span that draws nothing while still marking a boundary is the
+        // loop's start, which closes the getting-ready head.
+        if (isStructuralSpan(change.name)) {
+          if (change.name === "run.agent" && change.open) closePhase("getting_ready");
+          return;
+        }
+        // Delivery begins (`post.*`): whatever finishing-up rows there were are done.
+        if (change.name.startsWith("post.") && change.open) closePhase("finishing_up");
         // One row per span: the start opens it, the end closes the same row.
         const existing = spanRows.get(change.spanId);
         if (existing) {
@@ -551,26 +676,35 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
           at: change.open ? change.at : (change.startedAt ?? change.at),
         });
         spanRows.set(change.spanId, row);
-        if (isSetupSpan(change.name)) {
-          const group: SetupGroupVm =
-            setupGroup ?? reactive<SetupGroupVm>({ kind: "setup", key: key("setup"), rows: [], open: true });
-          if (!setupGroup) {
-            setupGroup = group;
-            state.log.push(group);
+        const phase = phaseOfSpan(change.name);
+        if (phase) {
+          let entry = phaseGroups.get(phase);
+          if (!entry) {
+            entry = {
+              group: reactive<PhaseGroupVm>({ kind: "phase", phase, key: key(phase), rows: [], open: true }),
+              toggled: false,
+            };
+            phaseGroups.set(phase, entry);
+            state.log.push(entry.group);
           }
-          group.rows.push(row);
+          entry.group.rows.push(row);
+          phaseOfRow.set(change.spanId, entry.group);
           return;
         }
-        // The agent loop starting is the end of setup: the head closes unless the reader holds it open.
-        if (change.name === "run.agent" && change.open && setupGroup && !setupToggled) setupGroup.open = false;
         state.log.push(row);
         return;
       }
       case "answer":
-        flushTurn("wrote the answer below"); // the answer's own thinking has no step to sit on
-        state.answer = { text: change.text, at: change.at };
+        flushTurn("wrote the reply below"); // the reply's own thinking has no step to sit on
+        state.reply = { text: change.text, at: change.at };
         return;
     }
+  }
+
+  /** A phase's head closes on its own only while the reader has left it alone. */
+  function closePhase(phase: Phase): void {
+    const entry = phaseGroups.get(phase);
+    if (entry && !entry.toggled) entry.group.open = false;
   }
 
   function handle(event: unknown): void {
@@ -602,11 +736,39 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   function setAllOpen(open: boolean): void {
     state.allOpen = open;
-    if (setupGroup) {
-      setupGroup.open = open;
-      setupToggled = true;
+    for (const entry of phaseGroups.values()) {
+      entry.group.open = open;
+      entry.toggled = true;
     }
     for (const c of callVms.values()) c.open = open;
+  }
+
+  function reveal(anchor: string): boolean {
+    if (anchor.startsWith("call-")) {
+      const id = anchor.slice("call-".length);
+      const step = stepOfCall.get(id);
+      if (!step || !callVms.has(id)) return false;
+      step.manual = true;
+      step.groupOpen = true;
+      return true;
+    }
+    if (anchor.startsWith("span-")) {
+      const id = anchor.slice("span-".length);
+      const group = phaseOfRow.get(id);
+      if (group) {
+        group.open = true;
+        const entry = phaseGroups.get(group.phase);
+        if (entry) entry.toggled = true;
+        return true;
+      }
+      if (spanRows.has(id)) return true;
+      // A model turn's span heads the step it produced (or its own flushed row).
+      for (const item of state.log) {
+        if (item.kind === "step" && item.turn?.spanId === id) return true;
+        if (item.kind === "turn" && item.turn.spanId === id) return true;
+      }
+    }
+    return false;
   }
 
   function markStopping(mode: "soft" | "hard"): void {
@@ -628,11 +790,18 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     losses: (windowStart) => losses.losses({ windowStart, elided: state.elided }),
     pendingCall,
     flushPendingTurn: flushTurn,
-    setAllOpen,
-    toggleSetup(group) {
-      group.open = !group.open;
-      setupToggled = true;
+    closePhases() {
+      closePhase("getting_ready");
+      closePhase("finishing_up");
     },
+    setAllOpen,
+    togglePhase(group) {
+      group.open = !group.open;
+      const entry = phaseGroups.get(group.phase);
+      if (entry) entry.toggled = true;
+    },
+    reveal,
+    callHeadline: (callId) => callVms.get(callId)?.headline,
     toggleGroup(step) {
       step.manual = true; // the auto-fold then leaves this group alone forever
       step.groupOpen = !step.groupOpen;

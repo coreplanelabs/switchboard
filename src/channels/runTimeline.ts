@@ -79,8 +79,9 @@ export type TimelineChange =
   | { kind: "result"; step: TimelineStep; call: TimelineCall }
   | { kind: "note"; text: string; noteKind: string; mode?: string; at?: number }
   /** One model call: `label` is "Thought for 5m 04s"; `facts` the token counts
-   *  ("12.3k in", "800 out", "11.2k cached") when the event carries usage. */
-  | { kind: "turn"; label: string; facts: string[]; durationMs: number; model?: string; at?: number }
+   *  ("12.3k in", "800 out", "11.2k cached") when the event carries usage;
+   *  `spanId` the turn's own span, so the page can address the step it heads. */
+  | { kind: "turn"; spanId: string; label: string; facts: string[]; durationMs: number; model?: string; at?: number }
   /** What the run is about (item 19): agent, model and the resolved repo context, for the Request head. */
   | {
       kind: "meta";
@@ -100,6 +101,9 @@ export type TimelineChange =
    *  like a note; it is not a run event and never reaches the run record. */
   | { kind: "replay_note"; text: string }
   | { kind: "answer"; text: string; at?: number }
+  /** The coding post-step's PR (a `pr_opened` event): what the reply is about,
+   *  for the Reply head — opened new, or an existing open PR edited. */
+  | { kind: "pr_opened"; url: string; number: number; created: boolean; at?: number }
   /** A skill loaded into context (a `skill_use` event): rendered inside the
    *  step whose `use_skill` call it belongs to, as its own row — not a call
    *  card (the call card is the tool's; this is what the tool loaded). */
@@ -311,6 +315,11 @@ export function createRunTimeline(): RunTimeline {
       }
       case "answer":
         return [{ kind: "answer", text: str(e.text), at: num(e.at) }];
+      case "pr_opened": {
+        const number = num(e.number);
+        if (!str(e.url) || number === undefined || !Number.isInteger(number) || number <= 0) return [];
+        return [{ kind: "pr_opened", url: str(e.url), number, created: e.created === true, at: num(e.at) }];
+      }
       case "run_meta": {
         // Optional fields ride only when present (and well-typed) — the page
         // shows exactly what was resolved, never an empty slot.
@@ -377,6 +386,7 @@ export function createRunTimeline(): RunTimeline {
           return [
             {
               kind: "turn",
+              spanId,
               label: "Thought for " + formatDuration(durationMs, "precise"),
               facts,
               durationMs,

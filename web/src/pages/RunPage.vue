@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import AppShell from "../components/AppShell.vue";
+import ExpandableText from "../components/ExpandableText.vue";
 import MarkdownText from "../components/MarkdownText.vue";
 import SlackMark from "../components/SlackMark.vue";
 import GithubMark from "../components/GithubMark.vue";
@@ -22,15 +23,17 @@ import {
   parseEndFrame,
   parseFinishedFrame,
   parseReplayElided,
+  phaseHeadText,
+  replyCaption,
   runnerNow,
   RunnerClockKey,
-  setupHeadText,
 } from "../lib/runPageModel";
 import { createPrReviewCollector } from "../lib/prReviewCollector";
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
 import { panelTitle } from "../modules/pr-review/types";
 import { durationTone, heatStyle } from "../lib/durationTone";
 import { formatClock, formatDateTime, formatDuration, formatLocalIso } from "../lib/format";
+import { githubCommitUrl, githubPrUrl, githubRepoUrl, githubTreeUrl, shortSha } from "../lib/githubLinks";
 import { statusLabel } from "../lib/indexRow";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
@@ -157,6 +160,7 @@ const timeline = computed(() => {
       delivery: { finishedAt: seed.finishedAt, sealedAt: seed.sealedAt, replyOk: seed.replyOk },
       ...(seed.truncated !== undefined ? { truncated: seed.truncated } : {}),
       ...(seed.untimed ? { untimed: true } : {}),
+      callTitle: model.callHeadline,
     });
   }
   if (!runClock) return null;
@@ -171,10 +175,24 @@ const timeline = computed(() => {
     totalMs,
     phase: tlPhase,
     delivery: liveStamps.value,
+    callTitle: model.callHeadline,
   });
 });
 /** The stored events as JSON lines — history mode only (a live page's URL carries its token). */
 const eventsHref = isHistory && seed?.mode === "history" ? `/runs/${encodeURIComponent(seed.id)}/events` : undefined;
+
+/** A Longest-steps link: the model opens whatever folds the row, then the page
+ *  scrolls there and flashes it once (the `revealed` class, web/src/style.css). */
+function reveal(anchor: string): void {
+  if (!model.reveal(anchor)) return;
+  void nextTick().then(() => {
+    const el = document.getElementById(anchor);
+    if (!el) return;
+    el.scrollIntoView?.({ block: "center" });
+    el.classList.add("revealed");
+    setTimeout(() => el.classList.remove("revealed"), 1500);
+  });
+}
 
 // ---- stop control -----------------------------------------------------------
 const actionsHidden = ref(isHistory);
@@ -265,6 +283,8 @@ const verb = computed(() => {
 function toggleAll(): void {
   model.setAllOpen(!state.allOpen);
 }
+/** The THIS RUN heading's count: the model's steps (one per narrated or tool-only turn). */
+const stepCount = computed(() => state.log.filter((i) => i.kind === "step").length);
 
 // ---- follow the stream only when the viewer is already at the tail -------------
 const logEnd = ref<HTMLElement | null>(null);
@@ -295,6 +315,7 @@ if (seed?.mode === "history") {
     model.handle(e);
     prReview.handle(e);
   }
+  model.closePhases(); // a record is over: nothing is in progress under a phase head
 }
 
 onMounted(() => {
@@ -341,7 +362,8 @@ onMounted(() => {
     if (phase.value === "connecting" || phase.value === "running") phase.value = "finished";
   });
   es.addEventListener("end", (data) => {
-    model.flushPendingTurn("the run ended here"); // a run that ended without an answer still shows its last turn
+    model.flushPendingTurn("the run ended here"); // a run that ended without a reply still shows its last turn
+    model.closePhases();
     actionsHidden.value = true;
     frozenMs.value ??= runClock?.elapsedMs(nowWall.value); // an `end` with no `finished` before it (a stored stream) freezes here
     liveStamps.value = { ...liveStamps.value, ...parseEndFrame(data) };
@@ -363,11 +385,26 @@ function httpsUrl(url: string | undefined): string {
   return url && /^https?:\/\//.test(url) ? url : "";
 }
 const sourceUrl = computed(() => httpsUrl(state.request?.source?.url));
-const metaRepoOk = computed(() => !!state.meta?.repo && /^[\w.-]+\/[\w.-]+$/.test(state.meta.repo));
+/** The REVIEW/CODING row's links (item 19): the repo, the branch, the head
+ *  commit and the PR, each built only from a value whose shape was verified
+ *  (`githubLinks.ts`) — an odd value renders as text, never as a link. */
+const links = computed(() => {
+  const m = state.meta;
+  return {
+    repo: githubRepoUrl(m?.repo),
+    tree: githubTreeUrl(m?.repo, m?.ref),
+    commit: githubCommitUrl(m?.repo, m?.headSha),
+    pr: githubPrUrl(m?.repo, m?.pr),
+  };
+});
+/** What the Reply is, from the run's facts (`replyCaption`). */
+const reply = computed(() =>
+  replyCaption({ meta: state.meta, requestText: state.request?.text ?? "", prOpened: state.prOpened }),
+);
 
-/** Block headers (Request/Context/Answer) read a human moment — `Aug 30,
- *  3:06 PM` — with the exact ISO stamp on hover; the timeline's meta rows
- *  read the wall clock (`5:19:57 PM PDT`, formatClock). */
+/** Block headers (Request / Earlier in this thread / Reply) read a human moment
+ *  — `Aug 30, 3:06 PM` — with the exact ISO stamp on hover; the timeline's
+ *  meta rows read the wall clock (`5:19:57 PM PDT`, formatClock). */
 function fmtTime(at: number | undefined): string {
   return typeof at === "number" ? formatDateTime(at, nowWall.value) : "";
 }
@@ -442,6 +479,12 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
     </template>
 
     <div class="mx-auto max-w-6xl">
+      <!-- The page is FOUR blocks a first-time reader can name, each headed
+           the same way (small caps label · muted facts · the moment at the
+           right edge): REQUEST — what came in; EARLIER IN THIS THREAD — the
+           turns the model was given, folded; THIS RUN — the timeline's summary
+           card and then the steps; REPLY — what went back. -->
+
       <!-- Request -->
       <!-- The card's spacing states the hierarchy: the frame (label, meta)
            and the framed prose breathe by the same rhythm — the meta row is
@@ -450,24 +493,19 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       <section
         v-if="state.request"
         id="request"
-        class="block mb-5 rounded-lg border border-default bg-(--ui-bg-muted) px-3.5 py-3"
+        class="block mb-4 rounded-lg border border-default bg-(--ui-bg-muted) px-3.5 py-3"
       >
         <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
           <span>Request</span>
           <span
-            class="ts select-none text-xs normal-case tracking-normal text-dimmed"
-            :title="fmtTimeTitle(state.request.at)"
-            >{{ fmtTime(state.request.at) }}</span
-          >
-          <span
             v-if="state.request.source"
-            class="source ml-auto flex items-center gap-2 font-normal normal-case tracking-normal text-muted"
+            class="source flex items-center gap-2 font-normal normal-case tracking-normal text-dimmed"
           >
             <template v-if="state.request.source.channel">
               <SlackMark />
               <a
                 v-if="sourceUrl"
-                class="text-toned no-underline hover:text-primary hover:underline"
+                class="text-muted no-underline hover:text-primary hover:underline"
                 :href="sourceUrl"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -478,111 +516,145 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             </template>
             <span v-if="state.request.source.user">{{ state.request.source.user }}</span>
           </span>
+          <span
+            class="ts ml-auto select-none text-xs font-normal normal-case tracking-normal text-dimmed"
+            :title="fmtTimeTitle(state.request.at)"
+            >{{ fmtTime(state.request.at) }}</span
+          >
         </h2>
-        <MarkdownText :text="state.request.text" />
+        <!-- A long request folds to its first lines (item 12); the fade takes this card's ground. -->
+        <ExpandableText :lines="5">
+          <MarkdownText :text="state.request.text" />
+        </ExpandableText>
         <!-- What the run is about (item 19/21): agent · model · effort · linked
-             repo · branch tag · GitHub-marked #PR. The branch is a fact, not a
-             destination; the sha is gone for the same reason. -->
+             repo · the branch (a link to it on GitHub) · the head commit (a
+             link) · GitHub-marked #PR. Every link is built from a
+             shape-verified value; an odd one stays text. -->
         <div
           v-if="state.meta"
           id="runmeta"
-          class="runmeta mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 border-t border-default pt-2.5 text-xs text-muted"
+          class="runmeta mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 border-t border-default pt-2.5 text-xs text-dimmed"
         >
           <span class="agent text-[0.68rem] font-semibold uppercase tracking-wider text-toned">{{
             state.meta.agent
           }}</span>
           <span class="model">{{ state.meta.model }}</span>
-          <span v-if="state.meta.effort" class="effort text-toned">{{ state.meta.effort }} effort</span>
-          <template v-if="metaRepoOk">
-            <a
-              class="text-primary no-underline hover:underline"
-              :href="`https://github.com/${state.meta.repo}`"
-              target="_blank"
-              rel="noopener noreferrer"
-              >{{ state.meta.repo }}</a
-            >
-            <span
-              v-if="state.meta.ref"
-              class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned"
-              >{{ state.meta.ref }}</span
-            >
-            <a
-              v-if="state.meta.pr"
-              class="prlink whitespace-nowrap text-primary no-underline hover:underline"
-              :href="`https://github.com/${state.meta.repo}/pull/${state.meta.pr}`"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
-            </a>
-          </template>
+          <span v-if="state.meta.effort" class="effort">{{ state.meta.effort }} effort</span>
+          <a
+            v-if="links.repo"
+            class="text-primary no-underline hover:underline"
+            :href="links.repo"
+            target="_blank"
+            rel="noopener noreferrer"
+            >{{ state.meta.repo }}</a
+          >
+          <span v-else-if="state.meta.repo" class="repo">{{ state.meta.repo }}</span>
+          <a
+            v-if="links.tree"
+            class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned no-underline hover:border-primary hover:text-primary"
+            :href="links.tree"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="the branch on GitHub"
+            >{{ state.meta.ref }}</a
+          >
+          <span
+            v-else-if="state.meta.ref"
+            class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned"
+            >{{ state.meta.ref }}</span
+          >
+          <a
+            v-if="links.commit && state.meta.headSha"
+            class="sha tabular-nums text-toned no-underline hover:text-primary hover:underline"
+            :href="links.commit"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="`the head commit ${state.meta.headSha}`"
+            >{{ shortSha(state.meta.headSha) }}</a
+          >
+          <a
+            v-if="links.pr"
+            class="prlink whitespace-nowrap text-primary no-underline hover:underline"
+            :href="links.pr"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
+          </a>
           <!-- The review's reading diff (docs/reference/specs/reading-diff.md item 6):
-               present exactly when the run published reading-diff artifacts. -->
-          <UButton
+               present exactly when the run published reading-diff artifacts —
+               a link-weight control like the chips beside it. -->
+          <button
             v-if="prReview.state.ready"
-            class="ml-auto"
-            size="xs"
-            color="neutral"
-            variant="outline"
-            icon="i-lucide-diff"
-            label="Reading diff"
+            type="button"
+            class="reading-diff ml-auto inline-flex cursor-pointer items-center gap-1 whitespace-nowrap text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
             data-testid="reading-diff-button"
             @click="prPanelOpen = true"
-          />
+          >
+            <UIcon name="i-lucide-git-compare" class="size-3.5 shrink-0" aria-hidden="true" />
+            Reading diff
+          </button>
         </div>
       </section>
 
-      <!-- Timeline (live-view item 25): the run's shape from its spans and stamps alone. -->
-      <TimelineSection v-if="timeline" :vm="timeline" :events-href="eventsHref" />
-
-      <!-- The log's toolbar: the Context fold (when the run has context) and
-           the one ghost toggle share ONE line — the button stays pinned to the
-           first line when the fold opens downward. -->
-      <div class="logbar mb-1.5 flex items-start gap-4 px-3">
-        <!-- Context: the thread turns the model was given, collapsed by default.
-             The chevron says "this opens" — the same fold grammar as the cards. -->
-        <details v-if="state.context.length > 0" id="context" class="group min-w-0 flex-1">
-          <summary
-            class="flex min-h-6 cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted hover:text-toned [&::-webkit-details-marker]:hidden"
+      <!-- Earlier in this thread: the turns the model was given as context,
+           collapsed by default. The chevron says "this opens" — the same fold
+           grammar as the cards. -->
+      <details v-if="state.context.length > 0" id="context" class="group mb-4 px-3.5">
+        <summary
+          class="flex min-h-6 cursor-pointer list-none items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted hover:text-toned [&::-webkit-details-marker]:hidden"
+        >
+          <span
+            class="chev select-none text-xs text-dimmed transition-transform group-open:rotate-90 motion-reduce:transition-none"
+            >❯</span
           >
-            <span
-              class="chev select-none text-xs text-dimmed transition-transform group-open:rotate-90 motion-reduce:transition-none"
-              >❯</span
-            >
-            <span>Context</span>
-            <span class="count font-normal normal-case tracking-normal"
-              >({{ state.context.length }} turn{{ state.context.length === 1 ? "" : "s" }})</span
-            >
-          </summary>
-          <div id="contextturns" class="pb-3">
-            <div
-              v-for="turn in state.context"
-              :key="turn.key"
-              class="turn flex items-baseline gap-3 border-t border-default py-1.5 opacity-85 first-of-type:border-t-0"
-            >
-              <span class="ts select-none text-xs text-dimmed" :title="fmtTimeTitle(turn.at)">{{
-                fmtTime(turn.at)
-              }}</span>
-              <MarkdownText :text="turn.text" />
-            </div>
+          <span>Earlier in this thread</span>
+          <span class="count font-normal normal-case tracking-normal text-dimmed"
+            >· {{ state.context.length }} turn{{ state.context.length === 1 ? "" : "s" }}</span
+          >
+        </summary>
+        <div id="contextturns" class="pb-1 pl-5">
+          <div
+            v-for="turn in state.context"
+            :key="turn.key"
+            class="turn flex items-baseline gap-3 border-t border-default py-1.5 opacity-85 first-of-type:border-t-0"
+          >
+            <MarkdownText :text="turn.text" />
+            <span class="ts ml-auto shrink-0 select-none text-xs text-dimmed" :title="fmtTimeTitle(turn.at)">{{
+              fmtTime(turn.at)
+            }}</span>
           </div>
-        </details>
-        <UButton
+        </div>
+      </details>
+
+      <!-- This run: the heading over the summary card and the steps, with the
+           one fold control at the right edge — a text button in the heading's
+           own row, at the same weight as the card's controls. -->
+      <h2
+        id="thisrun"
+        class="mb-2 flex items-baseline gap-2.5 px-3.5 text-xs font-semibold uppercase tracking-wider text-muted"
+      >
+        <span>This run</span>
+        <span v-if="stepCount > 0" class="count font-normal normal-case tracking-normal text-dimmed"
+          >· {{ stepCount }} step{{ stepCount === 1 ? "" : "s" }}</span
+        >
+        <button
           id="fold"
-          class="ml-auto shrink-0"
-          size="xs"
-          color="neutral"
-          variant="ghost"
-          :label="state.allOpen ? 'Collapse all' : 'Expand all'"
-          :icon="state.allOpen ? 'i-lucide-square-minus' : 'i-lucide-square-plus'"
+          type="button"
+          class="ml-auto cursor-pointer font-normal normal-case tracking-normal text-dimmed hover:text-toned focus-visible:outline-2 focus-visible:outline-primary"
           :aria-pressed="state.allOpen ? 'true' : 'false'"
           :data-open="state.allOpen ? '1' : '0'"
           :title="state.allOpen ? 'Close every call card' : 'Open every call card'"
           @click="toggleAll"
-        />
-      </div>
+        >
+          {{ state.allOpen ? "Collapse all" : "Expand all" }}
+        </button>
+      </h2>
 
-      <!-- The timeline -->
+      <!-- Where the time went (live-view item 25): the run's shape from its spans and stamps alone. -->
+      <TimelineSection v-if="timeline" :vm="timeline" :events-href="eventsHref" @reveal="reveal" />
+
+      <!-- The steps -->
       <ol id="log" class="m-0 list-none p-0">
         <li v-if="state.placeholder" id="placeholder" class="empty text-muted">Waiting for activity…</li>
         <template v-for="item in state.log" :key="item.key">
@@ -594,6 +666,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           />
           <li
             v-else-if="item.kind === 'turn'"
+            :id="`span-${item.turn.spanId}`"
             class="turn mt-5 border-l-2 border-(--ui-border-accented)/50 pb-3 pl-3 pt-2"
           >
             <!-- A turn that produced no step: the same ONE meta row a step heads with. -->
@@ -608,7 +681,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
                 >⇄ {{ modelName(item.turn.model) }}</span
               >
               <span
-                v-else-if="item.turn.model"
+                v-else-if="item.turn.showModel"
                 class="model-badge order-first rounded bg-accented px-1.5 text-[0.68rem] font-semibold leading-normal tracking-wider text-muted"
                 :title="item.turn.model"
                 >{{ modelName(item.turn.model) }}</span
@@ -625,18 +698,19 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           </li>
           <!-- A streamed span that is a step of its own (docs/reference/specs/tracing.md). -->
           <SpanRow v-else-if="item.kind === 'span'" :item="item" />
-          <!-- The setup spans under one head (docs/reference/specs/live-view.md item 25): open
-               while the run sets up, closed once the agent loop starts, the
-               reader's toggle winning from then on. -->
-          <li v-else-if="item.kind === 'setup'" class="setup py-0.5 text-xs">
+          <!-- A phase of the bar as a group of rows under one head — GETTING
+               READY, FINISHING UP — in the bar's own words (live-view item 25):
+               open while the phase is in progress, closed once the next begins,
+               the reader's toggle winning from then on. -->
+          <li v-else-if="item.kind === 'phase'" class="phase py-0.5 text-xs" :data-phase="item.phase">
             <button
               type="button"
-              class="setup-head flex w-full items-baseline gap-2 text-left text-muted hover:text-toned"
+              class="phase-head flex w-full cursor-pointer items-baseline gap-2 text-left text-muted hover:text-toned"
               :aria-expanded="item.open"
-              @click.prevent="model.toggleSetup(item)"
+              @click.prevent="model.togglePhase(item)"
             >
               <span class="glyph select-none text-dimmed">{{ item.open ? "▾" : "▸" }}</span>
-              <span class="what">{{ setupHeadText(item) }}</span>
+              <span class="what">{{ phaseHeadText(item) }}</span>
             </button>
             <ul v-if="item.open" class="m-0 list-none p-0 pl-4">
               <SpanRow v-for="row in item.rows" :key="row.key" :item="row" />
@@ -652,17 +726,12 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
               <span>↪ Follow-up</span>
               <span
-                class="ts select-none text-xs normal-case tracking-normal text-dimmed"
-                :title="fmtTimeTitle(item.input.at)"
-                >{{ fmtTime(item.input.at) }}</span
-              >
-              <span
                 v-if="item.input.source?.user"
-                class="source ml-auto flex items-center gap-2 font-normal normal-case tracking-normal text-muted"
+                class="source flex items-center gap-2 font-normal normal-case tracking-normal text-dimmed"
               >
                 <a
                   v-if="httpsUrl(item.input.source.url)"
-                  class="text-toned no-underline hover:text-primary hover:underline"
+                  class="text-muted no-underline hover:text-primary hover:underline"
                   :href="item.input.source.url"
                   target="_blank"
                   rel="noopener noreferrer"
@@ -671,6 +740,11 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
                 >
                 <span v-else>{{ item.input.source.user }}</span>
               </span>
+              <span
+                class="ts ml-auto select-none text-xs font-normal normal-case tracking-normal text-dimmed"
+                :title="fmtTimeTitle(item.input.at)"
+                >{{ fmtTime(item.input.at) }}</span
+              >
             </h2>
             <MarkdownText :text="item.input.text" />
           </li>
@@ -717,21 +791,32 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <li ref="logEnd" aria-hidden="true" />
       </ol>
 
-      <!-- Answer -->
+      <!-- Reply: what went back — the product's word (docs: "the reply lands in
+           the thread"). Not always an answer: the caption says what it is,
+           from the run's facts. -->
       <section
-        v-if="state.answer"
-        id="answer"
+        v-if="state.reply"
+        id="reply"
         class="block mt-6 rounded-lg border border-ok/40 bg-(--ui-bg-muted) px-3.5 py-3"
       >
         <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-ok">
-          <span>Answer</span>
+          <span>Reply</span>
+          <a
+            v-if="reply.href"
+            class="caption font-normal normal-case tracking-normal text-dimmed no-underline hover:text-primary hover:underline"
+            :href="reply.href"
+            target="_blank"
+            rel="noopener noreferrer"
+            >{{ reply.text }}</a
+          >
+          <span v-else class="caption font-normal normal-case tracking-normal text-dimmed">{{ reply.text }}</span>
           <span
-            class="ts select-none text-xs normal-case tracking-normal text-dimmed"
-            :title="fmtTimeTitle(state.answer.at)"
-            >{{ fmtTime(state.answer.at) }}</span
+            class="ts ml-auto select-none text-xs font-normal normal-case tracking-normal text-dimmed"
+            :title="fmtTimeTitle(state.reply.at)"
+            >{{ fmtTime(state.reply.at) }}</span
           >
         </h2>
-        <MarkdownText :text="state.answer.text" />
+        <MarkdownText :text="state.reply.text" />
       </section>
     </div>
 

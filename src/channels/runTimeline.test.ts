@@ -91,6 +91,15 @@ describe("createRunTimeline — grouping", () => {
     const t = createRunTimeline();
     expect(t.push({ type: "input", text: "review #1", at: 1 })).toEqual([{ kind: "input", text: "review #1", at: 1 }]);
     expect(t.push({ type: "answer", text: "LGTM", at: 9 })).toEqual([{ kind: "answer", text: "LGTM", at: 9 }]);
+    // The coding post-step's PR: url + a positive integer number, `created` only when literally true.
+    expect(
+      t.push({ type: "pr_opened", url: "https://github.com/acme/web/pull/7", number: 7, created: true, at: 8 }),
+    ).toEqual([{ kind: "pr_opened", url: "https://github.com/acme/web/pull/7", number: 7, created: true, at: 8 }]);
+    expect(t.push({ type: "pr_opened", url: "https://github.com/acme/web/pull/7", number: 7 })).toEqual([
+      { kind: "pr_opened", url: "https://github.com/acme/web/pull/7", number: 7, created: false, at: undefined },
+    ]);
+    expect(t.push({ type: "pr_opened", url: "", number: 7 })).toEqual([]);
+    expect(t.push({ type: "pr_opened", url: "https://github.com/acme/web/pull/0", number: 0 })).toEqual([]);
     expect(
       t.push({ type: "run_note", kind: "stop_requested", summary: "stop requested", mode: "soft", at: 3 }),
     ).toEqual([{ kind: "note", text: "stop requested", noteKind: "stop_requested", mode: "soft", at: 3 }]);
@@ -485,6 +494,7 @@ describe("createRunTimeline — span records", () => {
     expect(changes).toEqual([
       {
         kind: "turn",
+        spanId: "m1",
         label: "Thought for 5m 04s",
         facts: ["12.3k in", "800 out", "11.2k cached", "first token 800ms", "thinking 3.2s", "writing 1.1s"],
         durationMs: 304_000,
@@ -544,7 +554,14 @@ describe("createRunTimeline — model turns (item 15)", () => {
   it("a `model.turn` span end becomes its own change, labelled like the products people already know", () => {
     const t = createRunTimeline();
     const [c] = t.push(turn());
-    expect(c).toEqual({ kind: "turn", label: "Thought for 5m 04s", facts: [], durationMs: 304_000, at: 305_000 });
+    expect(c).toEqual({
+      kind: "turn",
+      spanId: "t1",
+      label: "Thought for 5m 04s",
+      facts: [],
+      durationMs: 304_000,
+      at: 305_000,
+    });
   });
 
   it("a turn carries the model that took it when the span names one; an unstamped turn has no model key", () => {

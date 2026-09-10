@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  callSummary,
   createRunPageModel,
   elidedText,
   liveWait,
@@ -8,11 +9,12 @@ import {
   parseEndFrame,
   parseFinishedFrame,
   parseReplayElided,
+  phaseHeadText,
+  replyCaption,
   runnerNow,
   createRunClock,
   sameModel,
   type StepVm,
-  setupHeadText,
 } from "./runPageModel";
 
 // The run page's fold, driven by real event streams (the same shapes the SSE
@@ -68,7 +70,7 @@ function step(m: ReturnType<typeof model>, i = 0): StepVm {
   return steps[i];
 }
 
-describe("request / context / answer / placeholder", () => {
+describe("request / context / reply / placeholder", () => {
   it("paints the request with its source, clears the placeholder on the FIRST change of any kind", () => {
     const m = model();
     expect(m.state.placeholder).toBe(true);
@@ -117,7 +119,7 @@ describe("request / context / answer / placeholder", () => {
     expect(m.state.log).toHaveLength(0);
   });
 
-  it("the answer lands below the log; the step's group stays open (the tally bars are the narrative)", () => {
+  it("the reply (the answer event) lands below the log; the step's group stays open (the tally bars are the narrative)", () => {
     const m = model();
     m.handle(assistant("running tests", 1));
     m.handle(call("c1", "$ npm test", 2));
@@ -126,8 +128,106 @@ describe("request / context / answer / placeholder", () => {
     m.handle(result("c2"));
     expect(step(m).groupOpen).toBe(true);
     m.handle({ type: "answer", text: "all done", at: 9 });
-    expect(m.state.answer?.text).toBe("all done");
+    expect(m.state.reply?.text).toBe("all done");
     expect(step(m).groupOpen).toBe(true); // never auto-folded
+  });
+
+  it("a `pr_opened` event is kept as the run's PR fact; a malformed one changes nothing", () => {
+    const m = model();
+    m.handle({ type: "pr_opened", url: "https://github.com/acme/web/pull/7", number: 0 });
+    expect(m.state.prOpened).toBeNull();
+    m.handle({ type: "pr_opened", url: "https://github.com/acme/web/pull/7", number: 7, created: true, at: 8 });
+    expect(m.state.prOpened).toEqual({ url: "https://github.com/acme/web/pull/7", number: 7, created: true });
+    expect(m.state.log).toHaveLength(0); // a fact of the run, not a row
+  });
+});
+
+describe("the Reply's caption — what the reply is, from the run's facts", () => {
+  const meta = (agent: string, over: Record<string, unknown> = {}) => ({
+    agent,
+    model: "anthropic/m",
+    ...over,
+  });
+  it("a review of a resolved PR is a verdict for that PR, linked; one whose request opted out of the GitHub post is Slack only; one with no PR is a bare verdict", () => {
+    expect(
+      replyCaption({ meta: meta("review", { repo: "acme/api", pr: 42 }), requestText: "review it", prOpened: null }),
+    ).toEqual({ text: "verdict for acme/api#42", href: "https://github.com/acme/api/pull/42" });
+    expect(
+      replyCaption({
+        meta: meta("review", { repo: "acme/api", pr: 42 }),
+        requestText: "review it — slack only please",
+        prOpened: null,
+      }),
+    ).toEqual({ text: "verdict, Slack only" });
+    expect(
+      replyCaption({
+        meta: meta("review", { repo: "acme/api", pr: 42 }),
+        requestText: "don't post this one",
+        prOpened: null,
+      }),
+    ).toEqual({ text: "verdict, Slack only" });
+    expect(replyCaption({ meta: meta("review", { repo: "acme/api" }), requestText: "x", prOpened: null })).toEqual({
+      text: "verdict",
+    });
+    // a hostile repo never becomes a link — and never a caption naming it
+    expect(
+      replyCaption({
+        meta: meta("review", { repo: "javascript:alert(1)//x", pr: 1 }),
+        requestText: "x",
+        prOpened: null,
+      }),
+    ).toEqual({ text: "verdict" });
+  });
+
+  it("a coding run's reply is its pull request — opened, or an existing one updated — linked through the verified repo; without a pr_opened it is an answer", () => {
+    const opened = { url: "https://github.com/acme/web/pull/7", number: 7, created: true };
+    expect(replyCaption({ meta: meta("coding", { repo: "acme/web" }), requestText: "x", prOpened: opened })).toEqual({
+      text: "pull request opened acme/web#7",
+      href: "https://github.com/acme/web/pull/7",
+    });
+    expect(
+      replyCaption({
+        meta: meta("coding", { repo: "acme/web" }),
+        requestText: "x",
+        prOpened: { ...opened, created: false },
+      }),
+    ).toEqual({ text: "pull request updated acme/web#7", href: "https://github.com/acme/web/pull/7" });
+    // the event's own url is never trusted as a link: no verified repo → text only
+    expect(replyCaption({ meta: meta("coding"), requestText: "x", prOpened: opened })).toEqual({
+      text: "pull request opened",
+    });
+    expect(replyCaption({ meta: meta("coding", { repo: "acme/web" }), requestText: "x", prOpened: null })).toEqual({
+      text: "answer",
+    });
+  });
+
+  it("a command run's reply is its output; general, research and an unknown agent answer; no meta answers too", () => {
+    expect(replyCaption({ meta: meta("command"), requestText: "x", prOpened: null })).toEqual({ text: "output" });
+    expect(replyCaption({ meta: meta("general"), requestText: "x", prOpened: null })).toEqual({ text: "answer" });
+    expect(replyCaption({ meta: meta("research"), requestText: "x", prOpened: null })).toEqual({ text: "answer" });
+    expect(replyCaption({ meta: null, requestText: "x", prOpened: null })).toEqual({ text: "answer" });
+  });
+});
+
+describe("a step's tool-call summary — the tally as a reader says it", () => {
+  const t = (over: Partial<Parameters<typeof callSummary>[0]>) => ({
+    n: 0,
+    ok: 0,
+    bad: 0,
+    infra: 0,
+    running: 0,
+    ...over,
+  });
+  it("every state has its sentence: all succeeded; some failed; a sandbox error; still running; all running; none", () => {
+    expect(callSummary(t({ n: 2, ok: 2 }))).toBe("2 tool calls, all succeeded");
+    expect(callSummary(t({ n: 1, ok: 1 }))).toBe("1 tool call, all succeeded");
+    expect(callSummary(t({ n: 3, ok: 2, bad: 1 }))).toBe("3 tool calls, 1 failed");
+    expect(callSummary(t({ n: 4, ok: 1, bad: 2, infra: 1 }))).toBe("4 tool calls, 2 failed, 1 sandbox error");
+    expect(callSummary(t({ n: 3, ok: 1, infra: 2 }))).toBe("3 tool calls, 2 sandbox errors");
+    expect(callSummary(t({ n: 3, ok: 2, running: 1 }))).toBe("3 tool calls, 1 still running");
+    expect(callSummary(t({ n: 3, ok: 1, bad: 1, running: 1 }))).toBe("3 tool calls, 1 failed, 1 still running");
+    expect(callSummary(t({ n: 2, running: 2 }))).toBe("2 tool calls, all running");
+    expect(callSummary(t({ n: 0 }))).toBe("no tool calls");
   });
 });
 
@@ -157,7 +257,7 @@ describe("steps and turns", () => {
     expect(flushed.kind).toBe("turn");
     if (flushed.kind === "turn") {
       expect(flushed.turn.chip).toBe("1m 01s");
-      expect(flushed.note).toBe("wrote the answer below");
+      expect(flushed.note).toBe("wrote the reply below");
     }
   });
 
@@ -412,7 +512,7 @@ describe("span rows", () => {
     expect(m.state.placeholder).toBe(false);
   });
 
-  it("setup spans — slack.receive, dispatch.* and the attach's grafts — fold under one Setup head that is open while the run sets up, closes when the agent loop starts unless the reader toggled it, and never takes a run.* row (docs/reference/specs/live-view.md item 25)", () => {
+  it("setup spans — slack.receive, dispatch.* and the attach's grafts — fold under one Getting ready head that is open while the run sets up, closes when the agent loop starts unless the reader toggled it, and never takes a run.* row (docs/reference/specs/live-view.md item 25)", () => {
     const m = model();
     m.handle({ type: "span_start", spanId: "r1", name: "slack.receive", at: 1_000 });
     m.handle({
@@ -437,14 +537,14 @@ describe("span rows", () => {
     m.handle({ type: "span_start", spanId: "g1", name: "dispatch.workspace.attach.install", at: 1_200 });
     expect(m.state.log).toHaveLength(1);
     const group = m.state.log[0];
-    expect(group).toMatchObject({ kind: "setup", open: true });
-    if (group.kind !== "setup") throw new Error("not a setup group");
+    expect(group).toMatchObject({ kind: "phase", phase: "getting_ready", open: true });
+    if (group.kind !== "phase") throw new Error("not a phase group");
     expect(group.rows.map((r) => [r.text, r.open])).toEqual([
       ["receiving", false],
       ["reading the thread", false],
       ["installing dependencies", true],
     ]);
-    expect(setupHeadText(group)).toBe("Setup · 3 steps"); // a step still open: no duration yet
+    expect(phaseHeadText(group)).toBe("Getting ready · 3 steps"); // a step still open: no duration yet
     m.handle({
       type: "span_end",
       spanId: "g1",
@@ -454,7 +554,7 @@ describe("span rows", () => {
       status: "ok",
       at: 10_000,
     });
-    expect(setupHeadText(group)).toBe("Setup · 3 steps · 9.0s"); // first start to last end
+    expect(phaseHeadText(group)).toBe("Getting ready · 3 steps · 9.0s"); // first start to last end
     // a setup row born from a lone span_end (its start elided) is stamped with the span's start, not its end
     m.handle({
       type: "span_end",
@@ -466,23 +566,133 @@ describe("span rows", () => {
       at: 1_300,
     });
     expect(group.rows.at(-1)).toMatchObject({ text: "preparing the prompt", open: false, at: 1_200, durationMs: 100 });
-    expect(setupHeadText(group)).toBe("Setup · 4 steps · 9.0s"); // still first start to last end
+    expect(phaseHeadText(group)).toBe("Getting ready · 4 steps · 9.0s"); // still first start to last end
     // a run.* span is a row of its own, beside the group
     m.handle({ type: "span_start", spanId: "rd", name: "run.reading_diff", at: 10_000 });
-    expect(m.state.log.map((i) => i.kind)).toEqual(["setup", "span"]);
-    // the agent loop starts: the head closes
+    expect(m.state.log.map((i) => i.kind)).toEqual(["phase", "span"]);
+    // the agent loop starts: the head closes — and the loop itself draws no row (it IS the steps)
     m.handle({ type: "span_start", spanId: "a1", name: "run.agent", at: 10_100 });
     expect(group.open).toBe(false);
-    expect(m.state.log.map((i) => i.kind)).toEqual(["setup", "span", "span"]);
+    expect(m.state.log.map((i) => i.kind)).toEqual(["phase", "span"]);
     // the reader opens it; a later loop start leaves it alone
-    m.toggleSetup(group);
+    m.togglePhase(group);
     expect(group.open).toBe(true);
     m.handle({ type: "span_start", spanId: "a2", name: "run.agent", at: 20_000 });
     expect(group.open).toBe(true);
     // Expand all / collapse all reach the head too
     m.setAllOpen(false);
     expect(group.open).toBe(false);
-    expect(setupHeadText({ rows: [] })).toBe("Setup · 0 steps");
+    expect(phaseHeadText({ phase: "getting_ready", rows: [] })).toBe("Getting ready · 0 steps");
+  });
+
+  it("the post-loop steps the bar counts as finishing up fold under a Finishing up head, closed when delivery (a post.* span) begins or the run ends; the request and the agent loop draw no row of their own; post.* rows stand alone", () => {
+    const m = model();
+    m.handle({ type: "span_start", spanId: "root", name: "request", at: 0 });
+    m.handle({ type: "span_start", spanId: "agent", name: "run.agent", at: 100 });
+    m.handle({ type: "span_start", spanId: "ow", name: "run.observe_workspace", at: 1_000 });
+    m.handle({
+      type: "span_end",
+      spanId: "ow",
+      name: "run.observe_workspace",
+      startedAt: 1_000,
+      durationMs: 200,
+      status: "ok",
+      at: 1_200,
+    });
+    m.handle({ type: "span_start", spanId: "pp", name: "run.pr_post_step", at: 1_200 });
+    expect(m.state.log.map((i) => i.kind)).toEqual(["phase"]); // no row for the request or the loop
+    const group = m.state.log[0];
+    if (group.kind !== "phase") throw new Error("not a phase group");
+    expect(group.phase).toBe("finishing_up");
+    expect(group.open).toBe(true);
+    expect(phaseHeadText(group)).toBe("Finishing up · 2 steps");
+    m.handle({
+      type: "span_end",
+      spanId: "pp",
+      name: "run.pr_post_step",
+      startedAt: 1_200,
+      durationMs: 800,
+      status: "ok",
+      at: 2_000,
+    });
+    expect(phaseHeadText(group)).toBe("Finishing up · 2 steps · 1.0s");
+    // delivery begins: the head closes; the delivery rows stand on their own
+    m.handle({ type: "span_start", spanId: "cc", name: "post.card_close", at: 2_000 });
+    expect(group.open).toBe(false);
+    expect(m.state.log.map((i) => i.kind)).toEqual(["phase", "span"]);
+    // the run's end closes what the reader left alone — and never what they touched
+    const n = model();
+    n.handle({ type: "span_start", spanId: "ow", name: "run.observe_workspace", at: 1_000 });
+    n.handle({ type: "span_start", spanId: "d1", name: "dispatch.history", at: 0 });
+    const [finishing, ready] = n.state.log;
+    if (finishing.kind !== "phase" || ready.kind !== "phase") throw new Error("not phase groups");
+    n.togglePhase(ready); // the reader closed getting ready themselves…
+    n.togglePhase(ready); // …and opened it again: it is theirs now
+    n.closePhases();
+    expect(finishing.open).toBe(false);
+    expect(ready.open).toBe(true);
+  });
+});
+
+describe("reveal — a Longest-steps link opens what folds its row", () => {
+  it("a call anchor opens its step's group (as a manual toggle); a span anchor opens its phase head; a turn's span is its step; an unknown anchor is refused", () => {
+    const m = model();
+    m.handle({ type: "span_start", spanId: "d1", name: "dispatch.history", at: 0 });
+    m.handle(modelTurn({ durationMs: 500, at: 900 }));
+    m.handle(assistant("work", 1000));
+    m.handle(call("c1", "$ a", 1001));
+    m.handle(call("c2", "$ b", 1002));
+    m.handle(result("c1", { at: 1_500 }));
+    m.handle(result("c2", { at: 1_600 }));
+    const ready = m.state.log[0];
+    if (ready.kind !== "phase") throw new Error("not a phase group");
+    m.handle({ type: "span_start", spanId: "agent", name: "run.agent", at: 100 });
+    expect(ready.open).toBe(false);
+    m.toggleGroup(step(m)); // the reader closed the group
+    expect(step(m).groupOpen).toBe(false);
+    expect(m.reveal("call-c2")).toBe(true);
+    expect(step(m).groupOpen).toBe(true);
+    expect(step(m).manual).toBe(true);
+    expect(m.reveal("span-d1")).toBe(true);
+    expect(ready.open).toBe(true);
+    m.handle({ type: "span_start", spanId: "a3", name: "run.agent", at: 2_000 });
+    expect(ready.open).toBe(true); // a reveal is the reader's toggle: the loop no longer closes it
+    expect(m.reveal("span-turn-900")).toBe(true);
+    expect(m.callHeadline("c1")).toBe("a");
+    expect(m.callHeadline("nope")).toBeUndefined();
+    expect(m.reveal("call-nope")).toBe(false);
+    expect(m.reveal("span-nope")).toBe(false);
+    expect(m.reveal("garbage")).toBe(false);
+  });
+});
+
+describe("the model badge — named once, and on every switch", () => {
+  it("the first head names the model; later heads on the same model do not; a switch does (the ⇄ chip) and the head after a switch stays quiet again", () => {
+    const m = model();
+    m.handle({ type: "run_meta", agent: "coding", model: "anthropic/claude-fable-5", at: 5 });
+    m.handle(modelTurn({ durationMs: 500, at: 900, model: "anthropic/claude-fable-5" }));
+    m.handle(assistant("one", 1000));
+    m.handle(modelTurn({ durationMs: 500, at: 1900, model: "anthropic/claude-fable-5" }));
+    m.handle(assistant("two", 2000));
+    m.handle(modelTurn({ durationMs: 500, at: 2900 })); // unstamped: still the run's model
+    m.handle(assistant("three", 3000));
+    m.handle(modelTurn({ durationMs: 500, at: 3900, model: "anthropic/claude-opus-5" }));
+    m.handle(assistant("four", 4000));
+    m.handle(modelTurn({ durationMs: 500, at: 4900, model: "anthropic/claude-opus-5" }));
+    m.handle(assistant("five", 5000));
+    const heads = m.state.log.filter((l): l is StepVm => l.kind === "step").map((s) => s.turn!);
+    expect(heads.map((t) => [t.showModel, t.switched])).toEqual([
+      [true, false],
+      [false, false],
+      [false, false],
+      [true, true],
+      [false, false],
+    ]);
+    // a run whose meta and turns name no model shows no badge at all
+    const bare = model();
+    bare.handle(modelTurn({ durationMs: 500, at: 900 }));
+    bare.handle(assistant("x", 1000));
+    expect(step(bare).turn!.showModel).toBe(false);
   });
 });
 

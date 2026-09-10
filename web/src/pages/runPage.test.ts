@@ -104,8 +104,10 @@ const spanEnd = (
 });
 
 describe("RunPage — the timeline (item 25)", () => {
-  it("history: the lede is the record's total split into its buckets, the delivery caption beside it, the raw-events link present, raw span names only in the debug copy", async () => {
+  it("history: the total, the bar and its legend (the bar's words with their times, defined on hover), the delivery caption, the Longest steps named as their rows are and linked to them, the raw-events link, raw span names only in the debug copy", async () => {
     const copy = vi.spyOn(browser, "copyText").mockResolvedValue();
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
     const { factory } = fakeEventSourceFactory();
     const w = mountApp(RunPage, {
       seed: historySeed(
@@ -133,25 +135,56 @@ describe("RunPage — the timeline (item 25)", () => {
     });
     const tl = w.find("#timeline");
     expect(tl.exists()).toBe(true);
-    expect(tl.find(".lede .shape").text()).toBe("1m 00s — 20s getting ready · 30s thinking · 10s in tools");
+    expect(tl.find("h2").text()).toContain("Where the time went");
+    // The lede is the total alone — the split is the legend, not a sentence.
+    expect(tl.find(".lede .shape").text()).toBe("1m 00s");
     expect(tl.find(".lede .current").text()).toBe("· delivered in 2s");
     expect(tl.findAll(".bar .seg").map((s) => s.attributes("data-term"))).toEqual([
       "getting ready",
       "thinking",
       "in tools",
     ]);
-    expect(tl.findAll(".ranked li .label").map((l) => l.text())).toEqual([
-      "a model turn",
-      "reading the thread",
-      "bash",
+    // The legend labels the bar: swatch · word · time, in the bar's order, the definition on hover.
+    const legend = tl.findAll(".legend li");
+    expect(legend.map((l) => [l.find(".term").text(), l.find(".ms").text()])).toEqual([
+      ["getting ready", "20s"],
+      ["thinking", "30s"],
+      ["in tools", "10s"],
     ]);
-    expect(tl.find("a").attributes("href")).toBe("/runs/run-1/events");
+    expect(legend.map((l) => l.attributes("data-term"))).toEqual(
+      tl.findAll(".bar .seg").map((s) => s.attributes("data-term")),
+    );
+    expect(legend[0].attributes("title")).toContain("before the agent's first turn");
+    // A swatch IS its segment: the same paint class.
+    expect(
+      legend.map((l) =>
+        l
+          .find(".swatch")
+          .classes()
+          .find((c) => c.startsWith("seg-")),
+      ),
+    ).toEqual(tl.findAll(".bar .seg").map((s) => s.classes().find((c) => c.startsWith("seg-"))));
+    expect(tl.find(".gloss").exists()).toBe(false); // the prose paragraph is gone; the words define themselves on hover
+    // Longest steps: the heading carries the footnote; a tool step wears its command and links to its card.
+    expect(tl.find(".ranked-head").text()).toBe("Longest steps");
+    expect(tl.find(".ranked-head").attributes("title")).toContain("own time");
+    expect(tl.find(".ranked-note").exists()).toBe(false);
+    const ranked = tl.findAll(".ranked li .label");
+    expect(ranked.map((l) => l.text())).toEqual(["a model turn", "reading the thread", "npm test"]);
+    expect(ranked.map((l) => l.attributes("href"))).toEqual(["#span-t1", "#span-hist", "#call-c1"]);
+    expect(w.find("#call-c1").exists()).toBe(true); // the card carries the id the link points at
+    expect(w.find("#span-t1").classes()).toContain("step"); // a turn's span is the step it heads
+    await ranked[2].trigger("click");
+    await w.vm.$nextTick();
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    expect(w.find("#call-c1").classes()).toContain("revealed");
+    expect(tl.find("h2 a").attributes("href")).toBe("/runs/run-1/events");
     expect(tl.text()).not.toContain("dispatch.history"); // never a raw span name
     await tl.find("button.debug").trigger("click");
     expect(copy).toHaveBeenCalledTimes(1);
     expect(copy.mock.calls[0][0]).toContain("dispatch.history");
-    // The header's total and the lede's total are one number.
-    expect(tl.find(".lede .shape").text().startsWith(w.find(".conn .dur").text())).toBe(true);
+    // The header's total and the card's total are one number.
+    expect(tl.find(".lede .shape").text()).toBe(w.find(".conn .dur").text());
   });
 
   it("history: an `untimed` record (written before span schema) renders its transcript and calls, and the timeline states `no timing data` — no bar, no shape, no crash on the event kinds it carries", () => {
@@ -209,7 +242,10 @@ describe("RunPage — the timeline (item 25)", () => {
       ),
       eventSource: factory,
     });
-    expect(cut.find("#timeline .lede .shape").text()).toBe("1m 00s — 30s getting ready · 30s not recorded (too large)");
+    expect(cut.find("#timeline .lede .shape").text()).toBe("1m 00s");
+    const lost = cut.findAll("#timeline .legend li").at(-1)!;
+    expect([lost.find(".term").text(), lost.find(".ms").text()]).toEqual(["not recorded", "30s"]);
+    expect(lost.attributes("title")).toContain("(too large)");
   });
 
   it("live: the lede follows the phases — the open bucket while running, `currently delivering` at the finished frame, the delivery caption at end — on the header's own total", async () => {
@@ -228,7 +264,13 @@ describe("RunPage — the timeline (item 25)", () => {
       await wrapper.vm.$nextTick();
       // serverNow 4000, startedAt 1000: 3 s elapsed at mount, the turn open for 2 s of it —
       // both buckets already informative (a third of the window), so the shape shows.
-      expect(wrapper.find("#timeline .lede .shape").text()).toBe("3s — 1s getting ready · 2s thinking");
+      expect(wrapper.find("#timeline .lede .shape").text()).toBe("3s");
+      expect(
+        wrapper.findAll("#timeline .legend li").map((l) => [l.find(".term").text(), l.find(".ms").text()]),
+      ).toEqual([
+        ["getting ready", "1s"],
+        ["thinking", "2s"],
+      ]);
       expect(wrapper.find("#timeline .lede .current").text()).toBe("· currently thinking 2s");
       expect(wrapper.find("#timeline .bar .seg.hatched").attributes("data-term")).toBe("thinking"); // the open turn's tail
       vi.advanceTimersByTime(60_000);
@@ -237,6 +279,7 @@ describe("RunPage — the timeline (item 25)", () => {
       expect(wrapper.find("#timeline .lede .shape").text()).toBe("1m 03s — thinking");
       expect(wrapper.find("#timeline .lede .current").text()).toBe("· currently thinking 1m 02s");
       expect(wrapper.find("#timeline .bar").exists()).toBe(false);
+      expect(wrapper.find("#timeline .legend").exists()).toBe(false);
       es().emitNamed("finished", JSON.stringify({ finishedAt: liveSeed.startedAt + 63_000 }));
       await wrapper.vm.$nextTick();
       expect(wrapper.find("#timeline .lede .current").text()).toBe("· currently delivering");
@@ -245,7 +288,7 @@ describe("RunPage — the timeline (item 25)", () => {
       await wrapper.vm.$nextTick();
       expect(wrapper.find("#timeline .lede .current").text()).toBe("· delivered in 2s");
       expect(wrapper.find("#timeline .lede .shape").text().startsWith(wrapper.find(".conn .dur").text())).toBe(true);
-      expect(wrapper.find("#timeline a").exists()).toBe(false); // no raw-events link on a live page
+      expect(wrapper.find("#timeline h2 a").exists()).toBe(false); // no raw-events link on a live page
     } finally {
       vi.useRealTimers();
     }
@@ -293,7 +336,7 @@ describe("RunPage — history mode", () => {
     expect(w.findAll("#request").length).toBe(1); // never a second request block
   });
 
-  it("seeds the whole record through the ONE fold: request (with source), steps, cards, answer; no stream, no stop controls", () => {
+  it("seeds the whole record through the ONE fold: request (with source), steps, cards, reply; no stream, no stop controls", () => {
     const { created, factory } = fakeEventSourceFactory();
     const w = mountApp(RunPage, {
       seed: historySeed(
@@ -317,7 +360,10 @@ describe("RunPage — history mode", () => {
     expect(w.find("#log").text()).toContain("running tests");
     expect(w.find("details.call").attributes("data-status")).toBe("failed");
     expect(w.find("details.call .facts").text()).toContain("exit 1");
-    expect(w.find("#answer").text()).toContain("gave up");
+    expect(w.find("#reply").text()).toContain("gave up");
+    expect(w.find("#reply h2").text()).toContain("Reply");
+    expect(w.find("#reply .caption").text()).toBe("answer"); // no meta: the general word
+    expect(w.find("#answer").exists()).toBe(false); // the section is called what the product calls it
     expect(w.find("#actions").exists()).toBe(false);
     expect(w.find("h1").text()).toBe("Run");
     // the way back to the token-less, Access-gated index — never with a token
@@ -356,7 +402,7 @@ describe("RunPage — history mode", () => {
     expect(w.find("#request").text()).toContain("<img src=x");
   });
 
-  it("shows the run meta line: agent · model · effort · linked repo · branch tag (no link) · GitHub-marked PR; never a sha; a hostile repo never links", () => {
+  it("shows the run meta line: agent · model · effort · linked repo · the branch linked to its tree · the head sha linked to its commit · GitHub-marked PR; a hostile repo never links", () => {
     const w = mountApp(RunPage, {
       seed: historySeed([
         input,
@@ -378,34 +424,66 @@ describe("RunPage — history mode", () => {
     expect(meta.text()).toContain("anthropic/claude-fable-5");
     expect(meta.text()).toContain("high effort");
     const hrefs = meta.findAll("a").map((a) => a.attributes("href"));
-    expect(hrefs).toContain("https://github.com/acme/web");
-    expect(hrefs).toContain("https://github.com/acme/web/pull/12");
-    expect(hrefs.join(" ")).not.toContain("/tree/");
-    expect(hrefs.join(" ")).not.toContain("0123456789"); // the sha is gone from the meta line
+    expect(hrefs).toEqual([
+      "https://github.com/acme/web",
+      "https://github.com/acme/web/tree/main",
+      "https://github.com/acme/web/commit/0123456789abcdef0123456789abcdef01234567",
+      "https://github.com/acme/web/pull/12",
+    ]);
     expect(meta.find(".reftag").text()).toBe("main");
-    expect(meta.find(".reftag").element.tagName).not.toBe("A");
+    expect(meta.find(".reftag").element.tagName).toBe("A"); // the branch is a destination
+    expect(meta.find(".sha").text()).toBe("0123456"); // seven characters, the full sha on hover
+    expect(meta.find(".sha").attributes("title")).toContain("0123456789abcdef0123456789abcdef01234567");
     expect(meta.find(".prlink svg").exists()).toBe(true);
     for (const a of meta.findAll("a")) expect(a.attributes("target")).toBe("_blank");
 
+    // A hostile repo never links — and neither does a branch or sha under it.
     const hostile = mountApp(RunPage, {
       seed: historySeed([
         input,
-        { type: "run_meta", agent: "review", model: "m", repo: "javascript:alert(1)//x", at: 1 },
+        {
+          type: "run_meta",
+          agent: "review",
+          model: "m",
+          repo: "javascript:alert(1)//x",
+          ref: "main",
+          headSha: "0123456789abcdef0123456789abcdef01234567",
+          at: 1,
+        },
       ] as LiveFrame[]),
     });
     expect(hostile.find("#runmeta").findAll("a")).toHaveLength(0);
+    expect(hostile.find("#runmeta .reftag").text()).toBe("main"); // the fact stays, as text
+    // A branch outside git's ref grammar is text too, under a good repo.
+    const oddRef = mountApp(RunPage, {
+      seed: historySeed([
+        input,
+        { type: "run_meta", agent: "review", model: "m", repo: "acme/web", ref: "a..b", at: 1 },
+      ] as LiveFrame[]),
+    });
+    expect(oddRef.find("#runmeta .reftag").element.tagName).toBe("SPAN");
+    expect(
+      oddRef
+        .find("#runmeta")
+        .findAll("a")
+        .map((a) => a.attributes("href")),
+    ).toEqual(["https://github.com/acme/web"]);
   });
 
-  it("collects context turns into the collapsed Context block with a count", () => {
+  it("collects context turns into the collapsed Earlier-in-this-thread block with a count", () => {
     const w = mountApp(RunPage, {
       seed: historySeed([
         { type: "context", text: "earlier", at: 1 },
         { type: "context", text: "another", at: 2 },
       ] as LiveFrame[]),
     });
-    expect(w.find("#context summary").text()).toContain("(2 turns)");
+    expect(w.find("#context summary").text()).toContain("Earlier in this thread");
+    expect(w.find("#context summary").text()).toContain("2 turns");
     expect(w.find("#context").text()).toContain("earlier");
     expect((w.find("#context").element as HTMLDetailsElement).open).toBe(false);
+    const one = mountApp(RunPage, { seed: historySeed([{ type: "context", text: "earlier", at: 1 }] as LiveFrame[]) });
+    expect(one.find("#context summary").text()).toContain("1 turn");
+    expect(one.find("#context summary").text()).not.toContain("1 turns");
   });
 
   it("groups a step's cards from the 2nd on under a tally bar; failed cards open by default, clean ones collapsed", () => {
@@ -418,10 +496,12 @@ describe("RunPage — history mode", () => {
         result("c2", { ok: true, at: 3500 }),
       ] as LiveFrame[]),
     });
+    // The summary reads as a sentence, muted — never `2 calls ✓ 1 ✗ 1`.
     const summary = w.find(".gsummary");
-    expect(summary.text()).toContain("2 calls");
-    expect(summary.text()).toContain("✓ 1");
-    expect(summary.text()).toContain("✗ 1");
+    expect(summary.find(".gcount").text()).toBe("2 tool calls, 1 failed");
+    expect(summary.text()).not.toContain("✓");
+    expect(summary.classes()).toContain("text-xs");
+    expect(summary.find(".gcount").classes()).toContain("text-bad");
     const cards = w.findAll("details.call");
     expect(cards).toHaveLength(2);
     expect((cards[0].element as HTMLDetailsElement).open).toBe(true); // failed
@@ -567,16 +647,108 @@ describe("RunPage — history mode", () => {
     expect(cards[1].findAll(".fact")[0]!.classes()).toContain("text-bad");
   });
 
-  it("the context fold announces itself with a rotating chevron and shares the toolbar line with the fold toggle", () => {
+  it("the page is four named blocks in order — Request, Earlier in this thread (a fold with a rotating chevron), This run (its heading carries the step count and the text Expand all at the right edge, over the summary card and the steps), Reply", () => {
     const w = mountApp(RunPage, {
-      seed: historySeed([{ type: "context", text: "earlier turn", at: 500 }, input] as LiveFrame[]),
+      seed: historySeed([
+        { type: "context", text: "earlier turn", at: 500 },
+        input,
+        assistant("one", 1000),
+        call("c1", "$ a", 1001),
+        result("c1", { at: 1002 }),
+        assistant("two", 2000),
+        { type: "answer", text: "done", at: 3000 },
+      ] as LiveFrame[]),
     });
     const chev = w.find("#context summary .chev");
     expect(chev.exists()).toBe(true);
     expect(chev.classes().join(" ")).toContain("group-open:rotate-90");
-    // Context and Expand-all live in the SAME bar (one line when collapsed).
-    expect(w.find(".logbar #context").exists()).toBe(true);
-    expect(w.find(".logbar #fold").exists()).toBe(true);
+    const heading = w.find("#thisrun");
+    expect(heading.text()).toContain("This run");
+    expect(heading.text()).toContain("2 steps");
+    expect(heading.find("#fold").exists()).toBe(true); // the fold control is in the heading's row
+    expect(heading.find("#fold").element.tagName).toBe("BUTTON");
+    expect(heading.find("#fold").classes()).toContain("ml-auto"); // at the right edge
+    expect(heading.find("#fold svg").exists()).toBe(false); // text, like the card's controls
+    expect(heading.find("#fold").text()).toBe("Expand all");
+    const order = Array.from(w.find(".max-w-6xl").element.children).map((el) => el.id);
+    expect(order).toEqual(["request", "context", "thisrun", "timeline", "log", "reply"]);
+    // Every block's heading is the same small-caps label with the moment at the right edge.
+    for (const id of ["request", "reply"]) {
+      const h2 = w.find(`#${id} h2`);
+      expect(h2.classes()).toContain("uppercase");
+      expect(h2.find(".ts").classes()).toContain("ml-auto");
+    }
+    expect(w.find("#context summary").classes()).toContain("uppercase");
+    expect(heading.classes()).toContain("uppercase");
+    expect(w.find(".logbar").exists()).toBe(false); // the floating toolbar is gone
+  });
+
+  it("the request folds to its first lines (ExpandableText) and the Reading diff control is a link-weight text button with the compare glyph", async () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([
+        input,
+        { type: "run_meta", agent: "review", model: "anthropic/m", repo: "acme/api", ref: "patch-1", pr: 42, at: 2 },
+        {
+          type: "review_artifact",
+          artifact: "reading_diff",
+          poweredBy: "git",
+          baseRef: "main",
+          diff: "diff --git a/x b/x\n",
+          truncated: false,
+          at: 3,
+        },
+      ] as LiveFrame[]),
+    });
+    expect(w.find("#request .expandable .md").exists()).toBe(true);
+    expect(w.find("#request .expandable .body").attributes("style")).toContain("--expandable-lines: 5");
+    const button = w.find('[data-testid="reading-diff-button"]');
+    expect(button.element.tagName).toBe("BUTTON");
+    expect(button.text()).toBe("Reading diff");
+    expect(button.classes()).toContain("text-primary"); // the weight of the chips beside it
+    expect(button.classes()).toContain("ml-auto");
+    expect(button.find("[class*='i-lucide-git-compare'], .iconify").exists()).toBe(true);
+    expect(button.attributes("class")).not.toContain("border"); // not a boxed UButton any more
+    w.unmount();
+  });
+
+  it("the Reply's caption says what the reply is, from the run's facts: a review's verdict for its PR (linked), Slack only when the request opted out, a coding run's pull request, an answer otherwise", () => {
+    const review = mountApp(RunPage, {
+      seed: historySeed([
+        input,
+        { type: "run_meta", agent: "review", model: "anthropic/m", repo: "acme/api", ref: "patch-1", pr: 42, at: 2 },
+        { type: "answer", text: "LGTM", at: 9 },
+      ] as LiveFrame[]),
+    });
+    expect(review.find("#reply .caption").text()).toBe("verdict for acme/api#42");
+    expect(review.find("#reply .caption").attributes("href")).toBe("https://github.com/acme/api/pull/42");
+    expect(review.find("#reply .ts").text()).not.toBe("");
+    const slackOnly = mountApp(RunPage, {
+      seed: historySeed([
+        { ...input, text: "review this, slack only" },
+        { type: "run_meta", agent: "review", model: "anthropic/m", repo: "acme/api", pr: 42, at: 2 },
+        { type: "answer", text: "LGTM", at: 9 },
+      ] as LiveFrame[]),
+    });
+    expect(slackOnly.find("#reply .caption").text()).toBe("verdict, Slack only");
+    expect(slackOnly.find("#reply .caption").element.tagName).toBe("SPAN");
+    const coding = mountApp(RunPage, {
+      seed: historySeed([
+        input,
+        { type: "run_meta", agent: "coding", model: "anthropic/m", repo: "acme/web", ref: "main", at: 2 },
+        { type: "pr_opened", url: "https://github.com/acme/web/pull/7", number: 7, created: true, at: 8 },
+        { type: "answer", text: "PR is up", at: 9 },
+      ] as LiveFrame[]),
+    });
+    expect(coding.find("#reply .caption").text()).toBe("pull request opened acme/web#7");
+    expect(coding.find("#reply .caption").attributes("href")).toBe("https://github.com/acme/web/pull/7");
+    const general = mountApp(RunPage, {
+      seed: historySeed([
+        input,
+        { type: "run_meta", agent: "general", model: "anthropic/m", at: 2 },
+        { type: "answer", text: "42", at: 9 },
+      ] as LiveFrame[]),
+    });
+    expect(general.find("#reply .caption").text()).toBe("answer");
   });
 
   it("the fold toggle opens every card (and future ones), then closes them; icon state flips", async () => {
@@ -729,7 +901,7 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find("#log .span .dur").text()).toBe("250ms");
   });
 
-  it("the setup spans fold under a Setup head with their count and span, open while setting up, closed by the agent loop's start and reopened by a click; the tail names the open span (docs/reference/specs/live-view.md item 25)", async () => {
+  it("the setup spans fold under a Getting ready head with their count and span, open while setting up, closed by the agent loop's start and reopened by a click; the request and the loop draw no row; the tail names the open span (docs/reference/specs/live-view.md item 25)", async () => {
     const { wrapper, es } = mountLive();
     es().emitOpen();
     es().emitMessage({ type: "span_start", spanId: "root", name: "request", at: 1_000 }, "1");
@@ -756,12 +928,14 @@ describe("RunPage — live mode", () => {
       "4",
     );
     await wrapper.vm.$nextTick();
-    expect(wrapper.find("#log .setup-head .glyph").text()).toBe("▾");
-    expect(wrapper.find("#log .setup-head .what").text()).toBe("Setup · 2 steps");
-    expect(wrapper.findAll("#log .setup .span").map((r) => r.find(".what").text())).toEqual([
+    expect(wrapper.find("#log .phase-head .glyph").text()).toBe("▾");
+    expect(wrapper.find("#log .phase-head .what").text()).toBe("Getting ready · 2 steps"); // the bar's word
+    expect(wrapper.find("#log .phase").attributes("data-phase")).toBe("getting_ready");
+    expect(wrapper.findAll("#log .phase .span").map((r) => r.find(".what").text())).toEqual([
       "reading the thread",
       "attaching the workspace",
     ]);
+    expect(wrapper.find("#span-h").exists()).toBe(true); // rows carry the ids the Longest steps link to
     // the tail names the open counted span, not a rotating verb
     expect(wrapper.find("#thinking .verb").text()).toBe("attaching the workspace…");
     es().emitMessage(
@@ -779,16 +953,54 @@ describe("RunPage — live mode", () => {
     );
     es().emitMessage({ type: "span_start", spanId: "agent", name: "run.agent", parentSpanId: "root", at: 2_000 }, "6");
     await wrapper.vm.$nextTick();
-    expect(wrapper.find("#log .setup-head .glyph").text()).toBe("▸");
-    expect(wrapper.find("#log .setup-head .what").text()).toBe("Setup · 2 steps · 1.0s");
-    expect(wrapper.findAll("#log .setup .span")).toHaveLength(0);
-    expect(wrapper.findAll("#log > .span").map((r) => r.find(".what").text())).toEqual([
-      "the request",
-      "the agent loop",
-    ]);
-    await wrapper.find("#log .setup-head").trigger("click");
-    expect(wrapper.findAll("#log .setup .span")).toHaveLength(2);
-    expect(wrapper.find("#log .setup-head").attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find("#log .phase-head .glyph").text()).toBe("▸");
+    expect(wrapper.find("#log .phase-head .what").text()).toBe("Getting ready · 2 steps · 1.0s");
+    expect(wrapper.findAll("#log .phase .span")).toHaveLength(0);
+    expect(wrapper.findAll("#log > .span")).toHaveLength(0); // the request and the loop are the page, not rows on it
+    expect(wrapper.text()).not.toContain("the agent loop");
+    await wrapper.find("#log .phase-head").trigger("click");
+    expect(wrapper.findAll("#log .phase .span")).toHaveLength(2);
+    expect(wrapper.find("#log .phase-head").attributes("aria-expanded")).toBe("true");
+  });
+
+  it("the post-loop steps fold under a Finishing up head that closes when delivery begins; the delivery rows stand on their own", async () => {
+    const { wrapper, es } = mountLive();
+    es().emitOpen();
+    es().emitMessage({ type: "span_start", spanId: "root", name: "request", at: 1_000 }, "1");
+    es().emitMessage({ type: "span_start", spanId: "agent", name: "run.agent", parentSpanId: "root", at: 1_000 }, "2");
+    es().emitMessage(assistant("done thinking", 5_000), "3");
+    es().emitMessage(
+      { type: "span_start", spanId: "pp", name: "run.pr_post_step", parentSpanId: "root", at: 6_000 },
+      "4",
+    );
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find("#log .phase[data-phase='finishing_up'] .phase-head .what").text()).toBe(
+      "Finishing up · 1 step",
+    );
+    expect(wrapper.findAll("#log .phase .span").map((r) => r.find(".what").text())).toEqual(["posting the PR"]);
+    es().emitMessage(
+      {
+        type: "span_end",
+        spanId: "pp",
+        name: "run.pr_post_step",
+        parentSpanId: "root",
+        startedAt: 6_000,
+        durationMs: 500,
+        status: "ok",
+        at: 6_500,
+      },
+      "5",
+    );
+    es().emitMessage(
+      { type: "span_start", spanId: "cc", name: "post.card_close", parentSpanId: "root", at: 6_500 },
+      "6",
+    );
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find("#log .phase[data-phase='finishing_up'] .phase-head .what").text()).toBe(
+      "Finishing up · 1 step · 500ms",
+    );
+    expect(wrapper.findAll("#log .phase .span")).toHaveLength(0); // closed: delivery began
+    expect(wrapper.findAll("#log > .span").map((r) => r.find(".what").text())).toEqual(["closing the card"]);
   });
 
   it("a replay_elided frame renders as a replay row naming the range the record still has; a malformed or empty one marks nothing", async () => {
@@ -891,7 +1103,7 @@ describe("RunPage — live mode", () => {
     expect(card.text()).not.toMatch(/running/);
   });
 
-  it("every thought head wears the model badge — a record from before per-turn stamps names its run_meta model; a switched turn wears the ⇄ chip instead; nothing known → no badge", () => {
+  it("the model badge is worn once, by the run's first head (a record from before per-turn stamps names its run_meta model there), and again only where the model switches — the ⇄ chip; the heads between stay quiet; nothing known → no badge", () => {
     const w = mountApp(RunPage, {
       seed: historySeed([
         input,
@@ -906,12 +1118,13 @@ describe("RunPage — live mode", () => {
     });
     const heads = w.findAll("#log .step .meta");
     expect(heads).toHaveLength(2);
-    for (const head of heads) {
-      expect(head.find(".model-badge").text()).toBe("claude-fable-5");
-      expect(head.find(".model-badge").attributes("title")).toBe("anthropic/claude-fable-5");
-      expect(head.find(".model-switch").exists()).toBe(false);
-    }
-    const turnRow = w.find("#log .turn .meta"); // the answer's own turn, flushed as its own row
+    expect(heads[0].find(".model-badge").text()).toBe("claude-fable-5");
+    expect(heads[0].find(".model-badge").attributes("title")).toBe("anthropic/claude-fable-5");
+    expect(heads[0].find(".model-switch").exists()).toBe(false);
+    expect(heads[1].find(".model-badge").exists()).toBe(false); // same model: nothing to learn here
+    expect(heads[1].find(".model-switch").exists()).toBe(false);
+    expect(heads[1].text()).toContain("thought"); // the cost facts stay
+    const turnRow = w.find("#log .turn .meta"); // the reply's own turn, flushed as its own row
     expect(turnRow.find(".model-switch").text()).toBe("⇄ claude-opus-5");
     expect(turnRow.find(".model-badge").exists()).toBe(false);
 

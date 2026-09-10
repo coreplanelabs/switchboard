@@ -78,6 +78,28 @@
   color: oklch(var(--sb-heat-l) calc(0.06 + 0.11 * var(--heat-t)) calc(88 - 60 * var(--heat-t)));
 }
 
+/*
+ * A row the run page scrolled to from the timeline's Longest steps: one fade
+ * of the primary colour, so the reader's eye lands where the link pointed.
+ * Off under prefers-reduced-motion (the scroll itself is enough).
+ */
+.revealed {
+  animation: sb-revealed 1.5s ease-out;
+}
+@keyframes sb-revealed {
+  from {
+    box-shadow: 0 0 0 2px var(--ui-primary);
+  }
+  to {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .revealed {
+    animation: none;
+  }
+}
+
 @layer base {
   /* ONE scaling knob: phones render ~10% larger. Every font size and spacing
    * utility in the app is rem-based, so text AND whitespace scale together —

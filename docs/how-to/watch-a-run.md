@@ -14,7 +14,7 @@ Open `/runs` (every active run, newest first) and click a row. The Slack status 
 
 ## Read the page
 
-`/runs/<id>` streams the request, each step (files, commands, tool calls and results) and the answer. Leave the tab open while the run is live.
+`/runs/<id>` streams the request, each step (files, commands, tool calls and results) and the reply — a review's verdict, a coding run's pull request, the general agent's answer. Leave the tab open while the run is live.
 
 Under the request, **Timeline** is the run's shape. You should see:
 
