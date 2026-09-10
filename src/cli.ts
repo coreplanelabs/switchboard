@@ -47,6 +47,7 @@
 // already read the config and the data directory.
 
 import "./loadEnv.js";
+import { Console } from "node:console";
 import { existsSync } from "node:fs";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
@@ -311,14 +312,18 @@ export async function runCli(
   }
 }
 
-/** The harness channel: replies to stdout, status lines to stderr, no history (one-shot). */
+/** The harness channel: the reply to `out` (stdout), status lines to stderr,
+ *  no history (one-shot). The reply is written to the stream directly, never
+ *  through `console` — the `ask` process points `console` at stderr so the
+ *  core's process log stays off stdout (`main`). */
 export class ConsoleIO implements ChannelIO {
   /** The receipt of the run this request started, once it finished — undefined
    *  before that, and forever when no run was started (a config reply such as
    *  `help`, a refusal before a run existed). */
   finished: RunReceipt | undefined;
+  constructor(private readonly out: NodeJS.WritableStream = process.stdout) {}
   async reply(text: string): Promise<void> {
-    console.log("\n" + text);
+    this.out.write("\n" + text + "\n");
   }
   runFinished(receipt: RunReceipt): void {
     this.finished = receipt;
@@ -547,6 +552,11 @@ async function main(): Promise<void> {
   }
 
   const { bot, mcpWiring } = wiring();
+  // The core writes its process log — `[run] …`, `[event] …`, `[done] …` — with
+  // `console.log`: in the bot that IS the container's log. Here stdout is the
+  // answer, so from this point every `console` line goes to stderr beside the
+  // status lines; the reply reaches stdout through `ConsoleIO`'s own stream.
+  globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
   const { config, runStore } = await bot();
   const providers = new ProviderRegistry(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);

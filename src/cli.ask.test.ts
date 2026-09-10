@@ -89,13 +89,18 @@ function ask(text: string): Promise<{ code: number | null; stdout: string; stder
   return new Promise((resolve) => child.on("close", (code) => resolve({ code, stdout, stderr })));
 }
 
+/** The core's process log: `[run] …`, `[event] …`, `[done] …` — a tag in brackets at the start of a line. */
+const PROCESS_LOG_LINE = /^\[[a-z-]+\] /m;
+
 describe("the CLI process running `ask` against a provider", () => {
-  it("an answered run: the answer on stdout, the status lines on stderr, exit 0", async () => {
+  it("an answered run: stdout is the answer alone, the status lines and the process log go to stderr, exit 0", async () => {
     script = { kind: "answer", text: "four" };
     const r = await ask("what is 2+2");
     expect(r.code, r.stderr).toBe(0);
-    expect(r.stdout).toContain("four");
+    expect(r.stdout.trim()).toBe("four");
+    expect(r.stdout).not.toMatch(PROCESS_LOG_LINE);
     expect(r.stderr).toMatch(/✅ \*general\* on `fake\/m`/);
+    expect(r.stderr).toMatch(/^\[run\] cli:\d+ user=cli:local agent=general model=fake\/m$/m);
   }, 60_000);
 
   it("a run the provider refuses (a 401 on the key) exits 1 — the code every failed command exits with — with the refusal on the terminal", async () => {
@@ -103,6 +108,7 @@ describe("the CLI process running `ask` against a provider", () => {
     const r = await ask("what is 2+2");
     expect(r.code, `${r.stdout}\n${r.stderr}`).toBe(1);
     expect(r.stdout).toContain('⚠️ Provider "fake" HTTP 401');
+    expect(r.stdout).not.toMatch(PROCESS_LOG_LINE);
     expect(r.stderr).toMatch(/❌ \*general\* on `fake\/m`/);
   }, 60_000);
 });

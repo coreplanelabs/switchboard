@@ -265,6 +265,15 @@ describe("askExitCode — what the `ask` process exits with (the ConsoleIO chann
     io.runFinished({ id: "r1", status: "failed" });
     expect(io.finished).toEqual({ id: "r1", status: "failed" });
   });
+
+  it("ConsoleIO writes the reply to the stream it is given — stdout in the process — never through console, which the ask process points at stderr", async () => {
+    const chunks: string[] = [];
+    const io = new ConsoleIO({
+      write: (chunk: string) => (chunks.push(chunk), true),
+    } as unknown as NodeJS.WritableStream);
+    await io.reply("four");
+    expect(chunks.join("")).toBe("\nfour\n");
+  });
 });
 
 describe("runCommand", () => {
