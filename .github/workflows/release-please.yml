@@ -293,11 +293,13 @@ jobs:
   # and this workflow file as its trusted publisher, and `npm publish`
   # authenticates with the run's OIDC identity — which is what `id-token: write`
   # is for, and the only scope this job holds beyond reading the tree. Nothing
-  # expires and no person's credential is in the path. `--provenance` only once
-  # the repository is public: npm signs provenance for public sources alone and
-  # the flag fails a private one, so a release before the flip publishes without
-  # it and the first release after the flip carries it. Independent of `deploy`
-  # and `publish-image`.
+  # expires and no person's credential is in the path. No `--provenance`: npm
+  # accepts a provenance bundle from GitHub-hosted runners alone, and this
+  # project's CI runs on Namespace runners — the registry answers 422
+  # `Unsupported GitHub Actions runner environment: "self-hosted"` — so the
+  # package publishes unsigned; the images keep their attestations (the
+  # attest action signs from any runner). Independent of `deploy` and
+  # `publish-image`.
   # OFF until the owner turns it on: the job runs only when the repository
   # variable SWITCHBOARD_PUBLISH_NPM is the string `true` — unset, the job is
   # skipped and the `npm publish is off` step above says so in one line — so a
@@ -328,4 +330,4 @@ jobs:
       - run: npm install -g npm@11.19.1
       - run: npm ci
       - run: npm run build -w packages/switchboard
-      - run: npm publish --workspace packages/switchboard --access public ${{ github.event.repository.private == false && '--provenance' || '' }}
+      - run: npm publish --workspace packages/switchboard --access public
