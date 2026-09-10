@@ -28,9 +28,12 @@ let tmp: string;
 let bin: string;
 let packed: { filename: string; files: string[] };
 
-/** Run the installed CLI in `cwd`; never throws — the caller reads the status. */
+/** Run the installed CLI in `cwd`; never throws — the caller reads the status. The shell's Cloudflare
+ *  credential and account never reach it: a smoke test touches no account, and a `registry`-mode
+ *  `deploy plan` reads the account registry only when a token is there. */
 function switchboard(cwd: string, ...args: string[]) {
-  const r = spawnSync(bin, args, { cwd, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
+  const { CLOUDFLARE_API_TOKEN: _token, CLOUDFLARE_ACCOUNT_ID: _account, ...env } = process.env;
+  const r = spawnSync(bin, args, { cwd, encoding: "utf8", env: { ...env, NO_COLOR: "1" } });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -133,7 +136,7 @@ describe("the installed CLI", () => {
     expect(r.stdout).toContain("bot");
   });
 
-  it("`init --cloudflare` in an empty directory writes the profile there and renders the Worker configs under .switchboard/ — no checkout, no install; `deploy plan` then plans that installation from that directory, naming no path of the package or the repository", () => {
+  it("`init --cloudflare` in an empty directory writes the profile there and renders the Worker configs under .switchboard/ — no checkout, no install; `deploy plan` then plans that installation from that directory with no credential and no network, naming no path of the package or the repository", () => {
     const work = join(tmp, "work-cf");
     mkdirSync(work);
     const account = "0123456789abcdef0123456789abcdef";
@@ -177,6 +180,11 @@ describe("the installed CLI", () => {
     expect(plan.stdout).toContain("materialised under .switchboard/ — no git");
     expect(plan.stdout).toContain("1. memory (switchboard-memory)");
     expect(plan.stdout).toContain("2. bot (switchboard)");
+    expect(plan.stdout).toContain("3. resident (switchboard-resident)");
+    expect(plan.stdout).toContain("4. sandbox (switchboard-sandbox)");
+    // The package's profile deploys the published images; without a token the registry is not read, and the plan says so.
+    expect(plan.stdout).toContain("Images: registry (version ");
+    expect(plan.stdout).toContain("not probed (CLOUDFLARE_API_TOKEN is not set");
     expect(plan.stdout).not.toContain("origin/main");
     // The installation's own profile, not the shipped example.
     expect(plan.stdout).not.toContain("profile.example.json");

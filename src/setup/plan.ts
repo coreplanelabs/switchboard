@@ -131,7 +131,7 @@ export function planInit(answers: InitAnswers, templates: InitTemplates, world: 
 
   const files: PlannedFile[] = [envFile(answers, templates.env), configFile(answers, templates.config)];
   if (wantsProfile) {
-    const profile = profileFile(answers, templates.profile);
+    const profile = profileFile(answers, templates.profile, world.package !== undefined);
     if (!profile.ok) return { ok: false, code: "invalid_input", problems: profile.problems };
     files.push(profile.file);
   }
@@ -285,12 +285,17 @@ function configFile(a: InitAnswers, template: string): PlannedFile {
 
 // ---- deploy/profile.json ---------------------------------------------------------
 
-/** The example profile's shape with this installation's account, zone and the
- *  two Workers the smallest production has; `configSource` is the example's.
- *  Validated with the same `parseProfile` `deploy` reads it with. */
+/** The example profile's shape with this installation's account and zone;
+ *  `configSource` is the example's. In a checkout: the two Workers the smallest
+ *  production has, building their images (the profile says nothing about
+ *  `images`). From the published package: all four Workers, deploying the
+ *  release's published images (`images: registry`) — there is no tree to build
+ *  an image from, and `deploy all` copies them into the account registry
+ *  itself. Validated with the same `parseProfile` `deploy` reads it with. */
 function profileFile(
   a: InitAnswers,
   template: string,
+  fromPackage: boolean,
 ): { ok: true; file: PlannedFile } | { ok: false; problems: string[] } {
   const example = JSON.parse(template) as { configSource?: unknown };
   const zone = a.zone as string;
@@ -300,8 +305,15 @@ function profileFile(
     workers: {
       memory: { script: `${a.name}-memory`, hostname: `${a.name}-memory.${zone}` },
       bot: { script: a.name, hostname: `${a.name}.${zone}` },
+      ...(fromPackage
+        ? {
+            resident: { script: `${a.name}-resident`, hostname: `${a.name}-resident.${zone}` },
+            sandbox: { script: `${a.name}-sandbox`, hostname: `${a.name}-sandbox.${zone}` },
+          }
+        : {}),
     },
     configSource: typeof example.configSource === "string" ? example.configSource : CONFIG_PATH,
+    ...(fromPackage ? { images: "registry" } : {}),
   };
   const parsed = parseProfile(raw);
   if (!parsed.ok) return { ok: false, problems: parsed.problems.map((p) => `${PROFILE_PATH}: ${p}`) };
@@ -316,9 +328,8 @@ function profileFile(
 function nextCommands(world: InitWorld, profile: boolean): string[] {
   const image = `${world.image}:latest`;
   const bot = `docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ${image}`;
-  const deploySteps = (cli: string) => [
-    `${cli} deploy secrets memory`,
-    `${cli} deploy secrets bot`,
+  const deploySteps = (cli: string, workers: string[]) => [
+    ...workers.map((w) => `${cli} deploy secrets ${w}`),
     `MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" ${cli} deploy all`,
   ];
   // From the npm package: `ask` and the deploy commands are the same package, run from this
@@ -328,7 +339,7 @@ function nextCommands(world: InitWorld, profile: boolean): string[] {
     return [
       `${cli} ask "what can you do?"`,
       `${bot}   # the bot, from the published image`,
-      ...(profile ? deploySteps(cli) : []),
+      ...(profile ? deploySteps(cli, ["memory", "bot", "resident", "sandbox"]) : []),
     ];
   }
   if (!world.inCheckout)
@@ -337,7 +348,7 @@ function nextCommands(world: InitWorld, profile: boolean): string[] {
     'npm run cli -- ask "what can you do?"',
     "npx tsx src/index.ts",
     `docker compose up -d   # the same bot from the published image ${image}`,
-    ...(profile ? deploySteps("npm run cli --") : []),
+    ...(profile ? deploySteps("npm run cli --", ["memory", "bot"]) : []),
   ];
 }
 
