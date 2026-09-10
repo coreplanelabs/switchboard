@@ -406,6 +406,41 @@ describe("the release publishes the bot image", () => {
     expect(attest.with?.["push-to-registry"]).toBe(true);
   });
 
+  it("retries the attestation once, on the same pushed digest, never rebuilding — a success on the first never runs the retry — and neither step asks for a storage record", () => {
+    // The images are not reproducible: a re-run of the leg pushes a different digest and leaves an unattested
+    // orphan, so the retry is a second attest step against `steps.build.outputs.digest` in the same job.
+    const attests = job.steps.filter((s) => s.uses?.startsWith("actions/attest-build-provenance@")) as (Step & {
+      id?: string;
+      "continue-on-error"?: boolean;
+    })[];
+    expect(attests).toHaveLength(2);
+    const [first, retry] = attests;
+    expect(first.id).toBe("attest");
+    expect(first["continue-on-error"]).toBe(true);
+    expect(first.if).toBeUndefined();
+    expect(retry.id).toBe("attest-retry");
+    expect(retry.if).toBe("steps.attest.outcome == 'failure'");
+    expect(retry["continue-on-error"]).toBeUndefined();
+    expect(retry.uses).toBe(first.uses);
+    expect(retry.with).toEqual(first.with);
+    for (const a of attests) {
+      expect(a.with?.["subject-digest"]).toBe("${{ steps.build.outputs.digest }}");
+      // The storage record needs a permission the job does not grant and buys nothing the registry copy does not.
+      expect(a.with?.["create-storage-record"]).toBe(false);
+    }
+    // One build per leg, and the retry follows the first attempt directly.
+    expect(job.steps.filter((s) => s.uses?.startsWith("docker/build-push-action@"))).toHaveLength(1);
+    expect(job.steps.indexOf(retry)).toBe(job.steps.indexOf(first) + 1);
+    // The steps are the same for every leg: nothing in them names a matrix value, so each image gets the retry.
+    for (const leg of matrix) {
+      expect(leg.name).toBeTruthy();
+      for (const a of attests) expect(JSON.stringify(a.with)).not.toContain("matrix.");
+    }
+    const said = job.steps.find((s) => s.if === "always() && steps.attest.outcome == 'failure'")!;
+    expect(said.run).toContain("::warning");
+    expect(said.run).toContain("steps.attest-retry.outcome");
+  });
+
   it("every action in the workflow is pinned to a full commit sha", () => {
     for (const j of Object.values(workflow.jobs)) {
       for (const s of j.steps ?? []) {

@@ -12,8 +12,9 @@
 # plus `-resident` / `-sandbox`, each at `:<version>` and `:latest`, with a
 # build-provenance attestation and an SBOM. The bot's serves the local loop
 # (docker-compose.yml); all three serve an installation that deploys published
-# images instead of building them — `deploy images` copies them into its
-# Cloudflare account registry (docs/decisions/0027-images-copied-into-the-account-registry.md).
+# images instead of building them — `deploy all` copies them into its Cloudflare
+# account registry over HTTPS (docs/decisions/0027-images-copied-into-the-account-registry.md,
+# docs/decisions/0030-deploy-all-copies-the-images-it-needs.md).
 # This project's own deploy builds each Dockerfile with wrangler instead, so a
 # failed publish never blocks the deploy, and vice versa. And it publishes the
 # CLI to npm (publish-npm below), the package an operator runs `init` from
@@ -247,11 +248,34 @@ jobs:
       # The signed attestation, on the digest the build pushed: a tag moves, a
       # digest does not, so `gh attestation verify oci://<name>:<version>`
       # resolves the tag to this digest and checks it against this workflow.
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      # Two attempts, on the SAME digest: the attestation service has refused a
+      # first attempt transiently with the image already pushed, and re-running
+      # the leg would rebuild — the images are not reproducible — and push a
+      # second, unattested digest. So the retry is one more attest step here;
+      # a first attempt that succeeded never runs it, and a second refusal is the
+      # leg's failure. No storage record: the action's record store needs a
+      # permission this job does not grant, and the attestation in the registry
+      # is what `gh attestation verify` reads.
+      - id: attest
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.image.outputs.name }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+          create-storage-record: false
+      - id: attest-retry
+        if: steps.attest.outcome == 'failure'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: the first attestation failed
+        # `always()`: without it GitHub ANDs `success()` in, and this step would be skipped exactly when the retry failed too.
+        if: always() && steps.attest.outcome == 'failure'
+        run: echo "::warning title=attestation retried::the first attestation of ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }} failed (its step above has the message) and the retry ${{ steps.attest-retry.outcome }}. The image itself was pushed once; the retry attests that same digest."
 
   # The same release publishes the CLI to npm (docs/reference/specs/packaging.md
   # item 5): the package under packages/switchboard, whose version the release
