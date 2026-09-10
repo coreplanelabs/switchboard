@@ -67,7 +67,8 @@ export type ScheduleAction =
   | RunAction
   /** Bot shim: GET the container's /healthz — starts it if stopped, renews its activity timeout. */
   | { type: "healthz" }
-  /** Resident Worker: one watchdog pass over every resident (re-arm dead refresh chains, time out stuck onboarding). */
+  /** Resident Worker: one watchdog pass over every resident (re-arm dead refresh chains, time out stuck
+   *  onboarding, create the refresh instance for residents on the Workflow lifecycle). */
   | { type: "watchdog" };
 
 export interface ScheduleDef {
@@ -115,7 +116,7 @@ export const SCHEDULES: readonly ScheduleDef[] = [
     cron: "*/10 * * * *",
     worker: "resident",
     description:
-      "Resident watchdog: re-arm dead refresh alarm chains (marking degraded(alarm-missed)) and time out stuck onboarding. Cadence must stay shorter than the resident SLEEP_AFTER (20m). Not a run.",
+      "Resident watchdog: re-arm dead refresh alarm chains (marking degraded(alarm-missed)), time out stuck onboarding, and create the refresh Workflow instance for residents whose lifecycle is `workflow`. Cadence must stay shorter than the resident SLEEP_AFTER (20m). Not a run.",
     action: { type: "watchdog" },
   },
 ];
@@ -375,6 +376,10 @@ export interface WatchdogSummary {
     action?: unknown;
     error?: string;
     disk?: unknown;
+    /** `alarm` or `workflow`: which scheduler drives this resident's refresh cycle. */
+    lifecycle?: unknown;
+    /** What the pass did about the resident's refresh Workflow instance (`workflow` residents only). */
+    instance?: unknown;
   }>;
 }
 
