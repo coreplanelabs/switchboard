@@ -40,8 +40,10 @@ import {
 } from "../../deploy/wranglerTemplate.js";
 import type { DeployRunResult, RestartRunResult } from "../../deploy/run.js";
 import type { PlannedFile } from "../../setup/plan.js";
+import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { InMemoryIssueTracker } from "../../execution/githubIssues.js";
 import { invokeChatCommand, parseChatCommand } from "../commandChat.js";
+import { ReviewAbridger } from "../reviewAbridge.js";
 import {
   bindCommands,
   CommandRegistry,
@@ -268,6 +270,69 @@ export function record(id: string, finishedAt: number): RunRecord {
   };
 }
 
+/** The head `REVIEW_HEAD` at `REVIEW_BASE` on `FIXTURE.repo`: what the seeded
+ *  review's `run_meta` and git artifact name, and what the fixture's GitHub
+ *  double answers a compare for. */
+export const REVIEW_HEAD = "e".repeat(40);
+export const REVIEW_BASE = "main";
+export const REVIEW_DIFF = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n";
+
+/** A finished PR review that recorded its git reading diff — `review abridge`'s
+ *  one happy input (a coding run has no such artifact and is refused by name). */
+export function reviewRecord(id: string, finishedAt: number): RunRecord {
+  const events: RunEvent[] = [
+    { type: "input", text: `agent:review https://github.com/${FIXTURE.repo}/pull/42 ${PLANTED_TEXT}`, seq: 1 },
+    { type: "run_meta", agent: "review", repo: FIXTURE.repo, ref: "patch-1", pr: 42, headSha: REVIEW_HEAD, seq: 2 },
+    {
+      type: "review_artifact",
+      artifact: "reading_diff",
+      poweredBy: "git",
+      baseRef: REVIEW_BASE,
+      diff: REVIEW_DIFF,
+      truncated: false,
+      seq: 3,
+    },
+    { type: "answer", text: `LGTM: looks correct ${PLANTED_TEXT}`, seq: 4 },
+  ];
+  return {
+    ...record(id, finishedAt),
+    label: `review · ${FIXTURE.repo} PR 42`,
+    agent: "review",
+    repo: FIXTURE.repo,
+    eventCount: events.length,
+    storedEventCount: events.length,
+    events,
+    diagnosis: analyzeRunFriction(events),
+  };
+}
+
+/** The fixture's abridger: the REAL `ReviewAbridger` over the fixture store,
+ *  GitHub's compare answered by the in-memory double and meat by a
+ *  deterministic fake (a marker summary; nothing spawned), the pinned clock —
+ *  so every surface's `review abridge` answers byte-identically. */
+export function fakeAbridger(store: InMemoryRunStore): ReviewAbridger {
+  const github = new InMemoryGithubApi({
+    [FIXTURE.repo]: { compares: { [`${REVIEW_BASE}...${REVIEW_HEAD}`]: REVIEW_DIFF } },
+  });
+  return new ReviewAbridger({
+    store,
+    github: () => github,
+    meat: async (run) => ({
+      ok: true,
+      result: {
+        diff: `abridged ${run.diff.length}`,
+        summary: `one line ${PLANTED_TEXT}`,
+        inputTokens: 9,
+        outputTokens: 3,
+      },
+    }),
+    defaultModel: () => "claude-opus-5",
+    timeoutMs: () => 240_000,
+    clock: () => NOW,
+    warn: () => {},
+  });
+}
+
 export function memoryRecord(scopeKey: string): MemoryRecord {
   return {
     id: `mem:${scopeKey}:1`,
@@ -329,6 +394,7 @@ export function recording(inner: CommandInvoker, recorded: Recorded[]): CommandI
 export interface Stubs {
   reg: RunRegistry;
   store: InMemoryRunStore;
+  abridger: ReviewAbridger;
   tracker: InMemoryIssueTracker;
   config: ConfigStore;
   memory: InMemoryMemoryStore;
@@ -441,6 +507,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
         output: `> ${op}\n\nok`,
       }),
   };
+  const runs = async () => createRunsService({ registry: s.reg, store: s.store, clock: () => NOW });
   return {
     help: {
       agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
@@ -455,7 +522,8 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       clearUserOverride: (u) => s.config.clearUserOverride(u),
       agentNames: () => Object.keys(AGENTS),
     },
-    runs: async () => createRunsService({ registry: s.reg, store: s.store, clock: () => NOW }), // a live run's friction window ends at the pinned clock on every surface
+    runs, // a live run's friction window ends at the pinned clock on every surface
+    review: { abridger: async () => s.abridger, runs },
     friction: {
       ledger: async () => new RunStoreFrictionLedger(s.store),
       tracker: s.tracker,
@@ -635,6 +703,8 @@ export async function fixture(
   const store = new InMemoryRunStore({ now: () => NOW });
   await store.put(record(FIXTURE.persistedRun, NOW - 1000));
   await store.put(record("fin-2", NOW - 2000));
+  await store.put(reviewRecord(FIXTURE.reviewRun, NOW - 3000));
+  const abridger = fakeAbridger(store);
   const tracker = new InMemoryIssueTracker();
   const { store: config, overridesPath } = freshConfig(yaml);
   const memory = new InMemoryMemoryStore(
@@ -658,6 +728,7 @@ export async function fixture(
     fakeDeps({
       reg,
       store,
+      abridger,
       tracker,
       config,
       memory,

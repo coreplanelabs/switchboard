@@ -58,6 +58,13 @@ export const POLICY: readonly Rule[] = [
   { action: "runs:read", resource: "command", when: [grant("runs:read")] },
   { action: "runs:write", resource: "command", when: [grant("runs:write")] },
 
+  // ── review ───────────────────────────────────────────────────────────────
+  // `review abridge` spends one Opus-class call and rewrites a stored record:
+  // the grant admits the command (admins through `all`, operators by name;
+  // never a baseline). Which run it may touch is the `runs:read` point read
+  // the handler makes, like every `runs.*` command.
+  { action: "review:write", resource: "command", when: [grant("review:write")] },
+
   // ── friction ─────────────────────────────────────────────────────────────
   // `friction report` is what every Slack user holds (CHAT_OPEN_ACTIONS); what
   // it reports is the store predicate's job. A token needs the grant.

@@ -43,7 +43,7 @@ A command under two capabilities is on when either gives it a backend.
 | `execution` | `repo test`, `repo build` |
 | `residents` | `repo list`, `repo onboard`, `repo offboard`, `repo reconfigure`, `repo rebuild`, `repo test`, `repo build` |
 | `memory` | `memory list`, `memory forget` |
-| `runHistory` | `friction report`, `friction propose` |
+| `runHistory` | `review abridge`, `friction report`, `friction propose` |
 | `runLedger` | — |
 | `mcp` | `mcp list`, `mcp add`, `mcp connect`, `mcp show`, `mcp remove` |
 | `costs` | — |

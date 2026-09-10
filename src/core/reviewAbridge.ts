@@ -1,9 +1,15 @@
-import { COMPARE_DIFF_MAX_CHARS, GithubApiError, type GithubApi } from "../execution/githubApi.js";
-import type { MeatRun, MeatRunResult } from "./meatProcess.js";
+import { resolve } from "node:path";
+import type { AppConfig } from "../config.js";
+import { COMPARE_DIFF_MAX_CHARS, GithubApiError, RestGithubApi, type GithubApi } from "../execution/githubApi.js";
+import { githubAppConfigured } from "../execution/githubApp.js";
+import { anthropicApiKey } from "../providers/anthropic.js";
+import type { EnvRecord, Secrets } from "../secrets.js";
+import { MEAT_MODEL_DEFAULT, meatOnHost, type MeatRun, type MeatRunResult } from "./meatProcess.js";
 import { capDiff, resolveReadingDiff, sanitizeArtifactText, type ReadingDiffConfig } from "./readingDiff.js";
 import { redactSecrets, type RunEvent } from "./runEvents.js";
 import { fitRecordToBudget, storedEventSeqs, type RunRecord } from "./runRecord.js";
 import type { RunStore } from "./runStore.js";
+import { systemClock } from "./trace/clock.js";
 
 // The abridged reading diff, produced on the BOT HOST after a review has
 // finished (docs/reference/specs/reading-diff.md items 5–8). ONE path:
@@ -303,6 +309,40 @@ async function appendReviewArtifact(
   const put = await store.put(next);
   if (!put.stored) throw new Error("the run's record fell outside the retention window; nothing was stored");
   return event;
+}
+
+/** The production abridger: the run store, GitHub's compare on the App (or
+ *  `GH_TOKEN`) read credential when the process holds one, meat on this host
+ *  with the bot's own Anthropic key and a cache under `<dataDir>/meat-cache`,
+ *  the configured `meatModel` (else Opus) and `meatTimeoutS`. Config is read
+ *  per call, so a reload changes the model without a restart. */
+export function reviewAbridgerFromConfig(
+  config: () => Pick<AppConfig, "providers" | "review">,
+  store: RunStore,
+  /** The process's credentials: the Anthropic key meat spends, the GitHub fallback token. */
+  secrets: Secrets,
+  /** The PUBLIC environment (`publicEnv()`): PATH and HOME for the child — never the secrets. */
+  env: EnvRecord,
+  dataDir: string,
+  warn: (message: string) => void,
+): ReviewAbridger {
+  const github = githubAppConfigured() || secrets.get("GH_TOKEN") ? new RestGithubApi() : undefined;
+  // Config only, the env switch ignored: `SWITCHBOARD_READING_DIFF=off` turns
+  // the auto mode off, not the model an operator abridges with by hand.
+  const resolved = () => resolveReadingDiff({ ...config().review?.readingDiff, provider: "meat" }, {})!;
+  return new ReviewAbridger({
+    store,
+    github: () => github,
+    meat: meatOnHost({
+      apiKey: () => anthropicApiKey(config().providers, secrets),
+      cacheDir: resolve(dataDir, "meat-cache"),
+      hostEnv: { PATH: env.PATH, HOME: env.HOME },
+    }),
+    defaultModel: () => resolved().meatModel ?? MEAT_MODEL_DEFAULT,
+    timeoutMs: () => resolved().meatTimeoutS * 1000,
+    clock: systemClock,
+    warn,
+  });
 }
 
 /** The `onPersisted` hook for `review.readingDiff.provider: meat`: once a run's

@@ -7,6 +7,7 @@ import { registerHelpCommands, type HelpCommandDeps } from "./help.js";
 import { registerMcpCommands, type McpCommandDeps } from "./mcp.js";
 import { registerMemoryCommands, type MemoryCommandDeps } from "./memory.js";
 import { registerRepoCommands, type RepoCommandDeps } from "./repo.js";
+import { registerReviewCommands, type ReviewCommandDeps } from "./review.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./runs.js";
 import { registerScheduleCommands, type ScheduleCommandDeps } from "./schedule.js";
 import { registerSetupCommands, type SetupCommandDeps } from "./setup.js";
@@ -22,6 +23,7 @@ import { registerSetupCommands, type SetupCommandDeps } from "./setup.js";
 export type CoreCommandDeps = HelpCommandDeps &
   ConfigCommandDeps &
   RunsCommandDeps &
+  ReviewCommandDeps &
   FrictionCommandDeps &
   RepoCommandDeps &
   MemoryCommandDeps &
@@ -35,6 +37,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerHelpCommands(registry);
   registerConfigCommands(registry);
   registerRunsCommands(registry);
+  registerReviewCommands(registry);
   registerFrictionCommands(registry);
   registerRepoCommands(registry);
   registerMemoryCommands(registry);

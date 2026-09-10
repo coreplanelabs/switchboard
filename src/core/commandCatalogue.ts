@@ -30,13 +30,14 @@ import {
   type CommandRegistryOptions,
 } from "./commandRegistry.js";
 import type { Capabilities } from "./capabilities.js";
-import type { Secrets } from "../secrets.js";
+import { publicEnv, type Secrets } from "../secrets.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import { selectFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
 import type { MemoryStore } from "./memory/types.js";
 import { MCP_OFF_MESSAGE, type McpService } from "../mcp/service.js";
 import type { Operations } from "./operations.js";
 import { residentAdminFromConfig, type ResidentAdminClient } from "./residentAdmin.js";
+import { reviewAbridgerFromConfig, ReviewAbridger } from "./reviewAbridge.js";
 import type { RunRegistry } from "./runRegistry.js";
 import type { RunStore } from "./runStore.js";
 import { createRunsService, type RunsService } from "./runsService.js";
@@ -84,6 +85,10 @@ export interface CoreCommandWiring {
   mcp?: () => Promise<McpService | { unavailable: string }> | McpService | { unavailable: string };
   /** The resident admin client; default: from `execution.resident` + its bearer (per call). */
   residentAdmin?: () => ResidentAdminClient | undefined;
+  /** The one `ReviewAbridger` of this process (index.ts shares it with the
+   *  `provider: meat` persist hook, so `review abridge` and auto mode see one
+   *  state); default: built once over the run store, meat on this host. */
+  abridger?: () => ReviewAbridger | undefined;
   /** `repo onboard`'s root inspection (resident-repos item 52); default: GitHub
    *  REST with the App's read token. */
   repoInspector?: RepoInspector;
@@ -170,6 +175,17 @@ export function buildCoreCommands(
   );
   const admin = async (): Promise<ResidentAdminClient | { unavailable: string }> =>
     wiring.residentAdmin?.() ?? residentAdminFromConfig(await cfg(), wiring.secrets);
+  // ONE abridger per binding: its running/failed state is per process, and
+  // the persist hook and the command must agree on it. meat's child gets the
+  // PUBLIC environment (PATH, HOME) and the one credential the getter reveals.
+  const abridger = once(async (): Promise<ReviewAbridger | undefined> => {
+    if (wiring.abridger) return wiring.abridger();
+    const store = await runStore();
+    const config = await cfg();
+    return store
+      ? reviewAbridgerFromConfig(() => config.config, store, wiring.secrets, publicEnv(), wiring.dataDir, wiring.warn)
+      : undefined;
+  });
   const deps: CoreCommandDeps = {
     help: {
       agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
@@ -185,6 +201,7 @@ export function buildCoreCommands(
       agentNames: () => Object.keys(AGENTS),
     },
     runs,
+    review: { abridger, runs },
     friction: {
       ledger,
       tracker: wiring.tracker,
