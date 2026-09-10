@@ -36,6 +36,7 @@ Every message resolves to exactly one (agent, model, effort) triple through laye
 | Criterion | Proof |
 |---|---|
 | `dashboard` (item 17): each mode accepted and exposed as written, absent by default; a misspelled mode, an unknown key, a non-mapping and `token` without its actor refused at load naming the key; the pure validator's every case | `[unit]` `src/config.test.ts::dashboard::*`, `src/core/dashboardAuthConfig.test.ts::validateDashboardConfig…::*` |
+| A `config.yaml` top-level key the document does not define fails the load naming it — a setting that does not exist (`permissions`) and a misspelling alike, never mapped or ignored; the example config loads | `[unit]` `src/config.test.ts::restrict — closed unless granted (authorization.md item 11)::an unknown top-level key is refused at load naming it…`, `src/config.test.ts::ship caps block (agent:ship pipeline)::the example config (config/config.example.yaml) still loads through ConfigStore` |
 | Directives extract and strip; unknown agent rejected with list | `[unit]` `src/directives.test.ts::parseDirectives` |
 | Sticky derivation: last-wins, user-turns-only, lenient | `[unit]` `src/directives.test.ts::lastThreadDirectives…` |
 | Full precedence matrix incl. forced vs per-agent models | `[unit]` `src/config.test.ts::layered resolution` |

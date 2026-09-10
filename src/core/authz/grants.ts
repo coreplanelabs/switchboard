@@ -120,10 +120,9 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
 /** `restrict:` in config.yaml. An agent listed here runs only for an actor whose
  *  grants hold `agent:run:<name>` (or `all`); a repo listed here (an `owner/name`
  *  slug) is used only by an actor whose `repos` axis names it (or `all`).
- *  Everything unlisted is open to everyone who can reach the bot — the same
- *  open-when-absent the retired `permissions.agents` / `permissions.repos`
- *  allowlists had, with the lock and the allowlist kept apart: listing a grant
- *  never takes anything from anyone else. */
+ *  Everything unlisted is open to everyone who can reach the bot. The lock and
+ *  the allowlist are kept apart: listing a grant never takes anything from
+ *  anyone else. */
 export interface RestrictConfig {
   agents?: readonly string[];
   repos?: readonly string[];
