@@ -9,18 +9,21 @@
  * mermaid renderer (MermaidDiagram.vue) reads the `--sb-diagram-*` set at draw time,
  * which is what keeps every diagram on the site in this palette in both modes.
  *
- * Type: Instrument Serif for titles, Instrument Sans for text, JetBrains Mono
- * for code — three faces bundled from the docs workspace's own dependencies
+ * Type: Bricolage Grotesque for titles (a variable grotesk with an optical-size
+ * axis, set tight and heavy at display sizes), Geist for text, Geist Mono for
+ * code — three faces bundled from the docs workspace's own dependencies
  * (theme/index.ts imports them), so the site builds and serves with no request
  * to a third party.
  */
 
 :root {
-  --sb-font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
-  --vp-font-family-base: "Instrument Sans Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --vp-font-family-mono: "JetBrains Mono Variable", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  /* JetBrains Mono sits wide; a step down keeps a code span level with the prose around it. */
-  --vp-code-font-size: 0.875em;
+  --sb-font-display: "Bricolage Grotesque Variable", "Helvetica Neue", Arial, sans-serif;
+  /* The display face at its large optical size: tighter apertures, closer letters. */
+  --sb-display-settings: "opsz" 96;
+  --vp-font-family-base: "Geist Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --vp-font-family-mono: "Geist Mono Variable", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  /* Geist Mono sits a touch wide; a step down keeps a code span level with the prose around it. */
+  --vp-code-font-size: 0.9em;
 
   /* Grounds. */
   --vp-c-bg: #f5f7fa;
@@ -45,6 +48,10 @@
   /* The one warm accent: "thinking" — the same amber the dashboard uses for a warning. */
   --sb-c-accent: #9a6700;
   --sb-c-accent-soft: rgba(154, 103, 0, 0.16);
+
+  /* The landing's hairline texture (ink at a few percent) and the shadow under a framed picture. */
+  --sb-c-hairline: rgba(20, 26, 34, 0.05);
+  --sb-frame-shadow: 0 32px 64px -32px rgba(20, 26, 34, 0.28), 0 8px 20px -12px rgba(20, 26, 34, 0.12);
 
   --vp-c-tip-1: var(--vp-c-brand-1);
   --vp-c-tip-2: var(--vp-c-brand-2);
@@ -100,6 +107,9 @@
   --sb-c-accent: #d29922;
   --sb-c-accent-soft: rgba(210, 153, 34, 0.18);
 
+  --sb-c-hairline: rgba(230, 230, 230, 0.07);
+  --sb-frame-shadow: 0 32px 64px -32px rgba(0, 0, 0, 0.7), 0 8px 20px -12px rgba(0, 0, 0, 0.5);
+
   --vp-button-brand-text: var(--vp-c-bg);
   --vp-button-brand-hover-text: var(--vp-c-bg);
   --vp-button-brand-hover-bg: var(--vp-c-brand-2);
@@ -120,12 +130,13 @@
   --sb-diagram-note-border: #d29922;
 }
 
-/* Titles are the serif; everything under them stays in the sans. */
+/* Titles are the display grotesk; everything under them stays in the sans. */
 .vp-doc h1,
 .VPHome .vp-doc h1 {
   font-family: var(--sb-font-display);
-  font-weight: 400;
-  letter-spacing: -0.01em;
+  font-variation-settings: var(--sb-display-settings);
+  font-weight: 600;
+  letter-spacing: -0.03em;
 }
 
 .vp-doc h1 {

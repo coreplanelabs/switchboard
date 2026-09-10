@@ -41,11 +41,11 @@ function escapeHtml(s: string): string {
 }
 
 // The faces the theme bundles (theme/index.ts), preloaded so the first paint
-// is set in them: the text face and the title face carry everything above the
-// fold, so those two; the code face follows with the stylesheet.
+// is set in them: the text face and the display face carry everything above
+// the fold, so those two; the code face follows with the stylesheet.
 const PRELOADED_FONTS = [
-  /instrument-sans-latin-wght-normal\.[\w-]+\.woff2$/,
-  /instrument-serif-latin-400-normal\.[\w-]+\.woff2$/,
+  /geist-latin-wght-normal\.[\w-]+\.woff2$/,
+  /bricolage-grotesque-latin-opsz-normal\.[\w-]+\.woff2$/,
 ];
 
 // The reference specs are one sidebar entry per file, read from the directory

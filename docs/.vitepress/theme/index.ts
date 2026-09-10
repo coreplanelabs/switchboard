@@ -7,10 +7,11 @@
 // theme's, which is the reason the site is fast and legible.
 import type { Theme } from "vitepress";
 import DefaultTheme from "vitepress/theme-without-fonts";
-import "@fontsource/instrument-serif/400.css";
-import "@fontsource/instrument-serif/400-italic.css";
-import "@fontsource-variable/instrument-sans/wght.css";
-import "@fontsource-variable/jetbrains-mono/wght.css";
+// Bricolage Grotesque's `opsz` build carries the optical-size and weight axes
+// (no width), which is what the display sizes read at.
+import "@fontsource-variable/bricolage-grotesque/opsz.css";
+import "@fontsource-variable/geist/wght.css";
+import "@fontsource-variable/geist-mono/wght.css";
 import "./product.css";
 import Layout from "./SiteLayout.vue";
 import Mermaid from "./MermaidDiagram.vue";

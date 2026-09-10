@@ -1,7 +1,7 @@
 // The four seams and the dispatcher between them — stated once. Everything
 // that draws them reads this file: the four-seam diagram (`npm run docs:gen`
 // renders it from src/docs/diagrams.ts into README.md, Architecture and How a
-// request flows; it finds each seam by id) and the landing page's seam cards
+// request flows; it finds each seam by id) and the landing page's seam row
 // (LandingPage.vue, which shows them in this order). A seam's implementations
 // are listed in the order the docs name them everywhere; `general` first
 // because it is the default agent. Plain JS with a .d.mts twin, so the bot's
