@@ -1,6 +1,6 @@
 {
   "name": "@coreplane/switchboard",
-  "version": "1.18.0",
+  "version": "1.18.1",
   "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.",
   "license": "Apache-2.0",
   "homepage": "https://openswitchboard.dev",

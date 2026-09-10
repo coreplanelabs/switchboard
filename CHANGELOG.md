@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.18.1](https://github.com/coreplanelabs/switchboard/compare/v1.18.0...v1.18.1) (2026-09-10)
+
+
+### Bug fixes
+
+* **init:** the package README says what init does now — writes to ~/.switchboard, no mkdir, every command from anywhere ([#888](https://github.com/coreplanelabs/switchboard/issues/888)) ([58d02b2](https://github.com/coreplanelabs/switchboard/commit/58d02b2297da81119293ff0ecdd6984ad8e8c22a))
+* **release:** the published bot image carries its build identity — the live gate can hold on a registry-mode deploy ([#890](https://github.com/coreplanelabs/switchboard/issues/890)) ([ecc607b](https://github.com/coreplanelabs/switchboard/commit/ecc607bb99322caac0d750715b175f036c969979))
+* **web:** ReplyBlock drops the unused at prop — nothing read it since the facts bar ([#892](https://github.com/coreplanelabs/switchboard/issues/892)) ([ad0f414](https://github.com/coreplanelabs/switchboard/commit/ad0f414ef279c2e4dc973e59eba1f0f88d65e4b0))
+
+
+### Documentation
+
+* **core:** the orchestration program plan drops the npm next dist-tag — the default-branch publish switch decides, so a 1.2xx release never publishes the package ([#894](https://github.com/coreplanelabs/switchboard/issues/894)) ([0a030fc](https://github.com/coreplanelabs/switchboard/commit/0a030fcb5aaf8d7b11a5b470287ee93f427d6c2a))
+
 ## [1.18.0](https://github.com/coreplanelabs/switchboard/compare/v1.17.0...v1.18.0) (2026-09-10)
 
 
