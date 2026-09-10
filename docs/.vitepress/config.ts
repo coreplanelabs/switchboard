@@ -120,7 +120,13 @@ export default defineConfig({
       };
     },
   },
-  head: [["link", { rel: "icon", href: "/favicon.svg" }]],
+  // The SVG for browsers that take one; the .ico for everything that asks for /favicon.ico by
+  // convention without reading the page (link unfurlers, feed readers, old clients) — three PNG
+  // frames (16, 32, 48) of the same mark, rendered from the SVG.
+  head: [
+    ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
+    ["link", { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" }],
+  ],
   transformHead({ assets }) {
     return assets
       .filter((asset) => PRELOADED_FONTS.some((font) => font.test(asset)))
