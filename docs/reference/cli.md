@@ -18,7 +18,7 @@ npx tsx src/cli.ts <group> <verb> [args…] [--kebab-option value…] [--json]
 npx tsx src/cli.ts ask [--thread <key>] "<request>"
 ```
 
-Not a registered command — a **channel**, exactly like Slack, just printing to your terminal instead. Directives (`agent:`, `model:`, `effort:`) work identically. Use `--thread` to simulate a follow-up in an existing thread (stickiness applies).
+Not a registered command — a **channel**, exactly like Slack, just printing to your terminal instead. Directives (`agent:`, `model:`, `effort:`) work identically. Use `--thread` to simulate a follow-up in an existing thread (stickiness applies). The answer goes to stdout, the status lines to stderr, and the process exits 1 when the run did not complete — a refused key, a failed tool — so a script can tell an answer from a failure.
 
 ```
 npx tsx src/cli.ts start

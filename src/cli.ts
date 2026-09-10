@@ -39,8 +39,10 @@
 // an unknown command, a malformed `ask`) or `invalid_input`, whether the
 // grammar refused the tail (`error (invalid_input): unknown option --x` + the
 // usage line) or the registry refused the parsed input (the same code every
-// surface returns for that fault); 1 the command (or dispatch) ran and failed
-// with any other code. The caller is
+// surface returns for that fault); 1 the command ran and failed with any other
+// code — or, for `ask`, the run did not complete (a provider refusal such as a
+// 401 on the key, a tool failure, a stop): a script can tell an answer from a
+// failure. The caller is
 // `cli:local` holding every scope — whoever can run this process can
 // already read the config and the data directory.
 
@@ -80,7 +82,7 @@ import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
 import { residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
-import type { ChannelIO, StatusHandle, StatusUpdate } from "./core/types.js";
+import type { ChannelIO, RunReceipt, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
@@ -310,9 +312,16 @@ export async function runCli(
 }
 
 /** The harness channel: replies to stdout, status lines to stderr, no history (one-shot). */
-class ConsoleIO implements ChannelIO {
+export class ConsoleIO implements ChannelIO {
+  /** The receipt of the run this request started, once it finished — undefined
+   *  before that, and forever when no run was started (a config reply such as
+   *  `help`, a refusal before a run existed). */
+  finished: RunReceipt | undefined;
   async reply(text: string): Promise<void> {
     console.log("\n" + text);
+  }
+  runFinished(receipt: RunReceipt): void {
+    this.finished = receipt;
   }
   async status(initial: StatusUpdate): Promise<StatusHandle> {
     console.error(initial.title);
@@ -325,6 +334,14 @@ class ConsoleIO implements ChannelIO {
   async history(): Promise<[]> {
     return [];
   }
+}
+
+/** What the `ask` process exits with: 1 when the run it started ended in any
+ *  state but `completed` — the code a command that ran and failed exits with
+ *  (`exitCodeFor`), so a shell reads a refused key, a failed tool or a stop the
+ *  same way; 0 for an answer, and for a request that started no run. */
+export function askExitCode(finished: RunReceipt | undefined): 0 | 1 {
+  return finished === undefined || finished.status === "completed" ? 0 : 1;
 }
 
 /** The bot config, loaded on first use — `deploy.*`, `env.*`, `friction
@@ -572,14 +589,17 @@ async function main(): Promise<void> {
   // The request's root (docs/reference/specs/tracing.md): the CLI's receipt is now.
   const receivedAt = systemClock();
   const trace = startRequestRoot(deps, { channel: "cli", receivedAt });
+  const io = new ConsoleIO();
   await dispatch(
     deps,
     { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text, receivedAt },
-    new ConsoleIO(),
+    io,
     { trace },
   );
   // Wait for the record write to settle before exiting rather than dropping it.
   await runHistoryWriter.settled();
+  // The exit code is set, not forced: the process ends when its last write has drained.
+  process.exitCode = askExitCode(io.finished);
 }
 
 // Run only when invoked as a script (tsx/node src/cli.ts, the `switchboard`

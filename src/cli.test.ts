@@ -16,8 +16,10 @@ import { InMemoryRunStore } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "./core/capabilities.js";
 import {
+  askExitCode,
   bindBotConfig,
   CLI_CALLER,
+  ConsoleIO,
   cliCapabilities,
   loadBotConfig,
   missingBotConfig,
@@ -241,6 +243,23 @@ describe("parseCliArgv — the `start` built-in (the bot process, not a registry
       "SIGINT",
     ])
       expect(out.stdout, fact).toContain(fact);
+  });
+});
+
+describe("askExitCode — what the `ask` process exits with (the ConsoleIO channel's receipt)", () => {
+  it("no run (a config reply such as `help`) or a completed run is 0; a run that ended failed or stopped is 1 — the code every failed command exits with", () => {
+    expect(askExitCode(undefined)).toBe(0);
+    expect(askExitCode({ id: "r1", status: "completed" })).toBe(0);
+    expect(askExitCode({ id: "r1", status: "failed" })).toBe(1);
+    expect(askExitCode({ id: "r1", status: "stopped_soft" })).toBe(1);
+    expect(askExitCode({ id: "r1", status: "stopped_hard" })).toBe(1);
+  });
+
+  it("ConsoleIO keeps the receipt the core hands it when the run finishes; none before", () => {
+    const io = new ConsoleIO();
+    expect(io.finished).toBeUndefined();
+    io.runFinished({ id: "r1", status: "failed" });
+    expect(io.finished).toEqual({ id: "r1", status: "failed" });
   });
 });
 
