@@ -1714,7 +1714,7 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     );
   });
 
-  it("build mode (the default, this project's own) never probes the registry and plans each Dockerfile", async () => {
+  it("build mode (the default for a checkout) never probes the registry and plans each Dockerfile", async () => {
     const res = await neverRuns().commands.invoke("deploy.plan", {}, cli);
     if (!res.ok) throw new Error(res.message);
     expect((res.value as unknown as DeployPlan).images).toEqual({
