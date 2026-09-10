@@ -104,8 +104,8 @@ function bind(world: World = {}) {
       pushConfig: async () => ({ ok: false, problem: "must not push" }),
       images: {
         registry: async () => ({ error: "must not read the registry" }),
-        docker: async () => ({ ok: false, problem: "must not probe docker" }),
-        copy: async () => ({ code: 1, output: "must not copy" }),
+        credential: async () => ({ ok: false, problem: "must not mint a credential" }),
+        copy: async () => ({ ok: false, problem: "must not copy" }),
       },
       cliVersion: () => TEST_PUBLISHED_IMAGES.version,
     },

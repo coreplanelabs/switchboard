@@ -222,7 +222,7 @@ export function buildCoreCommands(
       files: hostDeployFiles,
       secrets: hostSecretsIO,
       pushConfig: pushConfigOnHost,
-      images: imagesHostIO({ stream: (c) => process.stdout.write(c) }),
+      images: imagesHostIO({ log: (l) => console.log(l) }),
       cliVersion: packageVersion,
     },
     env: { bootstrap: bootstrapOnHost },

@@ -532,7 +532,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       // `deploy images`: the account registry already holds the bot's and the resident's images at the
       // fixture version and not the sandbox's, so under a `registry` profile one copy would be the effect
       // and is recorded; the fixture's profile builds its images, so the command answers with nothing to
-      // copy and reads nothing. Docker is here; a read of the registry is a probe, not an executor.
+      // copy and reads nothing. The credential is here; a read of the registry is a probe, not an executor.
       images: {
         registry: async () => ({
           value: [
@@ -541,10 +541,13 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
             { name: "switchboard-sandbox", tags: [TEST_PUBLISHED_IMAGES.version] },
           ].filter((r) => r.name !== "switchboard-sandbox" || imagesCopied),
         }),
-        docker: async () => ({ ok: true }),
+        credential: async () => ({ ok: true }),
         copy: async (copy: ImageCopy) => {
           imagesCopied = true;
-          return exec(`deploy.images copy ${copy.source} → ${copy.target}`, { code: 0, output: "" });
+          return exec(`deploy.images copy ${copy.source} → ${copy.target}`, {
+            ok: true,
+            report: { digest: `sha256:${"0".repeat(64)}`, blobs: 1, uploaded: 1, bytes: 1 },
+          });
         },
       },
       cliVersion: () => TEST_PUBLISHED_IMAGES.version,

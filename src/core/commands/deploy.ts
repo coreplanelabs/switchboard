@@ -4,6 +4,7 @@ import {
   planImageCopies,
   publishedImagesFrom,
   registryHas,
+  type ImageCopy,
   type ImagesPlan,
   type ImageStatus,
   type PublishedImages,
@@ -89,8 +90,8 @@ export interface DeployCommandDeps {
     secrets: SecretsHostIO;
     /** `deploy config`: read the source, validate, push the `base` document to the state Worker (src/deploy/run.ts `pushConfigOnHost`). */
     pushConfig(opts: { source: string; stateWorkerUrl: string; key: string }): Promise<ConfigPushOutcome>;
-    /** `deploy images` (and `deploy plan` in `registry` mode): the account registry's listing, whether Docker is
-     *  here, one image copy (src/deploy/imagesHost.ts). */
+    /** `deploy images` (and `deploy plan` / `deploy all` in `registry` mode): the account registry's listing, the
+     *  credential the copy pushes with, one image copy over HTTPS (src/deploy/imagesHost.ts). */
     images: ImagesHostIO;
     /** The version this CLI runs as (src/packageRoot.ts `packageVersion`): the images a release published carry
      *  it, so it is what `deploy images` copies and what `registry`-mode configs reference. */
@@ -589,7 +590,7 @@ const imagesOptions = z.object({
   dryRun: flag
     .optional()
     .describe(
-      "say which images the account registry already holds at the version and which would be copied; nothing is pulled or pushed",
+      "say which images the account registry already holds at the version and which would be copied; nothing is copied",
     ),
 });
 
@@ -620,6 +621,34 @@ function imagesOutput(plan: ImagesPlan, copied: ImageStatus): ImagesOutput {
   };
 }
 
+/** Copy the images the account registry lacks, in order: the credential first — the one thing the copy needs that
+ *  the rest of the deploy does not, refused by name before anything moves — then each transfer, stopping at the
+ *  first failure naming the image and what was not attempted. A transfer that reported success is not the proof:
+ *  the registry is listed again and every copy must appear. */
+async function copyImages(copies: readonly ImageCopy[], account: string, deps: DeployCommandDeps): Promise<void> {
+  const credential = await deps.deploy.images.credential(account);
+  if (!credential.ok) throw new CommandError("unavailable", credential.problem);
+  for (const [i, copy] of copies.entries()) {
+    const r = await deps.deploy.images.copy(copy, account);
+    if (!r.ok) {
+      const rest = copies.slice(i + 1).map((c) => c.kind);
+      throw new CommandError(
+        "unavailable",
+        `copying the ${copy.kind} image (${copy.source} → ${copy.target}) failed — ${r.problem}; stopping — ${rest.length > 0 ? rest.join(", ") : "nothing"} not attempted`,
+      );
+    }
+  }
+  const after = await deps.deploy.images.registry(account);
+  if ("error" in after)
+    throw new CommandError("unavailable", `copied, but cannot read the account registry back — ${after.error}`);
+  const unlisted = copies.filter((c) => !registryHas(after.value, c.name, c.version));
+  if (unlisted.length > 0)
+    throw new CommandError(
+      "unavailable",
+      `copied ${copies.map((c) => c.target).join(", ")}, but the account registry does not list ${unlisted.map((c) => c.target).join(", ")} afterwards`,
+    );
+}
+
 export const deployImages = defineCommand({
   id: "deploy.images",
   options: imagesOptions,
@@ -627,7 +656,7 @@ export const deployImages = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so `registry`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. Needs Docker where it runs.",
+    "Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so `registry`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. A registry-to-registry transfer over HTTPS: needs CLOUDFLARE_API_TOKEN with Containers Edit, nothing else.",
   render: (output) => {
     const o = output as unknown as ImagesOutput;
     if (o.mode === "build")
@@ -638,7 +667,7 @@ export const deployImages = defineCommand({
         (i) =>
           `${i.status.padEnd(10)} ${i.kind.padEnd(8)} ${i.target}${i.status === "present" ? "" : ` ← ${i.source}`}`,
       ),
-      `version ${o.version} on account ${o.account}: ${o.images.length - copied} present, ${copied} ${o.images.some((i) => i.status === "would copy") ? "to copy (dry run — nothing pulled or pushed)" : "copied"}`,
+      `version ${o.version} on account ${o.account}: ${o.images.length - copied} present, ${copied} ${o.images.some((i) => i.status === "would copy") ? "to copy (dry run — nothing copied)" : "copied"}`,
     ].join("\n");
   },
   handler: async ({ options, deps }) => {
@@ -659,31 +688,7 @@ export const deployImages = defineCommand({
     const plan = planImageCopies(published, account, before.value);
     if (options.dryRun) return imagesOutput(plan, "would copy") as unknown as JsonValue;
     if (plan.copy.length === 0) return imagesOutput(plan, "copied") as unknown as JsonValue;
-    // Docker is the one thing this command needs that the rest of the CLI does not; refused before
-    // anything is pulled, naming where it is.
-    const docker = await deps.deploy.images.docker();
-    if (!docker.ok) throw new CommandError("unavailable", docker.problem);
-    for (const [i, copy] of plan.copy.entries()) {
-      const r = await deps.deploy.images.copy(copy, account);
-      if (r.code !== 0) {
-        const rest = plan.copy.slice(i + 1).map((c) => c.kind);
-        const said = wranglerFailureLine(r.output);
-        throw new CommandError(
-          "unavailable",
-          `copying the ${copy.kind} image (${copy.source} → ${copy.target}) failed (exit ${r.code}); stopping — ${rest.length > 0 ? rest.join(", ") : "nothing"} not attempted${said ? `. ${said}` : ""}`,
-        );
-      }
-    }
-    // A push that returned 0 is not the proof; the registry listing it afterwards is.
-    const after = await deps.deploy.images.registry(account);
-    if ("error" in after)
-      throw new CommandError("unavailable", `pushed, but cannot read the account registry back — ${after.error}`);
-    const unlisted = plan.copy.filter((c) => !registryHas(after.value, c.name, c.version));
-    if (unlisted.length > 0)
-      throw new CommandError(
-        "unavailable",
-        `pushed ${plan.copy.map((c) => c.target).join(", ")}, but the account registry does not list ${unlisted.map((c) => c.target).join(", ")} afterwards`,
-      );
+    await copyImages(plan.copy, account, deps);
     return imagesOutput(plan, "copied") as unknown as JsonValue;
   },
 });
