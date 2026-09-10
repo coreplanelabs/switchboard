@@ -1,15 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
+import { flushPromises } from "@vue/test-utils";
 import { h, reactive } from "vue";
 import PrReviewPanel from "./PrReviewPanel.vue";
 import ReadingDiffView from "./ReadingDiffView.vue";
 import viewSource from "./ReadingDiffView.vue?raw";
+import tourSource from "./TourList.vue?raw";
+import panelSource from "./PrReviewPanel.vue?raw";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { mountApp } from "../../testing/mount";
 import { currentFileAt, filePaths, parseFiles, rowsInRange, splitPath } from "./files";
-import { anchorLabel, originNote, placementOf, staleAnchor, staleExplanation } from "./tour";
-import { panelTitle, poweredByExplanation, preferredDiff, prLinks, truncatedExplanation } from "./types";
+import { anchorLabel, originNote, placementNote, placementOf, staleAnchor, staleExplanation, stepTip } from "./tour";
+import { fileLink, panelTitle, poweredByExplanation, preferredDiff, prLinks, truncatedExplanation } from "./types";
 import type { AbridgeState, PrDescriptionData, PrReviewData, ReadingDiff } from "./types";
 
 // Feature: docs/reference/specs/reading-diff.md item 12 — the pr-review module renders the
@@ -515,12 +518,39 @@ describe("the Tour's pure helpers", () => {
     expect(originNote(desc({ origin: "submitted" }))).toBeUndefined();
   });
 
-  it("placementOf: in the shown diff, only in the full one, or in neither", () => {
+  it("placementOf: in the shown diff, only in the full one, beyond a full diff cut at its cap, or in neither", () => {
     const shown = new Set(["src/a.ts"]);
     const full = new Set(["src/a.ts", "src/b.ts"]);
     expect(placementOf("src/a.ts", shown, full)).toBe("shown");
     expect(placementOf("src/b.ts", shown, full)).toBe("full");
     expect(placementOf("src/zzz.ts", shown, full)).toBe("absent");
+    expect(placementOf("src/zzz.ts", shown, full, true)).toBe("beyond");
+    expect(placementOf("src/a.ts", shown, full, true)).toBe("shown");
+  });
+
+  it("placementNote says where the jump goes — or that it cannot; stepTip is the title and description whole", () => {
+    expect(placementNote("shown", false, false)).toBeUndefined();
+    expect(placementNote("shown", false, true)).toBe("lines not in this diff");
+    expect(placementNote("full", false, false)).toBe("not in the reading diff · open full diff");
+    expect(placementNote("beyond", true, false)).toBe("beyond the recorded diff · open on GitHub ↗");
+    expect(placementNote("beyond", false, false)).toBe("beyond the recorded diff");
+    expect(placementNote("absent", false, false)).toBe("not in this diff");
+    expect(stepTip({ title: "The marker", description: "Renames it." })).toBe("The marker — Renames it.");
+    expect(stepTip({ title: "The marker", description: "" })).toBe("The marker");
+  });
+
+  it("fileLink: the file on GitHub at the reviewed head with the lines selected, from shape-verified values only", () => {
+    const pr = { repo: "acme/api", headSha: "e".repeat(40) };
+    const base = `https://github.com/acme/api/blob/${"e".repeat(40)}`;
+    expect(fileLink(pr, { path: "src/a b.ts", from: 3, to: 9 })).toBe(`${base}/src/a%20b.ts#L3-L9`);
+    expect(fileLink(pr, { path: "src/a.ts", from: 5, to: 5 })).toBe(`${base}/src/a.ts#L5`);
+    expect(fileLink(pr, { path: "CHANGELOG.md" })).toBe(`${base}/CHANGELOG.md`);
+    for (const path of ["../x.ts", "src//a.ts", "/etc/passwd", "src/./a.ts", "src\\a.ts", "src/a\u0000.ts", ""]) {
+      expect(fileLink(pr, { path, from: 1, to: 2 }), path).toBeUndefined();
+    }
+    expect(fileLink({ repo: "acme/api" }, { path: "src/a.ts" })).toBeUndefined();
+    expect(fileLink({ repo: "acme/api", headSha: "not-a-sha" }, { path: "src/a.ts" })).toBeUndefined();
+    expect(fileLink({ repo: "javascript:alert(1)//x", headSha: "e".repeat(40) }, { path: "src/a.ts" })).toBeUndefined();
   });
 
   it("filePaths names a diff's files by the same key parseFiles uses, without rendering", () => {
@@ -608,11 +638,13 @@ describe("the PR description in the panel", () => {
     expect(steps.map((s) => s.find('[data-testid="tour-step-stale"]').exists())).toEqual([false, false, false, true]);
     const badge = steps[3].find('[data-testid="tour-step-stale"]');
     expect(badge.attributes("aria-label")).toBe("anchored at ddddddd, the review is at eeeeeee; lines may have moved");
-    expect(badge.attributes("data-state")).toBe("closed");
+    // the step itself is the one tooltip trigger; the stale explanation rides it (no nested trigger on the badge)
+    expect(steps[3].attributes("data-state")).toBe("closed");
+    expect(badge.attributes("data-state")).toBeUndefined();
     w.unmount();
   });
 
-  it("clicking a step in the shown diff lights its lines, scrolls to them, makes the step active (aria-current, unclamped description) and its file current", async () => {
+  it("clicking a step in the shown diff lights its lines, scrolls to them, makes the step active (aria-current, the accent, the clamp kept) and its file current", async () => {
     const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
     const scrollTo = vi.fn();
     (w.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo = scrollTo;
@@ -622,7 +654,7 @@ describe("the PR description in the panel", () => {
     await w.vm.$nextTick();
     expect(steps()[1].attributes("aria-current")).toBe("step");
     expect(steps()[1].classes()).toContain("is-active");
-    expect(steps()[1].find(".step-description").classes()).not.toContain("line-clamp-2");
+    expect(steps()[1].find(".step-description").classes()).toContain("line-clamp-2");
     expect(w.findAll("tr.is-focus").map((r) => r.text().replace(/\s+/g, " ").trim())).toEqual([
       "1 + export const b = 1;",
       "2 + export const c = 2;",
@@ -747,6 +779,232 @@ describe("the PR description in the panel", () => {
       expect(s.attributes("type")).toBe("button");
       expect(s.classes()).toContain("focus-visible:ring-2");
     }
+    w.unmount();
+  });
+});
+
+describe("the Tour holds still, jumps clearly, and says when a file lies past the recorded diff", () => {
+  /** The recorded full diff of a change too large for its cap, cut the way
+   *  the producer cuts it: `src/a.ts` and the NEW `src/b.ts` whole, the rename
+   *  open-ended at the marker — every later file never recorded. */
+  const cappedFiles = manyFiles.slice(0, manyFiles.indexOf("@@ -1,1 +1,1 @@\n-# Old")) + "…[9999 more chars]";
+  const cappedDiff: ReadingDiff = { poweredBy: "git", baseRef: "main", diff: cappedFiles, truncated: true };
+  /** Layout the DOM has none of: every clamp hides lines, every truncate hides text. */
+  function overflowEverywhere(): () => void {
+    const define = (name: string, value: number) =>
+      Object.defineProperty(HTMLElement.prototype, name, { configurable: true, get: () => value });
+    define("scrollHeight", 40);
+    define("clientHeight", 20);
+    define("scrollWidth", 400);
+    define("clientWidth", 200);
+    return () => {
+      for (const name of ["scrollHeight", "clientHeight", "scrollWidth", "clientWidth"]) {
+        Reflect.deleteProperty(HTMLElement.prototype, name);
+      }
+    };
+  }
+  /** Every element's class list under the Tour, in document order — the layout inputs a hover could touch. */
+  const classesUnder = (root: Element) => Array.from(root.querySelectorAll("*")).map((el) => el.className);
+
+  it("hovering a step changes no element's classes and the clamps are fixed: nothing hover- or active-driven changes a size", async () => {
+    // No hover-driven size change is even expressible in the template.
+    expect(tourSource).not.toMatch(/group-hover:/);
+    expect(tourSource).not.toMatch(/hover:(?:line-clamp|h-|max-h|min-h|p[xytblr]?-|text-\[|leading)/);
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    (w.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo = vi.fn();
+    const tour = w.find('[data-testid="tour"]');
+    const before = classesUnder(tour.element);
+    for (const step of w.findAll('[data-testid="tour-step"]')) {
+      await step.trigger("pointerenter");
+      await step.trigger("pointermove");
+      await step.trigger("mouseenter");
+      await step.trigger("mouseover");
+      await step.find(".step-prose").trigger("pointermove");
+    }
+    expect(classesUnder(tour.element)).toEqual(before);
+    // Active changes color only: both clamps stay, on the active step as on the rest.
+    await w.findAll('[data-testid="tour-step"]')[0].trigger("click");
+    await w.vm.$nextTick();
+    for (const step of w.findAll('[data-testid="tour-step"]')) {
+      expect(step.find(".step-title").classes()).toContain("line-clamp-2");
+      if (step.find(".step-description").exists())
+        expect(step.find(".step-description").classes()).toContain("line-clamp-2");
+      expect(step.find(".step-anchor").classes()).toContain("truncate");
+    }
+    const active = w.findAll('[data-testid="tour-step"]')[0];
+    expect(active.classes()).toContain("is-active");
+    expect(active.classes()).not.toContain("hover:bg-muted");
+    // The accent the lit rows carry, on the step too — colour, not a box.
+    expect(tourSource).toMatch(/\.tour \.step\.is-active \{[^}]*box-shadow: inset 3px 0 0 var\(--pr-review-mark\)/);
+    expect(viewSource).toMatch(/tr\.is-focus td \{[^}]*box-shadow:\s*inset 3px 0 0 var\(--pr-review-mark\)/);
+    // a third hue, not the insertion green: the panel defines it and a host may retune it
+    expect(panelSource).toMatch(/\.pr-review-panel \{[^}]*--pr-review-mark: var\(--ui-info/);
+    w.unmount();
+  });
+
+  it("what a clamp hides rides the step's own tooltip — the title and description whole, the full path, the stale note — opening on keyboard focus, and only while something is hidden", async () => {
+    const tips = () => Array.from(document.body.querySelectorAll('[data-slot="text"]')).map((n) => n.textContent);
+    const restore = overflowEverywhere();
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    await w.vm.$nextTick();
+    const steps = w.findAll('[data-testid="tour-step"]');
+    // The step element (a native button) is the trigger: Tab reaches it, and a focused reka
+    // trigger opens at once (no delay) — a keyboard user reads what the clamp hides.
+    await steps[0].trigger("focus");
+    await w.vm.$nextTick();
+    expect(tips()).toEqual(["The marker — Renames the marker constant so the reader sees the new one. · src/a.ts:2–3"]);
+    await steps[0].trigger("blur");
+    // A step anchored at another head carries the stale explanation in the same tooltip.
+    await steps[3].trigger("focus");
+    await w.vm.$nextTick();
+    expect(tips()).toEqual([
+      "Moved lines — Anchored at an older push. · src/a.ts:1 · anchored at ddddddd, the review is at eeeeeee; lines may have moved",
+    ]);
+    await steps[3].trigger("blur");
+    // The anchor truncates from the left: the file name is the part that stays.
+    expect(steps[0].find(".step-anchor").attributes("dir")).toBe("rtl");
+    expect(steps[0].find(".step-anchor bdi").text()).toBe("src/a.ts:2–3");
+    w.unmount();
+    restore();
+
+    // Without overflow a step is quiet — no tooltip repeats visible text — except the stale note, always worth one.
+    const fits = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    await fits.vm.$nextTick();
+    await fits.findAll('[data-testid="tour-step"]')[0].trigger("focus");
+    await fits.vm.$nextTick();
+    expect(tips()).toEqual([]);
+    await fits.findAll('[data-testid="tour-step"]')[3].trigger("focus");
+    await fits.vm.$nextTick();
+    expect(tips()).toEqual(["anchored at ddddddd, the review is at eeeeeee; lines may have moved"]);
+    fits.unmount();
+  });
+
+  it("an in-place change to a step's text is remeasured: the tooltip follows the words, not the step's identity", async () => {
+    const tips = () => Array.from(document.body.querySelectorAll('[data-slot="text"]')).map((n) => n.textContent);
+    const live = reactive(data({ readingDiffs: [manyDiff], description: desc() }));
+    const w = mountApp(PrReviewPanel, { props: { data: live } });
+    await w.vm.$nextTick();
+    // Nothing overflows at mount: the step is quiet.
+    await w.findAll('[data-testid="tour-step"]')[1].trigger("focus");
+    await w.vm.$nextTick();
+    expect(tips()).toEqual([]);
+    await w.findAll('[data-testid="tour-step"]')[1].trigger("blur");
+    // The text changes in place (same array, same step object) — and now the layout says it overflows.
+    const restore = overflowEverywhere();
+    live.description!.tour[1].description = "Adds b, and a great deal more than two lines can hold about it.";
+    // the deep watch → the post-render remeasure → the tooltip's enabling re-render: three turns
+    await flushPromises();
+    await w.findAll('[data-testid="tour-step"]')[1].trigger("focus");
+    await w.vm.$nextTick();
+    expect(tips()).toEqual([
+      "A new module — Adds b, and a great deal more than two lines can hold about it. · src/b.ts:1–2",
+    ]);
+    w.unmount();
+    restore();
+  });
+
+  it("the jump lands the range in the upper third of the column, keeps the light until the next step, and expands a folded file first", async () => {
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    const el = w.find('[data-testid="reading-diff"]').element as HTMLElement;
+    const scrollTo = vi.fn();
+    el.scrollTo = scrollTo;
+    Object.defineProperty(el, "clientHeight", { configurable: true, value: 600 });
+    el.getBoundingClientRect = () => ({ top: 0 }) as DOMRect;
+    const section = w.find('[data-path="src/b.ts"]');
+    const rows = Array.from(section.element.querySelectorAll("tr"));
+    const first = rows.find((r) => r.querySelector(".line-num2")?.textContent?.trim() === "1");
+    if (!first) throw new Error("fixture: src/b.ts has no row for line 1");
+    first.getBoundingClientRect = () => ({ top: 1000 }) as DOMRect;
+    await w.findAll('[data-testid="tour-step"]')[1].trigger("click");
+    await w.vm.$nextTick();
+    // 1000 down the content, minus 30 % of a 600 px column: the row sits at 180 px, its file header above it.
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 820 });
+    expect(w.findAll("tr.is-focus")).toHaveLength(2);
+    // The light is persistent: scrolling, or picking a file, leaves it alone.
+    await w.findAll('[data-testid="file-entry"]')[0].trigger("click");
+    await w.vm.$nextTick();
+    expect(w.findAll("tr.is-focus")).toHaveLength(2);
+    // A folded (viewed) file is unfolded so the landing is measured on rendered rows.
+    await w.findAll('[data-testid="file-viewed"]')[1].setValue(true);
+    expect(w.findAll('[data-testid="file-body"]')[1].isVisible()).toBe(false);
+    await w.findAll('[data-testid="tour-step"]')[1].trigger("click");
+    await w.vm.$nextTick();
+    expect(w.findAll('[data-testid="file-body"]')[1].isVisible()).toBe(true);
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 820 });
+    // A short column never puts the row under the sticky header: the header plus a line of room wins.
+    Object.defineProperty(el, "clientHeight", { configurable: true, value: 50 });
+    await w.findAll('[data-testid="tour-step"]')[1].trigger("click");
+    await w.vm.$nextTick();
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 1000 - 24 });
+    // The lit rows: the accent bar, a tint over the row's own colour, one pulse on arrival that reduced motion drops.
+    expect(viewSource).toMatch(/tr\.is-focus td \{[^}]*box-shadow:\s*inset 3px 0 0/);
+    expect(viewSource).toMatch(/tr\.is-focus td \{[^}]*background-image: linear-gradient\(var\(--pr-review-focus\)/);
+    // The pulse animates a box-shadow list (interpolable everywhere) — no registered custom property to depend on.
+    expect(viewSource).toMatch(/@keyframes pr-review-arrive \{\s*from \{\s*box-shadow:/);
+    expect(viewSource).not.toMatch(/@property/);
+    expect(viewSource).toMatch(/prefers-reduced-motion: reduce\) \{\s*\.d2h-host tr\.is-focus td \{\s*animation: none/);
+    w.unmount();
+  });
+
+  it("a step past the recorded diff's cap says so and links to the file on GitHub at the head — never 'not in this diff'; a new file before the cut is found", async () => {
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [cappedDiff], description: desc() }) } });
+    const scrollTo = vi.fn();
+    (w.find('[data-testid="reading-diff"]').element as HTMLElement).scrollTo = scrollTo;
+    expect(w.find('[data-testid="truncated-badge"]').exists()).toBe(true);
+    const steps = w.findAll('[data-testid="tour-step"]');
+    // the new file (--- /dev/null → +++ b/src/b.ts) is keyed by its new path and found; the file past the cut is beyond
+    expect(steps.map((s) => s.attributes("data-placement"))).toEqual(["shown", "shown", "beyond", "shown"]);
+    const beyond = steps[2];
+    expect(beyond.element.tagName).toBe("A");
+    expect(beyond.attributes("href")).toBe(`https://github.com/acme/api/blob/${"e".repeat(40)}/src/zzz.ts#L1-L2`);
+    expect(beyond.attributes("target")).toBe("_blank");
+    expect(beyond.attributes("rel")).toBe("noopener noreferrer");
+    expect(beyond.find('[data-testid="tour-step-note"]').text()).toBe("beyond the recorded diff · open on GitHub ↗");
+    expect(beyond.classes()).toContain("is-beyond");
+    expect(beyond.classes()).not.toContain("is-muted");
+    expect(w.text()).not.toContain("not in this diff");
+    await beyond.trigger("click");
+    await w.vm.$nextTick();
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(w.findAll('[data-testid="tour-step"]')[2].attributes("aria-current")).toBeUndefined();
+    // a Remaining path past the cut links the same way
+    const remaining = w.findAll('[data-testid="tour-remaining-entry"]')[1].find("a");
+    expect(remaining.attributes("href")).toBe(`https://github.com/acme/api/blob/${"e".repeat(40)}/nowhere.md`);
+    expect(remaining.attributes("title")).toBe("nowhere.md — beyond the recorded diff · open on GitHub");
+    w.unmount();
+
+    // The abridged diff shown, the full one cut: the full diff decides, the step is beyond.
+    const both = mountApp(PrReviewPanel, {
+      props: { data: data({ readingDiffs: [cappedDiff, meatDiff], description: desc() }) },
+    });
+    expect(both.findAll('[data-testid="tour-step"]')[2].attributes("data-placement")).toBe("beyond");
+    both.unmount();
+
+    // No repo or head to link to: the step says beyond, muted and inert, without a link.
+    const unlinked = mountApp(PrReviewPanel, {
+      props: { data: data({ pr: {}, readingDiffs: [cappedDiff], description: desc() }) },
+    });
+    const muted = unlinked.findAll('[data-testid="tour-step"]')[2];
+    expect(muted.element.tagName).toBe("BUTTON");
+    expect(muted.attributes("href")).toBeUndefined();
+    expect(muted.classes()).toContain("is-muted");
+    expect(muted.find('[data-testid="tour-step-note"]').text()).toBe("beyond the recorded diff");
+    unlinked.unmount();
+
+    // The whole diff on record and the file still missing: the change does not touch it.
+    const whole = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    expect(whole.findAll('[data-testid="tour-step"]')[2].find('[data-testid="tour-step-note"]').text()).toBe(
+      "not in this diff",
+    );
+    whole.unmount();
+  });
+
+  it("the left column is wide enough to read: 19rem, a two-line title, the path kept to its file name", () => {
+    const w = mountApp(PrReviewPanel, { props: { data: data({ readingDiffs: [manyDiff], description: desc() }) } });
+    expect(w.find("aside").classes()).toContain("w-[19rem]");
+    const step = w.findAll('[data-testid="tour-step"]')[0];
+    expect(step.find(".step-title").classes()).toContain("line-clamp-2");
+    expect(step.find(".step-anchor").classes()).toEqual(expect.arrayContaining(["truncate", "min-w-0"]));
     w.unmount();
   });
 });

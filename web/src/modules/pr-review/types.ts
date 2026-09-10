@@ -127,6 +127,23 @@ export function prLinks(pr: PrRef): { pr?: string; files?: string; commit?: stri
   return out;
 }
 
+/** One file of the PR on GitHub at the reviewed head, the lines selected —
+ *  where a Tour step goes when its file lies past the recorded diff's cap.
+ *  The same discipline as `prLinks`: a shape-verified repo and head, and a
+ *  path of plain segments (none empty, `.` or `..`, no backslash, no control
+ *  character), each URL-encoded; anything else is no link. */
+export function fileLink(pr: PrRef, anchor: { path: string; from?: number; to?: number }): string | undefined {
+  if (!pr.repo || !REPO_RE.test(pr.repo) || !pr.headSha || !SHA_RE.test(pr.headSha)) return undefined;
+  const segments = anchor.path.split("/");
+  // eslint-disable-next-line no-control-regex -- a control character is what is being refused
+  const unsafe = /[\\\u0000-\u001f]/;
+  if (segments.some((s) => s === "" || s === "." || s === ".." || unsafe.test(s))) return undefined;
+  const path = segments.map(encodeURIComponent).join("/");
+  const { from, to } = anchor;
+  const lines = from === undefined ? "" : to === undefined || to === from ? `#L${from}` : `#L${from}-L${to}`;
+  return `https://github.com/${pr.repo}/blob/${pr.headSha}/${path}${lines}`;
+}
+
 /** The diff a reader should see first: the abridged one when a producer made
  *  it, else the full diff, else null. */
 export function preferredDiff(diffs: readonly ReadingDiff[]): ReadingDiff | null {
