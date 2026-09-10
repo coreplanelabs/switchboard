@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { redactSecrets } from "./redact.js";
 
 // The PR description as DATA (docs/reference/specs/pr-description.md). One typed object
 // carries everything a reader needs about a change — the PR title, TL;DR,
@@ -74,6 +75,26 @@ export type { TourAnchor, TourStep, PrDescription } from "./prDescriptionTypes.j
  *  Throws a zod error naming the offending path — callers surface it. */
 export function parsePrDescription(input: unknown): PrDescription {
   return PrDescriptionSchema.parse(input);
+}
+
+/** The `pr_description` event's payload: every string LEAF passed through
+ *  `redactSecrets` by a generic deep walk — numbers/booleans ride unchanged,
+ *  structure preserved — so a field added to the schema (or a secret smuggled
+ *  into an anchor path) can never dodge redaction by being missed in a
+ *  hand-walk. */
+export function redactPrDescription(d: PrDescription): PrDescription {
+  return mapStringLeaves(d, redactSecrets) as PrDescription;
+}
+
+/** `fn` over every string leaf of a JSON-shaped value; numbers, booleans and
+ *  the structure ride unchanged. */
+export function mapStringLeaves(value: unknown, fn: (s: string) => string): unknown {
+  if (typeof value === "string") return fn(value);
+  if (Array.isArray(value)) return value.map((v) => mapStringLeaves(v, fn));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, mapStringLeaves(v, fn)]));
+  }
+  return value;
 }
 
 export interface RenderContext {

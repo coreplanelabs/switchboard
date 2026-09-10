@@ -49,7 +49,7 @@ import { buildMessages, contextMessageTexts } from "./messages.js";
 import type { ProvisionDeps } from "./provision.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
-import { redactPrDescription } from "./runLoop.js";
+import { redactPrDescription } from "../prDescription.js";
 import type { ReplyDeps } from "./reply.js";
 import { defaultRunRegistry, REPLAY_EVERYTHING } from "../runRegistry.js";
 import { createCardShell } from "../statusCardFrame.js";
