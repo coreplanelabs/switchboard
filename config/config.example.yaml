@@ -20,6 +20,15 @@ providers:
   #   type: openai-compatible
   #   baseUrl: https://api.groq.com/openai/v1
   #   apiKeyEnv: GROQ_API_KEY
+  # OpenRouter: one key, many vendors' models. Its model ids already carry the
+  # vendor, so a model is named openrouter/anthropic/claude-sonnet-4 (the first
+  # slash separates the provider; the rest is passed through). The compatible
+  # adapter sends no effort tier, turns document inputs into a text note and
+  # asks for no provider-side prompt caching.
+  # openrouter:
+  #   type: openai-compatible
+  #   baseUrl: https://openrouter.ai/api/v1
+  #   apiKeyEnv: OPENROUTER_API_KEY
   # local:
   #   type: openai-compatible
   #   baseUrl: http://localhost:11434/v1   # Ollama
