@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -21,6 +21,8 @@ import { hasAction } from "./core/authz/authorize.js";
 import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";
 import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, SHIP_DEFAULT_MAX_ROUNDS } from "./core/shipPipeline.js";
+import { OpenAICompatProvider } from "./providers/openaiCompat.js";
+import { ProviderRegistry } from "./providers/registry.js";
 
 // Feature: docs/reference/specs/routing-and-config.md — layered resolution & permission gates.
 
@@ -697,6 +699,56 @@ describe("ship caps block (agent:ship pipeline)", () => {
     expect(
       () => new ConfigStore(join(process.cwd(), "config/config.example.yaml"), join(dir, "overrides.json")),
     ).not.toThrow();
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md — the example config's commented
+// provider blocks are real configurations, not prose: uncommented, each loads and builds.
+describe("the example config's commented provider blocks", () => {
+  const EXAMPLE = readFileSync(join(process.cwd(), "config/config.example.yaml"), "utf8");
+
+  /** The example with one commented `providers.<name>` block turned on: its `# <name>:` line and
+   *  the `#   key: value` lines under it lose their `# `; every other comment stays one. */
+  const uncommented = (name: string): string => {
+    const lines = EXAMPLE.split("\n");
+    const start = lines.indexOf(`  # ${name}:`);
+    if (start < 0) throw new Error(`no commented provider block "${name}" in config.example.yaml`);
+    lines[start] = `  ${name}:`;
+    for (let i = start + 1; i < lines.length && lines[i].startsWith("  #   "); i++) {
+      lines[i] = `  ${lines[i].slice(4)}`;
+    }
+    return lines.join("\n");
+  };
+
+  const storeFrom = (yaml: string): ConfigStore => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-example-provider-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, yaml);
+    return new ConfigStore(cfg, join(dir, "overrides.json"));
+  };
+
+  it("the OpenRouter block, uncommented, loads and ProviderRegistry builds an openai-compatible provider from it with the trailing slash stripped from baseUrl", () => {
+    const yaml = uncommented("openrouter");
+    expect(yaml).toContain("\n  openrouter:\n    type: openai-compatible\n");
+
+    const store = storeFrom(yaml);
+    expect(store.config.providers.openrouter).toEqual({
+      type: "openai-compatible",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKeyEnv: "OPENROUTER_API_KEY",
+    });
+
+    const provider = new ProviderRegistry(store.config.providers).get("openrouter");
+    expect(provider).toBeInstanceOf(OpenAICompatProvider);
+    expect((provider as unknown as { baseUrl: string }).baseUrl).toBe("https://openrouter.ai/api/v1");
+
+    // The same block with a trailing slash on baseUrl reaches the adapter without it.
+    const slashed = storeFrom(
+      yaml.replace("baseUrl: https://openrouter.ai/api/v1", "baseUrl: https://openrouter.ai/api/v1/"),
+    );
+    expect(slashed.config.providers.openrouter?.baseUrl).toBe("https://openrouter.ai/api/v1/");
+    const fromSlashed = new ProviderRegistry(slashed.config.providers).get("openrouter");
+    expect((fromSlashed as unknown as { baseUrl: string }).baseUrl).toBe("https://openrouter.ai/api/v1");
   });
 });
 
