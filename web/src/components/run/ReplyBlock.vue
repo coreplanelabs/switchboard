@@ -9,7 +9,6 @@ import MarkdownText from "../MarkdownText.vue";
 
 defineProps<{
   text: string;
-  at: number | undefined;
   caption: { text: string; href?: string };
   when: string;
   whenTitle: string | undefined;
