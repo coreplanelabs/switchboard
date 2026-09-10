@@ -394,6 +394,12 @@ export type RunEvent =
       truncated: boolean;
       summary?: string;
       meatTokens?: { input: number; output: number };
+      /** meat only (docs/reference/specs/reading-diff.md item 6): which diff meat
+       *  read — GitHub's compare of base...head, or the recorded git artifact
+       *  (whole) — and how many bytes it was; the `-model` it ran with. */
+      input?: "github-compare" | "recorded";
+      inputBytes?: number;
+      model?: string;
       seq?: number;
       at?: number;
     }

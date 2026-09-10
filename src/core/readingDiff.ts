@@ -129,10 +129,13 @@ export function capDiff(diff: string, cap = READING_DIFF_CAP): { diff: string; t
 /** The stream's hygiene contract (`RunRegistry` publishes events as-is): every
  *  string that leaves this module for the stream is control-stripped and
  *  redacted FIRST, capped after — a diff of a PR that accidentally commits a
- *  credential must not carry it onto the run page or the record. */
-function sanitize(text: string): string {
+ *  credential must not carry it onto the run page or the record. Shared with
+ *  the host-side abridger (reviewAbridge.ts), whose artifact reaches the same
+ *  record. */
+export function sanitizeArtifactText(text: string): string {
   return redactSecrets(stripAnsi(text));
 }
+const sanitize = sanitizeArtifactText;
 
 /** What `produceReadingDiff` yields — the payload of the `review_artifact`
  *  event minus the event envelope. */

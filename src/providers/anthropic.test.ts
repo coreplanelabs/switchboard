@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   AnthropicProvider,
+  anthropicApiKey,
   buildAnthropicParams,
   effortFor,
   toAnthropicMessage,
   usageFromAnthropic,
 } from "./anthropic.js";
 import type { ChatMessage, CompletionRequest } from "./types.js";
+import { secretsFrom } from "../secrets.js";
 
 // Feature: docs/reference/specs/run-loop.md — prompt caching: the static prefix (tools +
 // system) and a rolling breakpoint on the newest message, so every turn after
@@ -421,5 +423,37 @@ describe("effortFor — effort is sent only where the model accepts it (item 11)
     expect(captured[0].params.output_config).toEqual({ effort: "high" });
     await p.complete(ttlReq({ model: "claude-haiku-4-5", effort: "max" }));
     expect(captured[1].params).not.toHaveProperty("output_config");
+  });
+});
+
+// Feature: docs/reference/specs/reading-diff.md item 6 — ONE getter for the Anthropic
+// credential this process spends: the provider's client and meat's abridging
+// call both read it here, never `process.env` at a call site.
+describe("anthropicApiKey — the one credential getter", () => {
+  const secrets = (env: Record<string, string>) => secretsFrom(env);
+
+  it("reads the first anthropic provider's apiKeyEnv, defaulting to ANTHROPIC_API_KEY, as a Secret named after its variable", () => {
+    const k1 = anthropicApiKey(
+      { oa: { type: "openai-compatible" }, ant: { type: "anthropic" } },
+      secrets({ ANTHROPIC_API_KEY: "k1" }),
+    );
+    expect(k1?.reveal()).toBe("k1");
+    expect(String(k1)).toBe("[secret:ANTHROPIC_API_KEY]"); // never the value by accident
+    const k2 = anthropicApiKey(
+      { ant: { type: "anthropic", apiKeyEnv: "MY_KEY" } },
+      secrets({ MY_KEY: "k2", ANTHROPIC_API_KEY: "x" }),
+    );
+    expect(k2?.reveal()).toBe("k2");
+    expect(k2?.name).toBe("MY_KEY");
+  });
+
+  it("is undefined without an anthropic provider, or when its variable is unset or blank — never a fallback", () => {
+    expect(
+      anthropicApiKey({ oa: { type: "openai-compatible" } }, secrets({ ANTHROPIC_API_KEY: "k1" })),
+    ).toBeUndefined();
+    expect(
+      anthropicApiKey({ ant: { type: "anthropic", apiKeyEnv: "MY_KEY" } }, secrets({ ANTHROPIC_API_KEY: "k1" })),
+    ).toBeUndefined();
+    expect(anthropicApiKey({ ant: { type: "anthropic" } }, secrets({ ANTHROPIC_API_KEY: "  " }))).toBeUndefined();
   });
 });

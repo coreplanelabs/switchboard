@@ -512,3 +512,71 @@ describe("RestGithubApi.withSpan", () => {
     expect(spansSeen.at(-1)).toBeUndefined();
   });
 });
+
+// Feature: docs/reference/specs/reading-diff.md item 6 — the abridged reading diff's
+// input is the COMPLETE unified diff, fetched from GitHub's compare endpoint
+// with the read token, never a recorded (and possibly capped) copy.
+describe("compareDiff — the unified diff of base...head", () => {
+  const DIFF = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n";
+
+  it("GETs /repos/<repo>/compare/<base>...<head> with the diff media type on the read token, and returns the text whole", async () => {
+    scopes.length = 0;
+    const { api: gh, calls } = api(({ url, headers }) =>
+      url === "https://api.github.com/repos/acme/api/compare/main...e3b0c44298fc1c149afbf4c8996fb92427ae41e4" &&
+      headers.accept === "application/vnd.github.diff"
+        ? { status: 200, text: DIFF }
+        : undefined,
+    );
+    await expect(gh.compareDiff("acme/api", "main", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4")).resolves.toEqual({
+      diff: DIFF,
+      complete: true,
+    });
+    expect(calls).toHaveLength(1);
+    expect(scopes).toEqual(["read"]);
+  });
+
+  it("a base with a slash is percent-encoded into the path", async () => {
+    const { api: gh, calls } = api(() => ({ status: 200, text: DIFF }));
+    await gh.compareDiff("acme/api", "release/1.x", "abc");
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/compare/release%2F1.x...abc");
+  });
+
+  it("stops reading at the cap and says the diff was cut", async () => {
+    const { api: gh } = api(() => ({ status: 200, text: "x".repeat(50) }));
+    await expect(gh.compareDiff("acme/api", "main", "abc", 20)).resolves.toEqual({
+      diff: "x".repeat(20),
+      complete: false,
+    });
+    await expect(gh.compareDiff("acme/api", "main", "abc", 50)).resolves.toEqual({
+      diff: "x".repeat(50),
+      complete: true,
+    });
+  });
+
+  it("GitHub's 404 (unknown ref) and 406 (too large to render as a diff) surface as GithubApiError with the status", async () => {
+    const { api: gh } = api(({ url }) =>
+      url.includes("gone...")
+        ? { status: 404, body: { message: "Not Found" } }
+        : { status: 406, body: { message: "Sorry, this diff is taking too long to generate." } },
+    );
+    await expect(gh.compareDiff("acme/api", "gone", "abc")).rejects.toMatchObject({ status: 404 });
+    await expect(gh.compareDiff("acme/api", "main", "huge")).rejects.toMatchObject({
+      status: 406,
+      message: expect.stringContaining("406"),
+    });
+  });
+
+  it("InMemoryGithubApi answers a seeded comparison, 404 for an unseeded one, and a seeded status as that error", async () => {
+    const gh = new InMemoryGithubApi({
+      "acme/api": { compares: { "main...abc": DIFF, "main...huge": { status: 406 } } },
+    });
+    await expect(gh.compareDiff("acme/api", "main", "abc")).resolves.toEqual({ diff: DIFF, complete: true });
+    await expect(gh.compareDiff("acme/api", "main", "abc", 5)).resolves.toEqual({
+      diff: DIFF.slice(0, 5),
+      complete: false,
+    });
+    await expect(gh.compareDiff("acme/api", "main", "nope")).rejects.toMatchObject({ status: 404 });
+    await expect(gh.compareDiff("acme/api", "main", "huge")).rejects.toMatchObject({ status: 406 });
+    await expect(gh.compareDiff("acme/other", "main", "abc")).rejects.toMatchObject({ status: 404 });
+  });
+});
