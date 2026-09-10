@@ -18,14 +18,13 @@ By the end, OpenSwitchboard runs in production on Cloudflare: the bot as a conta
 ## Write the profile
 
 ```bash
-mkdir switchboard && cd switchboard
 npx @coreplane/switchboard init --organization <org> --anthropic-key <key> --slack-app-token <xapp-token> --slack-bot-token <xoxb-token> --cloudflare <account id> --zone <zone>
 ```
 
 You should see:
 
 ```
-wrote:
+wrote to /Users/you/.switchboard:
   .env                  (mode 600)
   config/config.yaml
   deploy/profile.json
@@ -35,7 +34,7 @@ Worker configs from deploy/profile.json:
   …
 ```
 
-Every `deploy` command runs from this directory; `.switchboard/` holds the rendered Worker configs. The profile's fields:
+The installation is `~/.switchboard` (or `SWITCHBOARD_HOME`, or the directory you run in when it already holds one); every `deploy` command finds it from anywhere, and its `.switchboard/` holds the rendered Worker configs. The profile's fields:
 
 | Field | Meaning |
 |---|---|
@@ -152,7 +151,7 @@ gh workflow run deploy-switchboard.yml                  # afterwards: only what 
 
 ## Run the bot yourself
 
-Without the Workers every optional capability is off. From the directory `init` wrote, on any machine with Node:
+Without the Workers every optional capability is off. On any machine with Node and the installation `init` wrote:
 
 ```bash
 npx @coreplane/switchboard start

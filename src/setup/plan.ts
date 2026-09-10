@@ -123,14 +123,15 @@ export function planInit(answers: InitAnswers, templates: InitTemplates, world: 
   if (problems.length > 0) return { ok: false, code: "invalid_input", problems };
   const wantsProfile = answers.cloudflare !== undefined;
   // The profile is written where `deploy all` runs from: the root of a checkout, or — from the
-  // published package — the directory init runs in, which becomes the operator's deploy directory.
+  // published package — the installation (src/deploy/operatorRoot.ts: SWITCHBOARD_HOME, a cwd that
+  // already holds one, else ~/.switchboard), which every later command resolves the same way.
   // The container image is neither.
   if (wantsProfile && !world.inCheckout && world.package === undefined)
     return {
       ok: false,
       code: "unavailable",
       problems: [
-        `${PROFILE_PATH} and the Worker configs are written where \`deploy all\` runs from: the root of a checkout, or any directory when this CLI is the published npm package — not from here (the local files need neither)`,
+        `${PROFILE_PATH} and the Worker configs are written where \`deploy all\` runs from: the root of a checkout, or the installation (~/.switchboard, SWITCHBOARD_HOME, or a directory that already holds one) when this CLI is the published npm package — not from here (the local files need neither)`,
       ],
     };
 

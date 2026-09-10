@@ -9,14 +9,13 @@ By the end, OpenSwitchboard has answered you three times: in your terminal, in S
 ### Install
 
 ```bash
-mkdir switchboard && cd switchboard
 npx @coreplane/switchboard init --organization <org> --anthropic-key <key>
 ```
 
 You should see:
 
 ```
-wrote:
+wrote to /Users/you/.switchboard:
   .env                  (mode 600)
   config/config.yaml
 providers: anthropic
@@ -27,7 +26,7 @@ next:
   …
 ```
 
-`.env` holds your key and only you can read it; `config/config.yaml` is the example config with every optional block off. `init --help` lists every flag.
+The installation lives in `~/.switchboard`, so every later command works from any directory (`SWITCHBOARD_HOME` puts it elsewhere; a directory that already holds one wins when you run from inside it). `.env` holds your key and only you can read it; `config/config.yaml` is the example config with every optional block off. `init --help` lists every flag.
 
 ### Ask
 
@@ -84,8 +83,8 @@ npx @coreplane/switchboard init --force --organization <org> --anthropic-key <ke
 You should see:
 
 ```
-wrote:
-  .env                  (mode 600)
+wrote to /Users/you/.switchboard:
+  .env                  (mode 600) (replaced)
   config/config.yaml
   deploy/profile.json
 Worker configs from deploy/profile.json:

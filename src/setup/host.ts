@@ -6,6 +6,7 @@ import { Writable } from "node:stream";
 import { dirname, join, resolve } from "node:path";
 import { PROFILE_EXAMPLE_PATH } from "../deploy/profile.js";
 import { PACKAGE_ROOT, RUNS_FROM_PUBLISHED_PACKAGE } from "../packageRoot.js";
+import { OPERATOR_ROOT } from "../deploy/host.js";
 import { meatOnPath } from "../core/meatProcess.js";
 import type { InitTemplates, PlannedFile } from "./plan.js";
 
@@ -123,14 +124,20 @@ export function publishedPackage(root: string = PACKAGE_ROOT): string {
   return projectFact("npmPackage", root);
 }
 
-/** What `src/core/commands/setup.ts` binds to on a real host (see `SetupCommandDeps`). */
-export function hostSetupIO(cwd: string = process.cwd()) {
+/** What `src/core/commands/setup.ts` binds to on a real host (see `SetupCommandDeps`). The directory
+ *  is the operator root (src/deploy/operatorRoot.ts) — the checkout, or from the package the installation
+ *  `SWITCHBOARD_HOME` / a cwd that holds one / `~/.switchboard` names — so `init` needs no `mkdir` first. */
+export function hostSetupIO(cwd: string = OPERATOR_ROOT.root, startedIn: string = process.cwd()) {
   return {
     templates: () => readTemplates(),
+    // Where the files went when that is not where the operator stands — `init` prints it.
+    root: () => (resolve(cwd) === resolve(startedIn) ? undefined : cwd),
     exists: async (path: string) => existsSync(join(cwd, path)),
     write: (file: PlannedFile) => writePlannedFile(file, cwd),
+    // A file the operator NAMED (`--github-private-key-file app.pem`) is where the operator stands,
+    // not in the installation: `init` run from ~/Downloads reads ~/Downloads/app.pem.
     readFile: async (path: string): Promise<string | undefined> => {
-      const abs = resolve(cwd, path);
+      const abs = resolve(startedIn, path);
       return existsSync(abs) ? readFile(abs, "utf8") : undefined;
     },
     inCheckout: () => isCheckoutRoot(cwd),

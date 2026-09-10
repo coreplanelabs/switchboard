@@ -1,5 +1,8 @@
 import "./loadEnv.js";
 import { createServer } from "node:http";
+import { join } from "node:path";
+import { OPERATOR_ROOT } from "./deploy/host.js";
+import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
 import { ProviderRegistry } from "./providers/registry.js";
@@ -75,8 +78,11 @@ import { coreCommandGroups } from "./core/commands/all.js";
 import { claimEntry } from "./invokedAsScript.js";
 import { processSecrets, publicEnv } from "./secrets.js";
 
-const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? "./config/config.yaml";
-const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? "./data/overrides.json";
+// The installation's files (src/deploy/operatorRoot.ts): the checkout or the image's /app, or — `start`
+// from the published package — SWITCHBOARD_HOME, a cwd that holds an installation, else ~/.switchboard.
+const DATA_DIR = installationPath(OPERATOR_ROOT, "data");
+const CONFIG_PATH = process.env.SWITCHBOARD_CONFIG ?? installationPath(OPERATOR_ROOT, "config/config.yaml");
+const OVERRIDES_PATH = process.env.SWITCHBOARD_OVERRIDES ?? join(DATA_DIR, "overrides.json");
 
 // Process start for `/healthz.startedAt` — `deploy restart`'s live gate tells
 // the restarted container (same image, same `build.commit`) from the old one by
@@ -192,7 +198,7 @@ export async function runBot(): Promise<void> {
   );
   const runStore =
     buildRunStore(runHistoryCfg, processSecrets, {
-      dataDir: "./data",
+      dataDir: DATA_DIR,
       warn: (m) => console.warn(`[run-history] ${m}`),
     }) ?? new NullRunStore();
   // The ONE abridger of this process (docs/reference/specs/reading-diff.md item 5): meat
@@ -206,7 +212,7 @@ export async function runBot(): Promise<void> {
           runStore,
           processSecrets,
           publicEnv(),
-          "./data",
+          DATA_DIR,
           (m) => console.warn(m),
         )
       : undefined;
@@ -344,7 +350,7 @@ export async function runBot(): Promise<void> {
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
     secrets: processSecrets,
-    dataDir: "./data",
+    dataDir: DATA_DIR,
     warn: (m) => console.warn(m),
     capabilities,
     runs: runsService,

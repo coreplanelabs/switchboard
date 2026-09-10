@@ -33,6 +33,8 @@ interface World {
   inCheckout?: boolean;
   /** The published npm package the CLI runs from; undefined in a checkout or the image. */
   package?: string;
+  /** The installation directory when it is not the one the operator stands in (`~/.switchboard`). */
+  root?: string;
   prompt?: (question: string, opts: { secret: boolean }) => Promise<string>;
   files?: Record<string, string>;
 }
@@ -54,6 +56,7 @@ function bind(world: World = {}) {
       },
       readFile: async (path) => world.files?.[path],
       inCheckout: () => world.inCheckout ?? true,
+      root: () => world.root,
       image: () => "ghcr.io/example/switchboard",
       package: () => world.package,
       env: {},
@@ -189,6 +192,32 @@ describe("setup.init — flags", () => {
     expect(text).toContain("providers: anthropic");
     expect(text).toContain("execution local");
     expect(text).toContain("next:\n");
+  });
+
+  it("names the installation directory when it is not where the operator stands — `wrote to ~/.switchboard:` — and says nothing extra when it is", async () => {
+    const away = await invoke(bind({ inCheckout: false, root: "/Users/op/.switchboard" }), [
+      "--organization",
+      "acme",
+      "--anthropic-key",
+      KEY,
+    ]);
+    expect(away.ok).toBe(true);
+    if (!away.ok) throw new Error("unreachable");
+    expect((away.value as { root?: string }).root).toBe("/Users/op/.switchboard");
+    expect(renderText(setupInit, away.value)).toMatch(/^wrote to \/Users\/op\/\.switchboard:\n/);
+    const dry = await invoke(bind({ inCheckout: false, root: "/Users/op/.switchboard" }), [
+      "--dry-run",
+      "--organization",
+      "acme",
+      "--anthropic-key",
+      KEY,
+    ]);
+    if (!dry.ok) throw new Error("unreachable");
+    expect(renderText(setupInit, dry.value)).toMatch(/^would write to \/Users\/op\/\.switchboard:\n/);
+    const here = await invoke(bind({ inCheckout: false }), ["--organization", "acme", "--anthropic-key", KEY]);
+    if (!here.ok) throw new Error("unreachable");
+    expect((here.value as { root?: string }).root).toBeUndefined();
+    expect(renderText(setupInit, here.value)).toMatch(/^wrote:\n/);
   });
 
   it("--github-private-key-file is read from the working directory; a missing file is not_found naming it; the PEM reaches .env and nothing else", async () => {

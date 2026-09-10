@@ -664,6 +664,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       },
       readFile: async () => "-----BEGIN RSA PRIVATE KEY-----\nFIXTURE\n-----END RSA PRIVATE KEY-----\n",
       inCheckout: () => true,
+      root: () => undefined,
       image: () => "ghcr.io/example/switchboard",
       package: () => undefined,
       env: {},

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import {
   PACKAGE_ROOT,
   PACKAGE_SOURCE_FILE,
@@ -22,6 +23,9 @@ export const OPERATOR_ROOT: OperatorRoot = resolveOperatorRoot({
   packageRoot: PACKAGE_ROOT,
   published: RUNS_FROM_PUBLISHED_PACKAGE,
   cwd: process.cwd(),
+  home: homedir(),
+  env: process.env,
+  exists: existsSync,
 });
 
 /** The published package's own version and commit (`source.json` in its assets). Throws, naming the
