@@ -45,6 +45,28 @@ describe("createPrReviewCollector", () => {
     expect(c.state.pr).toEqual({ repo: "acme/api", number: 42, headSha: "d".repeat(40) });
   });
 
+  it("takes the PR's title from a pr_description artifact (either origin), so the panel's header names the PR; a bad or empty title changes nothing", () => {
+    const c = createPrReviewCollector();
+    c.handle({
+      type: "review_artifact",
+      artifact: "pr_description",
+      origin: "parsed",
+      title: "Retry webhook deliveries",
+    });
+    expect(c.state.title).toBe("Retry webhook deliveries");
+    expect(c.state.ready).toBe(false); // a description alone is not a panel
+    c.handle({ type: "review_artifact", artifact: "pr_description", origin: "submitted", title: "" });
+    c.handle({ type: "review_artifact", artifact: "pr_description", origin: "submitted", title: 42 });
+    expect(c.state.title).toBe("Retry webhook deliveries");
+    c.handle({
+      type: "review_artifact",
+      artifact: "pr_description",
+      origin: "submitted",
+      title: "Retry webhooks (v2)",
+    });
+    expect(c.state.title).toBe("Retry webhooks (v2)"); // the later artifact wins, like the diffs
+  });
+
   it("keeps one diff per producer — a re-review's later artifact replaces the earlier one; meat and git coexist", () => {
     const c = createPrReviewCollector();
     c.handle(artifact());

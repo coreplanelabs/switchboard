@@ -397,11 +397,33 @@ const REVIEW_STREAM = normalizeSpans([
     at: REVIEW_RECEIVED_AT + 6_000,
     seq: 4,
   },
+  // The PR's description as data (docs/reference/specs/reading-diff.md item 7), read back
+  // from the PR body: its title names the panel; the TL;DR and Tour wait for
+  // the follow-up that renders them.
+  {
+    type: "review_artifact",
+    artifact: "pr_description",
+    origin: "parsed",
+    repo: "acme/api",
+    pr: 57,
+    headSha: "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d",
+    title: "Webhook deliveries retry with exponential backoff, never on a 4xx",
+    body: "Webhook deliveries are tried once today; a flaky receiver loses the event. This adds a bounded retry policy and removes the unsigned legacy sender.",
+    tldr: "Webhook deliveries are tried once today; a flaky receiver loses the event. This adds a bounded retry policy and removes the unsigned legacy sender.",
+    tour: [],
+    remaining: [],
+    decisions: [],
+    complete: false,
+    problems: ["no Tour section in the body"],
+    truncated: false,
+    at: REVIEW_RECEIVED_AT + 6_500,
+    seq: 5,
+  },
   {
     type: "assistant",
     text: "Reading the sender change first, then the tests.",
     at: REVIEW_RECEIVED_AT + 18_000,
-    seq: 5,
+    seq: 6,
   },
   {
     type: "tool_call",
@@ -409,7 +431,7 @@ const REVIEW_STREAM = normalizeSpans([
     tool: "bash",
     summary: "$ git diff --stat origin/main...HEAD",
     at: REVIEW_RECEIVED_AT + 18_500,
-    seq: 6,
+    seq: 7,
   },
   {
     type: "tool_result",
@@ -420,7 +442,7 @@ const REVIEW_STREAM = normalizeSpans([
     output: " 19 files changed, 214 insertions(+), 31 deletions(-)",
     durationMs: 140,
     at: REVIEW_RECEIVED_AT + 18_700,
-    seq: 7,
+    seq: 8,
   },
   {
     type: "review_artifact",
@@ -432,9 +454,9 @@ const REVIEW_STREAM = normalizeSpans([
     summary: READING_DIFF_SUMMARY,
     meatTokens: { input: 21_300, output: 2_900 },
     at: REVIEW_RECEIVED_AT + 96_000,
-    seq: 8,
+    seq: 9,
   },
-  modelTurn("r2", REVIEW_RECEIVED_AT + 19_000, 380_000, 9, {
+  modelTurn("r2", REVIEW_RECEIVED_AT + 19_000, 380_000, 10, {
     stopReason: "end_turn",
     model: "anthropic/claude-fable-5",
     inputTokens: 41_200,
@@ -444,7 +466,7 @@ const REVIEW_STREAM = normalizeSpans([
     type: "answer",
     text: "**LGTM:** the retry loop is bounded by the policy, a 4xx is final, and both paths are tested. One nit: `sleep` could live in `retry.ts` beside the delays it waits on.",
     at: REVIEW_RECEIVED_AT + 400_000,
-    seq: 10,
+    seq: 11,
   },
   spanEnd("agent", "run.agent", REVIEW_RECEIVED_AT + 3_800, REVIEW_RECEIVED_AT + 400_500, "root"),
   spanEnd("post", "run.review_post_step", REVIEW_RECEIVED_AT + 400_500, REVIEW_FINISHED_AT, "root"),

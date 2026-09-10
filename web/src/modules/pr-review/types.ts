@@ -35,6 +35,16 @@ export interface ReadingDiff {
 export interface PrReviewData {
   pr: PrRef;
   readingDiffs: ReadingDiff[];
+  /** The PR's title when the host knows it (a description artifact); the
+   *  header falls back to `owner/repo#N` otherwise. */
+  title?: string;
+}
+
+/** The header's title text: the PR's own title, else its reference. */
+export function panelTitle(data: Pick<PrReviewData, "pr" | "title">): string {
+  if (data.title) return data.title;
+  if (data.pr.repo && data.pr.number !== undefined) return `${data.pr.repo}#${data.pr.number}`;
+  return data.pr.repo ?? "PR review";
 }
 
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -65,6 +75,18 @@ export function prLinks(pr: PrRef): { pr?: string; files?: string; commit?: stri
  *  it, else the full diff, else null. */
 export function preferredDiff(diffs: readonly ReadingDiff[]): ReadingDiff | null {
   return diffs.find((d) => d.poweredBy === "meat") ?? diffs.find((d) => d.poweredBy === "git") ?? null;
+}
+
+/** What a producer's label means, for the reader who cannot name it (a tooltip). */
+export function poweredByExplanation(poweredBy: ReadingDiff["poweredBy"]): string {
+  return poweredBy === "meat"
+    ? "An abridged reading of the change: a model dropped what a reviewer need not read (style, imports, boilerplate) and kept the concepts"
+    : "The complete change, base…head, as git reports it";
+}
+
+/** What `truncated` means: the recorded diff stops at `chars` characters. */
+export function truncatedExplanation(chars: number): string {
+  return `The recorded diff was cut at ${chars.toLocaleString("en-US")} characters; open the full diff on GitHub for the rest`;
 }
 
 /** Reader-facing label per producer. */

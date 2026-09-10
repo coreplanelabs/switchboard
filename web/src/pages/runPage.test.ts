@@ -1050,6 +1050,14 @@ describe("PR-review panel wiring", () => {
     expect(panel!.textContent).toContain("acme/api#42");
     expect(panel!.textContent).toContain("full diff · git");
     expect(panel!.textContent).toContain("NEW_MARKER");
+    // The panel replaces the slideover's header, so the dialog's accessible
+    // name has to come from somewhere rendered: the hidden DialogTitle the
+    // slideover keeps from its `title`, which `aria-labelledby` points at.
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const labelledBy = dialog!.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    expect(document.getElementById(labelledBy!)?.textContent).toContain("acme/api#42");
     wrapper.unmount();
   });
 

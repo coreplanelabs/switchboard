@@ -4,8 +4,9 @@ import { SHA_RE, type PrReviewData, type ReadingDiff } from "../modules/pr-revie
 // Switchboard's adapter from run events to the pr-review module's contract
 // (docs/reference/specs/reading-diff.md item 6). This is the runs-specific half the module
 // deliberately does not know about: `run_meta` carries which PR the review is
-// of, `review_artifact` events carry the reading diffs. Runs stay unique to
-// Switchboard; another host of the module writes its own adapter.
+// of, `review_artifact` events carry the reading diffs and the PR's
+// description (its title names the panel). Runs stay unique to Switchboard;
+// another host of the module writes its own adapter.
 
 export interface PrReviewState extends PrReviewData {
   /** True once the stream identified a PR review with at least one diff —
@@ -47,6 +48,11 @@ export function createPrReviewCollector(): PrReviewCollector {
         if (i >= 0) state.readingDiffs.splice(i, 1, diff);
         else state.readingDiffs.push(diff);
         state.ready = true;
+      } else if (o.type === "review_artifact" && o.artifact === "pr_description") {
+        // The PR's title for the panel's header (docs/reference/specs/reading-diff.md item 7's
+        // artifact; its TL;DR and Tour are the follow-up). A later artifact
+        // wins, like a re-review's diff. A description alone lights nothing.
+        if (typeof o.title === "string" && o.title !== "") state.title = o.title;
       }
     },
   };
