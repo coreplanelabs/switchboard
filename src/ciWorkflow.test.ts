@@ -468,12 +468,13 @@ describe("the release publishes the npm package", () => {
   // (docs/reference/specs/packaging.md item 5): gated on release-please
   // reporting a release like the image job, `id-token: write` for npm's trusted
   // publishing (the run's OIDC identity is the credential — no token, nothing
-  // expires) and nothing more, the package built by its own script, and no
-  // `--provenance`: npm takes provenance from GitHub-hosted runners alone, and
-  // this project's CI runs on Namespace runners.
+  // expires) and nothing more, the package built by its own script, and
+  // `--provenance=false` spelled out: trusted publishing generates provenance
+  // by default, npm takes it from GitHub-hosted runners alone, and this
+  // project's CI runs on Namespace runners.
   const file = ".github/workflows/release-please.yml";
   const workflow = parse(read(file)) as Workflow & { permissions?: Record<string, string> };
-  const PUBLISH_LINE = "npm publish --workspace packages/switchboard --access public";
+  const PUBLISH_LINE = "npm publish --workspace packages/switchboard --access public --provenance=false";
   const publish = Object.entries(workflow.jobs).filter(([, job]) =>
     job.steps?.some((s) => /^npm publish\b/.test(s.run?.trim() ?? "")),
   );
@@ -535,8 +536,13 @@ describe("the release publishes the npm package", () => {
       "npm run build -w packages/switchboard",
       PUBLISH_LINE,
     ]);
-    // No provenance flag anywhere in the job: the registry rejects a bundle from a self-hosted runner (422).
-    for (const s of job.steps) expect(s.run ?? "", "a step asks for provenance").not.toContain("provenance");
+    // Provenance is turned OFF by name: a bare publish still generates a bundle under trusted publishing,
+    // and the registry rejects one from a self-hosted runner (422) — the 1.19.0 and 1.19.1 runs, in turn.
+    expect(PUBLISH_LINE).toContain("--provenance=false");
+    for (const s of job.steps) {
+      if (s.run?.trim() === PUBLISH_LINE) continue;
+      expect(s.run ?? "", "another step mentions provenance").not.toContain("provenance");
+    }
     // Node from .nvmrc; no registry-url — setup-node would write an .npmrc naming an auth token this job does not have.
     const setup = job.steps.find((s) => s.uses?.startsWith("actions/setup-node@"))!;
     expect(setup.with?.["node-version-file"]).toBe(".nvmrc");
