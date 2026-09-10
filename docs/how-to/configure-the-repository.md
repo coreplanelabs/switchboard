@@ -109,14 +109,13 @@ gh api -X PUT repos/OWNER/REPO/actions/permissions/workflow \
 Secrets: `CLOUDFLARE_DEPLOY_TOKEN`, `MEMORY_TOKEN`, `RESIDENT_READ_TOKEN`, optionally `SANDBOX_TOKEN`; `CLOUDFLARE_API_TOKEN` for the docs deploy ([Rotate a secret](rotate-a-secret.md)).
 
 ```sh
-gh secret set NPM_TOKEN            # paste the token on stdin
 gh variable set SWITCHBOARD_PUBLISH_NPM --body true
 gh variable set SWITCHBOARD_DEPLOY_PROFILE --body "github://OWNER/CONFIG-REPO/switchboard/profile.json@main"
 gh variable set CONFIG_REPO_OWNER --body "OWNER"
 gh variable set CONFIG_REPO_NAME --body "CONFIG-REPO"
 ```
 
-npm publishing also needs the manifest's `"private": true` removed ([Ship a release](ship-a-release.md#merge-the-release-pr)).
+npm publishing uses no token. Once, before turning the variable on: an admin of the npm org publishes a placeholder `0.0.0` of the package from an empty directory (`npm init --scope=@OWNER -y`, `npm pkg set name=… version=0.0.0`, `npm publish --access public`), then on the package's npm settings adds a **Trusted Publisher**: GitHub Actions, this repository, workflow file `release-please.yml`. From then on every release publishes with the workflow's own identity; provenance is attached once the repository is public.
 
 ### Approve on the agent's LGTM
 

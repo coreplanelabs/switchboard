@@ -454,12 +454,14 @@ describe("the release publishes the bot image", () => {
 describe("the release publishes the npm package", () => {
   // The same release publishes the CLI to npm under `npmPackage`
   // (docs/reference/specs/packaging.md item 5): gated on release-please
-  // reporting a release like the image job, `id-token: write` for the
-  // provenance attestation and nothing more, the registry named on setup-node,
-  // the package built by its own script, and `npm publish` given the token as
-  // NODE_AUTH_TOKEN from the one repository secret an operator sets by hand.
+  // reporting a release like the image job, `id-token: write` for npm's trusted
+  // publishing (the run's OIDC identity is the credential — no token, nothing
+  // expires) and nothing more, the package built by its own script, and
+  // `--provenance` only while the repository is public.
   const file = ".github/workflows/release-please.yml";
   const workflow = parse(read(file)) as Workflow & { permissions?: Record<string, string> };
+  const PUBLISH_LINE =
+    "npm publish --workspace packages/switchboard --access public ${{ github.event.repository.private == false && '--provenance' || '' }}";
   const publish = Object.entries(workflow.jobs).filter(([, job]) =>
     job.steps?.some((s) => /^npm publish\b/.test(s.run?.trim() ?? "")),
   );
@@ -494,7 +496,7 @@ describe("the release publishes the npm package", () => {
       {
         f: "release-please.yml",
         id: "publish-npm",
-        line: "npm publish --workspace packages/switchboard --provenance --access public",
+        line: PUBLISH_LINE,
       },
     ]);
     const off = workflow.jobs["release-please"].steps.find((s) => s.name === "npm publish is off")!;
@@ -511,25 +513,29 @@ describe("the release publishes the npm package", () => {
     });
   });
 
-  it("installs from the lockfile, builds the package with its own script, and publishes it public with provenance", () => {
+  it("upgrades npm to a trusted-publishing release, installs from the lockfile, builds the package with its own script, and publishes it public — with provenance only while the repository is public", () => {
     expect(runs()).toEqual([
+      "npm install -g npm@11.19.1",
       "npm ci",
       "npm run build -w packages/switchboard",
-      "npm publish --workspace packages/switchboard --provenance --access public",
+      PUBLISH_LINE,
     ]);
-    // Node from .nvmrc, the registry named so npm reads NODE_AUTH_TOKEN for it.
+    // npm signs provenance for public sources alone: the flag is an expression on the repository's visibility.
+    expect(PUBLISH_LINE).toContain("${{ github.event.repository.private == false && '--provenance' || '' }}");
+    // Node from .nvmrc; no registry-url — setup-node would write an .npmrc naming an auth token this job does not have.
     const setup = job.steps.find((s) => s.uses?.startsWith("actions/setup-node@"))!;
     expect(setup.with?.["node-version-file"]).toBe(".nvmrc");
-    expect(setup.with?.["registry-url"]).toBe("https://registry.npmjs.org");
+    expect(setup.with?.["registry-url"]).toBeUndefined();
     const step = job.steps.find((s) => /^npm publish\b/.test(s.run?.trim() ?? "")) as Step & {
       env?: Record<string, string>;
     };
-    expect(step.env).toEqual({ NODE_AUTH_TOKEN: "${{ secrets.NPM_TOKEN }}" });
+    expect(step.env).toBeUndefined();
   });
 
-  it("the npm token reaches only the publish step", () => {
-    const text = read(file);
-    expect(text.match(/secrets\.NPM_TOKEN/g)).toHaveLength(1);
+  it("no npm token anywhere: trusted publishing means no workflow names one", () => {
+    const dir = new URL(".github/workflows/", `file://${root}`);
+    for (const f of readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)))
+      expect(read(`.github/workflows/${f}`), f).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN/);
   });
 });
 
