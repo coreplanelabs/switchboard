@@ -63,7 +63,7 @@ export interface ShipDeps
   extends
     RunDeps,
     ReplyDeps,
-    Pick<ProvisionDeps, "dataDir" | "residentFleet">,
+    Pick<ProvisionDeps, "dataDir" | "residentFleet" | "build">,
     Pick<FastPathDeps, "clock" | "runRegistry">,
     Pick<AuthorizeDeps, "capabilities"> {
   /**
@@ -369,7 +369,13 @@ export async function runShipBranch(
       // roadmap), and a line inviting `mcp add` into a run that could not use
       // the result would mislead. The line arrives with the tools.
     }),
-    about: selfDescriptionBlock(AGENTS, deps.config.config.organization, deps.capabilities, deps.residentFleet.cap()),
+    about: selfDescriptionBlock(
+      AGENTS,
+      deps.config.config.organization,
+      deps.capabilities,
+      deps.residentFleet.cap(),
+      deps.build,
+    ),
     instructions: instructionsBlock,
     skills: deps.skills ? skillGuidanceBlock(deps.skills, spec.agent.name) : undefined,
   });

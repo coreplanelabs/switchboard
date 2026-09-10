@@ -72,6 +72,7 @@ exports[`capability surfaces — cloud-full > CLI catalogue 1`] = `
 
 commands:
   help show            — What Switchboard can do: agents, per-request directives, and every chat command.
+  status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
   config set           — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
@@ -142,6 +143,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "runs.list",
   "runs.stop",
   "schedule.list",
+  "status.show",
 ]
 `;
 
@@ -177,6 +179,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "runs_list",
   "runs_stop",
   "schedule_list",
+  "status_show",
 ]
 `;
 
@@ -194,6 +197,8 @@ exports[`capability surfaces — cloud-full > help on chat 1`] = `
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
 • \`help show\` — What Switchboard can do: agents, per-request directives, and every chat command.
+*status*
+• \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
 • \`config set\` — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
@@ -279,6 +284,7 @@ exports[`capability surfaces — local-full > CLI catalogue 1`] = `
 
 commands:
   help show            — What Switchboard can do: agents, per-request directives, and every chat command.
+  status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
   config set           — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
@@ -335,6 +341,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "runs.get",
   "runs.list",
   "runs.stop",
+  "status.show",
 ]
 `;
 
@@ -363,6 +370,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "runs_get",
   "runs_list",
   "runs_stop",
+  "status_show",
 ]
 `;
 
@@ -380,6 +388,8 @@ exports[`capability surfaces — local-full > help on chat 1`] = `
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
 • \`help show\` — What Switchboard can do: agents, per-request directives, and every chat command.
+*status*
+• \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
 • \`config set\` — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
@@ -456,6 +466,7 @@ exports[`capability surfaces — minimal > CLI catalogue 1`] = `
 
 commands:
   help show            — What Switchboard can do: agents, per-request directives, and every chat command.
+  status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
   config set           — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
@@ -494,6 +505,7 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
   "runs.get",
   "runs.list",
   "runs.stop",
+  "status.show",
 ]
 `;
 
@@ -513,6 +525,7 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
   "runs_get",
   "runs_list",
   "runs_stop",
+  "status_show",
 ]
 `;
 
@@ -530,6 +543,8 @@ exports[`capability surfaces — minimal > help on chat 1`] = `
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
 • \`help show\` — What Switchboard can do: agents, per-request directives, and every chat command.
+*status*
+• \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
 • \`config set\` — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.

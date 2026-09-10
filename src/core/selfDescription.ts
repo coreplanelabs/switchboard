@@ -36,15 +36,32 @@ const WORKSPACE_WHERE: Readonly<Record<Capabilities["execution"], string>> = {
   cloudflare: "in a Cloudflare sandbox",
 };
 
+/** Which build the answering process is — so "what version are you running?"
+ *  is answered from fact, the same fact `status show` and `/healthz` report.
+ *  `commit` is `unknown` when nothing stamped the process; the block says so. */
+export interface BuildFacts {
+  version: string;
+  commit: string;
+}
+
+/** The build clause of the first line: the package version and the short commit, or the honest word for none. */
+export function buildClause(build: BuildFacts | undefined): string {
+  if (!build) return "";
+  const commit = build.commit === "unknown" ? "an unstamped build" : `build ${build.commit.slice(0, 8)}`;
+  return ` (version ${build.version}, ${commit} — \`status show\` reports it live)`;
+}
+
 /** `organization` is the config's — the GitHub org (or user) this installation
  *  serves; the block names it so the model knows whose gateway it is. `caps` is
  *  the process's capabilities; `residentCap` the resident Worker's last
- *  reported cap (undefined until known, and irrelevant without residents). */
+ *  reported cap (undefined until known, and irrelevant without residents);
+ *  `build` the process's own version and commit (omitted when the caller has none). */
 export function selfDescriptionBlock(
   agents: Record<string, Pick<AgentDef, "name" | "description">>,
   organization: string,
   caps: Capabilities,
   residentCap: number | undefined,
+  build?: BuildFacts,
 ): string {
   const agentLines = Object.values(agents)
     .map((a) => `\`${a.name}\` — ${a.description}`)
@@ -60,7 +77,7 @@ export function selfDescriptionBlock(
     ? " Cross-session memory is per org/repo/channel/user (`memory list` / `memory forget`)."
     : " This installation has no cross-session memory: a run knows only its own thread.";
   return [
-    `${SELF_DESCRIPTION_HEADER} you are Switchboard, the agent gateway of the ${organization} organization. A message arrives on a channel (Slack — an @-mention, thread follow-ups stay on the same agent — ${surfaces}), is routed to an agent, runs on a configured provider/model, and executes tools through an executor.`,
+    `${SELF_DESCRIPTION_HEADER} you are Switchboard${buildClause(build)}, the agent gateway of the ${organization} organization. A message arrives on a channel (Slack — an @-mention, thread follow-ups stay on the same agent — ${surfaces}), is routed to an agent, runs on a configured provider/model, and executes tools through an executor.`,
     `Agents: ${agentLines}. Users pick one with an inline \`agent:<name>\` directive (default: general); \`model:\` / \`effort:\` ride the same way (see the runtime-config block).`,
     repos,
     `Runs${caps.memory ? " and memory" : ""}: every run (agent or operator command) has a live page under /runs with its events${history}; runs can be stopped from there.${memory} \`help\` lists every chat command.`,

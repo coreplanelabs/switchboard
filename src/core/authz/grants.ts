@@ -51,6 +51,7 @@ export function agentRunAction(agent: string): string {
  *  so (admins through `actions: all`) and nowhere else. */
 export const CHAT_OPEN_ACTIONS: readonly string[] = [
   "help:read",
+  "status:read",
   "config:read",
   "repo:read",
   "friction:read",

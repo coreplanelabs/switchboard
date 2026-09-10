@@ -9,7 +9,7 @@ import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
 import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
-import { PACKAGE_ROOT } from "./packageRoot.js";
+import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
 import { makeShellRenderer } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
@@ -317,6 +317,8 @@ export async function runBot(): Promise<void> {
     spanLog,
     capabilities,
     residentFleet,
+    // What this process is, for the About block: the package version and the image's stamp.
+    build: { version: packageVersion(), commit: build.commit },
     skills,
     mcp,
     memory,
@@ -350,6 +352,16 @@ export async function runBot(): Promise<void> {
     frictionLedger,
     tracker: deps.issueTracker,
     memory: () => memory,
+    // `status show`: the same facts /healthz serves, read when asked (inFlight and
+    // draining are defined below and change over the process's life).
+    status: () => ({
+      version: packageVersion(),
+      commit: build.commit,
+      ...(build.builtAt !== undefined ? { builtAt: build.builtAt } : {}),
+      startedAt: PROCESS_STARTED_AT,
+      inFlight: inFlight(),
+      draining,
+    }),
     scheduleStore,
     mcp: () => mcpWiring.service ?? { unavailable: mcpWiring.unavailable ?? "MCP is not enabled" },
   });

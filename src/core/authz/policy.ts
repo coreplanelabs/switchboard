@@ -111,6 +111,7 @@ export const POLICY: readonly Rule[] = [
 
   // ── help / schedules / deploy / env / setup ──────────────────────────────────────
   { action: "help:read", resource: "command", when: [grant("help:read")] },
+  { action: "status:read", resource: "command", when: [grant("status:read")] },
   { action: "schedule:read", resource: "command", when: [grant("schedule:read")] },
   { action: "deploy:read", resource: "command", when: [grant("deploy:read")] },
   { action: "deploy:write", resource: "command", when: [grant("deploy:write")] },

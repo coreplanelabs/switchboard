@@ -53,6 +53,24 @@ describe("selfDescriptionBlock", () => {
     );
   });
 
+  it("names the build the answering process runs — version and short commit, or that nothing stamped it — and points at `status show`; a caller with no build facts gets the block unchanged", () => {
+    const stamped = selfDescriptionBlock(AGENTS, "acme", ALL_CAPABILITIES, 6, {
+      version: "1.16.0",
+      commit: "16680b30c0ffee0000000000000000000000abcd",
+    });
+    expect(stamped).toContain(
+      "you are Switchboard (version 1.16.0, build 16680b30 — `status show` reports it live), the agent gateway of the acme organization",
+    );
+    expect(stamped.split("\n")).toHaveLength(5);
+    const unstamped = selfDescriptionBlock(AGENTS, "acme", ALL_CAPABILITIES, 6, {
+      version: "0.0.0-dev",
+      commit: "unknown",
+    });
+    expect(unstamped).toContain("(version 0.0.0-dev, an unstamped build — `status show` reports it live)");
+    expect(unstamped).not.toContain("build unknown");
+    expect(allOn).toContain("you are Switchboard, the agent gateway of the acme organization");
+  });
+
   it("every `<group> <verb>` chat command it names is a registered, chat-exposed command OF THAT INSTALLATION — with everything on it names the resident and memory commands, with nothing on only what still exists", () => {
     const onIds = chatCommands(ALL_CAPABILITIES);
     const onNamed = named(allOn);

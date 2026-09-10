@@ -11,6 +11,7 @@ import { registerReviewCommands, type ReviewCommandDeps } from "./review.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./runs.js";
 import { registerScheduleCommands, type ScheduleCommandDeps } from "./schedule.js";
 import { registerSetupCommands, type SetupCommandDeps } from "./setup.js";
+import { registerStatusCommands, type StatusCommandDeps } from "./status.js";
 
 // Every command the bot registers, and the deps object they are bound to.
 // Bound ONCE per process by `buildCoreCommands` (src/core/commandCatalogue.ts)
@@ -31,10 +32,12 @@ export type CoreCommandDeps = HelpCommandDeps &
   ScheduleCommandDeps &
   DeployCommandDeps &
   EnvCommandDeps &
-  SetupCommandDeps;
+  SetupCommandDeps &
+  StatusCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
   registerHelpCommands(registry);
+  registerStatusCommands(registry);
   registerConfigCommands(registry);
   registerRunsCommands(registry);
   registerReviewCommands(registry);
