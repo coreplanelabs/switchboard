@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.2](https://github.com/coreplanelabs/switchboard/compare/v1.19.1...v1.19.2) (2026-09-10)
+
+
+### Bug fixes
+
+* **release:** the npm publish turns provenance off by name — trusted publishing generates it by default, and npm takes it from GitHub-hosted runners alone ([#904](https://github.com/coreplanelabs/switchboard/issues/904)) ([9071b12](https://github.com/coreplanelabs/switchboard/commit/9071b12f6e313690395507bf3c7c37828e768c47))
+
 ## [1.19.1](https://github.com/coreplanelabs/switchboard/compare/v1.19.0...v1.19.1) (2026-09-10)
 
 
