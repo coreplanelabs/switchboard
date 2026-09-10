@@ -6,7 +6,7 @@
 // Everything it says about the product is also said, with its proof, on the
 // page each link opens; this page only arranges it. The docs hub (README.md)
 // renders below it.
-import { ref } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { useData } from "vitepress";
 // The project's facts — its repository and the package it publishes — come
 // from the same file config.ts reads, never a copy typed here
@@ -23,7 +23,7 @@ import { listed, SEAMS } from "./seams.mjs";
 // The product's name is the site title, which the config reads from
 // project.json's `displayName` — one fact, no copy here; `check:site` proves
 // the built hero carries it.
-const { site } = useData();
+const { site, isDark } = useData();
 
 // The pictures are 1440×900 rendered at 2× (the manifest's viewport), so the
 // frames reserve that shape before an image arrives and the layout never moves.
@@ -38,10 +38,27 @@ function picture(name: string) {
 
 const hero = picture("run-page");
 
+// The hero is the page's largest paint, so it is ONE eager image the preload
+// scanner sees in the HTML — not the lazy light/dark pair the other frames use,
+// which a scanner never starts. Which file the HTML names has to be decided
+// before any script runs, and the site's appearance (`isDark`, the toggle or
+// the OS) is not known to static HTML; the OS scheme is, so a `<picture>`
+// source picks the dark file under `prefers-color-scheme: dark`. A reader who
+// has toggled away from the OS scheme gets one swap after mount, and any later
+// toggle swaps again; everyone else fetches exactly one hero file.
+const heroSrc = ref<string | null>(null);
+function followAppearance() {
+  const osDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  if (heroSrc.value !== null || osDark !== isDark.value)
+    heroSrc.value = shotSrc(hero.name, isDark.value ? "dark" : "light");
+}
+onMounted(followAppearance);
+watch(isDark, followAppearance);
+
 // One statement per picture: the first clause in ink, the second in grey, and
 // the page that proves it. The picture sits right, then left, then right, and
 // is cropped from the top to the aspect ratio its content fills — the fixture's
-// runs index and residents are a few rows; the spend page runs deeper.
+// runs index is a few rows, its residents two, the spend page runs deeper.
 const stories = [
   {
     shot: picture("runs-index"),
@@ -54,7 +71,7 @@ const stories = [
   },
   {
     shot: picture("residents"),
-    crop: "5 / 2",
+    crop: "5 / 1",
     lead: "Repos kept warm.",
     rest: "Onboard a repository once; every thread works in a checkout that is already there.",
     link: "/how-to/onboard-a-repo",
@@ -125,32 +142,21 @@ async function copy() {
       </div>
 
       <div class="wrap">
-        <!-- The one picture above the fold. The two images are one per appearance
-             and the site's `dark` class on <html> shows one. Both are lazy: the
-             hidden one has no box, never intersects the viewport and is not
-             fetched (an eager image is fetched even when hidden); the shown one
-             sits in the first viewport, so it loads at first layout, ahead of
-             every other image. -->
+        <!-- The one picture above the fold: one eager image (see `heroSrc`). Until
+             the script has run, the source picks the file for the OS scheme; once
+             `heroSrc` is set, the image follows the site's appearance instead. -->
         <figure class="frame hero-frame">
           <div class="bar" aria-hidden="true"><span class="dots"></span><span class="url">/runs/…</span></div>
-          <img
-            class="light"
-            :src="shotSrc(hero.name, 'light')"
-            :alt="hero.alt"
-            :width="PICTURE.width"
-            :height="PICTURE.height"
-            fetchpriority="high"
-            loading="lazy"
-          />
-          <img
-            class="dark"
-            :src="shotSrc(hero.name, 'dark')"
-            :alt="hero.alt"
-            :width="PICTURE.width"
-            :height="PICTURE.height"
-            fetchpriority="high"
-            loading="lazy"
-          />
+          <picture>
+            <source v-if="heroSrc === null" media="(prefers-color-scheme: dark)" :srcset="shotSrc(hero.name, 'dark')" />
+            <img
+              :src="heroSrc ?? shotSrc(hero.name, 'light')"
+              :alt="hero.alt"
+              :width="PICTURE.width"
+              :height="PICTURE.height"
+              fetchpriority="high"
+            />
+          </picture>
         </figure>
         <p class="caption">The run page: the model turns, the tool calls, the reply — every step timed.</p>
       </div>
