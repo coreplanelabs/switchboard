@@ -207,6 +207,7 @@ Five phases, in dependency order; the harness track runs in parallel with the re
 
 ### U0. The 1.2 line: branch, CI, releases, staging installation
 
+- **Status**: superseded by trunk. The owner moved the program onto `main`: units land as ordinary pull requests, dark by default behind the per-resident lifecycle flag, and the next `main` release is pinned to 1.200.0 through the repository's release config; no long-lived `v1.2` branch, no separate release leg, no `v1.2-staging` installation. The branch, its release pull request and its ruleset were retired once the units built on it had landed on `main`. The sync policy in KTD12 and the `Release-As: 2.0.0` landing still describe the 2.0.0 moment; the rest of this unit is not built.
 - **Goal**: V2 work has a branch, green checks, real 1.2xx releases and an installation to receipt against, without touching the 1.1x line.
 - **Requirements**: R24, R25
 - **Dependencies**: the v1.13.0 baseline (cut). If the public flip's history rewrite has not landed, cut anyway and rebase across it (Assumptions).
