@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.200.0](https://github.com/coreplanelabs/switchboard/compare/v1.19.3...v1.200.0) (2026-09-11)
+
+
+### Features
+
+* **resident:** the mirror mutex is a durable lease judged against the incarnation, and every engine step is an idempotent method a cycle can call twice ([#917](https://github.com/coreplanelabs/switchboard/issues/917)) ([4ee0c66](https://github.com/coreplanelabs/switchboard/commit/4ee0c66e4f03bb93dbf9aaf2a26f73221f1b9287))
+* **resident:** the refresh cycle runs as a cron-created Workflow instance behind a per-resident lifecycle flag, with the Workflows binding, its two cost meters and the instance's root span ([#920](https://github.com/coreplanelabs/switchboard/issues/920)) ([cd9e4e9](https://github.com/coreplanelabs/switchboard/commit/cd9e4e97cb8271a63fd639d3dc96cdfffc49a837))
+* **review:** a removed or narrowed test is a review finding unless its spec changes in the same PR — the test guard behind specs:coverage ([#929](https://github.com/coreplanelabs/switchboard/issues/929)) ([b2158dc](https://github.com/coreplanelabs/switchboard/commit/b2158dccdc296bfcf0f15dffa3dddee83deb4797))
+
+
+### Bug fixes
+
+* **process:** keep PR title checkout settings in sync ([#927](https://github.com/coreplanelabs/switchboard/issues/927)) ([511b5b2](https://github.com/coreplanelabs/switchboard/commit/511b5b2b9aa384de866a9710807a8eeea4d5780b))
+* **process:** run each CI workflow through one orchestrator ([#924](https://github.com/coreplanelabs/switchboard/issues/924)) ([9c1263e](https://github.com/coreplanelabs/switchboard/commit/9c1263e778e532a93b9c50f4a148d01dffdfc869))
+
+
+### Documentation
+
+* **core:** record 0029 is accepted — the retry policy counts six attempts and instance ids use the platform's alphabet, corrected before the flip ([#916](https://github.com/coreplanelabs/switchboard/issues/916)) ([7049f67](https://github.com/coreplanelabs/switchboard/commit/7049f679c4f39e3c01774eb758b453f9242fd1e6))
+* **core:** record 0031 — the coordinator runs a plan, a child is handed a contract and hands back a deviation, and a test cannot be narrowed without its spec; the program plan gains U16 to U19 and defers U6 and U14 ([#930](https://github.com/coreplanelabs/switchboard/issues/930)) ([dfb0ddb](https://github.com/coreplanelabs/switchboard/commit/dfb0ddb56464a833b9beaf9bc4ee39f98ecc69cd))
+* **docs:** the site wears the Polylane visual system — Instrument Sans and JetBrains Mono, neutral greys, an inverted-neutral action colour, in both modes ([#928](https://github.com/coreplanelabs/switchboard/issues/928)) ([65ca6e3](https://github.com/coreplanelabs/switchboard/commit/65ca6e3f911c241f6e409883e7b793b8ad4a23dc))
+* **process:** the open-source readiness plan is implemented ([#926](https://github.com/coreplanelabs/switchboard/issues/926)) ([aba6500](https://github.com/coreplanelabs/switchboard/commit/aba650024fd41f25410924466e3093c6f705946c))
+* **process:** the orchestration program's U0 is superseded by trunk — units land on main behind the lifecycle flag, and the 1.2 branch, its release PR and its ruleset are retired ([#921](https://github.com/coreplanelabs/switchboard/issues/921)) ([7dbb4cf](https://github.com/coreplanelabs/switchboard/commit/7dbb4cffce1a4deca1f8b16d3637823355265096))
+* **providers:** OpenRouter as a documented example — the commented config block, the how-to paragraph and a test that the block loads and builds ([#915](https://github.com/coreplanelabs/switchboard/issues/915)) ([bf1c863](https://github.com/coreplanelabs/switchboard/commit/bf1c863266d5e94795d3b455af54f0584f51dfc2))
+
 ## [1.19.3](https://github.com/coreplanelabs/switchboard/compare/v1.19.2...v1.19.3) (2026-09-10)
 
 
