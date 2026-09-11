@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.3](https://github.com/coreplanelabs/switchboard/compare/v1.19.2...v1.19.3) (2026-09-10)
+
+
+### Bug fixes
+
+* **docs:** the docs site answers /favicon.ico with the mark — three PNG frames of the SVG, named in the head beside it ([#913](https://github.com/coreplanelabs/switchboard/issues/913)) ([53c2cbc](https://github.com/coreplanelabs/switchboard/commit/53c2cbccb331c1750982afdd88882c2ffba566ef))
+
 ## [1.19.2](https://github.com/coreplanelabs/switchboard/compare/v1.19.1...v1.19.2) (2026-09-10)
 
 
