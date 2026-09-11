@@ -7,7 +7,7 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "2aec7f1618040fad2ae4740f5b4213b6f7731a9a5d0b041b684d50d30521e067",
-    "scripts/web-preview.ts": "4fe327384dfc9b316f1006299b85cb3451e0a4b0b819c52ac4a56553d8a1a5cc",
+    "scripts/web-preview.ts": "5a0fb7a8765c5c4088b0e0eb05cebd7764e03d871fb38481c97039ad193fa501",
     "src/channels/webShell.ts": "6bbb2d546f05bc33b7f5268a55b75741e2db842ed28ae8296d2b00cfbf598245",
     "src/docs/screenshotManifest.ts": "15fe70a7d71cc1164cea64b83cafce4d385b011cd66440670ad8346f0b26acf6",
     "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",
@@ -34,7 +34,7 @@
     "web/src/components/runs/SourceMark.vue": "bc1c8701265452c6f1899a895fbee2721d0964ed351ee8c07746ccb1731acc90",
     "web/src/lib/browser.ts": "709674c1c1478024432d5e3fc118e24465f02c0348cffc33c2e21adc23a1e0ed",
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
-    "web/src/lib/costs.ts": "02320f8fc261c742e254c746dd046c51364117a4eb9a9d5a4a6b8c6cff5d8fbe",
+    "web/src/lib/costs.ts": "c238c78fb5cfa0035176a6524d3cc3675c35695bdfffb899648a5acc6b8d7013",
     "web/src/lib/durationTone.ts": "9e5bbcf765a307f3c05cf1fd807697bf1957e03acbf95f38883b5db4d4b8f3c1",
     "web/src/lib/eventSource.ts": "56cee4056941a052433f8b19d2ce2f8eaf43ba483080d0e836afa19794900f9c",
     "web/src/lib/format.ts": "5cd244be725ce9b693bee6b6f84bdcda494573e87dc6d279bbbd59c06af8b485",

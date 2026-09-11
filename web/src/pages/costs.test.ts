@@ -17,6 +17,7 @@ function report(over: Partial<CostReport> = {}): CostReport {
     doStorageUsd: 0.01,
     workersUsd: 0.02,
     r2Usd: 0.01,
+    workflowsUsd: 0,
     cloudUsd: bot + 0.3,
     llmUsd: llm,
     total: bot + 0.3 + llm,
@@ -42,6 +43,7 @@ function report(over: Partial<CostReport> = {}): CostReport {
         doRows: 0.03,
         doStorage: 0.03,
         r2: 0.03,
+        workflows: 0,
       },
     },
     account: { cloudUsd: cloudUsd * 4 }, // three other tenants' worth on the same account
@@ -50,6 +52,7 @@ function report(over: Partial<CostReport> = {}): CostReport {
       containerApps: { "app-bot": "bot" },
       durableObjectNamespaces: { "ns-bot": "bot DO", "ns-resident": "switchboard-resident" },
       r2Buckets: { "switchboard-resident-cache": "switchboard-resident-cache" },
+      workflows: {},
     },
     ...over,
   };
@@ -100,6 +103,7 @@ describe("CostsPage", () => {
       "Durable Object SQLite rows",
       "Durable Object SQLite storage",
       "R2 storage + operations",
+      "Workflow steps + state",
     ])
       expect(t).toContain(row);
   });
