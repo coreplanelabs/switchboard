@@ -1,6 +1,6 @@
 # Switchboard docs
 
-Switchboard is an agent gateway: a message arrives over Slack, the CLI, HTTP or MCP, and an agent answers it, reviews a pull request, or ships code. Read this tree here or at [switchboard.space](https://switchboard.space).
+Switchboard is an agent gateway: a message arrives over Slack, the CLI, HTTP or MCP, and an agent answers it, reviews a pull request, or ships code. Read this tree here or at [openswitchboard.dev](https://openswitchboard.dev).
 
 ## Pick your surface
 
