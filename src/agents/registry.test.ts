@@ -427,3 +427,59 @@ describe("review prompts: the spec contradiction check (agent-review item 14)", 
     }
   });
 });
+
+// Feature: docs/reference/specs/agent-review.md item 16 — the test guard. Both
+// review prompts run `specs:coverage --test-guard` over the PR's range as a
+// sub-step of the spec check and read its two classes of line: a `removed:`
+// line is a finding at minor or above quoting the line verbatim; a `check:`
+// line is disposed of explicitly — weakened (a minor finding) or a refactor
+// with verification intact, one clause of why — never silently. A line the
+// guard allowed by a spec change is neither. The text is one constant, so the
+// sandbox and resident variants cannot drift apart on it.
+describe("review prompts: the test guard (agent-review item 16)", () => {
+  const prompts = () => [AGENTS.review.system, AGENTS.review.residentSystem!];
+
+  it("both review prompts run the guard over the PR's range as a sub-step of the spec check", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(/3a\. TEST GUARD/);
+      expect(sys).toContain("npm run --silent specs:coverage -- --changed origin/<base>...HEAD --test-guard");
+      expect(sys.indexOf("TEST GUARD")).toBeGreaterThan(sys.indexOf("SPEC CONTRADICTION CHECK"));
+      expect(sys.indexOf("TEST GUARD")).toBeLessThan(sys.indexOf("4. REPORT"));
+    }
+  });
+
+  it("a `removed:` line is a finding at minor or higher, titled by file, quoting the guard's line as printed", () => {
+    for (const sys of prompts()) {
+      expect(sys).toContain("`test-guard: <file> — removed: …` line");
+      expect(sys).toMatch(/removed: …` line is deterministic.*?finding of severity `minor` or higher/);
+      expect(sys).toContain("Test removed — <file>: <what>");
+      expect(sys).toMatch(/quotes the guard's line exactly as printed/);
+      for (const marker of [".skip(", ".only(", "xit(", "xdescribe(", "it.todo(", "test.todo("])
+        expect(sys).toContain(marker);
+    }
+  });
+
+  it("a `check:` line is disposed of explicitly — weakened (minor) or refactor with verification intact — never silently", () => {
+    for (const sys of prompts()) {
+      expect(sys).toContain("`test-guard: <file> — check: …` line");
+      expect(sys).toMatch(/dispose of every one of them explicitly[^.]*never silently/);
+      expect(sys).toMatch(/"weakened", which makes it a finding at `minor`/);
+      expect(sys).toMatch(/"refactor, verification intact" with one clause/);
+    }
+  });
+
+  it("an allowed line and the ok line are nothing to report; a failing command is judged by hand, never by installing", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(/`— allowed by <spec>` is licensed by a spec change in the same diff and is neither/);
+      expect(sys).toMatch(/`test-guard ok` is nothing to report/);
+      expect(sys).toMatch(/judge the same facts from the diff by hand/);
+      expect(sys).toMatch(/never install or build to make it run/);
+    }
+  });
+
+  it("the sandbox and resident prompts carry the same guard text, byte for byte", () => {
+    const step = (sys: string) => sys.slice(sys.indexOf("3a. TEST GUARD"), sys.indexOf("4. REPORT"));
+    expect(step(AGENTS.review.system)).toBe(step(AGENTS.review.residentSystem!));
+    expect(step(AGENTS.review.system).length).toBeGreaterThan(200);
+  });
+});
