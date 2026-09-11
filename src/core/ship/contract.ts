@@ -72,6 +72,11 @@ export interface ChildContract {
   /** The first instruction's names, when the caller knows them: the unit's
    *  branch and the merged parent it is rebased onto. */
   rebase: { branch: string | undefined; onto: string | undefined };
+  /** The unit's board issue, when the caller knows it: where the parent posts
+   *  the child's handoff (handoff.ts). Absent on a task-string pipeline and on
+   *  the by-hand render, whose handoff is recorded on the run only. Never
+   *  rendered — the block is the child's brief, and the post is the parent's. */
+  issue: { repo: string; number: number } | undefined;
 }
 
 /** The guards a child may not weaken (AGENTS.md's Commands table), one line each on what they refuse. */
@@ -319,6 +324,8 @@ export interface ContractFromPlanInput {
   readSpec: (spec: string) => string | undefined;
   agentRules?: AgentRules;
   rebase?: { branch?: string; onto?: string };
+  /** The unit's board issue, when the caller knows it (the runner; a test). */
+  issue?: { repo: string; number: number };
 }
 
 /** The contract for one unit of a plan. Throws when the plan has no such unit. */
@@ -336,6 +343,7 @@ export function contractFromPlan(input: ContractFromPlanInput): ChildContract {
     agentRules: input.agentRules,
     guards: GUARDS,
     rebase: { branch: input.rebase?.branch, onto: input.rebase?.onto },
+    issue: input.issue,
   };
 }
 
@@ -347,6 +355,7 @@ export function contractFromTask(input: {
   task: string;
   agentRules?: AgentRules;
   rebase?: { branch?: string; onto?: string };
+  issue?: { repo: string; number: number };
 }): ChildContract {
   const firstLine =
     input.task
@@ -360,6 +369,7 @@ export function contractFromTask(input: {
     agentRules: input.agentRules,
     guards: GUARDS,
     rebase: { branch: input.rebase?.branch, onto: input.rebase?.onto },
+    issue: input.issue,
   };
 }
 

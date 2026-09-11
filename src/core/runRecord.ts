@@ -1,6 +1,7 @@
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { RunEvent } from "./runEvents.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
+import { isHandoffShape, type Handoff } from "./ship/handoff.js";
 import {
   FRICTION_CATEGORIES,
   type CategoryTotals,
@@ -89,6 +90,13 @@ export interface RunRecord {
   /** The thread that started the run (`IncomingMessage.sourceUrl`), for the
    *  index's hover link. Optional as above. */
   sourceUrl?: string;
+  /** The typed handoff a coding child submitted (docs/reference/specs/agent-ship.md
+   *  item 14): its deviations from the plan unit, its follow-ups and the
+   *  criteria it could not prove — redacted like every stored string. Present
+   *  only on a run that submitted one (an affirmed empty handoff is stored as
+   *  three empty lists, distinguishable from none); absent on every other run
+   *  and on records written before it existed. */
+  handoff?: Handoff;
 }
 
 /** A run as a listing shows it: the record minus its events. `diagnosis` stays —
@@ -408,6 +416,9 @@ export function isRunRecord(v: unknown): v is RunRecord {
   )
     return false;
   if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl) || !isOptionalString(r.userName)) return false;
+  // The handoff is checked for shape, not bounds (docs/reference/specs/agent-ship.md
+  // item 14): redaction may lengthen a stored string past the tool's limit.
+  if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   // Absent on records written before the stamp existed (read as `unknown`); present → a known value.
   if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility))

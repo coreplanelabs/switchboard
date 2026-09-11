@@ -532,6 +532,66 @@ describe("coding prompts: the unit contract (agent-coding item 8)", () => {
   });
 });
 
+// Feature: docs/reference/specs/agent-coding.md item 9 — the unit handoff. A
+// coding child that carries a `## Contract` block hands back a typed handoff
+// through submit_handoff before its final message: what deviated from the unit
+// and why, what it found and did not do, which criteria it could not prove.
+// An empty handoff is submitted as empty, never skipped; without the block the
+// tool is not called. Both prompt variants carry the paragraph byte for byte.
+describe("coding prompts: the unit handoff (agent-coding item 9)", () => {
+  const prompts = () => [AGENTS.coding.system, AGENTS.coding.residentSystem!];
+
+  it("both coding prompts name submit_handoff, tie it to the `## Contract` block, and place it after the description and before the final message", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(
+        /UNIT HANDOFF: when your first user turn carries a `## Contract` block, call the submit_handoff tool once/,
+      );
+      expect(sys).toMatch(/after submit_pr_description and before your final message/);
+      expect(sys.indexOf("UNIT HANDOFF:")).toBeGreaterThan(sys.indexOf("UNIT CONTRACT:"));
+      expect(sys.indexOf("UNIT HANDOFF:")).toBeLessThan(sys.indexOf("PR description — submit it"));
+    }
+  });
+
+  it("the three lists are named with their fields: deviations (from, to, why), followUps (what, where), unproven (criterion, why)", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(/deviations: where you departed from the unit as written \(from, to, why\)/);
+      expect(sys).toMatch(/followUps: what you found and did not do, and where it belongs \(what, where\)/);
+      expect(sys).toMatch(
+        /unproven: which of the unit's test scenarios or criteria you could not prove, and why \(criterion, why\)/,
+      );
+    }
+  });
+
+  it("the handoff is recorded on the run and posted to the unit's board issue where a person disposes of it; the agent never edits the plan's ledger", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(/records it on the run and posts it to the unit's board issue/);
+      expect(sys).toMatch(/a person decides each row's disposition/);
+      expect(sys).toMatch(/you never edit the plan's ledger yourself/);
+    }
+  });
+
+  it("an empty handoff is submitted as three empty lists, never skipped; without a `## Contract` block the tool is not called", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(/An empty handoff is submitted as three empty lists, never skipped/);
+      expect(sys).toMatch(/Without a `## Contract` block, do not call it/);
+    }
+  });
+
+  it("the contract paragraph now routes an unprovable criterion to the handoff as well as the final message", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(
+        /where the unit is wrong or a criterion could not be proven, say so in the handoff and in your final message/,
+      );
+    }
+  });
+
+  it("the sandbox and resident coding prompts carry the same handoff text, byte for byte", () => {
+    const step = (sys: string) => sys.slice(sys.indexOf("UNIT HANDOFF:"), sys.indexOf("PR description — submit it"));
+    expect(step(AGENTS.coding.system)).toBe(step(AGENTS.coding.residentSystem!));
+    expect(step(AGENTS.coding.system).length).toBeGreaterThan(300);
+  });
+});
+
 // Feature: docs/reference/specs/agent-review.md item 17 — the unit contract
 // check. The review child of a plan unit reads the same `## Contract` block
 // after its REVIEW TARGET block and judges the diff against it, as sub-step 3b

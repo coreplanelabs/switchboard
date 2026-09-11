@@ -165,6 +165,35 @@ describe("runShipBranch — the agent:ship fork", () => {
     });
   });
 
+  // docs/reference/specs/agent-ship.md item 14 — the ship run's record carries the
+  // handoff its coding round handed back (redacted by the record assembly), and
+  // the pipeline's GitHub seam carries the issue-comment write the parent posts
+  // it through.
+  it("a pipeline whose outcome carries a handoff: the drain's record carries it, redacted; the issue-comment seam handed to the pipeline is the injected one", async () => {
+    const s = setup("slack:UADMIN");
+    const postIssueComment = vi.fn(async () => ({ url: "https://github.com/acme/plan/issues/12#issuecomment-1" }));
+    s.deps.postIssueComment = postIssueComment;
+    const token = `ghp_${"a".repeat(24)}`;
+    vi.mocked(runShipPipeline).mockResolvedValue({
+      status: "completed",
+      reply: "shipped: acme/api#7 is merge-ready",
+      handoff: {
+        deviations: [{ from: "a", to: "b", why: `used ${token}` }],
+        followUps: [{ what: "split the file", where: "src/x.ts" }],
+        unproven: [],
+      },
+    });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(vi.mocked(runShipPipeline).mock.calls[0][0].github.postIssueComment).toBe(postIssueComment);
+    s.ending.drain(true);
+    await s.writer.settled();
+    expect((await s.store.get("run-s"))?.handoff).toEqual({
+      deviations: [{ from: "a", to: "b", why: "used «redacted-github-token»" }],
+      followUps: [{ what: "split the file", where: "src/x.ts" }],
+      unproven: [],
+    });
+  });
+
   it("a pipeline that threw: the error propagates, the registry is finished `failed`, the card closes ❌ here, nothing is replied, and the drain writes the failed record", async () => {
     const s = setup("slack:UADMIN");
     vi.mocked(runShipPipeline).mockRejectedValue(new Error("resident down"));

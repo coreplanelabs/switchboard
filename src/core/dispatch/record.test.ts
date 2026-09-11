@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { RunRegistry } from "../runRegistry.js";
 import { isRunRecord, type RunRecord } from "../runRecord.js";
 import {
+  assembleRunRecord,
   interruptedRunRecord,
   registerFinishRecord,
   writeAbandonedRunRecords,
@@ -170,6 +171,46 @@ describe("writeTombstone — the provisional interrupted record at the loop's st
   });
 });
 
+// docs/reference/specs/agent-ship.md item 14, run-history.md item 2 — the handoff
+// a coding child submitted rides the record, redacted by the one assembly every
+// run goes through; a run that submitted none carries no key at all.
+describe("assembleRunRecord — the handoff on the record", () => {
+  const msg = { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" };
+  const base = () => ({
+    run: { id: "run-h" },
+    snap: null,
+    msg,
+    channelVisibility: "unknown" as const,
+    finishedAt: 10,
+    status: "completed" as const,
+    diagnosis: analyzeRunFriction([], { finished: true, truncated: false }),
+  });
+
+  it("carries the handoff with every string leaf redacted, and the record still validates", () => {
+    const token = `ghp_${"a".repeat(24)}`;
+    const record = assembleRunRecord({
+      ...base(),
+      handoff: {
+        deviations: [{ from: `used ${token}`, to: "b", why: "c" }],
+        followUps: [],
+        unproven: [{ criterion: "k", why: `see ${token}` }],
+      },
+    });
+    expect(record.handoff).toEqual({
+      deviations: [{ from: "used «redacted-github-token»", to: "b", why: "c" }],
+      followUps: [],
+      unproven: [{ criterion: "k", why: "see «redacted-github-token»" }],
+    });
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
+  });
+
+  it("no handoff → no key (the record's JSON is exactly what the store measures)", () => {
+    const record = assembleRunRecord(base());
+    expect("handoff" in record).toBe(false);
+  });
+});
+
 describe("registerFinishRecord — the finish record, written by the drain after the reply", () => {
   const agent = getAgent("general");
   const resolved = { agentName: "general", modelRef: "anthropic/general-model" } as ResolvedRequest;
@@ -209,9 +250,21 @@ describe("registerFinishRecord — the finish record, written by the drain after
       diagnosis: analyzeRunFriction(snap.events, { finished: true, truncated: false }),
       root: trace.root,
       ledgerRun: undefined,
+      handoff: { deviations: [], followUps: [{ what: "split the file", where: "src/x.ts" }], unproven: [] },
     });
     return { ending, writes };
   }
+
+  it("the handoff the run loop captured rides the finish record", () => {
+    const { ending, writes } = finished();
+    ending.drain(true);
+    expect(writes).toHaveLength(1);
+    expect(writes[0].record.handoff).toEqual({
+      deviations: [],
+      followUps: [{ what: "split the file", where: "src/x.ts" }],
+      unproven: [],
+    });
+  });
 
   it("nothing is written until the drain; then the record carries the seal's stamps and the terminal status", () => {
     const { ending, writes } = finished();

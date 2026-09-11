@@ -13,7 +13,8 @@ import {
   type CodingChildDeps,
   type CodingChildContext,
 } from "./codingChild.js";
-import { contractFromTask, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./contract.js";
+import { contractFromPlan, contractFromTask, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./contract.js";
+import { renderHandoffComment, type Handoff } from "./handoff.js";
 
 // Feature: docs/reference/specs/agent-ship.md items 3, 4, 6, 7 — one coding child
 // round as a callable stage. The pipeline scenarios in dispatcher.test.ts prove
@@ -99,6 +100,7 @@ function workspace(opts: { head: string; branch: string; bindingRef?: string; re
 function deps(provider: Provider) {
   const published: RunEvent[] = [];
   const opened: PullRequestTarget[] = [];
+  const comments: Array<{ repo: string; number: number; body: string }> = [];
   const spec = { agent: AGENTS.coding, provider, modelRef: "fake/coding-model", model: "coding-model" };
   const d: CodingChildDeps = {
     child: () => spec,
@@ -117,11 +119,33 @@ function deps(provider: Provider) {
       }),
       findOpenPrByHead: vi.fn(async () => null),
       fetchRepoShipInfo: vi.fn(async () => ({ allowAutoMerge: false, defaultBranch: "main" })),
+      postIssueComment: vi.fn(async (repo: string, number: number, body: string) => {
+        comments.push({ repo, number, body });
+        return { url: `https://github.com/${repo}/issues/${number}#issuecomment-1` };
+      }),
     },
     redactDescription: (desc) => ({ ...desc, title: `[redacted] ${desc.title}` }),
     logKey: "t",
   };
-  return { deps: d, published, opened };
+  return { deps: d, published, opened, comments };
+}
+
+const HANDOFF: Handoff = {
+  deviations: [{ from: "one re-arm stays", to: "none", why: "the next unit moves the wake path" }],
+  followUps: [{ what: "split codingChild.ts", where: "src/core/ship/codingChild.ts" }],
+  unproven: [],
+};
+
+/** A plan of one unit whose contract names the unit's board issue. */
+function unitContract(issue?: { repo: string; number: number }) {
+  return contractFromPlan({
+    planMarkdown:
+      "## Implementation Units\n\n### U17. Handoffs as data\n\n- **Goal**: the handoff reaches the board.\n",
+    unitId: "U17",
+    readSpec: () => undefined,
+    rebase: { branch: BRANCH, onto: "main" },
+    ...(issue ? { issue } : {}),
+  });
 }
 
 function context(over: Partial<CodingChildContext> = {}) {
@@ -313,5 +337,112 @@ describe("runShipCodingChild — one coding round as a stage", () => {
     expect(opened).toHaveLength(0);
     expect(published).toEqual([]);
     expect(releases).toEqual(["always"]);
+  });
+
+  // docs/reference/specs/agent-ship.md item 14 — the handoff as data: submitted
+  // beside the description through the same tool path, handed back typed on
+  // the round's result, and — when the contract names the unit's board issue —
+  // posted there by the parent process through the GitHub seam after the PR
+  // post-step, so the comment can name the PR.
+  it("a handoff submitted beside the description rides back typed; a contract naming the unit's board issue → the rendered comment is posted there, naming the unit and the PR, and the round's note says where", async () => {
+    const provider = scriptedProvider([
+      toolUse("submit_pr_description", DESCRIPTION),
+      toolUse("submit_handoff", HANDOFF),
+      say("Done."),
+    ]);
+    queueWorkspace(workspace({ head: HEAD, branch: BRANCH }));
+    const { deps: d, comments } = deps(provider);
+    const { ctx } = context();
+    const contract = unitContract({ repo: "acme/plan", number: 12 });
+    const out = await runShipCodingChild(d, ctx, { messages: [], contract }, undefined);
+    expect(out.handoff).toEqual(HANDOFF);
+    expect(out.opened).toEqual({ number: 7, url: PR_URL, created: true });
+    expect(comments).toEqual([
+      {
+        repo: "acme/plan",
+        number: 12,
+        body: renderHandoffComment(HANDOFF, { unitId: "U17", pr: { number: 7, url: PR_URL } }),
+      },
+    ]);
+    expect(comments[0].body.split("\n")[0]).toBe(`**Handoff — U17** · pull request [#7](${PR_URL})`);
+    expect(out.handoffNote).toBe(
+      "📋 Handoff posted to acme/plan#12: https://github.com/acme/plan/issues/12#issuecomment-1",
+    );
+  });
+
+  it("a handoff on a round without a contract (a plain task pipeline) rides back typed and posts nowhere; so does one whose contract names no issue (the by-hand receipt)", async () => {
+    for (const contract of [undefined, unitContract()]) {
+      const provider = scriptedProvider([
+        toolUse("submit_pr_description", DESCRIPTION),
+        toolUse("submit_handoff", HANDOFF),
+        say("Done."),
+      ]);
+      queueWorkspace(workspace({ head: HEAD, branch: BRANCH }));
+      const { deps: d, comments } = deps(provider);
+      const { ctx } = context();
+      const out = await runShipCodingChild(d, ctx, { messages: [], ...(contract ? { contract } : {}) }, undefined);
+      expect(out.handoff).toEqual(HANDOFF);
+      expect(out.handoffNote).toBeUndefined();
+      expect(comments).toEqual([]);
+    }
+  });
+
+  it("an EMPTY handoff under a contract naming an issue → recorded as the empty object (an affirmed empty handoff stays distinguishable from none), nothing posted; a round that submitted none carries no handoff", async () => {
+    const empty: Handoff = { deviations: [], followUps: [], unproven: [] };
+    const provider = scriptedProvider([
+      toolUse("submit_pr_description", DESCRIPTION),
+      toolUse("submit_handoff", empty),
+      say("Done."),
+    ]);
+    queueWorkspace(workspace({ head: HEAD, branch: BRANCH }));
+    const { deps: d, comments } = deps(provider);
+    const { ctx } = context();
+    const out = await runShipCodingChild(
+      d,
+      ctx,
+      { messages: [], contract: unitContract({ repo: "acme/plan", number: 12 }) },
+      undefined,
+    );
+    expect(out.handoff).toEqual(empty);
+    expect(out.handoffNote).toBeUndefined();
+    expect(comments).toEqual([]);
+
+    const none = scriptedProvider([toolUse("submit_pr_description", DESCRIPTION), say("Done.")]);
+    queueWorkspace(workspace({ head: HEAD, branch: BRANCH }));
+    const second = deps(none);
+    const out2 = await runShipCodingChild(
+      second.deps,
+      context().ctx,
+      { messages: [], contract: unitContract({ repo: "acme/plan", number: 12 }) },
+      undefined,
+    );
+    expect(out2.handoff).toBeUndefined();
+    expect(second.comments).toEqual([]);
+  });
+
+  it("a board post that FAILS → the handoff still rides back typed and the round's note says the post failed and that the run record has it; the round is not a failure", async () => {
+    const provider = scriptedProvider([
+      toolUse("submit_pr_description", DESCRIPTION),
+      toolUse("submit_handoff", HANDOFF),
+      say("Done."),
+    ]);
+    queueWorkspace(workspace({ head: HEAD, branch: BRANCH }));
+    const { deps: d } = deps(provider);
+    d.github.postIssueComment = vi.fn(async () => {
+      throw new Error("HTTP 403 Resource not accessible by integration");
+    });
+    const { ctx } = context();
+    const out = await runShipCodingChild(
+      d,
+      ctx,
+      { messages: [], contract: unitContract({ repo: "acme/plan", number: 12 }) },
+      undefined,
+    );
+    expect(out.handoff).toEqual(HANDOFF);
+    expect(out.opened).toEqual({ number: 7, url: PR_URL, created: true });
+    expect(out.handoffNote).toBe(
+      "⚠️ The handoff could not be posted to acme/plan#12: HTTP 403 Resource not accessible by integration — it is recorded on this run.",
+    );
+    expect(out.refusal).toBeUndefined();
   });
 });

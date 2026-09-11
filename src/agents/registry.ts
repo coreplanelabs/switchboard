@@ -83,7 +83,16 @@ const CONTRACT_HEADINGS_LIST = Object.values(CONTRACT_SECTION_HEADINGS)
 // assembled by the child, which would choose what to leave out. Both coding
 // prompts carry this verbatim so the resident and sandbox children read the
 // same rule; the review prompts name the same block and the same severity.
-const UNIT_CONTRACT = `UNIT CONTRACT: when your first user turn carries a \`${CONTRACT_HEADING}\` block — its sub-headings, in this order: ${CONTRACT_HEADINGS_LIST} — it is the contract for one plan unit, rendered by Switchboard from the plan itself, and it outranks any free-text task beside it. Do its first instruction first: the rebase of the unit's branch onto the merged parent (a conflict ends the unit — report it and stop; never resolve it by force). Then implement the unit's section as written: every test scenario it lists is added as a test, every spec row it names is updated so its proof binding resolves, the agent rules are followed, and no guard it names is weakened. The review is handed the same block and checks the diff against it: a test scenario the unit listed and the diff did not add is a finding at minor severity — the same severity as a spec contradiction. Never edit the plan record itself; where the unit is wrong or a criterion could not be proven, say so in your final message.`;
+const UNIT_CONTRACT = `UNIT CONTRACT: when your first user turn carries a \`${CONTRACT_HEADING}\` block — its sub-headings, in this order: ${CONTRACT_HEADINGS_LIST} — it is the contract for one plan unit, rendered by Switchboard from the plan itself, and it outranks any free-text task beside it. Do its first instruction first: the rebase of the unit's branch onto the merged parent (a conflict ends the unit — report it and stop; never resolve it by force). Then implement the unit's section as written: every test scenario it lists is added as a test, every spec row it names is updated so its proof binding resolves, the agent rules are followed, and no guard it names is weakened. The review is handed the same block and checks the diff against it: a test scenario the unit listed and the diff did not add is a finding at minor severity — the same severity as a spec contradiction. Never edit the plan record itself; where the unit is wrong or a criterion could not be proven, say so in the handoff and in your final message.`;
+
+// The unit handoff (docs/reference/specs/agent-coding.md item 9; agent-ship.md
+// item 14): the contract's return edge, as data. A child that ran for a plan
+// unit hands back what deviated, what it found and did not do, and what it
+// could not prove through submit_handoff, so the parent can record it and post
+// it to the unit's board issue without a person writing it there. Both coding
+// prompts carry this verbatim, right after the contract paragraph, so the
+// sandbox and resident children read the same rule.
+const UNIT_HANDOFF = `UNIT HANDOFF: when your first user turn carries a \`${CONTRACT_HEADING}\` block, call the submit_handoff tool once, after submit_pr_description and before your final message, with the typed handoff — deviations: where you departed from the unit as written (from, to, why); followUps: what you found and did not do, and where it belongs (what, where); unproven: which of the unit's test scenarios or criteria you could not prove, and why (criterion, why). Switchboard records it on the run and posts it to the unit's board issue, where a person decides each row's disposition; you never edit the plan's ledger yourself. An empty handoff is submitted as three empty lists, never skipped — a missing handoff reads as an unfinished run, not as nothing to say. Without a \`${CONTRACT_HEADING}\` block, do not call it.`;
 
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 
@@ -107,6 +116,8 @@ Workflow for shipping a PR:
 ${NEVER_MERGE}
 
 ${UNIT_CONTRACT}
+
+${UNIT_HANDOFF}
 
 ${PR_DESCRIPTION_TEMPLATE}
 
@@ -143,6 +154,8 @@ Workflow for shipping a change:
 ${NEVER_MERGE}
 
 ${UNIT_CONTRACT}
+
+${UNIT_HANDOFF}
 
 ${PR_DESCRIPTION_TEMPLATE}
 

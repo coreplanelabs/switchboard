@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ToolDef, ToolResultContent } from "../providers/types.js";
 import { parsePrDescription, type PrDescription } from "../core/prDescription.js";
+import { parseHandoff, type Handoff } from "../core/ship/handoff.js";
 import {
   parseDispositionsInput,
   parseVerdictInput,
@@ -78,6 +79,13 @@ export interface ToolContext {
    *  renders the GitHub body from it at the pushed head and opens/edits the
    *  PR. Absent → the tool still accepts the call. */
   onPrDescription?: (desc: PrDescription) => void;
+  /** Receives a coding child's typed handoff from `submit_handoff`
+   *  (docs/reference/specs/agent-coding.md item 9): where it departed from its plan
+   *  unit, what it found and did not do, what it could not prove. Injected by
+   *  the dispatcher and the ship coding round; the last valid call wins. The
+   *  run record carries it; a ship round posts it to the unit's board issue.
+   *  Absent → the tool says nothing is recording it. */
+  onHandoff?: (handoff: Handoff) => void;
   /** Receives a fix round's per-finding dispositions from
    *  `submit_dispositions` (docs/reference/specs/agent-ship.md item 6). Injected by the
    *  ship orchestrator for fix rounds; the last valid call wins. Absent → the
@@ -102,8 +110,8 @@ export interface RunnableTool extends ToolDef {
    *  concurrently — on a resident/sandbox each is a network round trip, and
    *  they cannot observe each other. Anything that mutates the workspace
    *  (`bash`, `write_file`) or the run's own state (`update_status`,
-   *  `submit_verdict`, `submit_pr_description`, `submit_dispositions`) leaves
-   *  this unset and runs strictly in order. */
+   *  `submit_verdict`, `submit_pr_description`, `submit_handoff`,
+   *  `submit_dispositions`) leaves this unset and runs strictly in order. */
   sideEffectFree?: true;
 }
 
@@ -517,6 +525,72 @@ export const submitPrDescriptionTool: RunnableTool = {
   },
 };
 
+// The handoff beside the description (docs/reference/specs/agent-coding.md item 9,
+// agent-ship.md item 14): a coding child of a plan unit says, as data, where
+// it departed from the unit, what it found and did not do, and which criteria
+// it could not prove. The dispatcher records the object on the run; the ship
+// pipeline posts it to the unit's board issue. Validation mirrors
+// submit_pr_description — a bad object is a readable string error naming the
+// path, never a throw. No sink means no run is listening (a unit context):
+// say so rather than ack a recording that never happened.
+const handoffEntry = (fields: Record<string, string>): Record<string, unknown> => ({
+  type: "object",
+  properties: Object.fromEntries(Object.entries(fields).map(([k, d]) => [k, { type: "string", description: d }])),
+  required: Object.keys(fields),
+});
+
+export const submitHandoffTool: RunnableTool = {
+  name: "submit_handoff",
+  description:
+    "Submit the unit handoff as a typed object — REQUIRED when your first user turn carries a `## Contract` block: once, " +
+    "after submit_pr_description and before your final message. `deviations`: where you departed from the unit as written " +
+    "(from, to, why); `followUps`: what you found and did not do, and where it belongs (what, where); `unproven`: which of " +
+    "the unit's test scenarios or criteria you could not prove, and why (criterion, why). Switchboard records it on the run " +
+    "and posts it to the unit's board issue, where a person decides each row. Submit empty lists when there is nothing to " +
+    "say — never skip it. A later call replaces the earlier one; an invalid object returns an error naming the field to fix.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      deviations: {
+        type: "array",
+        description: "Where you departed from the unit as written ([] when you did not)",
+        items: handoffEntry({
+          from: "What the unit said",
+          to: "What you did instead",
+          why: "Why — one or two sentences",
+        }),
+      },
+      followUps: {
+        type: "array",
+        description: "What you found and did not do ([] when nothing)",
+        items: handoffEntry({ what: "The follow-up, as one line", where: "Where it belongs: a file, a unit, a spec" }),
+      },
+      unproven: {
+        type: "array",
+        description: "The unit's test scenarios or criteria you could not prove ([] when every one is proven)",
+        items: handoffEntry({
+          criterion: "The scenario or criterion, as the unit states it",
+          why: "Why it is unproven",
+        }),
+      },
+    },
+    required: ["deviations", "followUps", "unproven"],
+  },
+  async run(input, ctx) {
+    const parsed = parseHandoff(input);
+    if (!parsed.ok) return `error: invalid handoff — ${parsed.error}`;
+    if (!ctx.onHandoff)
+      return "no run is recording a handoff here — it was not recorded (it applies to a coding run started for a plan unit)";
+    ctx.onHandoff(parsed.handoff);
+    const h = parsed.handoff;
+    const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+    return (
+      `handoff recorded: ${count(h.deviations.length, "deviation", "deviations")}, ` +
+      `${count(h.followUps.length, "follow-up", "follow-ups")}, ${h.unproven.length} unproven; a later call replaces this one`
+    );
+  },
+};
+
 export const updateStatusTool: RunnableTool = {
   name: "update_status",
   description:
@@ -545,9 +619,9 @@ export const updateStatusTool: RunnableTool = {
 // The read-only skill tools (list_skills/use_skill) join both the full
 // (coding) and readonly (review) toolsets — loading a methodology into context
 // never mutates the workspace, so it is safe for the read-only review agent.
-// submit_pr_description and submit_dispositions are full-only: only the coding
-// agent ships PRs and answers review findings, the way submit_verdict is
-// readonly-only because only the review agent judges them.
+// submit_pr_description, submit_handoff and submit_dispositions are full-only:
+// only the coding agent ships PRs, hands off and answers review findings, the
+// way submit_verdict is readonly-only because only the review agent judges them.
 // docs/reference/specs/github-tools.md: the GitHub READ tools (repos, files, trees, code
 // search, issue list/get) join every toolset with a tool loop — they need no
 // workspace and let any agent answer from the org's repos. The issue WRITE
@@ -561,6 +635,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     writeFileTool,
     updateStatusTool,
     submitPrDescriptionTool,
+    submitHandoffTool,
     submitDispositionsTool,
     webFetchTool,
     diffDigestTool,

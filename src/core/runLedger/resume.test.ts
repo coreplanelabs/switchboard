@@ -33,6 +33,7 @@ const TOOLS: KnownTool[] = [
   { name: "github_issue_comment" },
   { name: "update_status" },
   { name: "submit_verdict" },
+  { name: "submit_handoff" },
   { name: "mcp_jira_create_ticket" }, // a bridged tool that mutates: known, not side-effect-free, not on the safe list
 ];
 const toolMap = new Map(TOOLS.map((t) => [t.name, t]));
@@ -62,7 +63,15 @@ describe("settlementFor — D4", () => {
       action: "synthetic",
       text: expect.stringMatching(/restarted while this mcp_jira_create_ticket call was in flight/),
     });
-    for (const name of ["read_file", "web_fetch", "github_file", "write_file", "update_status", "submit_verdict"]) {
+    for (const name of [
+      "read_file",
+      "web_fetch",
+      "github_file",
+      "write_file",
+      "update_status",
+      "submit_verdict",
+      "submit_handoff",
+    ]) {
       expect(settlementFor(call("c", name), toolMap)).toEqual({ toolUse: call("c", name), action: "rerun" });
     }
     expect(settlementFor(call("c", "mcp_acme_search"), toolMap)).toMatchObject({

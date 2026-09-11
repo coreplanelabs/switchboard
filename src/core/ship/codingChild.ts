@@ -20,6 +20,7 @@ import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "
 import { attachRoundWorkspace, makeSystemComposer } from "../reviewRound.js";
 import type { ChildRoundContext, ChildRoundDeps } from "./childRound.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./contract.js";
+import { renderHandoffComment, type Handoff } from "./handoff.js";
 
 /** The GitHub seam a coding round writes through: the PR open-or-edit and
  *  the lookups the post-step and the description turn make before it. */
@@ -33,6 +34,11 @@ export interface CodingChildGithub {
    *  practice `entry.base` is already resolved by shipPreflight, so this fires
    *  only on the rare resume where that lookup itself failed. */
   fetchRepoShipInfo: (repo: string) => Promise<RepoShipInfo | undefined>;
+  /** The parent's post of the child's handoff to the unit's board issue
+   *  (docs/reference/specs/agent-ship.md item 14): an issue comment through the
+   *  bot's GitHub identity — a write the bot already makes. Called only when
+   *  the round's contract names an issue and the handoff renders to something. */
+  postIssueComment: (repo: string, number: number, body: string) => Promise<{ url: string }>;
 }
 
 /** What a coding round reads beyond the shared child slice. */
@@ -103,6 +109,14 @@ export interface CodingRoundResult {
    *  earlier one). The loop keys it by the review round it answers — finding
    *  ids are only unique within one round. */
   dispositions?: FindingDisposition[];
+  /** The round's LAST submit_handoff object (docs/reference/specs/agent-ship.md
+   *  item 14) — typed, as the tool accepted it; the pipeline carries it onto
+   *  the run record. An affirmed empty handoff is three empty lists. */
+  handoff?: Handoff;
+  /** What became of the handoff's board post, when the round's contract named
+   *  an issue and the handoff rendered to something: where it landed, or why
+   *  it did not — a fact of the round the thread sees, like `prNote`. */
+  handoffNote?: string;
   residentUnavailable?: string;
 }
 
@@ -165,6 +179,7 @@ export async function runShipCodingChild(
     };
   }
   let description: PrDescription | undefined;
+  let handoff: Handoff | undefined;
   let roundDispositions: FindingDisposition[] | undefined;
   const toolContext: ToolContext = {
     executor,
@@ -175,6 +190,9 @@ export async function runShipCodingChild(
     agentName: spec.agent.name,
     onPrDescription: (d) => {
       description = d;
+    },
+    onHandoff: (h) => {
+      handoff = h;
     },
     ...(opts.knownFindingIds
       ? {
@@ -325,6 +343,34 @@ export async function runShipCodingChild(
       logKey,
     });
   }
+  // The handoff's board post (docs/reference/specs/agent-ship.md item 14): a
+  // contract naming the unit's board issue gets the rendered comment there,
+  // through the bot's GitHub identity, AFTER the PR post-step so the comment
+  // names the PR. The handoff rides the result regardless (the pipeline puts
+  // it on the run record); an empty one renders nothing and posts nothing; a
+  // failed post is a note the thread sees, never a failed round — the record
+  // still has the handoff. Nothing is posted after a hard stop.
+  let handoffNote: string | undefined;
+  const contract = opts.contract;
+  if (handoff !== undefined && contract?.issue !== undefined && control.requested !== "hard") {
+    const issue = contract.issue;
+    const body = renderHandoffComment(handoff, {
+      unitId: contract.unit.id,
+      ...(opened !== undefined ? { pr: { number: opened.number, url: opened.url } } : {}),
+    });
+    if (body !== undefined) {
+      const where = `${issue.repo}#${issue.number}`;
+      try {
+        const posted = await github.postIssueComment(issue.repo, issue.number, body);
+        handoffNote = `📋 Handoff posted to ${where}: ${posted.url}`;
+        console.log(`[ship] ${logKey} handoff posted to ${where}`);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        handoffNote = `⚠️ The handoff could not be posted to ${where}: ${reason} — it is recorded on this run.`;
+        console.warn(`[ship] ${logKey} handoff post to ${where} failed: ${reason}`);
+      }
+    }
+  }
   return {
     answer,
     ...(prNote !== undefined ? { prNote } : {}),
@@ -332,5 +378,7 @@ export async function runShipCodingChild(
     ...(observed?.head !== undefined ? { headSha: observed.head } : {}),
     ...(description !== undefined ? { description } : {}),
     ...(roundDispositions !== undefined ? { dispositions: roundDispositions } : {}),
+    ...(handoff !== undefined ? { handoff } : {}),
+    ...(handoffNote !== undefined ? { handoffNote } : {}),
   };
 }

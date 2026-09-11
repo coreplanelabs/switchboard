@@ -3314,6 +3314,68 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(ev.description.tour[0].anchor.from).toBe(1); // numbers ride unchanged
   });
 
+  // docs/reference/specs/agent-coding.md item 9, run-history.md item 2 — a plain
+  // coding run's submitted handoff (the by-hand receipt: a `## Contract` block
+  // pasted into the request, no plan runner) is recorded on the run's record,
+  // redacted, and posted nowhere; a run that submitted none carries no key.
+  it("a submitted handoff rides the run record, redacted; a coding run that submitted none carries no handoff key", async () => {
+    const token = `ghp_${"a".repeat(24)}`;
+    const handoff = {
+      deviations: [{ from: "an empty handoff records nothing", to: "it is recorded as empty", why: `see ${token}` }],
+      followUps: [],
+      unproven: [{ criterion: "the board comment lands live", why: "no runner posts it yet" }],
+    };
+    let n = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        n++;
+        if (n === 1)
+          return {
+            content: [{ type: "tool_use", id: "h1", name: "submit_handoff", input: handoff }],
+            stopReason: "tool_use",
+          };
+        if (n === 2)
+          return {
+            content: [{ type: "tool_use", id: "d1", name: "submit_pr_description", input: DESCRIPTION }],
+            stopReason: "tool_use",
+          };
+        return { content: [{ type: "text", text: "Done — branch pushed." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = codingDeps(provider);
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    deps.openPullRequest = openSpy().fn;
+    const registry = new RunRegistry({ genId: () => "r11", genToken: () => "t11" });
+    deps.runRegistry = registry;
+    const store = new InMemoryRunStore();
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    await deps.runHistoryWriter.settled();
+    const rec = (await store.get("r11"))!;
+    expect(rec.handoff).toEqual({
+      deviations: [
+        { from: "an empty handoff records nothing", to: "it is recorded as empty", why: "see «redacted-github-token»" },
+      ],
+      followUps: [],
+      unproven: [{ criterion: "the board comment lands live", why: "no runner posts it yet" }],
+    });
+    expect(JSON.stringify(rec)).not.toContain("ghp_");
+    // the tool's ack reached the model as a recorded handoff
+    const ack = rec.events.find((e) => e.type === "tool_result" && /handoff recorded/.test(e.summary ?? ""));
+    expect(ack).toBeDefined();
+
+    const plain = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    plain.openPullRequest = openSpy().fn;
+    plain.runRegistry = new RunRegistry({ genId: () => "r12", genToken: () => "t12" });
+    const store2 = new InMemoryRunStore();
+    plain.runHistoryWriter = createRunHistoryWriter({ store: store2, warn: () => {}, sleep: async () => {} });
+    await dispatch(plain, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    await plain.runHistoryWriter.settled();
+    expect("handoff" in (await store2.get("r12"))!).toBe(false);
+  });
+
   it("a thread bound to an existing PR's head branch: the base is the PR's TRUE base ref, so a fix-round repush opens/edits instead of reading as 'nothing pushed'", async () => {
     const deps = makeDeps(YAML_FIXTURE, describeThenAnswer(DESCRIPTION));
     // The thread inherited PR acme/api#42 (head feat/x, true base main); the

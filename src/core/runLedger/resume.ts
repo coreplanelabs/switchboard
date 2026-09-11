@@ -62,6 +62,7 @@ export const RERUN_SAFE_TOOLS: ReadonlySet<string> = new Set([
   "update_status",
   "submit_verdict",
   "submit_pr_description",
+  "submit_handoff",
   "submit_dispositions",
 ]);
 
