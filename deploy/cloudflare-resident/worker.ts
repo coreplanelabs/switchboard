@@ -1241,6 +1241,16 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
 const PROVISIONING_CALLBACK = "onProvisioningDeadline"; // fail-closed deadline
 const PROVISION_RUN_CALLBACK = "runProvisioning"; // the actual provisioning work
+/** The schedule callbacks the retired alarm chain armed, gone with the flip to
+ *  the Workflow scheduler. Their rows outlive the code that armed them, and the
+ *  SDK's `alarm()` skips a due row whose callback method is gone WITHOUT
+ *  deleting it, then re-arms for that past time at once — a hot alarm loop
+ *  that only the row's deletion ends (@cloudflare/containers 0.3.7,
+ *  dist/lib/container.js `alarm()`: the `continue` precedes the DELETE). The
+ *  constructor deletes them before the first event, which on an upgraded
+ *  resident is that very alarm. Drop this list once every resident has woken on
+ *  this code (lifecycle.test.ts pins the names). */
+const RETIRED_SCHEDULE_CALLBACKS = ["onRefreshAlarm", "onWorktreeSweep", "onDiskMeasure"] as const;
 
 const STATE_KEY = "resident:state";
 const REASON_KEY = "resident:reason";
@@ -1325,6 +1335,14 @@ export class ResidentDO extends Sandbox<Env> {
   // schedule callback names, so ours cannot collide). Every other cycle is a
   // Workflow instance (refresh.ts) and the watchdog re-arms nothing;
   // lifecycle.test.ts holds the line over these sources.
+
+  constructor(...args: ConstructorParameters<typeof Sandbox<Env>>) {
+    super(...args);
+    // The base class created `container_schedules` synchronously above; the
+    // rows the retired alarm chain armed are gone before this object handles
+    // its first event (RETIRED_SCHEDULE_CALLBACKS).
+    for (const name of RETIRED_SCHEDULE_CALLBACKS) this.deleteSchedules(name);
+  }
 
   /** Serializes concurrent hydration attempts within one DO lifetime. Never
    *  used as a "hydrated" flag — the container can sleep while the DO object
