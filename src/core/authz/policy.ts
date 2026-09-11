@@ -117,6 +117,9 @@ export const POLICY: readonly Rule[] = [
   { action: "deploy:write", resource: "command", when: [grant("deploy:write")] },
   { action: "env:write", resource: "command", when: [grant("env:write")] },
   { action: "setup:write", resource: "command", when: [grant("setup:write")] },
+  // `contract render` reads host paths the caller names: CLI-only, the read
+  // grant by name — no chat baseline holds it.
+  { action: "contract:read", resource: "command", when: [grant("contract:read")] },
 
   // ── mcp (external MCP servers live in the three config tiers) ────────────
   { action: "mcp:read", resource: "command", when: [grant("mcp:read")] },

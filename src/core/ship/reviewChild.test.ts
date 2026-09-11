@@ -6,6 +6,7 @@ import type { CompletionRequest, CompletionResult, Provider } from "../../provid
 import type { Finding } from "../reviewVerdict.js";
 import { RunControl } from "../runRegistry/runControl.js";
 import type { ChildRoundContext } from "./childRound.js";
+import { contractFromTask, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./contract.js";
 import { buildShipReviewTurn, runShipReviewChild, type ReviewChildDeps, type ReviewRound } from "./reviewChild.js";
 
 // Feature: docs/reference/specs/agent-ship.md items 5, 9 — one review child round
@@ -169,6 +170,9 @@ describe("runShipReviewChild — one review round as a stage", () => {
     expect(vi.mocked(makeExecutor).mock.calls[0][1]).toMatchObject({ ref: BRANCH, headSha: HEAD });
     expect(clipped).toEqual([AGENTS.review]);
     expect(turnText(provider.requests[0])).toBe(buildShipReviewTurn({ where: "acme/api#7", round: 1, headSha: HEAD }));
+    // no contract → no rendered block in the prompt (the task-string pipeline); the
+    // review prompt still NAMES the block in its 3b step, so the needle is the block's own opening
+    expect(provider.requests[0].system ?? "").not.toContain("## Contract\n\n### First instruction");
     // the verdict landed on the PR, pinned to the reviewed head
     expect(posts).toHaveLength(1);
     expect(posts[0].target).toMatchObject({ repo: "acme/api", number: 7, commitId: HEAD });
@@ -203,6 +207,31 @@ describe("runShipReviewChild — one review round as a stage", () => {
     expect(text).toContain("F1");
     expect(text).toContain("F2: declined — shadowing is deliberate");
     expect(out.verdict?.verdict).toBe("approve");
+  });
+
+  // docs/reference/specs/agent-ship.md item 13 — the review child of a plan unit
+  // is handed the SAME contract object as the coding child, rendered right after
+  // its REVIEW TARGET block; the user turn is the round's turn as before.
+  it("a contract → the same rendered block the coding child gets, in the system prompt right after the REVIEW TARGET block; the turn is unchanged", async () => {
+    const provider = scriptedProvider([
+      toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD }),
+      say("Looks great."),
+    ]);
+    queueWorkspace(workspace({ sha: HEAD }));
+    const { deps: d } = deps(provider);
+    const { ctx } = context();
+    const contract = contractFromTask({ task: "fix the login redirect", rebase: { branch: BRANCH, onto: "main" } });
+    await runShipReviewChild(d, ctx, { ...round1, contract }, undefined);
+    const system = provider.requests[0].system ?? "";
+    const block = renderContract(contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text;
+    const target = system.indexOf("REVIEW TARGET (resolved by Switchboard");
+    const at = system.indexOf(block);
+    expect(target).toBeGreaterThan(0);
+    expect(at).toBeGreaterThan(target);
+    // right after the target block: nothing but the separator between them
+    const targetEnd = system.indexOf("Pass the commit you reviewed", target);
+    expect(system.slice(targetEnd, at)).toMatch(/^Pass the commit you reviewed[^\n]*\n\n$/);
+    expect(turnText(provider.requests[0])).toBe(buildShipReviewTurn({ where: "acme/api#7", round: 1, headSha: HEAD }));
   });
 
   it("a child that ends without submit_verdict → no verdict in the result; its prose is still posted, pinned, with no LGTM line", async () => {

@@ -521,6 +521,9 @@ export const FIELD_HINTS: SampleHints = {
   name: FIXTURE.mcpServer,
   url: "https://mcp.example.com/mcp",
   agents: "general,research",
+  // contract.render: the fixture plan's one unit (the fake reads the plan for any plan path).
+  plan: "docs/plans/fixture-plan.md",
+  unit: "U16",
 };
 
 /** Commands the generic fixture cannot drive on its own: `hints` override a

@@ -28,6 +28,7 @@ import {
   type ReviewPostOutcome,
 } from "../reviewRound.js";
 import type { ChildRoundContext, ChildRoundDeps } from "./childRound.js";
+import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./contract.js";
 
 /** The GitHub seam a review round reads and writes through: the PR head it
  *  pins and re-reads, the commits since the base, and the pinned review post. */
@@ -89,6 +90,10 @@ export interface ReviewRound {
   index: number;
   pr: number;
   prior?: { findings: Finding[]; dispositions: FindingDisposition[] };
+  /** The plan unit's contract — the SAME object the coding child was handed —
+   *  rendered after the REVIEW TARGET block so the diff is judged against it
+   *  (docs/reference/specs/agent-ship.md item 13). Absent on a task-string pipeline. */
+  contract?: ChildContract;
 }
 
 /**
@@ -173,6 +178,9 @@ export async function runShipReviewChild(
       repo: entry.repo,
       workspace: binding?.workspace,
       prTarget: { repo: entry.repo, pr: pr.number, ref: entry.branch, baseRef: entry.base },
+      ...(round.contract
+        ? { contract: renderContract(round.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text }
+        : {}),
       blocks: input.blocks(spec),
     });
     const clipped = clip(spec.agent);

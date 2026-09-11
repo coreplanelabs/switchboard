@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { AGENTS } from "../agents/registry.js";
 import { bootstrapOnHost } from "../agentEnv/host.js";
 import type { ConfigStore } from "../config.js";
@@ -145,6 +146,11 @@ function readSource(source: string): Promise<string> {
   return Promise.resolve(readFileSync(source === "-" ? 0 : source, "utf8"));
 }
 
+/** `contract render`'s reads — the plan, the specs it names, the rules file: the text, or undefined for no such file. */
+async function readOptionalFile(path: string): Promise<string | undefined> {
+  return existsSync(path) ? readFile(path, "utf8") : undefined;
+}
+
 /** A dependency handed in ready, or produced on first use. The CLI hands the
  *  bot config (and the run store derived from it) in lazily: `deploy.*`,
  *  `env.*`, `friction analyze`, `schedule list` and `help show` never touch
@@ -265,6 +271,8 @@ export function buildCoreCommands(
     status: { snapshot: () => (wiring.status ?? unstampedStatus)() },
     // `setup init` writes the operator's working directory — the one the CLI runs in.
     setup: hostSetupIO(),
+    // `contract render` reads the paths the CLI caller names (CLI-only).
+    contract: { readFile: readOptionalFile },
   };
   return bindCommands(registry, deps);
 }

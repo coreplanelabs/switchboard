@@ -139,6 +139,48 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "contract:read",
+    "args": [],
+    "effect": "read",
+    "id": "contract.render",
+    "options": [
+      {
+        "name": "plan",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "unit",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "root",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "branch",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "onto",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "maxChars",
+        "required": false,
+        "type": "integer",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
     "action": "deploy:write",
     "args": [],
     "effect": "write",

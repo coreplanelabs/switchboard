@@ -19,6 +19,7 @@ export const COMMAND_GROUPS = [
   "status",
   "env",
   "setup",
+  "contract",
 ] as const;
 
 export function grants(over: Partial<Grants> = {}): Grants {

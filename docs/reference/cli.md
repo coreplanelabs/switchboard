@@ -136,6 +136,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 |---|---|---|
 | `setup init [--organization <string>] [--anthropic-key <string>] [--openai-compatible <string>] [--model <string>] [--model-key <string>] [--slack-app-token <string>] [--slack-bot-token <string>] [--github-app-id <string>] [--github-installation-id <string>] [--github-private-key-file <string>] [--cloudflare <string>] [--zone <string>] [--name <string>] [--force] [--dry-run]` | The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run writes nothing and previews with secrets masked, existing files or not. | CLI only |
 
+### `contract`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `contract render --plan <string> --unit <string> [--root <string>] [--branch <string>] [--onto <string>] [--max-chars <integer>]` | Render one plan unit's child contract — its section, the spec rows it names with their proof bindings, the repository's agent rules, the guards — as the `## Contract` block a coding prompt carries, and measure it. | CLI only |
+
 <!-- /generated:cli-commands -->
 
 ## Which commands need bot config

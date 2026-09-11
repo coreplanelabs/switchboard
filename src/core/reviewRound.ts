@@ -247,6 +247,11 @@ export function makeSystemComposer(input: {
   /** Set for a PR review round: the REVIEW TARGET block's coordinates. */
   prTarget:
     { repo: string; pr: number; ref: string | undefined; baseRef: string | undefined; size?: PrSize } | undefined;
+  /** The unit contract block of a plan-unit review round (docs/reference/specs/agent-ship.md
+   *  item 13), rendered by the pipeline: placed right after the REVIEW TARGET
+   *  block (after the agent's prompt when there is none), so the review child
+   *  reads exactly what the coding child was handed. */
+  contract?: string;
   /** Pre-built advisory/context blocks; absent blocks leave the prompt untouched.
    *  `about` is the self-description (routing-and-config behavior 11), right
    *  after the config block — the same category of fact-about-yourself. */
@@ -281,17 +286,18 @@ export function makeSystemComposer(input: {
           ...(head.verified ? { verifiedAtAttach: true } : {}),
         })
       : undefined;
-  const agentSystem = (head: HeadPin): string | undefined => {
-    const target = targetBlock(head);
-    const baseSystem = target ? `${residentSystem ?? agent.system}\n\n${target}` : residentSystem;
-    // Tool guidance trails the agent's own instructions: skills, then the
-    // external MCP servers (docs/reference/specs/mcp-tools.md item 9) — both are about the
-    // agent's tools, not advisory context like the memory block up front.
-    const trailing = [blocks.skills, blocks.mcp].filter((b): b is string => Boolean(b));
-    return trailing.length > 0 ? [baseSystem ?? agent.system, ...trailing].join("\n\n") : baseSystem;
+  const agentSystem = (head: HeadPin): string => {
+    // The agent's prompt, then the REVIEW TARGET block, then the unit contract
+    // it is judged against; tool guidance trails the agent's own instructions:
+    // skills, then the external MCP servers (docs/reference/specs/mcp-tools.md item 9)
+    // — both are about the agent's tools, not advisory context like the
+    // memory block up front.
+    return [residentSystem ?? agent.system, targetBlock(head), input.contract, blocks.skills, blocks.mcp]
+      .filter((b): b is string => Boolean(b))
+      .join("\n\n");
   };
   return (head) =>
-    [blocks.memory, blocks.config, blocks.about, blocks.instructions, agentSystem(head) ?? agent.system]
+    [blocks.memory, blocks.config, blocks.about, blocks.instructions, agentSystem(head)]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
 }
