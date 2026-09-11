@@ -81,17 +81,17 @@ describe("factsProblems", () => {
   });
 
   it("a docs host without a `docs.` prefix — a product domain — is checked too: exact copies pass, a stale sibling is flagged", () => {
-    const apex = { ...facts, docs: "https://openswitchboard.example" };
+    const apex = { ...facts, docs: "https://oldswitchboard.example" };
     const files = {
-      "README.md": "# Acme Switchboard\n\nread at https://openswitchboard.example/start and https://docs.github.com/",
+      "README.md": "# Acme Switchboard\n\nread at https://oldswitchboard.example/start and https://docs.github.com/",
       // A lookalike host is compared whole: it is not the configured host, and it names the project.
-      "CONTRIBUTING.md": "not ours: https://openswitchboardXexample/",
+      "CONTRIBUTING.md": "not ours: https://oldswitchboardXexample/",
       "SUPPORT.md": "old: https://docs.switchboard.example.com/",
     };
     const what = factsProblems(apex, files).map((p) => `${p.file}: ${p.what}`);
     expect(what).toEqual([
-      'CONTRIBUTING.md: docs URL "https://openswitchboardXexample" — project.json says https://openswitchboard.example',
-      'SUPPORT.md: docs URL "https://docs.switchboard.example.com" — project.json says https://openswitchboard.example',
+      'CONTRIBUTING.md: docs URL "https://oldswitchboardXexample" — project.json says https://oldswitchboard.example',
+      'SUPPORT.md: docs URL "https://docs.switchboard.example.com" — project.json says https://oldswitchboard.example',
     ]);
   });
 
@@ -99,13 +99,13 @@ describe("factsProblems", () => {
     const apex = { ...facts, docs: "https://switchboard.example" };
     const files = {
       "README.md":
-        "# Acme Switchboard\n\nread at https://switchboard.example/start, formerly https://openswitchboard.example/start",
+        "# Acme Switchboard\n\nread at https://switchboard.example/start, formerly https://oldswitchboard.example/start",
       // A host that does not name the project or the organization is someone else's.
       "SUPPORT.md": "see https://board.example/ and https://acme-widgets.example/",
     };
     const what = factsProblems(apex, files).map((p) => `${p.file}: ${p.what}`);
     expect(what).toEqual([
-      'README.md: docs URL "https://openswitchboard.example" — project.json says https://switchboard.example',
+      'README.md: docs URL "https://oldswitchboard.example" — project.json says https://switchboard.example',
       'SUPPORT.md: docs URL "https://acme-widgets.example" — project.json says https://switchboard.example',
     ]);
   });

@@ -17,7 +17,7 @@ Credentials are environment variables: `.env` locally, a Worker secret on Cloudf
 
 ## Create the Slack app
 
-1. At [api.slack.com/apps](https://api.slack.com/apps): *Create New App* → *From a manifest* → paste [`slack-app-manifest.yaml`](https://switchboard.space/slack-app-manifest.yaml).
+1. At [api.slack.com/apps](https://api.slack.com/apps): *Create New App* → *From a manifest* → paste [`slack-app-manifest.yaml`](https://openswitchboard.dev/slack-app-manifest.yaml).
 2. *Basic Information* → *App-Level Tokens* → generate one with `connections:write`: `xapp-…` is `SLACK_APP_TOKEN`.
 3. *Install App* → *Install to Workspace*: the *Bot User OAuth Token* `xoxb-…` is `SLACK_BOT_TOKEN`.
 

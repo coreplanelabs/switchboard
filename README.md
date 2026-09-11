@@ -27,7 +27,7 @@ npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key
 npx @coreplane/switchboard ask "what can you do?"
 ```
 
-`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` runs the whole pipeline. `curl -fsSL https://switchboard.space/install.sh | sh` is the same `init`.
+`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` runs the whole pipeline. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`.
 
 Next: [Get started](docs/tutorials/get-started.md).
 
@@ -77,4 +77,4 @@ Off means absent from `help`, the dashboard and the plan ([Turn features on and 
 
 ## Learn more
 
-Docs: <https://switchboard.space> ([`docs/`](docs/README.md)) · [CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md) · [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
+Docs: <https://openswitchboard.dev> ([`docs/`](docs/README.md)) · [CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md) · [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
