@@ -19,6 +19,7 @@ import type { RunEvent } from "../runEvents.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "../codingPrPostStep.js";
 import { attachRoundWorkspace, makeSystemComposer } from "../reviewRound.js";
 import type { ChildRoundContext, ChildRoundDeps } from "./childRound.js";
+import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./contract.js";
 
 /** The GitHub seam a coding round writes through: the PR open-or-edit and
  *  the lookups the post-step and the description turn make before it. */
@@ -79,6 +80,16 @@ export function buildShipFixTurn(input: { where: string; findings: Finding[]; re
   );
 }
 
+/** The unit contract enters the child's FIRST user turn (docs/reference/specs/agent-ship.md
+ *  item 13): appended as its own text part after the request's text, so the
+ *  human's words stay first and the block is the same bytes the review child
+ *  reads after its REVIEW TARGET block. A transcript with no user turn gets one. */
+export function withContractInFirstUserTurn(messages: ChatMessage[], block: string): ChatMessage[] {
+  const at = messages.findIndex((m) => m.role === "user");
+  if (at < 0) return [...messages, { role: "user", content: [{ type: "text", text: block }] }];
+  return messages.map((m, i) => (i === at ? { ...m, content: [...m.content, { type: "text", text: block }] } : m));
+}
+
 export interface CodingRoundResult {
   answer: string;
   /** Attach-time refusal (the thread's worktree is bound to another ref) —
@@ -107,11 +118,21 @@ export async function runShipCodingChild(
     messages: ChatMessage[];
     knownFindingIds?: string[];
     attachHeadSha?: string;
+    /** The plan unit's contract, when the round runs for one (a plan runner's
+     *  child; the by-hand receipt): rendered into the first user turn. Absent
+     *  on a task-string pipeline, whose messages are used as given. */
+    contract?: ChildContract;
   },
   roundSpan: Span | undefined,
 ): Promise<CodingRoundResult> {
   const { entry, clip, now } = ctx;
   const { control, github, logKey } = input;
+  const messages = opts.contract
+    ? withContractInFirstUserTurn(
+        opts.messages,
+        renderContract(opts.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text,
+      )
+    : opts.messages;
   const spec = input.child("coding");
   const ws = await attachRoundWorkspace({
     factory: input.factory,
@@ -211,7 +232,7 @@ export async function runShipCodingChild(
       provider: spec.provider,
       model: spec.model,
       agent: clip(spec.agent),
-      messages: opts.messages,
+      messages,
       ...(roundSpan ? { span: roundSpan } : {}),
       backend: ws.selection.backend,
       system,
@@ -242,7 +263,7 @@ export async function runShipCodingChild(
       });
       if (turnTarget) {
         descriptionTurnRan = true;
-        const turnMessages = [...opts.messages];
+        const turnMessages = [...messages];
         const run = (span?: Span) =>
           runDescriptionTurn({
             ...(span ? { span } : {}),

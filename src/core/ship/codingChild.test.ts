@@ -9,9 +9,11 @@ import { RunControl } from "../runRegistry/runControl.js";
 import {
   runShipCodingChild,
   shipBranchContract,
+  withContractInFirstUserTurn,
   type CodingChildDeps,
   type CodingChildContext,
 } from "./codingChild.js";
+import { contractFromTask, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./contract.js";
 
 // Feature: docs/reference/specs/agent-ship.md items 3, 4, 6, 7 — one coding child
 // round as a callable stage. The pipeline scenarios in dispatcher.test.ts prove
@@ -185,6 +187,8 @@ describe("runShipCodingChild — one coding round as a stage", () => {
     const out = await runShipCodingChild(d, ctx, { messages }, undefined);
     // the child ran on the resolved coding def, clipped — never the shared def itself
     expect(clipped).toEqual([AGENTS.coding]);
+    // no contract → the first user turn as given, nothing appended (the task-string pipeline)
+    expect(provider.requests[0].messages[0]).toEqual(messages[0]);
     // the branch contract closes the system prompt, after the composed blocks
     const system = provider.requests[0].system ?? "";
     expect(system.endsWith(shipBranchContract(BRANCH))).toBe(true);
@@ -244,6 +248,55 @@ describe("runShipCodingChild — one coding round as a stage", () => {
     expect(out.dispositions).toEqual([{ findingId: "F1", disposition: "declined", note: "not a bug after all" }]);
     // the attach pinned the head the review read
     expect(vi.mocked(makeExecutor).mock.calls[0][1]).toMatchObject({ ref: BRANCH, headSha: HEAD });
+  });
+
+  // docs/reference/specs/agent-ship.md item 13 — the unit contract enters the
+  // coding child's FIRST user turn, rendered by the pipeline from the typed
+  // object, after the request's own text; the description turn runs on the same
+  // transcript.
+  it("a contract → its rendered block is the first user turn's last text part, byte-identical to the render, and the description turn sees the same turn", async () => {
+    const provider = scriptedProvider([say("I pushed."), toolUse("submit_pr_description", DESCRIPTION), say("Done.")]);
+    queueWorkspace(workspace({ head: HEAD, branch: BRANCH }));
+    const { deps: d } = deps(provider);
+    d.github.findOpenPrByHead = vi.fn(async () => ({ number: 7, htmlUrl: PR_URL }));
+    const { ctx } = context();
+    const contract = contractFromTask({ task: "fix the login redirect", rebase: { branch: BRANCH, onto: "main" } });
+    const messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "fix the login redirect" }] }];
+    await runShipCodingChild(d, ctx, { messages, contract }, undefined);
+    const block = renderContract(contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text;
+    const first = provider.requests[0].messages[0];
+    expect(first.role).toBe("user");
+    expect(first.content).toEqual([
+      { type: "text", text: "fix the login redirect" },
+      { type: "text", text: block },
+    ]);
+    expect(block.startsWith("## Contract\n")).toBe(true);
+    expect(block).toContain(`Rebase \`${BRANCH}\` onto \`main\``);
+    // the description turn (a second request) carries the same first turn
+    expect(provider.requests.length).toBeGreaterThan(1);
+    expect(provider.requests.at(-1)!.messages[0]).toEqual(first);
+    // the caller's messages were not mutated
+    expect(messages[0].content).toHaveLength(1);
+  });
+
+  it("withContractInFirstUserTurn: the first USER turn takes the block; a transcript without one gets a user turn made of it", () => {
+    const assistant = { role: "assistant" as const, content: [{ type: "text" as const, text: "earlier" }] };
+    const user = { role: "user" as const, content: [{ type: "text" as const, text: "task" }] };
+    const later = { role: "user" as const, content: [{ type: "text" as const, text: "follow-up" }] };
+    expect(withContractInFirstUserTurn([assistant, user, later], "BLOCK")).toEqual([
+      assistant,
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "task" },
+          { type: "text", text: "BLOCK" },
+        ],
+      },
+      later,
+    ]);
+    expect(withContractInFirstUserTurn([], "BLOCK")).toEqual([
+      { role: "user", content: [{ type: "text", text: "BLOCK" }] },
+    ]);
   });
 
   it("a hard stop during the child → the answer only: nothing observed, no PR write, the workspace released with force", async () => {

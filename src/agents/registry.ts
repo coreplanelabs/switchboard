@@ -1,6 +1,7 @@
 // Agent definitions. An agent is a system prompt + toolset + turn budget.
 import type { Effort } from "../effort.js";
 import type { CacheTtl } from "../providers/types.js";
+import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS } from "../core/ship/contract.js";
 // Which model runs it is resolved separately by the config layers, so any
 // agent can run on any configured provider/model.
 
@@ -69,6 +70,21 @@ EVERY PR includes one that already exists when you push — opened by a person, 
 // same way the review prompts spell out "never an approval or a merge".
 const NEVER_MERGE = `NEVER merge a pull request and NEVER approve one — no merge or approve command, no merge/approve API call, no pushing to the default branch. Your deliverable is the pushed branch plus the submitted description; Switchboard's own GitHub writes are the PR open/edit, never an approval or a merge — a human decides what merges.`;
 
+// The fixed sub-headings of the child contract, spelled once for both
+// prompt families from the module that renders them (src/core/ship/contract.ts).
+const CONTRACT_HEADINGS_LIST = Object.values(CONTRACT_SECTION_HEADINGS)
+  .map((h) => `\`${h}\``)
+  .join(", ");
+
+// The unit contract (docs/reference/specs/agent-coding.md item 8; agent-ship.md
+// item 13): a coding child started for a plan unit is handed the unit's own
+// section, the spec rows it names, the repository's agent rules and the guard
+// names as one block in its first user turn, rendered by Switchboard — never
+// assembled by the child, which would choose what to leave out. Both coding
+// prompts carry this verbatim so the resident and sandbox children read the
+// same rule; the review prompts name the same block and the same severity.
+const UNIT_CONTRACT = `UNIT CONTRACT: when your first user turn carries a \`${CONTRACT_HEADING}\` block — its sub-headings, in this order: ${CONTRACT_HEADINGS_LIST} — it is the contract for one plan unit, rendered by Switchboard from the plan itself, and it outranks any free-text task beside it. Do its first instruction first: the rebase of the unit's branch onto the merged parent (a conflict ends the unit — report it and stop; never resolve it by force). Then implement the unit's section as written: every test scenario it lists is added as a test, every spec row it names is updated so its proof binding resolves, the agent rules are followed, and no guard it names is weakened. The review is handed the same block and checks the diff against it: a test scenario the unit listed and the diff did not add is a finding at minor severity — the same severity as a spec contradiction. Never edit the plan record itself; where the unit is wrong or a criterion could not be proven, say so in your final message.`;
+
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 
 You work inside a dedicated workspace directory with bash, read_file, and write_file tools.
@@ -89,6 +105,8 @@ Workflow for shipping a PR:
 7. Report back with a short summary of what you did, including anything you skipped or couldn't verify; Switchboard adds the PR link when it opens the PR.
 
 ${NEVER_MERGE}
+
+${UNIT_CONTRACT}
 
 ${PR_DESCRIPTION_TEMPLATE}
 
@@ -124,6 +142,8 @@ Workflow for shipping a change:
 
 ${NEVER_MERGE}
 
+${UNIT_CONTRACT}
+
 ${PR_DESCRIPTION_TEMPLATE}
 
 Maintain the user-facing status card with the update_status tool: right after you decide your plan, post it as a checklist (○ pending items), then update it whenever an item starts (✱) or finishes (✓). Items are short outcomes ("Implement the fix", "Run the test suite"), never commands. Mark an item ✓ only after it has actually happened — never pre-mark reporting/posting steps. This is the only progress the user sees while you work.
@@ -148,6 +168,14 @@ const REVIEW_VERDICT_INSTRUCTION = `VERDICT: before your final message, call the
 const REVIEW_SPEC_CHECK = `3. SPEC CONTRADICTION CHECK, when the repository has \`docs/reference/specs/\`: list the specs the change touches — \`npm run --silent specs:coverage -- --changed origin/<base>...HEAD\` (\`<base>\` is the PR's base branch) when the repository's package.json has that script, otherwise match the changed paths against each spec's \`- **Code**:\` / \`- **Tests**:\` header lines (a header path covers itself and everything beneath it). If the command fails for any reason — dependencies not installed, tsx missing, a cold checkout — fall back to matching the header lines by hand; never install dependencies or build to make it run. Then read ONLY those specs, never the whole specs tree — fold the reads into your gather batch where you can. For each touched spec, judge whether the diff contradicts a numbered behavior statement or a validation criterion: code that now does what the spec says it does not, a criterion whose named test the diff removed or retitled, a behavior the diff deleted that the spec still promises. A contradiction is a finding of severity \`minor\` or higher titled \`Spec contradiction — <spec file> item <n>: <what the code now does vs what the spec says>\`; a spec updated in the same diff to match the code is not a finding. A repository with no \`docs/reference/specs/\` has nothing to check — skip this step silently.
    3a. TEST GUARD, in the same repositories: run \`npm run --silent specs:coverage -- --changed origin/<base>...HEAD --test-guard\` (fold it into the same batch). It compares every test file the diff touches at the base and at the head and prints one line per thing lost, in two classes. A \`test-guard: <file> — removed: …\` line is deterministic — the test file deleted, an it/test/describe title gone with no new title to pair with, a skip/only/todo marker (\`.skip(\`, \`.only(\`, \`xit(\`, \`xdescribe(\`, \`it.todo(\`, \`test.todo(\`) on a test the base ran — and each one is a finding of severity \`minor\` or higher titled \`Test removed — <file>: <what>\` whose explanation quotes the guard's line exactly as printed. A \`test-guard: <file> — check: …\` line is a heuristic — fewer \`expect(\` calls in the file, a title gone while another arrived (a rename or a split) — and you dispose of every one of them explicitly in your review, never silently: either "weakened", which makes it a finding at \`minor\`, or "refactor, verification intact" with one clause saying why. A line ending \`— allowed by <spec>\` is licensed by a spec change in the same diff and is neither; \`test-guard ok\` is nothing to report. If the command fails for any reason, judge the same facts from the diff by hand — a deleted test file, a removed title, a new skip marker, fewer assertions — and file each one the diff does not license the same way; never install or build to make it run.`;
 
+// The unit contract check (docs/reference/specs/agent-review.md item 17): the
+// review child of a plan unit is handed the same `## Contract` block the coding
+// child was, after its REVIEW TARGET block, and judges the diff against it. One
+// text for both review variants: a listed test scenario the diff did not add is
+// a finding at minor — the severity the review loop acts on, the same as a
+// spec contradiction — so the unit's own proofs cannot be skipped in silence.
+const REVIEW_UNIT_CONTRACT = `   3b. UNIT CONTRACT, when this prompt carries a \`${CONTRACT_HEADING}\` block after the REVIEW TARGET block (its sub-headings, in order: ${CONTRACT_HEADINGS_LIST}): it is what the coding child was handed for this plan unit, rendered by Switchboard from the plan, and the diff is judged against it. Read the unit's Test scenarios and find each one in the diff: a test scenario the unit listed and the diff did not add is a finding of severity \`minor\` titled \`Contract — test scenario missing: <the scenario>\` — the same severity as a spec contradiction. For each spec row the block names, check its proof binding resolves in the diff; a named row the diff leaves untouched is disposed of out loud, as in 3a: one clause on why it needed no change, or a finding at \`minor\` titled \`Contract — spec row not updated: <spec> item <n>\`. A guard the block names that the diff weakens is the guard's own finding (3a). No \`${CONTRACT_HEADING}\` block in this prompt → nothing to check; skip this step silently.`;
+
 // The whole change, or no verdict (docs/reference/specs/agent-review.md item 15;
 // distilled-diffs.md item 8) — one text for both review variants. Tool output
 // is capped, so a diff the agent reads can end early; a review that judged the
@@ -171,6 +199,7 @@ ${REVIEW_WHOLE_CHANGE}
    - if the PR is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then design/simplification notes. At most 2-3 targeted follow-up reads if a specific caller or callee is load-bearing — never a general exploration loop.
 ${REVIEW_SPEC_CHECK}
+${REVIEW_UNIT_CONTRACT}
 4. REPORT every issue you find, including uncertain or low-severity ones, each with severity, confidence, and file:line. Order findings most-severe first. If the change looks correct, say so plainly — do not manufacture findings.
 
 Do NOT post your review to GitHub yourself — no \`gh pr comment\`, no API call to create a comment. When the review is of a PR, Switchboard posts your final message to that PR automatically by default (as a comment — never an approval or a merge); just produce the review as your final message. If the request asks not to post (e.g. "don't post" / "slack only"), Switchboard handles that too — you still only write the review.
@@ -200,6 +229,7 @@ ${REVIEW_WHOLE_CHANGE}
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then design/simplification notes. At most 2-3 targeted follow-up reads if a specific caller or callee is load-bearing — never a general exploration loop.
 ${REVIEW_SPEC_CHECK}
+${REVIEW_UNIT_CONTRACT}
 4. REPORT every issue you find, including uncertain or low-severity ones, each with severity, confidence, and file:line. Order findings most-severe first. If the change looks correct, say so plainly — do not manufacture findings.
 
 Do NOT post your review to GitHub yourself — no API call to create a comment. When the review is of a PR, Switchboard posts your final message to that PR automatically by default (as a comment — never an approval or a merge); just produce the review as your final message. If the request asks not to post (e.g. "don't post" / "slack only"), Switchboard handles that too — you still only write the review.

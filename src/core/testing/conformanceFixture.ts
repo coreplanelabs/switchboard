@@ -131,6 +131,37 @@ export const NOBODY = "slack:UNOBODY";
 /** The channel a chat caller speaks from (its `origin`) — deliberately not the fixture's `--channel`. */
 export const CHAT_CHANNEL = "slack:CX";
 
+/** `contract render`'s plan: one unit naming one spec row. */
+export const CONTRACT_PLAN = [
+  "# Fixture plan",
+  "",
+  "## Implementation Units",
+  "",
+  "### U16. The child contract",
+  "",
+  "- **Goal**: A coding child never starts from a free-text task alone.",
+  "- **Files**: `src/core/ship/contract.ts`; `docs/reference/specs/agent-ship.md` item 4.",
+  "- **Approach**: build the object, render it under fixed headings.",
+  "- **Test scenarios**: a contract renders under the fixed headings.",
+  "",
+].join("\n");
+/** The spec that plan names, with the item and one row naming it. */
+export const CONTRACT_SPEC = [
+  "# Agent: ship",
+  "",
+  "## Behavior",
+  "",
+  "4. **Round 0 = the PR gate end to end.** The coding child implements, pushes, and submits.",
+  "",
+  "## Validation criteria",
+  "",
+  "| Criterion | Proof |",
+  "|---|---|",
+  "| Round 0 opens the PR (item 4) | `[unit]` `src/core/dispatcher.test.ts::agent:ship (pipeline)::LGTM round 1…` |",
+  "",
+].join("\n");
+export const CONTRACT_RULES = "# Agents\n\nRun only what the Commands table names.";
+
 /** `setup init`'s `.env.example` stand-in: the lines the installer fills, as the real file spells them. */
 export const SETUP_ENV_TEMPLATE = [
   "SLACK_BOT_TOKEN=xoxb-...",
@@ -668,6 +699,17 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       image: () => "ghcr.io/example/switchboard",
       package: () => undefined,
       env: {},
+    },
+    // `contract render`: reads, not executors (not recorded in `executed`) — the one-unit plan for
+    // whatever plan path a variant spells, the spec it names, AGENTS.md as the rules file.
+    contract: {
+      readFile: async (path) => {
+        if (path.endsWith("AGENTS.md")) return CONTRACT_RULES;
+        if (path.endsWith("CLAUDE.md")) return undefined;
+        if (path.includes(join("docs", "reference", "specs")))
+          return path.endsWith("agent-ship.md") ? CONTRACT_SPEC : undefined;
+        return CONTRACT_PLAN;
+      },
     },
     env: {
       bootstrap: async (opts, log): Promise<BootstrapResult> => {

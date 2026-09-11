@@ -1,5 +1,6 @@
 import { CommandRegistry } from "../commandRegistry.js";
 import { registerConfigCommands, type ConfigCommandDeps } from "./config.js";
+import { registerContractCommands, type ContractCommandDeps } from "./contract.js";
 import { registerDeployCommands, type DeployCommandDeps } from "./deploy.js";
 import { registerEnvCommands, type EnvCommandDeps } from "./env.js";
 import { registerFrictionCommands, type FrictionCommandDeps } from "./friction.js";
@@ -33,7 +34,8 @@ export type CoreCommandDeps = HelpCommandDeps &
   DeployCommandDeps &
   EnvCommandDeps &
   SetupCommandDeps &
-  StatusCommandDeps;
+  StatusCommandDeps &
+  ContractCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
   registerHelpCommands(registry);
@@ -49,6 +51,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerDeployCommands(registry);
   registerEnvCommands(registry);
   registerSetupCommands(registry);
+  registerContractCommands(registry);
 }
 
 /** The `<group>` of every registered command's action, once each, sorted — the

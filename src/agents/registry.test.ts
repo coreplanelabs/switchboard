@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS } from "../core/ship/contract.js";
 import { AGENTS, getAgent } from "./registry.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
@@ -478,8 +479,102 @@ describe("review prompts: the test guard (agent-review item 16)", () => {
   });
 
   it("the sandbox and resident prompts carry the same guard text, byte for byte", () => {
-    const step = (sys: string) => sys.slice(sys.indexOf("3a. TEST GUARD"), sys.indexOf("4. REPORT"));
+    const step = (sys: string) => sys.slice(sys.indexOf("3a. TEST GUARD"), sys.indexOf("3b. UNIT CONTRACT"));
     expect(step(AGENTS.review.system)).toBe(step(AGENTS.review.residentSystem!));
     expect(step(AGENTS.review.system).length).toBeGreaterThan(200);
+  });
+});
+
+// Feature: docs/reference/specs/agent-coding.md item 8 — the unit contract. A
+// coding child started for a plan unit finds a `## Contract` block in its first
+// user turn, rendered by Switchboard from the plan; both coding prompts name the
+// block, its fixed sub-headings in order, the first instruction (the rebase),
+// and the rule the review holds it to: a listed test scenario the diff did not
+// add is a finding at minor — the same severity as a spec contradiction.
+describe("coding prompts: the unit contract (agent-coding item 8)", () => {
+  const prompts = () => [AGENTS.coding.system, AGENTS.coding.residentSystem!];
+  const headings = Object.values(CONTRACT_SECTION_HEADINGS);
+
+  it("both coding prompts name the `## Contract` block and every fixed sub-heading, in the module's order", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(/UNIT CONTRACT: when your first user turn carries a `## Contract` block/);
+      expect(sys).toContain(`\`${CONTRACT_HEADING}\``);
+      const at = headings.map((h) => sys.indexOf(`\`${h}\``));
+      expect(at.every((i) => i > 0)).toBe(true);
+      expect([...at].sort((a, b) => a - b)).toEqual(at);
+    }
+  });
+
+  it("the block outranks the free-text task, the rebase comes first, the plan is never edited", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(/outranks any free-text task/);
+      expect(sys).toMatch(/Do its first instruction first: the rebase of the unit's branch onto the merged parent/);
+      expect(sys).toMatch(/a conflict ends the unit — report it and stop/);
+      expect(sys).toMatch(/Never edit the plan record/);
+    }
+  });
+
+  it("a listed test scenario the diff did not add is a finding at minor — the same severity as a spec contradiction", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(
+        /a test scenario the unit listed and the diff did not add is a finding at minor severity — the same severity as a spec contradiction/,
+      );
+      expect(sys).toMatch(/every test scenario it lists is added as a test/);
+      expect(sys).toMatch(/every spec row it names is updated so its proof binding resolves/);
+      expect(sys).toMatch(/no guard it names is weakened/);
+    }
+  });
+
+  it("the sandbox and resident coding prompts carry the same contract text, byte for byte", () => {
+    const step = (sys: string) => sys.slice(sys.indexOf("UNIT CONTRACT:"), sys.indexOf("PR description — submit it"));
+    expect(step(AGENTS.coding.system)).toBe(step(AGENTS.coding.residentSystem!));
+    expect(step(AGENTS.coding.system).length).toBeGreaterThan(300);
+  });
+});
+
+// Feature: docs/reference/specs/agent-review.md item 17 — the unit contract
+// check. The review child of a plan unit reads the same `## Contract` block
+// after its REVIEW TARGET block and judges the diff against it, as sub-step 3b
+// between the test guard and the report; a listed scenario the diff did not add
+// is a finding at minor, a named spec row left untouched is disposed of out
+// loud, and a prompt without the block skips the step silently.
+describe("review prompts: the unit contract check (agent-review item 17)", () => {
+  const prompts = () => [AGENTS.review.system, AGENTS.review.residentSystem!];
+  const headings = Object.values(CONTRACT_SECTION_HEADINGS);
+
+  it("both review prompts carry the step after the test guard and before the report, naming the block after the REVIEW TARGET block and every sub-heading in order", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(
+        /3b\. UNIT CONTRACT, when this prompt carries a `## Contract` block after the REVIEW TARGET block/,
+      );
+      expect(sys.indexOf("3b. UNIT CONTRACT")).toBeGreaterThan(sys.indexOf("3a. TEST GUARD"));
+      expect(sys.indexOf("3b. UNIT CONTRACT")).toBeLessThan(sys.indexOf("4. REPORT"));
+      const at = headings.map((h) => sys.indexOf(`\`${h}\``));
+      expect(at.every((i) => i > 0)).toBe(true);
+      expect([...at].sort((a, b) => a - b)).toEqual(at);
+    }
+  });
+
+  it("a listed test scenario the diff did not add is a finding of severity minor titled by the scenario — the same severity as a spec contradiction", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(
+        /a test scenario the unit listed and the diff did not add is a finding of severity `minor` titled `Contract — test scenario missing: <the scenario>` — the same severity as a spec contradiction/,
+      );
+    }
+  });
+
+  it("a named spec row the diff leaves untouched is disposed of out loud; a weakened guard is the guard's finding; no block → skip silently", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(/a named row the diff leaves untouched is disposed of out loud/);
+      expect(sys).toContain("`Contract — spec row not updated: <spec> item <n>`");
+      expect(sys).toMatch(/A guard the block names that the diff weakens is the guard's own finding \(3a\)/);
+      expect(sys).toMatch(/No `## Contract` block in this prompt → nothing to check; skip this step silently/);
+    }
+  });
+
+  it("the sandbox and resident review prompts carry the same contract step, byte for byte", () => {
+    const step = (sys: string) => sys.slice(sys.indexOf("3b. UNIT CONTRACT"), sys.indexOf("4. REPORT"));
+    expect(step(AGENTS.review.system)).toBe(step(AGENTS.review.residentSystem!));
+    expect(step(AGENTS.review.system).length).toBeGreaterThan(300);
   });
 });

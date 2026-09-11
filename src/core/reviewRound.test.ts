@@ -287,6 +287,34 @@ describe("makeSystemComposer (head-pinned composition with an explicit AgentDef)
     expect(moved).not.toContain(HEAD);
   });
 
+  it("a unit contract block sits right after the REVIEW TARGET block and before the trailing skills; without a target it follows the agent prompt", () => {
+    const compose = makeSystemComposer({
+      agent: AGENTS.review,
+      resident: true,
+      repo: "acme/api",
+      workspace: "/workspace/threads/t/x",
+      prTarget: { repo: "acme/api", pr: 42, ref: "patch-1", baseRef: "main" },
+      contract: "## Contract\n\nTHE BLOCK",
+      blocks: { ...blocks, skills: "SKL" },
+    });
+    const system = compose({ sha: HEAD, verified: true });
+    const target = system.indexOf("REVIEW TARGET (resolved by Switchboard");
+    const contract = system.indexOf("## Contract\n\nTHE BLOCK");
+    expect(target).toBeGreaterThan(0);
+    expect(contract).toBeGreaterThan(target);
+    expect(system.endsWith("## Contract\n\nTHE BLOCK\n\nSKL")).toBe(true);
+    const bare = makeSystemComposer({
+      agent: AGENTS.general,
+      resident: false,
+      repo: undefined,
+      workspace: undefined,
+      prTarget: undefined,
+      contract: "## Contract\n\nTHE BLOCK",
+      blocks,
+    });
+    expect(bare({ sha: undefined, verified: false })).toBe(`${AGENTS.general.system}\n\n## Contract\n\nTHE BLOCK`);
+  });
+
   it("blocks lead in order (memory, config, instructions) and skills trail the agent prompt", () => {
     const compose = makeSystemComposer({
       agent: AGENTS.general,
