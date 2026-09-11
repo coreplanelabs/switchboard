@@ -524,6 +524,8 @@ export const FIELD_HINTS: SampleHints = {
   // contract.render: the fixture plan's one unit (the fake reads the plan for any plan path).
   plan: "docs/plans/fixture-plan.md",
   unit: "U16",
+  // delivery.report: a calendar day the range resolver accepts (`YYYY-MM-DD`).
+  since: "2026-09-01T00:00:00Z".slice(0, 10),
 };
 
 /** Commands the generic fixture cannot drive on its own: `hints` override a

@@ -142,6 +142,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 |---|---|---|
 | `contract render --plan <string> --unit <string> [--root <string>] [--branch <string>] [--onto <string>] [--max-chars <integer>]` | Render one plan unit's child contract — its section, the spec rows it names with their proof bindings, the repository's agent rules, the guards — as the `## Contract` block a coding prompt carries, and measure it. | CLI only |
 
+### `delivery`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `delivery report [--repo <string>] [--since <string>] [--weeks <integer>]` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — read from GitHub and the run history; nothing written. | every surface |
+
 <!-- /generated:cli-commands -->
 
 ## Which commands need bot config

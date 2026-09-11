@@ -18,5 +18,6 @@ export const routes: RouteRecordRaw[] = [
     component: () => import("./pages/ResidentDetailPage.vue"),
   },
   { path: "/costs/:group?", component: () => import("./pages/CostsPage.vue") },
+  { path: "/delivery/:owner?/:name?", component: () => import("./pages/DeliveryPage.vue") },
   { path: "/:pathMatch(.*)*", component: () => import("./pages/NotFoundPage.vue") },
 ];

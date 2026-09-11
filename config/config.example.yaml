@@ -272,6 +272,16 @@ workspaceDir: ./workspaces
 #         some-other-bucket: uploads
 #       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
 
+# Delivery indicators: GET /delivery and `delivery report` (docs/reference/specs/delivery.md).
+# Optional. Needs a GitHub credential (the App triple or GH_TOKEN); read-only.
+# delivery:
+#   repos: [acme/api, acme/web]          # the repositories the page serves; the first is its default
+#                                        #   (`delivery report --repo owner/name` needs no entry here)
+#   reviewers: []                        # logins whose reviews count as the review agent's verdicts,
+#                                        #   beside this installation's own App identity
+#   agentLogins: []                      # logins that are agents beyond the `[bot]` suffix
+#   agentCoauthors: [Claude]             # `Co-Authored-By:` names that mark a commit as an agent's
+
 # Dashboard authentication (docs/reference/specs/access-gate.md). Everything the dashboard
 # serves — /runs*, /residents*, /costs*, /mcp/connect/*, and every /api/* command
 # — sits behind ONE identity gate; `auth` picks which credential it checks:

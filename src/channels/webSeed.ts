@@ -1,6 +1,7 @@
 import type { RunStatus } from "../core/runRecord.js";
 import type { RunView } from "../core/runsService.js";
 import type { CostReport } from "../core/costs.js";
+import type { DeliveryReport } from "../core/delivery.js";
 import type { ScheduledRow } from "./scheduledPanel.js";
 import type { LiveFrame } from "./liveView/sse.js";
 import type { Capabilities } from "../core/capabilities.js";
@@ -121,6 +122,13 @@ export interface CostsSeed {
   groups: string[];
 }
 
+export interface DeliverySeed {
+  page: "delivery";
+  report: DeliveryReport;
+  /** The configured repositories, for the switcher; the report's is one of them. */
+  repos: string[];
+}
+
 /** One page's data, as its view builds it. */
 export type PageSeed =
   | RunsIndexSeed
@@ -130,7 +138,8 @@ export type PageSeed =
   | RunNotFoundSeed
   | ResidentsIndexSeed
   | ResidentDetailSeed
-  | CostsSeed;
+  | CostsSeed
+  | DeliverySeed;
 
 /** What the island holds: the page's seed plus what is on in this process
  *  (src/core/capabilities.ts) — stamped by the shell renderer (webShell.ts),

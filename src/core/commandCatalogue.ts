@@ -22,7 +22,10 @@ import { hostSetupIO } from "../setup/host.js";
 import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
+import { resolveGithubIdentity } from "../execution/githubApp.js";
+import { GithubDeliverySource } from "../execution/githubDelivery.js";
 import { ResidentOperations } from "../execution/resident.js";
+import { createDeliveryService, NullDeliveryService, parseDeliveryConfig, type DeliveryService } from "./delivery.js";
 import {
   CommandRegistry,
   bindCommands,
@@ -109,6 +112,10 @@ export interface CoreCommandWiring {
    *  (build stamp, start, in-flight, draining); default: this package's version,
    *  no stamp, nothing in flight — what a CLI or a test process truthfully is. */
   status?: () => StatusSnapshot;
+  /** The delivery service behind `delivery report` (index.ts shares the one the
+   *  `/delivery` page reads); default: GitHub over the App's read token with the
+   *  `delivery:` config, or the Null Object when the process has no GitHub credential. */
+  delivery?: () => DeliveryService;
 }
 
 /** The snapshot of a process nobody stamped: a checkout's CLI, a test. */
@@ -212,6 +219,14 @@ export function buildCoreCommands(
       ? reviewAbridgerFromConfig(() => config.config, store, wiring.secrets, publicEnv(), wiring.dataDir, wiring.warn)
       : undefined;
   });
+  // ONE delivery service per binding: the page and the command read the same
+  // repositories under the same identities. Without a GitHub credential the
+  // Null Object answers (the command is hidden by its capability before that).
+  const delivery = once(async (): Promise<DeliveryService> => {
+    if (wiring.delivery) return wiring.delivery();
+    if (wiring.capabilities && !wiring.capabilities.github) return new NullDeliveryService();
+    return deliveryServiceFromConfig(parseDeliveryConfig((await cfg()).config.delivery));
+  });
   const deps: CoreCommandDeps = {
     help: {
       agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
@@ -273,6 +288,19 @@ export function buildCoreCommands(
     setup: hostSetupIO(),
     // `contract render` reads the paths the CLI caller names (CLI-only).
     contract: { readFile: readOptionalFile },
+    delivery: { service: delivery },
   };
   return bindCommands(registry, deps);
+}
+
+/** The production delivery service: GitHub over the App's read-scoped token, the
+ *  review agent's verdicts recognised by the App's own login beside any the
+ *  config names (the identity is looked up once per process, on first use). */
+export function deliveryServiceFromConfig(cfg: ReturnType<typeof parseDeliveryConfig>): DeliveryService {
+  return createDeliveryService(cfg, new GithubDeliverySource(), {
+    identities: async () => {
+      const identity = await resolveGithubIdentity();
+      return identity ? { reviewers: [identity.login] } : {};
+    },
+  });
 }

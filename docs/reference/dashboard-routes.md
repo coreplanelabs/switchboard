@@ -2,7 +2,7 @@
 
 Every route below sits behind the dashboard's one identity gate unless noted. Which credential it checks is the `dashboard.auth` strategy in [config.yaml](configuration.md): `access` — a Cloudflare Access browser session or, for machine callers, a service token (the default when `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are set); `token` — an `Authorization: Bearer` header holding the secret in `DASHBOARD_TOKEN` (or the env var `dashboard.token.env` names), which resolves to the one actor `dashboard.token.actor` names; or `none` — no credential, served only to loopback callers of a localhost deployment and refused everywhere else (the default without Access). None of them set caching headers that would let a proxy or browser cache a response beyond the request that made it (`no-store` throughout) — every load is live.
 
-The header lists only the surfaces this installation has: **Residents** appears when resident environments are configured (`execution.resident`), **Costs** when `costs` is configured with its analytics token, the **Scheduled** tab when `schedules.worker` records firings. The docs link is always there: it opens the project's published site. The routes themselves still answer without their subsystem — with a `503` naming the config that turns them on.
+The header lists only the surfaces this installation has: **Residents** appears when resident environments are configured (`execution.resident`), **Costs** when `costs` is configured with its analytics token, **Delivery** when a GitHub credential is set, the **Scheduled** tab when `schedules.worker` records firings. The docs link is always there: it opens the project's published site. The routes themselves still answer without their subsystem — with a `503` naming the config that turns them on.
 
 | Route | Shows | Notes |
 |---|---|---|
@@ -17,6 +17,9 @@ The header lists only the surfaces this installation has: **Residents** appears 
 | `GET /costs` | Daily spend across every configured group | Priced live from Cloudflare + (optionally) Anthropic billing data, nothing cached |
 | `GET /costs/<group>` | Spend for one group | |
 | `GET /costs/<group>.json` | Same data, machine-readable | For scripting/alerting, not for embedding a live dashboard elsewhere |
+| `GET /delivery` | Delivery indicators for the first configured repository — issue-to-merge time, first-pass CI, review rounds, the findings and the share resolved with no human edit, per week and per unit | Read live from GitHub and the run history you may see; `?weeks=n` or `?since=YYYY-MM-DD`; nothing stored |
+| `GET /delivery/<owner>/<name>` | The same for one configured repository | The command twin, `delivery report --repo`, takes any repository |
+| `GET /delivery/<owner>/<name>.json` | Same data, machine-readable | |
 | `GET /mcp/connect/<nonce>` | The one-time MCP credential-paste form | Bound to whoever mints it or first opens it; single use, expires in 10 minutes |
 | `GET /healthz` | `{ok, inFlight, draining, catchUp}` | **Not** gated — this is the process health probe, meant to be hit by the deploy tooling and the container platform |
 
@@ -58,6 +61,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/mcp.remove` | `POST` | `mcp:write` | Remove an MCP server you added and its stored credential (yours freely; channel ones need channel-config rights, org-wide ones admin rights). |
 | `/api/schedule.list` | `GET`, `POST` | `schedule:read` | Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did. |
 | `/api/deploy.plan` | `GET`, `POST` | `deploy:read` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why. |
+| `/api/delivery.report` | `GET`, `POST` | `delivery:read` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — read from GitHub and the run history; nothing written. |
 
 <!-- /generated:api-routes -->
 
