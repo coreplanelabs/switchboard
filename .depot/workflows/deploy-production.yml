@@ -1,3 +1,8 @@
+# Depot CI Migration
+# Source: .github/workflows/deploy-production.yml
+#
+# No changes were necessary.
+
 # Production deploy — the one path (docs/reference/specs/release-and-deploy.md items 2–3,
 # 9–11, 27), reusable from any repository. release-please.yml calls it when a
 # release is cut; a maintainer can dispatch it from main; an operator's own
@@ -86,7 +91,6 @@
 #                         the App token minted below can read exactly it; unset,
 #                         no token is minted (a path profile needs none)
 name: deploy-production
-
 on:
   workflow_call:
     inputs:
@@ -146,10 +150,8 @@ on:
         description: Bypass the bot/resident preflights — deploy over a rollout in progress, or blind when a bot cannot be consulted (in-flight bot runs hand off regardless)
         type: boolean
         default: false
-
 permissions:
   contents: read
-
 jobs:
   deploy:
     name: deploy ${{ inputs.targets }}

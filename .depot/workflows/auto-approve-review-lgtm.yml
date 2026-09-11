@@ -1,3 +1,9 @@
+# Depot CI Migration
+# Source: .github/workflows/auto-approve-review-lgtm.yml
+#
+# Changes made:
+# - Removed unsupported trigger "pull_request_review"
+
 # Approves a pull request when the repository's review App posts an "LGTM:"
 # verdict.
 #
@@ -34,23 +40,14 @@
 # protection ("Dismiss stale approvals" + a required human review) is the
 # real backstop.
 name: Auto-approve review LGTM
-
-on:
-  pull_request_review:
-    types: [submitted]
-
+# Removed unsupported trigger: pull_request_review. Pull request review events are not supported.
+on: {}
 permissions: {}
-
 jobs:
   approve:
     runs-on: depot-ubuntu-24.04
     if: >-
-      vars.REVIEW_BOT_LOGIN != '' &&
-      vars.REVIEW_BOT_ID != '' &&
-      github.event.review.user.login == vars.REVIEW_BOT_LOGIN &&
-      format('{0}', github.event.review.user.id) == vars.REVIEW_BOT_ID &&
-      github.event.review.state == 'commented' &&
-      startsWith(github.event.review.body, 'LGTM:')
+      vars.REVIEW_BOT_LOGIN != '' && vars.REVIEW_BOT_ID != '' && github.event.review.user.login == vars.REVIEW_BOT_LOGIN && format('{0}', github.event.review.user.id) == vars.REVIEW_BOT_ID && github.event.review.state == 'commented' && startsWith(github.event.review.body, 'LGTM:')
     permissions:
       pull-requests: write
     steps:

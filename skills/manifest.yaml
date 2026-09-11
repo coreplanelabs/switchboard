@@ -13,7 +13,7 @@ sources:
   addyosmani/agent-skills:
     repo: https://github.com/addyosmani/agent-skills
     ref: main
-    commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+    commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
 skills:
   # First-party (local: true): authored in this repo, never synced — git is
   # the integrity; the check verifies presence + agents and refuses an

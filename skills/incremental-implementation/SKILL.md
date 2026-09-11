@@ -1,15 +1,16 @@
 ---
 name: incremental-implementation
-description: Delivers changes incrementally. Use when implementing any feature
-  or change that touches more than one file. Use when you're about to write a
-  large amount of code at once, or when a task feels too big to land in one
-  step.
+description: Delivers changes incrementally in thin, verifiable slices. Use when
+  implementing any feature or change that touches more than one file, or when
+  picking up the next task from a plan. Use when rolling a change out behind a
+  feature flag, when you're about to write a large amount of code at once, or
+  when a task feels too big to land in one step.
 agents:
   - coding
-source: https://github.com/addyosmani/agent-skills/blob/d2c37ef6225dd8726cdd369a8030307f48592d26/skills/incremental-implementation/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/incremental-implementation/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
   path: skills/incremental-implementation/SKILL.md
   bodySha256: d09768665f152ae33f3a5098f374a1234e9fd62d06559660604e5882c1791e4f
 ---

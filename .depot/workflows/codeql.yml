@@ -1,3 +1,8 @@
+# Depot CI Migration
+# Source: .github/workflows/codeql.yml
+#
+# No changes were necessary.
+
 # Static analysis of the TypeScript across the repo. Runs on every PR, on
 # main, and weekly so newly published queries are applied to unchanged code.
 #
@@ -8,17 +13,14 @@
 # required status check before the repository is public — a skipped required
 # check satisfies branch protection, so requiring it would be vacuous.
 name: codeql
-
 on:
   pull_request:
   push:
     branches: [main]
   schedule:
     - cron: "17 6 * * 1"
-
 permissions:
   contents: read
-
 jobs:
   visibility:
     name: is the repository public?
@@ -37,7 +39,6 @@ jobs:
           else
             echo "public=true" >> "$GITHUB_OUTPUT"
           fi
-
   analyze:
     name: analyze javascript-typescript
     needs: visibility
