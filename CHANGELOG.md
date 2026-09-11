@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.201.0](https://github.com/coreplanelabs/switchboard/compare/v1.200.0...v1.201.0) (2026-09-11)
+
+
+### Features
+
+* **web:** the dashboard wears the docs site's visual system — Instrument Sans and JetBrains Mono, neutral greys, an inverted-neutral action colour, in both modes ([#935](https://github.com/coreplanelabs/switchboard/issues/935)) ([f3d9b5b](https://github.com/coreplanelabs/switchboard/commit/f3d9b5b998ee5d295a80d1b6e728d72cf294b53a))
+
+
+### Documentation
+
+* name the exact test-file extensions the test guard reads ([#938](https://github.com/coreplanelabs/switchboard/issues/938)) ([fd7ad0c](https://github.com/coreplanelabs/switchboard/commit/fd7ad0cb25dbddae04aa9e3189597caa2740c3a5))
+
 ## [1.200.0](https://github.com/coreplanelabs/switchboard/compare/v1.19.3...v1.200.0) (2026-09-11)
 
 
