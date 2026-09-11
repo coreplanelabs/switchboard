@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.202.0](https://github.com/coreplanelabs/switchboard/compare/v1.201.0...v1.202.0) (2026-09-11)
+
+
+### Features
+
+* **docs:** every page of the docs site gets a social card, drawn at build time from the page's own title ([#942](https://github.com/coreplanelabs/switchboard/issues/942)) ([56040ca](https://github.com/coreplanelabs/switchboard/commit/56040ca02ce5643c70eec871e6f16e69a1de9953))
+* **ship:** a coding child is handed the unit's contract — its plan section, the spec rows it names, the agent rules and the guard names — and the review child checks the diff against the same block ([#945](https://github.com/coreplanelabs/switchboard/issues/945)) ([80806d1](https://github.com/coreplanelabs/switchboard/commit/80806d184dac6d870b804573093918a819121fc1))
+
+
+### Bug fixes
+
+* **resident:** a restore the runtime replacement interrupts is degraded and retried, never down — the deploy that rolls a container mid-restore no longer strands the resident until a rebuild ([#939](https://github.com/coreplanelabs/switchboard/issues/939)) ([8f6ae3d](https://github.com/coreplanelabs/switchboard/commit/8f6ae3dd7177bea20bcb572f09b429ba615047b2))
+
+
+### Documentation
+
+* **docs:** Get started tells a stranger what Switchboard is, then gets to a Slack bot in two parts — production moves to the Deploy how-to ([#948](https://github.com/coreplanelabs/switchboard/issues/948)) ([fedf02a](https://github.com/coreplanelabs/switchboard/commit/fedf02a8a752338aa90f8f4316c1fd9933a5a120))
+* **docs:** the product is Switchboard and its site is switchboard.space — every copy follows project.json, and the facts check now catches a retired product domain ([#941](https://github.com/coreplanelabs/switchboard/issues/941)) ([0b7a9c7](https://github.com/coreplanelabs/switchboard/commit/0b7a9c703c7bee28edd16598ca50048f3bce7c50))
+* **docs:** the site stays at openswitchboard.dev until the zone can move — the docs fact reverts, the name does not ([#946](https://github.com/coreplanelabs/switchboard/issues/946)) ([f5497ae](https://github.com/coreplanelabs/switchboard/commit/f5497aefd3b9c3ac9b8b5b66031254631e04b6d5))
+
+
+### Refactoring
+
+* **resident:** the refresh instance lives in its own module — the Workflow entrypoint, the cron's instance creation and the existence probe leave worker.ts, which re-exports the class the binding names ([#943](https://github.com/coreplanelabs/switchboard/issues/943)) ([03a2b2e](https://github.com/coreplanelabs/switchboard/commit/03a2b2ef6bd74339745095a6e8b133acb55eeaa0))
+
 ## [1.201.0](https://github.com/coreplanelabs/switchboard/compare/v1.200.0...v1.201.0) (2026-09-11)
 
 
