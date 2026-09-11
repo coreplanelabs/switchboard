@@ -173,11 +173,13 @@ describe("the package manifest", () => {
     }
   });
 
-  it("runs on the Node the tree pins (.nvmrc), names the bundled CLI as the `switchboard` bin, ships only dist/, and would publish public", () => {
+  it("runs on the Node the tree pins (.nvmrc), names the committed entry that hands the process to the bundle as the `switchboard` bin, ships bin/ and dist/ alone, and would publish public", () => {
     const pinned = read(".nvmrc").trim();
     expect(pkg.engines.node).toBe(`>=${pinned}`);
-    expect(pkg.bin).toEqual({ switchboard: "dist/cli.js" });
-    expect(pkg.files).toEqual(["dist"]);
+    // A committed file, never the bundle: npm links a bin only when its target exists at install time, and the
+    // gitignored dist/ does not until the build runs (bin.test.mts).
+    expect(pkg.bin).toEqual({ switchboard: "bin/switchboard.js" });
+    expect(pkg.files).toEqual(["bin", "dist"]);
     // Public by config; no provenance — npm takes it from GitHub-hosted runners alone, and CI runs on Namespace (release-please.yml).
     expect(pkg.publishConfig).toEqual({ access: "public" });
   });

@@ -3,9 +3,12 @@ import { pathToFileURL } from "node:url";
 
 /**
  * True when the module at `moduleUrl` is the script Node was started with —
- * through a symlink too (the `switchboard` bin npm links to `dist/cli.js`:
- * `argv[1]` is the link, `import.meta.url` the target) — never when merely
- * imported. Pure over its arguments; `claimEntry` is what the entry points use.
+ * through a symlink too (npm links the `switchboard` bin under
+ * `node_modules/.bin`: `argv[1]` is the link, `import.meta.url` the target;
+ * the package's bin, `packages/switchboard/bin/switchboard.js`, sets `argv[1]`
+ * to the bundle it imports, so `dist/cli.js` is the script there) — never when
+ * merely imported. Pure over its arguments; `claimEntry` is what the entry
+ * points use.
  */
 export function invokedAsScript(moduleUrl: string, entry: string | undefined = process.argv[1]): boolean {
   if (!entry) return false;
