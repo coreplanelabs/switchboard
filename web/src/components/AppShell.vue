@@ -53,10 +53,16 @@ const menuItems = computed(() => [
 </script>
 
 <template>
-  <div class="mx-auto max-w-[80rem] px-3 pb-16 pt-4 sm:px-5">
-    <header class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-default pb-3">
+  <div class="mx-auto max-w-[80rem] px-3 pb-16 sm:px-5">
+    <!-- The header stays put: the canvas at 75% over a blur, so the page scrolls
+         under it and the run's Stop/Kill and the site nav are always at hand. -->
+    <header
+      class="sticky top-0 z-20 -mx-3 mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-default bg-default/75 px-3 pb-3 pt-4 backdrop-blur sm:-mx-5 sm:px-5"
+    >
       <slot name="leading" />
-      <h1 class="flex items-center gap-2 text-base font-semibold text-highlighted"><BrandMark />{{ title }}</h1>
+      <h1 class="flex items-center gap-2 text-base font-medium tracking-tight text-highlighted">
+        <BrandMark />{{ title }}
+      </h1>
       <slot name="status" />
       <span class="ml-auto flex items-center gap-4">
         <slot name="actions" />

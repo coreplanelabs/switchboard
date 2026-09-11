@@ -72,18 +72,21 @@ const count = computed(() => str(seed?.count) || String(rows.value.length));
             :href="row.href ?? undefined"
           >
             <StatusDot :tone="row.tone" :label="row.state" :tip="row.state" />
-            <span class="font-semibold text-primary">{{ row.display }}</span>
-            <span class="font-semibold">{{ row.state }}</span>
+            <span class="font-mono font-medium text-primary">{{ row.display }}</span>
+            <span class="font-medium">{{ row.state }}</span>
             <!-- The facts wrap to their own indented line on a phone instead of
                  breaking mid-token at the left edge. -->
-            <span class="text-xs text-muted max-sm:basis-full max-sm:pl-5" :title="row.refreshed || undefined">
+            <span
+              class="font-mono text-xs text-muted max-sm:basis-full max-sm:pl-5"
+              :title="row.refreshed || undefined"
+            >
               ref {{ row.ref }}<template v-if="row.sha"> · sha {{ row.sha }}</template
               ><template v-if="row.refreshedLabel"> · refreshed {{ row.refreshedLabel }}</template
               ><template v-if="row.disk">
                 · <span :title="row.diskAt ? `measured ${row.diskAt}` : undefined">disk {{ row.disk }}</span></template
               >
             </span>
-            <span v-if="row.reason" class="basis-full pl-5 text-xs text-warning">{{ row.reason }}</span>
+            <span v-if="row.reason" class="basis-full pl-5 text-xs text-warn">{{ row.reason }}</span>
           </component>
         </li>
       </ul>

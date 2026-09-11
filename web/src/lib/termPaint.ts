@@ -4,9 +4,9 @@ import type { Phase } from "./runPageModel";
 // The ONE mapping from a word of the bar to its paint — a global CSS class
 // (web/src/assets/main.css, `.paint-*`) so the bar's segments, the legend's
 // swatches and the phase heads' markers can never disagree. Each counted
-// bucket has its own hue from the theme's tokens, with contrast in both
-// themes: getting ready blue (`--ui-info`), thinking the product green
-// (`--ui-primary`), in tools violet (`--sb-skill`), finishing up muted
+// bucket has its own hue from the theme's status tokens, with contrast in
+// both themes: getting ready blue (`--sb-info`), thinking the data green
+// (`--sb-ok`), in tools violet (`--sb-skill`), finishing up muted
 // (`--ui-text-dimmed`); the residual is hatched grey and the two loss terms
 // are striped amber or hollow — visibly "not work".
 

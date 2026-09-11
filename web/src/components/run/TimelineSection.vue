@@ -35,7 +35,7 @@ function copyDebug(): void {
     class="block mb-4 rounded-lg border border-default bg-(--ui-bg-muted) px-(--sb-gutter) py-3"
     data-testid="timeline"
   >
-    <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
+    <h2 class="mb-2 flex items-baseline gap-2.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">
       <span>Where the time went</span>
       <span class="ml-auto flex items-baseline gap-3 font-normal normal-case tracking-normal">
         <a
@@ -57,7 +57,7 @@ function copyDebug(): void {
     </h2>
     <!-- The lede: the total (the header's, to the second) and what is happening
          now; below the gate the total and the one dominant word instead. -->
-    <p class="lede text-sm text-toned">
+    <p class="lede font-mono text-sm text-toned">
       <span class="shape tabular-nums">{{ vm.shown ? vm.total : vm.lede }}</span>
       <span v-if="vm.current" class="current text-muted"> · {{ vm.current }}</span>
     </p>
@@ -77,7 +77,7 @@ function copyDebug(): void {
       </div>
       <!-- The legend: the bar's segments, labelled — swatch · word · time, the
            word's definition on hover. Same numbers, same order as the bar. -->
-      <ul class="legend mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+      <ul class="legend mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs">
         <li
           v-for="item in vm.legend"
           :key="item.term"
@@ -92,12 +92,12 @@ function copyDebug(): void {
       </ul>
       <template v-if="vm.ranked.length > 0">
         <h3
-          class="ranked-head mt-3 inline-block cursor-help text-xs font-semibold text-muted underline decoration-dotted decoration-(--ui-border-accented) underline-offset-2"
+          class="ranked-head mt-3 inline-block cursor-help text-xs font-medium text-muted underline decoration-dotted decoration-(--ui-border-accented) underline-offset-2"
           :title="vm.rankedNote"
         >
           Longest steps
         </h3>
-        <ol class="ranked mt-1 flex flex-col gap-1 text-xs">
+        <ol class="ranked mt-1 flex flex-col gap-1 font-mono text-xs">
           <li v-for="(item, i) in vm.ranked" :key="i" class="flex items-baseline gap-2">
             <span class="ms w-14 shrink-0 tabular-nums text-toned">{{ formatDuration(item.ms, "clock") }}</span>
             <a

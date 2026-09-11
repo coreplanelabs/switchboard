@@ -148,14 +148,14 @@ const diskParts = computed(() => {
     </template>
 
     <section class="mt-4 first:mt-0">
-      <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Lifecycle</h2>
-      <table class="w-full border-collapse text-[0.8125rem]">
+      <h2 class="mb-1.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">Lifecycle</h2>
+      <table class="w-full border-collapse font-mono text-[0.8125rem]">
         <tbody>
           <tr class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">state</td>
             <td class="px-2 py-1 align-top">
               <StatusDot :tone="residentStateTone(live.state)" :label="live.state" />
-              <span class="ml-1.5 font-semibold">{{ live.state }}</span>
+              <span class="ml-1.5 font-medium">{{ live.state }}</span>
             </td>
           </tr>
           <tr class="border-t border-muted">
@@ -200,8 +200,8 @@ const diskParts = computed(() => {
     </section>
 
     <section class="mt-4">
-      <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Pinned facts</h2>
-      <table class="w-full border-collapse text-[0.8125rem]">
+      <h2 class="mb-1.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">Pinned facts</h2>
+      <table class="w-full border-collapse font-mono text-[0.8125rem]">
         <tbody>
           <tr class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">repository</td>
@@ -248,9 +248,9 @@ const diskParts = computed(() => {
     </section>
 
     <section class="mt-4">
-      <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Disk</h2>
+      <h2 class="mb-1.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">Disk</h2>
       <template v-if="disk">
-        <table class="w-full border-collapse text-[0.8125rem]">
+        <table class="w-full border-collapse font-mono text-[0.8125rem]">
           <tbody>
             <tr v-for="[label, value] in diskFacts" :key="label" class="border-t border-muted">
               <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ label }}</td>
@@ -262,7 +262,7 @@ const diskParts = computed(() => {
           components (one du, hardlinks counted once — a thread tree shows only what it does not share with the
           checkout)
         </p>
-        <table class="w-full border-collapse text-[0.8125rem]">
+        <table class="w-full border-collapse font-mono text-[0.8125rem]">
           <tbody>
             <tr v-for="[label, value] in diskParts" :key="label" class="border-t border-muted">
               <td class="w-32 break-all px-2 py-1 align-top text-muted sm:w-96 sm:break-words">{{ label }}</td>
@@ -277,8 +277,8 @@ const diskParts = computed(() => {
     </section>
 
     <section class="mt-4">
-      <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Snapshot stamp</h2>
-      <table v-if="snapshot" class="w-full border-collapse text-[0.8125rem]">
+      <h2 class="mb-1.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">Snapshot stamp</h2>
+      <table v-if="snapshot" class="w-full border-collapse font-mono text-[0.8125rem]">
         <tbody>
           <tr
             v-for="k in ['ref', 'sha', 'lockfileHash', 'createdAt', 'mirrorBackupId', 'checkoutBackupId']"
@@ -297,11 +297,11 @@ const diskParts = computed(() => {
     </section>
 
     <section class="mt-4">
-      <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Thread worktrees</h2>
+      <h2 class="mb-1.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">Thread worktrees</h2>
       <template v-if="threads.length > 0">
         <p class="mb-1 text-xs text-muted">{{ liveThreads }} live · {{ threads.length - liveThreads }} evicted</p>
         <div class="overflow-x-auto">
-          <table class="w-full border-collapse text-[0.8125rem]">
+          <table class="w-full border-collapse font-mono text-[0.8125rem]">
             <tbody>
               <tr class="text-xs text-muted">
                 <td class="px-2 py-1">thread</td>
@@ -345,8 +345,8 @@ const diskParts = computed(() => {
     </section>
 
     <section class="mt-4">
-      <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Pending schedules</h2>
-      <table class="w-full border-collapse text-[0.8125rem]">
+      <h2 class="mb-1.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">Pending schedules</h2>
+      <table class="w-full border-collapse font-mono text-[0.8125rem]">
         <tbody>
           <tr
             v-for="[label, key] in [
@@ -365,8 +365,8 @@ const diskParts = computed(() => {
     </section>
 
     <section class="mt-4">
-      <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Command table</h2>
-      <table v-if="commands.length > 0" class="w-full border-collapse text-[0.8125rem]">
+      <h2 class="mb-1.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">Command table</h2>
+      <table v-if="commands.length > 0" class="w-full border-collapse font-mono text-[0.8125rem]">
         <tbody>
           <tr v-for="c in commands" :key="c.name" class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">{{ c.name }}</td>
@@ -380,8 +380,8 @@ const diskParts = computed(() => {
     </section>
 
     <section class="mt-4">
-      <h2 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Registry settings</h2>
-      <table class="w-full border-collapse text-[0.8125rem]">
+      <h2 class="mb-1.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">Registry settings</h2>
+      <table class="w-full border-collapse font-mono text-[0.8125rem]">
         <tbody>
           <tr
             v-for="[label, value] in [

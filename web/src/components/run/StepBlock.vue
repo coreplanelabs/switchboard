@@ -73,7 +73,7 @@ const firstCallAt = computed(() => {
       <div class="min-w-0 flex-1">
         <div
           v-if="step.turn"
-          class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 text-xs tabular-nums text-dimmed"
+          class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 font-mono text-xs tabular-nums text-dimmed"
         >
           <span
             class="thought"
@@ -88,13 +88,13 @@ const firstCallAt = computed(() => {
                run on one model says it once. -->
           <span
             v-if="step.turn.switched"
-            class="model-switch order-first rounded border border-warn/40 bg-warn/10 px-1.5 font-semibold text-warn"
+            class="model-switch order-first rounded border border-warn/40 bg-warn/10 px-1.5 font-medium text-warn"
             :title="`model changed: this turn ran on ${step.turn.model}`"
             >⇄ {{ modelName(step.turn.model) }}</span
           >
           <span
             v-else-if="step.turn.showModel"
-            class="model-badge order-first rounded bg-accented px-1.5 text-[0.68rem] font-semibold leading-normal tracking-wider text-muted"
+            class="model-badge order-first rounded bg-accented px-1.5 text-[0.68rem] font-medium leading-normal tracking-wider text-muted"
             :title="step.turn.model"
             >{{ modelName(step.turn.model) }}</span
           >
@@ -106,7 +106,7 @@ const firstCallAt = computed(() => {
       </div>
       <span
         v-if="step.at !== undefined"
-        class="ts shrink-0 select-none text-xs tabular-nums text-dimmed"
+        class="ts shrink-0 select-none font-mono text-xs tabular-nums text-dimmed"
         :title="formatLocalIso(step.at)"
         >{{ formatClock(step.at) }}</span
       >
@@ -133,7 +133,7 @@ const firstCallAt = computed(() => {
         <!-- The group's summary is a muted line, not a header: the cards are
              the work, this is their count as a reader says it. -->
         <summary
-          class="gsummary flex cursor-pointer list-none items-baseline gap-3 rounded-md pl-3 pr-(--sb-gutter) py-1 text-xs text-dimmed hover:bg-accented/40 hover:text-muted focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
+          class="gsummary flex cursor-pointer list-none items-baseline gap-3 rounded-md pl-3 pr-(--sb-gutter) py-1 font-mono text-xs text-dimmed hover:bg-accented/40 hover:text-muted focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"
           :title="typeof firstCallAt === 'number' ? `calls began ${formatLocalIso(firstCallAt)}` : undefined"
           @click.prevent="emit('toggleGroup')"
         >
@@ -156,7 +156,7 @@ const firstCallAt = computed(() => {
             class="gtime ml-auto tabular-nums"
             :class="[
               tallyPaint ? 'heat' : '',
-              tallyHeat.over ? 'font-semibold text-bad' : tallyHeat.level >= 2 ? 'font-medium' : '',
+              tallyHeat.over ? 'font-medium text-bad' : tallyHeat.level >= 2 ? 'font-medium' : '',
             ]"
             :style="tallyPaint"
             :data-heat="tallyHeat.level"

@@ -45,11 +45,11 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
         <li v-for="r in rows" :key="r.name" class="border-b border-muted px-2 pb-3 pt-2.5" :data-schedule="r.name">
           <div class="def flex flex-wrap items-baseline gap-x-2 gap-y-1.5 text-[0.8rem] text-toned">
             <UTooltip :text="r.description">
-              <span class="name font-semibold text-highlighted max-sm:text-[0.9rem]">{{ r.name }}</span>
+              <span class="name font-medium text-highlighted max-sm:text-[0.9rem]">{{ r.name }}</span>
             </UTooltip>
             <span class="hidden text-accented sm:inline" aria-hidden="true">·</span>
             <span class="max-sm:ml-auto">
-              <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">on</span>
+              <span class="mr-1 font-mono text-[0.62rem] uppercase tracking-wider text-dimmed">on</span>
               <code class="rounded-xs bg-accented px-1.5 py-0.5 text-toned">{{ r.worker }}</code>
             </span>
             <span class="hidden text-accented sm:inline" aria-hidden="true">·</span>
@@ -67,10 +67,10 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
               <span class="text-dimmed">UTC</span>
               <span class="hidden text-accented sm:inline" aria-hidden="true">·</span>
               <span
-                class="next tabular-nums max-sm:ml-auto"
+                class="next font-mono tabular-nums max-sm:ml-auto"
                 :title="r.nextFireAt !== undefined ? formatLocalIso(r.nextFireAt) : undefined"
               >
-                <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">next</span>
+                <span class="mr-1 font-mono text-[0.62rem] uppercase tracking-wider text-dimmed">next</span>
                 <template v-if="r.nextFireAt !== undefined">
                   <!-- The absolute stamp is a wide-screen luxury; the phone reads the relative form (exact local time on the title). -->
                   <span class="max-sm:hidden">
@@ -84,9 +84,9 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
             </span>
           </div>
           <div
-            class="fire mt-1.5 text-xs text-muted max-sm:flex max-sm:flex-wrap max-sm:items-baseline max-sm:gap-x-1.5 max-sm:gap-y-1 sm:overflow-hidden sm:text-ellipsis sm:whitespace-nowrap"
+            class="fire mt-1.5 font-mono text-xs text-muted max-sm:flex max-sm:flex-wrap max-sm:items-baseline max-sm:gap-x-1.5 max-sm:gap-y-1 sm:overflow-hidden sm:text-ellipsis sm:whitespace-nowrap"
           >
-            <span class="mr-1 text-[0.62rem] uppercase tracking-wider text-dimmed">last</span>
+            <span class="mr-1 font-mono text-[0.62rem] uppercase tracking-wider text-dimmed">last</span>
             <template v-if="r.last">
               <span class="outcome" :class="OUTCOME_TONE[OUTCOME_CLASS[r.last.outcome]]">{{
                 OUTCOME_LABEL[r.last.outcome]
@@ -105,15 +105,15 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
               <template v-if="r.last.traceId">
                 <span class="mx-1.5 text-accented max-sm:mx-0" aria-hidden="true">·</span>
                 <!-- The firing's trace id: what the shim's cron root line and the run's meta share (docs/reference/specs/tracing.md item 22). -->
-                <span class="trace font-mono text-dimmed" :title="`trace ${r.last.traceId}`"
+                <span class="trace text-dimmed" :title="`trace ${r.last.traceId}`"
                   >trace {{ r.last.traceId.slice(0, 8) }}</span
                 >
               </template>
               <template v-if="r.last.detail && firingDetailSummary(r.last.detail)">
                 <span class="mx-1.5 text-accented max-sm:hidden" aria-hidden="true">·</span>
-                <!-- The reply's facts: one ellipsized line on desktop, a clamped block of its own on phones. -->
+                <!-- The reply's facts: prose, one ellipsized line on desktop, a clamped block of its own on phones. -->
                 <span
-                  class="detail max-sm:line-clamp-2 max-sm:basis-full max-sm:whitespace-normal"
+                  class="detail font-sans max-sm:line-clamp-2 max-sm:basis-full max-sm:whitespace-normal"
                   :title="r.last.detail"
                   >{{ firingDetailSummary(r.last.detail) }}</span
                 >

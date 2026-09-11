@@ -125,7 +125,7 @@ onUnmounted(() => {
     <RunsTabs current="runs" />
 
     <div class="toolbar mb-1.5 flex items-center gap-4 px-2 text-xs text-muted">
-      <span id="livecount" class="count tabular-nums">{{ liveCount }} running</span>
+      <span id="livecount" class="count font-mono tabular-nums">{{ liveCount }} running</span>
       <span class="filter ml-auto inline-flex items-center gap-1.5">
         <label
           class="toggle inline-flex cursor-pointer select-none items-center gap-1.5 text-toned hover:text-highlighted"
@@ -133,7 +133,7 @@ onUnmounted(() => {
           <input
             id="showdone"
             type="checkbox"
-            class="accent-green-600"
+            class="accent-(--ui-bg-inverted)"
             :checked="showAll"
             aria-describedby="retention"
             @change="onToggleCompleted"
@@ -164,7 +164,7 @@ onUnmounted(() => {
       <li
         v-if="afterDivider.length > 0"
         id="leaving"
-        class="divider flex items-baseline gap-2 border-b border-dashed border-warn/40 px-2 pb-1.5 pt-3 text-[0.72rem] uppercase tracking-wider text-warn"
+        class="divider flex items-baseline gap-2 border-b border-dashed border-warn/40 px-2 pb-1.5 pt-3 font-mono text-[0.72rem] uppercase tracking-wider text-warn"
         role="separator"
       >
         <span aria-hidden="true" class="text-sm tracking-normal">⏳</span>
@@ -184,7 +184,7 @@ onUnmounted(() => {
     >
       <template v-if="seed?.olderThan !== undefined">
         <a class="text-primary hover:underline" href="/runs?all=1">← Newest runs</a>
-        <span class="range tabular-nums text-dimmed">· runs finished before {{ olderThanLabel }}</span>
+        <span class="range font-mono tabular-nums text-dimmed">· runs finished before {{ olderThanLabel }}</span>
       </template>
       <a v-if="seed?.olderHref" class="older ml-auto text-primary hover:underline" :href="seed.olderHref"
         >Older runs →</a

@@ -17,8 +17,8 @@ const retention = retentionSentence(seed?.retentionDays ?? null);
   <AppShell title="Run not found" nav="runs">
     <RunsTabs current="runs" />
     <section class="notfound mx-auto my-12 max-w-xl text-center text-toned">
-      <p class="code mb-3 font-mono text-4xl font-semibold tracking-wide text-dimmed">404</p>
-      <h2 class="mb-3 text-lg font-semibold text-highlighted">That run isn't here.</h2>
+      <p class="code mb-3 font-mono text-4xl font-medium tracking-wide text-dimmed">404</p>
+      <h2 class="mb-3 text-lg font-medium tracking-tight text-highlighted">That run isn't here.</h2>
       <p class="mb-2.5 leading-relaxed">
         It may have finished and aged out, the link may be missing its token, or it never existed — this page says the
         same thing in every case.

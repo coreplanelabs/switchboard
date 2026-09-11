@@ -8,8 +8,8 @@
  * white on dark — so VitePress's brand tokens and its brand button map to ink,
  * never to a hue. Colour appears only as data (a ticked step, a running ring,
  * a warning callout), in the system's muted "print" saturation. The dashboard
- * adopts the same system next; until then its pictures on the landing keep
- * their own palette.
+ * (web/src/assets/main.css) wears the same system with the same values, so its
+ * pictures on the landing sit in the frames as one product.
  *
  * Type: Instrument Sans for display and text alike — no separate display face;
  * 500 is the house weight, headings are the same face set larger with the

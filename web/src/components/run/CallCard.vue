@@ -47,7 +47,7 @@ function toggle(): void {
 <template>
   <details
     :id="`call-${call.id}`"
-    class="call rounded-md border border-default bg-elevated open:bg-accented/40"
+    class="call rounded-lg border border-default bg-elevated font-mono open:bg-accented"
     :class="call.status"
     :open="call.open"
     :title="typeof call.startedAt === 'number' ? `started ${formatLocalIso(call.startedAt)}` : undefined"
@@ -59,7 +59,7 @@ function toggle(): void {
          The chevron leads, as on every other fold of the page, so the facts
          end on the page's one right gutter (less this card's border). -->
     <summary
-      class="flex min-w-0 cursor-pointer list-none items-baseline gap-3 rounded-md pl-3 pr-[calc(var(--sb-gutter)-1px)] py-2 hover:bg-accented/60 focus-visible:outline-2 focus-visible:outline-primary max-sm:flex-wrap [&::-webkit-details-marker]:hidden"
+      class="flex min-w-0 cursor-pointer list-none items-baseline gap-3 rounded-lg pl-3 pr-[calc(var(--sb-gutter)-1px)] py-2 hover:bg-accented/60 focus-visible:outline-2 focus-visible:outline-primary max-sm:flex-wrap [&::-webkit-details-marker]:hidden"
       :class="call.open ? 'rounded-b-none border-b border-default' : ''"
       @click.prevent="toggle"
     >
@@ -76,7 +76,7 @@ function toggle(): void {
       />
       <span
         v-else
-        class="glyph w-[1em] shrink-0 text-center font-bold"
+        class="glyph w-[1em] shrink-0 text-center font-medium"
         :class="call.status === 'ok' ? 'text-ok' : call.status === 'failed' ? 'text-bad' : 'text-warn'"
         >{{ call.status === "ok" ? "✓" : call.status === "failed" ? "✗" : "⚠" }}</span
       >
@@ -97,14 +97,14 @@ function toggle(): void {
       <span class="facts ml-auto flex shrink-0 gap-2.5 text-xs tabular-nums text-muted">
         <span v-if="elapsed" class="fact elapsed" title="since this call started (runner clock)">{{ elapsed }}</span>
         <template v-for="(fact, i) in call.facts" :key="i">
-          <span v-if="i === durationIndex && heat.over" class="over rounded bg-bad/15 px-1 font-semibold text-bad"
+          <span v-if="i === durationIndex && heat.over" class="over rounded bg-bad/15 px-1 font-medium text-bad"
             >timed out</span
           >
           <span
             class="fact"
             :class="[
               call.status !== 'ok' && i === 0 ? 'text-bad' : '',
-              i === durationIndex && heat.over ? 'font-semibold text-bad' : '',
+              i === durationIndex && heat.over ? 'font-medium text-bad' : '',
               i === durationIndex && heatPaint ? 'heat' : '',
               i === durationIndex && heat.level >= 2 && !heat.over ? 'font-medium' : '',
             ]"
@@ -112,7 +112,7 @@ function toggle(): void {
             >{{ fact }}</span
           >
         </template>
-        <span v-if="heat.over && durationIndex === -1" class="over rounded bg-bad/15 px-1 font-semibold text-bad"
+        <span v-if="heat.over && durationIndex === -1" class="over rounded bg-bad/15 px-1 font-medium text-bad"
           >timed out</span
         >
       </span>

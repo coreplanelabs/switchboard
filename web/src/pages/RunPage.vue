@@ -435,7 +435,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       <a class="back text-sm text-primary no-underline hover:underline" href="/runs">← All runs</a>
     </template>
     <template #status>
-      <span class="conn flex items-center gap-2">
+      <span class="conn flex items-center gap-2 font-mono">
         <template v-if="phase === 'ended'">
           <span v-if="endChip.ok" class="ok text-ok" role="img" aria-label="succeeded">✓</span>
           <span v-else class="chip rounded border px-1.5 text-[0.7rem]" :class="CHIP_CLS[endChip.cls]">{{
@@ -510,11 +510,9 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       <div
         v-if="state.meta"
         id="runmeta"
-        class="runmeta facts mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 px-(--sb-gutter) text-xs text-dimmed"
+        class="runmeta facts mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 px-(--sb-gutter) font-mono text-xs text-dimmed"
       >
-        <span class="agent text-[0.68rem] font-semibold uppercase tracking-wider text-toned">{{
-          state.meta.agent
-        }}</span>
+        <span class="agent text-[0.68rem] font-medium uppercase tracking-wider text-toned">{{ state.meta.agent }}</span>
         <span class="model">{{ state.meta.model }}</span>
         <span v-if="state.meta.effort" class="effort">{{ state.meta.effort }} effort</span>
         <a
@@ -582,7 +580,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         id="request"
         class="block mb-4 rounded-lg border border-default bg-(--ui-bg-muted) px-(--sb-gutter) py-3"
       >
-        <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
+        <h2 class="mb-2 flex items-baseline gap-2.5 font-mono text-xs font-medium uppercase tracking-wider text-muted">
           <span>Request</span>
           <span
             v-if="state.request.source"
@@ -630,7 +628,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
            grammar as the cards. -->
       <details v-if="state.context.length > 0" id="context" class="group mb-4 px-(--sb-gutter)">
         <summary
-          class="flex min-h-6 cursor-pointer list-none items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted hover:text-toned [&::-webkit-details-marker]:hidden"
+          class="flex min-h-6 cursor-pointer list-none items-baseline gap-2.5 font-mono text-xs font-medium uppercase tracking-wider text-muted hover:text-toned [&::-webkit-details-marker]:hidden"
         >
           <span
             class="chev select-none text-xs text-dimmed transition-transform group-open:rotate-90 motion-reduce:transition-none"
@@ -648,9 +646,11 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             class="turn flex items-baseline gap-3 border-t border-default py-1.5 opacity-85 first-of-type:border-t-0"
           >
             <MarkdownText :text="turn.text" />
-            <span class="ts ml-auto shrink-0 select-none text-xs text-dimmed" :title="fmtTimeTitle(turn.at)">{{
-              fmtTime(turn.at)
-            }}</span>
+            <span
+              class="ts ml-auto shrink-0 select-none font-mono text-xs text-dimmed"
+              :title="fmtTimeTitle(turn.at)"
+              >{{ fmtTime(turn.at) }}</span
+            >
           </div>
         </div>
       </details>
@@ -660,7 +660,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
            own row, at the same weight as the card's controls. -->
       <h2
         id="thisrun"
-        class="mb-2 flex items-baseline gap-2.5 px-(--sb-gutter) text-xs font-semibold uppercase tracking-wider text-muted"
+        class="mb-2 flex items-baseline gap-2.5 px-(--sb-gutter) font-mono text-xs font-medium uppercase tracking-wider text-muted"
       >
         <span>This run</span>
         <span v-if="stepCount > 0" class="count font-normal normal-case tracking-normal text-dimmed"
@@ -699,20 +699,20 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           >
             <!-- A turn that produced no step: the same ONE meta row a step heads with. -->
             <div
-              class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 pr-(--sb-gutter) text-xs tabular-nums text-dimmed"
+              class="meta flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 pr-(--sb-gutter) font-mono text-xs tabular-nums text-dimmed"
             >
               <span class="thought" :class="item.turn.quick ? '' : 'text-warn'" :title="item.turn.label"
                 >thought {{ item.turn.chip }}</span
               >
               <span
                 v-if="item.turn.switched"
-                class="model-switch order-first rounded border border-warn/40 bg-warn/10 px-1.5 font-semibold text-warn"
+                class="model-switch order-first rounded border border-warn/40 bg-warn/10 px-1.5 font-medium text-warn"
                 :title="`model changed: this turn ran on ${item.turn.model}`"
                 >⇄ {{ modelName(item.turn.model) }}</span
               >
               <span
                 v-else-if="item.turn.showModel"
-                class="model-badge order-first rounded bg-accented px-1.5 text-[0.68rem] font-semibold leading-normal tracking-wider text-muted"
+                class="model-badge order-first rounded bg-accented px-1.5 text-[0.68rem] font-medium leading-normal tracking-wider text-muted"
                 :title="item.turn.model"
                 >{{ modelName(item.turn.model) }}</span
               >
@@ -732,7 +732,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
                READY, FINISHING UP — in the bar's own words (live-view item 25):
                open while the phase is in progress, closed once the next begins,
                the reader's toggle winning from then on. -->
-          <li v-else-if="item.kind === 'phase'" class="phase py-0.5 text-xs" :data-phase="item.phase">
+          <li v-else-if="item.kind === 'phase'" class="phase py-0.5 font-mono text-xs" :data-phase="item.phase">
             <button
               type="button"
               class="phase-head flex w-full cursor-pointer items-baseline gap-2 text-left text-muted hover:text-toned"
@@ -759,7 +759,9 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             v-else-if="item.kind === 'followup'"
             class="followup block mt-5 rounded-lg border border-default bg-(--ui-bg-muted) px-(--sb-gutter) py-3"
           >
-            <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-muted">
+            <h2
+              class="mb-2 flex items-baseline gap-2.5 font-mono text-xs font-medium uppercase tracking-wider text-muted"
+            >
               <span>↪ Follow-up</span>
               <span
                 v-if="item.input.source?.user"
@@ -792,7 +794,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             <span>{{ (item.replay ? "… " : "⏱ ") + item.text }}</span>
             <span
               v-if="item.at !== undefined"
-              class="ts ml-auto select-none text-xs text-dimmed"
+              class="ts ml-auto select-none font-mono text-xs text-dimmed"
               :title="formatLocalIso(item.at)"
               >{{ formatClock(item.at) }}</span
             >
@@ -813,13 +815,13 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         >
           <span class="pulse text-[1.1em] leading-none text-info motion-safe:animate-pulse">∿</span>
           <span
-            class="badge shrink-0 rounded bg-accented px-1.5 text-[0.68rem] font-semibold leading-normal tracking-wider text-muted"
+            class="badge shrink-0 rounded bg-accented px-1.5 font-mono text-[0.68rem] font-medium leading-normal tracking-wider text-muted"
             :title="state.model ?? undefined"
             >{{ modelName(state.model) }}</span
           >
           <span class="verb min-w-0 truncate text-toned">{{ verb }}…</span>
           <span
-            class="since ml-auto shrink-0 text-xs tabular-nums"
+            class="since ml-auto shrink-0 font-mono text-xs tabular-nums"
             :class="waiting.slow ? 'text-warn' : 'text-dimmed'"
             >{{ formatDuration(waiting.elapsedMs, "clock") }}</span
           >
