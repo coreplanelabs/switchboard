@@ -8,10 +8,13 @@
 # passes with a note so the required check is never missing there.
 name: pr-title
 
+# Depot CI owns the required `pr-title / title` check. Keep this copy manual
+# for rollback, as with ci.yml, so each PR event runs the check only once.
 on:
-  pull_request:
-    types: [opened, edited, synchronize, reopened, ready_for_review]
-  merge_group:
+  # pull_request:
+  #   types: [opened, edited, synchronize, reopened, ready_for_review]
+  # merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read

@@ -32,6 +32,8 @@
 # repositories disappears the day the repository goes public (it did). The token
 # minted here is scoped to this repository and to the two permissions
 # release-please needs.
+# Keep release orchestration in GitHub Actions on Depot runners: npm trusted
+# publishing and image attestations use this workflow's GitHub OIDC identity.
 name: release-please
 
 on:

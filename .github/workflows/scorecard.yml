@@ -4,6 +4,9 @@
 # kept as a run artifact; publishing to the Scorecard API and uploading to
 # code scanning need a public repository, so the `visibility` job decides
 # those two steps and a private run says so instead of silently passing.
+#
+# GitHub Actions orchestrates this workflow on Depot runners: publishing
+# needs GitHub OIDC, and SARIF upload needs GitHub workflow-run metadata.
 name: scorecard
 
 on:
