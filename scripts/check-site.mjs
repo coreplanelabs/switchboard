@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // The built docs site is complete and is ours: every section index and the
-// pages the dashboard links to exist in docs/.vitepress/dist, and the home
-// page carries the product's display name — the tab title and the hero — as
-// project.json states it. The build proves the artifact compiles; this proves
-// it is the site we expect to deploy. The site derives its name from
-// project.json at build time rather than copying it, so the name is checked
-// here, on the artifact, and not by check:project-facts on a source copy. Run
-// after `npm run build -w docs`.
+// pages the dashboard links to exist in docs/.vitepress/dist, the home page
+// carries the product's display name — the tab title and the hero — as
+// project.json states it, and each required page names its social card under
+// the docs origin with the card's PNG in the tree. The build proves the
+// artifact compiles; this proves it is the site we expect to deploy. The site
+// derives its name and the cards' URLs from project.json at build time rather
+// than copying them, so they are checked here, on the artifact, and not by
+// check:project-facts on a source copy. Run after `npm run build -w docs`.
 //
 //   npm run check:site
 
@@ -27,16 +28,33 @@ export const REQUIRED_PAGES = [
   "reference/cli.html",
 ];
 
+/** The `og:image` a built page names, or undefined when it names none. */
+function ogImageOf(html) {
+  return /<meta property="og:image" content="([^"]*)"/.exec(html)?.[1];
+}
+
 /**
  * Pure: what is wrong with a built site, given a reader over its dist directory
  * (`read(relativePath)` → the file's text, or undefined when absent) and the
  * project facts. Every required page must exist; the home page's `<title>` and
- * the hero's `product` element must both read `displayName`.
+ * the hero's `product` element must both read `displayName`; every required
+ * page must name an `og:image` that is a PNG under `<docs>/og/` — the docs
+ * origin project.json states — and that PNG must be in the tree.
  */
 export function siteProblems(read, facts) {
   const problems = [];
   const pages = Object.fromEntries(REQUIRED_PAGES.map((p) => [p, read(p)]));
   for (const p of REQUIRED_PAGES) if (pages[p] === undefined) problems.push(`missing: ${p}`);
+  const cards = `${facts.docs.replace(/\/+$/, "")}/og/`;
+  for (const p of REQUIRED_PAGES) {
+    if (pages[p] === undefined) continue;
+    const image = ogImageOf(pages[p]);
+    if (image === undefined) problems.push(`${p}: names no og:image`);
+    else if (!image.startsWith(cards) || !image.endsWith(".png"))
+      problems.push(`${p}: og:image is "${image}" — expected a PNG under ${cards} (project.json's docs URL)`);
+    else if (read(`og/${image.slice(cards.length)}`) === undefined)
+      problems.push(`${p}: og:image names og/${image.slice(cards.length)}, which is not in the built site`);
+  }
   const home = pages["index.html"];
   if (home !== undefined) {
     const title = /<title>([^<]*)<\/title>/.exec(home);
@@ -70,7 +88,7 @@ function main() {
     process.exit(1);
   }
   console.log(
-    `check:site ok — ${REQUIRED_PAGES.length} required page(s) present in docs/.vitepress/dist, home page titled "${facts.displayName}"`,
+    `check:site ok — ${REQUIRED_PAGES.length} required page(s) present in docs/.vitepress/dist, home page titled "${facts.displayName}", every page's social card under ${facts.docs}/og/`,
   );
 }
 
