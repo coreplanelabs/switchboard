@@ -15,6 +15,7 @@ import type { ChatMessage, Provider } from "../../providers/types.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import { currentPrHeadSha, prCommitsSince, type RepoContext } from "../repoContext.js";
 import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";
+import { parseHandoff, type Handoff } from "../ship/handoff.js";
 import { parseVerdictInput, type ReviewVerdict } from "../reviewVerdict.js";
 import { parseDigestReport, type DigestReport } from "../diffDigest.js";
 import { settleReviewedHead, type makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
@@ -315,6 +316,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     prDescription = d;
     ledgerRun?.setState({ prDescription: d });
   };
+  // The unit handoff (docs/reference/specs/agent-coding.md item 9), set only
+  // through submit_handoff — the last valid call wins — and restored like the
+  // description so a resumed run keeps what its earlier generation submitted.
+  // A plain coding run has no board issue to post it to: the finish record
+  // (redacted there) is where it lands.
+  const restoredHandoff = parseHandoff(restored.handoff);
+  let handoff: Handoff | undefined = restoredHandoff.ok ? restoredHandoff.handoff : undefined;
+  const onHandoff = (h: Handoff) => {
+    handoff = h;
+    ledgerRun?.setState({ handoff: h });
+  };
   // The commit actually checked out in the run's workspace when the model
   // finished — read by us, not reported by the model — for the reviewed-head
   // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
@@ -376,6 +388,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     onVerdict,
     onDigest,
     onPrDescription,
+    onHandoff,
   };
   try {
     answer = await runAgent({
@@ -685,6 +698,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       diagnosis,
       root,
       ledgerRun,
+      ...(handoff !== undefined ? { handoff } : {}),
     });
     // The diagnosis rides the run record (above): the friction ledger the
     // cross-run proposer reads is run history, so nothing is written twice.

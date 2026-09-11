@@ -10,6 +10,7 @@ import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { isSpanRecord } from "../runEvents.js";
 import { fitRecordToBudget, type RunRecord, type RunStatus } from "../runRecord.js";
+import { redactHandoff, type Handoff } from "../ship/handoff.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import { activityOfEvents } from "../runRegistry/activity.js";
 import type { RunSnapshot, RunSummary, SealResult } from "../runRegistry/projections.js";
@@ -241,6 +242,10 @@ export function assembleRunRecord(input: {
    *  and seal are appended, the published total takes the larger count, and the
    *  two seal stamps ride the record — omitted when the seal has none. */
   seal?: SealResult;
+  /** The typed handoff the run submitted (docs/reference/specs/agent-ship.md item 14),
+   *  as the tool accepted it; redacted HERE, the one assembly, so no caller
+   *  can forget. Omitted (not set undefined) when the run submitted none. */
+  handoff?: Handoff;
 }): RunRecord {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
@@ -275,6 +280,7 @@ export function assembleRunRecord(input: {
     ...(activityOfEvents(events) !== undefined ? { activity: activityOfEvents(events) } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }
@@ -359,6 +365,8 @@ export interface FinishRecordContext {
   diagnosis: FrictionDiagnosis;
   root: Span;
   ledgerRun: LedgerRun | undefined;
+  /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
+  handoff?: Handoff;
 }
 
 /**
@@ -384,6 +392,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     diagnosis,
     root,
     ledgerRun,
+    handoff,
   } = ctx;
   // A tracked run finishes through the ledger: the record replaces its
   // live rows in one transaction (a refused finish falls back to the store).
@@ -404,6 +413,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           status: failedAfterFinish && status === "completed" ? "failed" : status,
           diagnosis,
           seal,
+          ...(handoff !== undefined ? { handoff } : {}),
         }),
         { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
       ),

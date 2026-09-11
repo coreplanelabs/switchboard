@@ -37,6 +37,7 @@ import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdic
 import type { RunEvent, ShipRoundOutcome } from "./runEvents.js";
 import { normalizeHead, sameCommit } from "./reviewedHead.js";
 import type { ShipEntry } from "./ship/preflight.js";
+import type { Handoff } from "./ship/handoff.js";
 import {
   buildShipFixTurn,
   runShipCodingChild,
@@ -153,6 +154,11 @@ export interface ShipPipelineInput extends CodingChildDeps, ReviewChildDeps {
 export interface ShipOutcome {
   status: "completed" | "aborted" | "capped" | "stopped_soft" | "stopped_hard";
   reply: string;
+  /** The LAST coding round's handoff (docs/reference/specs/agent-ship.md item 14) —
+   *  round 0's, or a fix round's, which replaces it — for the ship run's
+   *  record. Rides every ending: a stop or a cap after a round that handed one
+   *  back still records it. Absent when no round submitted one. */
+  handoff?: Handoff;
 }
 
 /**
@@ -163,6 +169,18 @@ export interface ShipOutcome {
  * run's `RunControl` is checked between rounds so a stop never starts one.
  */
 export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOutcome> {
+  // The last coding round's handoff decorates the outcome HERE, once, rather
+  // than at each of the loop's endings — so a stop, a cap or an abort after a
+  // round that handed one back still carries it onto the run record.
+  let handoff: Handoff | undefined;
+  const outcome = await runRounds(input, (h) => {
+    handoff = h;
+  });
+  return handoff !== undefined ? { ...outcome, handoff } : outcome;
+}
+
+/** The round loop proper; `onHandoff` receives each coding round's handoff as the round settles. */
+async function runRounds(input: ShipPipelineInput, onHandoff: (handoff: Handoff) => void): Promise<ShipOutcome> {
   const now = input.now ?? Date.now;
   const { entry, caps, control, github, logKey } = input;
   const deadlineAt = now() + caps.maxMinutes * 60_000;
@@ -354,6 +372,8 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     const r0 = await round(0, "coding", (span) =>
       runShipCodingChild(input, childCtx, { messages: input.round0Messages }, span),
     );
+    // Submitted is a fact no ending erases: recorded before the checks below.
+    if (r0.handoff) onHandoff(r0.handoff);
     if (r0.residentUnavailable) {
       emitRound(0, "coding", "aborted");
       return residentOutcome(r0.residentUnavailable);
@@ -382,13 +402,22 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         : "the coding round ended without submitting a PR description (a clarifying question, a budget write-up, or an unproven push ends the pipeline here)";
       return {
         status: "aborted",
-        reply: [r0.answer, r0.prNote, `⚠️ Ship ended at round 0: ${terminal}. No review round ran.`, reissue()]
+        reply: [
+          r0.answer,
+          r0.prNote,
+          r0.handoffNote,
+          `⚠️ Ship ended at round 0: ${terminal}. No review round ran.`,
+          reissue(),
+        ]
           .filter(Boolean)
           .join("\n\n"),
       };
     }
     emitRound(0, "coding", "pr_opened");
     if (r0.prNote) await input.reply(r0.prNote).catch(() => {});
+    // Where the handoff went (or why it did not) is a fact of the round the
+    // thread sees, like the post-step's note.
+    if (r0.handoffNote) await input.reply(r0.handoffNote).catch(() => {});
   }
 
   // ---- review → fix loop ------------------------------------------------------
@@ -504,6 +533,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
         span,
       ),
     );
+    if (fx.handoff) onHandoff(fx.handoff);
     if (fx.residentUnavailable) {
       emitRound(reviewRounds, "coding", "aborted");
       return residentOutcome(fx.residentUnavailable);
@@ -532,6 +562,7 @@ export async function runShipPipeline(input: ShipPipelineInput): Promise<ShipOut
     // exactly like round 0's — a failed repush or PR edit must not vanish
     // into the log while the pipeline sails on.
     if (fx.prNote) await input.reply(fx.prNote).catch(() => {});
+    if (fx.handoffNote) await input.reply(fx.handoffNote).catch(() => {});
     // Nothing repushed → usually nothing to re-review: a branch still at the
     // head the review already read would burn a review round on the very same
     // diff. ONE exception, by contract (spec item 7): a round that DECLINED

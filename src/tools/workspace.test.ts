@@ -7,9 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DigestReport } from "../core/diffDigest.js";
 import type { PrDescription } from "../core/prDescription.js";
+import type { Handoff } from "../core/ship/handoff.js";
 import {
   bashTool,
   diffDigestTool,
+  submitHandoffTool,
   submitPrDescriptionTool,
   submitVerdictTool,
   TOOLSETS,
@@ -472,6 +474,91 @@ describe("submit_dispositions tool", () => {
 // model) renders the GitHub body from it at the pushed head and opens/edits
 // the PR. Validation mirrors submit_verdict: a bad object comes back as a
 // readable string error (never a throw) so the model can fix it and retry.
+// Feature: docs/reference/specs/agent-coding.md item 9 — the typed handoff a
+// coding child of a plan unit submits beside its description: the same tool
+// path, the dispatcher's sink records it on the run and the pipeline posts it
+// to the unit's board issue. Validation mirrors submit_pr_description: a bad
+// object is a string error naming the path, never a throw.
+describe("submit_handoff tool", () => {
+  const ctxWith = (onHandoff?: ToolContext["onHandoff"]): ToolContext =>
+    ({ executor: {} as ToolContext["executor"], onHandoff }) as ToolContext;
+
+  const valid = () => ({
+    deviations: [{ from: "one re-arm", to: "none", why: "the next unit moves the wake path" }],
+    followUps: [{ what: "split the file", where: "src/core/ship/codingChild.ts" }],
+    unproven: [],
+  });
+
+  it("is in the coding (full) toolset only, beside submit_pr_description — review/web/none never submit handoffs", () => {
+    const names = (key: string) => (TOOLSETS[key] ?? []).map((t) => t.name);
+    expect(names("full")).toContain("submit_handoff");
+    expect(names("full").indexOf("submit_handoff")).toBe(names("full").indexOf("submit_pr_description") + 1);
+    expect(names("readonly")).not.toContain("submit_handoff");
+    expect(names("web")).not.toContain("submit_handoff");
+    expect(names("none")).not.toContain("submit_handoff");
+  });
+
+  it("mutates run state, so it is never side-effect-free (must run strictly in order)", () => {
+    expect(submitHandoffTool.sideEffectFree).toBeUndefined();
+  });
+
+  it("forwards a valid handoff to the sink, trimmed, and acknowledges it with the counts", async () => {
+    const got: Handoff[] = [];
+    const input = valid();
+    input.followUps[0].what = "  split the file ";
+    const out = await submitHandoffTool.run(
+      input,
+      ctxWith((h) => got.push(h)),
+    );
+    expect(got).toHaveLength(1);
+    expect(got[0].followUps[0].what).toBe("split the file");
+    expect(String(out)).toMatch(/^handoff recorded: 1 deviation, 1 follow-up, 0 unproven/);
+    expect(String(out)).toMatch(/a later call replaces this one/);
+  });
+
+  it("an empty handoff is accepted and forwarded — submitted empty is the contract, never an error", async () => {
+    const got: Handoff[] = [];
+    const out = await submitHandoffTool.run(
+      { deviations: [], followUps: [], unproven: [] },
+      ctxWith((h) => got.push(h)),
+    );
+    expect(got).toEqual([{ deviations: [], followUps: [], unproven: [] }]);
+    expect(String(out)).toMatch(/^handoff recorded: 0 deviations, 0 follow-ups, 0 unproven/);
+  });
+
+  it("a malformed handoff is a string error naming the path — no throw, the sink untouched", async () => {
+    const got: Handoff[] = [];
+    const out = await submitHandoffTool.run(
+      { deviations: [{ from: "a", to: "b" }], followUps: [], unproven: [] },
+      ctxWith((h) => got.push(h)),
+    );
+    expect(got).toEqual([]);
+    expect(String(out)).toMatch(/^error: invalid handoff — deviations\.0\.why/);
+    const missing = await submitHandoffTool.run(
+      { deviations: [], followUps: [] },
+      ctxWith((h) => got.push(h)),
+    );
+    expect(String(missing)).toMatch(/^error: invalid handoff — unproven: must be an array/);
+    expect(got).toEqual([]);
+  });
+
+  it("last valid call wins; an invalid call after a valid one leaves the valid one standing", async () => {
+    let latest: Handoff | undefined;
+    const ctx = ctxWith((h) => (latest = h));
+    await submitHandoffTool.run(valid(), ctx);
+    await submitHandoffTool.run({ ...valid(), unproven: [{ criterion: "c", why: "w" }] }, ctx);
+    expect(latest?.unproven).toEqual([{ criterion: "c", why: "w" }]);
+    await submitHandoffTool.run({ deviations: "no" }, ctx);
+    expect(latest?.unproven).toEqual([{ criterion: "c", why: "w" }]);
+  });
+
+  it("no sink (a unit context) → the truth: nothing recorded, never a false 'recorded' ack", async () => {
+    const out = await submitHandoffTool.run(valid(), ctxWith(undefined));
+    expect(String(out)).toMatch(/no run is recording a handoff here/);
+    expect(String(out)).not.toMatch(/^handoff recorded/);
+  });
+});
+
 describe("submit_pr_description tool", () => {
   const ctxWith = (onPrDescription?: ToolContext["onPrDescription"]): ToolContext =>
     ({ executor: {} as ToolContext["executor"], onPrDescription }) as ToolContext;

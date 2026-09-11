@@ -306,6 +306,23 @@ describe("isRunRecord", () => {
     expect(isRunRecord({ ...record(), schema: -1 })).toBe(false);
   });
 
+  it("accepts a handoff of the typed shape (docs/reference/specs/agent-ship.md item 14) — also after a JSON round-trip — and refuses a malformed one; a record without one is unchanged", () => {
+    const handoff = {
+      deviations: [{ from: "a", to: "b", why: "c" }],
+      followUps: [{ what: "w", where: "x" }],
+      unproven: [{ criterion: "k", why: "y" }],
+    };
+    expect(isRunRecord(record({ handoff }))).toBe(true);
+    const back = JSON.parse(JSON.stringify(record({ handoff }))) as RunRecord;
+    expect(isRunRecord(back)).toBe(true);
+    expect(back.handoff).toEqual(handoff);
+    expect(isRunRecord(record({ handoff: { deviations: [], followUps: [], unproven: [] } }))).toBe(true);
+    expect(isRunRecord({ ...record(), handoff: { deviations: [], followUps: [] } })).toBe(false);
+    expect(isRunRecord({ ...record(), handoff: { ...handoff, unproven: [{ criterion: 1, why: "y" }] } })).toBe(false);
+    expect(isRunRecord({ ...record(), handoff: "none" })).toBe(false);
+    expect("handoff" in record()).toBe(false);
+  });
+
   it("accepts every terminal status — `interrupted` (the tombstone/drain status) included — and the Worker shares this validator", () => {
     for (const status of ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"] as const) {
       expect(isRunRecord(record({ status }))).toBe(true);

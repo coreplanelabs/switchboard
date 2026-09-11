@@ -87,6 +87,14 @@ export interface ShipDeps
    * Default: githubApp's `resolveGithubIdentity`. Injectable for tests.
    */
   fetchSelfIdentity?: () => Promise<GithubIdentity | undefined>;
+  /**
+   * The parent's post of a coding child's handoff to the unit's board issue
+   * (agent-ship.md item 14): an issue comment through the bot's GitHub
+   * identity — the same REST write the general agent's issue tools make.
+   * Default: the shared REST client's `commentIssue`. Injectable so tests
+   * assert the call without a network call.
+   */
+  postIssueComment?: (repo: string, number: number, body: string) => Promise<{ url: string }>;
 }
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
@@ -388,6 +396,9 @@ export async function runShipBranch(
   const heartbeat = setInterval(() => card.update(currentFrame()), 5000);
   let outcome: ShipOutcome | undefined;
   let shipDiagnosis: FrictionDiagnosis | undefined;
+  // One GitHub capability for the children's `github_*` tools and for the
+  // parent's own issue-comment write (the handoff post, agent-ship.md item 14).
+  const githubCap = githubCapabilityFor(deps, msg.userId);
   try {
     outcome = await runShipPipeline({
       span: root,
@@ -420,12 +431,14 @@ export async function runShipBranch(
       reply: (text) => io.reply(text),
       web: webCapability(),
       skills: deps.skills,
-      githubTools: githubCapabilityFor(deps, msg.userId),
+      githubTools: githubCap,
       github: {
         createBranchRef: deps.createBranchRef ?? createBranchRef,
         openPullRequest: deps.openPullRequest ?? openPullRequest,
         findOpenPrByHead: deps.findOpenPrByHead ?? findOpenPrByHead,
         postReviewComment: deps.postReviewComment ?? postReviewComment,
+        postIssueComment:
+          deps.postIssueComment ?? ((repo, number, body) => githubCap.api.commentIssue(repo, number, body)),
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
         prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
@@ -486,6 +499,9 @@ export async function runShipBranch(
             status: failedAfterFinish && status === "completed" ? "failed" : status,
             diagnosis,
             seal,
+            // The last coding round's handoff (agent-ship.md item 14) — the
+            // pipeline's, so the ship record carries what its child handed back.
+            ...(outcome?.handoff !== undefined ? { handoff: outcome.handoff } : {}),
           }),
           { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
         ),
