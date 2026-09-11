@@ -1,6 +1,6 @@
 # Architecture
 
-OpenSwitchboard is an agent gateway: a message arrives over a channel, a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor.
+Switchboard is an agent gateway: a message arrives over a channel, a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor.
 
 ## The four seams
 

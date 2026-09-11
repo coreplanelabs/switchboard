@@ -7,7 +7,7 @@ import { REQUIRED_PAGES, siteProblems } from "../scripts/check-site.mjs";
 // file at build time, so this is the proof that the derivation reached the
 // artifact, not a check of a hand-written copy.
 
-const facts = { displayName: "OpenSwitchboard" };
+const facts = { displayName: "Acme Switchboard" };
 
 const home = (title: string, hero: string) =>
   `<!doctype html><html><head><title>${title}</title></head><body>` +
@@ -21,22 +21,22 @@ describe("siteProblems", () => {
   const what = (files: Record<string, string>) => siteProblems((p) => files[p], facts);
 
   it("is silent when every required page exists and the home page names the product in its title and hero", () => {
-    expect(what(complete(home("OpenSwitchboard", "OpenSwitchboard")))).toEqual([]);
+    expect(what(complete(home("Acme Switchboard", "Acme Switchboard")))).toEqual([]);
   });
 
   it("names each missing page", () => {
-    const files = complete(home("OpenSwitchboard", "OpenSwitchboard"));
+    const files = complete(home("Acme Switchboard", "Acme Switchboard"));
     delete files["tutorials/index.html"];
     delete files["reference/specs/index.html"];
     expect(what(files)).toEqual(["missing: tutorials/index.html", "missing: reference/specs/index.html"]);
   });
 
   it("names a home page whose tab title or hero does not read displayName", () => {
-    expect(what(complete(home("Switchboard", "OpenSwitchboard")))).toEqual([
-      'index.html: <title> is "Switchboard" — project.json says displayName "OpenSwitchboard"',
+    expect(what(complete(home("Switchboard", "Acme Switchboard")))).toEqual([
+      'index.html: <title> is "Switchboard" — project.json says displayName "Acme Switchboard"',
     ]);
-    expect(what(complete(home("OpenSwitchboard", "Switchboard")))).toEqual([
-      'index.html: the hero names the product "Switchboard" — project.json says displayName "OpenSwitchboard"',
+    expect(what(complete(home("Acme Switchboard", "Switchboard")))).toEqual([
+      'index.html: the hero names the product "Switchboard" — project.json says displayName "Acme Switchboard"',
     ]);
     expect(what(complete("<html><head></head><body>no hero</body></html>"))).toEqual([
       "index.html: has no <title>",

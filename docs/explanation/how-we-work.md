@@ -43,15 +43,15 @@ flowchart LR
 | Squash-only, title as commit | the `main` ruleset ([Configure the repository](../how-to/configure-the-repository.md)) |
 | Only the changed Workers deploy | `deploy plan --affected` on every PR |
 
-## OpenSwitchboard develops OpenSwitchboard
+## Switchboard develops Switchboard
 
 The rules in [AGENTS.md](../../AGENTS.md) are written for the product's own agents, who follow them:
 
 - **`agent:review` reviews every PR**: read-only, one verdict at the head it read; a reviewed-head guard refuses any other head.
-- **`agent:coding` implements issues** in the vendored skills' house style, submitting a typed description OpenSwitchboard renders as the PR.
+- **`agent:coding` implements issues** in the vendored skills' house style, submitting a typed description Switchboard renders as the PR.
 - **`agent:ship` runs the loop end to end** to an `LGTM`, in one thread.
 - **Run pages are the audit trail**: what each run read, ran and wrote.
-- **`friction propose` files the process's own improvement issues**; proposals only, never PRs ([How OpenSwitchboard improves itself](how-switchboard-improves-itself.md)).
+- **`friction propose` files the process's own improvement issues**; proposals only, never PRs ([How Switchboard improves itself](how-switchboard-improves-itself.md)).
 
 ## Read next
 

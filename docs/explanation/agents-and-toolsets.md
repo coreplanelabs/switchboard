@@ -9,7 +9,7 @@ The loop: call the model, run the tool calls it asks for, append the results, re
 | Agent | What it does | Toolset | Budget |
 |---|---|---|---|
 | `general` | The default. Answers directly, reads repositories and manages issues, reads a URL; refers code, reviews and research onward. | `assistant`: GitHub reads and issue writes, URL fetch, status. No shell, no workspace. | 8 turns, 5 min |
-| `coding` | Implements a change and pushes a branch; OpenSwitchboard renders its typed description and opens the PR. | `full`: bash, file read and write, URL fetch, diff digest, PR description, skills, GitHub reads, issue writes. | 60 turns, 45 min |
+| `coding` | Implements a change and pushes a branch; Switchboard renders its typed description and opens the PR. | `full`: bash, file read and write, URL fetch, diff digest, PR description, skills, GitHub reads, issue writes. | 60 turns, 45 min |
 | `review` | Reviews a pull request with full-repository context; ranked findings and a verdict. | `readonly`: bash, file read, verdict, URL fetch, diff digest, skills, GitHub reads. | 30 turns, 25 min, effort `medium` |
 | `ship` | Coding, review, fixes, until LGTM. A person merges. | Never sent to a model; each round runs `coding` or `review`. | The `ship` config block |
 | `research` | Web search and URL reading, plus repository and issue reads; no workspace. | `web`: search, URL fetch, status, GitHub reads. | 12 turns, 8 min, effort `medium` |

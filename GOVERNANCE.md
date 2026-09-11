@@ -1,11 +1,11 @@
 # Governance
 
-OpenSwitchboard is an open-source project stewarded by [Coreplane Labs](https://coreplane.ai).
+Switchboard is an open-source project stewarded by [Coreplane Labs](https://coreplane.ai).
 This document says who decides what, and how that changes.
 
 ## Roles
 
-**Users** run OpenSwitchboard. Anyone. Their bug reports and questions shape the
+**Users** run Switchboard. Anyone. Their bug reports and questions shape the
 roadmap more than anything else.
 
 **Contributors** have had a change merged. Anyone who follows

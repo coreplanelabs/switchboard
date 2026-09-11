@@ -1,6 +1,6 @@
 # Deploy
 
-By the end, OpenSwitchboard runs in production on Cloudflare: the bot as a container with a state Worker beside it, deployed from your terminal in one command.
+By the end, Switchboard runs in production on Cloudflare: the bot as a container with a state Worker beside it, deployed from your terminal in one command.
 
 **You need:** a Cloudflare account with a domain (a *zone*) in it, an API token for it in `CLOUDFLARE_API_TOKEN` (scopes: [Set up accounts](set-up-accounts.md); Containers Edit is what the image copy needs), and the Slack tokens and provider key from [Get started](../tutorials/get-started.md). No Docker, no clone.
 

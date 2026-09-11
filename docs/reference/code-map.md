@@ -1,6 +1,6 @@
 # Code map
 
-Where each part of OpenSwitchboard lives, what it owns, and the rule that keeps it that way. This is the map for someone changing the code; the pipeline it implements is explained in [How a request flows](../explanation/how-a-request-flows.md), and the behavioral contract each area must keep is its spec under [`docs/reference/specs/`](specs/README.md).
+Where each part of Switchboard lives, what it owns, and the rule that keeps it that way. This is the map for someone changing the code; the pipeline it implements is explained in [How a request flows](../explanation/how-a-request-flows.md), and the behavioral contract each area must keep is its spec under [`docs/reference/specs/`](specs/README.md).
 
 ## Areas
 

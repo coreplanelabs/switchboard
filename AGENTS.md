@@ -1,8 +1,8 @@
-# OpenSwitchboard — the operating contract
+# Switchboard — the operating contract
 
-OpenSwitchboard is an agent gateway: a message arrives over a channel (Slack, the CLI, HTTP, MCP), a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor it never touches directly. Slack is one channel, not the architecture.
+Switchboard is an agent gateway: a message arrives over a channel (Slack, the CLI, HTTP, MCP), a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor it never touches directly. Slack is one channel, not the architecture.
 
-Every agent here reads this first, as does a person asking how we work: how a change is made, the invariants, where things are, the commands that are the repo's whole interface, and the rules. Detail is a link away: [README.md](README.md) (the front door), [docs/](docs/README.md) (the human-facing tree, published at <https://openswitchboard.dev>), [docs/reference/specs/](docs/reference/specs/README.md) (the behavioral contract).
+Every agent here reads this first, as does a person asking how we work: how a change is made, the invariants, where things are, the commands that are the repo's whole interface, and the rules. Detail is a link away: [README.md](README.md) (the front door), [docs/](docs/README.md) (the human-facing tree, published at <https://switchboard.space>), [docs/reference/specs/](docs/reference/specs/README.md) (the behavioral contract).
 
 ## How a change is made
 
@@ -10,7 +10,7 @@ Every agent here reads this first, as does a person asking how we work: how a ch
 2. **A failing test, then the code.** Unit tests are the default proof. `npx vitest run --changed origin/main` is the loop; `npm test` before pushing.
 3. **`npm run fix`, then `npm run verify`.** `fix` regenerates every generated artifact and repairs lint and formatting. `verify` is the whole gate and exactly what CI runs — nothing lives only in CI; a unit test over the workflow files keeps it so.
 4. **A PR written for the reader.** The title is the changelog line: `type(scope): what a reader can now do or expect`, scope from the code map's Areas, `!` plus a migration note when it breaks ([the rule](CONTRIBUTING.md#the-pr-title-is-the-changelog-line)); a required check refuses anything else. Body: two sentences a stranger can act on, then a Tour of the change in reading order with permalinks at the pushed head, the non-obvious decisions, and the validation with receipts. Docs for changed behavior change in the same PR.
-5. **OpenSwitchboard reviews it, in the open.** The PR is posted to `agent:review`; findings are addressed or declined with a reason, the branch rewritten into reviewable commits, review re-requested at the new head. `LGTM:` auto-approves where the repo has opted in; a person merges.
+5. **Switchboard reviews it, in the open.** The PR is posted to `agent:review`; findings are addressed or declined with a reason, the branch rewritten into reviewable commits, review re-requested at the new head. `LGTM:` auto-approves where the repo has opted in; a person merges.
 6. **Squash-merge, release, deploy.** The title is the commit. release-please accumulates a release PR; merging it tags the version and CI deploys only the Workers whose inputs changed. Why this shape: [How we work](docs/explanation/how-we-work.md).
 
 ## Invariants
@@ -98,9 +98,9 @@ Each workspace has its own `verify` (`-w web|docs|deploy/<worker>|packages/switc
 - **Credentials are never in the tree** and never on the bot host when a sandbox executes tools; a missing one fails fast by name. `config/config.example.yaml` documents every knob of the gitignored `config/config.yaml`.
 - **Run only what the Commands table names.** Need more? Add and describe a script; `agents:check` refuses an undescribed one.
 
-## OpenSwitchboard develops OpenSwitchboard
+## Switchboard develops Switchboard
 
-The product's own agents follow these rules: `agent:review` reviews every PR (read-only, one verdict, never a merge), `agent:coding` implements issues in the vendored skills' house style, `agent:ship` runs the loop end to end, every run has a page, `friction propose` files the process's own improvement issues. Details: [How we work](docs/explanation/how-we-work.md#openswitchboard-develops-openswitchboard).
+The product's own agents follow these rules: `agent:review` reviews every PR (read-only, one verdict, never a merge), `agent:coding` implements issues in the vendored skills' house style, `agent:ship` runs the loop end to end, every run has a page, `friction propose` files the process's own improvement issues. Details: [How we work](docs/explanation/how-we-work.md#switchboard-develops-switchboard).
 
 ## Working locally
 

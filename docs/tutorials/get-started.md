@@ -1,6 +1,6 @@
 # Get started
 
-By the end, OpenSwitchboard has answered you three times: in your terminal, in Slack, and from a production deployment on Cloudflare.
+By the end, Switchboard has answered you three times: in your terminal, in Slack, and from a production deployment on Cloudflare.
 
 **You need:** Node 24 and an Anthropic API key. Part 2 adds a Slack workspace where you may create an app. Part 3 adds a Cloudflare account with a domain in it.
 
@@ -40,7 +40,7 @@ You should see status lines (`preparing workspace…`, `preparing the prompt…`
 
 ### Create the Slack app
 
-1. At [api.slack.com/apps](https://api.slack.com/apps): *Create New App* → *From a manifest* → paste [`slack-app-manifest.yaml`](https://openswitchboard.dev/slack-app-manifest.yaml).
+1. At [api.slack.com/apps](https://api.slack.com/apps): *Create New App* → *From a manifest* → paste [`slack-app-manifest.yaml`](https://switchboard.space/slack-app-manifest.yaml).
 2. *Basic Information* → *App-Level Tokens* → generate one with `connections:write`. It starts with `xapp-`.
 3. *Install App* → *Install to Workspace*. The *Bot User OAuth Token* starts with `xoxb-`.
 

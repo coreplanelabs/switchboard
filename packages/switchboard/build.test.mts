@@ -202,11 +202,11 @@ describe("packageReadme", () => {
 
   it("makes relative links absolute on github.com at blob/HEAD; absolute URLs, anchors, mailto and a badge's nested image stay as they are, a badge's own relative target moves", () => {
     const out = packageReadme(
-      "[Get started](docs/tutorials/get-started.md) · [site](https://openswitchboard.dev) · [top](#quick-start) · [mail](mailto:a@b.c) · [![CI](https://ci.example/badge.svg)](https://ci.example/run) · [![License](https://b.example/l.svg)](LICENSE) · [Apache-2.0](LICENSE)",
+      "[Get started](docs/tutorials/get-started.md) · [site](https://site.example) · [top](#quick-start) · [mail](mailto:a@b.c) · [![CI](https://ci.example/badge.svg)](https://ci.example/run) · [![License](https://b.example/l.svg)](LICENSE) · [Apache-2.0](LICENSE)",
       repo,
     );
     expect(out).toBe(
-      "[Get started](https://github.com/acme/widget/blob/HEAD/docs/tutorials/get-started.md) · [site](https://openswitchboard.dev) · [top](#quick-start) · [mail](mailto:a@b.c) · [![CI](https://ci.example/badge.svg)](https://ci.example/run) · [![License](https://b.example/l.svg)](https://github.com/acme/widget/blob/HEAD/LICENSE) · [Apache-2.0](https://github.com/acme/widget/blob/HEAD/LICENSE)",
+      "[Get started](https://github.com/acme/widget/blob/HEAD/docs/tutorials/get-started.md) · [site](https://site.example) · [top](#quick-start) · [mail](mailto:a@b.c) · [![CI](https://ci.example/badge.svg)](https://ci.example/run) · [![License](https://b.example/l.svg)](https://github.com/acme/widget/blob/HEAD/LICENSE) · [Apache-2.0](https://github.com/acme/widget/blob/HEAD/LICENSE)",
     );
   });
 
@@ -219,9 +219,9 @@ describe("packageReadme", () => {
   });
 
   it("the repository's own README comes out with no relative target left and no mermaid", () => {
-    const facts = JSON.parse(read("project.json")) as { repository: string };
+    const facts = JSON.parse(read("project.json")) as { repository: string; displayName: string };
     const out = packageReadme(read("README.md"), facts.repository);
-    expect(out).toMatch(/^# OpenSwitchboard$/m);
+    expect(out).toMatch(new RegExp(`^# ${facts.displayName}$`, "m"));
     for (const m of out.matchAll(/\]\(([^)\s]+)\)/g)) expect(m[1]).toMatch(/^(https?:|#|mailto:)/);
     for (const m of out.matchAll(/\b(?:src|srcset)="([^"]+)"/g)) expect(m[1]).toMatch(/^https?:/);
     expect(out).not.toContain("```mermaid");

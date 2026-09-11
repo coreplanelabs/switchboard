@@ -1,6 +1,6 @@
 # Explanation
 
-Why OpenSwitchboard is shaped the way it is: constraints, rejected alternatives, and the decision record behind each choice.
+Why Switchboard is shaped the way it is: constraints, rejected alternatives, and the decision record behind each choice.
 
 The contract is elsewhere: [`docs/reference/specs/`](../reference/specs/README.md).
 
@@ -26,6 +26,6 @@ The contract is elsewhere: [`docs/reference/specs/`](../reference/specs/README.m
 
 ## The project
 
-- [How OpenSwitchboard improves itself](how-switchboard-improves-itself.md) — friction → pattern → issue.
+- [How Switchboard improves itself](how-switchboard-improves-itself.md) — friction → pattern → issue.
 - [How we work](how-we-work.md) — spec, test, PR, agent review, release.
 - [Design decisions](design-decisions.md) — the records.
