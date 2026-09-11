@@ -3289,8 +3289,13 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Run one step of the refresh instance the way the alarm runs its cycle:
-   *  counted in flight (so an attach-path reconcileImage never stops the
-   *  container under it), under a step trace the instance grafts on its root,
+   *  counted in flight once past the entry gates (so an attach-path
+   *  reconcileImage never stops the container under it — while the gates
+   *  themselves, `isIdle`, `reconcileImage("refresh")` and the disk-full
+   *  recycle, must not see the probing cycle as an operation in flight, or no
+   *  resident would ever park, restart a stale image or recycle a full disk;
+   *  the step is handed `cycle.count` and calls it at the point the alarm
+   *  handler increments), under a step trace the instance grafts on its root,
    *  its outcome on the instance row for `/status`. A step killed from outside
    *  (the container replaced under it) is thrown to the engine, whose retry
    *  re-enters the same idempotent method — the row stays `refreshing`, never
@@ -3302,14 +3307,19 @@ export class ResidentDO extends Sandbox<Env> {
   private async runInstanceStep<T>(
     instance: string,
     step: string,
-    fn: () => Promise<InstanceStepResult<T>>,
+    fn: (cycle: { count: () => void }) => Promise<InstanceStepResult<T>>,
   ): Promise<InstanceStepAnswer<T>> {
     const startedAt = systemClock();
     const trace = createStepTrace(startedAt);
-    this.refreshesInFlight++;
+    let counted = false;
+    const count = () => {
+      if (counted) return;
+      counted = true;
+      this.refreshesInFlight++;
+    };
     let outcome = "done";
     try {
-      const result = await this.stepTrace.run(trace, fn);
+      const result = await this.stepTrace.run(trace, () => fn({ count }));
       if (result.status !== "done") {
         outcome = result.status === "stopped" ? `stopped (${result.why})` : `failed (${result.reason})`;
         await this.clearInstanceLease(instance);
@@ -3333,7 +3343,7 @@ export class ResidentDO extends Sandbox<Env> {
       outcome = `failed (${failure.reason})`;
       return { status: "failed", reason: failure.reason, startedAt, trace: trace.steps() };
     } finally {
-      this.refreshesInFlight--;
+      if (counted) this.refreshesInFlight--;
       // The gates set this for the alarm's finally; no alarm runs on this path.
       this.rearmOutcome = "normal";
       await this.recordInstanceStep(instance, step, outcome).catch((err) =>
@@ -3350,12 +3360,16 @@ export class ResidentDO extends Sandbox<Env> {
     resource: string;
     instance: string;
   }): Promise<InstanceStepAnswer<RefreshFetchFacts>> {
-    return this.runInstanceStep<RefreshFetchFacts>(input.instance, "fetch", async () => {
+    return this.runInstanceStep<RefreshFetchFacts>(input.instance, "fetch", async (cycle) => {
       const before = await this.getStatus();
       // down stays down (a rebuild is the escape hatch); onboarding is owned by provisioning.
       if (before.state === "onboarding" || before.state === "down") return { status: "stopped", why: "not-serving" };
       const gate = await this.refreshGate(input.resource);
       if (!gate.go) return { status: "stopped", why: gate.why };
+      // Past the gates the cycle mutates the mirror and checkout: count it in
+      // flight from here, exactly where the alarm handler does — never before,
+      // or the gates above would have seen this cycle as a live operation.
+      cycle.count();
       const { record, facts } = gate;
       const holder = this.nextHolder();
       await this.recordInFlight("refresh", holder, REFRESH_CYCLE_LEASE_MS, "refresh");
@@ -3394,7 +3408,8 @@ export class ResidentDO extends Sandbox<Env> {
     sha: string;
     lockfileKey: string;
   }): Promise<InstanceStepAnswer<{ entry: string | null }>> {
-    return this.runInstanceStep<{ entry: string | null }>(input.instance, "install", async () => {
+    return this.runInstanceStep<{ entry: string | null }>(input.instance, "install", async (cycle) => {
+      cycle.count();
       const record = await this.registry().getRecord(input.resource);
       if (!record) return { status: "stopped", why: "offboarded" };
       const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
@@ -3414,7 +3429,8 @@ export class ResidentDO extends Sandbox<Env> {
     lockfileKey: string;
     depsEntry: string | null;
   }): Promise<InstanceStepAnswer<{ ran: boolean; why: string }>> {
-    return this.runInstanceStep<{ ran: boolean; why: string }>(input.instance, "build", async () => {
+    return this.runInstanceStep<{ ran: boolean; why: string }>(input.instance, "build", async (cycle) => {
+      cycle.count();
       const record = await this.registry().getRecord(input.resource);
       if (!record) return { status: "stopped", why: "offboarded" };
       const built = await this.runBuild({
@@ -3444,7 +3460,8 @@ export class ResidentDO extends Sandbox<Env> {
     action: RefreshPlan["action"];
     mintError: string | null;
   }): Promise<InstanceStepAnswer<{ committed: boolean }>> {
-    return this.runInstanceStep<{ committed: boolean }>(input.instance, "snapshot", async () => {
+    return this.runInstanceStep<{ committed: boolean }>(input.instance, "snapshot", async (cycle) => {
+      cycle.count();
       const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
       if (!facts) return { status: "stopped", why: "no-facts" };
       const committed =
