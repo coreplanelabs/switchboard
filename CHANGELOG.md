@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.202.1](https://github.com/coreplanelabs/switchboard/compare/v1.202.0...v1.202.1) (2026-09-11)
+
+
+### Bug fixes
+
+* **deploy:** the package's bin is a committed entry that hands the process to the bundle — npm links it in the checkout too, and an unbuilt workspace says what to run instead of `sh: switchboard: command not found` ([#949](https://github.com/coreplanelabs/switchboard/issues/949)) ([41ba0b1](https://github.com/coreplanelabs/switchboard/commit/41ba0b1e155ecd1ba1aaa781fb5312eb91ec2a24))
+
 ## [1.202.0](https://github.com/coreplanelabs/switchboard/compare/v1.201.0...v1.202.0) (2026-09-11)
 
 
