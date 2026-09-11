@@ -2,7 +2,7 @@
 title: Open-source readiness - Plan
 type: feat
 date: 2026-09-04
-status: accepted
+status: implemented
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: review-ready
 product_contract_source: session 2026-09-04 (Justin + Claude)
