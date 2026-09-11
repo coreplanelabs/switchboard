@@ -6,10 +6,10 @@ description: Conducts multi-axis code review. Use before merging any change. Use
   the main branch.
 agents:
   - review
-source: https://github.com/addyosmani/agent-skills/blob/d2c37ef6225dd8726cdd369a8030307f48592d26/skills/code-review-and-quality/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/code-review-and-quality/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
   path: skills/code-review-and-quality/SKILL.md
   bodySha256: 2d86c0a85f1b223db964134fd62e8808f06c9e6717e50f28970bc1b6484e3d72
 ---

@@ -1,3 +1,8 @@
+# Depot CI Migration
+# Source: .github/workflows/pr-title.yml
+#
+# No changes were necessary.
+
 # The pull request title becomes the squash commit's subject on main and a
 # changelog line, so it is checked on every PR as a required status (job name
 # `title`). Its own workflow rather than a job in ci.yml because it must re-run
@@ -7,15 +12,12 @@
 # verdict locally. In the merge queue there is no title to read; the script
 # passes with a note so the required check is never missing there.
 name: pr-title
-
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]
   merge_group:
-
 permissions:
   contents: read
-
 # Queued, never cancelled. release-please updates the release PR with a
 # force-push AND a title/body edit in the same second, so `synchronize` and
 # `edited` each start a run for the same head; with cancel-in-progress the
@@ -26,7 +28,6 @@ permissions:
 concurrency:
   group: pr-title-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
   title:
     name: title
@@ -35,8 +36,6 @@ jobs:
       PR_TITLE: ${{ github.event.pull_request.title }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc

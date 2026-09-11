@@ -2,15 +2,16 @@
 name: spec-driven-development
 description: Creates specs before coding. Use when starting a new project,
   feature, or significant change and no specification exists yet. Use when
+  drafting a PRD or requirements document with objectives and scope, or when
   requirements are unclear, ambiguous, or only exist as a vague idea. Use when a
   single requirement spans several independently testable capabilities and needs
   decomposing into a capability map of modules before specifying.
 agents:
   - coding
-source: https://github.com/addyosmani/agent-skills/blob/d2c37ef6225dd8726cdd369a8030307f48592d26/skills/spec-driven-development/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/spec-driven-development/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
   path: skills/spec-driven-development/SKILL.md
   bodySha256: 0df901751a72679874f5ecd1595152d6e760aa5ad90c4f0b8d9b286b07e3241e
 ---

@@ -1,3 +1,9 @@
+# Depot CI Migration
+# Source: .github/workflows/ci.yml
+#
+# The jobs mirror .github/workflows/ci.yml exactly (src/ciWorkflow.test.ts
+# holds them equal); only this header and the real triggers differ.
+
 # CI is a thin caller of the repository's own scripts: every step below is
 # `npm ci` or `npm run <script>`, so a contributor or an agent runs the exact
 # same checks locally with `npm run verify` (or one area's `verify`). Nothing
@@ -14,13 +20,10 @@
 name: ci
 
 on:
-  # Automatic CI runs in .depot/workflows/ci.yml during the Depot trial.
-  # Restore these triggers to switch back; keep a manual trigger for valid YAML.
-  workflow_dispatch:
-  # pull_request:
-  # merge_group:
-  # push:
-  #   branches: [main]
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
 
 permissions:
   contents: read

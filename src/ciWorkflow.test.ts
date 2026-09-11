@@ -48,8 +48,8 @@ interface Workflow {
 // The workflows that gate a pull request. pr-title.yml is separate from ci.yml
 // only because it must re-run when the title is edited (see its header); it is
 // held to the same rule.
-const GATE_WORKFLOWS = [".github/workflows/ci.yml", ".github/workflows/pr-title.yml"];
-const ci = parse(read(".github/workflows/ci.yml")) as Workflow;
+const GATE_WORKFLOWS = [".depot/workflows/ci.yml", ".github/workflows/pr-title.yml"];
+const ci = parse(read(".depot/workflows/ci.yml")) as Workflow;
 const rootPkg = JSON.parse(read("package.json")) as { scripts: Record<string, string>; workspaces: string[] };
 
 /** The status checks `main-ci-required` requires (AGENTS.md); each must be a job's name. */
@@ -151,6 +151,12 @@ describe("the gate workflows run only the repository's own scripts", () => {
     expect(ci.on).toHaveProperty("pull_request");
     expect(ci.on).toHaveProperty("push");
     expect(ci.on).toHaveProperty("merge_group");
+  });
+
+  it("GitHub CI is manual-only during the Depot trial", () => {
+    const github = parse(read(".github/workflows/ci.yml")) as Workflow;
+    expect(github.on).toEqual({ workflow_dispatch: null });
+    expect(github.jobs).toEqual(ci.jobs);
   });
 
   it("pr-title.yml re-runs when a title is edited and is present in the merge queue", () => {
@@ -612,7 +618,7 @@ describe("the image check builds every image the deploy builds", () => {
   it.each(images)(
     "$dir: `check:image` builds the Dockerfile wrangler deploys, from the same context",
     ({ dir, context }) => {
-      expect(scriptsOf(dir)["check:image"]).toBe(`docker build --quiet ${context}`);
+      expect(scriptsOf(dir)["check:image"]).toBe(`docker build ${context}`);
     },
   );
 
@@ -906,5 +912,25 @@ describe("the production deploy is one reusable workflow", () => {
     expect(call.uses).toBe("./.github/workflows/deploy-production.yml");
     expect(call.with).toEqual({ targets: "affected" });
     expect(call.secrets).toBe("inherit");
+  });
+});
+
+describe("CodeQL orchestration", () => {
+  it("runs only in GitHub Actions on Depot runners", () => {
+    const workflow = parse(read(".github/workflows/codeql.yml")) as Workflow;
+    expect(workflow.on).toHaveProperty("pull_request");
+    expect(workflow.on.push).toEqual({ branches: ["main"] });
+    expect(workflow.on.schedule).toEqual([{ cron: "17 6 * * 1" }]);
+    expect(workflow.jobs.analyze["runs-on"]).toMatch(/^depot-/);
+    for (const file of readdirSync(path.join(root, ".depot/workflows"))) {
+      if (!/\.ya?ml$/.test(file)) continue;
+      const depot = parse(read(`.depot/workflows/${file}`)) as Workflow;
+      for (const job of Object.values(depot.jobs)) {
+        expect(
+          job.steps?.some((step) => step.uses?.startsWith("github/codeql-action/analyze@")),
+          file,
+        ).not.toBe(true);
+      }
+    }
   });
 });

@@ -1,15 +1,15 @@
 ---
 name: test-driven-development
-description: Drives development with tests. Use when implementing any logic,
-  fixing any bug, or changing any behavior. Use when you need to prove that code
-  works, when a bug report arrives, or when you're about to modify existing
-  functionality.
+description: Drives development with tests using the red-green-refactor loop.
+  Use when implementing any logic, fixing any bug, or changing any behavior. Use
+  when you need to prove that code works, when a bug report arrives, or when
+  you're about to modify existing functionality.
 agents:
   - coding
-source: https://github.com/addyosmani/agent-skills/blob/d2c37ef6225dd8726cdd369a8030307f48592d26/skills/test-driven-development/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/test-driven-development/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
   path: skills/test-driven-development/SKILL.md
   bodySha256: f2d1d98b7cbbc08775e0acae1779e1122bc24e2458542396133f026b803dc69f
 ---

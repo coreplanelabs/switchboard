@@ -23,7 +23,7 @@ permissions: {}
 jobs:
   zizmor:
     name: zizmor
-    runs-on: namespace-profile-mid
+    runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
     steps:
