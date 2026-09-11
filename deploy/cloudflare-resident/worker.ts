@@ -65,7 +65,6 @@
 //      (untrusted repo code) run unprivileged (worker1) and token-free
 //      (docs/decisions/0009-residents-second-credential-domain.md).
 import {
-  getSandbox,
   isDurableObjectCodeUpdateReset,
   OperationInterruptedError,
   ProcessWaitTimeoutError,
@@ -77,7 +76,7 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
-import { DurableObject, WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
+import { DurableObject } from "cloudflare:workers";
 import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
@@ -148,12 +147,8 @@ import {
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
 import {
-  REFRESH_STEP_RETRIES,
   lifecycleOf,
   parseLifecycle,
-  refreshInstanceId,
-  shouldCreateRefreshInstance,
-  stepTimeoutMs,
   type RefreshRow,
   type ResidentLifecycle,
 } from "../../src/execution/residentInstanceId.js";
@@ -222,8 +217,7 @@ import { graftResidentSteps } from "../../src/execution/residentTrace.js";
 import type { SpanAttrs } from "../../src/core/trace/attrs.js";
 import type { Span as TraceSpan } from "../../src/core/trace/types.js";
 import { systemClock } from "../../src/core/trace/clock.js";
-import { createTracer } from "../../src/core/trace/tracer.js";
-import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrace.js";
+import { startAdoptedRoot } from "../../src/core/trace/workerTrace.js";
 import { backupTransferMode } from "../../src/execution/residentBackupTransfer.js";
 import {
   extractRestoreScript,
@@ -256,6 +250,27 @@ import {
   planDepsMaterialization,
 } from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
+import { createRefreshInstance, type RefreshInstanceParams } from "./refresh";
+import {
+  DEFAULT_EXEC_TIMEOUT_MS,
+  DEPS_STEP_OVERHEAD_MS,
+  errMsg,
+  GIT_NETWORK_TIMEOUT_MS,
+  IDLE_REFRESH_INTERVAL_S,
+  R2_TRANSFER_TIMEOUT_MS,
+  REFRESH_BUILD_TIMEOUT_MS,
+  REFRESH_INSTALL_TIMEOUT_MS,
+  REFRESH_INTERVAL_S,
+  registryStub,
+  residentStub,
+  tracer,
+  traceSinks,
+} from "./shared";
+
+/** The refresh cycle's Workflow entrypoint is declared in refresh.ts; the
+ *  Workflows binding resolves its `class_name` against this module
+ *  (wrangler.template.jsonc), so the entry exports it under that name. */
+export { ResidentRefresh } from "./refresh";
 
 /** The commit this bundle was built from, injected by the deploy
  *  (`deploy/bin/build-stamp.mjs`; `unknown` when nobody stamped it). Answered
@@ -271,9 +286,8 @@ const BUILD_ID = buildId(BUILD);
 // (/attach, /exec, /op) are rooted inside the DO where the work is, their
 // collector's steps as `resident.<step>` children; every other authenticated
 // route is a `resident.fetch` root at the edge. Each joins the bot's trace when
-// the request carried one. A `slow` log sink whose filter drops a refusal's line.
-const tracer = createTracer({ clock: systemClock });
-const traceSinks = [workerLogSink((line) => console.log(line))];
+// the request carried one. The tracer and its log sink are shared.ts's: the
+// refresh instance's root (refresh.ts) starts from the same pair.
 const STREAMED_ROUTES: ReadonlySet<string> = new Set(["/attach", "/exec", "/op"]);
 
 /** One request as the resident's own root: started at its t0, joining the
@@ -297,20 +311,14 @@ function refusalOutcome(err: ThreadErr): string {
   return err.needs ? `needs_${err.needs}` : "error";
 }
 
-/** What a refresh instance is created with: the resident it runs for. Every
- *  other input is read from the resident's rows at each step, never carried. */
-interface RefreshInstanceParams {
-  resource: string;
-}
-
-interface Env {
+export interface Env {
   RESIDENT: DurableObjectNamespace<ResidentDO>;
   REGISTRY: DurableObjectNamespace<ResidentRegistryDO>;
   BACKUP_BUCKET: R2Bucket;
   /** The refresh cycle as a Workflow instance (docs/reference/specs/resident-repos.md
-   *  item 7): `ResidentRefresh` below. The watchdog cron creates one per
-   *  resident whose row says `lifecycle: workflow`; an `alarm` resident (the
-   *  default) never has one. */
+   *  item 7): `ResidentRefresh` in refresh.ts, re-exported above. The watchdog
+   *  cron creates one per resident whose row says `lifecycle: workflow`; an
+   *  `alarm` resident (the default) never has one. */
   RESIDENT_REFRESH: Workflow<RefreshInstanceParams>;
   // Presigned snapshot transfers (docs/reference/specs/resident-repos.md item 61): with all
   // four present the container moves archive bytes itself over presigned R2
@@ -355,19 +363,6 @@ interface Env {
 // `evictColdest:true` makes room (docs/reference/specs/resident-repos.md item 46).
 const RESIDENT_CAP = 6;
 
-/** Container sleep window, passed to every getSandbox() for ResidentDO.
- *  Invariant: REFRESH_INTERVAL_S and the watchdog cron (wrangler.jsonc,
- *  every 10 minutes) MUST both stay SHORTER than this window, so a healthy
- *  resident is re-warmed before the platform can sleep it. Bump together. */
-const SLEEP_AFTER = "20m";
-
-/** Refresh alarm cadence (seconds). Each resident DO self-reschedules this
- *  alarm (per-resident alarms own freshness; the sparse cron is only the
- *  watchdog); it doubles as the keep-warm heartbeat, so it must stay below
- *  SLEEP_AFTER. Matches the watchdog cron so a killed chain is re-armed
- *  within one refresh interval. */
-const REFRESH_INTERVAL_S = 600;
-
 /** R2 lifetime of snapshot objects. We delete replaced/offboarded snapshots
  *  explicitly (see deleteBackupObjects); the TTL is a leak backstop, and it
  *  must be long — a quiet repo's current snapshot may go unreplaced for
@@ -380,46 +375,16 @@ const DEFAULT_PROVISIONING_TIMEOUT_MS = 5 * 60_000;
 const MIN_PROVISIONING_TIMEOUT_MS = 10_000;
 const MAX_PROVISIONING_TIMEOUT_MS = 30 * 60_000;
 
-/** Exec budgets. The DO alarm handler has a ~15-minute platform wall clock;
- *  every schedule callback's step budgets are chosen to fit under it. */
-const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
-const GIT_NETWORK_TIMEOUT_MS = 5 * 60_000;
-const REFRESH_BUILD_TIMEOUT_MS = 5 * 60_000;
-/** The refresh install budget. Twice the build's: a full `npm install` of the
- *  switchboard lockfile takes ~4 min on the resident's 1 vCPU when nothing
- *  else runs, and thread runs (tests, a review's greps) share that vCPU —
- *  under load it crosses 5 min several cycles in a row while the default
- *  branch keeps moving. A timed-out install is worse than a slow one: the cycle's whole
- *  budget is spent and the checkout is left without deps, so the next cycle
- *  starts the same install over. The cycle runs in the background (runs keep
- *  attaching to the last snapshot); the cost of a longer budget is a longer
- *  mirror-lock window, bounded well inside STALE_MIDFLIGHT_MS. */
-const REFRESH_INSTALL_TIMEOUT_MS = 10 * 60_000;
 /** After `output()`'s wait gives up on a process the supervisor should have
  *  killed at `timeout`, how long to wait for the exit status of OUR kill
  *  before reporting the step without one. */
 const KILL_EXIT_WAIT_MS = 10_000;
-/** Budget per R2 SNAPSHOT upload. The SDK's createBackup
- *  accepts no timeout or AbortSignal, so each call is raced against this
- *  (withTimeout): a hung upload fails the cycle into the existing degrade
- *  handling with a named error, instead of stranding `refreshing` until the
- *  30-min watchdog. Restores are NOT on this budget any more: a download is
- *  judged by the bytes arriving in its target (restoreWithProgress) —
- *  a fixed budget abandoned a 481 s restore that then completed.
- *  Same class as the other network budgets (observed live transfers run
- *  seconds, recorded in `lastRestore.ms`). */
-const R2_TRANSFER_TIMEOUT_MS = 5 * 60_000;
 /** The mirror-mutex lease for a section that names no step budget of its own
  *  (attach's clone section, a sweep's eviction, the wake and reclaim fetches):
  *  a holder of the current incarnation still holding past this has hung, the
  *  same bound the watchdog puts on a mid-flight state. The engine steps pass
  *  their exact budgets instead. */
 const MIRROR_LEASE_DEFAULT_MS = STALE_MIDFLIGHT_MS;
-/** What the dependency install step runs around the install itself, each
- *  bounded: the scratch clone, the seed and its cache swap, the commit (one
- *  network budget each) and the harden (the default exec budget). The step's
- *  lease is the install budget plus this. */
-const DEPS_STEP_OVERHEAD_MS = 4 * GIT_NETWORK_TIMEOUT_MS + DEFAULT_EXEC_TIMEOUT_MS;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -508,7 +473,6 @@ const SWEEP_DRIFT_SLACK_S = 5 * 60;
  *  the container can actually sleep (SLEEP_AFTER); the next attach refreshes
  *  first if the mirror is stale (refresh-on-attach). */
 const IDLE_AFTER_S = 60 * 60;
-const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
 /** LRU eviction floor: an over-cap onboard with `evictColdest:true` may
  *  offboard the coldest eligible warm resident, but never one whose last
  *  activity (attach or provisioning) is younger than this — a repo used
@@ -564,13 +528,6 @@ const LIFECYCLE_KEY = "resident:lifecycle";
  *  this resident, with the step it last reported and the cycle lease it holds,
  *  and the last bucket the cron skipped (a live cycle, a duplicate id). */
 const REFRESH_INSTANCE_KEY = "resident:refreshInstance";
-/** The refresh instance's step budgets: each `step.do` timeout is the DO
- *  method's own budget, capped at the engine's 30-minute step ceiling
- *  (`stepTimeoutMs`), so a step timeout and a command timeout agree. */
-const REFRESH_FETCH_STEP_BUDGET_MS = RESTORE_MAX_MS + GIT_NETWORK_TIMEOUT_MS; // a wake's restore, then the fetch
-const REFRESH_INSTALL_STEP_BUDGET_MS = REFRESH_INSTALL_TIMEOUT_MS + DEPS_STEP_OVERHEAD_MS; // the install's own lease
-const REFRESH_BUILD_STEP_BUDGET_MS = GIT_NETWORK_TIMEOUT_MS + REFRESH_BUILD_TIMEOUT_MS; // the build's mutex lease
-const REFRESH_SNAPSHOT_STEP_BUDGET_MS = R2_TRANSFER_TIMEOUT_MS + GIT_NETWORK_TIMEOUT_MS; // the archives, then the reclaim pass and the disk sample
 const DISK_MEASURE_CALLBACK = "onDiskMeasure";
 const DISK_MEASURE_DELAY_S = 1;
 /** A `du` over a multi-GB checkout plus every live tree is seconds warm, tens
@@ -655,8 +612,6 @@ export function validateEnvNames(vars: Record<string, string>): void {
     }
   }
 }
-
-const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** The resident runtime (the Sandbox SDK's control session to the container)
  *  was replaced while a command was in flight — in practice a `wrangler deploy`
@@ -1131,7 +1086,7 @@ interface RefreshInstanceRow {
 /** What every instance step answers besides its own facts: the resident's
  *  wall clock at the step's start and the commands it ran, so the instance
  *  can graft them under its root the way the bot grafts an attach's. */
-interface InstanceStepTrace {
+export interface InstanceStepTrace {
   startedAt: number;
   trace: ResidentStep[];
 }
@@ -1153,12 +1108,6 @@ interface RefreshFetchFacts {
   /** Whether the install step must run: a rebuild whose lockfile key moved, on a repo with an install command. */
   install: boolean;
   mintError: string | null;
-}
-/** What the cron did about one resident's refresh instance this pass. */
-interface RefreshInstanceAction {
-  id: string;
-  action: "created" | "duplicate" | "skipped" | "failed";
-  why: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -3178,7 +3127,7 @@ export class ResidentDO extends Sandbox<Env> {
 
   // -- the refresh cycle as a Workflow instance (item 7) --------------------------
   //
-  // `ResidentRefresh` (the Workflow entrypoint, below the DO) calls these four
+  // `ResidentRefresh` (the Workflow entrypoint, refresh.ts) calls these four
   // methods, one per step, through the DO stub. Each runs the same phase the
   // alarm runs, over the same rows, so a step the engine retries re-enters
   // the same idempotent read-then-act method (item 22) and finds the work
@@ -6678,14 +6627,6 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/op": { scope: "operator", method: "POST" },
 };
 
-function registryStub(env: Env) {
-  return env.REGISTRY.get(env.REGISTRY.idFromName("registry"));
-}
-
-function residentStub(env: Env, resource: string) {
-  return getSandbox(env.RESIDENT, resource, { sleepAfter: SLEEP_AFTER });
-}
-
 /** Per-resource R2 prefix for future resident cache objects; offboard deletes
  *  everything beneath it. NOTE: SDK backup snapshots deliberately do NOT live
  *  here — they land under backups/<uuid>/ and are deleted via the stored
@@ -7630,64 +7571,6 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
   }
 }
 
-/** The cron's instance-creation duty for one resident (item 7). Only a
- *  `workflow` row gets an instance, at most one per ten-minute bucket, never
- *  while a cycle is live (`shouldCreateRefreshInstance`); the id is
- *  deterministic per resident and bucket, so a second firing in one bucket
- *  meets the engine's duplicate-id refusal, which is the expected no-op. A
- *  skipped live cycle and a duplicate are recorded on the row for `/status`.
- *  An `alarm` resident answers null: nothing here touches it. */
-/** Whether the engine knows an instance by this id, in any status. A missing
- *  id rejects on `get` or on `status`; either way the answer is false. */
-async function refreshInstanceExists(env: Env, id: string): Promise<boolean> {
-  try {
-    await (await env.RESIDENT_REFRESH.get(id)).status();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function createRefreshInstance(
-  env: Env,
-  stub: ReturnType<typeof residentStub>,
-  resource: string,
-  row: RefreshRow,
-): Promise<RefreshInstanceAction | null> {
-  if (row.lifecycle !== "workflow") return null;
-  const now = systemClock();
-  const decision = shouldCreateRefreshInstance(row, now, {
-    intervalS: REFRESH_INTERVAL_S,
-    idleIntervalS: IDLE_REFRESH_INTERVAL_S,
-  });
-  const slug = resource.slice("repo:".length);
-  const slash = slug.indexOf("/");
-  const id = refreshInstanceId(slug.slice(0, slash), slug.slice(slash + 1), now);
-  if (!decision.create) {
-    if (decision.why === "mid-cycle" || decision.why === "running")
-      await stub.recordRefreshSkipped(id, now, decision.why);
-    return { id, action: "skipped", why: decision.why };
-  }
-  try {
-    await env.RESIDENT_REFRESH.create({ id, params: { resource } });
-  } catch (err) {
-    const message = errMsg(err);
-    // The engine refuses an id that names an instance still inside its
-    // retention, and the refusal carries no code — so the id is asked, not
-    // the wording: an instance that answers for it exists, and the refusal
-    // was the duplicate it looks like. Any other failure stays a failure.
-    if (await refreshInstanceExists(env, id)) {
-      await stub.recordRefreshSkipped(id, now, "duplicate");
-      return { id, action: "duplicate", why: "duplicate" };
-    }
-    console.error(`resident-watchdog: creating refresh instance ${id} failed — ${message}`);
-    return { id, action: "failed", why: residentText(message) };
-  }
-  await stub.recordRefreshInstance(id, now);
-  console.log(`resident-watchdog: created refresh instance ${id}`);
-  return { id, action: "created", why: decision.why };
-}
-
 /** One watchdog pass over every registered resident. Shared by the cron
  *  handler and the /debug run-watchdog op. Each check targets a different DO,
  *  so they run concurrently; a failing one becomes its own {error} entry
@@ -7731,133 +7614,6 @@ async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummar
       : { resource: record.resource, error: errMsg(s.reason) };
   });
   return { cap: (await registry.limits()).cap, count: residents.length, results };
-}
-
-// ---------------------------------------------------------------------------
-// The refresh cycle as a Workflow instance (docs/reference/specs/resident-repos.md item 7)
-// ---------------------------------------------------------------------------
-
-/** What an instance answers when it ends: small facts for the engine's record. */
-interface RefreshInstanceSummary {
-  instance: string;
-  /** `ok`, or the word a gate or a failure ended the cycle with. */
-  outcome: string;
-  step: "fetch" | "install" | "build" | "snapshot";
-  action?: RefreshPlan["action"];
-  sha?: string;
-}
-
-/** One refresh cycle as one short Workflow instance: `fetch`, `install` (only
- *  when the plan moved the lockfile key), `build` (only when the branch
- *  moved), `snapshot` — each a `step.do` calling the resident's own step
- *  method through the DO stub, under the retry policy `REFRESH_STEP_RETRIES`
- *  (six attempts, thirty seconds apart, doubling: about 15.5 minutes, past
- *  the 3 to 10 minutes a resident Worker rollover takes to settle) and a
- *  timeout equal to the method's own budget (never above the engine's 30
- *  minutes). Inputs to a step are the event's `resource`, the instance id and
- *  previous steps' returns — refs, shas, a key, a path — never a payload and
- *  never a credential. A step killed from outside (the container replaced
- *  under it) throws and the engine retries it into the same idempotent
- *  method; a gate that ends the cycle (idle, a container restart) or a
- *  failure of the repository's own (recorded as `degraded`, the last snapshot
- *  still serving) ends the instance with that word, and the next cron firing
- *  creates the next one from the row's state. The instance runs one cycle
- *  and returns: it is created by the watchdog cron per resident and
- *  ten-minute bucket (`createRefreshInstance`), never a loop.
- *
- *  The run is the cycle's root span, `resident.refresh` carrying the instance
- *  id (docs/reference/specs/tracing.md item 25), with every command a step ran
- *  grafted under it as a `resident.<step>` child — the same shape the alarm's
- *  root has. */
-export class ResidentRefresh extends WorkflowEntrypoint<Env, RefreshInstanceParams> {
-  async run(
-    event: Readonly<WorkflowEvent<RefreshInstanceParams>>,
-    step: WorkflowStep,
-  ): Promise<RefreshInstanceSummary> {
-    const { resource } = event.payload;
-    const instance = event.instanceId;
-    const stub = residentStub(this.env, resource);
-    const root = startAdoptedRoot(tracer, "resident.refresh", {
-      sinks: traceSinks,
-      startedAt: event.timestamp.getTime(),
-      attrs: { instanceId: instance },
-    });
-    const graft = (answer: InstanceStepTrace) =>
-      graftResidentSteps(answer.trace, {
-        parent: root,
-        prefix: "resident",
-        baseAt: answer.startedAt,
-        clipAt: systemClock(),
-      });
-    const retries = REFRESH_STEP_RETRIES;
-    /** The word a step that did not finish ends the instance with, and its outcome for the root. */
-    const ended = (
-      at: RefreshInstanceSummary["step"],
-      answer: { status: "stopped"; why: string } | { status: "failed"; reason: string },
-    ): RefreshInstanceSummary => ({
-      instance,
-      outcome: answer.status === "stopped" ? answer.why : "failed",
-      step: at,
-    });
-    let summary: RefreshInstanceSummary | undefined;
-    try {
-      const fetched = await step.do("fetch", { retries, timeout: stepTimeoutMs(REFRESH_FETCH_STEP_BUDGET_MS) }, () =>
-        stub.refreshInstanceFetch({ resource, instance }),
-      );
-      graft(fetched);
-      if (fetched.status !== "done") return (summary = ended("fetch", fetched));
-      let depsEntry: string | null = null;
-      if (fetched.install) {
-        const installed = await step.do(
-          "install",
-          { retries, timeout: stepTimeoutMs(REFRESH_INSTALL_STEP_BUDGET_MS) },
-          () => stub.refreshInstanceInstall({ resource, instance, sha: fetched.sha, lockfileKey: fetched.lockfileKey }),
-        );
-        graft(installed);
-        if (installed.status !== "done") return (summary = ended("install", installed));
-        depsEntry = installed.entry;
-      }
-      if (fetched.action !== "unchanged") {
-        const built = await step.do("build", { retries, timeout: stepTimeoutMs(REFRESH_BUILD_STEP_BUDGET_MS) }, () =>
-          stub.refreshInstanceBuild({
-            resource,
-            instance,
-            sha: fetched.sha,
-            factsSha: fetched.factsSha,
-            lockfileKey: fetched.lockfileKey,
-            depsEntry,
-          }),
-        );
-        graft(built);
-        if (built.status !== "done") return (summary = ended("build", built));
-      }
-      const snapped = await step.do(
-        "snapshot",
-        { retries, timeout: stepTimeoutMs(REFRESH_SNAPSHOT_STEP_BUDGET_MS) },
-        () =>
-          stub.refreshInstanceSnapshot({
-            resource,
-            instance,
-            ref: fetched.ref,
-            sha: fetched.sha,
-            lockfileKey: fetched.lockfileKey,
-            action: fetched.action,
-            mintError: fetched.mintError,
-          }),
-      );
-      graft(snapped);
-      if (snapped.status !== "done") return (summary = ended("snapshot", snapped));
-      return (summary = { instance, outcome: "ok", step: "snapshot", action: fetched.action, sha: fetched.sha });
-    } catch (err) {
-      // A step out of retries: the engine records the failed instance by id;
-      // the row keeps its last state and the next cron firing starts the next cycle.
-      root.fail(err);
-      throw err;
-    } finally {
-      const outcome = summary?.outcome ?? "error";
-      root.end(outcome === "ok" || (summary !== undefined && outcome !== "failed") ? "ok" : "error", { outcome });
-    }
-  }
 }
 
 function json(data: unknown, status = 200): Response {

@@ -15,5 +15,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["worker.ts", "node-async-hooks.d.ts"]
+  "include": ["worker.ts", "refresh.ts", "shared.ts", "node-async-hooks.d.ts"]
 }
