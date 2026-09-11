@@ -40,6 +40,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0028 | [What a container image installs is a manifest per image class, rendered into the committed Dockerfile and extended by an operator overlay that deploy images builds](../decisions/0028-image-manifest.md) | Generated artifact (gen + check) over a declarative manifest; artifact promotion for the operator overlay | proposed | 2026-09-10 |
 | 0029 | [Durable Objects are the store and never the scheduler, Cloudflare Workflows schedules the multi-step lifecycles, and the agent loop stays in a container](../decisions/0029-durable-objects-store-workflows-schedule.md) | Durable execution for the lifecycles around the loop, never for the loop; one order for four converging tracks | accepted | 2026-09-10 |
 | 0030 | [deploy all copies the images it needs into the account registry itself, over HTTPS, and the operator's whole deploy is one command](../decisions/0030-deploy-all-copies-the-images-it-needs.md) | Artifact promotion, folded into the one deploy command | accepted | 2026-09-10 |
+| 0031 | [The coordinator runs a plan, not a pull request; a child is handed a contract and hands back a deviation; verification cannot be weakened without its spec](../decisions/0031-the-coordinator-runs-a-plan-not-a-pull-request.md) | Planner over workers with one policy table per child; specs as the contract both ways; deterministic guards on the review gate | proposed | 2026-09-11 |
 
 <!-- /generated:decision-records -->
 
