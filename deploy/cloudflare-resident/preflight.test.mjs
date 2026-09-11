@@ -75,7 +75,7 @@ describe("resident deploy preflight — decide()", () => {
     expect(d.message).toMatch(/RESIDENT_DEPLOY_FORCE=1/);
   });
 
-  it("a resident refreshing or restoring with 0 in flight → allow with a WARNING naming the state: the cycle re-arms in 45 s after the swap (item 44), a restore is retried by the next hydrate (item 61)", () => {
+  it("a resident refreshing or restoring with 0 in flight → allow with a WARNING naming the state: the refresh instance retries the step after the swap (item 44), a restore is retried by the next hydrate (item 61)", () => {
     for (const state of ["refreshing", "restoring"]) {
       const d = decide(
         payload([resident("repo:jshttp/vary", 0), { resource: "repo:acme/widgets", live: { state, inFlight: 0 } }]),

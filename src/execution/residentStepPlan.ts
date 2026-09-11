@@ -20,7 +20,7 @@ import { planRefresh, type CleanScope, type RefreshDisk } from "./residentRefres
 export const LAST_FETCH_KEY = "resident:lastFetch";
 
 export interface FetchRecord {
-  /** The cycle that fetched (the alarm firing or the instance driving it). */
+  /** The cycle that fetched: the refresh instance driving it. */
   cycle: string;
   ref: string;
   /** The ref's tip in the mirror after that fetch. */

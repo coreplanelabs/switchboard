@@ -140,24 +140,25 @@ describe("watchdogFiring (the resident's firing record)", () => {
       schedule: "resident-watchdog",
       firedAt: T0,
       outcome: "completed",
-      detail: "3/10 residents · 0 re-armed · 0 timed out · 0 errors",
+      detail: "3/10 residents · 0 refreshed · 0 timed out · 0 errors",
     });
   });
 
-  it("counts re-armed chains and timed-out onboardings; any per-resident error makes the pass `failed`", () => {
+  it("counts the refresh instances the pass created and the timed-out onboardings; a skipped or duplicate instance is not a refresh; any per-resident error makes the pass `failed`", () => {
     const summary = {
       cap: 10,
-      count: 4,
+      count: 5,
       results: [
-        { resource: "a", action: "re-armed" },
+        { resource: "a", action: "none", instance: { id: "refresh_a_1", action: "created", why: "due" } },
         { resource: "b", action: "provision-timed-out" },
         { resource: "c", error: "boom" },
-        { resource: "d" },
+        { resource: "d", action: "none", instance: { id: "refresh_d_1", action: "skipped", why: "not-due" } },
+        { resource: "e", action: "none", instance: { id: "refresh_e_1", action: "duplicate", why: "duplicate" } },
       ],
     };
     expect(watchdogFiring(watchdog, T0, summary)).toMatchObject({
       outcome: "failed",
-      detail: "4/10 residents · 1 re-armed · 1 timed out · 1 errors — c: boom",
+      detail: "5/10 residents · 1 refreshed · 1 timed out · 1 errors — c: boom",
     });
   });
 
@@ -173,11 +174,11 @@ describe("watchdogFiring (the resident's firing record)", () => {
       ],
     };
     expect(watchdogFiring(watchdog, T0, summary).detail).toBe(
-      "3/6 residents · 0 re-armed · 0 timed out · 0 errors · disk max 80% (b/two)",
+      "3/6 residents · 0 refreshed · 0 timed out · 0 errors · disk max 80% (b/two)",
     );
     expect(
       watchdogFiring(watchdog, T0, { cap: 6, count: 1, results: [{ resource: "repo:a/one", action: "none" }] }).detail,
-    ).toBe("1/6 residents · 0 re-armed · 0 timed out · 0 errors");
+    ).toBe("1/6 residents · 0 refreshed · 0 timed out · 0 errors");
   });
 
   it("a thrown watchdog is `failed` with the message; detail stays capped", () => {

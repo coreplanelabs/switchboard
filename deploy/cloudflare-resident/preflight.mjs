@@ -41,8 +41,8 @@ const SETTLED_STATES = new Set(["warm", "degraded", "down"]);
  *  is `provision-failed`, `down`, and only a rebuild recovers it. */
 const PROVISIONING_STATES = new Set(["onboarding"]);
 /** The engine is executing and an isolate swap merely INTERRUPTS it: a refresh
- *  cycle re-arms in 45 s and resumes from its disk checkpoints (resident-repos
- *  items 44 and 48); a restore is retried by the next hydrate, which first
+ *  step is retried by its Workflow instance and resumes from its disk
+ *  checkpoints (resident-repos items 44 and 48); a restore is retried by the next hydrate, which first
  *  unmounts and removes whatever the interrupted one left (item 61). These
  *  used to refuse like `onboarding`, and a release deploy once spent its whole
  *  budget behind a resident stuck in `restoring` — a state an isolate swap
@@ -162,7 +162,7 @@ export function decide(fetched, { force = false } = {}) {
   // Interruptible cycles never refuse; they are named so the log says what the
   // swap interrupts and why that is fine.
   const warningText = interrupting.length
-    ? ` — WARNING: mid-cycle: ${interrupting.map((m) => `${m.resource} (${m.state})`).join(", ")} — the isolate swap interrupts it; a refresh re-arms in 45 s from its checkpoints, a restore is retried by the next hydrate (resident-repos items 44/61)`
+    ? ` — WARNING: mid-cycle: ${interrupting.map((m) => `${m.resource} (${m.state})`).join(", ")} — the isolate swap interrupts it; the refresh instance retries the step from its checkpoints, a restore is retried by the next hydrate (resident-repos items 44/61)`
     : "";
 
   if (problems.length === 0) {

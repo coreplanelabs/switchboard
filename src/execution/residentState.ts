@@ -16,14 +16,13 @@ export const SERVICEABLE_STATES: ReadonlySet<ResidentLifecycleState> = new Set<R
 ]);
 
 // A `degraded` reason names its cause (docs/reference/specs/resident-repos.md item 7).
-// Only reasons that PROVE the previous checkout + dep cache are intact attach:
-// `github-unreachable: …` (the fetch failed before the checkout was touched)
-// and `alarm-missed: …` (the watchdog re-armed a dead chain; nothing ran).
-// `stale-mid-flight: …` does NOT qualify: it is stamped when a `refreshing`
-// marker was orphaned by a cycle that died mid-flight, and that death may have
-// been inside the rebuild lock section (after `git clean -fdx`, mid-install) —
-// exactly the torn checkout this gate exists to avoid; the +5s recovery cycle
-// rebuilds it within seconds anyway. A failure INSIDE the rebuild —
+// Only a reason that PROVES the previous checkout + dep cache are intact
+// attaches: `github-unreachable: …` (the fetch failed before the checkout was
+// touched). `stale-mid-flight: …` does NOT qualify: it is stamped when a
+// `refreshing` marker was orphaned by a cycle that died mid-flight, and that
+// death may have been inside the rebuild lock section (after `git clean -fdx`,
+// mid-install) — exactly the torn checkout this gate exists to avoid; the next
+// refresh instance rebuilds it within one bucket anyway. A failure INSIDE the rebuild —
 // `checkout-update-failed`, `install-failed`, `build-failed`,
 // `snapshot-failed`, `refresh-failed` — leaves the checkout at a new sha with
 // absent/partial deps, and a fresh thread would hardlink that broken cache.
@@ -33,7 +32,7 @@ export const SERVICEABLE_STATES: ReadonlySet<ResidentLifecycleState> = new Set<R
 // (recorded as `github-unreachable`, every run would attach and die at
 // git-setup). Everything not on the allow-list, including unknown reasons,
 // stays cold.
-const SERVICEABLE_DEGRADED_REASON = /^(?:github-unreachable|alarm-missed)(?::|$)/;
+const SERVICEABLE_DEGRADED_REASON = /^github-unreachable(?::|$)/;
 
 export function degradedIsServiceable(reason: string | undefined): boolean {
   return SERVICEABLE_DEGRADED_REASON.test(reason ?? "");

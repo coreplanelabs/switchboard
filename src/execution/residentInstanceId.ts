@@ -1,44 +1,43 @@
 /** The refresh cycle as a cron-created Workflow instance — the id scheme, the
- *  per-resident lifecycle flag and the cron's decision to create one
+ *  per-resident lifecycle row and the cron's decision to create one
  *  (docs/reference/specs/resident-repos.md item 7), kept pure and
  *  dependency-free so it is unit-testable from src/ and imported by the
  *  resident Worker like residentRefresh — the tested code IS the shipped code.
  *
- *  Background: the refresh cycle is driven by a self-rearming alarm chain,
- *  and every failure between two re-arms ends the chain silently; a watchdog
- *  guesses from a timestamp. A Cloudflare Workflow instance is the durable
- *  fact the chain lacks: the engine records that a sequence is in progress
- *  and which step it reached, retries a failed step on a policy, and shows a
- *  failed instance by name. The port runs behind a per-resident flag,
- *  `lifecycle: alarm | workflow`, default `alarm`: one resident can run its
- *  cycles as instances while the fleet keeps the chain, and the two
- *  schedulers never both drive a cycle for the same resident.
+ *  Background: the refresh cycle used to be driven by a self-rearming alarm
+ *  chain, and every failure between two re-arms ended the chain silently; a
+ *  watchdog guessed from a timestamp. A Cloudflare Workflow instance is the
+ *  durable fact the chain lacked: the engine records that a sequence is in
+ *  progress and which step it reached, retries a failed step on a policy,
+ *  and shows a failed instance by name. The port ran behind a per-resident
+ *  flag for one release; the chain is gone now and Workflows is the one
+ *  scheduler, so every row reads `workflow` whatever it stores.
  *
  *  Shape: a cycle is one SHORT instance, not a loop — the resident Worker's
  *  existing ten-minute cron creates one per eligible resident with a
  *  deterministic id per resident and ten-minute bucket, so a second firing in
  *  the same bucket is refused as a duplicate id and cycles stay serialized
- *  per resident the way the chain serialized them. (A perpetual instance
- *  that slept between cycles was rejected by arithmetic: five steps every
- *  600 s reaches the engine's 10,000-step instance cap in about two weeks.) */
+ *  per resident. (A perpetual instance that slept between cycles was
+ *  rejected by arithmetic: five steps every 600 s reaches the engine's
+ *  10,000-step instance cap in about two weeks.) */
 
 import { STALE_MIDFLIGHT_MS } from "./residentIncarnation.js";
-import { nextRefreshDelayS } from "./residentRefresh.js";
 import type { ResidentLifecycleState } from "./residentState.js";
 
-// -- the flag ----------------------------------------------------------------
+// -- the lifecycle row ---------------------------------------------------------
 
-/** Which scheduler drives a resident's refresh cycle. */
-export type ResidentLifecycle = "alarm" | "workflow";
+/** Which scheduler drives a resident's refresh cycle: there is one. The row
+ *  survives from the flagged rollout so `/status` can say so; an `alarm` value
+ *  a flip left behind names a chain that no longer exists. */
+export type ResidentLifecycle = "workflow";
 
-/** The alarm chain is the default; a row without the field reads as `alarm`. */
-export const DEFAULT_LIFECYCLE: ResidentLifecycle = "alarm";
+export const DEFAULT_LIFECYCLE: ResidentLifecycle = "workflow";
 
 export function parseLifecycle(value: unknown): ResidentLifecycle | undefined {
-  return value === "alarm" || value === "workflow" ? value : undefined;
+  return value === "workflow" ? value : undefined;
 }
 
-/** What a stored row means: the two words, else the default. */
+/** What a stored row means: `workflow`, whatever it says. */
 export function lifecycleOf(stored: unknown): ResidentLifecycle {
   return parseLifecycle(stored) ?? DEFAULT_LIFECYCLE;
 }
@@ -94,7 +93,6 @@ export function refreshInstanceId(owner: string, name: string, atMs: number): st
 
 /** What the cron reads about one resident before creating its instance. */
 export interface RefreshRow {
-  lifecycle: ResidentLifecycle;
   state: ResidentLifecycleState;
   /** When the state last changed (epoch ms); null when the row never recorded one. */
   updatedAt: number | null;
@@ -110,36 +108,41 @@ export interface RefreshRow {
 }
 
 export interface RefreshCadence {
-  /** The awake cadence (the alarm's REFRESH_INTERVAL_S). */
+  /** The awake cadence (REFRESH_INTERVAL_S). */
   intervalS: number;
-  /** The idle cadence (the alarm's IDLE_REFRESH_INTERVAL_S). */
+  /** The idle cadence (IDLE_REFRESH_INTERVAL_S). */
   idleIntervalS: number;
 }
 
-export type InstanceDecision =
-  | { create: true; why: "due" }
-  | { create: false; why: "alarm-lifecycle" | "not-serving" | "mid-cycle" | "not-due" | "running" };
-
-/** Create an instance only for a `workflow` row that is serving, is not in a
- *  live cycle (a `refreshing` marker younger than the stale bound; an older
- *  one is an orphan the next cycle normalizes, exactly as the watchdog
- *  judges it), and whose cadence has elapsed since the last instance —
- *  counted in whole buckets so cron jitter never skips a due bucket: the
- *  awake cadence is one bucket, the idle cadence the row records is
- *  `nextRefreshDelayS`'s idle interval in buckets. */
-export function shouldCreateRefreshInstance(row: RefreshRow, nowMs: number, cadence: RefreshCadence): InstanceDecision {
-  if (row.lifecycle !== "workflow") return { create: false, why: "alarm-lifecycle" };
-  if (row.state === "onboarding" || row.state === "down") return { create: false, why: "not-serving" };
-  if (row.instanceRunning) return { create: false, why: "running" };
+/** Why no cycle may start for a row right now, or null when one may: the
+ *  resident is not serving (`onboarding` is provisioning's, `down` is a
+ *  rebuild's); the engine still runs the last instance; or a `refreshing`
+ *  marker younger than the stale bound says a cycle is live (an older one is
+ *  an orphan the next cycle normalizes, exactly as the watchdog judges it).
+ *  Shared by the cron's decision and the admin `refresh-now` op, which
+ *  starts a cycle whether or not one is due but never beside a live one. */
+export function refreshCycleBlocked(row: RefreshRow, nowMs: number): "not-serving" | "running" | "mid-cycle" | null {
+  if (row.state === "onboarding" || row.state === "down") return "not-serving";
+  if (row.instanceRunning) return "running";
   if (row.state === "refreshing" && row.updatedAt !== null && nowMs - row.updatedAt <= STALE_MIDFLIGHT_MS) {
-    return { create: false, why: "mid-cycle" };
+    return "mid-cycle";
   }
+  return null;
+}
+
+export type InstanceDecision =
+  { create: true; why: "due" } | { create: false; why: "not-serving" | "mid-cycle" | "not-due" | "running" };
+
+/** Create an instance only for a row no live cycle blocks (`refreshCycleBlocked`)
+ *  whose cadence has elapsed since the last instance — counted in whole
+ *  buckets so cron jitter never skips a due bucket: the awake cadence is one
+ *  bucket, the idle cadence the row records (`idleSince` set) is the idle
+ *  interval in buckets. */
+export function shouldCreateRefreshInstance(row: RefreshRow, nowMs: number, cadence: RefreshCadence): InstanceDecision {
+  const blocked = refreshCycleBlocked(row, nowMs);
+  if (blocked) return { create: false, why: blocked };
   if (row.lastInstanceAt !== null) {
-    const delayS = nextRefreshDelayS({
-      outcome: row.idleSince !== null ? "idle" : "normal",
-      intervalS: cadence.intervalS,
-      idleIntervalS: cadence.idleIntervalS,
-    });
+    const delayS = row.idleSince !== null ? cadence.idleIntervalS : cadence.intervalS;
     const dueBuckets = Math.max(1, Math.ceil((delayS * 1000) / REFRESH_BUCKET_MS));
     if (refreshBucket(nowMs) - refreshBucket(row.lastInstanceAt) < dueBuckets) return { create: false, why: "not-due" };
   }

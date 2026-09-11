@@ -9,6 +9,7 @@ import {
   lifecycleOf,
   parseLifecycle,
   refreshBucket,
+  refreshCycleBlocked,
   refreshInstanceId,
   retryWindowMs,
   shouldCreateRefreshInstance,
@@ -21,7 +22,6 @@ const NOW = 1_700_000_400_000 + 200_000; // 200 s past a 10-minute boundary (1_7
 const CADENCE = { intervalS: 600, idleIntervalS: 6 * 60 * 60 };
 
 const row = (over: Partial<RefreshRow> = {}): RefreshRow => ({
-  lifecycle: "workflow",
   instanceRunning: false,
   state: "warm",
   updatedAt: NOW - 60_000,
@@ -30,13 +30,14 @@ const row = (over: Partial<RefreshRow> = {}): RefreshRow => ({
   ...over,
 });
 
-describe("lifecycleOf / parseLifecycle — the per-resident flag, alarm by default", () => {
-  it("a missing or unknown stored value reads as `alarm`; the two words parse; anything else is refused", () => {
-    expect(lifecycleOf(undefined)).toBe("alarm");
-    expect(lifecycleOf("nonsense")).toBe("alarm");
+describe("lifecycleOf / parseLifecycle — one scheduler: every row reads `workflow`", () => {
+  it("a missing stored value reads `workflow`; so does an `alarm` row a flagged rollout left behind — the chain it named is gone; `workflow` is the one word that parses", () => {
+    expect(lifecycleOf(undefined)).toBe("workflow");
+    expect(lifecycleOf("alarm")).toBe("workflow");
+    expect(lifecycleOf("nonsense")).toBe("workflow");
     expect(lifecycleOf("workflow")).toBe("workflow");
-    expect(parseLifecycle("alarm")).toBe("alarm");
     expect(parseLifecycle("workflow")).toBe("workflow");
+    expect(parseLifecycle("alarm")).toBeUndefined();
     expect(parseLifecycle("Workflow")).toBeUndefined();
     expect(parseLifecycle(1)).toBeUndefined();
   });
@@ -73,12 +74,8 @@ describe("refreshInstanceId — deterministic per resident and 10-minute bucket,
 });
 
 describe("shouldCreateRefreshInstance — the cron's decision per resident", () => {
-  it("creates only for a `workflow` row; an `alarm` row (the default) is never given an instance", () => {
+  it("a serving row whose bucket is due is created for — every resident is on the one scheduler, no flag defers it", () => {
     expect(shouldCreateRefreshInstance(row(), NOW, CADENCE)).toEqual({ create: true, why: "due" });
-    expect(shouldCreateRefreshInstance(row({ lifecycle: "alarm" }), NOW, CADENCE)).toEqual({
-      create: false,
-      why: "alarm-lifecycle",
-    });
   });
   it("never creates for a resident that is onboarding or down (provisioning owns the first, a rebuild is the second's escape hatch)", () => {
     expect(shouldCreateRefreshInstance(row({ state: "onboarding" }), NOW, CADENCE)).toEqual({
@@ -137,6 +134,24 @@ describe("shouldCreateRefreshInstance — the cron's decision per resident", () 
       create: false,
       why: "not-due",
     });
+  });
+});
+
+describe("refreshCycleBlocked — what stops a cycle from starting now, shared by the cron and `refresh-now`", () => {
+  it("nothing blocks a serving row with no live cycle, due or not — `refresh-now` starts one inside a bucket the cron already served", () => {
+    expect(refreshCycleBlocked(row(), NOW)).toBeNull();
+    expect(refreshCycleBlocked(row({ lastInstanceAt: NOW - 1 }), NOW)).toBeNull();
+    expect(refreshCycleBlocked(row({ state: "degraded" }), NOW)).toBeNull();
+  });
+  it("an onboarding or down resident is not serving; a running instance and a young `refreshing` marker are a live cycle; an old marker is not", () => {
+    expect(refreshCycleBlocked(row({ state: "onboarding" }), NOW)).toBe("not-serving");
+    expect(refreshCycleBlocked(row({ state: "down" }), NOW)).toBe("not-serving");
+    expect(refreshCycleBlocked(row({ instanceRunning: true }), NOW)).toBe("running");
+    expect(refreshCycleBlocked(row({ state: "refreshing", updatedAt: NOW - STALE_MIDFLIGHT_MS + 1 }), NOW)).toBe(
+      "mid-cycle",
+    );
+    expect(refreshCycleBlocked(row({ state: "refreshing", updatedAt: NOW - STALE_MIDFLIGHT_MS - 1 }), NOW)).toBeNull();
+    expect(refreshCycleBlocked(row({ state: "refreshing", updatedAt: null }), NOW)).toBeNull();
   });
 });
 

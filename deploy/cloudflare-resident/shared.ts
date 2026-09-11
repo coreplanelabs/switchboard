@@ -19,20 +19,25 @@ import type { Env } from "./worker";
  *  resident is re-warmed before the platform can sleep it. Bump together. */
 export const SLEEP_AFTER = "20m";
 
-/** Refresh alarm cadence (seconds). Each resident DO self-reschedules this
- *  alarm (per-resident alarms own freshness; the sparse cron is only the
- *  watchdog); it doubles as the keep-warm heartbeat, so it must stay below
- *  SLEEP_AFTER. Matches the watchdog cron so a killed chain is re-armed
- *  within one refresh interval. */
+/** The refresh cadence (seconds): one instance per resident per ten-minute
+ *  bucket, created by the watchdog cron, so the cron's own period is the
+ *  cadence. The cycle doubles as the keep-warm heartbeat (its steps call into
+ *  the container), so it must stay below SLEEP_AFTER. */
 export const REFRESH_INTERVAL_S = 600;
 
-/** How far out an idle resident's cycle is parked (seconds): the alarm's idle
- *  re-arm (`IDLE_AFTER_S` in worker.ts decides idleness) and the cron's idle
- *  cadence, in whole ten-minute buckets since the last instance. */
+/** How far out an idle resident's next cycle is (seconds): the cron's idle
+ *  cadence (`IDLE_AFTER_S` in worker.ts decides idleness), in whole
+ *  ten-minute buckets since the last instance. */
 export const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
 
-/** Exec budgets. The DO alarm handler has a ~15-minute platform wall clock;
- *  every schedule callback's step budgets are chosen to fit under it. */
+/** The thread user pool the image carries (`worker2`..`worker17`): one OS
+ *  user per attached thread, and the bound on how many bindings one sweep
+ *  step can have to check. */
+export const THREAD_POOL_SIZE = 16;
+
+/** Exec budgets. Each is a refresh step's own budget too (refresh.ts), so a
+ *  step timeout and the command timeout it bounds agree; every one is under
+ *  the engine's 30-minute step ceiling. */
 export const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 export const GIT_NETWORK_TIMEOUT_MS = 5 * 60_000;
 export const REFRESH_BUILD_TIMEOUT_MS = 5 * 60_000;

@@ -17,12 +17,15 @@
 //   operator scope  POST /attach /detach /exec /read /write /op            GET /status (state, reason, inFlight)
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
 //
-// Lifecycle engine: alarm-driven provisioning (clone → install/build →
-// stamped snapshot → warm), wake-path rehydration (`restoring` persisted
-// BEFORE restore, stamped snapshots refused on mismatch), a self-rescheduling
-// refresh alarm, and a cron watchdog (re-arm dead chains + degraded
-// (alarm-missed); time out stuck onboarding; auto-rebuild after N consecutive
-// down passes on a rehydration-flavored reason). GitHub App tokens are minted
+// Lifecycle engine: schedule-driven provisioning (clone → install/build →
+// stamped snapshot → warm; the one timer left), wake-path rehydration
+// (`restoring` persisted BEFORE restore, stamped snapshots refused on
+// mismatch), the refresh cycle as a Workflow instance the cron creates per
+// resident and ten-minute bucket (refresh.ts: fetch, install, build,
+// snapshot, then the worktree sweep and the disk measurement as steps), and
+// a cron watchdog (create the due instances; name a stale mid-flight marker
+// by its instance; time out stuck onboarding; auto-rebuild after N
+// consecutive down passes on a rehydration-flavored reason). GitHub App tokens are minted
 // repo-scoped on WebCrypto. POST /rebuild is the down→onboarding escape hatch
 // (discard snapshots, reprovision from scratch); /offboard and /rebuild
 // support dryRun (itemized plan, nothing executed); onboard verifies GitHub
@@ -131,7 +134,6 @@ import {
   classifyRefreshFailure,
   restoreFailureDisposition,
   killStaleBuildProcessesCommand,
-  nextRefreshDelayS,
   planRefresh,
   RUNTIME_REPLACEMENT_WORDING,
   judgeRestoreProgress,
@@ -144,7 +146,6 @@ import {
   type RefreshPlan,
   type RestoreSample,
   type RefreshFailure,
-  type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
 import {
   lifecycleOf,
@@ -250,13 +251,13 @@ import {
   planDepsMaterialization,
 } from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
-import { createRefreshInstance, type RefreshInstanceParams } from "./refresh";
+import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
 import {
   DEFAULT_EXEC_TIMEOUT_MS,
   DEPS_STEP_OVERHEAD_MS,
   errMsg,
   GIT_NETWORK_TIMEOUT_MS,
-  IDLE_REFRESH_INTERVAL_S,
+  THREAD_POOL_SIZE,
   R2_TRANSFER_TIMEOUT_MS,
   REFRESH_BUILD_TIMEOUT_MS,
   REFRESH_INSTALL_TIMEOUT_MS,
@@ -317,8 +318,7 @@ export interface Env {
   BACKUP_BUCKET: R2Bucket;
   /** The refresh cycle as a Workflow instance (docs/reference/specs/resident-repos.md
    *  item 7): `ResidentRefresh` in refresh.ts, re-exported above. The watchdog
-   *  cron creates one per resident whose row says `lifecycle: workflow`; an
-   *  `alarm` resident (the default) never has one. */
+   *  cron creates one per resident and ten-minute bucket. */
   RESIDENT_REFRESH: Workflow<RefreshInstanceParams>;
   // Presigned snapshot transfers (docs/reference/specs/resident-repos.md item 61): with all
   // four present the container moves archive bytes itself over presigned R2
@@ -436,7 +436,7 @@ const OPS_DIR = "/workspace/ops";
  *  repo are genuinely concurrent. Memory, not this list, is the real ceiling
  *  — see the instance_type note in wrangler.jsonc. Must match the useradd loop
  *  in the Dockerfile. */
-const THREAD_USERS = Array.from({ length: 16 }, (_, i) => `worker${i + 2}`);
+const THREAD_USERS = Array.from({ length: THREAD_POOL_SIZE }, (_, i) => `worker${i + 2}`);
 
 /** Force-detach: after killing the thread user's processes, how long
  *  to wait for the in-flight op counter to drain (polled every
@@ -457,21 +457,16 @@ const FORCE_DETACH_KILL_TIMEOUT_MS = 2_000;
  *  binding record is KEPT so the next attach recreates with the same
  *  ref. Overridable per resident via the onboard-time `worktreeTtlDays`. */
 const WORKTREE_TTL_DAYS_DEFAULT = 7;
-/** The sweep self-reschedules hourly (armed by attach when no sweep pends). */
-const SWEEP_INTERVAL_S = 60 * 60; // hourly: the sweep is the backstop for trees a run kept (dirty) or never released
 /** A live binding whose last attach is older than this AND whose tree is clean
- *  (no uncommitted/unpushed work) is released by the hourly sweep — runs that
- *  ended before /detach existed, or whose release call was lost. Dirty trees
- *  keep to the TTL. */
+ *  (no uncommitted/unpushed work) is released by the sweep step (every refresh
+ *  instance runs one) — runs that ended before /detach existed, or whose
+ *  release call was lost. Dirty trees keep to the TTL. */
 const CLEAN_IDLE_RELEASE_S = 60 * 60;
-/** Slack over SWEEP_INTERVAL_S before a pending sweep row counts as config
- *  drift (armed by older code with a longer interval). A healthy row is due at
- *  most SWEEP_INTERVAL_S out and only gets closer, so this never trips on one. */
-const SWEEP_DRIFT_SLACK_S = 5 * 60;
 /** Idle sleep: when no thread has attached within this window and no live
- *  tree is dirty, the refresh alarm skips the fetch and re-arms far out so
- *  the container can actually sleep (SLEEP_AFTER); the next attach refreshes
- *  first if the mirror is stale (refresh-on-attach). */
+ *  tree is dirty, the refresh cycle skips the fetch and the cron holds the
+ *  next instance to the idle cadence, so the container can actually sleep
+ *  (SLEEP_AFTER); the next attach refreshes first if the mirror is stale
+ *  (refresh-on-attach). */
 const IDLE_AFTER_S = 60 * 60;
 /** LRU eviction floor: an over-cap onboard with `evictColdest:true` may
  *  offboard the coldest eligible warm resident, but never one whose last
@@ -487,49 +482,42 @@ const GITHUB_API_TIMEOUT_MS = 10_000;
  *  idle-park like a warm one; the next attach still refreshes first. */
 const DEGRADED_PARK_AFTER_CYCLES = 3;
 const DEGRADED_STREAK_KEY = "resident:degradedStreak";
-/** Degraded reasons stamped by the WATCHDOG rather than by an attempted refresh
- *  (`watchdogCheck`: `alarm-missed: …`, `stale-mid-flight: …` — both always
- *  carry a `: detail` suffix). They mean "a cycle must run", so they never
- *  count toward the park streak. Deliberate trade-off: a resident that
- *  oscillates between a refresh-produced failure and watchdog stamps (e.g.
- *  `install-failed` → DO eviction → `stale-mid-flight` → `install-failed` …)
- *  keeps resetting the streak and never parks — full 10-min cadence for a
- *  chronically broken repo. Accepted: a watchdog stamp means the previous
- *  "same reason" observation is not trustworthy, and preserving the streak
- *  across it would re-open the parked-degraded hole this fixes. */
-/** Plus a cycle whose step was killed from OUTSIDE by a deploy
- *  (`refresh-interrupted: …`, classified by `classifyRefreshFailure`): equally
- *  not evidence about the repository, equally never counted. */
-const NON_EVIDENCE_REASON = /^(?:alarm-missed|stale-mid-flight|refresh-interrupted|restore-interrupted):/;
-/** Consecutive cycles that ended `refresh-interrupted`: feeds the
- *  short-re-arm cap in `nextRefreshDelayS`; cleared by any other outcome. */
-const INTERRUPTED_STREAK_KEY = "resident:interruptedStreak";
+/** Degraded reasons that are not evidence about the repository — both always
+ *  carry a `: detail` suffix: the watchdog's `stale-mid-flight: …` (a marker
+ *  a dead cycle left behind; a cycle must run) and the wake path's
+ *  `restore-interrupted: …` (the runtime was replaced under a restore; the
+ *  step's retry restores again). They never count toward the park streak.
+ *  Deliberate trade-off: a resident that oscillates between a
+ *  refresh-produced failure and a watchdog stamp (e.g. `install-failed` → DO
+ *  eviction → `stale-mid-flight` → `install-failed` …) keeps resetting the
+ *  streak and never parks — full 10-min cadence for a chronically broken
+ *  repo. Accepted: a watchdog stamp means the previous "same reason"
+ *  observation is not trustworthy, and preserving the streak across it would
+ *  re-open the parked-degraded hole this fixes. A refresh step killed from
+ *  outside (`refresh-interrupted`, `classifyRefreshFailure`) is never recorded
+ *  as `degraded` at all: the instance throws it to the engine, whose retry
+ *  re-enters the step. */
+const NON_EVIDENCE_REASON = /^(?:stale-mid-flight|restore-interrupted):/;
 /** When the disk-full recovery last stopped the container (docs/reference/specs/resident-repos.md item 54):
  *  feeds `planDiskFullRecovery`'s cooldown so a working set that refills the
  *  disk is named, not recycled in a loop. */
 const DISK_FULL_RECYCLE_KEY = "resident:diskFullRecycleAt";
-/** A disk-full attach pulls the refresh cycle this close (seconds) so the
- *  recovery decision runs now, not at the next 600 s alarm. */
-const DISK_FULL_REARM_S = 1;
 /** The last disk measurement (docs/reference/specs/resident-repos.md item 55; `residentDiskBudget.ts`): one
- *  `df` + one `du` over the parts, taken at the end of every refresh cycle and
- *  (deferred by DISK_MEASURE_DELAY_S, off the hot path) after every attach,
- *  detach and sweep eviction. Surfaced as the live view's `disk`; the attach
- *  admission projects a new tree's cost from its parts. */
+ *  `df` + one `du` over the parts, taken by every refresh instance's `measure`
+ *  step after its sweep. Surfaced as the live view's `disk`; the attach
+ *  admission projects a new tree's cost from its parts (its free-space term
+ *  is a live `df` of its own). */
 const DISK_KEY = "resident:disk";
-/** Which scheduler drives this resident's refresh cycle (docs/reference/specs/resident-repos.md
- *  item 7): the alarm chain (the default — a row without the key reads `alarm`)
- *  or the Workflow instance the watchdog cron creates. Set through the admin
- *  `/debug` `lifecycle` op; read by the alarm's entry, the watchdog's re-arm
- *  branches and the cron's instance-creation duty, so the two schedulers never
- *  both drive a cycle for one resident. */
+/** The lifecycle row (docs/reference/specs/resident-repos.md item 7): `workflow`,
+ *  the one scheduler. Kept from the flagged rollout so `/status` and `/debug
+ *  info` can say so; an `alarm` value a flip left behind reads `workflow`
+ *  (`lifecycleOf`) — the chain it named no longer exists. Rewritten by the
+ *  admin `/debug` `lifecycle` op. */
 const LIFECYCLE_KEY = "resident:lifecycle";
-/** The refresh instance row (item 7): the last instance the cron created for
- *  this resident, with the step it last reported and the cycle lease it holds,
- *  and the last bucket the cron skipped (a live cycle, a duplicate id). */
+/** The refresh instance row (item 7): the last instance created for this
+ *  resident, with the step it last reported and the cycle lease it holds, and
+ *  the last bucket the cron skipped (a live cycle, a duplicate id). */
 const REFRESH_INSTANCE_KEY = "resident:refreshInstance";
-const DISK_MEASURE_CALLBACK = "onDiskMeasure";
-const DISK_MEASURE_DELAY_S = 1;
 /** A `du` over a multi-GB checkout plus every live tree is seconds warm, tens
  *  of seconds on a cold page cache — the same class as a git network step. */
 const DU_TIMEOUT_MS = GIT_NETWORK_TIMEOUT_MS;
@@ -1030,7 +1018,7 @@ interface RepoFacts {
   lastRefreshAt: string;
   lastRefreshError?: string; // last cycle's failure reason: command-level (e.g. token mint, no lifecycle flip) or the classified reason of a failed/interrupted cycle (survives a concurrent state overwrite); cleared by the next completed cycle
   lastRestore?: { at: string; ms: number }; // proof of restore-not-reclone on the wake path
-  /** Set while the resident is in idle mode (refresh alarm parked far out so the container may sleep). */
+  /** Set while the resident is in idle mode (the cron holds the next refresh instance to the idle cadence so the container may sleep). */
   idleSince?: string;
 }
 
@@ -1082,6 +1070,17 @@ interface RefreshInstanceRow {
   /** The most recent bucket the cron did not create for: a live cycle, or the engine's duplicate-id refusal. */
   skipped: { id: string; at: string; why: string } | null;
 }
+
+/** The engine's statuses under which an instance is still a live cycle:
+ *  queued, running, paused or waiting. Anything else — `complete`, `errored`,
+ *  `terminated`, an id the engine does not know — is not. */
+const INSTANCE_LIVE_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "paused",
+  "waiting",
+  "waitingForPause",
+]);
 
 /** What every instance step answers besides its own facts: the resident's
  *  wall clock at the step's start and the commands it ran, so the instance
@@ -1242,8 +1241,6 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
 const PROVISIONING_CALLBACK = "onProvisioningDeadline"; // fail-closed deadline
 const PROVISION_RUN_CALLBACK = "runProvisioning"; // the actual provisioning work
-const REFRESH_CALLBACK = "onRefreshAlarm"; // self-rescheduling freshness chain
-const SWEEP_CALLBACK = "onWorktreeSweep"; // hourly worktree inactivity eviction
 
 const STATE_KEY = "resident:state";
 const REASON_KEY = "resident:reason";
@@ -1298,20 +1295,36 @@ class StepError extends Error {
 }
 
 /** Thrown after the resident has ALREADY been transitioned to `down` (reason
- *  persisted); signals callers to stop the refresh chain without re-flipping. */
+ *  persisted); signals callers the cycle is over without re-flipping. */
 class ResidentDownError extends Error {
   constructor(public reason: string) {
     super(reason);
   }
 }
 
+/** Thrown by a refresh gate that stopped the container on purpose — a stale
+ *  image (`reconcileImage`), a disk-full recycle (`recoverFromDiskFull`) — so
+ *  the instance step it runs in throws to the engine, whose retry (thirty
+ *  seconds on) finds the container back on the current image or an empty
+ *  disk, restores it and runs the cycle: the retry is the re-warm that a
+ *  short re-arm used to be. Not a failure of the repository's own — never
+ *  recorded as `degraded`. */
+class CycleRestartError extends Error {
+  constructor(public why: "image-stale-restart" | "disk-full-restart") {
+    super(`${why}: the container is restarting — the step is retried onto it`);
+  }
+}
+
 export class ResidentDO extends Sandbox<Env> {
-  // TIMER RULE: never call ctx.storage.setAlarm/deleteAlarm from lifecycle
-  // code — the Container base class owns the DO alarm slot (its sleepAfter
-  // machinery and schedule multiplexing live there). All resident timers go
-  // through this.schedule()/this.deleteSchedules(), which multiplex onto that
-  // alarm safely. (Checked against @cloudflare/containers 0.3.7: the SDK
-  // registers no schedule callback names, so ours cannot collide.)
+  // TIMER RULE: lifecycle code never arms the Durable Object's own alarm slot
+  // — the Container base class owns it (its sleepAfter machinery and the
+  // schedule multiplexing live there). The one timer left is provisioning's
+  // (`initResident`: the run at +1 s and its fail-closed deadline), through
+  // the base class's schedule API, which multiplexes onto that slot safely
+  // (checked against @cloudflare/containers 0.3.7: the SDK registers no
+  // schedule callback names, so ours cannot collide). Every other cycle is a
+  // Workflow instance (refresh.ts) and the watchdog re-arms nothing;
+  // lifecycle.test.ts holds the line over these sources.
 
   /** Serializes concurrent hydration attempts within one DO lifetime. Never
    *  used as a "hydrated" flag — the container can sleep while the DO object
@@ -1978,8 +1991,8 @@ export class ResidentDO extends Sandbox<Env> {
   // about to change and asks the pure plan (residentStepPlan.ts) whether the
   // work is done — done issues no command, so a second call with the same
   // inputs has no effect — then takes its lease, runs its commands under the
-  // step's own budget, writes its result and releases. The alarm chain drives
-  // them today in the order it always did.
+  // step's own budget, writes its result and releases. The refresh instance
+  // drives them one step at a time (`refreshInstance*`).
 
   /** Fetch the mirror from origin, once per cycle: the record under
    *  LAST_FETCH_KEY names the cycle, so a repeated call inside the same cycle
@@ -2205,9 +2218,9 @@ export class ResidentDO extends Sandbox<Env> {
    *  or capped restore leaves the resident `down` with the reason and the
    *  container stopped, as the wake path always did; a restore the runtime
    *  replacement interrupts (a deploy rolled the container under it) is
-   *  `restore-interrupted`, degraded and rethrown for the cycle to re-arm
-   *  short — nothing is streaming into a disk that no longer exists
-   *  (restoreFailureDisposition). */
+   *  `restore-interrupted`, degraded and rethrown for the instance step that
+   *  called it to retry — nothing is streaming into a disk that no longer
+   *  exists (restoreFailureDisposition). */
   async restoreCheckout(snap: SnapshotRecord, deadlineMs: number): Promise<{ done: boolean }> {
     const plan = planRestore({ sha: snap.sha, readyStamp: await this.readyStamp() });
     if (plan.action === "done") return { done: true };
@@ -2265,9 +2278,9 @@ export class ResidentDO extends Sandbox<Env> {
         // container, so nothing can land on a rebuild and there is nothing to
         // stop. Not evidence about the repo — the resident is `degraded` with
         // the restore named, never `down`, and the error goes back to the
-        // cycle, whose classifier reads the same wording as an interruption
-        // and re-arms short; the next wake restores again onto the new
-        // container. Before this branch every such restore ended `down`, and
+        // instance step, whose classifier reads the same wording as an
+        // interruption and throws to the engine; the retry restores again onto
+        // the new container. Before this branch every such restore ended `down`, and
         // only a rebuild (the watchdog's, after three passes) brought the
         // resident back.
         this.swapIncarnation(); // the container this incarnation's memos described is gone
@@ -2325,16 +2338,11 @@ export class ResidentDO extends Sandbox<Env> {
     return counts.reduce((a, n) => a + n, 0);
   }
 
-  private async armRefresh(resource: string, intervalS = REFRESH_INTERVAL_S): Promise<void> {
-    this.deleteSchedules(REFRESH_CALLBACK); // at most one pending refresh
-    await this.schedule(intervalS, REFRESH_CALLBACK, resource);
-  }
-
-  /** Persist `down` with a reason, stop the refresh chain, and hand back the
-   *  error that tells callers the transition already happened. */
+  /** Persist `down` with a reason and hand back the error that tells callers
+   *  the transition already happened (a down resident gets no refresh
+   *  instance: the cron's decision reads the state). */
   private async goDown(reason: string): Promise<ResidentDownError> {
     await this.setResidentState("down", reason);
-    this.deleteSchedules(REFRESH_CALLBACK);
     return new ResidentDownError(reason);
   }
 
@@ -2360,13 +2368,12 @@ export class ResidentDO extends Sandbox<Env> {
     await this.ctx.storage.delete([FACTS_KEY, SNAPSHOT_KEY]); // defensive: no stale facts from a past life
     this.deleteSchedules(PROVISIONING_CALLBACK);
     this.deleteSchedules(PROVISION_RUN_CALLBACK);
-    this.deleteSchedules(REFRESH_CALLBACK);
     await this.schedule(Math.max(1, Math.ceil(provisioningTimeoutMs / 1000)), PROVISIONING_CALLBACK, resource);
     await this.schedule(1, PROVISION_RUN_CALLBACK, resource);
     return { state: "onboarding", reason: "" };
   }
 
-  /** The provisioning engine (alarm-driven): clone bare mirror → resolve the
+  /** The provisioning engine (schedule-driven): clone bare mirror → resolve the
    *  default branch → full install + build in a working checkout using the
    *  onboard-time command table → stamped snapshot → record facts → warm.
    *  On failure: down(provision-failed at <step>) — the registry slot is
@@ -2481,7 +2488,8 @@ export class ResidentDO extends Sandbox<Env> {
       await this.writeDiskMarkers({ ready: sha, depsKey: lockfileHash, builtSha: sha });
       this.deleteSchedules(PROVISIONING_CALLBACK);
       await this.setResidentState("warm");
-      await this.armRefresh(resource);
+      // The first refresh instance is the cron's: the row now reads `warm`
+      // with no instance recorded, so the next firing creates it (item 9).
     } catch (err) {
       if ((await this.ctx.storage.get<ResidentState>(STATE_KEY)) !== "onboarding") return;
       this.deleteSchedules(PROVISIONING_CALLBACK);
@@ -2507,7 +2515,6 @@ export class ResidentDO extends Sandbox<Env> {
     await this.setResidentState("down", reason);
     this.deleteSchedules(PROVISIONING_CALLBACK);
     this.deleteSchedules(PROVISION_RUN_CALLBACK);
-    this.deleteSchedules(REFRESH_CALLBACK);
     const resource = await this.ctx.storage.get<string>(RESOURCE_KEY);
     if (resource) {
       try {
@@ -2525,12 +2532,13 @@ export class ResidentDO extends Sandbox<Env> {
    *  otherwise still say warm while the R2 restore runs. Refuses mismatched
    *  stamps → down(snapshot-stamp-mismatch); a stalled or capped restore →
    *  down(r2-restore-failed); a restore the runtime replacement interrupts →
-   *  degraded(restore-interrupted), rethrown so the cycle re-arms short.
-   *  Throws ResidentDownError after the down transitions. Called by the
-   *  refresh alarm (and the attach path). */
+   *  degraded(restore-interrupted), rethrown so the instance step that called
+   *  it is retried by the engine. Throws ResidentDownError after the down
+   *  transitions. Called by the refresh instance's fetch step (and the attach
+   *  path). */
   async ensureHydrated(): Promise<void> {
     // Fresh positive verdict for this incarnation → nothing to probe. See the
-    // per-incarnation memo block for why this is safe; the refresh alarm's
+    // per-incarnation memo block for why this is safe; the refresh cycle's
     // 10-min cadence always outlives the TTL, so a cycle re-probes for real.
     if (this.hydratedVerdictAt !== 0 && systemClock() - this.hydratedVerdictAt < this.hydrationMemoTtlMs) return;
     if (this.hydration) return this.hydration;
@@ -2671,164 +2679,27 @@ export class ResidentDO extends Sandbox<Env> {
     await this.setResidentState("warm");
   }
 
-  // -- freshness (the self-rescheduling refresh alarm) --------------------------
-
-  /** Self-rescheduling refresh: rehydrate if the container slept → mint a
-   *  repo-scoped token (mint failure is command-level: recorded, never a
-   *  lifecycle flip) → fetch into the bare mirror → when the default branch
-   *  moved: plan against the disk checkpoints (planRefresh) — reuse a
-   *  checkout an interrupted cycle already materialized, else update the
-   *  checkout and reinstall ONLY if the committed lockfile key changed, then
-   *  rebuild — write a new stamped snapshot, delete the replaced backup
-   *  objects. Transitions: refreshing → warm, or degraded(reason) with the
-   *  last snapshot still serving. */
-  async onRefreshAlarm(payload: string): Promise<void> {
-    // The freshness cycle nobody asked for is a root of its own
-    // (docs/reference/specs/tracing.md item 25): `resident.refresh`, with every command it
-    // ran as a `resident.<step>` child, exactly like an attach's.
-    const t0 = systemClock();
-    const trace = createStepTrace(t0);
-    let outcome = "ok";
-    try {
-      await this.stepTrace.run(trace, () => this.onRefreshAlarmTraced(payload));
-    } catch (err) {
-      outcome = "error";
-      throw err;
-    } finally {
-      emitStepRoot("resident.refresh", t0, trace.steps(), undefined, outcome);
-    }
-  }
-
-  private async onRefreshAlarmTraced(payload: string): Promise<void> {
-    const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
-    // Item 7: a resident on the Workflow lifecycle has no chain. An alarm a
-    // previous flip left armed — or an attach's +1 s pull, or a provisioning's
-    // first arm — runs nothing and re-arms nothing, so the two schedulers never
-    // both drive a cycle for one resident.
-    if ((await this.getLifecycle()) === "workflow") {
-      console.log(`refresh: lifecycle is workflow — the alarm chain runs no cycle for ${resource}`);
-      return;
-    }
-    let refreshCounted = false;
-    /** This cycle's lease holder in the in-flight row, once it is counted. */
-    let cycleHolder: string | null = null;
-    /** This firing's identity: what `fetchMirror` records so a repeated call inside the cycle is done. */
-    const cycle = crypto.randomUUID();
-    const before = await this.getStatus();
-    // down chains stay down (a rebuild is the escape hatch); onboarding is
-    // owned by provisioning, which arms the first refresh itself.
-    if (before.state === "onboarding" || before.state === "down") return;
-    try {
-      const gate = await this.refreshGate(resource);
-      if (!gate.go) return; // finally re-arms on the outcome the gate set
-      const { record, facts } = gate;
-      // From here the cycle mutates the mirror/checkout: count it as in flight
-      // so an attach-path reconcileImage never stops the container under it,
-      // and lease it in the in-flight row so the watchdog can tell this cycle
-      // from a marker a dead one left behind (item 22).
-      this.refreshesInFlight++;
-      refreshCounted = true;
-      cycleHolder = this.nextHolder();
-      await this.recordInFlight("refresh", cycleHolder, REFRESH_CYCLE_LEASE_MS, "refresh");
-
-      const fetched = await this.refreshFetch(resource, facts, cycle, 1);
-      if (!fetched.ok) return;
-      const { sha, lockfileHash, mintError, token } = fetched;
-      const plan = planRefresh({
-        sha,
-        factsSha: facts.sha,
-        lockfileKey: lockfileHash,
-        disk: await this.readRefreshDisk(),
-      });
-      // Whether this cycle's snapshot step committed (`superseded` means
-      // another writer moved the record, whose facts then stand).
-      let committed = true;
-      if (plan.action !== "unchanged") {
-        const t0 = systemClock();
-        console.log(`refresh: ${facts.sha.slice(0, 8)} → ${sha.slice(0, 8)}: ${plan.action} (${plan.why})`);
-        // Deps come from the store (item 59): a changed lockfile key is
-        // materialized ONCE into `/workspace/deps/<key>` — OUTSIDE the mirror
-        // lock, because the install runs in its own scratch clone and touches
-        // no consumer's tree (the staging step) — and the checkout's
-        // node_modules becomes a hardlink view of that entry (runBuild). An
-        // attach that needs the same key joins this very install instead of
-        // starting its own. Checkpoint: the deps marker comes off BEFORE the
-        // install so an interruption mid-install can never read as completion.
-        let depsEntry: string | null = null;
-        if (plan.action === "rebuild") {
-          await this.refreshClearMarkers(plan.install);
-          if (plan.install) depsEntry = await this.refreshInstall(record, facts, sha, lockfileHash);
-        }
-        // `reuse`: the checkout already holds this sha with its deps and build
-        // (an interrupted cycle got that far) — the build step finds it done and
-        // only the snapshot, facts and stamp are missing; they move together.
-        await this.runBuild({
-          sha,
-          factsSha: facts.sha,
-          lockfileKey: lockfileHash,
-          buildCmd: record.commands.build,
-          depsEntry,
-        });
-        committed = await this.refreshSnapshot(resource, { ref: facts.defaultRef, sha, lockfileHash });
-        console.log(`refresh: ${sha.slice(0, 8)} ${plan.action} done in ${systemClock() - t0}ms`);
-      }
-      await this.refreshComplete(resource, facts, { sha, lockfileHash, committed, mintError, token });
-    } catch (err) {
-      if (err instanceof ResidentDownError) return; // already down with reason; chain stops below
-      const failure = await this.classifyCycleError(err);
-      // Set BEFORE the writes on purpose: if either throws, the finally still
-      // re-arms short — the safe direction for an interruption.
-      if (failure.interrupted) this.rearmOutcome = "interrupted";
-      await this.refreshFailed(failure, refreshCounted ? 1 : 0);
-    } finally {
-      if (refreshCounted) this.refreshesInFlight--;
-      if (cycleHolder) await this.clearInFlight("refresh", cycleHolder);
-      const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
-      // Consecutive-interruption count: bounds the short re-arm so
-      // a step whose output chronically carries the kill signature falls back to
-      // the cadence after INTERRUPTED_REARM_MAX_CONSECUTIVE instead of hot-looping.
-      let consecutiveInterrupted: number | undefined;
-      if (this.rearmOutcome === "interrupted") {
-        consecutiveInterrupted = ((await this.ctx.storage.get<number>(INTERRUPTED_STREAK_KEY)) ?? 0) + 1;
-        await this.ctx.storage.put(INTERRUPTED_STREAK_KEY, consecutiveInterrupted);
-      } else {
-        await this.ctx.storage.delete(INTERRUPTED_STREAK_KEY);
-      }
-      const interval = nextRefreshDelayS({
-        outcome: this.rearmOutcome,
-        intervalS: REFRESH_INTERVAL_S,
-        idleIntervalS: IDLE_REFRESH_INTERVAL_S,
-        consecutiveInterrupted,
-      });
-      this.rearmOutcome = "normal";
-      // A flip to `workflow` while this cycle ran: the chain ends here (item 7).
-      const chained = (await this.getLifecycle()) === "alarm";
-      if (chained && state && state !== "down" && state !== "onboarding") await this.armRefresh(resource, interval);
-    }
-  }
-
-  // -- the cycle's phases, shared by the alarm and the instance (item 7) -------
+  // -- freshness (the refresh cycle's phases, one per instance step) -----------
   //
-  // The alarm chain and the Workflow instance run the same cycle in the same
-  // order: the gates, the fetch, the plan, the install, the build, the
-  // snapshot, the completion. Each phase is one method here so neither
-  // scheduler carries a copy; the instance calls them one step at a time
-  // (`refreshInstance*`, below), the alarm in one handler (above).
+  // The cycle runs as the Workflow instance in refresh.ts: the gates, the
+  // fetch, the plan, the install, the build, the snapshot, the completion,
+  // then the housekeeping steps. Each phase is one method here; the instance
+  // calls them one step at a time (`refreshInstance*`, below).
 
-  /** The cycle's entry gates, in the alarm's order: hydrate; the registry
-   *  record (gone → the resident was offboarded mid-flight, nothing to do);
-   *  the image reconcile (a stale image stops the container, which restarts
-   *  on the current one — `image-stale-restart`); the disk-full re-probe (a
-   *  disk still full decides its own recovery and stops the cycle — item 54);
-   *  the park streak and the idle gate (`idle`); and, for a cycle that runs,
-   *  the end of idle mode. Sets `rearmOutcome` for the alarm's finally; the
-   *  instance resets it. */
+  /** The cycle's entry gates, in order: hydrate; the registry record (gone →
+   *  the resident was offboarded mid-flight, nothing to do); the image
+   *  reconcile (a stale image stops the container, which restarts on the
+   *  current one — thrown as `CycleRestartError` so the engine retries the
+   *  step onto it); the disk-full re-probe (a disk still full decides its own
+   *  recovery — a recycle is thrown the same way, a kept container stops the
+   *  cycle — item 54); the park streak and the idle gate (`idle`); and, for a
+   *  cycle that runs, the end of idle mode. */
   private async refreshGate(
     resource: string,
   ): Promise<{ go: false; why: string } | { go: true; record: ResidentRecord; facts: RepoFacts }> {
     await this.ensureHydrated();
     const record = await this.registry().getRecord(resource);
-    if (!record) return { go: false, why: "offboarded" }; // offboarded mid-flight: let the chain die quietly
+    if (!record) return { go: false, why: "offboarded" }; // offboarded mid-flight: the cycle ends quietly
     const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
     if (!facts) throw new StepError("facts", "no repo facts recorded despite hydration");
 
@@ -2837,16 +2708,16 @@ export class ResidentDO extends Sandbox<Env> {
     // users the image lacks. Reconcile here (every cycle, cheap) — see
     // reconcileImage — so a rollout self-applies within one refresh.
     if (await this.reconcileImage("refresh")) {
-      // Container stopping; it restarts on the new image in seconds. Re-arm
-      // SHORT so the resident is re-warmed within a minute instead of
-      // sitting on the old cadence for a full 600 s.
-      this.rearmOutcome = "image-stale-restart";
-      return { go: false, why: "image-stale-restart" };
+      // Container stopping; it restarts on the new image in seconds. The
+      // engine's retry re-enters this step thirty seconds on and re-warms the
+      // resident within the minute, instead of the next bucket.
+      throw new CycleRestartError("image-stale-restart");
     }
 
     // Idle sleep: nobody has attached for IDLE_AFTER_S and no live tree is
-    // dirty → skip this fetch and park the alarm far out so SLEEP_AFTER can
-    // elapse. Staleness is repaid at the next attach (refreshIfStale). A
+    // dirty → skip this fetch; the cron holds the next instance to the idle
+    // cadence, so SLEEP_AFTER can elapse. Staleness is repaid at the next
+    // attach (refreshIfStale). A
     // dirty live tree pins the container awake: sleep destroys the disk and
     // uncommitted work is not snapshotted.
     // Only a SETTLED resident may park: a cycle that finds `refreshing`/
@@ -2868,8 +2739,11 @@ export class ResidentDO extends Sandbox<Env> {
       // sweep freed trees) → run the cycle as usual and earn `warm`.
       const free = await this.freeKiB();
       if (free !== null && free < DISK_FULL_FREE_KIB) {
-        await this.recoverFromDiskFull(entry.reason, 0);
-        return { go: false, why: "disk-full" }; // the alarm's finally re-arms: short after a recycle, the cadence otherwise
+        // A recycle: the engine's retry re-enters this step, restores onto the
+        // empty disk and runs the cycle. A kept container: nothing a fetch can
+        // do until space is freed; the cycle ends and the next bucket re-probes.
+        if (await this.recoverFromDiskFull(entry.reason, 0)) throw new CycleRestartError("disk-full-restart");
+        return { go: false, why: "disk-full" };
       }
     }
     let settled = entry.state === "warm";
@@ -2886,11 +2760,10 @@ export class ResidentDO extends Sandbox<Env> {
       await this.ctx.storage.put(DEGRADED_STREAK_KEY, streak);
       settled = streak.count >= DEGRADED_PARK_AFTER_CYCLES;
     } else {
-      // Warm, or a degraded stamped by the WATCHDOG (alarm-missed /
-      // stale-mid-flight) or by an INTERRUPTED cycle (refresh-interrupted —
-      // a deploy killed the step; it says nothing about the repo): the
-      // watchdog pulled this cycle to +5s precisely so a refresh RUNS, and the
-      // interrupted cycle re-armed short for the same reason.
+      // Warm, or a degraded stamped by the WATCHDOG (stale-mid-flight) or by
+      // an interrupted restore (restore-interrupted — a deploy rolled the
+      // container; it says nothing about the repo): both mean a cycle must
+      // RUN — this one.
       // Counting those toward the streak would be self-fulfilling —
       // each cycle that found the reason would park without attempting anything,
       // and after three the resident would sit parked-degraded for 6h at a
@@ -2905,8 +2778,7 @@ export class ResidentDO extends Sandbox<Env> {
           ...now,
           idleSince: new Date(systemClock()).toISOString(),
         } satisfies RepoFacts);
-      this.rearmOutcome = "idle";
-      return { go: false, why: "idle" }; // the alarm's finally re-arms at IDLE_REFRESH_INTERVAL_S
+      return { go: false, why: "idle" }; // the cron creates the next instance at IDLE_REFRESH_INTERVAL_S
     }
     if (facts.idleSince) {
       const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
@@ -2924,9 +2796,9 @@ export class ResidentDO extends Sandbox<Env> {
    *  the installation stays fresh, and a private one fails at the fetch
    *  below into a visible `degraded(github-unreachable: …)`. Returning early
    *  instead would freeze whatever state the resident was in — a public
-   *  repo the App is not installed on would sit in the watchdog's
-   *  `degraded(alarm-missed)` forever with an ever-staler mirror, because
-   *  the App cannot mint for a repo it is not installed on. A failed fetch
+   *  repo the App is not installed on would sit `degraded` forever with an
+   *  ever-staler mirror, because the App cannot mint for a repo it is not
+   *  installed on. A failed fetch
    *  is recorded here — `degraded` with its reason, the disk-full recovery
    *  when that is the cause — and answered `ok: false`. */
   private async refreshFetch(
@@ -2957,7 +2829,7 @@ export class ResidentDO extends Sandbox<Env> {
     let sha: string;
     try {
       // Same mirror mutex as attach's fetch/worktree work: the
-      // refresh alarm and an in-flight attach serialize instead of racing
+      // refresh cycle and an in-flight attach serialize instead of racing
       // a prune against a worktree clone.
       sha = (await this.fetchMirror({ ref: facts.defaultRef, cycle, token })).sha;
     } catch (err) {
@@ -3042,9 +2914,9 @@ export class ResidentDO extends Sandbox<Env> {
    *  them in the same write as the record — a wake never sees a half-updated
    *  pair; this is the cycle's own bookkeeping on a fresh read, and a
    *  superseded snapshot leaves the other writer's stamp alone), `warm`, then
-   *  the housekeeping that is never a lifecycle flip: the finished-ref
-   *  reclamation the prune already informed (item 45) and the disk sample
-   *  (item 55). */
+   *  the finished-ref reclamation the prune already informed (item 45) —
+   *  housekeeping, never a lifecycle flip. The disk sample is the instance's
+   *  own `measure` step (item 55), after its sweep. */
   private async refreshComplete(
     resource: string,
     facts: RepoFacts,
@@ -3082,27 +2954,21 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       console.log(`reclaim ${resource}: pass failed: ${errMsg(err)}`);
     }
-    // Item 55: the cycle's disk sample — what /residents, `repo list`, the
-    // watchdog line and the next attach admission read. Housekeeping too.
-    await this.measureDisk().catch((err) => console.log(`disk: measure failed: ${errMsg(err)}`));
   }
 
   /** What a cycle's throw means. A step killed from OUTSIDE (the container
    *  replaced under it — an image-changing deploy or a container stop; a
    *  Worker-only deploy leaves the container running and interrupts nothing)
-   *  is `refresh-interrupted`: not evidence about the repo — it never counts
-   *  toward the park streak (the entry gate) — and the chain re-arms SHORT so
-   *  the resident is warm again within a minute instead of after the full
-   *  cadence (an unclassified kill otherwise costs the resident the whole
-   *  10-minute cadence, e.g. `degraded(build-failed: exit 143 …)` until the
-   *  next alarm); the instance throws it to the engine, whose retry re-enters
-   *  the step. Any other failure is the repo's own: `<step>-failed: …` /
-   *  `refresh-failed: …` as before. Non-StepErrors classify too — an SDK
-   *  replacement error can surface between steps — with the generic
-   *  "refresh" step, whose failure reason is the pre-existing
-   *  `refresh-failed: …` shape. A full disk is a third class: `disk-full: …`,
-   *  never serviceable, and the one failure the resident can act on itself
-   *  (recoverFromDiskFull). */
+   *  is `refresh-interrupted`: not evidence about the repo, so it is never
+   *  recorded as `degraded` — the instance step throws it to the engine, whose
+   *  retry re-enters the same idempotent method (an unclassified kill would
+   *  instead cost the resident a `degraded(build-failed: exit 143 …)` until
+   *  the next cycle). Any other failure is the repo's own: `<step>-failed: …`
+   *  / `refresh-failed: …`. Non-StepErrors classify too — an SDK replacement
+   *  error can surface between steps — with the generic "refresh" step, whose
+   *  failure reason is the `refresh-failed: …` shape. A full disk is a third
+   *  class: `disk-full: …`, never serviceable, and the one failure the
+   *  resident can act on itself (recoverFromDiskFull). */
   private async classifyCycleError(err: unknown): Promise<RefreshFailure> {
     return err instanceof StepError
       ? await this.classifyFailure(err.step, err.message)
@@ -3127,56 +2993,38 @@ export class ResidentDO extends Sandbox<Env> {
 
   // -- the refresh cycle as a Workflow instance (item 7) --------------------------
   //
-  // `ResidentRefresh` (the Workflow entrypoint, refresh.ts) calls these four
-  // methods, one per step, through the DO stub. Each runs the same phase the
-  // alarm runs, over the same rows, so a step the engine retries re-enters
+  // `ResidentRefresh` (the Workflow entrypoint, refresh.ts) calls these
+  // methods, one per step, through the DO stub. Each runs one phase of the
+  // cycle over the resident's rows, so a step the engine retries re-enters
   // the same idempotent read-then-act method (item 22) and finds the work
   // done. Inputs and answers are small facts — refs, shas, keys, a path, a
   // word — never a payload and never a credential: the token is minted inside
   // the step that needs it.
 
-  /** Which scheduler drives this resident's refresh cycle (LIFECYCLE_KEY). */
+  /** The lifecycle row (LIFECYCLE_KEY): `workflow`, whatever a flagged rollout stored. */
   async getLifecycle(): Promise<ResidentLifecycle> {
     return lifecycleOf(await this.ctx.storage.get(LIFECYCLE_KEY));
   }
 
-  /** Flip the resident between the alarm chain and the Workflow instance
-   *  (admin `/debug` `lifecycle`). To `workflow`: the pending alarm is
-   *  dropped; an alarm already firing runs to its end and re-arms nothing.
-   *  Back to `alarm`: the chain is re-armed the way the watchdog re-arms a
-   *  dead one, when the resident is in a state the chain serves. */
-  async setLifecycle(mode: ResidentLifecycle): Promise<{ lifecycle: ResidentLifecycle; refreshSchedules: number }> {
-    const previous = await this.getLifecycle();
+  /** Rewrite the lifecycle row (admin `/debug` `lifecycle`). `workflow` is
+   *  the one mode, so the op's only effect is to replace a stale `alarm`
+   *  value the flagged rollout left behind — the row then says what
+   *  `lifecycleOf` already reads. */
+  async setLifecycle(mode: ResidentLifecycle): Promise<{ lifecycle: ResidentLifecycle }> {
     await this.ctx.storage.put(LIFECYCLE_KEY, mode);
-    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
-    if (mode === "workflow") {
-      this.deleteSchedules(REFRESH_CALLBACK);
-    } else if (previous !== "alarm") {
-      const { state } = await this.getStatus();
-      const pending = await this.listSchedules(REFRESH_CALLBACK);
-      if (state !== "onboarding" && state !== "down" && pending.length === 0) {
-        await this.schedule(5, REFRESH_CALLBACK, resource);
-      }
-    }
-    console.log(`lifecycle: ${resource} ${previous} → ${mode}`);
-    return { lifecycle: mode, refreshSchedules: (await this.listSchedules(REFRESH_CALLBACK)).length };
+    return { lifecycle: mode };
   }
 
   private async instanceRow(): Promise<RefreshInstanceRow> {
     return (await this.ctx.storage.get<RefreshInstanceRow>(REFRESH_INSTANCE_KEY)) ?? { instance: null, skipped: null };
   }
 
-  /** The facts the cron's instance-creation decision reads
-   *  (`shouldCreateRefreshInstance`): the flag, the state and when it last
-   *  changed, idle mode, the last instance's creation time. */
+  /** The facts the cron's instance-creation decision and the admin
+   *  `refresh-now` op read (`shouldCreateRefreshInstance`,
+   *  `refreshCycleBlocked`): the state and when it last changed, idle mode,
+   *  the last instance's creation time and whether the engine still runs it. */
   async refreshRow(): Promise<RefreshRow> {
-    const map = await this.ctx.storage.get<unknown>([
-      LIFECYCLE_KEY,
-      STATE_KEY,
-      UPDATED_KEY,
-      FACTS_KEY,
-      REFRESH_INSTANCE_KEY,
-    ]);
+    const map = await this.ctx.storage.get<unknown>([STATE_KEY, UPDATED_KEY, FACTS_KEY, REFRESH_INSTANCE_KEY]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const row = (map.get(REFRESH_INSTANCE_KEY) as RefreshInstanceRow | undefined) ?? { instance: null, skipped: null };
     const epochMs = (iso: string | undefined): number | null => {
@@ -3184,7 +3032,6 @@ export class ResidentDO extends Sandbox<Env> {
       return Number.isFinite(t) ? t : null;
     };
     return {
-      lifecycle: lifecycleOf(map.get(LIFECYCLE_KEY)),
       state: (map.get(STATE_KEY) as ResidentState | undefined) ?? "down",
       updatedAt: epochMs(map.get(UPDATED_KEY) as string | undefined),
       idleSince: epochMs(facts?.idleSince),
@@ -3193,25 +3040,26 @@ export class ResidentDO extends Sandbox<Env> {
     };
   }
 
-  /** Whether the engine still runs `id`: queued, running, paused or waiting.
-   *  The one fact the marker's age cannot give — a step between retry
-   *  attempts holds no lease and writes nothing — read from the engine, which
-   *  knows. An unknown id, a missing binding or a failed read answer false:
-   *  the marker's age then decides, as before. */
-  private async instanceRunning(id: string | null): Promise<boolean> {
-    if (!id) return false;
+  /** The engine's own word on the instance `id` — `queued`, `running`,
+   *  `complete`, `errored`, … — or null for an id the engine does not know (a
+   *  missing binding or a failed read answer the same). The one fact the
+   *  marker's age cannot give — a step between retry attempts holds no lease
+   *  and writes nothing — read from the engine, which knows. */
+  private async instanceStatus(id: string | null): Promise<string | null> {
+    if (!id) return null;
     try {
-      const { status } = await (await this.env.RESIDENT_REFRESH.get(id)).status();
-      return (
-        status === "queued" ||
-        status === "running" ||
-        status === "paused" ||
-        status === "waiting" ||
-        status === "waitingForPause"
-      );
+      return (await (await this.env.RESIDENT_REFRESH.get(id)).status()).status;
     } catch {
-      return false;
+      return null;
     }
+  }
+
+  /** Whether the engine still runs `id`: queued, running, paused or waiting.
+   *  Anything else — a finished or failed instance, an unknown id — is not a
+   *  live cycle, and the marker's age then decides, as before. */
+  private async instanceRunning(id: string | null): Promise<boolean> {
+    const status = await this.instanceStatus(id);
+    return status !== null && INSTANCE_LIVE_STATUSES.has(status);
   }
 
   /** The cron created an instance for this resident. */
@@ -3288,22 +3136,23 @@ export class ResidentDO extends Sandbox<Env> {
     } satisfies RefreshInstanceRow);
   }
 
-  /** Run one step of the refresh instance the way the alarm runs its cycle:
-   *  counted in flight once past the entry gates (so an attach-path
-   *  reconcileImage never stops the container under it — while the gates
-   *  themselves, `isIdle`, `reconcileImage("refresh")` and the disk-full
-   *  recycle, must not see the probing cycle as an operation in flight, or no
-   *  resident would ever park, restart a stale image or recycle a full disk;
-   *  the step is handed `cycle.count` and calls it at the point the alarm
-   *  handler increments), under a step trace the instance grafts on its root,
+  /** Run one step of the refresh instance: counted in flight once past the
+   *  entry gates (so an attach-path reconcileImage never stops the container
+   *  under it — while the gates themselves, `isIdle`, `reconcileImage("refresh")`
+   *  and the disk-full recycle, must not see the probing cycle as an operation
+   *  in flight, or no resident would ever park, restart a stale image or
+   *  recycle a full disk; the step is handed `cycle.count` and calls it once
+   *  its gates have passed — the fetch step after `refreshGate`, every other
+   *  step first thing), under a step trace the instance grafts on its root,
    *  its outcome on the instance row for `/status`. A step killed from outside
-   *  (the container replaced under it) is thrown to the engine, whose retry
+   *  (the container replaced under it), or a gate that stopped the container
+   *  on purpose (`CycleRestartError`), is thrown to the engine, whose retry
    *  re-enters the same idempotent method — the row stays `refreshing`, never
    *  `degraded`, and a `refreshing` younger than the stale bound keeps the
    *  cron from creating a second instance meanwhile. A failure of the repo's
-   *  own is recorded as the alarm records it — `degraded` with the reason,
-   *  the last snapshot still serving — and answered `failed`, which ends the
-   *  instance; the next cron firing starts the next cycle from that state. */
+   *  own is recorded — `degraded` with the reason, the last snapshot still
+   *  serving — and answered `failed`, which ends the cycle; the next cron
+   *  firing starts the next one from that state. */
   private async runInstanceStep<T>(
     instance: string,
     step: string,
@@ -3332,20 +3181,27 @@ export class ResidentDO extends Sandbox<Env> {
         await this.clearInstanceLease(instance);
         return { status: "failed", reason: err.message, startedAt, trace: trace.steps() };
       }
+      if (err instanceof CycleRestartError) {
+        outcome = `restarting (${err.why}) — the engine retries`;
+        console.log(`refresh instance ${instance}: ${step} ${err.message}`);
+        throw err;
+      }
       const failure = await this.classifyCycleError(err);
       if (failure.interrupted) {
         outcome = `interrupted (${failure.reason}) — the engine retries`;
         console.log(`refresh instance ${instance}: ${step} interrupted — ${failure.reason.slice(0, 400)}; retrying`);
         throw err;
       }
-      await this.refreshFailed(failure, 1);
+      // The disk-full recovery excludes this cycle from its in-flight count only
+      // when the cycle counted itself: a failure inside the gates (before
+      // `cycle.count()`) contributed nothing, and excluding it anyway would read
+      // one real run as none and recycle the container under it.
+      await this.refreshFailed(failure, counted ? 1 : 0);
       await this.clearInstanceLease(instance);
       outcome = `failed (${failure.reason})`;
       return { status: "failed", reason: failure.reason, startedAt, trace: trace.steps() };
     } finally {
       if (counted) this.refreshesInFlight--;
-      // The gates set this for the alarm's finally; no alarm runs on this path.
-      this.rearmOutcome = "normal";
       await this.recordInstanceStep(instance, step, outcome).catch((err) =>
         console.log(`refresh instance ${instance}: recording ${step} failed: ${errMsg(err)}`),
       );
@@ -3367,8 +3223,9 @@ export class ResidentDO extends Sandbox<Env> {
       const gate = await this.refreshGate(input.resource);
       if (!gate.go) return { status: "stopped", why: gate.why };
       // Past the gates the cycle mutates the mirror and checkout: count it in
-      // flight from here, exactly where the alarm handler does — never before,
-      // or the gates above would have seen this cycle as a live operation.
+      // flight from here — never before, or the gates above (the idle park,
+      // the image reconcile, the disk-full recycle) would have seen this
+      // cycle as a live operation and never fired.
       cycle.count();
       const { record, facts } = gate;
       const holder = this.nextHolder();
@@ -3448,9 +3305,9 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Step `snapshot`: the stamped pair to R2 (`snapshot` finds a record at the
    *  stamp done and answers `superseded` to another writer, never a throw),
-   *  then the cycle's completion — facts, `warm`, the reclamation, the disk
-   *  sample — and the cycle lease released. An `unchanged` cycle skips the
-   *  archive and still completes, as the alarm does. */
+   *  then the cycle's completion — facts, `warm`, the reclamation — and the
+   *  cycle lease released. An `unchanged` cycle skips the archive and still
+   *  completes. */
   async refreshInstanceSnapshot(input: {
     resource: string;
     instance: string;
@@ -3497,11 +3354,50 @@ export class ResidentDO extends Sandbox<Env> {
     });
   }
 
-  /** Set during one alarm by the idle gate (`idle`), an image-stale container
-   *  stop (`image-stale-restart`), a disk-full recycle (`disk-full-restart`)
-   *  or an interrupted step (`interrupted`) so `finally` picks the matching
-   *  re-arm delay (`nextRefreshDelayS`); reset to `normal` after every arm. */
-  private rearmOutcome: RefreshOutcome = "normal";
+  /** A housekeeping step never flips lifecycle state: its failure is a log
+   *  line and a `done` answer naming it (`result` null) — except a step killed
+   *  from outside, which the engine retries like any other. */
+  private async housekeeping<T>(
+    step: string,
+    work: () => Promise<T>,
+  ): Promise<InstanceStepResult<{ result: T | null; error: string | null }>> {
+    try {
+      return { status: "done", result: await work(), error: null };
+    } catch (err) {
+      const failure = await this.classifyCycleError(err);
+      if (failure.interrupted) throw err;
+      console.log(`refresh instance: ${step} failed — ${failure.reason.slice(0, 400)}`);
+      return { status: "done", result: null, error: residentText(failure.reason) };
+    }
+  }
+
+  /** Step `sweep`: the worktree inactivity sweep (item 23) — TTL eviction and
+   *  the clean-idle release. No gate runs here, so the step counts its cycle
+   *  first thing, like install, build and snapshot. Idempotent by shape: a
+   *  second call finds the bindings it evicted already evicted and nothing
+   *  else past its cutoffs. */
+  async refreshInstanceSweep(input: {
+    resource: string;
+    instance: string;
+  }): Promise<InstanceStepAnswer<{ result: { evicted: string[]; kept: number } | null; error: string | null }>> {
+    return this.runInstanceStep(input.instance, "sweep", async (cycle) => {
+      cycle.count();
+      return this.housekeeping("sweep", () => this.sweepWorktrees(input.resource));
+    });
+  }
+
+  /** Step `measure`: the disk sample (item 55) — one `df` + one `du`, written
+   *  over the last; a second call takes the same sample again. Counts its
+   *  cycle first thing, like every step past the gates. Never wakes a slept
+   *  container (`measureDisk` answers null, `measured: false`). */
+  async refreshInstanceMeasure(input: {
+    instance: string;
+  }): Promise<InstanceStepAnswer<{ result: { measured: boolean } | null; error: string | null }>> {
+    return this.runInstanceStep(input.instance, "measure", async (cycle) => {
+      cycle.count();
+      return this.housekeeping("measure", async () => ({ measured: (await this.measureDisk()) !== null }));
+    });
+  }
 
   /** Idle = no live binding attached within IDLE_AFTER_S AND (when the
    *  runtime is up) no live tree is dirty. Bindings are storage; dirtiness
@@ -3555,14 +3451,15 @@ export class ResidentDO extends Sandbox<Env> {
     return classifyRefreshFailure({ step, message, freeKiB: await this.freeKiB() });
   }
 
-  /** The disk is a cache: stop the container so the next alarm restores
-   *  mirror + checkout from R2 onto an empty disk — the same wake path as a
-   *  platform sleep. Only when the pure plan allows it: nothing in flight
-   *  (`selfInFlight` excludes the calling refresh cycle from the count), every
-   *  live tree clean, and no recycle within the cooldown. A refused recycle is
-   *  written to `lastRefreshError` with its why, so `/residents` says what an
-   *  operator must do; the `degraded` reason stays the clean `disk-full: …`. */
-  private async recoverFromDiskFull(reason: string, selfInFlight: number): Promise<void> {
+  /** The disk is a cache: stop the container so the next cycle attempt
+   *  restores mirror + checkout from R2 onto an empty disk — the same wake
+   *  path as a platform sleep. Only when the pure plan allows it: nothing in
+   *  flight (`selfInFlight` excludes the calling refresh cycle from the
+   *  count), every live tree clean, and no recycle within the cooldown. A
+   *  refused recycle is written to `lastRefreshError` with its why, so
+   *  `/residents` says what an operator must do; the `degraded` reason stays
+   *  the clean `disk-full: …`. Answers whether the container was recycled. */
+  private async recoverFromDiskFull(reason: string, selfInFlight: number): Promise<boolean> {
     const lastRecycleAt = await this.ctx.storage.get<number>(DISK_FULL_RECYCLE_KEY);
     const plan = planDiskFullRecovery({
       now: systemClock(),
@@ -3573,16 +3470,16 @@ export class ResidentDO extends Sandbox<Env> {
     if (plan.action === "wait") {
       console.log(`disk-full: container kept — ${plan.why}`);
       await this.recordRefreshError(`${reason} — container kept: ${plan.why}`);
-      return;
+      return false;
     }
     console.log(
-      `disk-full: recycling the container — the next alarm restores mirror + checkout from R2 onto an empty disk (${reason})`,
+      `disk-full: recycling the container — the next cycle restores mirror + checkout from R2 onto an empty disk (${reason})`,
     );
     await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, systemClock());
-    await this.recordRefreshError(`${reason} — container recycled; restoring from R2 on the next alarm`);
+    await this.recordRefreshError(`${reason} — container recycled; restoring from R2 on the next cycle`);
     this.swapIncarnation(); // deliberate incarnation swap
     await this.stop().catch((err) => console.log(`disk-full: stop failed: ${errMsg(err)}`));
-    this.rearmOutcome = "disk-full-restart";
+    return true;
   }
 
   // -- disk budget (docs/reference/specs/resident-repos.md item 55) -------------------------
@@ -3640,18 +3537,6 @@ export class ResidentDO extends Sandbox<Env> {
         `homes ${formatGiB(Object.values(p.homes).reduce((a, n) => a + n, 0))}, other ${formatGiB(p.other)}`,
     );
     return sample;
-  }
-
-  /** Schedule callback: the deferred measurement an attach/detach/sweep arms. */
-  async onDiskMeasure(_payload: string): Promise<void> {
-    await this.measureDisk().catch((err) => console.log(`disk: measure failed: ${errMsg(err)}`));
-  }
-
-  /** Arm one deferred measurement (at most one pending): the attach's hot path
-   *  pays a `df`, not the `du`. */
-  private async scheduleDiskMeasure(resource: string): Promise<void> {
-    if ((await this.listSchedules(DISK_MEASURE_CALLBACK)).length > 0) return;
-    await this.schedule(DISK_MEASURE_DELAY_S, DISK_MEASURE_CALLBACK, resource);
   }
 
   /** `{usedKiB, totalKiB, at}` of the last sample for the watchdog line (storage
@@ -3798,9 +3683,10 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Refresh-on-attach, BOUNDED: if the resident was idle (or the last
    *  refresh is older than the active cadence), fetch the mirror now — seconds,
-   *  under the mirror lock — so the ref this thread binds is current, clear
-   *  idle mode, and pull the full refresh cycle (checkout rebuild if main
-   *  moved: minutes) to +1s in the BACKGROUND. The attach never waits on an
+   *  under the mirror lock — so the ref this thread binds is current, and
+   *  clear idle mode, which puts the full refresh cycle (checkout rebuild if
+   *  main moved: minutes) on the cron's awake cadence — the next firing
+   *  creates its instance, within one bucket. The attach never waits on an
    *  install/build, so a wake cannot become a cold-fallback generator. */
   private async refreshIfStale(resource: string): Promise<void> {
     const facts = await this.ctx.storage.get<RepoFacts>(FACTS_KEY);
@@ -3815,7 +3701,7 @@ export class ResidentDO extends Sandbox<Env> {
       // Bounded like attach's own clone section: a full checkout rebuild
       // holding the mutex must not stall a wake attach for minutes — on
       // expiry (MirrorBusyError) proceed on the last mirror, same as a failed
-      // fetch. The background full cycle armed below repays the staleness.
+      // fetch. The next refresh instance repays the staleness.
       await this.withMirrorLock(
         () =>
           this.gitWithCred(
@@ -3839,7 +3725,6 @@ export class ResidentDO extends Sandbox<Env> {
       const { idleSince: _woke, ...awake } = fresh;
       await this.ctx.storage.put(FACTS_KEY, awake satisfies RepoFacts);
     }
-    await this.armRefresh(resource, 1); // full cycle now, in the background; it re-arms at the active cadence
   }
 
   /** Pool users live in the IMAGE (Dockerfile useradd loop) while THREAD_USERS
@@ -3868,20 +3753,26 @@ export class ResidentDO extends Sandbox<Env> {
     return true;
   }
 
-  // -- watchdog (the sparse cron that re-arms dead alarm chains) ---------------
+  // -- watchdog (the sparse cron; it re-arms nothing) --------------------------
 
-  /** One watchdog pass over this resident (invoked by the Worker cron):
-   *  re-arm a dead refresh chain and mark degraded(alarm-missed); time out an
-   *  onboarding stuck past its budget → down(provision-timeout) + cap slot
-   *  release; auto-rebuild a resident stuck down on unusable snapshots (one
-   *  strike per pass, rebuild at AUTO_REBUILD_AFTER_STRIKES). Storage/
-   *  schedule reads (plus the strike counter) only — containers start via the
-   *  re-armed alarms, never in this pass. */
+  /** One watchdog pass over this resident (invoked by the Worker cron): time
+   *  out an onboarding stuck past its budget → down(provision-timeout) + cap
+   *  slot release; auto-rebuild a resident stuck down on unusable snapshots
+   *  (one strike per pass, rebuild at AUTO_REBUILD_AFTER_STRIKES); name a
+   *  `refreshing`/`restoring` marker older than STALE_MIDFLIGHT_MS that no
+   *  live lease and no running instance stands behind —
+   *  `degraded(stale-mid-flight: …)` carrying the last instance's id and the
+   *  engine's word on it, so a failed instance is visible by name on
+   *  `/status` (item 9) — and the next instance the cron creates (this very
+   *  pass) normalizes it. Storage and engine-status reads only: containers
+   *  are started by the instances' steps, never in this pass. The refresh row
+   *  the cron's instance-creation decision reads rides on the answer, read
+   *  after the check settled the state. */
   async watchdogCheck(): Promise<{
     resource: string;
     state: ResidentState;
     reason: string;
-    action: "none" | "rearmed" | "provision-timed-out" | "auto-rebuilt";
+    action: "none" | "provision-timed-out" | "auto-rebuilt";
     /** Item 55: the last disk sample's gauge, for the watchdog's status line. */
     disk: { usedKiB: number; totalKiB: number; freeKiB: number; at: string } | null;
     /** Item 7: what the cron's instance-creation decision reads, after the check above settled the state. */
@@ -3895,7 +3786,7 @@ export class ResidentDO extends Sandbox<Env> {
     resource: string;
     state: ResidentState;
     reason: string;
-    action: "none" | "rearmed" | "provision-timed-out" | "auto-rebuilt";
+    action: "none" | "provision-timed-out" | "auto-rebuilt";
   }> {
     const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
     const status = await this.getStatus();
@@ -3910,8 +3801,8 @@ export class ResidentDO extends Sandbox<Env> {
     }
     if (status.state === "down") {
       // Auto-rebuild escape hatch: only rehydration-flavored downs — the
-      // snapshots themselves are the problem, and down chains never retry, so
-      // without this the resident would stay down forever.
+      // snapshots themselves are the problem, and a down resident runs no
+      // cycle, so without this the resident would stay down forever.
       if (REHYDRATION_FAILURE_RE.test(status.reason)) {
         const strikes = ((await this.ctx.storage.get<number>(REBUILD_STRIKES_KEY)) ?? 0) + 1;
         if (strikes >= AUTO_REBUILD_AFTER_STRIKES) {
@@ -3931,51 +3822,16 @@ export class ResidentDO extends Sandbox<Env> {
     // Any serving state clears accumulated strikes (a recovery must reset the
     // counter, or an unrelated later down inherits stale strikes).
     await this.ctx.storage.delete(REBUILD_STRIKES_KEY);
-    // Item 7: a resident on the Workflow lifecycle has no chain to re-arm —
-    // its cycles are the instances the cron creates. The sweep re-arm below
-    // is housekeeping either way; the two refresh re-arms are the alarm's.
-    const chained = (await this.getLifecycle()) === "alarm";
-
-    // The sweep chain has the same failure mode as the refresh chain (a DO
-    // eviction mid-callback kills the self-rescheduling), but nothing re-armed
-    // it: only an attach did, so a resident with live bindings and no traffic
-    // never swept again (idle bindings sat for hours with no sweep).
-    // Re-arm at +5s whenever live bindings exist and none is pending. Not a
-    // lifecycle event — the sweep is housekeeping, no state flip. Runs BEFORE
-    // the stale-mid-flight check so that branch's early return never skips it.
-    const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-    const liveBindings = [...bindings.values()].some((b) => !b.evicted && b.user);
-    // `sweepInFlight` is the explicit guard against arming a second chain while
-    // a sweep is executing (its schedule row also stays listed until the callback
-    // resolves, but that is a library detail we do not lean on).
-    if (liveBindings && !this.sweepInFlight) {
-      const pendingSweeps = await this.listSchedules(SWEEP_CALLBACK);
-      // Config drift: a row armed by OLDER code (e.g. a daily sweep from
-      // before the cadence shortened, due 24h out) is still honored by the runtime, so a
-      // shorter SWEEP_INTERVAL_S never takes effect until it fires. Treat a row
-      // due further out than the current interval (+ slack) as stale and
-      // replace it, so a deploy that shortens the cadence applies within one
-      // watchdog pass rather than after the old delay elapses.
-      const nowS = Math.floor(systemClock() / 1000);
-      const drifted = pendingSweeps.some((row) => (row.time ?? 0) - nowS > SWEEP_INTERVAL_S + SWEEP_DRIFT_SLACK_S);
-      // Re-check the guard: listSchedules yielded, and a sweep that started
-      // meanwhile owns the row its own `finally` is about to arm.
-      if ((pendingSweeps.length === 0 || drifted) && !this.sweepInFlight) {
-        this.deleteSchedules(SWEEP_CALLBACK);
-        await this.schedule(5, SWEEP_CALLBACK, resource);
-        // Disjoint by construction: inside this branch, a non-empty list implies `drifted`.
-        console.log(
-          `watchdog ${resource}: sweep ${pendingSweeps.length === 0 ? "chain was dead" : "row was due beyond the current interval (config drift)"} with live bindings — re-armed`,
-        );
-      }
-    }
 
     // A mid-flight state older than STALE_MIDFLIGHT_MS with no cycle or restore
-    // actually running is a marker orphaned by an interrupted cycle (DO evicted
-    // by a deploy, platform restart). Left alone it is permanent — the idle gate
-    // above only parks from `warm`, but nothing else would ever rewrite it, and
-    // the bot's warm-gate keeps sending runs cold. Mark it degraded (visible —
-    // named degradation, never a stall) and pull the next cycle to +5s so it normalizes.
+    // actually running is a marker orphaned by a cycle that died — a DO evicted
+    // by a deploy, a platform restart, an instance out of retries mid-step.
+    // Left alone it is permanent — the idle gate only parks from `warm`, and
+    // nothing else would ever rewrite it, so the bot's warm-gate keeps sending
+    // runs cold. Mark it degraded (visible — named degradation, never a
+    // stall), naming the instance the row last recorded and the engine's word
+    // on it; the marker is no longer `refreshing`, so the instance the cron
+    // creates in this same pass normalizes it.
     if (status.state === "refreshing" || status.state === "restoring") {
       const updatedAt = Date.parse((await this.ctx.storage.get<string>(UPDATED_KEY)) ?? "") || 0;
       // Who holds what comes from the in-flight row (item 22), not from this
@@ -3997,48 +3853,31 @@ export class ResidentDO extends Sandbox<Env> {
         if (again.state !== status.state || liveAgain.refresh || liveAgain.hydration) {
           return { resource, ...again, action: "none" };
         }
-        // Drop the dead hydration reference and the dead leases so the
-        // re-armed cycle's ensureHydrated starts a fresh restore instead of
-        // awaiting a promise that will never settle. Safe: past the bound
-        // nothing on the other end is still writing (the container it talked
-        // to is gone). Each clear is compared against the holder just read:
-        // a cycle that recorded a fresh lease between that read and this
-        // delete keeps it, the way a release never deletes another holder's row.
-        this.hydration = null;
-        if (!chained && (await this.instanceRunning((await this.instanceRow()).instance?.id ?? null))) {
+        const last = (await this.instanceRow()).instance?.id ?? null;
+        const engine = await this.instanceStatus(last);
+        if (engine !== null && INSTANCE_LIVE_STATUSES.has(engine)) {
           // The engine still runs the recorded instance — a step between retry
           // attempts, holding no lease and writing no state. Not stale: leave
           // the marker, create nothing (the cron's decision reads the same fact).
           return { resource, ...status, action: "none" };
         }
+        // Drop the dead hydration reference and the dead leases so the next
+        // cycle's ensureHydrated starts a fresh restore instead of awaiting a
+        // promise that will never settle. Safe: past the bound nothing on the
+        // other end is still writing (the container it talked to is gone).
+        // Each clear is compared against the holder just read: a cycle that
+        // recorded a fresh lease between that read and this delete keeps it,
+        // the way a release never deletes another holder's row.
+        this.hydration = null;
         if (rowAgain.refresh) await this.clearInFlight("refresh", rowAgain.refresh.holder);
         if (rowAgain.hydration) await this.clearInFlight("hydration", rowAgain.hydration.holder);
-        if (!chained) {
-          // The orphan is named the same way; the next instance the cron
-          // creates (this very pass — the marker is no longer `refreshing`)
-          // normalizes it, no alarm involved.
-          const reason = `stale-mid-flight: ${status.state} since ${new Date(updatedAt).toISOString()} with no cycle running; the next refresh instance normalizes it`;
-          await this.setResidentState("degraded", reason);
-          return { resource, state: "degraded", reason, action: "none" };
-        }
-        const reason = `stale-mid-flight: ${status.state} since ${new Date(updatedAt).toISOString()} with no cycle running; re-armed by watchdog`;
+        const instance = last
+          ? `the last instance ${last} is ${engine ?? "unknown to the engine"}`
+          : "no instance recorded";
+        const reason = `stale-mid-flight: ${status.state} since ${new Date(updatedAt).toISOString()} with no cycle running; ${instance}; the next refresh instance normalizes it`;
         await this.setResidentState("degraded", reason);
-        this.deleteSchedules(REFRESH_CALLBACK);
-        await this.schedule(5, REFRESH_CALLBACK, resource);
-        return { resource, state: "degraded", reason, action: "rearmed" };
+        return { resource, state: "degraded", reason, action: "none" };
       }
-    }
-
-    // No chain to be dead under the Workflow lifecycle (item 7).
-    if (!chained) return { resource, ...status, action: "none" };
-    const pending = await this.listSchedules(REFRESH_CALLBACK);
-    if (pending.length === 0) {
-      await this.schedule(5, REFRESH_CALLBACK, resource);
-      const reason = "alarm-missed: refresh chain was dead; re-armed by watchdog";
-      // An in-flight restore owns its own state; everything else is visibly
-      // degraded until the re-armed refresh succeeds.
-      if (status.state !== "restoring") await this.setResidentState("degraded", reason);
-      return { resource, state: "degraded", reason, action: "rearmed" };
     }
     return { resource, ...status, action: "none" };
   }
@@ -4214,7 +4053,7 @@ export class ResidentDO extends Sandbox<Env> {
       }
       // From here the attach may hold the mirror lock through clone/install:
       // count it so a concurrent refresh-cycle reconcileImage never stops the
-      // container under it (and isIdle never parks the alarm mid-attach).
+      // container under it (and isIdle never parks the cycle mid-attach).
       this.attachesInFlight++;
       try {
         return await this.attachThreadBody(threadKey, refHint, readonly, wantSha, resourceId, t0, record);
@@ -4230,16 +4069,15 @@ export class ResidentDO extends Sandbox<Env> {
    *  on, named by step. A step that died of a full disk (docs/reference/specs/resident-repos.md item 54) also
    *  flips the resident `degraded(disk-full: …)` — not serviceable, so the
    *  next dispatch goes cold without attaching (the card names the disk, not
-   *  `/etc/gitconfig.lock`) — and pulls the refresh cycle to now, where the
-   *  recovery decision lives (an attach never stops the container itself: it
-   *  is in flight). */
-  private async attachFailed(err: unknown, resource: string): Promise<ThreadErr> {
+   *  `/etc/gitconfig.lock`); the recovery decision lives in the next refresh
+   *  instance's entry gate (the cron's, within one bucket) — an attach never
+   *  stops the container itself: it is in flight. */
+  private async attachFailed(err: unknown): Promise<ThreadErr> {
     if (!(err instanceof StepError)) return { error: `attach-failed: ${errMsg(err)}`, status: 500 };
     const failure = await this.classifyFailure(err.step, err.message);
     if (!failure.diskFull) return { error: `attach-failed at ${err.step}: ${err.message}`, status: 500 };
     console.log(`attach: ${failure.reason}`);
     await this.setResidentState("degraded", failure.reason);
-    await this.armRefresh(resource, DISK_FULL_REARM_S);
     return { error: `attach-failed: ${failure.reason}`, status: 500 };
   }
 
@@ -4311,7 +4149,6 @@ export class ResidentDO extends Sandbox<Env> {
         threadKey,
         refHint,
         wantSha,
-        resource,
         slug,
         t0,
         facts,
@@ -4333,7 +4170,6 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string;
     refHint: string | null;
     wantSha: string | null;
-    resource: string;
     slug: string;
     t0: number;
     facts: RepoFacts;
@@ -4342,7 +4178,7 @@ export class ResidentDO extends Sandbox<Env> {
     mode: ReturnType<typeof planReadonlyAttach>;
     rollback: () => Promise<void>;
   }): Promise<AttachOk | ThreadErr> {
-    const { threadKey, refHint, wantSha, resource, slug, t0, facts, record, binding, mode, rollback } = input;
+    const { threadKey, refHint, wantSha, slug, t0, facts, record, binding, mode, rollback } = input;
 
     // Command-level token mint — before the lock so mint latency
     // never holds the mutex, and failure never blocks the attach.
@@ -4431,7 +4267,7 @@ export class ResidentDO extends Sandbox<Env> {
       if (err instanceof StepError && err.step === "unknown-ref") {
         return { error: `unknown-ref: ${err.message}`, status: 400 };
       }
-      return this.attachFailed(err, resource);
+      return this.attachFailed(err);
     }
 
     let deps: { deps: ThreadDepsMechanism; reconciled: boolean; depsKey?: string };
@@ -4466,7 +4302,7 @@ export class ResidentDO extends Sandbox<Env> {
         const s = await this.getStatus();
         return { error: errMsg(err), status: 503, state: s.state, reason: "mirror-busy" };
       }
-      return this.attachFailed(err, resource);
+      return this.attachFailed(err);
     }
 
     // The prior write time and token expiry never survive an attach: a
@@ -4487,12 +4323,9 @@ export class ResidentDO extends Sandbox<Env> {
       ...(credentialsWrittenAt !== undefined ? { credentialsWrittenAt } : {}),
       ...(credentialTokenExpiresAtMs !== undefined ? { tokenExpiresAtMs: credentialTokenExpiresAtMs } : {}),
     } satisfies ThreadBinding);
-    if ((await this.listSchedules(SWEEP_CALLBACK)).length === 0) {
-      await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
-    }
-    // Item 55: the tree is on disk now — measure it (deferred; the `du` stays
-    // off this hot path) so the next admission projects from current parts.
-    await this.scheduleDiskMeasure(resource);
+    // Item 55: the tree is on disk now; the next refresh instance's `measure`
+    // step counts it — the admission's free-space term is a live `df`, and the
+    // per-part projection it reads from the sample moves only with a cycle.
 
     return {
       workspace: binding.worktreePath,
@@ -5506,9 +5339,8 @@ export class ResidentDO extends Sandbox<Env> {
     if (!(await this.evictBinding(current, activeNow, `detach`, "detach"))) {
       return { released: false, reason: "re-attached during eviction — kept", user };
     }
-    // Item 55: the tree is gone — re-measure (deferred) so the gauge and the
-    // next admission see the space back.
-    await this.scheduleDiskMeasure((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
+    // Item 55: the tree is gone; the gauge catches up at the next refresh
+    // instance's `measure` step, and the admission's `df` sees the space now.
     return { released: true, user };
   }
 
@@ -5595,84 +5427,64 @@ export class ResidentDO extends Sandbox<Env> {
   /** A refresh cycle past its idle/reconcile gates (fetching, rebuilding, snapshotting). */
   private refreshesInFlight = 0;
 
-  /** Hourly inactivity sweep (schedule: onWorktreeSweep). Removes worktrees
-   *  whose binding is idle past the TTL, releases the user to the pool, and
-   *  KEEPS the binding record marked evicted. Never wakes a slept
-   *  container just to delete files a sleep already destroyed. */
-  /** True while onWorktreeSweep is executing (DO memory; a restart clears it
-   *  together with the in-flight sweep). The watchdog's re-arm checks it so
-   *  two sweep chains can never be armed by construction. */
-  private sweepInFlight = false;
-
-  async onWorktreeSweep(payload: string): Promise<{ evicted: string[]; kept: number }> {
-    const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
+  /** The worktree inactivity sweep — every refresh instance's `sweep` step
+   *  (item 23) and the `sweep-now` debug op. Removes worktrees whose binding
+   *  is idle past the TTL, releases the user to the pool, and KEEPS the
+   *  binding record marked evicted. Never wakes a slept container just to
+   *  delete files a sleep already destroyed. */
+  async sweepWorktrees(resource: string): Promise<{ evicted: string[]; kept: number }> {
     const evicted: string[] = [];
     let kept = 0;
-    this.sweepInFlight = true;
-    try {
-      const record = await this.registry()
-        .getRecord(resource)
-        .catch(() => null);
-      const ttlDays = record?.worktreeTtlDays ?? WORKTREE_TTL_DAYS_DEFAULT;
-      const cutoff = systemClock() - ttlDays * 86_400_000;
-      const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-      const active = await this.isRuntimeActive().catch(() => false);
-      const idleCutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
-      for (const binding of all.values()) {
-        if (binding.evicted || !binding.user) continue;
-        const last = Date.parse(binding.lastAttachAt);
-        if (last >= cutoff) {
-          // Not past the TTL. Still release it if it has been idle for an hour,
-          // nothing is running on it, and the tree is provably clean — the run
-          // that used it is over and there is nothing to preserve. A slept
-          // container has NO tree any more (sleep destroys the disk), so an
-          // idle binding on an inactive runtime is releasable outright: there is
-          // nothing left to protect, only a pool user to give back. (Keeping
-          // them would leave idle bindings on a sleeping resident until the
-          // 7-day TTL.)
-          const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
-          const cleanIdle =
-            last < idleCutoff && busy === 0 && (!active || (await this.worktreeCleanliness(binding)).clean);
-          // Re-read right before removal: the clean check awaited (the DO
-          // yields), so an exec that arrived meanwhile would otherwise have
-          // its tree removed under it — same guard as detachThread.
-          const busyNow = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
-          if (!cleanIdle || busyNow > 0) {
-            kept++;
-            continue;
-          }
-        }
-        // Re-read the binding too: a re-attach that completed inside the
-        // clean-check await bumped lastAttachAt and rebuilt the tree — evicting
-        // from this loop's stale snapshot would rm the fresh tree.
-        const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
-        if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt) {
+    const record = await this.registry()
+      .getRecord(resource)
+      .catch(() => null);
+    const ttlDays = record?.worktreeTtlDays ?? WORKTREE_TTL_DAYS_DEFAULT;
+    const cutoff = systemClock() - ttlDays * 86_400_000;
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const active = await this.isRuntimeActive().catch(() => false);
+    const idleCutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
+    for (const binding of all.values()) {
+      if (binding.evicted || !binding.user) continue;
+      const last = Date.parse(binding.lastAttachAt);
+      if (last >= cutoff) {
+        // Not past the TTL. Still release it if it has been idle for an hour,
+        // nothing is running on it, and the tree is provably clean — the run
+        // that used it is over and there is nothing to preserve. A slept
+        // container has NO tree any more (sleep destroys the disk), so an
+        // idle binding on an inactive runtime is releasable outright: there is
+        // nothing left to protect, only a pool user to give back. (Keeping
+        // them would leave idle bindings on a sleeping resident until the
+        // 7-day TTL.)
+        const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
+        const cleanIdle =
+          last < idleCutoff && busy === 0 && (!active || (await this.worktreeCleanliness(binding)).clean);
+        // Re-read right before removal: the clean check awaited (the DO
+        // yields), so an exec that arrived meanwhile would otherwise have
+        // its tree removed under it — same guard as detachThread.
+        const busyNow = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
+        if (!cleanIdle || busyNow > 0) {
           kept++;
           continue;
         }
-        // `active` is re-read per binding: the container can wake mid-sweep (an
-        // attach), and an eviction decided on a stale "inactive" would skip the
-        // rm and orphan a real tree.
-        const activeNow = await this.isRuntimeActive().catch(() => false);
-        if (
-          await this.evictBinding(
-            current,
-            activeNow,
-            `worktree-sweep ${resource}`,
-            last >= cutoff ? "clean-idle" : "ttl",
-          )
-        )
-          evicted.push(binding.threadKey);
-        else kept++;
       }
-    } finally {
-      const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-      const live = [...all.values()].some((b) => !b.evicted && b.user);
-      this.deleteSchedules(SWEEP_CALLBACK);
-      if (live) await this.schedule(SWEEP_INTERVAL_S, SWEEP_CALLBACK, resource);
-      this.sweepInFlight = false;
+      // Re-read the binding too: a re-attach that completed inside the
+      // clean-check await bumped lastAttachAt and rebuilt the tree — evicting
+      // from this loop's stale snapshot would rm the fresh tree.
+      const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+      if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt) {
+        kept++;
+        continue;
+      }
+      // `active` is re-read per binding: the container can wake mid-sweep (an
+      // attach), and an eviction decided on a stale "inactive" would skip the
+      // rm and orphan a real tree.
+      const activeNow = await this.isRuntimeActive().catch(() => false);
+      if (
+        await this.evictBinding(current, activeNow, `worktree-sweep ${resource}`, last >= cutoff ? "clean-idle" : "ttl")
+      )
+        evicted.push(binding.threadKey);
+      else kept++;
     }
-    if (evicted.length > 0) await this.scheduleDiskMeasure(resource); // item 55
     return { evicted, kept };
   }
 
@@ -5887,9 +5699,9 @@ export class ResidentDO extends Sandbox<Env> {
     return { ok: true, lastAttachAt };
   }
 
-  /** Debug: run the sweep pass now (the exact scheduled function). */
+  /** Debug: run the sweep pass now (the exact function the `sweep` step runs). */
   async debugSweepNow(): Promise<{ evicted: string[]; kept: number }> {
-    return this.onWorktreeSweep("");
+    return this.sweepWorktrees((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
   }
 
   // -- event-triggered reclamation ---------------------------------------------
@@ -5925,7 +5737,7 @@ export class ResidentDO extends Sandbox<Env> {
   /** Reclaim worktrees whose ref is FINISHED: the branch vanished from the
    *  mirror (the refresh cycle's `fetch --prune` just ran) or its PR was
    *  merged/closed. Runs inside the refresh cycle — a poll on the existing
-   *  alarm, since the GitHub App has webhooks off — and via /debug
+   *  cadence, since the GitHub App has webhooks off — and via /debug
    *  reclaim-now. Never touches the default branch, a busy thread, or a dirty
    *  tree (reclaimDecision); every keep is named. The eviction itself is the
    *  sweep's `evictBinding` with the same re-read guards. */
@@ -6115,8 +5927,7 @@ export class ResidentDO extends Sandbox<Env> {
       instance: null,
       skipped: null,
     };
-    const [refresh, provisionRun, provisionDeadline, bindings] = await Promise.all([
-      this.listSchedules(REFRESH_CALLBACK),
+    const [provisionRun, provisionDeadline, bindings] = await Promise.all([
       this.listSchedules(PROVISION_RUN_CALLBACK),
       this.listSchedules(PROVISIONING_CALLBACK),
       this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX }),
@@ -6161,8 +5972,8 @@ export class ResidentDO extends Sandbox<Env> {
             checkoutBackupId: snap.checkout.id,
           }
         : null,
+      // The provisioning schedules, the one timer a resident has (item 3).
       schedules: {
-        refresh: refresh.length,
         provisionRun: provisionRun.length,
         provisionDeadline: provisionDeadline.length,
       },
@@ -6177,9 +5988,8 @@ export class ResidentDO extends Sandbox<Env> {
         map.get(inFlightKey("refresh")) as Lease | undefined,
         map.get(inFlightKey("hydration")) as Lease | undefined,
       ),
-      // Item 7: which scheduler drives the refresh cycle, and — on the
-      // Workflow lifecycle — the instance the cron last created with the step
-      // it last reported, and the last bucket the cron skipped.
+      // Item 7: the lifecycle row (`workflow`), the instance last created with
+      // the step it last reported, and the last bucket the cron skipped.
       lifecycle: lifecycleOf(map.get(LIFECYCLE_KEY)),
       refresh: {
         instance: refreshRow.instance
@@ -6200,32 +6010,15 @@ export class ResidentDO extends Sandbox<Env> {
 
   // -- debug surface (admin-scoped via POST /debug; used by live validation) ---
 
+  /** The pending schedule rows: provisioning's two, the one timer a resident
+   *  has — a settled resident answers both empty (lifecycle.test.ts holds that
+   *  nothing else is ever scheduled). */
   async debugSchedules(): Promise<Record<string, unknown>> {
-    const [refresh, provisionRun, provisionDeadline, sweep] = await Promise.all([
-      this.listSchedules(REFRESH_CALLBACK),
+    const [provisionRun, provisionDeadline] = await Promise.all([
       this.listSchedules(PROVISION_RUN_CALLBACK),
       this.listSchedules(PROVISIONING_CALLBACK),
-      this.listSchedules(SWEEP_CALLBACK),
     ]);
-    return { refresh, provisionRun, provisionDeadline, sweep };
-  }
-
-  /** Kill the refresh chain (simulates a dead alarm chain for watchdog tests). */
-  async debugKillRefresh(): Promise<{ killed: boolean; remaining: number }> {
-    this.deleteSchedules(REFRESH_CALLBACK);
-    return { killed: true, remaining: (await this.listSchedules(REFRESH_CALLBACK)).length };
-  }
-
-  /** Pull the next refresh forward to ~1s from now. A resident on the Workflow
-   *  lifecycle has no chain to pull: its next cycle is the instance the next
-   *  cron firing creates (`run-watchdog` runs that pass on demand). */
-  async debugRefreshNow(): Promise<{ scheduled: boolean; lifecycle: ResidentLifecycle }> {
-    const lifecycle = await this.getLifecycle();
-    if (lifecycle === "workflow") return { scheduled: false, lifecycle };
-    const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
-    this.deleteSchedules(REFRESH_CALLBACK);
-    await this.schedule(1, REFRESH_CALLBACK, resource);
-    return { scheduled: true, lifecycle };
+    return { provisionRun, provisionDeadline };
   }
 
   /** Fault injection for the watchdog's stuck-onboarding path: re-persist
@@ -6251,23 +6044,21 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Fault injection for the watchdog's auto-rebuild path: persist
-   *  `down` with a rehydration-flavored reason and stop the refresh chain
-   *  (mirroring what a real goDown does), so repeated watchdog passes can
-   *  strike it up to the auto-rebuild without corrupting real R2 objects.
-   *  Test-only semantics; admin scope. */
+   *  `down` with a rehydration-flavored reason (what a real goDown does), so
+   *  repeated watchdog passes can strike it up to the auto-rebuild without
+   *  corrupting real R2 objects. Test-only semantics; admin scope. */
   async debugForceDown(reason: string): Promise<ResidentStatus> {
     await this.setResidentState("down", reason);
-    this.deleteSchedules(REFRESH_CALLBACK);
     return this.getStatus();
   }
 
   /** Rebuild: the down→onboarding escape hatch — discard the recorded
    *  snapshots (R2 objects included) and reprovision from scratch through the
-   *  ordinary alarm-driven pipeline, reusing the registry record's command
+   *  ordinary provisioning pipeline, reusing the registry record's command
    *  table/ref/budget. `dryRun` returns the same itemized plan WITHOUT
    *  executing: nothing deleted, no state change, schedules untouched.
    *  Refused while the engine owns the state (onboarding/refreshing/
-   *  restoring) — two engine chains must never race the same disk. */
+   *  restoring) — two cycles must never race the same disk. */
   async rebuild(
     resource: string,
     defaultRef: string,
@@ -6355,18 +6146,16 @@ export class ResidentDO extends Sandbox<Env> {
     threadBindings: number;
   }> {
     const status = await this.getStatus();
-    const [prov, run, refresh, sweep] = await Promise.all([
+    const [prov, run] = await Promise.all([
       this.listSchedules(PROVISIONING_CALLBACK),
       this.listSchedules(PROVISION_RUN_CALLBACK),
-      this.listSchedules(REFRESH_CALLBACK),
-      this.listSchedules(SWEEP_CALLBACK),
     ]);
     const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
     const ids = snap ? [snap.mirror.id, snap.checkout.id] : [];
     const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
     return {
       ...status,
-      schedules: prov.length + run.length + refresh.length + sweep.length,
+      schedules: prov.length + run.length,
       snapshotBackupIds: ids,
       backupObjects: await this.countBackupObjects(ids),
       threadBindings: bindings.size,
@@ -6390,8 +6179,6 @@ export class ResidentDO extends Sandbox<Env> {
     let backupObjectsDeleted = 0;
     this.deleteSchedules(PROVISIONING_CALLBACK);
     this.deleteSchedules(PROVISION_RUN_CALLBACK);
-    this.deleteSchedules(REFRESH_CALLBACK);
-    this.deleteSchedules(SWEEP_CALLBACK);
     const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
     if (snap) {
       try {
@@ -6768,11 +6555,13 @@ export default {
     return res;
   },
 
-  /** Watchdog cron: one sparse pass that re-arms dead refresh chains
-   *  (marking degraded(alarm-missed)) and times out stuck onboarding. Cadence
-   *  invariant: this cron (every 10 minutes) stays SHORTER than SLEEP_AFTER
-   *  ("20m"). It reads DO storage/schedules only — containers are started by
-   *  the re-armed refresh alarms, not by the watchdog itself.
+  /** Watchdog cron: one sparse pass that creates each resident's due refresh
+   *  instance (item 7), names a stale mid-flight marker by its instance, and
+   *  times out stuck onboarding. Cadence invariant: this cron (every 10
+   *  minutes) stays SHORTER than SLEEP_AFTER ("20m") — the instance it
+   *  creates is the keep-warm. It reads DO storage and the engine's instance
+   *  status only — containers are started by the instances' steps, not by the
+   *  watchdog itself.
    *
    *  The cron is the `resident` entry of the schedule registry
    *  (src/core/schedules.ts — a unit test keeps wrangler.jsonc equal to it);
@@ -7119,7 +6908,7 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
  *  reusing the registry record (command table, ref, budget) as-is; the cap
  *  slot and thread bindings are untouched. `dryRun:true` answers 200 with the
  *  itemized plan and executes nothing; a real rebuild answers 202 like
- *  onboard (the transition is alarm-driven). */
+ *  onboard (the transition is provisioning's schedule). */
 async function handleRebuild(env: Env, body: Record<string, unknown>): Promise<Response> {
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
@@ -7481,8 +7270,8 @@ function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>): R
   );
 }
 
-/** Admin diagnostic surface, used by the live validation of the freshness engine (kill-refresh /
- *  stop-container simulate dead chains and platform sleeps; mint-token proves
+/** Admin diagnostic surface, used by the live validation of the freshness engine (refresh-now
+ *  creates this bucket's instance on demand, stop-container simulates a platform sleep; mint-token proves
  *  the command-level mint failure shape without exposing token material).
  *  Side-effect-explicit; every op is admin-scope except the pure reads
  *  info/schedules/threads, which the read scope may also run. */
@@ -7530,10 +7319,14 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json(await stub.getResidentInfo());
     case "schedules":
       return json(await stub.debugSchedules());
-    case "kill-refresh":
-      return json(await stub.debugKillRefresh());
     case "refresh-now":
-      return json(await stub.debugRefreshNow());
+      // Item 13: this bucket's refresh instance, created now — `duplicate` when
+      // the cron already served the bucket, `skipped` beside a live cycle.
+      return json({
+        op,
+        resource: resource.resource,
+        ...(await createRefreshInstanceNow(env, stub, resource.resource)),
+      });
     case "stop-container":
       return json(await stub.debugStopContainer());
     case "force-onboarding":
@@ -7572,16 +7365,16 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json(await stub.debugBackdateThread(threadKey.threadKey, days.value));
     }
     case "lifecycle": {
-      // Item 7: which scheduler drives this resident's refresh cycle. Admin
-      // scope, one resident at a time; the default for every resident is `alarm`.
+      // Item 7: the lifecycle row. `workflow` is the one scheduler, so the op
+      // only rewrites a stale `alarm` value the flagged rollout left behind.
       const mode = parseLifecycle(body.mode);
-      if (!mode) return json({ error: 'mode must be "alarm" or "workflow"' }, 400);
+      if (!mode) return json({ error: 'mode must be "workflow" — the alarm chain no longer exists' }, 400);
       return json({ op, resource: resource.resource, ...(await stub.setLifecycle(mode)) });
     }
     default:
       return json(
         {
-          error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, kill-refresh, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, purge-bindings, backdate-thread, lifecycle)`,
+          error: `unknown op ${JSON.stringify(op)} (ops: info, schedules, refresh-now, stop-container, force-onboarding, force-down, mint-token, run-watchdog, set-test-overrides, threads, sweep-now, reclaim-now, measure-disk, purge-bindings, backdate-thread, lifecycle)`,
         },
         400,
       );
@@ -7592,8 +7385,8 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
  *  handler and the /debug run-watchdog op. Each check targets a different DO,
  *  so they run concurrently; a failing one becomes its own {error} entry
  *  without touching its neighbors, and the results follow the registry list.
- *  For a resident on the Workflow lifecycle the pass also creates the refresh
- *  instance the bucket is due (item 7). */
+ *  The pass also creates each resident's refresh instance when its bucket is
+ *  due (item 7). */
 async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummary> {
   const registry = registryStub(env);
   const residents = await registry.list();
@@ -7625,7 +7418,6 @@ async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummar
           reason: s.value.reason,
           action: s.value.action,
           disk: s.value.disk,
-          lifecycle: s.value.refresh.lifecycle,
           instance: s.value.instance,
         }
       : { resource: record.resource, error: errMsg(s.reason) };

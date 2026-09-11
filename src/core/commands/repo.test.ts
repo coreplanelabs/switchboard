@@ -36,7 +36,7 @@ const TWO_RESIDENTS = {
       defaultRef: "master",
       live: { state: "warm", reason: "", sha: "0123456789abcdef", lastRefreshAt: "2026-01-01T00:00:00.000Z" },
     },
-    { resource: "repo:acme/api", defaultRef: "main", live: { state: "degraded", reason: "alarm-missed" } },
+    { resource: "repo:acme/api", defaultRef: "main", live: { state: "degraded", reason: "github-unreachable" } },
   ],
 };
 
@@ -176,7 +176,7 @@ describe("repo.list", () => {
     expect(res.ok).toBe(true);
     expect(res.ok && res.value).toEqual(TWO_RESIDENTS);
     expect(renderText(commands.get("repo.list")!, res.ok ? res.value : null)).toBe(
-      "*Resident repos* (2/6):\n• `jshttp/vary` — *warm* · ref `master` · sha `01234567` · refreshed 2026-01-01T00:00:00.000Z\n• `acme/api` — *degraded* (alarm-missed) · ref `main`",
+      "*Resident repos* (2/6):\n• `jshttp/vary` — *warm* · ref `master` · sha `01234567` · refreshed 2026-01-01T00:00:00.000Z\n• `acme/api` — *degraded* (github-unreachable) · ref `main`",
     );
     await commands.invoke("repo.list", {}, chat("slack:URANDOM"));
     expect(c.residents).toHaveBeenCalledTimes(2);
@@ -745,10 +745,10 @@ describe("provisioning follow-up (item 52): repo onboard / repo rebuild settle",
     });
     expect(
       await settleProvisioning(
-        deps(statusSequence({ state: "degraded", reason: "alarm-missed", inFlight: 0 })),
+        deps(statusSequence({ state: "degraded", reason: "github-unreachable", inFlight: 0 })),
         "acme/api",
       ),
-    ).toEqual({ ok: true, text: "ℹ️ `acme/api` left `onboarding` and is `degraded` (alarm-missed)." });
+    ).toEqual({ ok: true, text: "ℹ️ `acme/api` left `onboarding` and is `degraded` (github-unreachable)." });
     expect(
       await settleProvisioning(
         depsOf({
