@@ -39,7 +39,10 @@ you can work on almost everything without a Slack workspace. The tutorial
 The repository is one npm workspace: the bot at the root, the dashboard in
 `web/`, the docs site in `docs/`, the five Workers under `deploy/`, and the
 published CLI package in `packages/switchboard/` (what `npx @coreplane/switchboard`
-runs — the same `src/cli.ts`, bundled; operators install it, contributors clone). One
+runs — the same `src/cli.ts`, bundled; operators install it, contributors clone;
+inside the checkout that `npx` spelling reaches this workspace, not the registry,
+and until `npm run build -w packages/switchboard` has run its bin says so —
+`npm run cli` is the checkout's spelling). One
 `npm ci` installs all of them from the single lockfile; run a package's script
 with `npm run <script> -w <path>` (for example `npm test -w web`).
 

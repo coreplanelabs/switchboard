@@ -45,7 +45,13 @@ export default tseslint.config(
   ...vue.configs["flat/recommended"],
   {
     // Node-side TypeScript and scripts.
-    files: ["src/**/*.ts", "src/**/*.mjs", "scripts/**/*.{ts,mjs,mts}", "deploy/**/*.{ts,mjs}", "packages/**/*.mts"],
+    files: [
+      "src/**/*.ts",
+      "src/**/*.mjs",
+      "scripts/**/*.{ts,mjs,mts}",
+      "deploy/**/*.{ts,mjs}",
+      "packages/**/*.{js,mts}",
+    ],
     languageOptions: { globals: { ...globals.node } },
   },
   {

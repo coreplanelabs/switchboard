@@ -17,9 +17,10 @@
     "node": ">=24"
   },
   "bin": {
-    "switchboard": "dist/cli.js"
+    "switchboard": "bin/switchboard.js"
   },
   "files": [
+    "bin",
     "dist"
   ],
   "publishConfig": {

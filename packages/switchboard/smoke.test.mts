@@ -77,7 +77,7 @@ afterAll(() => {
 });
 
 describe("the tarball", () => {
-  it("is the package's name and version, and carries the bundle, the assets, the manifest, the README and the license — no source, no tests, nothing an operator wrote", () => {
+  it("is the package's name and version, and carries the bin, the bundle, the assets, the manifest, the README and the license — no source, no tests, nothing an operator wrote", () => {
     const pkg = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8")) as { version: string };
     expect(packed.filename).toBe(`${facts.npmPackage.replace("@", "").replace("/", "-")}-${pkg.version}.tgz`);
     expect(packed.files).toEqual(
@@ -85,6 +85,7 @@ describe("the tarball", () => {
         "package.json",
         "README.md",
         "LICENSE",
+        "bin/switchboard.js",
         "dist/cli.js",
         "dist/assets/project.json",
         "dist/assets/.env.example",
@@ -102,8 +103,8 @@ describe("the tarball", () => {
     );
     expect(packed.files.filter((f) => f.startsWith("dist/assets/web/dist/assets/")).length).toBeGreaterThan(1);
     for (const f of packed.files) {
-      expect(f, "only the manifest, README, LICENSE and dist/ ship").toMatch(
-        /^(package\.json|README\.md|LICENSE|dist\/)/,
+      expect(f, "only the manifest, README, LICENSE, the bin and dist/ ship").toMatch(
+        /^(package\.json|README\.md|LICENSE|bin\/switchboard\.js|dist\/)/,
       );
       expect(f).not.toMatch(/\.test\.|vitest\.config|\/wrangler\.jsonc$|\/profile\.json$|agent-env|\.env$/);
     }
