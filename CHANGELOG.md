@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.203.0](https://github.com/coreplanelabs/switchboard/compare/v1.202.1...v1.203.0) (2026-09-11)
+
+
+### Features
+
+* **core:** the delivery page and command — issue-to-merge time, first-pass CI, review rounds and the no-human-edit share, read from the run history and the pull requests' own facts ([#947](https://github.com/coreplanelabs/switchboard/issues/947)) ([39db1c9](https://github.com/coreplanelabs/switchboard/commit/39db1c968309628e50430f6fd9d0ef47dc93275a))
+* **resident:** every refresh cycle is a Workflow instance — the alarm chain, the watchdog's re-arm and `alarm-missed` are gone, the worktree sweep and the disk gauge are instance steps, and `refresh-now` creates this bucket's instance ([#951](https://github.com/coreplanelabs/switchboard/issues/951)) ([9a95dd5](https://github.com/coreplanelabs/switchboard/commit/9a95dd5f320c009cfebc92a784c87bfc17a8d05a))
+* **ship:** a coding child hands back deviations, follow-ups and unproven criteria as data — recorded on the run and posted to the unit's board issue ([#952](https://github.com/coreplanelabs/switchboard/issues/952)) ([16ebf14](https://github.com/coreplanelabs/switchboard/commit/16ebf141093afd87235ebb8e8b5a6bf01267c2d9))
+
+
+### Bug fixes
+
+* **resident:** the refresh instance counts its cycle in flight only past the entry gates — the idle park, the image-stale restart and the disk-full recycle fire on the Workflow path as they do on the alarm path ([#953](https://github.com/coreplanelabs/switchboard/issues/953)) ([f743c78](https://github.com/coreplanelabs/switchboard/commit/f743c78717234244c1534a46d40a040dfd8e8da1))
+* **resident:** the rows the retired alarm chain armed are deleted before a resident's first event — the SDK skips a due row whose callback is gone without deleting it and re-arms for its past time at once, a hot alarm loop ([#955](https://github.com/coreplanelabs/switchboard/issues/955)) ([f42a9c6](https://github.com/coreplanelabs/switchboard/commit/f42a9c6c5da7a9fb52fc56e261a2efd92b7a10d0))
+
 ## [1.202.1](https://github.com/coreplanelabs/switchboard/compare/v1.202.0...v1.202.1) (2026-09-11)
 
 
