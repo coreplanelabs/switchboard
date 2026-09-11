@@ -166,25 +166,27 @@ export function resourceSplitOf(report: CostReport): ResourceSplitRow[] {
   return parts.map(([label, v]) => ({ label, usd: v, percent: (v / tot) * 100 }));
 }
 
-/** Series swatch/fill classes by index — the validated categorical palette
- *  (light + dark stepped), painted as Tailwind arbitrary-value classes. */
+/** Series swatch/fill classes by index — the theme's muted data palette (the
+ *  same print saturation as the status tokens in main.css), one hue per
+ *  series, light + dark stepped, painted as Tailwind arbitrary-value classes:
+ *  blue, orange, green, yellow, plum, indigo, red, teal. */
 export const SERIES_FILL = [
-  "fill-[#2a78d6] dark:fill-[#3987e5]",
-  "fill-[#eb6834] dark:fill-[#d95926]",
-  "fill-[#1baf7a] dark:fill-[#199e70]",
-  "fill-[#eda100] dark:fill-[#c98500]",
-  "fill-[#e87ba4] dark:fill-[#d55181]",
-  "fill-[#4a3aa7] dark:fill-[#9085e9]",
-  "fill-[#e34948] dark:fill-[#e66767]",
-  "fill-[#008300] dark:fill-[#008300]",
+  "fill-[#4478b8] dark:fill-[#7aa7e0]",
+  "fill-[#c8823b] dark:fill-[#e0a95a]",
+  "fill-[#4c8c57] dark:fill-[#6fae7a]",
+  "fill-[#b8963e] dark:fill-[#d4b45a]",
+  "fill-[#b0568c] dark:fill-[#d489b8]",
+  "fill-[#6b7bcc] dark:fill-[#98a5e6]",
+  "fill-[#d05252] dark:fill-[#e07a74]",
+  "fill-[#3e8e96] dark:fill-[#6fb9c0]",
 ];
 export const SERIES_SWATCH = [
-  "bg-[#2a78d6] dark:bg-[#3987e5]",
-  "bg-[#eb6834] dark:bg-[#d95926]",
-  "bg-[#1baf7a] dark:bg-[#199e70]",
-  "bg-[#eda100] dark:bg-[#c98500]",
-  "bg-[#e87ba4] dark:bg-[#d55181]",
-  "bg-[#4a3aa7] dark:bg-[#9085e9]",
-  "bg-[#e34948] dark:bg-[#e66767]",
-  "bg-[#008300] dark:bg-[#008300]",
+  "bg-[#4478b8] dark:bg-[#7aa7e0]",
+  "bg-[#c8823b] dark:bg-[#e0a95a]",
+  "bg-[#4c8c57] dark:bg-[#6fae7a]",
+  "bg-[#b8963e] dark:bg-[#d4b45a]",
+  "bg-[#b0568c] dark:bg-[#d489b8]",
+  "bg-[#6b7bcc] dark:bg-[#98a5e6]",
+  "bg-[#d05252] dark:bg-[#e07a74]",
+  "bg-[#3e8e96] dark:bg-[#6fb9c0]",
 ];

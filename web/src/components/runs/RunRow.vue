@@ -162,7 +162,7 @@ function onRowClick(ev: MouseEvent): void {
       </span>
       <UTooltip :text="whenTip(run)" :ui="{ text: 'whitespace-pre-line' }">
         <span
-          class="when pointer-events-auto shrink-0 tabular-nums max-sm:order-7 max-sm:pl-5 max-sm:text-xs max-sm:text-dimmed sm:min-w-[8.5em] sm:text-[0.8rem]"
+          class="when pointer-events-auto shrink-0 font-mono tabular-nums max-sm:order-7 max-sm:pl-5 max-sm:text-xs max-sm:text-dimmed sm:min-w-[8.5em] sm:text-[0.8rem]"
           :class="run.finished ? 'text-dimmed' : 'text-muted'"
         >
           {{ formatRelative(run.startedAt, now) }}
@@ -170,14 +170,14 @@ function onRowClick(ev: MouseEvent): void {
       </UTooltip>
       <span
         v-if="parts.agent"
-        class="agent shrink-0 rounded border px-1.5 text-[0.68rem] font-semibold uppercase tracking-wider max-sm:order-2"
+        class="agent shrink-0 rounded border px-1.5 font-mono text-[0.68rem] font-medium uppercase tracking-wider max-sm:order-2"
         :class="[AGENT_HUE[agentHue(parts.agent)], run.finished ? 'opacity-55' : '']"
         :data-agent-hue="agentHue(parts.agent)"
         >{{ parts.agent }}</span
       >
       <UTooltip v-if="repo" :text="repo">
         <a
-          class="repo pointer-events-auto min-w-0 shrink-0 rounded border border-accented bg-accented/50 px-1.5 text-[0.72rem] font-semibold leading-normal text-toned no-underline hover:border-(--ui-text-dimmed) hover:text-highlighted max-sm:order-3"
+          class="repo pointer-events-auto min-w-0 shrink-0 rounded border border-accented bg-accented/50 px-1.5 font-mono text-[0.72rem] font-medium leading-normal text-toned no-underline hover:border-(--ui-text-dimmed) hover:text-highlighted max-sm:order-3"
           :href="`https://github.com/${repo}`"
           target="_blank"
           rel="noopener noreferrer"
@@ -186,7 +186,7 @@ function onRowClick(ev: MouseEvent): void {
       </UTooltip>
       <span
         v-else
-        class="scope min-w-0 shrink-0 truncate font-semibold max-sm:order-3"
+        class="scope min-w-0 shrink-0 truncate font-medium max-sm:order-3"
         :class="run.finished ? 'text-toned' : 'text-highlighted'"
         >{{ parts.scope }}</span
       >
@@ -197,13 +197,13 @@ function onRowClick(ev: MouseEvent): void {
       >
       <span
         v-if="outcome"
-        class="outcome shrink-0 rounded border px-1.5 text-[0.7rem] max-sm:order-10"
+        class="outcome shrink-0 rounded border px-1.5 font-mono text-[0.7rem] max-sm:order-10"
         :class="tone === 'red' ? 'border-bad/30 text-bad' : 'border-warn/30 text-warn'"
         >{{ outcome }}</span
       >
       <span
         v-if="stopBadge"
-        class="stopbadge shrink-0 rounded border px-1.5 text-[0.7rem] max-sm:order-10"
+        class="stopbadge shrink-0 rounded border px-1.5 font-mono text-[0.7rem] max-sm:order-10"
         :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-warn/30 text-warn'"
         >{{ stopBadge }}</span
       >
@@ -212,13 +212,13 @@ function onRowClick(ev: MouseEvent): void {
         <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
       </span>
       <UTooltip v-if="leaving && expires !== undefined" :text="`removed at ${formatLocalIso(expires)}`">
-        <span class="expires pointer-events-auto shrink-0 text-xs tabular-nums text-warn max-sm:order-11"
+        <span class="expires pointer-events-auto shrink-0 font-mono text-xs tabular-nums text-warn max-sm:order-11"
           >gone {{ formatDateTime(expires, now) }}</span
         >
       </UTooltip>
       <UTooltip :text="run.finished ? 'start to finish' : 'running for'">
         <span
-          class="elapsed pointer-events-auto ml-auto shrink-0 text-right text-xs tabular-nums max-sm:order-4 sm:min-w-[4.5em]"
+          class="elapsed pointer-events-auto ml-auto shrink-0 text-right font-mono text-xs tabular-nums max-sm:order-4 sm:min-w-[4.5em]"
           :class="
             run.finished
               ? [elapsedPaint ? 'heat' : 'text-muted', elapsedHeat.level >= 2 ? 'font-medium' : '']
@@ -232,7 +232,7 @@ function onRowClick(ev: MouseEvent): void {
       <span class="hidden text-xs text-dimmed max-sm:order-8 max-sm:inline" aria-hidden="true">·</span>
       <UTooltip :text="countTip(run)">
         <span
-          class="count shrink-0 text-right text-xs tabular-nums max-sm:order-9 max-sm:text-dimmed sm:min-w-[6em] sm:text-muted"
+          class="count shrink-0 text-right font-mono text-xs tabular-nums max-sm:order-9 max-sm:text-dimmed sm:min-w-[6em] sm:text-muted"
         >
           {{ countText(run) }}
         </span>

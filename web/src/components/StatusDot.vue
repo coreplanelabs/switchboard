@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // The status dot every dashboard row leads with: tone = green live/warm,
-// amber transitional, red failed/down, grey finished/unknown. The label is the
-// accessible name; `tip` adds the shared tooltip.
+// amber transitional, red failed/down, grey finished/unknown — the theme's
+// status tokens (main.css), never a palette hue. The label is the accessible
+// name; `tip` adds the shared tooltip.
 
 type Tone = "green" | "amber" | "red" | "grey";
 
@@ -14,10 +15,10 @@ defineProps<{
 }>();
 
 const TONE: Record<Tone, string> = {
-  green: "bg-green-600",
-  amber: "bg-yellow-600",
-  red: "bg-red-500",
-  grey: "bg-neutral-500",
+  green: "bg-ok",
+  amber: "bg-warn",
+  red: "bg-bad",
+  grey: "bg-(--ui-text-dimmed)",
 };
 </script>
 

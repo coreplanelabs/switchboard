@@ -3,11 +3,15 @@
 @plugin "@tailwindcss/typography";
 
 @theme static {
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* The two faces (web/src/main.ts imports the fontsource builds, so both ship
+   * as same-origin hashed assets under the shell's `font-src 'self'`): the sans
+   * for the chrome, the nav, labels, headings and every markdown surface; the
+   * mono for what the spec keeps monospace — call cards, commands, timestamps,
+   * facts, the time bar's words, code (live-view.md items 12–13). */
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   /* Status colors as first-class utilities (text-ok, border-warn/30, …): the
-   * values swap with the theme via the --sb-* vars below — the dark set is the
-   * original run-page palette. */
+   * values swap with the theme via the --sb-* vars below. */
   --color-ok: var(--sb-ok);
   --color-bad: var(--sb-bad);
   --color-warn: var(--sb-warn);
@@ -18,20 +22,32 @@
 }
 
 /*
- * One token set for every page (replaces the four divergent CSS blobs of the
- * string-rendered frontend). Dark is the product's canonical look; light
- * values exist so a future color-mode toggle is a class flip, not a redesign.
+ * One token set for every page, the same system the docs site wears
+ * (docs/.vitepress/theme/product.css — the same values, so the two surfaces
+ * read as one product): one neutral at zero chroma in two modes, a `#fafafa`
+ * canvas in light and pure `#000000` in dark, structure drawn with 1px alpha
+ * hairlines and surfaces of 3–6% alpha rather than opaque panels, and an
+ * action colour that is the INVERTED neutral — near-black on light, white on
+ * dark — mapped onto Nuxt UI's `--ui-primary`, so a link, a focus ring or a
+ * solid button is ink, never a hue. Colour is data only: the seven status
+ * tokens below (a run's outcome, an agent's chip, a bucket of the time bar),
+ * the duration heat ramp, and the mark's route (BrandMark.vue reads `--sb-ok`).
+ * Dark is the product's canonical look; the light set is its mirror.
  */
 :root {
-  --sb-ok: #1a7f37;
-  --sb-bad: #c93c37;
-  --sb-warn: #9a6700;
-  --sb-info: #0969da;
-  --sb-skill: #6639ba;
-  --sb-review: #8250df;
-  --sb-research: #1b7c83;
+  /* Data colours, in the system's muted print saturation, each ≥ 4.5:1 on the
+   * canvas as text (measured: 4.9–5.6:1); seven hues a reader can tell apart —
+   * green, red, orange, blue, violet, plum, teal. */
+  --sb-ok: #3d7346;
+  --sb-bad: #b84a42;
+  --sb-warn: #94601c;
+  --sb-info: #3a68a0;
+  --sb-skill: #7a4fb3;
+  --sb-review: #9c4a7b;
+  --sb-research: #33767d;
   /* Duration heat (item 24): the ONE lightness every heat colour shares in this
-     theme, so the amber→red ramp keeps constant contrast against the ground. */
+     theme, so the amber→red ramp keeps constant contrast against the ground
+     (≥ 5.3:1 on the light canvas at every step). */
   --sb-heat-l: 0.52;
   /* The run page's one right gutter: every timestamp and duration column ends
      this far from the container's right edge, whatever its nesting depth —
@@ -39,39 +55,81 @@
      (a bordered card subtracts its border so the text, not the box, lands
      here). `pr-(--sb-gutter)` in the templates. */
   --sb-gutter: 0.75rem;
-  --ui-bg: #f5f7fa;
-  --ui-bg-muted: #eef1f5;
-  --ui-bg-elevated: #ffffff;
-  --ui-bg-accented: #e8ecf2;
-  --ui-border: #dbe1ea;
-  --ui-border-muted: #e8ecf2;
-  --ui-border-accented: #cdd5e0;
-  --ui-text: #141a22;
-  --ui-text-muted: #4f5966;
-  --ui-text-dimmed: #7b8593;
-  --ui-text-highlighted: #0a0e13;
+  /* Selection: the system's, a grey band under ink. */
+  --sb-sel-bg: #d4d4d4;
+  --sb-sel-fg: #0a0a0a;
+
+  /* Canvas and surfaces. The inline fills (`muted`, `accented`) are alpha on
+   * the canvas so they nest on any ground. `elevated` is OPAQUE — the 3% ink
+   * composited over the canvas (250 − 0.03·250 = 242.5 → #f2f2f2) — because a
+   * surface that can float (a panel, a menu, a tooltip) must never let the
+   * content under it show through; Nuxt UI's own floating panels sit on
+   * `bg-default`, the canvas, which is opaque too. */
+  --ui-bg: #fafafa;
+  --ui-bg-muted: rgb(0 0 0 / 0.03);
+  --ui-bg-elevated: #f2f2f2;
+  --ui-bg-accented: rgb(0 0 0 / 0.06);
+  /* Hairlines: the one line weight, and its emphasized state. */
+  --ui-border: rgb(0 0 0 / 0.12);
+  --ui-border-muted: rgb(0 0 0 / 0.12);
+  --ui-border-accented: rgb(0 0 0 / 0.24);
+  /* The text ladder: strong, body, muted, faint — and one more step the
+   * dashboard's facts need (Nuxt UI has five, the system four): `dimmed` sits
+   * between the faint and the ghost grey, still legible for a timestamp. */
+  --ui-text-highlighted: #0a0a0a;
+  --ui-text: #404040;
+  --ui-text-toned: #525252;
+  --ui-text-muted: #737373;
+  --ui-text-dimmed: #8a8a8a;
+  /* The action colour: the inverted neutral. `--ui-primary` is what
+   * `text-primary`, `outline-primary` and a solid button resolve to. */
+  --ui-bg-inverted: #171717;
+  --ui-text-inverted: #ffffff;
+  --ui-border-inverted: #171717;
+  --ui-primary: #0a0a0a;
+  /* Nuxt UI's own semantic colours (a `color="error"` Kill button, a
+   * `text-warning`) resolve to the status tokens, so no default Tailwind hue
+   * survives anywhere. */
+  --ui-success: var(--sb-ok);
+  --ui-info: var(--sb-info);
+  --ui-warning: var(--sb-warn);
+  --ui-error: var(--sb-bad);
 }
 
 .dark {
-  --sb-ok: #7ee787;
-  --sb-bad: #ff7b72;
-  --sb-warn: #d29922;
-  --sb-info: #9ecbff;
-  --sb-skill: #a78bfa;
-  --sb-review: #d2a8ff;
-  --sb-research: #76e3ea;
+  /* The same hues lifted to read on black (measured 7.2–10:1). */
+  --sb-ok: #6fae7a;
+  --sb-bad: #e07a74;
+  --sb-warn: #e0a95a;
+  --sb-info: #7aa7e0;
+  --sb-skill: #b18ae0;
+  --sb-review: #d489b8;
+  --sb-research: #6fb9c0;
   --sb-heat-l: 0.8;
-  --ui-bg: #0b0d12;
-  --ui-bg-muted: #0f1218;
-  --ui-bg-elevated: #12151c;
-  --ui-bg-accented: #181d27;
-  --ui-border: #232836;
-  --ui-border-muted: #1b1f28;
-  --ui-border-accented: #3b4252;
-  --ui-text: #e6e6e6;
-  --ui-text-muted: #8b93a7;
-  --ui-text-dimmed: #5f677a;
+  --sb-sel-bg: #404040;
+  --sb-sel-fg: #ffffff;
+  --ui-bg: #000000;
+  --ui-bg-muted: rgb(255 255 255 / 0.03);
+  /* 3% white over black, opaque: 0.03·255 = 7.65 → #080808. */
+  --ui-bg-elevated: #080808;
+  --ui-bg-accented: rgb(255 255 255 / 0.06);
+  --ui-border: rgb(255 255 255 / 0.1);
+  --ui-border-muted: rgb(255 255 255 / 0.1);
+  --ui-border-accented: rgb(255 255 255 / 0.25);
   --ui-text-highlighted: #ffffff;
+  --ui-text: #d4d4d4;
+  --ui-text-toned: #a3a3a3;
+  --ui-text-muted: #8a8a8a;
+  --ui-text-dimmed: #737373;
+  --ui-bg-inverted: #ffffff;
+  --ui-text-inverted: #000000;
+  --ui-border-inverted: #ffffff;
+  --ui-primary: #ffffff;
+}
+
+::selection {
+  background: var(--sb-sel-bg);
+  color: var(--sb-sel-fg);
 }
 
 /*
@@ -87,16 +145,16 @@
 /*
  * The words of the run page's time bar, painted from the theme's own tokens
  * (web/src/lib/termPaint.ts is the one mapping from word to class). One hue
- * per counted bucket, each distinct in both themes — blue, the product green,
+ * per counted bucket, each distinct in both themes — blue, the data green,
  * violet, muted grey — the residual hatched and the two loss terms striped
  * or hollow, so what is not work never reads as work. The bar's segments,
  * the legend's swatches and the phase heads' markers all wear these.
  */
 .paint-ready {
-  background: var(--ui-info);
+  background: var(--sb-info);
 }
 .paint-thinking {
-  background: var(--ui-primary);
+  background: var(--sb-ok);
 }
 .paint-tools {
   background: var(--sb-skill);
@@ -108,7 +166,7 @@
   background: repeating-linear-gradient(135deg, var(--ui-border-accented) 0 3px, transparent 3px 6px);
 }
 .paint-lost {
-  background: repeating-linear-gradient(135deg, var(--ui-warning) 0 3px, transparent 3px 6px);
+  background: repeating-linear-gradient(135deg, var(--sb-warn) 0 3px, transparent 3px 6px);
 }
 .paint-elided {
   box-shadow: inset 0 0 0 1px var(--ui-border-accented);
@@ -121,7 +179,7 @@
 
 /*
  * A row the run page scrolled to from the timeline's Longest steps: one fade
- * of the primary colour, so the reader's eye lands where the link pointed.
+ * of the action colour, so the reader's eye lands where the link pointed.
  * Off under prefers-reduced-motion (the scroll itself is enough).
  */
 .revealed {
@@ -154,8 +212,10 @@
       font-size: 16px;
     }
   }
+  /* The compact app size in the sans; the monospace surfaces opt in with
+   * `font-mono` (and `code`/`pre` are mono by the preflight). */
   body {
-    @apply bg-default text-default font-mono text-[0.8125rem] leading-normal antialiased;
+    @apply bg-default text-default font-sans text-[0.8125rem] leading-normal antialiased;
   }
   /* Tailwind v4's preflight leaves buttons on the default cursor and Nuxt UI
    * does not add one: every enabled button on the dashboard — the run page's

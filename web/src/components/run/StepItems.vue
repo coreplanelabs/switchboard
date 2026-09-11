@@ -25,7 +25,7 @@ function fmtBytes(n: number): string {
     <CallCard v-if="item.kind === 'call'" :call="item.call" />
     <div
       v-else-if="item.kind === 'quiet'"
-      class="quiet flex items-baseline gap-3 pl-3 pr-(--sb-gutter) py-0.5 text-xs text-dimmed"
+      class="quiet flex items-baseline gap-3 pl-3 pr-(--sb-gutter) py-0.5 font-mono text-xs text-dimmed"
       :title="item.at !== undefined ? formatLocalIso(item.at) : undefined"
     >
       <span>{{ item.text }}</span>
@@ -36,11 +36,11 @@ function fmtBytes(n: number): string {
       :title="item.skill.at !== undefined ? formatLocalIso(item.skill.at) : undefined"
     >
       <span class="skillmark shrink-0 select-none text-xs">📚</span>
-      <span class="skillname whitespace-nowrap font-semibold text-skill">skill {{ item.skill.name }}</span>
+      <span class="skillname whitespace-nowrap font-mono font-medium text-skill">skill {{ item.skill.name }}</span>
       <span v-if="item.skill.description" class="skilldesc min-w-0 flex-1 truncate text-xs text-muted">{{
         item.skill.description
       }}</span>
-      <span class="facts ml-auto flex shrink-0 gap-2.5 text-xs text-muted">
+      <span class="facts ml-auto flex shrink-0 gap-2.5 font-mono text-xs text-muted">
         <a
           v-if="item.skill.source"
           class="fact text-primary hover:underline"

@@ -13,7 +13,7 @@ const model = computed(() => chartModelOf(props.report, props.series));
 <template>
   <div class="overflow-x-auto">
     <svg
-      class="block h-auto w-full"
+      class="block h-auto w-full font-mono"
       :viewBox="`0 0 ${model.width} ${model.height}`"
       role="img"
       aria-label="Daily cost, stacked by component"

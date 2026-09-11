@@ -24,7 +24,7 @@ defineProps<{
     :class="position === 'first' ? 'mb-4' : 'mt-6'"
     :data-position="position"
   >
-    <h2 class="mb-2 flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-wider text-ok">
+    <h2 class="mb-2 flex items-baseline gap-2.5 font-mono text-xs font-medium uppercase tracking-wider text-ok">
       <span>Reply</span>
       <a
         v-if="caption.href"

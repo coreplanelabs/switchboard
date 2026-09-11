@@ -45,7 +45,7 @@ function monthDay(date: string): string {
         <template v-for="g in groups" :key="g">
           <span
             v-if="g === report.group"
-            class="rounded-md bg-accented px-2.5 py-1 text-xs font-semibold text-highlighted"
+            class="rounded-md bg-accented px-2.5 py-1 text-xs font-medium text-highlighted"
             aria-current="page"
             >{{ g }}</span
           >
@@ -57,7 +57,7 @@ function monthDay(date: string): string {
           >
         </template>
       </nav>
-      <p class="text-sm tabular-nums text-muted">
+      <p class="font-mono text-sm tabular-nums text-muted">
         {{ monthDay(report.range.from) }} → {{ monthDay(report.range.to) }} · {{ report.range.days }}d<template
           v-if="report.range.partialLastDay"
         >
@@ -67,45 +67,53 @@ function monthDay(date: string): string {
     </div>
 
     <section class="mb-5 grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3">
-      <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
-        <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">Yesterday</span>
-        <span class="text-2xl font-medium tabular-nums">{{ tiles.yesterday ? usd(tiles.yesterday.total) : "—" }}</span>
+      <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
+        <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">Yesterday</span>
+        <span class="font-mono text-2xl font-medium tabular-nums">{{
+          tiles.yesterday ? usd(tiles.yesterday.total) : "—"
+        }}</span>
         <span class="text-xs text-muted">{{
           tiles.yesterday ? `${tiles.yesterday.date} · last full day` : "no full day in range"
         }}</span>
       </div>
-      <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
-        <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">7-day average</span>
-        <span class="text-2xl font-medium tabular-nums">{{ usd(tiles.avg7) }}</span>
+      <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
+        <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">7-day average</span>
+        <span class="font-mono text-2xl font-medium tabular-nums">{{ usd(tiles.avg7) }}</span>
         <span class="text-xs text-muted">per day, full days only</span>
       </div>
-      <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
-        <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">Projected month</span>
-        <span class="text-2xl font-medium tabular-nums">{{ usd(tiles.projectedMonth, 0) }}</span>
+      <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
+        <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed"
+          >Projected month</span
+        >
+        <span class="font-mono text-2xl font-medium tabular-nums">{{ usd(tiles.projectedMonth, 0) }}</span>
         <span class="text-xs text-muted">7-day rate × 30.4, before plan fees and included allowances</span>
       </div>
-      <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
-        <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">{{
+      <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
+        <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">{{
           report.llmAvailable ? "LLM share" : "LLM spend"
         }}</span>
-        <span class="text-2xl font-medium tabular-nums">{{ report.llmAvailable ? `${tiles.llmShare}%` : "—" }}</span>
+        <span class="font-mono text-2xl font-medium tabular-nums">{{
+          report.llmAvailable ? `${tiles.llmShare}%` : "—"
+        }}</span>
         <span class="text-xs text-muted">{{
           report.llmAvailable ? "of the range total" : "LLM spend not configured"
         }}</span>
       </div>
-      <div class="grid gap-0.5 rounded-md border border-default bg-elevated px-4 py-3.5">
-        <span class="text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">Share of account</span>
-        <span class="text-2xl font-medium tabular-nums">{{ tiles.accountShare }}%</span>
+      <div class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5">
+        <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed"
+          >Share of account</span
+        >
+        <span class="font-mono text-2xl font-medium tabular-nums">{{ tiles.accountShare }}%</span>
         <span class="text-xs text-muted"
           >{{ usd(report.totals.cloudUsd) }} of {{ usd(report.account.cloudUsd) }} Cloudflare spend in range</span
         >
       </div>
     </section>
 
-    <section class="mb-5 grid gap-3 rounded-md border border-default bg-elevated px-5 py-4">
+    <section class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
       <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
         <div>
-          <h2 class="text-[0.9375rem] font-semibold">Daily cost</h2>
+          <h2 class="text-[0.9375rem] font-medium">Daily cost</h2>
           <p class="text-sm text-muted">Stacked by component · USD list price</p>
         </div>
         <div class="legend flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted">
@@ -123,11 +131,11 @@ function monthDay(date: string): string {
       </p>
     </section>
 
-    <section class="mb-5 grid gap-3 rounded-md border border-default bg-elevated px-5 py-4">
+    <section class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
       <div>
-        <h2 class="text-[0.9375rem] font-semibold">What each cloud dollar buys</h2>
+        <h2 class="text-[0.9375rem] font-medium">What each cloud dollar buys</h2>
       </div>
-      <table class="w-full border-collapse text-[0.8125rem] tabular-nums">
+      <table class="w-full border-collapse font-mono text-[0.8125rem] tabular-nums">
         <tbody>
           <tr v-for="row in split" :key="row.label" class="border-b border-muted">
             <td class="px-2.5 py-1.5">{{ row.label }}</td>
@@ -144,24 +152,34 @@ function monthDay(date: string): string {
       </table>
     </section>
 
-    <section class="mb-5 grid gap-3 rounded-md border border-default bg-elevated px-5 py-4">
+    <section class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
       <details open>
         <summary class="cursor-pointer text-sm text-muted">Table view — daily cost by component (USD)</summary>
         <!-- The table scrolls sideways on a narrow screen instead of squishing
              into wrapped headers and split dates. -->
         <div class="mt-2.5 overflow-x-auto">
-          <table class="data w-full min-w-[38rem] border-collapse whitespace-nowrap text-[0.8125rem] tabular-nums">
+          <table
+            class="data w-full min-w-[38rem] border-collapse whitespace-nowrap font-mono text-[0.8125rem] tabular-nums"
+          >
             <thead>
               <tr>
-                <th class="border-b border-muted px-2.5 py-1.5 text-left text-xs font-medium text-muted">Date</th>
+                <th
+                  class="border-b border-muted bg-(--ui-bg-muted) px-2.5 py-1.5 text-left text-xs font-medium text-muted"
+                >
+                  Date
+                </th>
                 <th
                   v-for="s in series"
                   :key="s"
-                  class="border-b border-muted px-2.5 py-1.5 text-right text-xs font-medium text-muted"
+                  class="border-b border-muted bg-(--ui-bg-muted) px-2.5 py-1.5 text-right text-xs font-medium text-muted"
                 >
                   {{ s }}
                 </th>
-                <th class="border-b border-muted px-2.5 py-1.5 text-right text-xs font-medium text-muted">Total</th>
+                <th
+                  class="border-b border-muted bg-(--ui-bg-muted) px-2.5 py-1.5 text-right text-xs font-medium text-muted"
+                >
+                  Total
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -175,7 +193,7 @@ function monthDay(date: string): string {
                 <td v-for="s in series" :key="s" class="border-b border-muted px-2.5 py-1.5 text-right">
                   {{ usd(valueOf(d, s), 3) }}
                 </td>
-                <td class="border-b border-muted px-2.5 py-1.5 text-right font-semibold">{{ usd(d.total, 3) }}</td>
+                <td class="border-b border-muted px-2.5 py-1.5 text-right font-medium">{{ usd(d.total, 3) }}</td>
               </tr>
             </tbody>
           </table>

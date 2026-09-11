@@ -155,9 +155,7 @@ defineExpose({ scrollTo, scrollToFile });
          diffs) as a labelled block — the same hairline under it as under a
          file header, so the first file follows at the files' own rhythm. -->
     <section v-if="diff.summary" class="lede border-b border-default px-4 py-3" data-testid="diff-lede">
-      <h3 class="m-0 text-[0.68rem] font-semibold uppercase tracking-wider text-muted">
-        Summary · {{ diff.poweredBy }}
-      </h3>
+      <h3 class="m-0 text-[0.68rem] font-medium uppercase tracking-wider text-muted">Summary · {{ diff.poweredBy }}</h3>
       <p class="m-0 mt-1 max-w-[80ch] font-sans text-sm leading-normal text-default" data-testid="diff-summary">
         {{ diff.summary }}
       </p>
@@ -229,7 +227,7 @@ defineExpose({ scrollTo, scrollToFile });
          The room below keeps the last hunk off the panel's edge. -->
     <footer
       v-if="files.length > 0"
-      class="footer px-4 pb-24 pt-4 text-center font-sans text-[0.68rem] font-semibold uppercase tracking-wider text-muted"
+      class="footer px-4 pb-24 pt-4 text-center font-sans text-[0.68rem] font-medium uppercase tracking-wider text-muted"
       data-testid="diff-end"
     >
       <template v-if="fullFileCount !== undefined">

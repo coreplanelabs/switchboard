@@ -1,9 +1,10 @@
 <script lang="ts">
 // The tabs of the /runs page: Runs (live list) · Scheduled. Full page loads;
-// underline = current, aria-current is both the styling hook and the
-// accessible signal. Scheduled exists only when firing history is configured
-// (`capabilities.schedules`, from the seed) or the viewer is on it; a bar with
-// one tab is no choice at all, so the bar is not drawn then.
+// the current tab is ink at the house weight over a 1px ink rail, aria-current
+// is both the styling hook and the accessible signal. Scheduled exists only
+// when firing history is configured (`capabilities.schedules`, from the seed)
+// or the viewer is on it; a bar with one tab is no choice at all, so the bar
+// is not drawn then.
 import type { Capabilities } from "@core/core/capabilities.js";
 
 export type RunsTab = "runs" | "scheduled";
@@ -47,7 +48,7 @@ const tabs = computed(() => runsTabs(caps, props.current));
       :key="t.id"
       :href="t.href"
       :aria-current="t.id === current ? 'page' : undefined"
-      class="-mb-px border-b-2 border-transparent pb-2 pt-1.5 text-muted no-underline hover:text-default aria-[current=page]:border-primary aria-[current=page]:font-semibold aria-[current=page]:text-highlighted"
+      class="-mb-px border-b border-transparent pb-2 pt-1.5 text-muted no-underline hover:text-highlighted aria-[current=page]:border-(--ui-text-highlighted) aria-[current=page]:font-medium aria-[current=page]:text-highlighted"
     >
       {{ t.label }}
     </a>

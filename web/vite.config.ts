@@ -11,8 +11,10 @@ export default defineConfig({
     vue(),
     ui({
       ui: {
+        // The chrome has no hue: both aliases are the zero-chroma neutral, and
+        // main.css maps `--ui-primary` itself onto the inverted neutral (ink).
         colors: {
-          primary: "green",
+          primary: "neutral",
           neutral: "neutral",
         },
       },

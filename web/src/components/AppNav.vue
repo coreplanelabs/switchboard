@@ -4,7 +4,8 @@
 // a section needs its capability on (src/core/capabilities.ts, via the seed),
 // except Runs, which is the dashboard itself, and the section the viewer is on.
 // Full page loads (plain anchors): the server renders a fresh shell + seed per
-// section.
+// section. The current section is ink over a 1px grey rail — a weight and a
+// line, never a coloured fill.
 import type { Capabilities } from "@core/core/capabilities.js";
 
 export type NavSection = "runs" | "residents" | "costs";
@@ -48,7 +49,7 @@ const sections = computed(() => navSections(caps, props.current));
       :key="s.id"
       :href="s.href"
       :aria-current="s.id === current ? 'page' : undefined"
-      class="text-muted no-underline underline-offset-4 hover:text-highlighted hover:underline aria-[current=page]:font-semibold aria-[current=page]:text-highlighted aria-[current=page]:underline"
+      class="font-medium text-muted no-underline decoration-1 underline-offset-[6px] hover:text-highlighted aria-[current=page]:text-highlighted aria-[current=page]:underline aria-[current=page]:decoration-(--ui-border-accented)"
     >
       {{ s.label }}
     </a>

@@ -158,7 +158,7 @@ function tip(i: number): string {
   <section ref="root" class="tour border-b border-default text-xs" data-testid="tour">
     <template v-if="steps.length > 0">
       <h3
-        class="m-0 flex items-baseline gap-1.5 border-b border-muted px-3 py-1.5 text-[0.68rem] font-semibold uppercase tracking-wider text-muted"
+        class="m-0 flex items-baseline gap-1.5 border-b border-muted px-3 py-1.5 text-[0.68rem] font-medium uppercase tracking-wider text-muted"
       >
         Tour
         <span class="normal-case tracking-normal text-dimmed"
@@ -190,7 +190,7 @@ function tip(i: number): string {
               @click="activate(i)"
             >
               <span
-                class="step-number mt-px flex size-4 shrink-0 items-center justify-center rounded-full text-[0.65rem] font-semibold tabular-nums"
+                class="step-number mt-px flex size-4 shrink-0 items-center justify-center rounded-full text-[0.65rem] font-medium tabular-nums"
                 :class="active === i ? 'bg-(--pr-review-mark) text-inverted' : 'bg-accented text-muted'"
                 >{{ i + 1 }}</span
               >
@@ -242,7 +242,7 @@ function tip(i: number): string {
       </ol>
     </template>
     <div v-if="remaining.length > 0" class="px-3 py-1.5" data-testid="tour-remaining">
-      <h4 class="m-0 mb-1 text-[0.68rem] font-semibold uppercase tracking-wider text-muted">Remaining changes</h4>
+      <h4 class="m-0 mb-1 text-[0.68rem] font-medium uppercase tracking-wider text-muted">Remaining changes</h4>
       <ul class="m-0 flex list-none flex-col gap-0.5 p-0">
         <li v-for="r in remaining" :key="r.path" class="min-w-0 leading-snug" data-testid="tour-remaining-entry">
           <component

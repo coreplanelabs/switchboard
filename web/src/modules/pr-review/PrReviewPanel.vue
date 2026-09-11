@@ -158,7 +158,7 @@ const wrap = ref(false);
   <div class="pr-review-panel flex h-full min-h-0 min-w-0 flex-col" data-testid="pr-review-panel">
     <header class="header flex shrink-0 flex-col gap-1 border-b border-default px-4 py-2.5">
       <div class="flex items-center gap-2">
-        <h2 class="m-0 min-w-0 flex-1 truncate text-sm font-semibold text-highlighted" data-testid="pr-title">
+        <h2 class="m-0 min-w-0 flex-1 truncate text-sm font-medium text-highlighted" data-testid="pr-title">
           <a v-if="links.pr" :href="links.pr" target="_blank" rel="noopener noreferrer" class="hover:underline">{{
             title
           }}</a>
@@ -182,7 +182,7 @@ const wrap = ref(false);
               class="rounded px-2 py-0.5 text-xs leading-normal transition-colors motion-reduce:transition-none"
               :class="
                 i === active
-                  ? 'bg-default font-semibold text-highlighted shadow-sm ring-1 ring-default'
+                  ? 'bg-default font-medium text-highlighted shadow-sm ring-1 ring-default'
                   : 'font-medium text-muted hover:bg-default/60 hover:text-default'
               "
               :aria-selected="i === active"
@@ -370,9 +370,9 @@ const wrap = ref(false);
  * third hue on purpose: a range of added lines lit in the insertion green
  * would vanish into them. */
 .pr-review-panel {
-  --pr-review-ins: var(--ui-success, #1a7f37);
-  --pr-review-del: var(--ui-error, #c93c37);
-  --pr-review-mark: var(--ui-info, #0969da);
+  --pr-review-ins: var(--ui-success, #3d7346);
+  --pr-review-del: var(--ui-error, #b84a42);
+  --pr-review-mark: var(--ui-info, #3a68a0);
 }
 .pr-review-panel .text-ins {
   color: var(--pr-review-ins);
