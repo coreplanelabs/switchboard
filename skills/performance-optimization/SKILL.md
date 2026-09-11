@@ -7,10 +7,10 @@ description: Optimizes application performance across frontend, backend,
   bottlenecks.
 agents:
   - review
-source: https://github.com/addyosmani/agent-skills/blob/d2c37ef6225dd8726cdd369a8030307f48592d26/skills/performance-optimization/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/performance-optimization/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
   path: skills/performance-optimization/SKILL.md
   bodySha256: 117b15fcfa1e98cfca963e5d15ad6f0ecfd5170e60f24974e7e20310066262d3
 ---

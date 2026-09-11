@@ -1,6 +1,9 @@
 # Static analysis of the TypeScript across the repo. Runs on every PR, on
 # main, and weekly so newly published queries are applied to unchanged code.
 #
+# GitHub Actions orchestrates this workflow on Depot runners: CodeQL's SARIF
+# processing needs GitHub workflow-run metadata that Depot CI does not create.
+#
 # Code scanning is a GitHub Advanced Security feature: free on public repos,
 # unavailable on a private one without a GHAS seat. The `visibility` job asks
 # the API once; on a private repository the `analyze` job is SKIPPED (grey in
@@ -22,7 +25,7 @@ permissions:
 jobs:
   visibility:
     name: is the repository public?
-    runs-on: namespace-profile-smidge
+    runs-on: depot-ubuntu-24.04
     outputs:
       public: ${{ steps.check.outputs.public }}
     steps:
@@ -42,7 +45,7 @@ jobs:
     name: analyze javascript-typescript
     needs: visibility
     if: needs.visibility.outputs.public == 'true'
-    runs-on: namespace-profile-mid
+    runs-on: depot-ubuntu-24.04-4
     permissions:
       contents: read
       security-events: write

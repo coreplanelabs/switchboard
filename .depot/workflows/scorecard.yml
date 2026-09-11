@@ -1,3 +1,8 @@
+# Depot CI Migration
+# Source: .github/workflows/scorecard.yml
+#
+# No changes were necessary.
+
 # OpenSSF Scorecard: supply-chain health checks (pinned dependencies, branch
 # protection, dangerous workflow patterns, token permissions, ...). Runs on
 # main and weekly. The checks run on any repository and the SARIF is always
@@ -5,16 +10,13 @@
 # code scanning need a public repository, so the `visibility` job decides
 # those two steps and a private run says so instead of silently passing.
 name: scorecard
-
 on:
   push:
     branches: [main]
   schedule:
     - cron: "31 7 * * 1"
   workflow_dispatch:
-
 permissions: read-all
-
 jobs:
   visibility:
     name: is the repository public?
@@ -33,7 +35,6 @@ jobs:
           else
             echo "public=true" >> "$GITHUB_OUTPUT"
           fi
-
   analysis:
     name: scorecard analysis
     needs: visibility

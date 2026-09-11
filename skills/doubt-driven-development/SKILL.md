@@ -1,16 +1,18 @@
 ---
 name: doubt-driven-development
 description: Subjects every non-trivial decision to a fresh-context adversarial
-  review before it stands. Use when correctness matters more than speed, when
-  working in unfamiliar code, when stakes are high (production,
-  security-sensitive logic, irreversible operations), or any time a confident
-  output would be cheaper to verify now than to debug later.
+  review before it stands. Use when you want every assumption cross-examined
+  before proceeding, when stress-testing a plan for hidden failure modes, when
+  correctness matters more than speed, when working in unfamiliar code, when
+  stakes are high (production auth, security-sensitive logic, a high-stakes
+  migration, irreversible operations), or any time a confident output would be
+  cheaper to verify now than to debug later.
 agents:
   - coding
-source: https://github.com/addyosmani/agent-skills/blob/d2c37ef6225dd8726cdd369a8030307f48592d26/skills/doubt-driven-development/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/doubt-driven-development/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: d2c37ef6225dd8726cdd369a8030307f48592d26
+  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
   path: skills/doubt-driven-development/SKILL.md
   bodySha256: 938cf9d31522ad5650bdf0959d2d09251a1071fbcc52bd9da8883c37948793cd
 ---

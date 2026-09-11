@@ -1,3 +1,8 @@
+# Depot CI Migration
+# Source: .github/workflows/ci.yml
+#
+# No changes were necessary.
+
 # CI is a thin caller of the repository's own scripts: every step below is
 # `npm ci` or `npm run <script>`, so a contributor or an agent runs the exact
 # same checks locally with `npm run verify` (or one area's `verify`). Nothing
@@ -12,19 +17,13 @@
 # that name — `needs:` every leg, `if: always()`, `npm run ci:gate` over the
 # `needs` context — green only when every leg succeeded.
 name: ci
-
 on:
-  # Automatic CI runs in .depot/workflows/ci.yml during the Depot trial.
-  # Restore these triggers to switch back; keep a manual trigger for valid YAML.
-  workflow_dispatch:
-  # pull_request:
-  # merge_group:
-  # push:
-  #   branches: [main]
-
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
 permissions:
   contents: read
-
 env:
   # actions/cache (inside setup-node's `cache: npm`) downloads the cache in
   # segments and, by default, waits 10 MINUTES for a segment that stopped
@@ -34,12 +33,10 @@ env:
   # One minute is plenty for a segment on a healthy connection; a stalled one
   # costs 60 s and a full install instead of 600 s.
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
-
 # Rapid successive pushes to the same PR cancel the stale run.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   bot-checks:
     # One static check per job — typecheck, lint, and prettier each take 15–25 s
@@ -52,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [check:consistency, typecheck, lint, format:check, check:dist]
+        check: ["check:consistency", typecheck, lint, "format:check", "check:dist"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,7 +63,6 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: npm run ${{ matrix.check }}
-
   bot-tests:
     # The vitest suite (every project in vitest.config.ts) split by file across
     # N shards; N is the length of the matrix and nothing else. A shard
@@ -86,7 +82,6 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
-
   bot:
     # The required check `bot`: green only when every static check and every
     # test shard succeeded (scripts/ci-gate.mjs).
@@ -99,7 +94,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: npm run ci:gate
-
   web:
     name: web
     runs-on: depot-ubuntu-24.04-4
@@ -112,7 +106,6 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: npm run verify -w web
-
   docs:
     name: docs
     runs-on: depot-ubuntu-24.04-4
@@ -132,7 +125,6 @@ jobs:
       - run: npm run verify -w docs
       - run: npm run check:site
       - run: npm run verify -w deploy/cloudflare-docs
-
   package:
     # The npm package's own verify: build the bundle and its assets, typecheck,
     # licenses, then the smoke test — pack, install the tarball into a temp
@@ -149,7 +141,6 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: npm run verify -w packages/switchboard
-
   workers-each:
     # One job per Worker: the memory Worker's tests run inside workerd and take
     # ~30 s on a runner; the other three verify in a few seconds each. The name
@@ -171,7 +162,6 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: npm run verify -w ${{ matrix.worker }}
-
   workers:
     # The required check `workers`: green only when every Worker's job succeeded.
     name: workers
@@ -183,7 +173,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: npm run ci:gate
-
   image-each:
     # One leg per image the deploy builds — the same Dockerfiles, from the same
     # contexts, that wrangler builds on a release: the bot's (the root
@@ -202,7 +191,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: npm run check:image -w ${{ matrix.worker }}
-
   image:
     # The required check `image`: green only when every image built.
     name: image
@@ -214,7 +202,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: npm run ci:gate
-
   # Which Workers this PR's diff would deploy (docs/reference/specs/release-and-deploy.md
   # item 8): `deploy plan --affected --base HEAD^` — HEAD is the merge commit,
   # so HEAD^ is the PR's base — into the job summary, on every PR. An
@@ -241,7 +228,6 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: npm run deploy:targets
-
   docs-deploy:
     name: deploy the docs site
     # Only after the site is proven to build, and only for main.

@@ -1,3 +1,9 @@
+# Depot CI Migration
+# Source: .github/workflows/release-please.yml
+#
+# Changes made:
+# - Rewrote .github/ path references to .depot/
+
 # Releases from conventional commits, and the production deploy that follows
 # them (docs/reference/specs/release-and-deploy.md). Every merge to main updates (or opens)
 # one release PR carrying the next version and the changelog entry; merging
@@ -33,14 +39,11 @@
 # minted here is scoped to this repository and to the two permissions
 # release-please needs.
 name: release-please
-
 on:
   push:
     branches: [main]
-
 permissions:
   contents: read
-
 jobs:
   release-please:
     runs-on: depot-ubuntu-24.04
@@ -100,7 +103,6 @@ jobs:
       - name: npm publish is off
         if: always() && (steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created) == 'true' && (vars.SWITCHBOARD_PUBLISH_NPM != 'true' || github.ref != format('refs/heads/{0}', github.event.repository.default_branch))
         run: echo "::notice title=npm publish is off::this release does not publish the npm package — the publish-npm job runs only for a release cut from the default branch (this one is ${{ github.ref_name }}) with the repository variable SWITCHBOARD_PUBLISH_NPM set to true (it is '${{ vars.SWITCHBOARD_PUBLISH_NPM }}') and the package's trusted publisher naming this repository."
-
   # The release PR carries its deploy plan (docs/reference/specs/release-and-deploy.md
   # item 8). Posted from HERE, on the push to main that opened or updated the
   # release PR: the PR's own `deploy targets` job judges a diff against its
@@ -162,7 +164,6 @@ jobs:
         env:
           SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_DEPLOY_PROFILE }}
           CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
-
   # Only when this push IS the release (the release PR merged): the ordinary
   # merge to main that merely updates the release PR deploys nothing. The deploy
   # waits for the three image publishes: production runs its Workers from the
@@ -173,13 +174,12 @@ jobs:
   deploy:
     needs: [release-please, publish-image]
     if: needs.release-please.outputs.release_created == 'true'
-    uses: ./.github/workflows/deploy-production.yml
+    uses: ./.depot/workflows/deploy-production.yml
     permissions:
       contents: read
     with:
       targets: affected
     secrets: inherit
-
   # The same release publishes the three images (docs/reference/specs/release-and-deploy.md
   # item 21), one leg per image: each Dockerfile from the context its
   # `check:image` proves on every PR. `deploy` waits for this job: production
@@ -285,7 +285,6 @@ jobs:
         # `always()`: without it GitHub ANDs `success()` in, and this step would be skipped exactly when the retry failed too.
         if: always() && steps.attest.outcome == 'failure'
         run: echo "::warning title=attestation retried::the first attestation of ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }} failed (its step above has the message) and the retry ${{ steps.attest-retry.outcome }}. The image itself was pushed once; the retry attests that same digest."
-
   # The same release publishes the CLI to npm (docs/reference/specs/packaging.md
   # item 5): the package under packages/switchboard, whose version the release
   # commit already carries (release-please-config.json's extra files), built by
