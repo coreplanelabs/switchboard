@@ -35,6 +35,7 @@ flowchart LR
 |---|---|
 | Spec proofs resolve to real tests | `npm run specs:check` |
 | A diff agrees with the specs it touches | the review agent, over `npm run specs:coverage` |
+| A test is removed or narrowed only with its spec | the review agent, over `npm run specs:coverage -- --test-guard` |
 | CI runs only repository scripts | a unit test over the workflow files |
 | Generated artifacts are current | `docs:check`, `agents:check`, `skills:check` |
 | Records are superseded, never edited | `decisions:check` |

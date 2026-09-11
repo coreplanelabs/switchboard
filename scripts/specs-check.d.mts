@@ -12,6 +12,10 @@ export interface HeaderPath {
 export interface TestNode {
   parts: string[];
   leaf: boolean;
+  /** The modifier that takes the block out of the run; absent when it runs. */
+  mode?: "skip" | "only" | "todo";
+  /** The arguments after the title as written, whitespace collapsed. */
+  body?: string;
 }
 export interface Problem {
   kind?: "proof" | "header" | "gap";

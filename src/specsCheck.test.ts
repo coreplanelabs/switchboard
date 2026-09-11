@@ -120,6 +120,39 @@ describe("collectTestTitles", () => {
     expect(nodes.find((n) => n.parts.at(-1) === "outer")?.leaf).toBe(false);
     expect(nodes.find((n) => n.parts.at(-1) === "plain")?.leaf).toBe(true);
   });
+
+  it("carries the modifier that takes a block out of the run — skip, only, todo, the x-aliases — and none when it runs", () => {
+    const modes = collectTestTitles(`
+      it("runs", () => {});
+      it.skip("a", () => {});
+      describe.only("b", () => { test.todo("c"); });
+      xit("d", () => {}); xdescribe("e", () => { xtest("f", () => {}); });
+      it.skip.each([1])("g %s", () => {});
+    `).map((n) => [n.parts.at(-1), n.mode]);
+    expect(modes).toEqual([
+      ["runs", undefined],
+      ["a", "skip"],
+      ["b", "only"],
+      ["c", "todo"],
+      ["d", "skip"],
+      ["e", "skip"],
+      ["f", "skip"],
+      ["g %s", "skip"],
+    ]);
+  });
+
+  it("carries the arguments after the title with whitespace collapsed, so the same body under two titles can be told apart from a new test", () => {
+    const [a, b, c] = collectTestTitles(`
+      it("a", () => {
+        expect(x).toBe(1);
+      });
+      it("b", () => { expect(x).toBe(1); });
+      it.todo("c");
+    `);
+    expect(a.body).toBe("() => { expect(x).toBe(1); }");
+    expect(a.body).toBe(b.body);
+    expect(c.body).toBe("");
+  });
 });
 
 describe("segmentMatches", () => {

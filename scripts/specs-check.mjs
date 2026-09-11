@@ -117,17 +117,32 @@ export function parseHeaderPaths(markdown) {
 // Test side: what the suite has.
 
 const TEST_FNS = new Set(["describe", "it", "test", "suite"]);
+/** The `x` aliases disable the test they name: `xit("a")` is `it.skip("a")`. */
+const X_FNS = { xit: "it", xtest: "test", xdescribe: "describe" };
+/** The modifiers that take a test out of the run (or every other test, for `only`). */
+const MODES = new Set(["skip", "only", "todo"]);
 
-/** The bare function name of a `describe` / `describe.each(...)` / `it.skip` callee, or null. */
-function testFnName(expr) {
+/**
+ * The bare function name of a `describe` / `describe.each(...)` / `it.skip`
+ * callee with the mode its modifier chain carries (`skip`, `only`, `todo`, or
+ * none), or null when the callee is not a test function.
+ */
+function testFn(expr) {
   let e = expr;
   // `it.each([...])` on its own is the parameter list, not the test: the test
   // is the OUTER call, whose callee is that call.
   if (ts.isPropertyAccessExpression(e) && (e.name.text === "each" || e.name.text === "for")) return null;
   // `it.each([...])(...)` — the callee is itself a call whose callee is `it.each`.
   if (ts.isCallExpression(e)) e = e.expression;
-  while (ts.isPropertyAccessExpression(e)) e = e.expression;
-  return ts.isIdentifier(e) && TEST_FNS.has(e.text) ? e.text : null;
+  let mode;
+  while (ts.isPropertyAccessExpression(e)) {
+    if (MODES.has(e.name.text)) mode = e.name.text;
+    e = e.expression;
+  }
+  if (!ts.isIdentifier(e)) return null;
+  if (TEST_FNS.has(e.text)) return { fn: e.text, mode };
+  if (e.text in X_FNS) return { fn: X_FNS[e.text], mode: "skip" };
+  return null;
 }
 
 /** The title of a test call's first argument as a match pattern, or null when it is not a string-like. */
@@ -142,21 +157,33 @@ function titlePattern(arg) {
 }
 
 /**
- * Pure: every describe and it in a test source, as `{ parts }` — the title
- * path from the outermost describe down. Both describes and leaves are
- * listed, so a reference may name a whole describe.
+ * Pure: every describe and it in a test source, as `{ parts, leaf, mode, body }`
+ * — the title path from the outermost describe down, whether it is a leaf,
+ * the modifier that takes it out of the run (`skip` / `only` / `todo`, absent
+ * when it runs), and the source of its arguments after the title with
+ * whitespace collapsed, so two blocks can be told the same test under
+ * different titles. Both describes and leaves are listed, so a reference may
+ * name a whole describe.
  */
 export function collectTestTitles(source, fileName = "x.test.ts") {
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const nodes = [];
   const visit = (node, ancestry) => {
     if (ts.isCallExpression(node)) {
-      const fn = testFnName(node.expression);
-      if (fn) {
+      const call = testFn(node.expression);
+      if (call) {
+        const { fn, mode } = call;
         const title = titlePattern(node.arguments[0]);
         if (title !== null) {
           const parts = [...ancestry, title];
-          nodes.push({ parts, leaf: fn !== "describe" && fn !== "suite" });
+          const body = node.arguments
+            .slice(1)
+            .map((a) => a.getText(sf))
+            .join(", ")
+            .replace(/\s+/g, " ");
+          const entry = { parts, leaf: fn !== "describe" && fn !== "suite", body };
+          if (mode) entry.mode = mode;
+          nodes.push(entry);
           const next = fn === "describe" || fn === "suite" ? parts : ancestry;
           ts.forEachChild(node, (c) => visit(c, next));
           return;

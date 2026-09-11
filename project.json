@@ -145,7 +145,7 @@
     },
     "specs:coverage": {
       "does": "Maps a change's paths to the specs whose `Code`/`Tests` headers cover them, then lists changed source paths no spec covers.",
-      "when": "`-- --changed origin/main...HEAD` before review; `-- --require` fails on an uncovered path (warn-only today); `-- --json` for machines."
+      "when": "`-- --changed origin/main...HEAD [--test-guard]` before review; `-- --require` fails on an uncovered path; `-- --json` for machines."
     },
     "decisions:check": {
       "does": "Every record under `docs/decisions/` and `docs/plans/` carries a valid `status`, a superseded one names what replaced it, and an accepted record's body is unchanged against `origin/main`.",
