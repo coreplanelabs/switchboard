@@ -77,6 +77,14 @@ Four tracks touch orchestration and were being planned independently: a resident
 - R22. The v1.2 board carries the program (R26); [#765](https://github.com/coreplanelabs/switchboard/issues/765) and [#813](https://github.com/coreplanelabs/switchboard/issues/813) close pointing at the parent issue; record 0029 flips `proposed → accepted` before the first code unit.
 - R23. Every inherited follow-up has a disposition in this plan: absorbed into a named unit, deferred with the trigger that revives it, or out of scope with the reason.
 
+**Self-driving edges** (record 0031)
+
+- R27. A coding child started for a plan unit is handed a typed contract (the unit's section, the spec rows it names with their proof bindings, the repository's agent rules, the guard names) rendered under fixed headings; the review child is handed the same object and a listed test scenario the diff did not add is a finding at minor or above; a task string is a plan of one unit with no rows.
+- R28. A child returns a typed handoff `{ deviations, followUps, unproven }` beside its pull-request description; it is recorded on the run and posted to the unit's board issue by the parent; a person decides each disposition and amends the plan's follow-ups ledger while the plan is `proposed` (no bot path writes to `main`, and a plan's body freezes once accepted).
+- R31. The merge of a unit's pull request is the policy action `plan:merge` (record 0007's table): held by the requester, the runner merges once the review approves and the guards are green (squash, the title as the commit, an empty body) through the bot's GitHub identity as a write authorized to that requester, one more of the bot's named GitHub writes; not held, the runner waits for a person's merge as R15 and record 0029 have it. The release pull request stays a person's merge under every grant; ship on a task string keeps refusing repositories with auto-merge on.
+- R29. The delivery indicators (issue-to-merge time, first-pass CI success, review rounds per pull request, share of findings resolved with no human branch edit) are computed from the run ledger and the pull requests' own facts, per unit and per week, with no new writes.
+- R30. The verification guard prints two classes over a pull request's range, both allowed by a change to a spec whose Code/Tests header covers the test file: **removed** (a test file deleted, a test block whose title is gone from its file with no new title added there, a skip marker added) fails the guard and is a review finding at minor or above; **check** (a decreased `expect` count, a removed title beside a new one in the same file) never fails the guard and must be disposed of in the review body as weakened (a finding at minor) or as a refactor with one clause of why. The guard is deterministic, runs behind `specs:coverage`, and is named in the review prompt both variants share.
+
 ### Scope Boundaries
 
 **In scope**: the three tracks above and the program hygiene; spec rows for every changed behaviour; the live receipts each unit names.
@@ -146,6 +154,11 @@ flowchart LR
     G4([distribution series]) --> U14[U14 deploy stage]
     U13 --> U14
     U14 --> U15[U15 retire the round loop]
+    U16[U16 child contract] --> U13
+    U16 --> U17[U17 handoffs as data]
+    U17 --> U13
+    U18[U18 delivery metrics]
+    U19[U19 verification guard]
 ```
 
 The ship coordinator on the hard case: the coding child is killed and resumed by the ledger while the parent waits.
@@ -199,7 +212,8 @@ Five phases, in dependency order; the harness track runs in parallel with the re
 | A. Program hygiene | U1 | U0 | 0029 `accepted`; the board carries the parent and every unit; #765 and #813 closed |
 | B. Residents on Workflows | U2 to U7 | U1 | a resident deploy mid-refresh ends in a completed instance after one retry; `alarm-missed` absent from the reason vocabulary for a week of production |
 | C. Harness | U8 to U11 | U1 (U11 also 0026 slice one) | the adoption record, Justin's decision, with the spike's table |
-| D. Ship coordinator | U12 to U15 | 0026 slice one; spawn/await Phase 1 and 2; the distribution series for U14 | a bot kill under a ship pipeline resumes the child and the parent proceeds; a bot deploy landing on a `spawn` step is retried through; the round loop is deleted |
+| D. Ship coordinator | U12 to U15 | 0026 slice one; spawn/await Phase 1 and 2; the distribution series for U14; U16 and U17 for U13 | a bot kill under a ship pipeline resumes the child and the parent proceeds; a bot deploy landing on a `spawn` step is retried through; two dependent plan units land through the runner; the round loop is deleted |
+| E. Self-driving edges (record 0031) | U16 to U19 | nothing (U17 on U16); run ahead of D and of U6 and U14 | a coding child of this program ran from a rendered contract and its handoff reached its board issue without a person; the delivery table shows the trunk pass's week; a deliberate test-weakening pull request drew the guard's finding |
 
 ---
 
@@ -317,6 +331,7 @@ Five phases, in dependency order; the harness track runs in parallel with the re
 
 ### U6. Provision, wake and rebuild as instances
 
+- **Status**: deferred behind U16 to U19 (record 0031). Third-order reliability: it starts only if the wake or provision path produces an incident after U5 deletes the chain; until then the alarm's provisioning deadline stands.
 - **Goal**: The remaining cycles run as instances started by the admin routes and the attach path, and the provisioning deadline is a step timeout, not an alarm.
 - **Requirements**: R1, R2, R7, R8
 - **Dependencies**: U5.
@@ -430,7 +445,8 @@ Five phases, in dependency order; the harness track runs in parallel with the re
 
 ### U13. The ship Workflow in the shim Worker
 
-- **Goal**: A ship pipeline survives every bot death with no lease of its own, and each round is a child run.
+- **Status**: reshaped by record 0031. The coordinator's input is a plan record's unit graph, not one task: it walks the graph in dependency order and runs the pipeline below once per ready unit, each unit in a thread of its own (a resident binds one branch per thread) on the head branch `plan/<plan-id>/<unit-slug>` (open-or-edit; a pull request a person closed unmerged ends the unit), review rounds to approve, then the merge under R31 (the runner merges when the requester holds `plan:merge`, else waits for a person), then the dependents, whose coding child rebases onto the merged parent as its first instruction; step names are `<unit>/<round>/<kind>` so R13's key shape holds; a conflict ends the unit with the conflict as its handoff, blocks its dependents and leaves other ready units running; a task string is a plan of one unit. Hands each coding child the unit's contract (U16) and posts its handoff (U17). The events and the retry policy below are unchanged; the state machine gains the outer unit cursor and the merge step; the trace in record 0031 is this unit's hard case. Files add `src/core/authz/` (the `plan:merge` action) and `docs/reference/specs/authorization.md`. Waits additionally on U16 and U17.
+- **Goal**: A ship pipeline survives every bot death with no lease of its own, each round is a child run, the pipeline runs once per unit of a plan, and the merge is a granted action.
 - **Requirements**: R10, R11, R12, R13, R14, R16
 - **Dependencies**: U12.
 - **Files**: `deploy/cloudflare/wrangler.template.jsonc` (a `workflows` binding); `deploy/cloudflare/worker.ts`: a `ShipCoordinator` entrypoint whose bot-calling steps carry the R13 retry policy; new `src/core/ship/coordinator.ts` (+ `.test.ts`): the pure round state machine (round index, findings, dispositions, PR facts, the ending rules from `runShipPipeline`: cap, stop, abort, merge-ready) operating on step returns; `src/core/dispatch/ship.ts`: `runShipBranch` writes the parent ship record (requester, channel, thread, branch), creates the instance through the shim's `POST /admin/coordinator/instances` and returns, instead of running `runShipPipeline`; the ship card and record are written by the bot from the coordinator's events (`ship_round` events posted through a `POST /admin/coordinator/round` route); `docs/reference/specs/agent-ship.md` items 3, 4, 5, 8, 9, 10, 11, 12 and the Code and Budgets headers.
@@ -451,6 +467,7 @@ Five phases, in dependency order; the harness track runs in parallel with the re
 
 ### U14. The deploy stage against the distribution series
 
+- **Status**: deferred behind U16 to U19 (record 0031). The gated production deploy already exists as the release pull request a person merges; this unit adds only the pipeline's receipt after deploy, and starts after the plan runner has landed two units.
 - **Goal**: A merge-ready ship can carry through merge and deploy without a person relaying.
 - **Requirements**: R15
 - **Dependencies**: U13; the distribution series ([#792](https://github.com/coreplanelabs/switchboard/issues/792)) merged (published images, `deploy images`, the reusable deploy workflow).
@@ -473,6 +490,46 @@ Five phases, in dependency order; the harness track runs in parallel with the re
   - `runShipPipeline` and its ending helpers are gone; the ship child modules export only what the spawn route needs (a source-scan test).
   - `decisions:check` accepts the superseded status and the resolving link.
 - **Verification**: `npm run verify` green; the follow-ups ledger in the Appendix has no row without a disposition.
+
+### U16. The child contract
+
+- **Goal**: A coding child never starts from a free-text task alone when a plan unit exists for the work; the review child checks the diff against the same object.
+- **Requirements**: R27
+- **Dependencies**: none; receipted by hand on this program's next unit before the runner exists.
+- **Files**: new `src/core/ship/contract.ts` (+ `.test.ts`): the typed contract `{ unit, specRows, agentRules, guards }` and its renderer to the child's first turn under fixed headings; `src/core/ship/codingChild.ts` and `reviewChild.ts` (the rendered contract enters the first user turn; the review child is handed the same object); `src/agents/registry.ts` (one paragraph in both coding prompts and both review prompts naming the contract's headings and the rule that a listed test scenario the diff did not add is a finding); `docs/reference/specs/agent-coding.md`, `agent-review.md`, `agent-ship.md`.
+- **Approach**: the contract carries the unit's section verbatim (a unit is the `### U<n>.` heading to the next heading, with the bullet keys this plan uses: Goal, Requirements, Dependencies, Files, Approach, Test scenarios, Verification), the spec rows the unit names (this plan names them as `<spec>.md` items by number, the convention every unit here already follows) with their current proof bindings, the target repository's agent rules file (`AGENTS.md`, else `CLAUDE.md`, else none, read at the pinned head) and the guard names with one line each; rendered by the runner (by hand until U13), never assembled by the child, into the first user turn as a fixed block under `## Contract`; the review child receives the same block after its REVIEW TARGET block. Over-length is cut by dropping approach text before spec rows, to a budget measured on the first render (the number record 0031 lacks). The two open questions in record 0031 (rows by path for a unit naming none; whether a child may propose a unit) are answered on the first two units rendered this way.
+- **Test scenarios**: a contract renders under the fixed headings in a stable order; a unit naming spec items renders exactly those rows with their proof bindings; an over-length contract drops approach text and never spec rows; a task string renders as a plan of one unit with no rows; the review prompt names a listed-but-missing test scenario as a finding.
+- **Verification**: `npm test` green; `agent-coding.md` and `agent-review.md` rows bound; one unit of this program run with a rendered contract, receipted on its board issue.
+
+### U17. Handoffs as data
+
+- **Goal**: A child's deviation from its unit reaches the unit's board issue without a person writing it.
+- **Requirements**: R28
+- **Dependencies**: U16.
+- **Files**: `src/core/ship/handoff.ts` (+ `.test.ts`): `{ deviations, followUps, unproven }` and its renderer to a board comment (with a ledger-row rendering a person can paste into Appendix B); the coding tools (a `submit_handoff` tool beside `submit_pr_description`, same path); `src/core/runRecord.ts` (the handoff on the child's record); `src/core/dispatch/ship.ts` (the parent posts it to the unit's issue through the bot's GitHub identity, an issue comment being a write the bot already makes); `docs/reference/specs/agent-coding.md`, `agent-ship.md`, `run-history.md`.
+- **Approach**: the handoff is submitted through the same tool path as the description and recorded on the run; the parent posts it to the unit's board issue; the plan's Appendix B is amended by a person at review points while the plan is `proposed` (no bot path writes to `main`; a plan's body freezes once accepted), each row with disposition `open` until a person decides.
+- **Test scenarios**: a handoff with each of the three lists renders to the comment and to ledger rows; an empty handoff renders nothing and records nothing; a handoff on a run without a unit (a plain coding run) is recorded and posts nowhere; the record round-trips the handoff.
+- **Verification**: `npm test` green; the same receipted unit as U16 shows its handoff on the board issue.
+
+### U18. Delivery metrics from the run history and the pull requests
+
+- **Goal**: The leading indicators both published accounts name are read from data the system already keeps, per unit and per week: time from a unit's issue to its merged pull request, first-pass CI success, review rounds per pull request, and the share of review findings resolved with no human branch edit.
+- **Requirements**: R29
+- **Dependencies**: none.
+- **Files**: `src/core/delivery.ts` (+ `.test.ts`): pure aggregation over run records and the GitHub facts the bot already fetches; a `delivery` command in the registry rendering one table; `web/src/pages/` a page in the costs page's shape; `docs/reference/specs/` a new spec.
+- **Approach**: the run ledger has every child's start, end and outcome; GitHub has the pull request's opened, merged and review timestamps and the pushes; no new writes, one read path.
+- **Test scenarios**: each indicator computed over a fixture week (the six pull requests of the trunk pass: two fix rounds, zero human edits, one blocking finding); a week with no merges renders zeros, not errors; a pull request with a human push counts against the no-human-edit share.
+- **Verification**: `npm test` green; the page and the command show the trunk pass's week.
+
+### U19. The verification guard
+
+- **Goal**: No pull request deletes or narrows a test bound to a spec, or an assertion inside one, without the spec changing in the same pull request.
+- **Requirements**: R30
+- **Dependencies**: none; in progress as its own pull request when this amendment lands.
+- **Files**: `src/docs/testGuard.ts` (+ `.test.ts`); `scripts/specs-coverage.ts` (a `--test-guard` flag over the same range); `src/agents/registry.ts` (`REVIEW_SPEC_CHECK` names the guard and the minor severity); `docs/reference/specs/agent-review.md`, `specs-coverage.md`.
+- **Approach**: record 0031, Guarding verification: the removed class (deletions, gone titles, skip markers) fails the guard and is a finding at minor unless a covering spec changes in the range; the check class (a lower `expect` count, a rename or split) prints and the reviewer disposes of each line in the review body; the review agent runs and quotes the script; CI wiring for the removed class follows the CI migration in progress; loosened assertion semantics stay the review agent's.
+- **Test scenarios**: each line kind in each class; the allowed-by-spec case for both; a rename lands in the check class, not the removed class; a test file that only adds assertions prints nothing.
+- **Verification**: `npm test` green; the spec rows bound; the review prompt test green; one deliberate weakening pull request draws the finding, receipted on the review spec's board issue.
 
 ---
 
@@ -501,7 +558,8 @@ Five phases, in dependency order; the harness track runs in parallel with the re
 - The harness track has an accepted or rejected adoption record with the spike's table behind it; if adopted, five pi coding runs are receipted with complete records and metered spend.
 - Ship runs as a Workflow coordinator: a bot kill under a ship pipeline is receipted as a resumed child and a proceeding parent; the round loop is deleted; the ship-restart plan is superseded.
 - Every follow-up in the Appendix ledger has a disposition.
-- Every V2 PR merged into `v1.2` and released as 1.2xx; V2 reached `main` once, at the release moment, as 2.0.0 with its migration notes.
+- Every V2 PR merged into `v1.2` and released as 1.2xx; V2 reached `main` once, at the release moment, as 2.0.0 with its migration notes. (Superseded by trunk: units land on `main` from 1.200.0; the 2.0.0 landing keeps its migration notes.)
+- Record 0031 holds: two dependent units landed by the plan runner in two threads with one bot kill during the first, one merged under `plan:merge` and one waiting for a person; a coding child of this program ran from a rendered contract and its handoff reached its board issue without a person; a deliberate test-weakening pull request drew the guard's finding.
 
 ---
 
