@@ -48,7 +48,7 @@ interface Workflow {
 // The workflows that gate a pull request. pr-title.yml is separate from ci.yml
 // only because it must re-run when the title is edited (see its header); it is
 // held to the same rule.
-const GATE_WORKFLOWS = [".depot/workflows/ci.yml", ".github/workflows/pr-title.yml"];
+const GATE_WORKFLOWS = [".depot/workflows/ci.yml", ".depot/workflows/pr-title.yml"];
 const ci = parse(read(".depot/workflows/ci.yml")) as Workflow;
 const rootPkg = JSON.parse(read("package.json")) as { scripts: Record<string, string>; workspaces: string[] };
 
@@ -160,7 +160,7 @@ describe("the gate workflows run only the repository's own scripts", () => {
   });
 
   it("pr-title.yml re-runs when a title is edited and is present in the merge queue", () => {
-    const wf = parse(read(".github/workflows/pr-title.yml")) as Workflow & {
+    const wf = parse(read(".depot/workflows/pr-title.yml")) as Workflow & {
       on: { pull_request: { types: string[] } };
     };
     // A required status must exist for the queue's merge group too, or the
@@ -925,6 +925,64 @@ describe("CodeQL orchestration", () => {
           job.steps?.some((step) => step.uses?.startsWith("github/codeql-action/analyze@")),
           file,
         ).not.toBe(true);
+      }
+    }
+  });
+});
+
+describe("Scorecard orchestration", () => {
+  it("runs only in GitHub Actions on Depot runners", () => {
+    const workflow = parse(read(".github/workflows/scorecard.yml")) as Workflow;
+    expect(workflow.on.push).toEqual({ branches: ["main"] });
+    expect(workflow.on.schedule).toEqual([{ cron: "31 7 * * 1" }]);
+    expect(workflow.on).toHaveProperty("workflow_dispatch");
+    expect(workflow.jobs.analysis["runs-on"]).toMatch(/^depot-/);
+    expect(workflow.jobs.analysis.steps.some((step) => step.uses?.startsWith("ossf/scorecard-action@"))).toBe(true);
+    for (const file of readdirSync(path.join(root, ".depot/workflows"))) {
+      if (!/\.ya?ml$/.test(file)) continue;
+      const depot = parse(read(`.depot/workflows/${file}`)) as Workflow;
+      for (const job of Object.values(depot.jobs)) {
+        expect(
+          job.steps?.some((step) => step.uses?.startsWith("ossf/scorecard-action@")),
+          file,
+        ).not.toBe(true);
+      }
+    }
+  });
+});
+
+describe("workflow ownership", () => {
+  it("automatic workflows have one orchestrator", () => {
+    const owners = new Map<string, string>();
+    for (const dir of [".github/workflows", ".depot/workflows"]) {
+      for (const file of readdirSync(path.join(root, dir))) {
+        if (!/\.ya?ml$/.test(file)) continue;
+        const workflow = parse(read(`${dir}/${file}`)) as Workflow & { name: string };
+        const automatic = Object.keys(workflow.on).filter(
+          (event) => !["workflow_call", "workflow_dispatch"].includes(event),
+        );
+        if (automatic.length === 0) continue;
+        expect(owners.get(workflow.name), `${workflow.name} also runs from ${dir}/${file}`).toBeUndefined();
+        owners.set(workflow.name, `${dir}/${file}`);
+      }
+    }
+  });
+
+  it("GitHub PR title is manual-only with the same jobs as Depot", () => {
+    const github = parse(read(".github/workflows/pr-title.yml")) as Workflow;
+    const depot = parse(read(".depot/workflows/pr-title.yml")) as Workflow;
+    expect(github.on).toEqual({ workflow_dispatch: null });
+    expect(github.jobs).toEqual(depot.jobs);
+  });
+
+  it("release and deployment use only the GitHub Actions workflows on Depot runners", () => {
+    const release = parse(read(".github/workflows/release-please.yml")) as Workflow;
+    expect(release.on).toEqual({ push: { branches: ["main"] } });
+    for (const file of ["release-please.yml", "deploy-production.yml"]) {
+      expect(existsSync(path.join(root, ".depot/workflows", file))).toBe(false);
+      const workflow = parse(read(`.github/workflows/${file}`)) as Workflow;
+      for (const job of Object.values(workflow.jobs)) {
+        if (job["runs-on"]) expect(job["runs-on"]).toMatch(/^depot-/);
       }
     }
   });
