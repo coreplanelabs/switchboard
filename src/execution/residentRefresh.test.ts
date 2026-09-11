@@ -15,6 +15,7 @@ import {
   RUNTIME_REPLACEMENT_WORDING,
   checkoutUpdateCommand,
   classifyRefreshFailure,
+  restoreFailureDisposition,
   killStaleBuildProcessesCommand,
   nextRefreshDelayS,
   judgeRestoreProgress,
@@ -303,6 +304,66 @@ describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interrupti
     expect(
       classifyRefreshFailure({ step: "build", message: "exit 1: error: process killed by OOM killer" }).interrupted,
     ).toBe(false);
+  });
+});
+
+describe("restoreFailureDisposition (a restore the runtime replacement interrupts is retried, never down)", () => {
+  // The exact reason a production resident carried when a resident Worker
+  // deploy rolled its container mid-restore: the wake path
+  // sent it `down(r2-restore-failed: …)` and only a rebuild could bring it
+  // back, though nothing was still streaming into the disk — the container
+  // it streamed into was gone.
+  const REPLACED_MID_RESTORE =
+    "runtime-replaced: the resident runtime was replaced (a deploy) while this command was starting; its output is lost (The container is not running, consider calling start())";
+
+  it("a runtime replacement under the restore is `interrupted`: the disk it streamed into is gone, so nothing can land on a rebuild", () => {
+    expect(restoreFailureDisposition(REPLACED_MID_RESTORE)).toEqual({
+      action: "interrupted",
+      reason: `restore-interrupted: ${REPLACED_MID_RESTORE}`,
+    });
+  });
+
+  it("every wording the SDK uses for a replaced runtime is interrupted, wherever in the message it sits", () => {
+    for (const msg of [
+      "Process handle refers to a previous runtime incarnation",
+      "operation interrupted because the runtime changed",
+      "Process supervisor is closed",
+      "sandbox.exec failed: The container is not running, consider calling start()",
+    ]) {
+      expect(restoreFailureDisposition(msg).action, msg).toBe("interrupted");
+    }
+  });
+
+  it("a typed replacement with no wording on its message is interrupted when the caller says so (the Worker's typed and cause-chain check), and a timeout still wins", () => {
+    expect(restoreFailureDisposition("restore failed", { runtimeReplaced: true })).toEqual({
+      action: "interrupted",
+      reason: "restore-interrupted: restore failed",
+    });
+    expect(restoreFailureDisposition("restore failed", { runtimeReplaced: false }).action).toBe("down");
+    expect(restoreFailureDisposition("restore failed (timed out)", { runtimeReplaced: true }).action).toBe("down");
+  });
+
+  it("a stalled or capped restore is still `down`: the SDK call cannot be cancelled and may still be writing", () => {
+    for (const msg of [
+      "checkout restore stalled: 0 bytes written in 120000 ms (archive 0 B, target 0 B)",
+      "mirror restore over the 25 min cap (1500000 ms): 2.1 GiB so far",
+      "2 earlier restore(s) still running (timed out)",
+    ]) {
+      const d = restoreFailureDisposition(msg);
+      expect(d.action, msg).toBe("down");
+      expect(d.reason).toBe(`r2-restore-failed: ${msg} — container stopped so the transfer cannot land on a rebuild`);
+    }
+  });
+
+  it("a genuinely failed container is `down`, not interrupted — a crash is not a replacement", () => {
+    expect(restoreFailureDisposition("container exited with unexpected exit code: 1").action).toBe("down");
+    expect(restoreFailureDisposition("the container is not listening").action).toBe("down");
+  });
+
+  it("a runtime replacement whose message also says it timed out is still `down`: the timeout means the stream ran on", () => {
+    expect(
+      restoreFailureDisposition("exit 143 (timed out): The container is not running, consider calling start()").action,
+    ).toBe("down");
   });
 });
 
