@@ -1,18 +1,30 @@
+---
+description: Install Switchboard, get an answer in your terminal, then put it in a Slack channel. Ten minutes, one process, your keys on your machine.
+---
+
 # Get started
 
-By the end, Switchboard has answered you three times: in your terminal, in Slack, and from a production deployment on Cloudflare.
+Switchboard is an open-source agent gateway. You mention it in Slack, or call it from a terminal, and an AI agent answers the question, reviews the pull request, or ships the fix — on the model you choose, with its tools running where you decide. You install it; you do not fork it.
 
-**You need:** Node 24 and an Anthropic API key. Part 2 adds a Slack workspace where you may create an app. Part 3 adds a Cloudflare account with a domain in it.
+In ten minutes it will be answering you in your terminal and in a Slack channel, from one process on your machine. Production comes after, as a how-to.
+
+**You need:** Node 24 and an Anthropic API key. Part 2 adds a Slack workspace where you may create an app.
+
+## What you are installing
+
+| | |
+|---|---|
+| **One process** | The bot. It talks to your terminal, and to Slack over Socket Mode: no public URL, no Docker, no hosted service in between. |
+| **Three agents** | `general` answers and reads links. `review` reviews a pull request. `coding` makes a change and opens the PR. Say `agent:review` or `agent:coding` in a message to pick one; the default is `general`. |
+| **Your keys, at home** | Keys live in `~/.switchboard/.env`, readable only by you. Every later command finds them from any directory. |
 
 ## Part 1: an answer in your terminal
 
-### Install
+### 1. Install
 
 ```bash
-npx @coreplane/switchboard init --organization <org> --anthropic-key <key>
+npx @coreplane/switchboard init --organization <your-github-org> --anthropic-key <sk-ant-…>
 ```
-
-You should see:
 
 ```
 wrote to /Users/you/.switchboard:
@@ -23,42 +35,53 @@ capabilities: execution local · github off · memory off · run history off · 
 next:
   npx @coreplane/switchboard ask "what can you do?"
   npx @coreplane/switchboard start
-  …
 ```
 
-The installation lives in `~/.switchboard`, so every later command works from any directory (`SWITCHBOARD_HOME` puts it elsewhere; a directory that already holds one wins when you run from inside it). `.env` holds your key and only you can read it; `config/config.yaml` is the example config with every optional block off. `init --help` lists every flag.
+`--organization` is the GitHub organization the agents will work in once you connect GitHub; it is a name in `config/config.yaml`, editable later. Every optional capability starts off. `init --help` lists every flag.
 
-### Ask
+### 2. Ask
 
 ```bash
 npx @coreplane/switchboard ask "what can you do?"
 ```
 
-You should see status lines (`preparing workspace…`, `preparing the prompt…`), then the general agent's answer.
+Status lines appear (`preparing workspace…`, `preparing the prompt…`), then the answer. Now ask something that needs a tool:
+
+```bash
+npx @coreplane/switchboard ask "read https://github.com/coreplanelabs/switchboard and say what it does in two sentences"
+```
+
+The `general` agent fetched the page and answered. That was the whole pipeline — the same one Slack will use.
 
 ## Part 2: an answer in Slack
 
-### Create the Slack app
+### 3. Create the Slack app
 
-1. At [api.slack.com/apps](https://api.slack.com/apps): *Create New App* → *From a manifest* → paste [`slack-app-manifest.yaml`](https://openswitchboard.dev/slack-app-manifest.yaml).
-2. *Basic Information* → *App-Level Tokens* → generate one with `connections:write`. It starts with `xapp-`.
-3. *Install App* → *Install to Workspace*. The *Bot User OAuth Token* starts with `xoxb-`.
+1. At [api.slack.com/apps](https://api.slack.com/apps): **Create New App → From a manifest** → paste [`slack-app-manifest.yaml`](https://openswitchboard.dev/slack-app-manifest.yaml).
+2. **Basic Information → App-Level Tokens** → generate one with `connections:write`. It starts with `xapp-`.
+3. **Install App → Install to Workspace**. The **Bot User OAuth Token** starts with `xoxb-`.
 
-### Add the tokens
+### 4. Add the tokens
 
 ```bash
-npx @coreplane/switchboard init --force --organization <org> --anthropic-key <key> --slack-app-token <xapp-token> --slack-bot-token <xoxb-token>
+npx @coreplane/switchboard init --force --organization <your-github-org> --anthropic-key <sk-ant-…> --slack-app-token <xapp-…> --slack-bot-token <xoxb-…>
 ```
 
-### Start the bot
+`--force` rewrites the same two files with the tokens added. Nothing else changes.
+
+### 5. Start the bot
 
 ```bash
 npx @coreplane/switchboard start
 ```
 
-You should see `switchboard running (providers: anthropic; default agent: general)`. This is the process the production container runs, over Slack's Socket Mode: no port, no Docker. Leave it running.
+```
+switchboard running (providers: anthropic; default agent: general)
+```
 
-### Say something
+Leave it running. This is the same process production runs in a container.
+
+### 6. Mention it
 
 In Slack, `/invite @<your app>` into a channel, then:
 
@@ -66,89 +89,15 @@ In Slack, `/invite @<your app>` into a channel, then:
 @<your app> what can you do?
 ```
 
-You should see a 👀 reaction, a status card, and the answer in a thread. Reply in the thread without a mention and it answers again.
+You should see a 👀 reaction (the receipt), a status card that updates in place, and the answer in a thread. Reply in the thread without the mention: it answers again, and the thread keeps its context. No 👀 means the bot is not in the channel.
 
-## Part 3: an answer from production
+## What you have
 
-Production is the bot as a container on Cloudflare plus a **state Worker** that keeps state across restarts.
-
-**You need:** a Cloudflare account, a domain (a *zone*) in it, and an API token for that account in `CLOUDFLARE_API_TOKEN` with the scopes [Set up accounts](../how-to/set-up-accounts.md) lists. Stop the local bot first (Ctrl-C).
-
-### Write the deployment profile
-
-```bash
-npx @coreplane/switchboard init --force --organization <org> --anthropic-key <key> --slack-app-token <xapp-token> --slack-bot-token <xoxb-token> --cloudflare <account id> --zone <zone>
-```
-
-You should see:
-
-```
-wrote to /Users/you/.switchboard:
-  .env                  (mode 600) (replaced)
-  config/config.yaml
-  deploy/profile.json
-Worker configs from deploy/profile.json:
-  written   .switchboard/deploy/cloudflare-memory/wrangler.jsonc
-  written   .switchboard/deploy/cloudflare/wrangler.jsonc
-  …
-```
-
-The profile names all four Workers under your zone; this lesson deploys the two required ones.
-
-### Point the config at the state Worker
-
-Add to `config/config.yaml` (which `--force` rewrote):
-
-```yaml
-runHistory:
-  worker:
-    baseUrl: https://switchboard-memory.<zone>
-runtimeOverrides:
-  worker:
-    baseUrl: https://switchboard-memory.<zone>
-```
-
-### Stage the secrets
-
-```bash
-mkdir -p -m 700 ~/.secrets/switchboard
-openssl rand -hex 32 > ~/.secrets/switchboard/MEMORY_TOKEN
-```
-
-Write `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` and `ANTHROPIC_API_KEY` there too, one value per file. Then:
-
-```bash
-npx @coreplane/switchboard deploy secrets memory
-npx @coreplane/switchboard deploy secrets bot
-```
-
-### Deploy
-
-```bash
-npx @coreplane/switchboard deploy plan --only memory,bot
-MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx @coreplane/switchboard deploy all --only memory,bot
-```
-
-You should see the plan's `Images: registry … 0 of 1 present; deploy all copies the rest`, then:
-
-```
-copied into the account registry: bot …
-[deploy:all] bot: live (commit <sha>; 45s after the upload)
-deployed and live
-```
-
-That copied the release's image into your account, deployed both Workers, and waited until `/healthz` answered from the new container.
-
-### Say something, again
-
-Mention the bot in Slack as before; the reply now comes from production.
-
-```bash
-curl -sS https://switchboard.<zone>/healthz
-```
+One process, answering on two channels, with your keys in a file only you can read. Nothing runs anywhere else yet.
 
 ## Next
 
-- [Your first request in Slack](first-request-in-slack.md): follow-ups, directives, handing off to the coding agent.
-- [Deploy](../how-to/deploy.md): the optional Workers, the GitHub App, deploying from CI.
+- [Your first request in Slack](first-request-in-slack.md): follow-ups, `agent:` and `model:` directives, handing a task to the coding agent.
+- [Set up accounts](../how-to/set-up-accounts.md): the GitHub App, so agents can read your repositories and open pull requests.
+- [Deploy](../how-to/deploy.md): run it on Cloudflare so it no longer depends on your laptop.
 - [Architecture](../explanation/architecture.md): what you just ran.
