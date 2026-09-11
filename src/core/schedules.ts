@@ -116,7 +116,7 @@ export const SCHEDULES: readonly ScheduleDef[] = [
     cron: "*/10 * * * *",
     worker: "resident",
     description:
-      "Resident watchdog: re-arm dead refresh alarm chains (marking degraded(alarm-missed)), time out stuck onboarding, and create the refresh Workflow instance for residents whose lifecycle is `workflow`. Cadence must stay shorter than the resident SLEEP_AFTER (20m). Not a run.",
+      "Resident watchdog: create each resident's refresh Workflow instance when its ten-minute bucket is due, name a stale mid-flight marker by its instance, and time out stuck onboarding. Cadence must stay shorter than the resident SLEEP_AFTER (20m). Not a run.",
     action: { type: "watchdog" },
   },
 ];
@@ -376,9 +376,7 @@ export interface WatchdogSummary {
     action?: unknown;
     error?: string;
     disk?: unknown;
-    /** `alarm` or `workflow`: which scheduler drives this resident's refresh cycle. */
-    lifecycle?: unknown;
-    /** What the pass did about the resident's refresh Workflow instance (`workflow` residents only). */
+    /** What the pass did about the resident's refresh Workflow instance: `{id, action, why}`. */
     instance?: unknown;
   }>;
 }
@@ -396,6 +394,14 @@ function fullestDisk(results: WatchdogSummary["results"]): string | undefined {
   return best ? `${best.pct}% (${best.resource.replace(/^repo:/, "")})` : undefined;
 }
 
+/** The `action` word of a resident's refresh-instance outcome on a watchdog
+ *  pass (`created | duplicate | skipped | failed`), or undefined when the row
+ *  carries none. */
+function instanceActionOf(instance: unknown): string | undefined {
+  const action = (instance as { action?: unknown } | null | undefined)?.action;
+  return typeof action === "string" ? action : undefined;
+}
+
 /** Turn a watchdog pass (or the error it threw) into a firing record. A pass is
  *  `completed` when every resident was checked; any per-resident error — or a
  *  throw before the sweep — is `failed`, naming the first failing resident. */
@@ -407,10 +413,10 @@ export function watchdogFiring(
   if (result instanceof Error)
     return { schedule: schedule.name, firedAt, outcome: "failed", detail: cap(`watchdog threw: ${result.message}`) };
   const errors = result.results.filter((r) => r.error !== undefined);
-  const reArmed = result.results.filter((r) => r.action === "re-armed").length;
+  const created = result.results.filter((r) => instanceActionOf(r.instance) === "created").length;
   const timedOut = result.results.filter((r) => r.action === "provision-timed-out").length;
   const disk = fullestDisk(result.results);
-  const counts = `${result.count}/${result.cap} residents · ${reArmed} re-armed · ${timedOut} timed out · ${errors.length} errors${disk ? ` · disk max ${disk}` : ""}`;
+  const counts = `${result.count}/${result.cap} residents · ${created} refreshed · ${timedOut} timed out · ${errors.length} errors${disk ? ` · disk max ${disk}` : ""}`;
   const first = errors[0];
   return {
     schedule: schedule.name,

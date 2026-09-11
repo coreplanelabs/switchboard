@@ -4,8 +4,6 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  INTERRUPTED_REARM_MAX_CONSECUTIVE,
-  INTERRUPTED_REARM_S,
   RESTORE_MAX_MS,
   RESTORE_POLL_MS,
   RESTORE_STALL_MS,
@@ -17,7 +15,6 @@ import {
   classifyRefreshFailure,
   restoreFailureDisposition,
   killStaleBuildProcessesCommand,
-  nextRefreshDelayS,
   judgeRestoreProgress,
   planRefresh,
   restoreArchivePath,
@@ -227,7 +224,7 @@ describe("killStaleBuildProcessesCommand (a build-user step never starts beside 
 describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interruption, not evidence)", () => {
   const live = "exit 143: Session terminated, killing shell... ...killed.";
 
-  it("exit 143 during build → refresh-interrupted, reason prefixed for the streak gate", () => {
+  it("exit 143 during build → refresh-interrupted, the reason prefixed so the instance step retries it instead of recording `degraded`", () => {
     const f = classifyRefreshFailure({ step: "build", message: live });
     expect(f.interrupted).toBe(true);
     expect(f.reason).toMatch(/^refresh-interrupted: build exit 143/);
@@ -386,7 +383,7 @@ describe("RUNTIME_REPLACEMENT_WORDING (a deploy that ROLLS the container, not ju
     expect(RUNTIME_REPLACEMENT_WORDING.test(`sandbox.exec failed: ${CONTAINER_ROLLED}`)).toBe(true);
   });
 
-  it("a container roll under a refresh step is refresh-interrupted, not <step>-failed (re-arm SHORT, keep the snapshot)", () => {
+  it("a container roll under a refresh step is refresh-interrupted, not <step>-failed (the engine retries the step, the snapshot keeps serving)", () => {
     const f = classifyRefreshFailure({ step: "snapshot", message: CONTAINER_ROLLED });
     expect(f.interrupted).toBe(true);
     expect(f.reason).toBe(`refresh-interrupted: snapshot ${CONTAINER_ROLLED}`);
@@ -459,61 +456,6 @@ describe("classifyRefreshFailure (a full container disk is `disk-full`, not GitH
     });
     expect(f.diskFull).toBe(true);
     expect(f.interrupted).toBe(false);
-  });
-});
-
-describe("nextRefreshDelayS (re-arm short after an interruption or an image-stale restart)", () => {
-  const cadence = { intervalS: 600, idleIntervalS: 21600 };
-
-  it("normal outcome → the regular interval", () => {
-    expect(nextRefreshDelayS({ outcome: "normal", ...cadence })).toBe(600);
-  });
-
-  it("disk-full restart → the same short re-arm as an image-stale restart (the container is coming back on an empty disk), uncapped", () => {
-    expect(nextRefreshDelayS({ outcome: "disk-full-restart", ...cadence })).toBe(INTERRUPTED_REARM_S);
-    expect(nextRefreshDelayS({ outcome: "disk-full-restart", consecutiveInterrupted: 50, ...cadence })).toBe(
-      INTERRUPTED_REARM_S,
-    );
-  });
-
-  it("interrupted → the short re-arm, well under the regular interval", () => {
-    expect(nextRefreshDelayS({ outcome: "interrupted", ...cadence })).toBe(INTERRUPTED_REARM_S);
-    expect(INTERRUPTED_REARM_S).toBeGreaterThanOrEqual(30);
-    expect(INTERRUPTED_REARM_S).toBeLessThanOrEqual(60);
-  });
-
-  it("image-stale restart → the same short re-arm (the container is coming back on the new image)", () => {
-    expect(nextRefreshDelayS({ outcome: "image-stale-restart", ...cadence })).toBe(INTERRUPTED_REARM_S);
-  });
-
-  it("idle → the idle interval", () => {
-    expect(nextRefreshDelayS({ outcome: "idle", ...cadence })).toBe(21600);
-  });
-
-  it("a run of consecutive interruptions is capped: past the cap the regular interval returns (no 45 s hot loop on a chronic false positive)", () => {
-    for (let n = 1; n <= INTERRUPTED_REARM_MAX_CONSECUTIVE; n++) {
-      expect(nextRefreshDelayS({ outcome: "interrupted", consecutiveInterrupted: n, ...cadence })).toBe(
-        INTERRUPTED_REARM_S,
-      );
-    }
-    expect(
-      nextRefreshDelayS({
-        outcome: "interrupted",
-        consecutiveInterrupted: INTERRUPTED_REARM_MAX_CONSECUTIVE + 1,
-        ...cadence,
-      }),
-    ).toBe(600);
-    expect(nextRefreshDelayS({ outcome: "interrupted", consecutiveInterrupted: 50, ...cadence })).toBe(600);
-  });
-
-  it("the cap applies to interruptions only — an image-stale restart is never repeated by the same cause", () => {
-    expect(nextRefreshDelayS({ outcome: "image-stale-restart", consecutiveInterrupted: 50, ...cadence })).toBe(
-      INTERRUPTED_REARM_S,
-    );
-  });
-
-  it("omitting the count means 'first interruption' (short)", () => {
-    expect(nextRefreshDelayS({ outcome: "interrupted", ...cadence })).toBe(INTERRUPTED_REARM_S);
   });
 });
 

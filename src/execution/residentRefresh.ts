@@ -1,8 +1,8 @@
-/** The refresh cycle's rebuild decision for the resident Worker's
- *  `onRefreshAlarm` (deploy/cloudflare-resident/worker.ts), kept pure and
- *  dependency-free so it is unit-testable from src/ and imported across
- *  packages by the resident Worker (like residentDetach) — the tested code IS
- *  the shipped code.
+/** The refresh cycle's rebuild decision for the resident Worker's refresh
+ *  instance steps (`refreshInstanceFetch` and its siblings in
+ *  deploy/cloudflare-resident/worker.ts), kept pure and dependency-free so it
+ *  is unit-testable from src/ and imported across packages by the resident
+ *  Worker (like residentDetach) — the tested code IS the shipped code.
  *
  *  Background: the refresh used to `git clean -fdx` + `npm install` on
  *  EVERY default-branch advance (a refresh over two minutes long), even
@@ -18,7 +18,7 @@
  *  The disk facts come from two root-only markers the cycle writes as it
  *  materializes (deps key after install, built sha after build) plus the
  *  checkout's actual HEAD. A worker-code deploy resets the DO mid-cycle but
- *  leaves the container disk alone, so the next alarm can pick up where the
+ *  leaves the container disk alone, so the next cycle can pick up where the
  *  interrupted one stopped instead of redoing the whole rebuild. */
 
 import { DISK_FULL_FREE_KIB, diskFullReason, isDiskFullMessage } from "./residentDisk.js";
@@ -119,11 +119,12 @@ export function checkoutUpdateCommand(sha: string, clean: CleanScope): string {
  *  the SDK's replacement errors (stale process handle, closed supervisor).
  *  Everything else is the repo's own build failing. */
 export interface RefreshFailure {
-  /** The `degraded` reason to record. Interruptions are prefixed
-   *  `refresh-interrupted:` so the park-streak gate can exclude them by prefix,
-   *  exactly like the watchdog's stamps; a full disk is `disk-full:`
-   *  (`residentDisk.ts` — the cycle's entry gate and the recycle decision key
-   *  on it); real failures keep `<step>-failed:`. */
+  /** The reason. An interruption's is prefixed `refresh-interrupted:` and is
+   *  never recorded as `degraded`: the instance step throws it to the engine,
+   *  whose retry re-enters the step, and the row keeps its state (the word
+   *  shows on the instance row's `lastStep` and in the log). A full disk is
+   *  `disk-full:` (`residentDisk.ts` — the cycle's entry gate and the recycle
+   *  decision key on it); real failures keep `<step>-failed:`. */
   reason: string;
   interrupted: boolean;
   diskFull: boolean;
@@ -196,7 +197,8 @@ const INTERRUPTION_SIGNATURE = /\bexit 143\b|Session terminated|SIGTERM/;
  *  (deploy/cloudflare-resident/worker.ts) as its message-level fallback, so the
  *  exec path and the refresh classifier agree on one wording list (a container
  *  stop mid-snapshot produces "Process supervisor is closed"; classified as the
- *  repo's own `snapshot-failed` it would re-arm at the full cadence). */
+ *  repo's own `snapshot-failed` it would end the instance `degraded` instead of
+ *  being retried into the same step). */
 export const RUNTIME_REPLACEMENT_WORDING =
   /previous runtime incarnation|interrupted because the runtime changed|runtime identity is no longer active|sandbox lifetime is no longer current|platform was updating the sandbox runtime|no longer identifies pid|process supervisor is closed|container is not running, consider calling start/i;
 
@@ -238,8 +240,9 @@ export function classifyRefreshFailure(input: {
  *  was replaced under the restore (a resident Worker deploy rolled the
  *  container; `RUNTIME_REPLACEMENT_WORDING`), so the disk it wrote to is gone
  *  with it. That is `interrupted`, the same class a refresh step earns when a
- *  deploy kills it: not evidence about the repo, re-armed short, and the next
- *  wake restores again. The caller may also say the error IS a replacement
+ *  deploy kills it: not evidence about the repo, thrown to the engine whose
+ *  retry re-enters the step, and that attempt restores again. The caller may
+ *  also say the error IS a replacement
  *  (`runtimeReplaced`, from the Worker's typed and cause-chain check, since
  *  the SDK throws typed replacement errors whose top-level message carries no
  *  wording); the message check stays for the untyped ones. A message that
@@ -257,58 +260,6 @@ export function restoreFailureDisposition(
     action: "down",
     reason: `r2-restore-failed: ${message} — container stopped so the transfer cannot land on a rebuild`,
   };
-}
-
-/** Re-arm delay after a cycle that did not run to completion for a reason
- *  outside the repo — an interrupted step, or an image-stale container stop.
- *  45 s: comfortably longer than a container restart plus rehydration
- *  (~10–20 s observed), so the retry finds a live runtime, and an order of
- *  magnitude under the 600 s cadence that previously left the resident
- *  `degraded` (every run falling back cold) until the next regular alarm. */
-export const INTERRUPTED_REARM_S = 45;
-
-export type RefreshOutcome =
-  /** Cycle ran (warm, or a real failure): regular cadence. */
-  | "normal"
-  /** A step was killed from outside (see classifyRefreshFailure). */
-  | "interrupted"
-  /** `reconcileImage` stopped the container so it restarts on the new image. */
-  | "image-stale-restart"
-  /** The disk-full recovery stopped the container so it restarts on an empty
-   *  disk and the next alarm restores from R2 (`residentDisk.ts`). */
-  | "disk-full-restart"
-  /** Idle gate parked the resident. */
-  | "idle";
-
-/** How many CONSECUTIVE interrupted cycles still re-arm short. A real deploy
- *  interrupts once, maybe twice (a deploy train); a step whose own output
- *  happens to carry the kill signature every cycle (a test supervisor printing
- *  `signal SIGTERM`) would otherwise retry at 45 s forever — never parking
- *  (it is excluded from the streak) AND at 13× the cadence. Past the cap the
- *  regular interval returns; the classification (and the streak exclusion)
- *  stand, matching the watchdog's accepted "never parks, but at cadence". */
-export const INTERRUPTED_REARM_MAX_CONSECUTIVE = 3;
-
-export function nextRefreshDelayS(input: {
-  outcome: RefreshOutcome;
-  intervalS: number;
-  idleIntervalS: number;
-  /** Consecutive cycles (this one included) that ended `interrupted`; omitted = 1. */
-  consecutiveInterrupted?: number;
-}): number {
-  switch (input.outcome) {
-    case "idle":
-      return input.idleIntervalS;
-    case "interrupted":
-      return (input.consecutiveInterrupted ?? 1) > INTERRUPTED_REARM_MAX_CONSECUTIVE
-        ? input.intervalS
-        : INTERRUPTED_REARM_S;
-    case "image-stale-restart":
-    case "disk-full-restart":
-      return INTERRUPTED_REARM_S;
-    default:
-      return input.intervalS;
-  }
 }
 
 /** Bound a promise that offers no timeout of its own (the

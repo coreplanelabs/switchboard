@@ -20,15 +20,15 @@ describe("isServiceable", () => {
     expect(isServiceable("bogus-state")).toBe(false);
   });
 
-  it("degraded attaches only for fetch/bookkeeping reasons (checkout intact)", () => {
+  it("degraded attaches only for a fetch failure (checkout intact) — the one reason class that proves nothing was rebuilt", () => {
     expect(isServiceable("degraded", "github-unreachable: fetch timed out after 300000ms")).toBe(true);
-    expect(isServiceable("degraded", "alarm-missed: refresh chain was dead; re-armed by watchdog")).toBe(true);
+    expect(isServiceable("degraded", "github-unreachable")).toBe(true);
   });
 
   it("degraded stays cold for any failure inside the rebuild, an orphaned mid-flight marker, or an unknown reason", () => {
     for (const r of [
       // the orphaned cycle may have died inside the rebuild lock section
-      "stale-mid-flight: refreshing since 2026-08-29T20:00:00Z with no cycle running; re-armed by watchdog",
+      "stale-mid-flight: refreshing since 2026-08-29T20:00:00Z with no cycle running; the last instance refresh_acme-api_2936000 is errored; the next refresh instance normalizes it",
       "install-failed: npm ERR! ERESOLVE",
       "build-failed: tsc exited 2",
       "checkout-update-failed: git reset --hard failed",

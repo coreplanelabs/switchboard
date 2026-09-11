@@ -10,8 +10,8 @@
 // falls back cold with a message that reads like a lock bug, and nothing frees
 // the disk. Two facts fix that: the failure is classified `disk-full` (never
 // serviceable, so the bot skips the attach and the card names the disk), and
-// the resident recycles its container — the disk is a cache; the next alarm
-// restores mirror + checkout from R2 — once nothing live would be lost.
+// the resident recycles its container — the disk is a cache; the next refresh
+// cycle restores mirror + checkout from R2 — once nothing live would be lost.
 
 /** The errno wording tools print for ENOSPC: Node's `ENOSPC` code and libc's
  *  strerror text (git, cp, tar, pnpm all pass it through). A message carrying
