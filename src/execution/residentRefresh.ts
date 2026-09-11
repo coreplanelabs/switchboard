@@ -230,6 +230,35 @@ export function classifyRefreshFailure(input: {
   return { interrupted: false, diskFull: false, reason: `${step}-failed: ${message}` };
 }
 
+/** What the wake path does with a failed restore. `down` is the rule: the
+ *  SDK's restore cannot be cancelled, so a stalled or capped one may still be
+ *  streaming into the disk, and a `down` resident's only exit is a rebuild
+ *  that starts on an empty container — the stream must not land on it. The
+ *  one exception is the failure that proves nothing is streaming: the runtime
+ *  was replaced under the restore (a resident Worker deploy rolled the
+ *  container; `RUNTIME_REPLACEMENT_WORDING`), so the disk it wrote to is gone
+ *  with it. That is `interrupted`, the same class a refresh step earns when a
+ *  deploy kills it: not evidence about the repo, re-armed short, and the next
+ *  wake restores again. The caller may also say the error IS a replacement
+ *  (`runtimeReplaced`, from the Worker's typed and cause-chain check, since
+ *  the SDK throws typed replacement errors whose top-level message carries no
+ *  wording); the message check stays for the untyped ones. A message that
+ *  also says the command timed out stays `down` either way — the timeout
+ *  means the stream ran on before the replacement. */
+export function restoreFailureDisposition(
+  message: string,
+  facts: { runtimeReplaced?: boolean } = {},
+): { action: "interrupted"; reason: string } | { action: "down"; reason: string } {
+  const timedOut = /\(timed out\)/.test(message);
+  if (!timedOut && (facts.runtimeReplaced === true || RUNTIME_REPLACEMENT_WORDING.test(message))) {
+    return { action: "interrupted", reason: `restore-interrupted: ${message}` };
+  }
+  return {
+    action: "down",
+    reason: `r2-restore-failed: ${message} — container stopped so the transfer cannot land on a rebuild`,
+  };
+}
+
 /** Re-arm delay after a cycle that did not run to completion for a reason
  *  outside the repo — an interrupted step, or an image-stale container stop.
  *  45 s: comfortably longer than a container restart plus rehydration

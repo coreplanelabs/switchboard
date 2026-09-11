@@ -130,6 +130,7 @@ import {
 import {
   checkoutUpdateCommand,
   classifyRefreshFailure,
+  restoreFailureDisposition,
   killStaleBuildProcessesCommand,
   nextRefreshDelayS,
   planRefresh,
@@ -535,7 +536,7 @@ const DEGRADED_STREAK_KEY = "resident:degradedStreak";
 /** Plus a cycle whose step was killed from OUTSIDE by a deploy
  *  (`refresh-interrupted: …`, classified by `classifyRefreshFailure`): equally
  *  not evidence about the repository, equally never counted. */
-const NON_EVIDENCE_REASON = /^(?:alarm-missed|stale-mid-flight|refresh-interrupted):/;
+const NON_EVIDENCE_REASON = /^(?:alarm-missed|stale-mid-flight|refresh-interrupted|restore-interrupted):/;
 /** Consecutive cycles that ended `refresh-interrupted`: feeds the
  *  short-re-arm cap in `nextRefreshDelayS`; cleared by any other outcome. */
 const INTERRUPTED_STREAK_KEY = "resident:interruptedStreak";
@@ -2251,9 +2252,13 @@ export class ResidentDO extends Sandbox<Env> {
    *  their bytes, against the caller's one deadline), verify the restored
    *  mirror against the stamp and hand the checkout to the build user. Runs
    *  inside the hydration lease its caller holds — every mirror-mutex taker
-   *  hydrates first, so nothing else touches these trees meanwhile. Failures
-   *  leave the resident `down` with the reason and the container stopped, as
-   *  the wake path always did. */
+   *  hydrates first, so nothing else touches these trees meanwhile. A stalled
+   *  or capped restore leaves the resident `down` with the reason and the
+   *  container stopped, as the wake path always did; a restore the runtime
+   *  replacement interrupts (a deploy rolled the container under it) is
+   *  `restore-interrupted`, degraded and rethrown for the cycle to re-arm
+   *  short — nothing is streaming into a disk that no longer exists
+   *  (restoreFailureDisposition). */
   async restoreCheckout(snap: SnapshotRecord, deadlineMs: number): Promise<{ done: boolean }> {
     const plan = planRestore({ sha: snap.sha, readyStamp: await this.readyStamp() });
     if (plan.action === "done") return { done: true };
@@ -2301,6 +2306,27 @@ export class ResidentDO extends Sandbox<Env> {
         deadlineMs,
       );
     } catch (err) {
+      // The typed and cause-chain check first: the SDK's replacement errors
+      // (a stale process handle, an inactive runtime identity, an interrupted
+      // operation) carry the wording one cause down or not at all.
+      const disposition = restoreFailureDisposition(errMsg(err), { runtimeReplaced: isRuntimeReplacement(err) });
+      if (disposition.action === "interrupted") {
+        // The runtime was replaced under the restore (a resident Worker deploy
+        // rolled the container): the disk the stream wrote to is gone with the
+        // container, so nothing can land on a rebuild and there is nothing to
+        // stop. Not evidence about the repo — the resident is `degraded` with
+        // the restore named, never `down`, and the error goes back to the
+        // cycle, whose classifier reads the same wording as an interruption
+        // and re-arms short; the next wake restores again onto the new
+        // container. Before this branch every such restore ended `down`, and
+        // only a rebuild (the watchdog's, after three passes) brought the
+        // resident back.
+        this.swapIncarnation(); // the container this incarnation's memos described is gone
+        console.log(`restore: interrupted by a runtime replacement — ${disposition.reason.slice(0, 400)}`);
+        await this.recordRefreshError(disposition.reason);
+        await this.setResidentState("degraded", disposition.reason);
+        throw err;
+      }
       // A stalled or capped restore is STILL STREAMING (the SDK call cannot be
       // cancelled); `pendingRestores` keeps the next hydrate off its directory,
       // but a `down` resident's only exit is a REBUILD, and provisioning owns
@@ -2312,9 +2338,7 @@ export class ResidentDO extends Sandbox<Env> {
       // with it, and the rebuild starts on an empty one.
       this.swapIncarnation(); // deliberate incarnation swap
       await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
-      throw await this.goDown(
-        `r2-restore-failed: ${errMsg(err)} — container stopped so the transfer cannot land on a rebuild`,
-      );
+      throw await this.goDown(disposition.reason);
     }
     await this.ensureGitSetup();
 
@@ -2550,9 +2574,11 @@ export class ResidentDO extends Sandbox<Env> {
   /** Ensure the container disk holds the stamped snapshot state. `restoring`
    *  is persisted BEFORE any restore work — DO storage would
    *  otherwise still say warm while the R2 restore runs. Refuses mismatched
-   *  stamps → down(snapshot-stamp-mismatch); restore failures →
-   *  down(r2-restore-failed). Throws ResidentDownError after those
-   *  transitions. Called by the refresh alarm (and the attach path). */
+   *  stamps → down(snapshot-stamp-mismatch); a stalled or capped restore →
+   *  down(r2-restore-failed); a restore the runtime replacement interrupts →
+   *  degraded(restore-interrupted), rethrown so the cycle re-arms short.
+   *  Throws ResidentDownError after the down transitions. Called by the
+   *  refresh alarm (and the attach path). */
   async ensureHydrated(): Promise<void> {
     // Fresh positive verdict for this incarnation → nothing to probe. See the
     // per-incarnation memo block for why this is safe; the refresh alarm's
