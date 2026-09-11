@@ -21,7 +21,7 @@ upgrade to the current release to receive fixes.
 
 ## What counts
 
-OpenSwitchboard runs agents that execute model-generated commands. Where those
+Switchboard runs agents that execute model-generated commands. Where those
 commands run, and what they can reach, is decided by the deployment's execution
 backend, so the boundaries below define what is and is not a vulnerability.
 

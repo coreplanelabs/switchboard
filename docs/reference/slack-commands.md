@@ -120,7 +120,7 @@ One table per group. "Who can run it" is what the authorization policy decides f
 | `mcp` | [how-to: connect an MCP server](../how-to/connect-an-mcp-server.md) |
 | `repo` | [how-to: onboard a repo](../how-to/onboard-a-repo.md) |
 | `runs` | [how-to: watch a run](../how-to/watch-a-run.md) |
-| `friction` | [explanation: how OpenSwitchboard improves itself](../explanation/how-switchboard-improves-itself.md) |
+| `friction` | [explanation: how Switchboard improves itself](../explanation/how-switchboard-improves-itself.md) |
 
 ## Repo commands run no model turns
 

@@ -1,6 +1,6 @@
-# OpenSwitchboard docs
+# Switchboard docs
 
-OpenSwitchboard is an agent gateway: a message arrives over Slack, the CLI, HTTP or MCP, and an agent answers it, reviews a pull request, or ships code. Read this tree here or at [openswitchboard.dev](https://openswitchboard.dev).
+Switchboard is an agent gateway: a message arrives over Slack, the CLI, HTTP or MCP, and an agent answers it, reviews a pull request, or ships code. Read this tree here or at [switchboard.space](https://switchboard.space).
 
 ## Pick your surface
 
@@ -29,4 +29,4 @@ The tree follows [Diataxis](https://diataxis.fr): four jobs, never mixed on one 
 
 [`reference/specs/`](reference/specs/README.md) is the contract: one file per feature, every criterion bound to a test or a procedure. When a page here disagrees with a spec, the spec is right.
 
-[`README.md`](../README.md) is the front door; [`AGENTS.md`](../AGENTS.md) is for whoever changes OpenSwitchboard.
+[`README.md`](../README.md) is the front door; [`AGENTS.md`](../AGENTS.md) is for whoever changes Switchboard.

@@ -1,6 +1,6 @@
 # Your first request in Slack
 
-By the end, you have sent OpenSwitchboard a request, followed up without repeating yourself, and handed a real task to a specialist agent.
+By the end, you have sent Switchboard a request, followed up without repeating yourself, and handed a real task to a specialist agent.
 
 **You need:** a Slack workspace where the bot is installed and a channel it is in (or a direct message with it). Ten minutes.
 
@@ -14,14 +14,14 @@ By the end, you have sent OpenSwitchboard a request, followed up without repeati
 sequenceDiagram
     participant You
     participant Slack
-    participant OpenSwitchboard
+    participant Switchboard
 
     You->>Slack: @switchboard what's a lateral join?
-    Slack->>OpenSwitchboard: message event
-    OpenSwitchboard->>Slack: 👀 reaction — "got it"
-    OpenSwitchboard->>Slack: status card: "thinking…"
-    Note over OpenSwitchboard: reads, answers, no tools needed
-    OpenSwitchboard->>Slack: reply in-thread
+    Slack->>Switchboard: message event
+    Switchboard->>Slack: 👀 reaction — "got it"
+    Switchboard->>Slack: status card: "thinking…"
+    Note over Switchboard: reads, answers, no tools needed
+    Switchboard->>Slack: reply in-thread
 ```
 
 You should see a 👀 reaction (the receipt), one status card edited in place, then the answer in a thread. No 👀 means the bot is not in the channel.

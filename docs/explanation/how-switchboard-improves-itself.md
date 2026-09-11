@@ -1,6 +1,6 @@
-# How OpenSwitchboard improves itself
+# How Switchboard improves itself
 
-OpenSwitchboard diagnoses every run, clusters friction that recurs across runs, and files each pattern as a labelled GitHub issue for a person to triage.
+Switchboard diagnoses every run, clusters friction that recurs across runs, and files each pattern as a labelled GitHub issue for a person to triage.
 
 ## It proposes and never fixes
 
@@ -22,7 +22,7 @@ flowchart TB
     HUMAN -.->|"close"| PROP
 ```
 
-The dashed arrows are the ones OpenSwitchboard never follows.
+The dashed arrows are the ones Switchboard never follows.
 
 ## Where each piece runs
 

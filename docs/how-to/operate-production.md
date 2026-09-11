@@ -53,7 +53,7 @@ curl -sS -H "authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
 
 ## For this installation
 
-The project's own production, not OpenSwitchboard:
+The project's own production, not Switchboard:
 
 - Deploys run from CI, which refuses any ref but `main`: `gh workflow run deploy-production.yml --ref main -f targets=affected` (also `-f targets=bot,resident`; `-f force=true` bypasses the preflights).
 - The profile and config live in a private repository named by the variable `SWITCHBOARD_DEPLOY_PROFILE`, read with an App token minted as `CONFIG_REPO_TOKEN`.

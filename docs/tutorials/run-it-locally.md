@@ -1,6 +1,6 @@
 # Run it locally
 
-By the end, you run OpenSwitchboard from a checkout of the repository, ask it a question, connect it to Slack, and pass the check every change must pass. This is the contributor's loop; to use the product, [Get started](get-started.md) needs no checkout.
+By the end, you run Switchboard from a checkout of the repository, ask it a question, connect it to Slack, and pass the check every change must pass. This is the contributor's loop; to use the product, [Get started](get-started.md) needs no checkout.
 
 **You need:** Node 24 (`.nvmrc` pins it; 22 or newer runs), git, and an Anthropic API key.
 

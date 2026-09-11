@@ -20,7 +20,7 @@ execution:
 @switchboard repo onboard acme/api --ref main --install "npm ci" --test "npm test" --build "npm run build"
 ```
 
-Omit `--install`, `--test` or `--build` and OpenSwitchboard detects them from the lockfile and `package.json`, saying what it chose. The command returns at once; provisioning continues in the background.
+Omit `--install`, `--test` or `--build` and Switchboard detects them from the lockfile and `package.json`, saying what it chose. The command returns at once; provisioning continues in the background.
 
 ## Watch it come up
 

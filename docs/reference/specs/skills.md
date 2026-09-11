@@ -1,6 +1,6 @@
 # Skill loading
 
-Agents can list and load **skills** — reusable methodologies (spec-driven development, code review, TDD, …) — on demand at run time. Rather than baking a methodology into an agent's system prompt, OpenSwitchboard exposes the calling agent's scoped skills as a short name+description list in-prompt (**progressive disclosure**) and lets the model pull the full instructions into its context only when it needs them, via the `use_skill` tool.
+Agents can list and load **skills** — reusable methodologies (spec-driven development, code review, TDD, …) — on demand at run time. Rather than baking a methodology into an agent's system prompt, Switchboard exposes the calling agent's scoped skills as a short name+description list in-prompt (**progressive disclosure**) and lets the model pull the full instructions into its context only when it needs them, via the `use_skill` tool.
 
 This is delivered in stages. **PR1 (this spec) ships the seam + two stores + the seeded bundled skills + the load path.** User-uploaded skills backed by a durable store are tracked below as `[gap]` (PR2).
 

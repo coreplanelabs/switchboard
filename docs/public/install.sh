@@ -1,13 +1,13 @@
 #!/bin/sh
-# OpenSwitchboard's installer front door: https://openswitchboard.dev/install.sh
+# Switchboard's installer front door: https://switchboard.space/install.sh
 #
-#   curl -fsSL https://openswitchboard.dev/install.sh | sh -s -- --organization <org> --anthropic-key <key>
+#   curl -fsSL https://switchboard.space/install.sh | sh -s -- --organization <org> --anthropic-key <key>
 #
 # Installs nothing itself. It checks that Node.js is present and new enough,
 # says how to get it when it is not (never installs Node for you), and then
 # runs the published installer — `npx @coreplane/switchboard init` — with every
 # argument you gave it, in the directory you ran it from. Everything the
-# installer does is described at https://openswitchboard.dev/tutorials/get-started
+# installer does is described at https://switchboard.space/tutorials/get-started
 # and can be run by hand: `npx @coreplane/switchboard init --help`.
 set -eu
 

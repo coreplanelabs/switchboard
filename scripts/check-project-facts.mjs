@@ -67,10 +67,8 @@ export function composeServiceImages(compose) {
   }
   return images;
 }
-/** A docs URL: any `docs.` host (so a stale copy under an old name is caught)
- *  or the configured docs host itself, which need not start with `docs.`. */
-const docsUrlPattern = (docsHost) =>
-  new RegExp(`https?://(?:docs\\.[A-Za-z0-9.-]+|${docsHost.replace(/\./g, "\\.")}(?![A-Za-z0-9.-]))`, "g");
+/** Every URL's scheme and host; which of them are docs URLs is decided on the host (`ours`, below). */
+const URL_HOST = /https?:\/\/[A-Za-z0-9.-]+/g;
 
 /**
  * Pure: the disagreements between the facts and one set of file contents
@@ -191,9 +189,11 @@ export function factsProblems(facts, files) {
     }
     if (images.length === 0) say("docker-compose.yml", `no service runs the published image ${facts.image}:latest`);
   }
-  // A `docs.` host is one of OURS — and so a stale copy when it differs — when
-  // it names the project or the organization (`docs.switchboard.old.example`);
-  // a third party's documentation (`docs.github.com`) is left alone.
+  // A host is one of OURS — and so a stale docs copy when it is not the docs
+  // host — when it names the project or the organization: a `docs.` host under
+  // an old name (`docs.switchboard.old.example`) and a retired product domain
+  // (`old-switchboard.example`) alike. A third party's host (`docs.github.com`,
+  // the repository's `github.com`) is left alone.
   const ours = (host) => host.includes(facts.name) || host.includes(facts.organization);
 
   for (const [file, text] of Object.entries(files)) {
@@ -204,7 +204,7 @@ export function factsProblems(facts, files) {
     for (const m of (scopeMention && text.match(scopeMention)) ?? []) {
       if (m !== npmPackage) say(file, `package "${m}" — project.json says npmPackage ${npmPackage}`);
     }
-    for (const m of text.match(docsUrlPattern(docsHost)) ?? []) {
+    for (const m of text.match(URL_HOST) ?? []) {
       const host = new URL(m).host;
       if (host !== docsHost && ours(host)) say(file, `docs URL "${m}" — project.json says ${facts.docs}`);
     }

@@ -3,7 +3,7 @@
   <img src="docs/public/logo-light.svg" width="56" height="56" alt="">
 </picture>
 
-# OpenSwitchboard
+# Switchboard
 
 [![CI](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/coreplanelabs/switchboard/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/coreplanelabs/switchboard/badge)](https://scorecard.dev/viewer/?uri=github.com/coreplanelabs/switchboard) [![Latest release](https://img.shields.io/github/v/release/coreplanelabs/switchboard)](https://github.com/coreplanelabs/switchboard/releases/latest) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
@@ -27,7 +27,7 @@ npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key
 npx @coreplane/switchboard ask "what can you do?"
 ```
 
-`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` runs the whole pipeline. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`.
+`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` runs the whole pipeline. `curl -fsSL https://switchboard.space/install.sh | sh` is the same `init`.
 
 Next: [Get started](docs/tutorials/get-started.md).
 
@@ -77,4 +77,4 @@ Off means absent from `help`, the dashboard and the plan ([Turn features on and 
 
 ## Learn more
 
-Docs: <https://openswitchboard.dev> ([`docs/`](docs/README.md)) · [CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md) · [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
+Docs: <https://switchboard.space> ([`docs/`](docs/README.md)) · [CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md) · [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).

@@ -1,6 +1,6 @@
 # Run-friction analyzer
 
-OpenSwitchboard can diagnose **what cost a run time or made it stumble** from its own run-event stream — slow model turns, slow or failed tool calls, retries, setup/install time, wrap-up, budget hits, and exec-infrastructure failures — as a structured, deterministic diagnosis. This is the *observe → diagnose* half of the self-improvement loop. Everything in this feature is read-only analysis; the *propose* half — clustering these diagnoses across recent runs and filing deduped issue proposals — is [self-improvement.md](self-improvement.md).
+Switchboard can diagnose **what cost a run time or made it stumble** from its own run-event stream — slow model turns, slow or failed tool calls, retries, setup/install time, wrap-up, budget hits, and exec-infrastructure failures — as a structured, deterministic diagnosis. This is the *observe → diagnose* half of the self-improvement loop. Everything in this feature is read-only analysis; the *propose* half — clustering these diagnoses across recent runs and filing deduped issue proposals — is [self-improvement.md](self-improvement.md).
 
 **Pure and deterministic (locked design).** `analyzeRunFriction(events, opts?)` is a function of the event stream alone — no clock, no I/O, no mutation of its input. The same events always yield a deep-equal diagnosis, so it runs identically over a live backlog, a saved capture, or a test fixture. That property is what will later let a fix-proposer be tested against recorded runs.
 

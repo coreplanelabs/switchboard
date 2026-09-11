@@ -12,7 +12,7 @@ const read = (p: string) => readFileSync(new URL(p, `file://${root}`), "utf8");
 
 const facts = {
   name: "switchboard",
-  displayName: "OpenSwitchboard",
+  displayName: "Acme Switchboard",
   npmPackage: "@acme/switchboard",
   description: "Mention it and an agent does the work.",
   organization: "acme",
@@ -42,7 +42,7 @@ describe("factsProblems", () => {
   it("is silent when every copy agrees", () => {
     const files = {
       "package.json": goodPkg,
-      "README.md": "# OpenSwitchboard\n\nInstall `@acme/switchboard`; the sandbox pins `@cloudflare/sandbox`.",
+      "README.md": "# Acme Switchboard\n\nInstall `@acme/switchboard`; the sandbox pins `@cloudflare/sandbox`.",
       "SECURITY.md": "email <dev@example.com> or the Security tab",
       "docs/README.md": "published at https://docs.switchboard.example.com/ and https://github.com/acme/switchboard",
       "deploy/cloudflare-docs/wrangler.jsonc":
@@ -71,7 +71,7 @@ describe("factsProblems", () => {
 
   it("leaves a third party's docs host alone, and flags one under the organization's name", () => {
     const files = {
-      "README.md": "# OpenSwitchboard\n\nsee https://docs.github.com/en/actions and https://docs.anthropic.com/",
+      "README.md": "# Acme Switchboard\n\nsee https://docs.github.com/en/actions and https://docs.anthropic.com/",
       "SUPPORT.md": "old: https://docs.acme.example/switchboard",
     };
     const what = factsProblems(facts, files).map((p) => `${p.file}: ${p.what}`);
@@ -83,14 +83,30 @@ describe("factsProblems", () => {
   it("a docs host without a `docs.` prefix — a product domain — is checked too: exact copies pass, a stale sibling is flagged", () => {
     const apex = { ...facts, docs: "https://openswitchboard.example" };
     const files = {
-      "README.md": "# OpenSwitchboard\n\nread at https://openswitchboard.example/start and https://docs.github.com/",
-      // A lookalike host must not match the configured host: the dots are literal, not wildcards.
+      "README.md": "# Acme Switchboard\n\nread at https://openswitchboard.example/start and https://docs.github.com/",
+      // A lookalike host is compared whole: it is not the configured host, and it names the project.
       "CONTRIBUTING.md": "not ours: https://openswitchboardXexample/",
       "SUPPORT.md": "old: https://docs.switchboard.example.com/",
     };
     const what = factsProblems(apex, files).map((p) => `${p.file}: ${p.what}`);
     expect(what).toEqual([
+      'CONTRIBUTING.md: docs URL "https://openswitchboardXexample" — project.json says https://openswitchboard.example',
       'SUPPORT.md: docs URL "https://docs.switchboard.example.com" — project.json says https://openswitchboard.example',
+    ]);
+  });
+
+  it("a retired product domain — an apex that names the project, not a `docs.` host — is a stale docs URL too", () => {
+    const apex = { ...facts, docs: "https://switchboard.example" };
+    const files = {
+      "README.md":
+        "# Acme Switchboard\n\nread at https://switchboard.example/start, formerly https://openswitchboard.example/start",
+      // A host that does not name the project or the organization is someone else's.
+      "SUPPORT.md": "see https://board.example/ and https://acme-widgets.example/",
+    };
+    const what = factsProblems(apex, files).map((p) => `${p.file}: ${p.what}`);
+    expect(what).toEqual([
+      'README.md: docs URL "https://openswitchboard.example" — project.json says https://switchboard.example',
+      'SUPPORT.md: docs URL "https://acme-widgets.example" — project.json says https://switchboard.example',
     ]);
   });
 
@@ -103,7 +119,7 @@ describe("factsProblems", () => {
         repository: { url: "y" },
         bugs: { url: "z" },
       }),
-      "README.md": "# OpenSwitchboard\n\nsee https://github.com/acme/infrastructure",
+      "README.md": "# Acme Switchboard\n\nsee https://github.com/acme/infrastructure",
     };
     const problems = factsProblems(facts, files);
     expect(problems.filter((p) => p.file === "README.md")).toEqual([]);
@@ -165,7 +181,7 @@ describe("factsProblems", () => {
     it("is silent when every badge names the repository under its owner", () => {
       const files = {
         "README.md": [
-          "# OpenSwitchboard",
+          "# Acme Switchboard",
           "[![CI](https://github.com/acme/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/acme/switchboard/actions/workflows/ci.yml)",
           "[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/acme/switchboard/badge)](https://scorecard.dev/viewer/?uri=github.com/acme/switchboard)",
           "[![Latest release](https://img.shields.io/github/v/release/acme/switchboard)](https://github.com/acme/switchboard/releases/latest)",
@@ -178,7 +194,7 @@ describe("factsProblems", () => {
     it("names a shields.io GitHub badge under another owner, and leaves one for another repository alone", () => {
       const files = {
         "README.md":
-          "# OpenSwitchboard\n\n![release](https://img.shields.io/github/v/release/someone-else/switchboard) ![other](https://img.shields.io/github/license/acme/infrastructure)",
+          "# Acme Switchboard\n\n![release](https://img.shields.io/github/v/release/someone-else/switchboard) ![other](https://img.shields.io/github/license/acme/infrastructure)",
       };
       expect(factsProblems(facts, files).map((p) => `${p.file}: ${p.what}`)).toEqual([
         'README.md: repository "img.shields.io/github/v/release/someone-else/switchboard" — project.json says https://github.com/acme/switchboard',
@@ -315,13 +331,13 @@ describe("factsProblems", () => {
     const what = (readme: string) => factsProblems(facts, { "README.md": readme }).map((p) => `${p.file}: ${p.what}`);
 
     it("the README's first H1 equals displayName; a stale name or a README without a heading is named", () => {
-      expect(what("# OpenSwitchboard\n\nbadges")).toEqual([]);
-      expect(what("Intro line\n\n# OpenSwitchboard\n## Not first")).toEqual([]);
+      expect(what("# Acme Switchboard\n\nbadges")).toEqual([]);
+      expect(what("Intro line\n\n# Acme Switchboard\n## Not first")).toEqual([]);
       expect(what("# Switchboard\n")).toEqual([
-        'README.md: first heading is "Switchboard" — project.json says displayName "OpenSwitchboard"',
+        'README.md: first heading is "Switchboard" — project.json says displayName "Acme Switchboard"',
       ]);
       expect(what("no heading at all")).toEqual([
-        'README.md: has no `# ` heading — the first one must be displayName "OpenSwitchboard"',
+        'README.md: has no `# ` heading — the first one must be displayName "Acme Switchboard"',
       ]);
     });
 
@@ -356,7 +372,7 @@ describe("factsProblems", () => {
 
     it("every package mentioned under the same scope is npmPackage; other scopes are left alone", () => {
       const files = {
-        "README.md": "# OpenSwitchboard\n\nnpm install @acme/switchboard — the sandbox is @cloudflare/sandbox@0.5.0",
+        "README.md": "# Acme Switchboard\n\nnpm install @acme/switchboard — the sandbox is @cloudflare/sandbox@0.5.0",
         "CONTRIBUTING.md": "publish as `@acme/switchboard-cli` and `@acme/switchboard`",
       };
       expect(what({}, files)).toEqual([

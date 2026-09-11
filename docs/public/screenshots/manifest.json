@@ -14,7 +14,7 @@
     "web/src/assets/main.css": "4db83d9d4b8000ec9985386895be1526599a9a2379f9ba44283722f4c0ff1de5",
     "web/src/components/AppNav.vue": "3f57e83cd3ba54d426dd1a50e7fd8e4e49ca918e0d164a8f1c0cc5b714783a93",
     "web/src/components/AppShell.vue": "4ba11f15ece856685ef7e486fc654d5a1aa921a40acab25a38be5c22ce5e1a84",
-    "web/src/components/BrandMark.vue": "4a1f4b12855e9d39c68ace33c2933b46e85feee8a8ba78b832862745dda5d837",
+    "web/src/components/BrandMark.vue": "8311ed167941d2bb64d97d8d355edad1738816af02cdaf4a02fabc5086c4c63f",
     "web/src/components/DocsLink.vue": "1f7f5d4b34758ae9c7febafde0ab94a0812fb15ce5fe4bc5af6fed1ff58b756e",
     "web/src/components/ExpandableText.vue": "e98b2d6c352a08d5a8ecc89bef39e42301295084a158e566bd0eeb9bc14b8b76",
     "web/src/components/GithubMark.vue": "8376ffa827e804622a201780658611f5be1cb650215e20f10c018ced34e8c705",

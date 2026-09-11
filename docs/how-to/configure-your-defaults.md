@@ -4,7 +4,7 @@ Set the agent, model and effort once, at the scope that owns them, instead of re
 
 **You need:**
 
-- OpenSwitchboard answering you in Slack or on the CLI.
+- Switchboard answering you in Slack or on the CLI.
 - For a channel's defaults, the `config:write` grant ([Restrict who can do what](restrict-who-can-do-what.md)); your own need none.
 
 Examples are chat messages; the same commands work on the CLI (`npx @coreplane/switchboard config set me --model openai/gpt-5`), HTTP and MCP.

@@ -1,4 +1,4 @@
-# Contributing to OpenSwitchboard
+# Contributing to Switchboard
 
 Thanks for helping. This page is the short version of how work gets done here;
 the docs tree explains the system itself.
@@ -93,7 +93,7 @@ reproduces a shard locally.
 it pass. When you fix a bug, the test that reproduces it lands in the same
 commit as the fix.
 
-**Specs and docs move with the code.** OpenSwitchboard keeps a written behavioral
+**Specs and docs move with the code.** Switchboard keeps a written behavioral
 contract for each feature and a documentation tree organized by
 [Diataxis](https://diataxis.fr). A pull request that changes what a user,
 operator, or dashboard viewer sees updates the matching spec and the matching

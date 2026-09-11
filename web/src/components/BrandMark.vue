@@ -7,7 +7,7 @@
   <svg
     viewBox="0 0 64 64"
     class="mark inline-block size-[1.35em] shrink-0 align-[-0.3em]"
-    aria-label="OpenSwitchboard"
+    aria-label="Switchboard"
     role="img"
   >
     <g transform="translate(0 2)" stroke-linejoin="round" stroke-linecap="round" stroke-width="4">

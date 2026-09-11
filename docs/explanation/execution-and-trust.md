@@ -1,6 +1,6 @@
 # Execution and trust
 
-OpenSwitchboard cannot make the model's judgement safe, so it bounds the blast radius of a tool call by choosing where the call runs.
+Switchboard cannot make the model's judgement safe, so it bounds the blast radius of a tool call by choosing where the call runs.
 
 Every agent's `bash` runs commands the model wrote; an injected instruction or a bad turn runs anything the tool's environment reaches. The full threat model is [Security model](security-model.md).
 

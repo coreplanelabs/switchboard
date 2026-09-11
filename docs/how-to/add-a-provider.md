@@ -1,6 +1,6 @@
 # Add a model provider
 
-Route a new provider's models through OpenSwitchboard, so a `model:` directive and `defaults.models` can name them.
+Route a new provider's models through Switchboard, so a `model:` directive and `defaults.models` can name them.
 
 **You need:**
 
