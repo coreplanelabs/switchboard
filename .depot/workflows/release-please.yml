@@ -206,9 +206,9 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - {name: bot, context: ., suffix: ""}
-          - {name: resident, context: deploy/cloudflare-resident, suffix: -resident}
-          - {name: sandbox, context: deploy/cloudflare-sandbox, suffix: -sandbox}
+          - { name: bot, context: ., suffix: "" }
+          - { name: resident, context: deploy/cloudflare-resident, suffix: -resident }
+          - { name: sandbox, context: deploy/cloudflare-sandbox, suffix: -sandbox }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: name the image from the repository
