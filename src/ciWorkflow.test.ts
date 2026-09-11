@@ -517,7 +517,12 @@ describe("the release publishes the npm package", () => {
     expect(off.if).toContain("vars.SWITCHBOARD_PUBLISH_NPM != 'true'");
     expect(off.if).toContain("github.ref != format('refs/heads/{0}', github.event.repository.default_branch)");
     expect(off.if).toContain("release_created");
-    expect(off.run).toContain("${{ github.ref_name }}");
+    // The ref name reaches the shell through env, never expanded inside `run:`.
+    expect((off as Step & { env?: Record<string, string> }).env).toEqual({
+      REF_NAME: "${{ github.ref_name }}",
+      PUBLISH_NPM: "${{ vars.SWITCHBOARD_PUBLISH_NPM }}",
+    });
+    expect(off.run).toContain("$REF_NAME");
     expect(off.run).toContain("::notice");
     expect(off.run).toContain("SWITCHBOARD_PUBLISH_NPM");
   });
@@ -815,7 +820,7 @@ describe("the production deploy is one reusable workflow", () => {
       expect(c.with ?? {}).not.toHaveProperty("ref");
     }
     expect(tree.if).toBe("inputs.cli != 'package'");
-    expect(tree.with).toEqual({ "fetch-depth": 0, "fetch-tags": true });
+    expect(tree.with).toEqual({ "fetch-depth": 0, "fetch-tags": true, "persist-credentials": false });
     expect(profileOnly.if).toBe(
       "inputs.cli == 'package' && !(startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'github://') || startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'op://'))",
     );

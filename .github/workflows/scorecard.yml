@@ -13,7 +13,10 @@ on:
     - cron: "31 7 * * 1"
   workflow_dispatch:
 
-permissions: read-all
+# The reads the ANALYSIS job needs are named on that job; the workflow itself
+# holds the same floor as every other workflow here.
+permissions:
+  contents: read
 
 jobs:
   visibility:
@@ -38,7 +41,7 @@ jobs:
     name: scorecard analysis
     needs: visibility
     runs-on: namespace-profile-mid
-    # A job-level block REPLACES the workflow's `read-all`, so every read the
+    # A job-level block REPLACES the workflow's block, so every read the
     # action needs must be named here. On a private repository the action's
     # GraphQL setup (ListCommits: commits with their pull requests, reviews and
     # checks) fails with "Resource not accessible by integration" without the
