@@ -59,6 +59,9 @@ jobs:
           # `decisions:check` (in check:consistency) diffs accepted records against origin/main;
           # a shallow clone has no origin/main and would skip that half.
           fetch-depth: 0
+          # No step here pushes or fetches after the checkout, so the token
+          # never lands in .git/config (here and in every checkout below).
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -79,13 +82,17 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
-      - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+      # The shard values are the integers in this job's matrix, not user input,
+      # and src/ciWorkflow.test.ts pins this exact line — hence the ignore.
+      - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }} # zizmor: ignore[template-injection]
 
   bot:
     # The required check `bot`: green only when every static check and every
@@ -98,6 +105,8 @@ jobs:
       NEEDS: ${{ toJSON(needs) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: npm run ci:gate
 
   web:
@@ -105,6 +114,8 @@ jobs:
     runs-on: depot-ubuntu-24.04-4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -120,6 +131,8 @@ jobs:
       WRANGLER_SEND_METRICS: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -142,6 +155,8 @@ jobs:
     runs-on: depot-ubuntu-24.04-4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -164,6 +179,8 @@ jobs:
         worker: [deploy/cloudflare, deploy/cloudflare-memory, deploy/cloudflare-resident, deploy/cloudflare-sandbox]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -182,6 +199,8 @@ jobs:
       NEEDS: ${{ toJSON(needs) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: npm run ci:gate
 
   image-each:
@@ -201,6 +220,8 @@ jobs:
         worker: [deploy/cloudflare, deploy/cloudflare-resident, deploy/cloudflare-sandbox]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: npm run check:image -w ${{ matrix.worker }}
 
   image:
@@ -213,6 +234,8 @@ jobs:
       NEEDS: ${{ toJSON(needs) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: npm run ci:gate
 
   # Which Workers this PR's diff would deploy (docs/reference/specs/release-and-deploy.md
@@ -234,6 +257,7 @@ jobs:
         with:
           # Full history: the diff against the PR base needs both commits.
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -259,6 +283,7 @@ jobs:
         with:
           # Two commits: enough to see what this push changed.
           fetch-depth: 2
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc

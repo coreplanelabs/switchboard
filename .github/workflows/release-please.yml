@@ -101,7 +101,11 @@ jobs:
       # published lives here, on the release that would have published it.
       - name: npm publish is off
         if: always() && (steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created) == 'true' && (vars.SWITCHBOARD_PUBLISH_NPM != 'true' || github.ref != format('refs/heads/{0}', github.event.repository.default_branch))
-        run: echo "::notice title=npm publish is off::this release does not publish the npm package — the publish-npm job runs only for a release cut from the default branch (this one is ${{ github.ref_name }}) with the repository variable SWITCHBOARD_PUBLISH_NPM set to true (it is '${{ vars.SWITCHBOARD_PUBLISH_NPM }}') and the package's trusted publisher naming this repository."
+        # Through env, not inline: a ref name expanded inside `run:` is shell.
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          PUBLISH_NPM: ${{ vars.SWITCHBOARD_PUBLISH_NPM }}
+        run: echo "::notice title=npm publish is off::this release does not publish the npm package — the publish-npm job runs only for a release cut from the default branch (this one is $REF_NAME) with the repository variable SWITCHBOARD_PUBLISH_NPM set to true (it is '$PUBLISH_NPM') and the package's trusted publisher naming this repository."
 
   # The release PR carries its deploy plan (docs/reference/specs/release-and-deploy.md
   # item 8). Posted from HERE, on the push to main that opened or updated the
@@ -141,6 +145,8 @@ jobs:
           # the last `v*` tag as the fallback base.
           fetch-depth: 0
           fetch-tags: true
+          # The sticky comment is posted with GH_TOKEN, never through git.
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -175,12 +181,15 @@ jobs:
   deploy:
     needs: [release-please, publish-image]
     if: needs.release-please.outputs.release_created == 'true'
-    uses: ./.github/workflows/deploy-production.yml
+    # The called workflow declares each secret by name and requires none; this
+    # repository's own call inherits the full set on purpose (an operator's
+    # repository passes them by name instead) — src/ciWorkflow.test.ts pins both.
+    uses: ./.github/workflows/deploy-production.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
     with:
       targets: affected
-    secrets: inherit
+    secrets: inherit # zizmor: ignore[secrets-inherit]
 
   # The same release publishes the three images (docs/reference/specs/release-and-deploy.md
   # item 21), one leg per image: each Dockerfile from the context its
@@ -213,6 +222,8 @@ jobs:
           - { name: sandbox, context: deploy/cloudflare-sandbox, suffix: -sandbox }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: name the image from the repository
         id: image
         # `${VAR,,}` is bash's lowercase; the tag is `v<version>`, the image tag
@@ -286,7 +297,12 @@ jobs:
       - name: the first attestation failed
         # `always()`: without it GitHub ANDs `success()` in, and this step would be skipped exactly when the retry failed too.
         if: always() && steps.attest.outcome == 'failure'
-        run: echo "::warning title=attestation retried::the first attestation of ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }} failed (its step above has the message) and the retry ${{ steps.attest-retry.outcome }}. The image itself was pushed once; the retry attests that same digest."
+        # Name and digest through env, not inline: step outputs expanded inside
+        # `run:` are shell. The outcome is GitHub's own enum and stays inline.
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "::warning title=attestation retried::the first attestation of $IMAGE@$DIGEST failed (its step above has the message) and the retry ${{ steps.attest-retry.outcome }}. The image itself was pushed once; the retry attests that same digest."
 
   # The same release publishes the CLI to npm (docs/reference/specs/packaging.md
   # item 5): the package under packages/switchboard, whose version the release
@@ -323,6 +339,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -330,7 +348,7 @@ jobs:
           cache-dependency-path: package-lock.json
       # Trusted publishing needs npm 11.5.1 or later; the Node in .nvmrc may bundle an
       # older one. Pinned, like every action above: a release runs the npm that was reviewed.
-      - run: npm install -g npm@11.19.1
+      - run: npm install -g npm@11.19.1 # zizmor: ignore[adhoc-packages]
       - run: npm ci
       - run: npm run build -w packages/switchboard
       - run: npm publish --workspace packages/switchboard --access public --provenance=false

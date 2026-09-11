@@ -240,12 +240,17 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          # Nothing after the checkout pushes or fetches; the deploy's
+          # credentials are Cloudflare's, never the GitHub token.
+          persist-credentials: false
       # In `package` mode only a profile that is a path inside the calling
       # repository wants it on disk — shallow, there is no tree to judge. A
       # `github://` or `op://` profile is read over the network and the
       # operator's directory stays empty.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: inputs.cli == 'package' && !(startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'github://') || startsWith(env.SWITCHBOARD_DEPLOY_PROFILE, 'op://'))
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: inputs.cli != 'package'
         with:
