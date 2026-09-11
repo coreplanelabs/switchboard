@@ -13,16 +13,22 @@ import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
 import { MermaidMarkdown } from "vitepress-plugin-mermaid";
+import { writeOgCards } from "./og-render.mjs";
+import { ogHead, ogSubject, type OgSubject } from "./og.mjs";
 
 // The project's identity — the name a reader sees, its repository and steward —
 // is stated once in project.json (npm run check:project-facts); the site reads
 // it, never copies it: `displayName` is the site title, the tab, and the hero's
 // product name (theme/LandingPage.vue reads it back as `site.title`), and
 // `check:site` proves the built home page carries it. The licence the footer
-// names is the one package.json declares, for the same reason.
+// names is the one package.json declares, for the same reason. The one-sentence
+// `description` is the home card's muted line, and `docs` — the site's own
+// origin — is what every card's absolute URL is built on.
 const project = JSON.parse(readFileSync(new URL("../../project.json", import.meta.url), "utf8")) as {
   displayName: string;
+  description: string;
   repository: string;
+  docs: string;
   steward: { name: string };
 };
 const { license } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
@@ -53,6 +59,13 @@ const PRELOADED_FONTS = [
 // at build time so the list cannot drift from the tree; the label is each
 // spec's own H1.
 const SPECS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "reference", "specs");
+// Every page names its social card in its head (transformHead) and the cards
+// are drawn once the pages are rendered (buildEnd), into the build output —
+// so the set drawn is exactly the set the pages point at. Keyed by file: the
+// not-found page shares the home card and must not draw it twice.
+const ogSubjects = new Map<string, OgSubject>();
+const MARK_SVG = fileURLToPath(new URL("../public/logo-dark.svg", import.meta.url));
+
 const specItems = readdirSync(SPECS_DIR)
   .filter((f) => f.endsWith(".md") && f !== "README.md")
   .sort()
@@ -131,10 +144,37 @@ export default defineConfig({
     ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
     ["link", { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" }],
   ],
-  transformHead({ assets }) {
-    return assets
-      .filter((asset) => PRELOADED_FONTS.some((font) => font.test(asset)))
-      .map((href) => ["link", { rel: "preload", href, as: "font", type: "font/woff2", crossorigin: "" }]);
+  // The font preloads, then the page's social card: Open Graph and Twitter
+  // tags pointing at `<docs>/og/<route>.png`, absolute under project.json's
+  // `docs` — an unfurler fetches the picture from wherever the tags say. The
+  // card's title is the page's own (its H1), its line the page's description
+  // — the site's sentence unless the page's frontmatter has one; the home
+  // card carries the product's name and its one-sentence description.
+  transformHead({ assets, pageData, description }) {
+    const subject = ogSubject(
+      { relativePath: pageData.relativePath, title: pageData.title, description },
+      { displayName: project.displayName, description: project.description },
+    );
+    ogSubjects.set(subject.file, subject);
+    return [
+      ...assets
+        .filter((asset) => PRELOADED_FONTS.some((font) => font.test(asset)))
+        .map((href): [string, Record<string, string>] => [
+          "link",
+          { rel: "preload", href, as: "font", type: "font/woff2", crossorigin: "" },
+        ]),
+      ...ogHead(subject, project.docs),
+    ];
+  },
+  // The cards themselves, one PNG per page under `og/` in the build output —
+  // generated, never committed; deploy/cloudflare-docs/ uploads dist whole.
+  async buildEnd(siteConfig) {
+    const written = await writeOgCards(ogSubjects.values(), join(siteConfig.outDir, "og"), {
+      displayName: project.displayName,
+      docsUrl: project.docs,
+      markSvgPath: MARK_SVG,
+    });
+    siteConfig.logger.info(`social cards: ${written.length} drawn into ${join(siteConfig.outDir, "og")}`);
   },
   // The root README.md is the docs hub GitHub shows for the directory; on the
   // site the same route is the landing page. Marking it `layout: home` here
