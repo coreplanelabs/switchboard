@@ -130,7 +130,14 @@ async function copy() {
           Mention it in Slack or call it over the CLI, HTTP or MCP — an agent answers on the model you choose.
         </p>
         <div class="actions">
-          <a class="button brand" href="/tutorials/get-started">Get started</a>
+          <!-- The primary door is the system's arrow-chip button: the inverted
+               neutral with a canvas-coloured square holding a thin arrow. -->
+          <a class="button brand" href="/tutorials/get-started">
+            Get started
+            <span class="chip" aria-hidden="true">
+              <svg viewBox="0 0 16 16"><path d="M4.5 11.5 11.5 4.5M6 4.5h5.5V10" /></svg>
+            </span>
+          </a>
           <a class="button alt" :href="project.repository">GitHub</a>
         </div>
         <div class="install">
@@ -146,7 +153,9 @@ async function copy() {
              the script has run, the source picks the file for the OS scheme; once
              `heroSrc` is set, the image follows the site's appearance instead. -->
         <figure class="frame hero-frame">
-          <div class="bar" aria-hidden="true"><span class="dots"></span><span class="url">/runs/…</span></div>
+          <div class="bar" aria-hidden="true">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/runs/…</span>
+          </div>
           <picture>
             <source v-if="heroSrc === null" media="(prefers-color-scheme: dark)" :srcset="shotSrc(hero.name, 'dark')" />
             <img
@@ -171,7 +180,9 @@ async function copy() {
           <a class="more" :href="story.link">{{ story.cta }} →</a>
         </div>
         <figure class="frame picture" :style="{ '--crop': story.crop }">
-          <div class="bar" aria-hidden="true"><span class="dots"></span></div>
+          <div class="bar" aria-hidden="true">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          </div>
           <img
             class="light"
             :src="shotSrc(story.shot.name, 'light')"
@@ -307,9 +318,8 @@ async function copy() {
   }
 }
 
-/* Hero */
+/* Hero: type on the bare canvas, nothing behind it. */
 .hero {
-  position: relative;
   padding: 64px 0 0;
 }
 
@@ -319,42 +329,31 @@ async function copy() {
   }
 }
 
-/* A hairline texture behind the hero: diagonal lines at a few percent of ink,
- * fading out before the picture. */
-.hero::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: repeating-linear-gradient(-60deg, var(--sb-c-hairline) 0 1px, transparent 1px 18px);
-  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.9), transparent 80%);
-  pointer-events: none;
-}
-
+/* The eyebrow is the system's: mono, small, spaced, faint. */
 .eyebrow {
-  margin: 0 0 20px;
+  margin: 0 0 24px;
   font-family: var(--vp-font-family-mono);
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--vp-c-brand-1);
+  color: var(--vp-c-text-3);
 }
 
 /* The product's name keeps its own casing inside the uppercase eyebrow. */
 .eyebrow .product {
   text-transform: none;
-  font-weight: 600;
+  color: var(--vp-c-text-1);
 }
 
+/* The headline is the text face, bigger: the house weight, the letters
+ * tightened, the leading closed. */
 .title {
   margin: 0;
-  font-family: var(--sb-font-display);
-  font-variation-settings: var(--sb-display-settings);
-  font-weight: 600;
+  font-weight: 500;
   font-size: clamp(2.75rem, 1.25rem + 5.6vw, 6.25rem);
   line-height: 0.98;
-  letter-spacing: -0.035em;
+  letter-spacing: -0.025em;
   color: var(--vp-c-text-1);
 }
 
@@ -371,53 +370,80 @@ async function copy() {
 
 .lead {
   margin: 28px 0 0;
-  max-width: 44ch;
-  font-size: clamp(1.125rem, 1rem + 0.5vw, 1.375rem);
-  line-height: 1.45;
+  max-width: 36rem;
+  font-size: clamp(1.0625rem, 1rem + 0.35vw, 1.25rem);
+  line-height: 1.55;
   color: var(--vp-c-text-2);
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 12px;
   margin: 36px 0 0;
 }
 
 .button {
-  display: inline-block;
-  padding: 0 24px;
-  line-height: 48px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  font-size: 15px;
-  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 12px;
+  font-size: 14px;
   text-decoration: none;
   transition:
-    background-color 0.2s,
-    border-color 0.2s,
-    color 0.2s;
+    opacity 0.15s,
+    background-color 0.15s;
 }
 
+/* Primary: the inverted neutral, lit faintly from above, floating on the one
+ * shadow; the canvas-coloured chip holds a thin arrow that nudges on hover. */
 .button.brand {
-  background: var(--vp-button-brand-bg);
-  color: var(--vp-button-brand-text);
+  gap: 16px;
+  padding: 6px 6px 6px 20px;
+  background: linear-gradient(to bottom, var(--sb-c-accent-from), var(--sb-c-accent-to));
+  color: var(--sb-c-on-accent);
+  font-weight: 500;
+  box-shadow: var(--sb-shadow-float);
 }
 
 .button.brand:hover {
-  background: var(--vp-button-brand-hover-bg);
-  color: var(--vp-button-brand-hover-text);
+  opacity: 0.95;
 }
 
+.chip {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--vp-c-bg);
+}
+
+.chip svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--vp-c-text-1);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.15s;
+}
+
+.button.brand:hover .chip svg {
+  transform: translate(2px, -2px);
+}
+
+/* Secondary: the same shape, just a hairline; hover is a 3% fill. */
 .button.alt {
-  border-color: var(--vp-c-border);
-  background: var(--vp-c-bg-elv);
+  padding: 0 20px;
+  line-height: 46px;
+  border: 1px solid var(--vp-c-divider);
   color: var(--vp-c-text-1);
 }
 
 .button.alt:hover {
-  border-color: var(--vp-c-brand-3);
-  color: var(--vp-c-brand-1);
+  background: var(--vp-c-bg-soft);
 }
 
 .install {
@@ -429,13 +455,13 @@ async function copy() {
   padding: 6px 6px 6px 16px;
   border: 1px solid var(--vp-c-divider);
   border-radius: 12px;
-  background: var(--vp-c-bg-elv);
+  background: var(--vp-c-bg-soft);
 }
 
 .command {
   overflow-x: auto;
   font-family: var(--vp-font-family-mono);
-  font-size: 14px;
+  font-size: 13px;
   white-space: nowrap;
   color: var(--vp-c-text-1);
 }
@@ -446,38 +472,39 @@ async function copy() {
   line-height: 30px;
   border: 0;
   border-radius: 8px;
-  background: var(--vp-c-bg-soft);
+  background: var(--vp-c-default-3);
   font: inherit;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--vp-c-text-2);
   cursor: pointer;
   transition:
-    background-color 0.2s,
-    color 0.2s;
+    background-color 0.15s,
+    color 0.15s;
 }
 
-.copy:hover {
+.copy:hover,
+.copy.done {
   color: var(--vp-c-text-1);
 }
 
-.copy.done {
-  background: var(--vp-c-brand-soft);
-  color: var(--vp-c-brand-1);
-}
-
-/* Frames: a window bar over the picture, a soft shadow under it. The image
- * keeps its own 16:10 through width/height, so the box is sized before it
- * arrives. The two images are one per appearance; the site's `dark` class on
- * <html> picks. */
+/* Frames: a hairline, the frame radius, the canvas behind — no shadow, no
+ * bezel — dimmed a little at rest and full on hover. The image keeps its own
+ * 16:10 through width/height, so the box is sized before it arrives. The two
+ * images are one per appearance; the site's `dark` class on <html> picks. */
 .frame {
   position: relative;
   margin: 0;
   border: 1px solid var(--vp-c-divider);
-  border-radius: 16px;
-  background: var(--vp-c-bg-elv);
-  box-shadow: var(--sb-frame-shadow);
+  border-radius: 12px;
+  background: var(--vp-c-bg);
   overflow: hidden;
+  opacity: 0.88;
+  transition: opacity 0.35s ease;
+}
+
+.frame:hover {
+  opacity: 1;
 }
 
 .hero-frame {
@@ -490,38 +517,37 @@ async function copy() {
   }
 }
 
+/* The window bar is the terminal mock's: three hollow dots and a faint address. */
 .bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 40px;
-  padding: 0 16px;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--vp-c-divider);
   background: var(--vp-c-bg-soft);
 }
 
-.dots {
+.dot {
   display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--vp-c-divider);
   border-radius: 50%;
-  background: var(--vp-c-border);
-  box-shadow:
-    16px 0 0 var(--vp-c-border),
-    32px 0 0 var(--vp-c-border);
-  margin-right: 32px;
+  background: var(--vp-c-bg-soft);
 }
 
 .url {
   flex: 1;
   max-width: 320px;
-  padding: 0 12px;
-  line-height: 24px;
+  margin-left: 12px;
+  padding: 0 10px;
+  line-height: 22px;
   border-radius: 6px;
-  background: var(--vp-c-bg);
+  background: var(--vp-c-default-3);
   font-family: var(--vp-font-family-mono);
-  font-size: 12px;
-  color: var(--vp-c-text-3);
+  font-size: 11px;
+  color: var(--vp-c-text-2);
 }
 
 .frame img {
@@ -606,35 +632,41 @@ async function copy() {
   }
 }
 
+/* The two-tone sentence: the claim in ink, the qualifier in the faint grey,
+ * one size, one weight, inline. */
 .two-tone {
   margin: 0;
-  font-family: var(--sb-font-display);
-  font-variation-settings: var(--sb-display-settings);
-  font-weight: 600;
-  font-size: clamp(1.75rem, 1.1rem + 1.9vw, 2.75rem);
-  line-height: 1.08;
-  letter-spacing: -0.03em;
+  font-weight: 500;
+  font-size: clamp(1.5rem, 1rem + 1.6vw, 2.25rem);
+  line-height: 1.15;
+  letter-spacing: -0.025em;
   text-wrap: balance;
-  /* The second clause is the paragraph's own grey; only the first is inked. */
-  color: var(--vp-c-text-2);
+  color: var(--vp-c-text-3);
 }
 
 .two-tone .ink {
   color: var(--vp-c-text-1);
 }
 
+/* A link is strong text with a faint underline that darkens on hover. */
+.more,
+.pr {
+  color: var(--vp-c-text-1);
+  text-decoration: underline;
+  text-decoration-color: var(--sb-c-ghost);
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.15s;
+}
+
 .more {
   display: inline-block;
   margin-top: 24px;
   font-size: 15px;
-  font-weight: 600;
-  color: var(--vp-c-brand-1);
-  text-decoration: none;
+  font-weight: 500;
 }
 
 .more:hover {
-  color: var(--vp-c-brand-2);
-  text-decoration: underline;
+  text-decoration-color: var(--vp-c-text-1);
 }
 
 /* The thread: neutral messages in the site's own tokens, no platform's styling. */
@@ -645,9 +677,8 @@ async function copy() {
   max-width: 600px;
   padding: 24px;
   border: 1px solid var(--vp-c-divider);
-  border-radius: 16px;
-  background: var(--vp-c-bg-elv);
-  box-shadow: var(--sb-frame-shadow);
+  border-radius: 12px;
+  background: var(--vp-c-bg);
 }
 
 @media (min-width: 960px) {
@@ -665,22 +696,22 @@ async function copy() {
   flex: none;
   width: 36px;
   height: 36px;
-  border-radius: 9px;
-  font-family: var(--sb-font-display);
-  font-weight: 600;
-  font-size: 17px;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 16px;
   line-height: 36px;
   text-align: center;
 }
 
+/* A person is a soft chip; the bot wears the action colour. */
 .avatar.person {
-  background: var(--sb-c-accent-soft);
-  color: var(--sb-c-accent);
+  background: var(--vp-c-default-3);
+  color: var(--vp-c-text-2);
 }
 
 .avatar.bot {
-  background: var(--vp-c-brand-soft);
-  color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-3);
+  color: var(--sb-c-on-accent);
 }
 
 .body {
@@ -698,20 +729,21 @@ async function copy() {
 }
 
 .who {
-  font-weight: 700;
+  font-weight: 500;
   color: var(--vp-c-text-1);
 }
 
 .tag {
   padding: 0 5px;
   border-radius: 4px;
-  background: var(--vp-c-bg-soft);
+  background: var(--vp-c-default-3);
+  font-family: var(--vp-font-family-mono);
   font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-weight: 500;
+  letter-spacing: 0.08em;
   line-height: 16px;
   text-transform: uppercase;
-  color: var(--vp-c-text-3);
+  color: var(--vp-c-text-2);
 }
 
 .when {
@@ -723,37 +755,30 @@ async function copy() {
   margin: 4px 0 0;
   font-size: 15px;
   line-height: 1.5;
-  color: var(--vp-c-text-1);
+  color: var(--sb-c-body);
 }
 
 .mention {
   padding: 0 4px;
   border-radius: 4px;
   background: var(--vp-c-brand-soft);
-  font-weight: 600;
-  color: var(--vp-c-brand-1);
-}
-
-.pr {
-  color: var(--vp-c-brand-1);
-  text-decoration: underline;
-  text-decoration-color: var(--vp-c-brand-soft);
-  text-underline-offset: 2px;
+  font-weight: 500;
+  color: var(--vp-c-text-1);
 }
 
 .card {
   margin: 8px 0 0;
   padding: 14px 16px;
   border: 1px solid var(--vp-c-divider);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--vp-c-bg-soft);
 }
 
 .card-title {
   margin: 0;
   font-family: var(--vp-font-family-mono);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--vp-c-text-1);
 }
 
@@ -773,13 +798,14 @@ async function copy() {
   padding: 3px 0;
 }
 
+/* The two data colours on the page: a step that finished, a step in progress. */
 .tick {
   flex: none;
   width: 16px;
   height: 16px;
   fill: none;
-  stroke: var(--vp-c-brand-1);
-  stroke-width: 2;
+  stroke: var(--sb-c-ok);
+  stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -793,8 +819,8 @@ async function copy() {
   width: 14px;
   height: 14px;
   margin: 0 1px;
-  border: 2px solid var(--sb-c-accent-soft);
-  border-top-color: var(--sb-c-accent);
+  border: 2px solid var(--sb-c-working-soft);
+  border-top-color: var(--sb-c-working);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -814,8 +840,8 @@ async function copy() {
 .card-link {
   margin: 10px 0 0;
   font-size: 13px;
-  font-weight: 600;
-  color: var(--vp-c-brand-1);
+  font-weight: 500;
+  color: var(--vp-c-text-2);
 }
 
 /* The four seams: one row, a term and its implementations, no boxes. */
@@ -857,21 +883,19 @@ async function copy() {
   flex-direction: column;
   gap: 6px;
   text-decoration: none;
+  transition: opacity 0.15s;
+}
+
+.seam:hover {
+  opacity: 0.8;
 }
 
 .term {
-  font-family: var(--sb-font-display);
-  font-variation-settings: var(--sb-display-settings);
-  font-weight: 600;
-  font-size: 1.5rem;
+  font-weight: 500;
+  font-size: 1.375rem;
   letter-spacing: -0.025em;
-  line-height: 1.1;
+  line-height: 1.15;
   color: var(--vp-c-text-1);
-  transition: color 0.2s;
-}
-
-.seam:hover .term {
-  color: var(--vp-c-brand-1);
 }
 
 .gloss {
@@ -881,22 +905,23 @@ async function copy() {
   color: var(--vp-c-text-3);
 }
 
-/* Closing: the three commands, then one line. */
+/* Closing: the three commands, then one line; below it the section gap before
+ * the hub's own hairline (product.css draws that over the hub's title). */
 .closing {
-  padding: 96px 0 0;
+  padding: 96px 0 96px;
 }
 
 @media (min-width: 960px) {
   .closing {
-    padding: 144px 0 0;
+    padding: 144px 0 112px;
   }
 }
 
 .terminal {
   margin: 0;
-  padding: 24px 28px;
+  padding: 20px 24px;
   border: 1px solid var(--vp-c-divider);
-  border-radius: 16px;
+  border-radius: 12px;
   background: var(--vp-code-block-bg);
   overflow-x: auto;
 }
@@ -904,7 +929,7 @@ async function copy() {
 .terminal code {
   display: block;
   font-family: var(--vp-font-family-mono);
-  font-size: 15px;
+  font-size: 14px;
   line-height: 2;
   color: var(--vp-c-text-1);
 }
@@ -915,7 +940,7 @@ async function copy() {
 }
 
 .prompt {
-  color: var(--vp-c-text-3);
+  color: var(--sb-c-ghost);
 }
 
 .closing .caption {

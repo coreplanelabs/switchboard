@@ -41,11 +41,12 @@ function escapeHtml(s: string): string {
 }
 
 // The faces the theme bundles (theme/index.ts), preloaded so the first paint
-// is set in them: the text face and the display face carry everything above
-// the fold, so those two; the code face follows with the stylesheet.
+// is set in them: the text face carries the headline and the copy above the
+// fold, the mono the eyebrow and the install line, so those two — their latin
+// files; the other scripts follow with the stylesheet.
 const PRELOADED_FONTS = [
-  /geist-latin-wght-normal\.[\w-]+\.woff2$/,
-  /bricolage-grotesque-latin-opsz-normal\.[\w-]+\.woff2$/,
+  /instrument-sans-latin-wght-normal\.[\w-]+\.woff2$/,
+  /jetbrains-mono-latin-wght-normal\.[\w-]+\.woff2$/,
 ];
 
 // The reference specs are one sidebar entry per file, read from the directory
@@ -87,6 +88,9 @@ export default defineConfig({
   // A dead internal link is a build failure, not a 404 someone finds later.
   ignoreDeadLinks: false,
   markdown: {
+    // The highlighter's two palettes, one per appearance: the system's pair. The
+    // block's ground is the theme's own token (`--vp-code-block-bg`), not a theme's.
+    theme: { light: "github-light", dark: "vesper" },
     // Inline code is literal text. Fenced blocks already get `v-pre`; without
     // it on `<code>` too, a `{{placeholder}}` in a code span is compiled as a
     // Vue interpolation and breaks the build.
