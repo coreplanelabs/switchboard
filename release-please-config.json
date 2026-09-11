@@ -3,6 +3,7 @@
   "release-type": "node",
   "include-component-in-tag": false,
   "bootstrap-sha": "c3836673ab5bec15c331869f161d3b98e3852e07",
+  "release-as": "1.200.0",
   "changelog-sections": [
     { "type": "feat", "section": "Features" },
     { "type": "fix", "section": "Bug fixes" },
