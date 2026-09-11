@@ -16,6 +16,8 @@ import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
 import { makeShellRenderer } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
+import { createDeliveryViewHandler } from "./channels/deliveryView.js";
+import { NullDeliveryService, parseDeliveryConfig } from "./core/delivery.js";
 import {
   AnthropicCostReportSource,
   CloudflareGraphqlUsageSource,
@@ -71,7 +73,7 @@ import { writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters ---
-import { buildCoreCommands } from "./core/commandCatalogue.js";
+import { buildCoreCommands, deliveryServiceFromConfig } from "./core/commandCatalogue.js";
 import { accessActor, createCommandHttpHandler, isCommandPath, serviceTokenAllowed } from "./channels/commandHttp.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
@@ -347,6 +349,13 @@ export async function runBot(): Promise<void> {
   const scheduleStore =
     buildScheduleStore(config.config.schedules, processSecrets, (m) => console.warn(`[schedules] ${m}`)) ??
     new NullScheduleStore();
+  // Delivery indicators (docs/reference/specs/delivery.md): ONE service for the
+  // `/delivery` page and `delivery report`, GitHub over the App's read token
+  // with the `delivery:` config; without a GitHub credential the Null Object
+  // answers the page's 503 and the command is hidden by its capability.
+  const deliveryService = capabilities.github
+    ? deliveryServiceFromConfig(parseDeliveryConfig(config.config.delivery))
+    : new NullDeliveryService();
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
     secrets: processSecrets,
@@ -354,6 +363,7 @@ export async function runBot(): Promise<void> {
     warn: (m) => console.warn(m),
     capabilities,
     runs: runsService,
+    delivery: () => deliveryService,
     abridger: () => abridger,
     frictionLedger,
     tracker: deps.issueTracker,
@@ -475,6 +485,15 @@ export async function runBot(): Promise<void> {
       : costsCfg
         ? `GET /costs (503 — ${costsCfg.cloudflareTokenEnv} not set)`
         : "GET /costs (503 — no costs config)";
+    // Delivery page: GET /delivery (first repository) + /delivery/<owner>/<name>
+    // (+ .json twin). Reads GitHub and the viewer's own runs live per request;
+    // gated below alongside /runs, /residents and /costs.
+    const deliveryView = createDeliveryViewHandler({ service: deliveryService, runs: runsService }, shell);
+    const deliveryState = !capabilities.github
+      ? "GET /delivery (503 — no GitHub credential)"
+      : deliveryService.repos().length === 0
+        ? "GET /delivery (503 — no delivery.repos)"
+        : `GET /delivery (${deliveryService.repos().join(",")})`;
     const tokenCount = Object.keys(auth.tokens).length;
     const liveViewState = process.env.PUBLIC_BASE_URL
       ? "GET /runs (index) + /runs/:id (live view)"
@@ -626,7 +645,10 @@ export async function runBot(): Promise<void> {
         path.startsWith("/residents/") ||
         path === "/costs" ||
         path === "/costs.json" ||
-        path.startsWith("/costs/")
+        path.startsWith("/costs/") ||
+        path === "/delivery" ||
+        path === "/delivery.json" ||
+        path.startsWith("/delivery/")
       ) {
         dashboardAuth
           .verify(req)
@@ -648,11 +670,13 @@ export async function runBot(): Promise<void> {
             // --- /api/*: the command handler owns everything under it. ---
             if (isCommandPath(path)) return commandHttp(req, res, gate.identity);
             // --- end /api/* ---
-            if (liveView(req, res, { actor: accessActor(gate.identity, (id) => config.grantsFor(id)) })) return;
+            const actor = accessActor(gate.identity, (id) => config.grantsFor(id));
+            if (liveView(req, res, { actor })) return;
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res)) return;
             if (costsView(req, res)) return;
+            if (deliveryView(req, res, { actor })) return;
             res.writeHead(200, { "content-type": "text/plain" });
             res.end("ok");
           })
@@ -728,7 +752,7 @@ export async function runBot(): Promise<void> {
       // (~seconds) for an external prober to land inside the window itself.
       httpListeningAt = systemClock();
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       );
     });

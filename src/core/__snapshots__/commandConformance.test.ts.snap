@@ -181,6 +181,36 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "delivery:read",
+    "args": [],
+    "effect": "read",
+    "id": "delivery.report",
+    "options": [
+      {
+        "name": "repo",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "since",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "weeks",
+        "required": false,
+        "type": "integer",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "deploy:write",
     "args": [],
     "effect": "write",

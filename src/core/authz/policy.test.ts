@@ -277,6 +277,12 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
   ...commandRow("help:read", "help.show", [A.chatUser, A.browser, A.admin], [A.dispatchOnly, A.noGrants, A.token]),
   ...commandRow("status:read", "status.show", [A.chatUser, A.browser, A.admin], [A.dispatchOnly, A.noGrants, A.token]),
   ...commandRow(
+    "delivery:read",
+    "delivery.report",
+    [A.browser, A.admin, A.operator],
+    [A.chatUser, A.dispatchOnly, A.noGrants, A.token],
+  ),
+  ...commandRow(
     "schedule:read",
     "schedule.list",
     [A.chatUser, A.browser, A.operator],

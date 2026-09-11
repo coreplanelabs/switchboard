@@ -26,7 +26,7 @@ Copy the nearest fixture from [`src/core/testing/capabilityFixtures.ts`](../../s
 | `mcp` | An `mcp` block (`credentialKeyEnv`, default `MCP_CREDENTIAL_KEY`, 32 bytes base64) | `mcp` commands; `mcp__<server>__<tool>` tools on runs; the one-time connect page ([Connect an MCP server](connect-an-mcp-server.md)) | No external tools; `mcpServers` entries never connect | Local: sealed credentials in `data/mcp-secrets.json`; with `runtimeOverrides.worker`: the state Worker |
 | `costs` | A `costs` block + `CF_ANALYTICS_TOKEN` (Account Analytics: Read); optional `ANTHROPIC_ADMIN_KEY` | **Costs** section, `/costs`, `/costs/<group>.json` ([Check spend](check-spend.md)) | `/costs` answers 503 | Read-only API tokens; nothing stored |
 | `schedules` | `schedules.worker.baseUrl` + `MEMORY_TOKEN`; the cron identity in `SWITCHBOARD_INGRESS_TOKENS` with a `grants.http:cron` entry | Firing history on the **Scheduled** tab and in `schedule list` | Schedules listed, no firing history | The state Worker's `ScheduleDO`; the bot Worker's cron triggers |
-| `github` | `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`, or a personal `GH_TOKEN` | `github_*` tools; the coding agent's push and PR; `friction propose` files issues | Agents answer from the conversation and the web; no PRs | A GitHub App (recommended: scoped, rotates) or one personal token |
+| `github` | `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`, or a personal `GH_TOKEN` | `github_*` tools; the coding agent's push and PR; `friction propose` files issues; the **Delivery** section, `/delivery` and `delivery report` (repositories under `delivery.repos`) | Agents answer from the conversation and the web; no PRs; `/delivery` answers 503 | A GitHub App (recommended: scoped, rotates) or one personal token |
 | `ingress` | `SWITCHBOARD_INGRESS_TOKENS`: JSON map bearer → `{ subject, channel? }`, each subject granted in `grants.http:<subject>` / `mcp:<subject>` | `POST /ingress` and the MCP server at `/mcp` | Both routes refuse every bearer | Nothing |
 | `readingDiffAbridge` | The `meat` binary on the bot host's PATH (the bot image ships it) + the Anthropic provider's key + `review.readingDiff.provider` not `off` (see below) | `review abridge`; with `provider: meat` an abridged diff on every review | Reviews record the full diff only; no `review abridge` anywhere | One Opus-class call per abridged review |
 | `dashboardAuth` | `dashboard.auth`; default `access` when `ACCESS_TEAM_DOMAIN` + `ACCESS_AUD` are set, else `none`. `token` needs `dashboard.token.actor` and `DASHBOARD_TOKEN` (or the env var `dashboard.token.env` names) | `access`: anyone your Access policy admits, service tokens for machines. `token`: dashboards and `/api/*` for the bearer as one actor. `none`: loopback callers only | `none` refuses every remote caller; an explicit `none` on a public `PUBLIC_BASE_URL` refuses to start | Cloudflare Access (free tier covers small teams); `token` and `none`: nothing |
@@ -63,7 +63,7 @@ A command under two capabilities is on when either gives it a backend.
 | `mcp` | `mcp list`, `mcp add`, `mcp connect`, `mcp show`, `mcp remove` |
 | `costs` | — |
 | `schedules` | `schedule list` |
-| `github` | — |
+| `github` | `delivery report` |
 | `ingress` | — |
 | `readingDiffAbridge` | `review abridge` |
 | `dashboardAuth` | — |

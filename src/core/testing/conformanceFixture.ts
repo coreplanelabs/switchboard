@@ -42,6 +42,7 @@ import type { DeployRunResult, RestartRunResult } from "../../deploy/run.js";
 import type { PlannedFile } from "../../setup/plan.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { InMemoryIssueTracker } from "../../execution/githubIssues.js";
+import { createDeliveryService, InMemoryDeliverySource, type PullRequestFacts } from "../delivery.js";
 import { invokeChatCommand, parseChatCommand } from "../commandChat.js";
 import { ReviewAbridger } from "../reviewAbridge.js";
 import {
@@ -539,7 +540,55 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       }),
   };
   const runs = async () => createRunsService({ registry: s.reg, store: s.store, clock: () => NOW });
+  // `delivery report`: one merged pull request of the fixture repo, reviewed
+  // twice by a bot the fixture names, merged in the week of the pinned clock —
+  // read from memory, never from GitHub (`fetch` is disarmed here).
+  const merged = new Date(NOW).toISOString();
+  const delivery = createDeliveryService(
+    { repos: [FIXTURE.repo], reviewers: ["acme-review[bot]"], agentLogins: [], agentCoauthors: [] },
+    new InMemoryDeliverySource({
+      [FIXTURE.repo]: [
+        {
+          number: 42,
+          title: "fix the build",
+          author: "acme-coding[bot]",
+          createdAt: new Date(NOW - 3_600_000).toISOString(),
+          mergedAt: merged,
+          firstHeadSha: "0123456789abcdef0123456789abcdef01234567",
+          ci: [
+            {
+              headSha: "0123456789abcdef0123456789abcdef01234567",
+              trigger: "pull_request",
+              conclusion: "success",
+              attempt: 1,
+              createdAt: new Date(NOW - 3_500_000).toISOString(),
+            },
+          ],
+          reviews: [
+            {
+              author: "acme-review[bot]",
+              state: "commented",
+              submittedAt: new Date(NOW - 2_400_000).toISOString(),
+              body: "Changes requested: one thing.\n- [minor] F1 src/x.ts — a nit worth fixing",
+            },
+            {
+              author: "acme-review[bot]",
+              state: "commented",
+              submittedAt: new Date(NOW - 600_000).toISOString(),
+              body: "LGTM: fixed.",
+            },
+          ],
+          pushes: [
+            { actor: "acme-coding[bot]", at: new Date(NOW - 1_200_000).toISOString(), kind: "force", coauthors: [] },
+          ],
+          issue: { number: 7, title: "the build is broken", createdAt: new Date(NOW - 7_200_000).toISOString() },
+        } satisfies PullRequestFacts,
+      ],
+    }),
+    { now: () => new Date(NOW) },
+  );
   return {
+    delivery: { service: async () => delivery },
     help: {
       agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
       commands: () => s.commands(),

@@ -148,6 +148,14 @@ export interface AppConfig {
    */
   costs?: unknown;
   /**
+   * Delivery indicators (`GET /delivery`, `delivery report`): the repositories
+   * the page serves and the identities the indicators judge by (the review
+   * agent's login, agent logins, agent co-author names). Validated at startup by
+   * `parseDeliveryConfig` (src/core/delivery.ts); absent → no default repository
+   * (the command still takes `--repo`).
+   */
+  delivery?: unknown;
+  /**
    * Dashboard authentication (docs/reference/specs/access-gate.md, plan D5): which
    * credential gates `/runs*`, `/residents*`, `/costs*`, `/mcp/connect/*` and
    * `/api/*` — `auth: access | token | none`, plus the `token` strategy's `env`

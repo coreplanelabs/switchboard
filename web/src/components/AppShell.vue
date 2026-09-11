@@ -9,7 +9,8 @@
 // it opens the project's published site, the same on every installation.
 import { computed } from "vue";
 import { useColorMode } from "@vueuse/core";
-import AppNav, { navSections, type NavSection } from "./AppNav.vue";
+import AppNav from "./AppNav.vue";
+import { navSections, type NavSection } from "../lib/navSections";
 import DocsLink, { DOCS_HREF, DOCS_ICON, DOCS_LABEL } from "./DocsLink.vue";
 import ThemeToggle from "./ThemeToggle.vue";
 import BrandMark from "./BrandMark.vue";

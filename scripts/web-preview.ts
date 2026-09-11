@@ -5,6 +5,7 @@ import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js
 import type { PageSeed, RunIndexRowSeed } from "../src/channels/webSeed.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
 import type { CostReport, DailyCost } from "../src/core/costs.js";
+import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
 import { normalizeSpans } from "../src/core/normalizeSpans.js";
@@ -21,7 +22,7 @@ import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web
 //   /runs/hist-1     a finished run in history mode        /runs/nope   the 404
 //   /runs/review-1   a finished PR review carrying both reading diffs (the panel)
 //   /runs/hist-4     a finished PR review with a request_changes verdict as the Reply
-//   /runs/scheduled  the Scheduled tab                     /residents   /costs
+//   /runs/scheduled  the Scheduled tab                     /residents   /costs   /delivery
 //
 // SWITCHBOARD_PREVIEW_CAPABILITIES=minimal serves the same fixtures with every
 // optional capability off (the nav shrinks to Runs, no Scheduled tab, no docs).
@@ -860,6 +861,137 @@ const COSTS: CostReport = {
   },
 };
 
+// The delivery page's four weeks, built through the real aggregation so the
+// fixture cannot drift from the report shape: eight merged pull requests of
+// `acme/api`, five linked to a board issue, one reviewed twice after a
+// blocking finding, one retried in CI, one fixed by a person after review.
+const daysAgo = (days: number, hours = 0): string =>
+  new Date(NOW - days * 86_400_000 + hours * 3_600_000).toISOString();
+const DELIVERY_REVIEWER = "acme-review[bot]";
+const DELIVERY_AGENT = "Claude <noreply@anthropic.com>";
+const deliveryPr = (
+  number: number,
+  mergedDaysAgo: number,
+  over: Partial<PullRequestFacts> & { issue?: PullRequestFacts["issue"] } = {},
+): PullRequestFacts => {
+  const head = `${number}`.padStart(8, "a").repeat(5);
+  return {
+    number,
+    title: `change ${number}`,
+    author: "alice",
+    createdAt: daysAgo(mergedDaysAgo, -3),
+    mergedAt: daysAgo(mergedDaysAgo),
+    firstHeadSha: head,
+    ci: [
+      {
+        headSha: head,
+        trigger: "pull_request",
+        conclusion: "success",
+        attempt: 1,
+        createdAt: daysAgo(mergedDaysAgo, -2.9),
+      },
+    ],
+    reviews: [
+      { author: DELIVERY_REVIEWER, state: "commented", submittedAt: daysAgo(mergedDaysAgo, -1), body: "LGTM: clean." },
+    ],
+    pushes: [
+      { actor: "Alice Example", at: daysAgo(mergedDaysAgo, -2.95), kind: "commit", coauthors: [DELIVERY_AGENT] },
+    ],
+    ...over,
+  };
+};
+const DELIVERY_RANGE = resolveDeliveryRange({ weeks: 4 }, new Date(NOW));
+const DELIVERY = buildDeliveryReport({
+  repo: "acme/api",
+  range: DELIVERY_RANGE,
+  identities: { reviewers: [DELIVERY_REVIEWER], agentCoauthors: ["Claude"] },
+  runs: [
+    {
+      agent: "review",
+      startedAt: NOW - 1.1 * 86_400_000,
+      finishedAt: NOW - 1.1 * 86_400_000 + 360_000,
+      status: "completed",
+      pr: 108,
+    },
+    {
+      agent: "review",
+      startedAt: NOW - 1.05 * 86_400_000,
+      finishedAt: NOW - 1.05 * 86_400_000 + 240_000,
+      status: "completed",
+      pr: 108,
+    },
+    {
+      agent: "coding",
+      startedAt: NOW - 5.2 * 86_400_000,
+      finishedAt: NOW - 5.2 * 86_400_000 + 900_000,
+      status: "completed",
+      pr: 105,
+    },
+  ],
+  prs: [
+    deliveryPr(108, 1, {
+      title: "feat(api): the retry queue caps its backoff",
+      issue: { number: 61, title: "Retries: cap the backoff", createdAt: daysAgo(3) },
+      reviews: [
+        {
+          author: DELIVERY_REVIEWER,
+          state: "commented",
+          submittedAt: daysAgo(1, -2),
+          body: "Changes requested: the cap is applied before the jitter.\n- [blocking] F1 src/worker.ts:88 — the cap is not a cap\n- [nit] F2 src/queue.test.ts:12 — add a case at the cap",
+        },
+        { author: DELIVERY_REVIEWER, state: "commented", submittedAt: daysAgo(1, -0.5), body: "LGTM: both fixed." },
+      ],
+      pushes: [
+        { actor: "Alice Example", at: daysAgo(1, -2.95), kind: "commit", coauthors: [DELIVERY_AGENT] },
+        { actor: "alice", at: daysAgo(1, -1), kind: "force", coauthors: [DELIVERY_AGENT] },
+      ],
+    }),
+    deliveryPr(107, 2, {
+      title: "fix(web): the abridge poller stops on a repeated cursor",
+      author: "acme-coding[bot]",
+      issue: { number: 60, title: "The abridge poller never stops", createdAt: daysAgo(2, -6) },
+    }),
+    deliveryPr(105, 5, {
+      title: "feat(api): webhook deliveries retry with backoff",
+      issue: { number: 57, title: "Webhook deliveries are tried once", createdAt: daysAgo(9) },
+      reviews: [
+        {
+          author: DELIVERY_REVIEWER,
+          state: "commented",
+          submittedAt: daysAgo(5, -2),
+          body: "LGTM: one thing worth a look.\n- [minor] F1 src/webhooks.ts:41 — the 4xx check runs after the counter",
+        },
+        { author: DELIVERY_REVIEWER, state: "commented", submittedAt: daysAgo(5, -0.5), body: "LGTM: fixed." },
+      ],
+      // A person fixed the finding: the one human edit of the range.
+      pushes: [{ actor: "sam", at: daysAgo(5, -1), kind: "force", coauthors: [] }],
+    }),
+    deliveryPr(104, 6, { title: "docs: the runbook for webhook retries" }),
+    deliveryPr(101, 9, {
+      title: "chore(deps): bump the SDK",
+      author: "acme-coding[bot]",
+      ci: [
+        {
+          headSha: "101aaaaa".repeat(5),
+          trigger: "pull_request",
+          conclusion: "success",
+          attempt: 2,
+          createdAt: daysAgo(9, -2.9),
+        },
+      ],
+    }),
+    deliveryPr(98, 12, {
+      title: "feat(web): the run page reads in three seconds",
+      issue: { number: 52, title: "The run page is slow to read", createdAt: daysAgo(15) },
+    }),
+    deliveryPr(95, 16, { title: "fix(api): the health probe answers during a drain" }),
+    deliveryPr(93, 20, {
+      title: "feat(api): one command definition, every surface",
+      issue: { number: 47, title: "Commands once, every surface", createdAt: daysAgo(27) },
+    }),
+  ],
+});
+
 /** The real registry entry's action (identity + declared actor and grants), so the preview row cannot drift from the schedule shape. */
 const SELF_IMPROVEMENT = SCHEDULES.filter(isRunSchedule).find((s) => s.name === "self-improvement");
 if (!SELF_IMPROVEMENT) throw new Error("web-preview: the schedule registry has no `self-improvement` run schedule");
@@ -988,6 +1120,11 @@ function page(pathname: string, all: boolean): { title: string; seed: PageSeed; 
     return {
       title: "Switchboard spend",
       seed: { page: "costs", report: COSTS, groups: ["api", "web"] },
+    };
+  if (pathname.startsWith("/delivery"))
+    return {
+      title: "acme/api delivery",
+      seed: { page: "delivery", report: DELIVERY, repos: ["acme/api", "acme/web"] },
     };
   return null;
 }

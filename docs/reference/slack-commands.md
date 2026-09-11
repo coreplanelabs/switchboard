@@ -110,6 +110,12 @@ One table per group. "Who can run it" is what the authorization policy decides f
 |---|---|---|
 | `deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why. | admins |
 
+### `delivery`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `delivery report [--repo <string>] [--since <string>] [--weeks <integer>]` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — read from GitHub and the run history; nothing written. | admins |
+
 <!-- /generated:chat-commands -->
 
 ## Where each group is explained
