@@ -146,6 +146,32 @@ import {
   type RefreshOutcome,
 } from "../../src/execution/residentRefresh.js";
 import {
+  MIRROR_MUTEX_KEY,
+  REFRESH_CYCLE_LEASE_MS,
+  STALE_MIDFLIGHT_MS,
+  depsLeaseKey,
+  liveInFlight,
+  mintIncarnationId,
+  inFlightKey,
+  inFlightRow,
+  releaseMutex,
+  takeMutex,
+  type InFlightRow,
+  type Lease,
+} from "../../src/execution/residentIncarnation.js";
+import {
+  LAST_FETCH_KEY,
+  planBuild,
+  planFetchMirror,
+  planInstallDeps,
+  planMaterializeDeps,
+  planRestore,
+  planSnapshot,
+  snapshotCommitDecision,
+  type FetchRecord,
+  type SnapshotStamp,
+} from "../../src/execution/residentStepPlan.js";
+import {
   DF_FREE_ARGV,
   DISK_FULL_FREE_KIB,
   isDiskFullReason,
@@ -204,6 +230,8 @@ import {
   depsEntryPath,
   depsInstallSemaphoreSize,
   depsScratchCloneArgv,
+  depsAttemptOfScratchPath,
+  depsAttemptPaths,
   depsScratchPath,
   depsStagingPath,
   depsHardenScript,
@@ -358,6 +386,19 @@ const KILL_EXIT_WAIT_MS = 10_000;
  *  Same class as the other network budgets (observed live transfers run
  *  seconds, recorded in `lastRestore.ms`). */
 const R2_TRANSFER_TIMEOUT_MS = 5 * 60_000;
+/** The mirror-mutex lease for a section that names no step budget of its own
+ *  (attach's clone section, a sweep's eviction, the wake and reclaim fetches):
+ *  a holder of the current incarnation still holding past this has hung, the
+ *  same bound the watchdog puts on a mid-flight state. The engine steps pass
+ *  their exact budgets instead. */
+const MIRROR_LEASE_DEFAULT_MS = STALE_MIDFLIGHT_MS;
+/** What the dependency install step runs around the install itself, each
+ *  bounded: the scratch clone, the seed and its cache swap, the commit (one
+ *  network budget each) and the harden (the default exec budget). The step's
+ *  lease is the install budget plus this. */
+const DEPS_STEP_OVERHEAD_MS = 4 * GIT_NETWORK_TIMEOUT_MS + DEFAULT_EXEC_TIMEOUT_MS;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** On-disk layout inside the resident container (disk is cache, never truth —
  *  DO storage is). Thread worktrees hang off the same mirror; keep these paths stable. */
@@ -453,10 +494,6 @@ const LRU_FLOOR_S = IDLE_AFTER_S;
 /** Budget for one GitHub REST call in the reclamation pass (pulls lookup per
  *  live non-default binding); a slow API answers "unknown", never blocks the cycle. */
 const GITHUB_API_TIMEOUT_MS = 10_000;
-/** A `refreshing`/`restoring` marker older than this with nothing running is
- *  an orphan from an interrupted cycle; the watchdog normalizes it. Comfortably
- *  above the longest legitimate cycle (REFRESH_BUILD_TIMEOUT_MS-scale installs). */
-const STALE_MIDFLIGHT_MS = 30 * 60_000;
 /** A resident degraded with the SAME reason for this many consecutive cycles
  *  is chronically broken (e.g. the default branch's build fails); retrying
  *  every 10 min bills the container 24/7 for nothing. After the streak it may
@@ -1028,6 +1065,13 @@ interface DepsBackupRecord {
   createdAt: string;
 }
 
+/** What the snapshot step answers: the record already at the stamp, a record
+ *  it committed (with the one it replaced), or a step another writer won. */
+type SnapshotStepResult =
+  | { done: true; record: SnapshotRecord }
+  | { done: false; superseded: false; record: SnapshotRecord; previous: SnapshotRecord | undefined }
+  | { done: false; superseded: true };
+
 // ---------------------------------------------------------------------------
 // Registry DO (singleton): onboarded set + config, atomic cap enforcement
 // ---------------------------------------------------------------------------
@@ -1385,8 +1429,9 @@ export class ResidentDO extends Sandbox<Env> {
   // because every way the fact can stop being true is observable and clears
   // the memos: a runtime replacement surfaces as RuntimeReplacedError at the
   // ONE exec choke point (`run()`), a deliberate stop/teardown/rebuild calls
-  // `clearIncarnationMemos()` at its site, every lifecycle transition
-  // (`setResidentState`) clears too, and a sleep cannot race the TTL — the
+  // `swapIncarnation()` at its site (memos AND the incarnation id go), every
+  // lifecycle transition (`setResidentState`) clears the memos alone — the
+  // incarnation survives it — and a sleep cannot race the TTL — the
   // container sleeps only after SLEEP_AFTER (20 min) of idleness, while the
   // hydration memo lives `hydrationMemoTtlMs` (60 s) past the last activity
   // that set it. Storage stays the truth: the memo caches a verdict PROBED from
@@ -1396,6 +1441,29 @@ export class ResidentDO extends Sandbox<Env> {
   private gitSetupDone = false;
   private stageDirsReady = new Set<string>();
 
+  /** The incarnation: one isolate paired with one container runtime
+   *  (docs/reference/specs/resident-repos.md item 22). Minted when the object
+   *  starts and again ONLY when the runtime is replaced under it
+   *  (`swapIncarnation`) — every lease this object writes carries it, and a
+   *  lease from another incarnation is a holder whose process context is gone.
+   *  A lifecycle transition is not a swap: the cycle that flips the state to
+   *  `refreshing` holds a lease of this incarnation and must still hold it
+   *  afterwards, so `setResidentState` clears the memos and nothing more. */
+  private incarnation = mintIncarnationId();
+  private leaseSeq = 0;
+
+  private nextHolder(): string {
+    return `${this.incarnation}:${++this.leaseSeq}`;
+  }
+
+  /** The runtime under this object is gone (a replacement seen at the exec
+   *  choke point, a deliberate stop/teardown/rebuild, retirement): every lease
+   *  this incarnation holds is dead from here on, and so are its memos. */
+  private swapIncarnation(): void {
+    this.incarnation = mintIncarnationId();
+    this.clearIncarnationMemos();
+  }
+
   private clearIncarnationMemos(): void {
     this.hydratedVerdictAt = 0;
     this.gitSetupDone = false;
@@ -1404,18 +1472,25 @@ export class ResidentDO extends Sandbox<Env> {
     this.depsInstallSlots = null;
   }
 
-  /** Mirror mutex: a DO yields at every await, so two in-flight
-   *  requests CAN interleave mid-handler — every mirror mutation (fetch,
-   *  worktree add/remove) runs under this explicit promise-chain lock. The
-   *  chain lives in DO memory only; that is sufficient because all mirror
-   *  work happens through this one DO instance, and a DO restart also drops
-   *  any in-flight work the lock was guarding. */
+  /** Mirror mutex, in-process half: a DO yields at every await, so two
+   *  in-flight requests CAN interleave mid-handler — every mirror mutation
+   *  (fetch, worktree add/remove) queues on this promise chain, in arrival
+   *  order. The chain is the fast path within one incarnation; the durable
+   *  row (MIRROR_MUTEX_KEY) is the truth across incarnations: an isolate swap
+   *  drops the chain while the holder's process may keep writing, and the row
+   *  is what the next incarnation reads before it touches the tree. */
   private mirrorLockTail: Promise<void> = Promise.resolve();
 
   /** Run `fn` holding the mirror mutex. With waitTimeoutMs > 0, gives up
    *  waiting after that long (throws MirrorBusyError) — the queued slot is
-   *  released so later waiters are not stuck behind a ghost. */
-  private async withMirrorLock<T>(fn: () => Promise<T>, waitTimeoutMs = 0): Promise<{ value: T; waitedMs: number }> {
+   *  released so later waiters are not stuck behind a ghost. `lease` names
+   *  the step and its budget on the row; a section without a budget of its
+   *  own gets the default lease. */
+  private async withMirrorLock<T>(
+    fn: () => Promise<T>,
+    waitTimeoutMs = 0,
+    lease: { step: string; budgetMs: number } = { step: "mirror", budgetMs: MIRROR_LEASE_DEFAULT_MS },
+  ): Promise<{ value: T; waitedMs: number }> {
     const prev = this.mirrorLockTail;
     let release!: () => void;
     const slot = new Promise<void>((resolve) => (release = resolve));
@@ -1445,13 +1520,86 @@ export class ResidentDO extends Sandbox<Env> {
     } else {
       await prev.catch(() => {});
     }
+    // Past the chain, the row: taken when free or when its holder is dead.
+    const holder = this.nextHolder();
+    try {
+      await this.takeMirrorRow(holder, lease, waitTimeoutMs, started);
+    } catch (err) {
+      release();
+      throw err;
+    }
     const waitedMs = systemClock() - started;
     this.stepTrace.getStore()?.mutexWait(waitedMs, systemClock());
     try {
       return { value: await fn(), waitedMs };
     } finally {
-      release();
+      try {
+        // A failed release must not replace fn's result: the row's expiry is
+        // the backstop, and the next taker takes over a dead holder anyway.
+        await this.releaseLease(MIRROR_MUTEX_KEY, holder).catch((err: unknown) => {
+          console.log(`mirror mutex: release of ${holder} failed (${errMsg(err)}); the lease expires on its own`);
+        });
+      } finally {
+        release();
+      }
     }
+  }
+
+  /** Write the mirror-mutex row for `holder`, or wait for a live holder of
+   *  this incarnation to end. A dead holder — another incarnation, or one past
+   *  its budget — is taken over at once (takeMutex); the row only ever names a
+   *  live one of THIS incarnation when a release is racing this read, so the
+   *  wait is short and bounded by the caller's timeout like the chain wait. */
+  private async takeMirrorRow(
+    holder: string,
+    lease: { step: string; budgetMs: number },
+    waitTimeoutMs: number,
+    started: number,
+  ): Promise<void> {
+    for (;;) {
+      const row = await this.ctx.storage.get<Lease>(MIRROR_MUTEX_KEY);
+      const decision = takeMutex(row, systemClock(), this.incarnation, lease.budgetMs, lease.step, holder);
+      if (decision.action === "take") {
+        if (decision.dead) {
+          console.log(
+            `mirror mutex: ${decision.why} — ${lease.step} takes over from ${decision.dead.step} (${decision.dead.holder})`,
+          );
+        }
+        await this.ctx.storage.put(MIRROR_MUTEX_KEY, decision.row);
+        return;
+      }
+      const left = waitTimeoutMs > 0 ? waitTimeoutMs - (systemClock() - started) : Infinity;
+      if (left <= 0) throw new MirrorBusyError(`mirror-busy: mutex not acquired within ${waitTimeoutMs}ms`);
+      await sleep(Math.min(decision.remainingMs + 1, left, 1_000));
+    }
+  }
+
+  /** Delete a lease row iff `holder` still owns it (releaseMutex). */
+  private async releaseLease(key: string, holder: string): Promise<void> {
+    const outcome = releaseMutex(await this.ctx.storage.get<Lease>(key), holder);
+    if (outcome.released) await this.ctx.storage.delete(key);
+  }
+
+  /** Lease one of the in-flight facts the watchdog reads: one document per
+   *  fact (inFlightKey), a plain put, so a hydration's clear can never race a
+   *  refresh's record on a shared row. */
+  private async recordInFlight(kind: keyof InFlightRow, holder: string, budgetMs: number, step: string): Promise<void> {
+    const lease: Lease = { holder, incarnation: this.incarnation, expiresAt: systemClock() + budgetMs, step };
+    await this.ctx.storage.put(inFlightKey(kind), lease);
+  }
+
+  private async clearInFlight(kind: keyof InFlightRow, holder: string): Promise<void> {
+    const lease = await this.ctx.storage.get<Lease>(inFlightKey(kind));
+    if (lease?.holder === holder) await this.ctx.storage.delete(inFlightKey(kind));
+  }
+
+  /** The two in-flight facts as one row, for liveInFlight and /debug. */
+  private async readInFlight(): Promise<InFlightRow> {
+    const [refresh, hydration] = await Promise.all([
+      this.ctx.storage.get<Lease>(inFlightKey("refresh")),
+      this.ctx.storage.get<Lease>(inFlightKey("hydration")),
+    ]);
+    return inFlightRow(refresh, hydration);
   }
 
   private registry() {
@@ -1491,7 +1639,7 @@ export class ResidentDO extends Sandbox<Env> {
       // takes the throw below. It exists so that if a future SDK vouches "never
       // started" we retry then — and only then — without a change here.
       if (!(err instanceof OperationInterruptedError && err.retryable === true)) {
-        this.clearIncarnationMemos(); // the container this incarnation's memos described is gone
+        this.swapIncarnation(); // the container this incarnation's memos described is gone
         throw new RuntimeReplacedError("spawn", err);
       }
       console.log(
@@ -1504,7 +1652,7 @@ export class ResidentDO extends Sandbox<Env> {
       return { stdout: out.stdout, stderr: out.stderr, exitCode: out.exitCode, timedOut: out.timedOut };
     } catch (err) {
       if (isRuntimeReplacement(err)) {
-        this.clearIncarnationMemos(); // the container this incarnation's memos described is gone
+        this.swapIncarnation(); // the container this incarnation's memos described is gone
         throw new RuntimeReplacedError("collect", err);
       }
       if (err instanceof ProcessWaitTimeoutError) {
@@ -1681,14 +1829,21 @@ export class ResidentDO extends Sandbox<Env> {
     return (await this.runOk(["sh", "-c", script], "lockfile-key")).trim();
   }
 
-  /** True when the disk already holds exactly what the snapshot stamp says. */
-  private async diskMatches(sha: string): Promise<boolean> {
+  /** The sha the disk was last materialized to (READY_MARKER), or null when
+   *  either tree or the marker is missing — the restore step's fact. */
+  private async readyStamp(): Promise<string | null> {
     const r = await this.run([
       "sh",
       "-c",
       `test -d ${MIRROR_DIR}/objects && test -d ${CHECKOUT_DIR}/.git && cat ${READY_MARKER} 2>/dev/null || echo __absent__`,
     ]);
-    return r.exitCode === 0 && r.stdout.trim() === sha;
+    const out = r.stdout.trim();
+    return r.exitCode === 0 && out !== "" && out !== "__absent__" ? out : null;
+  }
+
+  /** True when the disk already holds exactly what the snapshot stamp says. */
+  private async diskMatches(sha: string): Promise<boolean> {
+    return (await this.readyStamp()) === sha;
   }
 
   /** Write the disk markers that a materialized checkout leaves behind (see
@@ -1777,6 +1932,320 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       throw new StepError("snapshot", errMsg(err));
     }
+  }
+
+  // -- engine steps (docs/reference/specs/resident-repos.md item 22) ---------------
+  //
+  // Each step is one public method a cycle calls: it reads the facts it is
+  // about to change and asks the pure plan (residentStepPlan.ts) whether the
+  // work is done — done issues no command, so a second call with the same
+  // inputs has no effect — then takes its lease, runs its commands under the
+  // step's own budget, writes its result and releases. The alarm chain drives
+  // them today in the order it always did.
+
+  /** Fetch the mirror from origin, once per cycle: the record under
+   *  LAST_FETCH_KEY names the cycle, so a repeated call inside the same cycle
+   *  answers the sha it already read. */
+  async fetchMirror(input: {
+    ref: string;
+    cycle: string;
+    token: string | null;
+  }): Promise<{ done: boolean; sha: string }> {
+    const last = await this.ctx.storage.get<FetchRecord>(LAST_FETCH_KEY);
+    const plan = planFetchMirror({ ref: input.ref, cycle: input.cycle, last });
+    if (plan.action === "done") return { done: true, sha: plan.sha };
+    // The tip is read under the same lock as the fetch: an attach's own
+    // `fetch --prune` between the two could delete the ref and fail the cycle.
+    const { value: sha } = await this.withMirrorLock(
+      async () => {
+        await this.gitWithCred(
+          input.token,
+          ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
+          "fetch",
+          GIT_NETWORK_TIMEOUT_MS,
+        );
+        return this.readMirrorSha(input.ref);
+      },
+      0,
+      { step: "fetch", budgetMs: GIT_NETWORK_TIMEOUT_MS },
+    );
+    await this.ctx.storage.put(LAST_FETCH_KEY, {
+      cycle: input.cycle,
+      ref: input.ref,
+      sha,
+      at: systemClock(),
+    } satisfies FetchRecord);
+    return { done: false, sha };
+  }
+
+  /** The store entry for `key`, complete (item 59 is the primitive under it).
+   *  The install's exclusive resource is the key's entry, never the mirror —
+   *  installs run in a private scratch tree outside the mirror mutex — so its
+   *  lease is per key (depsLeaseKey). A live holder of this incarnation is the
+   *  install already running for the key: joined, never duplicated. A dead
+   *  holder left its scratch tree behind, possibly with a process still
+   *  writing into it: that tree is swept before this attempt starts, the way
+   *  every build-user step sweeps the checkout. */
+  async installDeps(input: {
+    key: string;
+    sha: string;
+    installCmd: string;
+    budgetMs: number;
+    seedFromKey?: string;
+    restoreDeadlineMs?: number;
+  }): Promise<{ done: boolean; entry: string }> {
+    const { key } = input;
+    const plan = planInstallDeps({ key, entryComplete: await this.depsEntryComplete(key) });
+    if (plan.action === "done") {
+      await this.run(["touch", depsUsedPath(key)]);
+      return { done: true, entry: depsEntryPath(key) };
+    }
+    const attempt = crypto.randomUUID().slice(0, 8);
+    const leaseKey = depsLeaseKey(key);
+    const holder = this.nextHolder();
+    const leaseMs = Math.max(input.budgetMs, (input.restoreDeadlineMs ?? 0) - systemClock()) + DEPS_STEP_OVERHEAD_MS;
+    for (;;) {
+      const row = await this.ctx.storage.get<Lease>(leaseKey);
+      const decision = takeMutex(
+        row,
+        systemClock(),
+        this.incarnation,
+        leaseMs,
+        "deps-install",
+        holder,
+        depsScratchPath(attempt),
+      );
+      if (decision.action === "wait") {
+        const running = this.depsInFlight.get(key);
+        if (running) return { done: false, entry: await running };
+        // The lease is written before the running install registers itself;
+        // a caller landing in between waits for that, briefly.
+        await sleep(Math.min(decision.remainingMs + 1, 1_000));
+        continue;
+      }
+      if (decision.dead?.tree) {
+        // The dead attempt's scratch tree AND its staging dir: its install ran
+        // in the first, its commit script was moving node_modules into the
+        // second; a process still writing to either is killed, then both go.
+        const deadAttempt = depsAttemptOfScratchPath(decision.dead.tree);
+        const deadPaths = deadAttempt ? depsAttemptPaths(key, deadAttempt) : [decision.dead.tree];
+        console.log(
+          `deps: ${decision.why} — sweeping ${deadPaths.join(" ")} left by ${decision.dead.holder} before installing ${key.slice(0, 8)}`,
+        );
+        for (const dir of deadPaths) {
+          const swept = await this.runOk(killStaleBuildProcessesCommand(BUILD_USER, dir), "deps-install-stale-sweep");
+          if (swept.trim()) console.log(`deps: ${swept.trim()}`);
+        }
+        await this.run(["rm", "-rf", ...deadPaths]).catch(() => {});
+      }
+      await this.ctx.storage.put(leaseKey, decision.row);
+      break;
+    }
+    try {
+      const entry = await this.materializeDeps(key, input.sha, input.installCmd, input.budgetMs, {
+        seedFromKey: input.seedFromKey,
+        restoreDeadlineMs: input.restoreDeadlineMs,
+        attempt,
+      });
+      return { done: false, entry };
+    } finally {
+      await this.releaseLease(leaseKey, holder);
+    }
+  }
+
+  /** Bring the checkout to `sha` and build it, under the mirror mutex. The
+   *  disk markers decide (planBuild over the refresh planner): a checkout
+   *  whose HEAD, deps and build markers all name the target is done. */
+  async runBuild(input: {
+    sha: string;
+    factsSha: string;
+    lockfileKey: string;
+    buildCmd: string;
+    /** The store entry to link as the checkout's node_modules when the plan installs; null when the command table has no install. */
+    depsEntry: string | null;
+  }): Promise<{ done: boolean; why: string }> {
+    const { sha, lockfileKey } = input;
+    const plan = planBuild({ sha, factsSha: input.factsSha, lockfileKey, disk: await this.readRefreshDisk() });
+    if (plan.action === "done") return { done: true, why: plan.why };
+    // Serialize the CHECKOUT_DIR mutation on the mirror mutex:
+    // materializeThreadDeps reads CHECKOUT_DIR via `cp -al` under the same
+    // lock, so an attach/op dep-copy can never hardlink a half-rebuilt
+    // checkout into a thread tree (torn cache → false ❌ from `repo test`).
+    // No wait timeout, exactly like the fetch lock: the background refresh
+    // queues behind an in-flight attach instead of flipping to degraded on
+    // transient lock contention. Token-free: repo code runs during the build.
+    await this.withMirrorLock(
+      async () => {
+        // Isolation invariant (review 1b): attached, sha-pinned thread
+        // worktrees hold hardlinks to the store entry's FILE inodes, and so
+        // does the checkout. A build that writes THROUGH an existing inode —
+        // many bundlers do (e.g. .next incremental manifests open+truncate
+        // rather than recreate) — would mutate every consumer's pinned
+        // artifacts. The `-x` clean removes the checkout's build output so
+        // the build allocates FRESH inodes; the entry's own files are
+        // owner-read-only (deps-harden), so a write through them fails
+        // loudly instead of silently reaching the store; the tool caches
+        // inside node_modules are the checkout's private copies (item 18).
+        //
+        // Install gate: when the committed lockfile key is unchanged,
+        // node_modules (the view) is excluded from the clean and no deps
+        // work happens; a changed key re-links the view to the new entry —
+        // which is also what drops deps the new lockfile no longer has.
+        await this.buildUserRun(checkoutUpdateCommand(sha, plan.clean), "checkout-update", GIT_NETWORK_TIMEOUT_MS);
+        if (plan.install) {
+          // The old view (a resumed install's keep-deps clean leaves it in
+          // place, item 57) makes way for the new entry's: hardlinks only,
+          // the entry's inodes are untouched.
+          if (input.depsEntry) {
+            await this.runOk(["rm", "-rf", `${CHECKOUT_DIR}/node_modules`], "unlink-deps-view");
+            await this.linkDepsView(`${input.depsEntry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
+          }
+          await this.writeDiskMarkers({ depsKey: lockfileKey });
+          await this.runOk(["rm", "-f", INSTALLING_MARKER], "clear-installing-marker");
+        }
+        await this.buildUserRun(input.buildCmd, "build", REFRESH_BUILD_TIMEOUT_MS);
+        await this.writeDiskMarkers({ builtSha: sha });
+      },
+      0,
+      { step: "build", budgetMs: GIT_NETWORK_TIMEOUT_MS + REFRESH_BUILD_TIMEOUT_MS },
+    );
+    return { done: false, why: plan.why };
+  }
+
+  /** Archive the mirror and checkout to R2 under `stamp` and record it, with
+   *  compare-and-swap on the record read at the start: a record already at
+   *  the stamp is done; a record that moved while the archive was taken was
+   *  written by someone else and wins — the fresh objects are dropped and the
+   *  step answers `superseded`, never a throw. The recorded facts move to the
+   *  stamp in the same write, so a wake never sees a half-updated pair. */
+  async snapshot(input: { resource: string; stamp: SnapshotStamp }): Promise<SnapshotStepResult> {
+    const { ref, sha, lockfileHash } = input.stamp;
+    const readAtStart = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
+    const plan = planSnapshot({ stamp: input.stamp, current: readAtStart });
+    if (plan.action === "done" && readAtStart) return { done: true, record: readAtStart };
+    // Under the mirror mutex: nothing may mutate the checkout while it is archived.
+    const { value: snap } = await this.withMirrorLock(
+      () => this.takeSnapshot(input.resource, ref, sha, lockfileHash),
+      0,
+      { step: "snapshot", budgetMs: R2_TRANSFER_TIMEOUT_MS },
+    );
+    const stored = await this.ctx.storage.get<SnapshotRecord | RepoFacts>([SNAPSHOT_KEY, FACTS_KEY]);
+    const decision = snapshotCommitDecision({
+      readAtStart,
+      current: stored.get(SNAPSHOT_KEY) as SnapshotRecord | undefined,
+    });
+    if (decision.action === "superseded") {
+      console.log(
+        `snapshot: superseded — a record at ${decision.by?.sha.slice(0, 8) ?? "(none)"} moved under this step`,
+      );
+      await this.deleteBackupObjects([snap.mirror.id, snap.checkout.id]).catch(() => {});
+      return { done: false, superseded: true };
+    }
+    const facts = stored.get(FACTS_KEY) as RepoFacts | undefined;
+    await this.ctx.storage.put({
+      [SNAPSHOT_KEY]: snap,
+      ...(facts
+        ? {
+            [FACTS_KEY]: {
+              ...facts,
+              sha,
+              lockfileHash,
+              lastRefreshAt: new Date(systemClock()).toISOString(),
+            } satisfies RepoFacts,
+          }
+        : {}),
+    });
+    return { done: false, superseded: false, record: snap, previous: readAtStart };
+  }
+
+  /** Bring the disk to the snapshot's stamp: the ready marker naming its sha
+   *  is done; otherwise unmount and clean, restore both archives (judged by
+   *  their bytes, against the caller's one deadline), verify the restored
+   *  mirror against the stamp and hand the checkout to the build user. Runs
+   *  inside the hydration lease its caller holds — every mirror-mutex taker
+   *  hydrates first, so nothing else touches these trees meanwhile. Failures
+   *  leave the resident `down` with the reason and the container stopped, as
+   *  the wake path always did. */
+  async restoreCheckout(snap: SnapshotRecord, deadlineMs: number): Promise<{ done: boolean }> {
+    const plan = planRestore({ sha: snap.sha, readyStamp: await this.readyStamp() });
+    if (plan.action === "done") return { done: true };
+    // A restore a previous attempt gave up on may still be writing into these
+    // directories (the SDK call cannot be cancelled): wait for it to
+    // settle before the clean, bounded by the same cap the restores get. A
+    // restore that will not settle even then leaves the disk alone — a named
+    // `down`, not a clean racing a writer.
+    if (this.pendingRestores.size > 0) {
+      try {
+        await withTimeout(
+          Promise.allSettled([...this.pendingRestores]),
+          Math.max(1, deadlineMs - systemClock()),
+          `${this.pendingRestores.size} earlier restore(s) still running`,
+        );
+      } catch (err) {
+        // Same exit as a stalled restore below: the stream is still running and
+        // a rebuild is what follows a `down`, so the container goes with it.
+        this.swapIncarnation(); // deliberate incarnation swap
+        await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
+        throw await this.goDown(
+          `r2-restore-failed: ${errMsg(err)} — container stopped so the transfer cannot land on a rebuild`,
+        );
+      }
+    }
+    // A previous incarnation's restore may still be MOUNTED at these paths
+    // (item 61: the SDK's presigned restore mounts) — `rm -rf` on a mount
+    // point is "Device or resource busy". Unmount first, every time.
+    await this.runOk(["sh", "-c", unmountAllRestoresScript()], "unmount-restores");
+    await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-before-restore");
+    try {
+      // The restore pair IS the cold-wake critical path. Sequential on purpose:
+      // the SDK serializes backup operations anyway (one queue), so a
+      // concurrent pair only made the second one's clock run while it waited —
+      // and each is judged by its own bytes (restoreWithProgress), not by
+      // a fixed budget: a slow transfer waits, a stalled one goes down with
+      // the bytes and the idle span named instead of stranding `restoring` for
+      // the watchdog.
+      await this.restoreExtracted(snap.mirror, MIRROR_DIR, "mirror restore", "mirror-restore-extract", deadlineMs);
+      await this.restoreExtracted(
+        snap.checkout,
+        CHECKOUT_DIR,
+        "checkout restore",
+        "checkout-restore-extract",
+        deadlineMs,
+      );
+    } catch (err) {
+      // A stalled or capped restore is STILL STREAMING (the SDK call cannot be
+      // cancelled); `pendingRestores` keeps the next hydrate off its directory,
+      // but a `down` resident's only exit is a REBUILD, and provisioning owns
+      // the same directories. Left running, the restore the wake path gave up
+      // on lands into the checkout the rebuild has just cloned and linked —
+      // tar overwrites in place through the deps store's hardlinks, resetting
+      // every hardened entry file from 444 to 644. Stop
+      // the container on the way down: the disk is ephemeral, the stream dies
+      // with it, and the rebuild starts on an empty one.
+      this.swapIncarnation(); // deliberate incarnation swap
+      await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
+      throw await this.goDown(
+        `r2-restore-failed: ${errMsg(err)} — container stopped so the transfer cannot land on a rebuild`,
+      );
+    }
+    await this.ensureGitSetup();
+
+    // Verify the restored disk against the stamp — a snapshot that does not
+    // prove its own {ref, sha, lockfileHash} is refused. Both values
+    // derive from the restored MIRROR (the source of truth the checkout was
+    // built from); the checkout's presence was proven by restoreBackup + the
+    // chown below failing loudly if it is missing.
+    const shaRes = await this.run(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${snap.ref}`]);
+    const diskSha = shaRes.exitCode === 0 ? shaRes.stdout.trim() : `unreadable(${tail(shaRes.stderr, 120)})`;
+    const diskLock = await this.lockfileKey(snap.sha).catch((err) => `unreadable(${errMsg(err)})`);
+    if (diskSha !== snap.sha || diskLock !== snap.lockfileHash) {
+      throw await this.goDown(
+        `snapshot-stamp-mismatch: restored disk {sha:${diskSha}, lockfileHash:${diskLock}} != stamp {sha:${snap.sha}, lockfileHash:${snap.lockfileHash}}`,
+      );
+    }
+
+    await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
+    return { done: false };
   }
 
   /** Delete the R2 objects behind SDK backup handles (backups/<id>/ lives
@@ -1922,17 +2391,22 @@ export class ResidentDO extends Sandbox<Env> {
       // install budget is at least the refresh's: a provisioning budget below
       // a real install time just fails the onboarding.
       if (record.commands.install) {
-        const entry = await this.materializeDeps(
-          lockfileHash,
+        const { entry } = await this.installDeps({
+          key: lockfileHash,
           sha,
-          record.commands.install,
-          Math.max(stepBudget, REFRESH_INSTALL_TIMEOUT_MS),
-        );
+          installCmd: record.commands.install,
+          budgetMs: Math.max(stepBudget, REFRESH_INSTALL_TIMEOUT_MS),
+        });
         await this.linkDepsView(`${entry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
       }
       await this.buildUserRun(record.commands.build, "build", stepBudget);
 
-      const snap = await this.takeSnapshot(resource, ref, sha, lockfileHash);
+      // Provisioning is the only writer while `onboarding`, so the step cannot
+      // be superseded; a record already at the stamp (a re-fired schedule) is
+      // reused.
+      const snapped = await this.snapshot({ resource, stamp: { ref, sha, lockfileHash } });
+      if (!snapped.done && snapped.superseded) throw new StepError("snapshot", "superseded by a concurrent writer");
+      const snap = snapped.record;
 
       // The deadline may have fired mid-provision (down + slot released);
       // never flip a non-onboarding resident to warm from here.
@@ -1997,12 +2471,18 @@ export class ResidentDO extends Sandbox<Env> {
     // 10-min cadence always outlives the TTL, so a cycle re-probes for real.
     if (this.hydratedVerdictAt !== 0 && systemClock() - this.hydratedVerdictAt < this.hydrationMemoTtlMs) return;
     if (this.hydration) return this.hydration;
-    const p = this.doHydrate()
+    // The hydration's lease in the in-flight row (item 22) is what the
+    // watchdog reads: alive for this incarnation until the stale bound, gone
+    // with the isolate that started it.
+    const holder = this.nextHolder();
+    const p = this.recordInFlight("hydration", holder, STALE_MIDFLIGHT_MS, "restore")
+      .then(() => this.doHydrate())
       .then(() => {
         this.hydratedVerdictAt = systemClock();
       })
-      .finally(() => {
+      .finally(async () => {
         if (this.hydration === p) this.hydration = null;
+        await this.clearInFlight("hydration", holder);
       });
     this.hydration = p;
     this.hydrationStartedAt = systemClock();
@@ -2044,93 +2524,17 @@ export class ResidentDO extends Sandbox<Env> {
     if (active && (await this.diskMatches(snap.sha))) return;
 
     await this.setResidentState("restoring", "rehydrating");
-    if (await this.diskMatches(snap.sha)) {
+    const t0 = systemClock();
+    // One deadline for the whole hydrate: the restore step's wait for earlier
+    // restores, both restores and the deps materialization below judge
+    // against it, so the worst-case `restoring` span is RESTORE_MAX_MS, under
+    // the watchdog's stale-mid-flight window — not three caps in a row.
+    const deadlineMs = systemClock() + RESTORE_MAX_MS;
+    if ((await this.restoreCheckout(snap, deadlineMs)).done) {
       // Raced a container start that already had the right disk.
       await this.setResidentState("warm");
       return;
     }
-
-    const t0 = systemClock();
-    // A restore a previous attempt gave up on may still be writing into these
-    // directories (the SDK call cannot be cancelled): wait for it to
-    // settle before the clean, bounded by the same cap the restores get. A
-    // restore that will not settle even then leaves the disk alone — a named
-    // `down`, not a clean racing a writer.
-    // One deadline for the whole hydrate: the wait below and both restores
-    // judge against it, so the worst-case `restoring` span is RESTORE_MAX_MS,
-    // under the watchdog's stale-mid-flight window — not three caps in a row.
-    const deadlineMs = systemClock() + RESTORE_MAX_MS;
-    if (this.pendingRestores.size > 0) {
-      try {
-        await withTimeout(
-          Promise.allSettled([...this.pendingRestores]),
-          Math.max(1, deadlineMs - systemClock()),
-          `${this.pendingRestores.size} earlier restore(s) still running`,
-        );
-      } catch (err) {
-        // Same exit as a stalled restore below: the stream is still running and
-        // a rebuild is what follows a `down`, so the container goes with it.
-        this.clearIncarnationMemos(); // deliberate incarnation swap
-        await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
-        throw await this.goDown(
-          `r2-restore-failed: ${errMsg(err)} — container stopped so the transfer cannot land on a rebuild`,
-        );
-      }
-    }
-    // A previous incarnation's restore may still be MOUNTED at these paths
-    // (item 61: the SDK's presigned restore mounts) — `rm -rf` on a mount
-    // point is "Device or resource busy". Unmount first, every time.
-    await this.runOk(["sh", "-c", unmountAllRestoresScript()], "unmount-restores");
-    await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-before-restore");
-    try {
-      // The restore pair IS the cold-wake critical path. Sequential on purpose:
-      // the SDK serializes backup operations anyway (one queue), so a
-      // concurrent pair only made the second one's clock run while it waited —
-      // and each is judged by its own bytes (restoreWithProgress), not by
-      // a fixed budget: a slow transfer waits, a stalled one goes down with
-      // the bytes and the idle span named instead of stranding `restoring` for
-      // the watchdog.
-      await this.restoreExtracted(snap.mirror, MIRROR_DIR, "mirror restore", "mirror-restore-extract", deadlineMs);
-      await this.restoreExtracted(
-        snap.checkout,
-        CHECKOUT_DIR,
-        "checkout restore",
-        "checkout-restore-extract",
-        deadlineMs,
-      );
-    } catch (err) {
-      // A stalled or capped restore is STILL STREAMING (the SDK call cannot be
-      // cancelled); `pendingRestores` keeps the next hydrate off its directory,
-      // but a `down` resident's only exit is a REBUILD, and provisioning owns
-      // the same directories. Left running, the restore the wake path gave up
-      // on lands into the checkout the rebuild has just cloned and linked —
-      // tar overwrites in place through the deps store's hardlinks, resetting
-      // every hardened entry file from 444 to 644. Stop
-      // the container on the way down: the disk is ephemeral, the stream dies
-      // with it, and the rebuild starts on an empty one.
-      this.clearIncarnationMemos(); // deliberate incarnation swap
-      await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
-      throw await this.goDown(
-        `r2-restore-failed: ${errMsg(err)} — container stopped so the transfer cannot land on a rebuild`,
-      );
-    }
-    await this.ensureGitSetup();
-
-    // Verify the restored disk against the stamp — a snapshot that does not
-    // prove its own {ref, sha, lockfileHash} is refused. Both values
-    // derive from the restored MIRROR (the source of truth the checkout was
-    // built from); the checkout's presence was proven by restoreBackup + the
-    // chown below failing loudly if it is missing.
-    const shaRes = await this.run(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${snap.ref}`]);
-    const diskSha = shaRes.exitCode === 0 ? shaRes.stdout.trim() : `unreadable(${tail(shaRes.stderr, 120)})`;
-    const diskLock = await this.lockfileKey(snap.sha).catch((err) => `unreadable(${errMsg(err)})`);
-    if (diskSha !== snap.sha || diskLock !== snap.lockfileHash) {
-      throw await this.goDown(
-        `snapshot-stamp-mismatch: restored disk {sha:${diskSha}, lockfileHash:${diskLock}} != stamp {sha:${snap.sha}, lockfileHash:${snap.lockfileHash}}`,
-      );
-    }
-
-    await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
     // The snapshot carries the checkout's tree, not the store (item 59): adopt
     // its node_modules as the entry for the stamp's key — a rename plus a
     // hardlink view, seconds — so the first attach on the warm key hits.
@@ -2160,26 +2564,32 @@ export class ResidentDO extends Sandbox<Env> {
       const hasView = (await this.run(["test", "-d", `${CHECKOUT_DIR}/node_modules`])).exitCode === 0;
       if (!record.commands.install) {
         depsLinked = hasView;
-      } else if (hasView) {
-        depsLinked = true;
       } else {
-        const budget = planWakeDepsBudget({
-          nowMs: systemClock(),
-          deadlineMs,
-          installBudgetMs: REFRESH_INSTALL_TIMEOUT_MS,
+        const plan = planMaterializeDeps({
+          key: snap.lockfileHash,
+          viewPresent: hasView,
+          entryComplete: await this.depsEntryComplete(snap.lockfileHash),
         });
-        if (budget.action === "skip") throw new Error(`${budget.remainingMs} ms left of the hydrate deadline`);
-        const entry = await this.materializeDeps(
-          snap.lockfileHash,
-          snap.sha,
-          record.commands.install,
-          budget.installBudgetMs,
-          {
+        if (plan.action === "done") {
+          depsLinked = true;
+        } else {
+          console.log(`deps: ${plan.why}`);
+          const budget = planWakeDepsBudget({
+            nowMs: systemClock(),
+            deadlineMs,
+            installBudgetMs: REFRESH_INSTALL_TIMEOUT_MS,
+          });
+          if (budget.action === "skip") throw new Error(`${budget.remainingMs} ms left of the hydrate deadline`);
+          const { entry } = await this.installDeps({
+            key: snap.lockfileHash,
+            sha: snap.sha,
+            installCmd: record.commands.install,
+            budgetMs: budget.installBudgetMs,
             restoreDeadlineMs: deadlineMs,
-          },
-        );
-        await this.linkDepsView(`${entry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
-        depsLinked = true;
+          });
+          await this.linkDepsView(`${entry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
+          depsLinked = true;
+        }
       }
     } catch (err) {
       console.log(`deps: no view after restore — the next refresh installs: ${errMsg(err)}`);
@@ -2229,6 +2639,10 @@ export class ResidentDO extends Sandbox<Env> {
   private async onRefreshAlarmTraced(payload: string): Promise<void> {
     const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
     let refreshCounted = false;
+    /** This cycle's lease holder in the in-flight row, once it is counted. */
+    let cycleHolder: string | null = null;
+    /** This firing's identity: what `fetchMirror` records so a repeated call inside the cycle is done. */
+    const cycle = crypto.randomUUID();
     const before = await this.getStatus();
     // down chains stay down (a rebuild is the escape hatch); onboarding is
     // owned by provisioning, which arms the first refresh itself.
@@ -2322,9 +2736,13 @@ export class ResidentDO extends Sandbox<Env> {
         await this.ctx.storage.put(FACTS_KEY, awake satisfies RepoFacts);
       }
       // From here the cycle mutates the mirror/checkout: count it as in flight
-      // so an attach-path reconcileImage never stops the container under it.
+      // so an attach-path reconcileImage never stops the container under it,
+      // and lease it in the in-flight row so the watchdog can tell this cycle
+      // from a marker a dead one left behind (item 22).
       this.refreshesInFlight++;
       refreshCounted = true;
+      cycleHolder = this.nextHolder();
+      await this.recordInFlight("refresh", cycleHolder, REFRESH_CYCLE_LEASE_MS, "refresh");
 
       // Token-mint failure is a command-level error — the resident
       // keeps serving the last snapshot and lifecycle state is NOT flipped by
@@ -2352,14 +2770,17 @@ export class ResidentDO extends Sandbox<Env> {
       }
 
       await this.setResidentState("refreshing");
+      let sha: string;
       try {
         // Same mirror mutex as attach's fetch/worktree work: the
         // refresh alarm and an in-flight attach serialize instead of racing
         // a prune against a worktree clone.
-        await this.withMirrorLock(() =>
-          this.gitWithCred(token, ["-C", MIRROR_DIR, "fetch", "--prune", "origin"], "fetch", GIT_NETWORK_TIMEOUT_MS),
-        );
+        sha = (await this.fetchMirror({ ref: facts.defaultRef, cycle, token })).sha;
       } catch (err) {
+        // The fetch itself failed — or the tip could not be read afterwards,
+        // which is the mirror's own failure, not GitHub's: the cycle's
+        // classifier below names that step.
+        if (err instanceof StepError && err.step === "rev-parse") throw err;
         // A private repo whose mint failed lands here (the anonymous fetch is
         // refused): say so, rather than blaming GitHub reachability alone.
         const cause = mintError ? `${mintError}; then ` : "";
@@ -2379,7 +2800,6 @@ export class ResidentDO extends Sandbox<Env> {
         return;
       }
 
-      const sha = await this.readMirrorSha(facts.defaultRef);
       // Pure function of the commit — computed from the mirror before
       // any checkout work so the planner can compare it to the deps marker.
       const lockfileHash = sha === facts.sha ? facts.lockfileHash : await this.lockfileKey(sha);
@@ -2389,28 +2809,21 @@ export class ResidentDO extends Sandbox<Env> {
         lockfileKey: lockfileHash,
         disk: await this.readRefreshDisk(),
       });
-      let snap: SnapshotRecord | null = null;
+      // Whether this cycle's snapshot step committed (`superseded` means
+      // another writer moved the record, whose facts then stand).
+      let committed = false;
       let previous: SnapshotRecord | undefined;
       if (plan.action !== "unchanged") {
         const t0 = systemClock();
         console.log(`refresh: ${facts.sha.slice(0, 8)} → ${sha.slice(0, 8)}: ${plan.action} (${plan.why})`);
-        // Serialize the CHECKOUT_DIR mutation on the mirror mutex (FIX 2):
-        // materializeThreadDeps reads CHECKOUT_DIR via `cp -al` under the same
-        // lock, so an attach/op dep-copy can no longer hardlink a half-rebuilt
-        // checkout into a thread tree (torn cache → false ❌ from `repo test`).
-        // No wait timeout, exactly like the fetch lock above: the background
-        // refresh queues behind an in-flight attach instead of flipping to
-        // degraded on transient lock contention.
-        // Token-free from here on: repo code runs during install/build.
-        //
         // Deps come from the store (item 59): a changed lockfile key is
         // materialized ONCE into `/workspace/deps/<key>` — OUTSIDE the mirror
         // lock, because the install runs in its own scratch clone and touches
         // no consumer's tree (the staging step) — and the checkout's
-        // node_modules becomes a hardlink view of that entry. An attach that
-        // needs the same key joins this very install instead of starting its
-        // own. Checkpoint: the deps marker comes off BEFORE the install so an
-        // interruption mid-install can never read as completion.
+        // node_modules becomes a hardlink view of that entry (runBuild). An
+        // attach that needs the same key joins this very install instead of
+        // starting its own. Checkpoint: the deps marker comes off BEFORE the
+        // install so an interruption mid-install can never read as completion.
         let depsEntry: string | null = null;
         if (plan.action === "rebuild") {
           await this.runOk(["rm", "-f", BUILT_MARKER, ...(plan.install ? [DEPS_MARKER] : [])], "clear-markers");
@@ -2422,66 +2835,47 @@ export class ResidentDO extends Sandbox<Env> {
             // install finds its key already in the store when the last attempt
             // completed, or reconciles from the warm key again when it did not.
             await this.writeDiskMarkers({ installingKey: lockfileHash });
-            depsEntry = await this.materializeDeps(
-              lockfileHash,
-              sha,
-              record.commands.install,
-              REFRESH_INSTALL_TIMEOUT_MS,
-              {
+            depsEntry = (
+              await this.installDeps({
+                key: lockfileHash,
+                sha,
+                installCmd: record.commands.install,
+                budgetMs: REFRESH_INSTALL_TIMEOUT_MS,
                 seedFromKey: facts.lockfileHash,
-              },
-            );
+              })
+            ).entry;
           }
         }
-        await this.withMirrorLock(async () => {
-          if (plan.action === "rebuild") {
-            // Isolation invariant (review 1b): attached, sha-pinned thread
-            // worktrees hold hardlinks to the store entry's FILE inodes, and so
-            // does the checkout. A build that writes THROUGH an existing inode —
-            // many bundlers do (e.g. .next incremental manifests open+truncate
-            // rather than recreate) — would mutate every consumer's pinned
-            // artifacts. The `-x` clean removes the checkout's build output so
-            // the build allocates FRESH inodes; the entry's own files are
-            // owner-read-only (deps-harden), so a write through them fails
-            // loudly instead of silently reaching the store; the tool caches
-            // inside node_modules are the checkout's private copies (item 18).
-            //
-            // Install gate: when the committed lockfile key is unchanged,
-            // node_modules (the view) is excluded from the clean and no deps
-            // work happens; a changed key takes the full clean and re-links the
-            // view to the new entry — which is also what drops deps the new
-            // lockfile no longer has.
-            await this.buildUserRun(checkoutUpdateCommand(sha, plan.clean), "checkout-update", GIT_NETWORK_TIMEOUT_MS);
-            if (plan.install) {
-              // The old view (a resumed install's keep-deps clean leaves it in
-              // place, item 57) makes way for the new entry's: hardlinks only,
-              // the entry's inodes are untouched.
-              if (depsEntry) {
-                await this.runOk(["rm", "-rf", `${CHECKOUT_DIR}/node_modules`], "unlink-deps-view");
-                await this.linkDepsView(`${depsEntry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
-              }
-              await this.writeDiskMarkers({ depsKey: lockfileHash });
-              await this.runOk(["rm", "-f", INSTALLING_MARKER], "clear-installing-marker");
-            }
-            await this.buildUserRun(record.commands.build, "build", REFRESH_BUILD_TIMEOUT_MS);
-            await this.writeDiskMarkers({ builtSha: sha });
-          }
-          // `reuse`: the checkout already holds this sha with its deps and
-          // build (an interrupted cycle got that far) — only the snapshot,
-          // facts and stamp are missing, and they must still move together.
-          previous = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
-          snap = await this.takeSnapshot(resource, facts.defaultRef, sha, lockfileHash);
+        // `reuse`: the checkout already holds this sha with its deps and build
+        // (an interrupted cycle got that far) — the build step finds it done and
+        // only the snapshot, facts and stamp are missing; they move together.
+        await this.runBuild({
+          sha,
+          factsSha: facts.sha,
+          lockfileKey: lockfileHash,
+          buildCmd: record.commands.build,
+          depsEntry,
         });
+        const snapped = await this.snapshot({ resource, stamp: { ref: facts.defaultRef, sha, lockfileHash } });
+        if (!snapped.done && !snapped.superseded) previous = snapped.previous;
+        committed = snapped.done || !snapped.superseded;
         console.log(`refresh: ${sha.slice(0, 8)} ${plan.action} done in ${systemClock() - t0}ms`);
+        if (committed) {
+          await this.writeDiskMarkers({ ready: sha });
+          if (previous) await this.deleteBackupObjects([previous.mirror.id, previous.checkout.id]).catch(() => {});
+        }
+      } else {
+        committed = true;
       }
 
-      // Facts and snapshot move together so the stamp check never sees a
-      // half-updated pair.
+      // The snapshot step moved the facts to the stamp in the same write as
+      // the record (a wake never sees a half-updated pair); this is the cycle's
+      // own bookkeeping on a fresh read. A superseded snapshot leaves the
+      // other writer's stamp alone.
+      const fresh = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
       const updatedFacts: RepoFacts = {
-        ...facts,
-        sha,
-        lockfileHash,
-        lastRefreshAt: new Date(systemClock()).toISOString(),
+        ...fresh,
+        ...(committed ? { sha, lockfileHash, lastRefreshAt: new Date(systemClock()).toISOString() } : {}),
       };
       // Clear a PRIOR cycle's error; keep THIS cycle's mint error visible.
       delete updatedFacts.lastRefreshError;
@@ -2490,13 +2884,7 @@ export class ResidentDO extends Sandbox<Env> {
       // still carries it — never resurrect it here (the dash would show a stale
       // "idle since" and every attach would take the wake-fetch path).
       delete updatedFacts.idleSince;
-      if (snap) {
-        await this.ctx.storage.put({ [FACTS_KEY]: updatedFacts, [SNAPSHOT_KEY]: snap });
-        await this.writeDiskMarkers({ ready: sha });
-        if (previous) await this.deleteBackupObjects([previous.mirror.id, previous.checkout.id]).catch(() => {});
-      } else {
-        await this.ctx.storage.put(FACTS_KEY, updatedFacts);
-      }
+      await this.ctx.storage.put(FACTS_KEY, updatedFacts);
       await this.setResidentState("warm");
       // Event-triggered reclamation: the prune above already told the
       // mirror which branches died; finished refs give their worktree and
@@ -2553,6 +2941,7 @@ export class ResidentDO extends Sandbox<Env> {
       if (failure.diskFull) await this.recoverFromDiskFull(failure.reason, refreshCounted ? 1 : 0);
     } finally {
       if (refreshCounted) this.refreshesInFlight--;
+      if (cycleHolder) await this.clearInFlight("refresh", cycleHolder);
       const state = await this.ctx.storage.get<ResidentState>(STATE_KEY);
       // Consecutive-interruption count: bounds the short re-arm so
       // a step whose output chronically carries the kill signature falls back to
@@ -2658,7 +3047,7 @@ export class ResidentDO extends Sandbox<Env> {
     );
     await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, systemClock());
     await this.recordRefreshError(`${reason} — container recycled; restoring from R2 on the next alarm`);
-    this.clearIncarnationMemos(); // deliberate incarnation swap
+    this.swapIncarnation(); // deliberate incarnation swap
     await this.stop().catch((err) => console.log(`disk-full: stop failed: ${errMsg(err)}`));
     this.rearmOutcome = "disk-full-restart";
   }
@@ -2941,7 +3330,7 @@ export class ResidentDO extends Sandbox<Env> {
     console.log(
       `image-stale (${where}): ${last} missing in the running container — stopping so it restarts on the current image`,
     );
-    this.clearIncarnationMemos(); // deliberate incarnation swap
+    this.swapIncarnation(); // deliberate incarnation swap
     await this.stop().catch((err) => console.log(`image-stale: stop failed: ${errMsg(err)}`));
     return true;
   }
@@ -3050,28 +3439,35 @@ export class ResidentDO extends Sandbox<Env> {
     // named degradation, never a stall) and pull the next cycle to +5s so it normalizes.
     if (status.state === "refreshing" || status.state === "restoring") {
       const updatedAt = Date.parse((await this.ctx.storage.get<string>(UPDATED_KEY)) ?? "") || 0;
-      // A hydration older than the stale bound counts as DEAD, not in flight:
-      // its promise lives on SDK calls into a container that may have
-      // been replaced under it, and a promise that never settles would
-      // otherwise hold `this.hydration` non-null forever — making a stuck
-      // `restoring` permanently invisible to this branch. No legitimate
+      // Who holds what comes from the in-flight row (item 22), not from this
+      // isolate's memory: a cycle or hydration lease is alive only for the
+      // current incarnation and inside its budget. A hydration past the stale
+      // bound counts as DEAD, not in flight: its promise lives on SDK calls
+      // into a container that may have been replaced under it, and a promise
+      // that never settles would otherwise hold the memo forever — making a
+      // stuck `restoring` permanently invisible to this branch. No legitimate
       // restore approaches STALE_MIDFLIGHT_MS (a full R2 restore is ~1 min).
-      const hydrationLive = this.hydration !== null && systemClock() - this.hydrationStartedAt <= STALE_MIDFLIGHT_MS;
-      const inFlight = this.refreshesInFlight > 0 || hydrationLive;
+      const live = liveInFlight(await this.readInFlight(), systemClock(), this.incarnation);
+      const inFlight = live.refresh || live.hydration;
       if (!inFlight && systemClock() - updatedAt > STALE_MIDFLIGHT_MS) {
         // The reads above yielded; a cycle that started meanwhile owns the
         // state now — leave it alone rather than stamp `degraded` over it.
         const again = await this.getStatus();
-        const hydrationStillDead =
-          this.hydration === null || systemClock() - this.hydrationStartedAt > STALE_MIDFLIGHT_MS;
-        if (again.state !== status.state || this.refreshesInFlight > 0 || !hydrationStillDead) {
+        const rowAgain = await this.readInFlight();
+        const liveAgain = liveInFlight(rowAgain, systemClock(), this.incarnation);
+        if (again.state !== status.state || liveAgain.refresh || liveAgain.hydration) {
           return { resource, ...again, action: "none" };
         }
-        // Drop the dead hydration reference so the re-armed cycle's
-        // ensureHydrated starts a fresh restore instead of awaiting a promise
-        // that will never settle. Safe: past the bound nothing on the other
-        // end is still writing (the container it talked to is gone).
+        // Drop the dead hydration reference and the dead leases so the
+        // re-armed cycle's ensureHydrated starts a fresh restore instead of
+        // awaiting a promise that will never settle. Safe: past the bound
+        // nothing on the other end is still writing (the container it talked
+        // to is gone). Each clear is compared against the holder just read:
+        // a cycle that recorded a fresh lease between that read and this
+        // delete keeps it, the way a release never deletes another holder's row.
         this.hydration = null;
+        if (rowAgain.refresh) await this.clearInFlight("refresh", rowAgain.refresh.holder);
+        if (rowAgain.hydration) await this.clearInFlight("hydration", rowAgain.hydration.holder);
         const reason = `stale-mid-flight: ${status.state} since ${new Date(updatedAt).toISOString()} with no cycle running; re-armed by watchdog`;
         await this.setResidentState("degraded", reason);
         this.deleteSchedules(REFRESH_CALLBACK);
@@ -3788,8 +4184,9 @@ export class ResidentDO extends Sandbox<Env> {
      *  `restoring` span stays under RESTORE_MAX_MS in total (the hydrate
      *  invariant); every other caller gets `min(budgetMs, RESTORE_MAX_MS)`
      *  from now, so an attach never waits longer for a download than it
-     *  would for an install. */
-    opts: { seedFromKey?: string; restoreDeadlineMs?: number } = {},
+     *  would for an install. `attempt`: the private scratch tree's name when
+     *  the caller has leased it (installDeps); minted here otherwise. */
+    opts: { seedFromKey?: string; restoreDeadlineMs?: number; attempt?: string } = {},
   ): Promise<string> {
     const backupRecord = await this.depsBackupRecord(key);
     const plan = planDepsMaterialization({
@@ -3808,14 +4205,15 @@ export class ResidentDO extends Sandbox<Env> {
     // same way next time) and falls through to the installer, which records
     // a fresh backup — never a stranded key.
     const restoreDeadlineMs = opts.restoreDeadlineMs ?? systemClock() + Math.min(budgetMs, RESTORE_MAX_MS);
+    const attempt = opts.attempt ?? crypto.randomUUID().slice(0, 8);
     const p = (
       plan.action === "restore" && backupRecord
-        ? this.restoreDepsEntry(key, backupRecord, restoreDeadlineMs).catch(async (err) => {
+        ? this.restoreDepsEntry(key, backupRecord, restoreDeadlineMs, attempt).catch(async (err) => {
             console.log(`deps: restore of ${key.slice(0, 8)} failed — installing instead: ${errMsg(err)}`);
             await this.dropDepsBackups([key]).catch(() => {});
-            return this.installDepsEntry(key, sha, installCmd, budgetMs, opts);
+            return this.installDepsEntry(key, sha, installCmd, budgetMs, { ...opts, attempt });
           })
-        : this.installDepsEntry(key, sha, installCmd, budgetMs, opts)
+        : this.installDepsEntry(key, sha, installCmd, budgetMs, { ...opts, attempt })
     ).finally(() => this.depsInFlight.delete(key));
     this.depsInFlight.set(key, p);
     return p;
@@ -3875,8 +4273,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  then the same commit script an install ends with: staging, atomic
    *  rename, `.complete` LAST. A partial download never becomes an entry.
    *  `deadlineMs` is the caller's (see materializeDeps): never a fresh cap. */
-  private async restoreDepsEntry(key: string, record: DepsBackupRecord, deadlineMs: number): Promise<string> {
-    const attempt = crypto.randomUUID().slice(0, 8);
+  private async restoreDepsEntry(
+    key: string,
+    record: DepsBackupRecord,
+    deadlineMs: number,
+    attempt: string,
+  ): Promise<string> {
     const scratch = depsScratchPath(attempt);
     const staging = depsStagingPath(key, attempt);
     const t0 = systemClock();
@@ -3933,10 +4335,10 @@ export class ResidentDO extends Sandbox<Env> {
     sha: string,
     installCmd: string,
     budgetMs: number,
-    opts: { seedFromKey?: string },
+    opts: { seedFromKey?: string; attempt: string },
   ): Promise<string> {
     await this.acquireDepsInstallSlot();
-    const attempt = crypto.randomUUID().slice(0, 8);
+    const { attempt } = opts;
     const scratch = depsScratchPath(attempt);
     const staging = depsStagingPath(key, attempt);
     const t0 = systemClock();
@@ -5145,6 +5547,9 @@ export class ResidentDO extends Sandbox<Env> {
       FACTS_KEY,
       SNAPSHOT_KEY,
       DISK_KEY,
+      MIRROR_MUTEX_KEY,
+      inFlightKey("refresh"),
+      inFlightKey("hydration"),
     ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
@@ -5203,6 +5608,14 @@ export class ResidentDO extends Sandbox<Env> {
       inFlight: this.inFlightCount(),
       // The runs alone (no refresh cycle): what the deploy preflight refuses on.
       runsInFlight: this.runsInFlightCount(),
+      // Item 22: who holds what, as the rows say — the mirror mutex and the
+      // cycle/hydration leases, each judged against this incarnation.
+      incarnation: this.incarnation,
+      mirrorMutex: (map.get(MIRROR_MUTEX_KEY) as Lease | undefined) ?? null,
+      leases: inFlightRow(
+        map.get(inFlightKey("refresh")) as Lease | undefined,
+        map.get(inFlightKey("hydration")) as Lease | undefined,
+      ),
       threads,
       // Item 55: the last disk sample (`residentDiskBudget.ts` DiskSample), or
       // null before the first measurement of this incarnation.
@@ -5250,7 +5663,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  next refresh must take the restoring→warm wake path). */
   async debugStopContainer(): Promise<{ stopped: boolean; error?: string }> {
     try {
-      this.clearIncarnationMemos(); // deliberate incarnation swap
+      this.swapIncarnation(); // deliberate incarnation swap
       await this.stop();
       return { stopped: true };
     } catch (err) {
@@ -5423,7 +5836,7 @@ export class ResidentDO extends Sandbox<Env> {
     }
     // Retired DO: clear the alarm the Container base may have armed for its
     // schedules, then wipe storage so nothing ever wakes this object again.
-    this.clearIncarnationMemos(); // retired object, retired memos
+    this.swapIncarnation(); // retired object, retired memos
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     return { schedulesCancelled: true, containerStopped, storageCleared: true, backupObjectsDeleted, errors };
