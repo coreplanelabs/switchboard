@@ -660,5 +660,20 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  and URL reading, so a plain mention can answer from the repos and act on
    *  issues without being re-sent to another agent. */
   assistant: [webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS],
+  /** The explore agent (docs/reference/specs/agent-explore.md): a shell and
+   *  file reads in a cold sandbox, the web with search, the skills and the
+   *  GitHub reads — and nothing that writes: no `write_file`, no `submit_*`,
+   *  no issue writes. Read-only is a toolset-and-prompt contract; the wall is
+   *  the read-scoped credential its machine holds. */
+  explore: [
+    bashTool,
+    readFileTool,
+    updateStatusTool,
+    webFetchTool,
+    webSearchTool,
+    listSkillsTool,
+    useSkillTool,
+    ...GITHUB_READ_TOOLS,
+  ],
   none: [],
 };

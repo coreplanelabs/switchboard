@@ -340,9 +340,12 @@ function streamExec(
           // command (137 when the follow-up SIGKILL had to) — annotate so the
           // agent knows what happened and how to adapt.
           const timedOut = exitCode === 124 || exitCode === 137;
+          // A job past the ceiling is detached with `setsid -f`: every /exec
+          // runs under `timeout … bash -c`, whose process group is reaped when
+          // the command returns, so a plain background job dies with it.
           const note = timedOut
             ? `command timed out in the sandbox after ${execTimeoutSecs}s (pass the bash tool's timeoutMs for longer commands, max ${BASH_TIMEOUT_MAX_MS} ms); ` +
-              "re-run as smaller/faster steps or background it with nohup"
+              "re-run as smaller/faster steps, or start it detached with `setsid -f sh -c '<command> > /tmp/job.log 2>&1'` and poll the log on later calls"
             : "";
           // The command as the Worker's own root (docs/reference/specs/tracing.md item 22).
           execRoot(attemptStartedAt, traceparent).end(exitCode === 0 ? "ok" : "error", {

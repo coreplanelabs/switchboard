@@ -112,6 +112,7 @@ describe("planInit — the files", () => {
       general: "openai/llama-3.3-70b",
       coding: "openai/llama-3.3-70b",
       review: "openai/llama-3.3-70b",
+      explore: "openai/llama-3.3-70b",
     });
     expect(parseEnv(fileAt(plan, ENV_PATH).text).OPENAI_API_KEY).toBe(OPENAI);
     expect(plan.providers).toEqual(["openai"]);
@@ -139,7 +140,12 @@ describe("planInit — the files", () => {
     expect(Object.keys(a.providers)).toEqual(["anthropic", "openai"]);
     expect(a.defaults.models.general).toBe("anthropic/claude-haiku-4-5");
     const b = parseAppConfigText(fileAt(planned({ ...both, model: "gpt-5" }), CONFIG_PATH).text);
-    expect(b.defaults.models).toEqual({ general: "openai/gpt-5", coding: "openai/gpt-5", review: "openai/gpt-5" });
+    expect(b.defaults.models).toEqual({
+      general: "openai/gpt-5",
+      coding: "openai/gpt-5",
+      review: "openai/gpt-5",
+      explore: "openai/gpt-5",
+    });
   });
 
   it("Slack tokens and the GitHub App land in .env on their example lines; the PEM is one double-quoted line Node's parser reads back whole; the ids are not secrets", () => {

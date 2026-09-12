@@ -41,6 +41,7 @@ defaults:
     general: anthropic/claude-haiku-4-5
     coding: anthropic/claude-opus-5
     review: anthropic/claude-opus-5
+    explore: anthropic/claude-opus-5 # the two-hour read-only investigation (docs/reference/specs/agent-explore.md)
   # Default model effort per agent: low | medium | high (how hard the model
   # thinks per turn; lower = much faster turns). Same layering as models —
   # per-channel/user `effort` / `efforts.<agent>` and a per-request `effort:`

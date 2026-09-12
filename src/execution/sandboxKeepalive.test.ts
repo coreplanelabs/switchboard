@@ -195,6 +195,16 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toContain("EXEC_KEEPALIVE_INTERVAL_MS");
   });
 
+  // docs/reference/specs/execution.md item 2: every /exec runs under `timeout …
+  // bash -c`, whose process group is reaped when the command returns, so a
+  // `nohup … &` job dies with the command that started it while a `setsid -f`
+  // job outlives it. The hint the model reads on an exit 124 must name the
+  // tool that works and never the one that does not.
+  it("the timeout hint tells the model to detach a long job with setsid -f, and never names nohup", () => {
+    expect(worker).toContain("setsid -f");
+    expect(worker).not.toContain("nohup");
+  });
+
   it("the /exec failure path names a mid-command recycle, typed errors first", () => {
     expect(worker).toContain("recycledMidCommandMessage(");
     expect(worker).toContain("isRecycleError(");

@@ -10551,3 +10551,111 @@ workspaceDir: __WORKDIR__
     expect(statuses.map((s) => JSON.stringify(s)).some((s) => s.includes("budget"))).toBe(false);
   });
 });
+
+// docs/reference/specs/agent-explore.md — the first `repo-cold` preset end to
+// end through dispatch(): the cold path PR 1 built gets its first real user.
+describe("agent:explore — the first repo-cold preset", () => {
+  /** A deployment with a Cloudflare sandbox AND a resident fleet: a `repo-resident`
+   *  preset would probe the registry here; `explore` must never. */
+  const EXPLORE_YAML = `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+    explore: anthropic/explore-model
+execution:
+  type: cloudflare
+  url: https://sandbox.example
+  resident:
+    baseUrl: https://resident.example
+channels:
+  "slack:CSHORT":
+    boundary:
+      maxMinutes: 45
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+workspaceDir: __WORKDIR__
+`;
+  const inChannel = (channel: string, text: string) => ({
+    channelId: `slack:${channel}`,
+    userId: "slack:UADMIN",
+    threadKey: `slack:${channel}:1.0`,
+    text,
+  });
+  /** Every URL the dispatch fetches: GitHub's repository lookup answers 200,
+   *  anything else — the resident Worker above all — is an unexpected call. */
+  function recordingFetch() {
+    const urls: string[] = [];
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      urls.push(url);
+      if (url === "https://api.github.com/repos/acme/api") return new Response("{}", { status: 200 });
+      throw new Error(`unexpected network call: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    return urls;
+  }
+  /** The deps of an explore run: a fixed run id, a recording store, the production repo resolver. */
+  function exploreDeps(runId: string, provider: Provider) {
+    const registry = new RunRegistry({ genId: () => runId, genToken: () => "tok" });
+    const store = new InMemoryRunStore();
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(EXPLORE_YAML, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    return { deps, store, writer };
+  }
+
+  beforeEach(() => {
+    // The read-scoped vet and the sandbox env mint from GH_TOKEN (no App
+    // configured); the sandbox client is constructed with its bearer, never called.
+    vi.stubEnv("GH_TOKEN", "ghp_read_only_fixture");
+    vi.stubEnv("SANDBOX_TOKEN", "sbx");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "res-op");
+    vi.mocked(makeExecutor).mockClear();
+    vi.mocked(runAgent).mockClear();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.mocked(makeExecutor).mockClear();
+    vi.mocked(runAgent).mockClear();
+  });
+
+  it("agent:explore against a deployment with a resident fleet reaches the factory with `repo-cold` and identity `read`, vets the repository against GitHub once, and never calls the resident Worker", async () => {
+    const urls = recordingFetch();
+    const provider = capturingProvider("11 of 16 claims hold");
+    const { deps, store, writer } = exploreDeps("run-x", provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore in acme/api: how long does the test suite take?"), io);
+    await writer.settled();
+    expect(replies).toContain("11 of 16 claims hold");
+    expect(makeExecutor).toHaveBeenCalledTimes(1);
+    const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
+    expect(ctx.agent.name).toBe("explore");
+    expect(ctx.repo).toBe("acme/api");
+    expect(ctx.profile).toEqual({ machine: "repo-cold", identity: "read", minutes: 120 });
+    await expect(vi.mocked(makeExecutor).mock.results[0].value).resolves.toMatchObject({ backend: "sandbox" });
+    // The runner ran the explore preset's own def — 120 minutes, the explore toolset.
+    expect(vi.mocked(runAgent).mock.calls[0][0].agent).toMatchObject({ name: "explore", maxMinutes: 120 });
+    // One GitHub lookup with the run's credential; the resident registry and Worker untouched.
+    expect(urls).toEqual(["https://api.github.com/repos/acme/api"]);
+    expect(urls.some((u) => u.includes("resident.example"))).toBe(false);
+    expect((await store.get("run-x"))!.profile).toEqual({
+      preset: "explore",
+      machine: "repo-cold",
+      identity: "read",
+      minutes: 120,
+    });
+  });
+});

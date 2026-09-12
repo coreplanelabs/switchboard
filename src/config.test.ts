@@ -1336,9 +1336,9 @@ describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
   it("per-actor goldens: with no boundary set, every preset admits and refuses per actor kind exactly as canRunAgent does, and resolves its declared profile", () => {
     const s = store();
     const baseline: Record<string, Record<string, boolean>> = {
-      "slack:URANDOM": { general: true, coding: false, review: true, ship: true, research: true },
-      "slack:UDEV": { general: true, coding: true, review: true, ship: true, research: true },
-      "slack:UADMIN": { general: true, coding: true, review: true, ship: true, research: true },
+      "slack:URANDOM": { general: true, coding: false, review: true, ship: true, research: true, explore: true },
+      "slack:UDEV": { general: true, coding: true, review: true, ship: true, research: true, explore: true },
+      "slack:UADMIN": { general: true, coding: true, review: true, ship: true, research: true, explore: true },
     };
     expect(Object.keys(baseline["slack:URANDOM"]).sort()).toEqual(Object.keys(AGENTS).sort());
     for (const [actor, byAgent] of Object.entries(baseline)) {
