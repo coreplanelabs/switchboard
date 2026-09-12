@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createBranchRef,
   fetchPullRequestFacts,
+  fetchPullRequestReviews,
   fetchRepoShipInfo,
   findOpenPrByHead,
   openPullRequest,
@@ -346,6 +347,46 @@ describe("githubPulls", () => {
         htmlUrl: "https://github.com/acme/api/pull/7",
       });
       expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7");
+    });
+
+    // The coordinator's `read-record` asks whether the bot's own verdict stands
+    // on the pull request at the reviewed head (agent-ship.md item 9).
+    it("fetchPullRequestReviews lists the reviews with author, state, pinned head and body; a failed fetch or a non-list answer is undefined, never a throw", async () => {
+      stubToken();
+      const calls = stubFetch(
+        () =>
+          new Response(
+            JSON.stringify([
+              {
+                user: { login: "acme-switchboard[bot]", id: 318072483 },
+                state: "COMMENTED",
+                commit_id: "c".repeat(40),
+                body: "LGTM: clean",
+              },
+              { user: { login: "alice" }, state: "APPROVED", commit_id: "c".repeat(40), body: null },
+              { state: 7 },
+            ]),
+            { status: 200 },
+          ),
+      );
+      expect(await fetchPullRequestReviews({ repo: "acme/api", number: 7 })).toEqual([
+        {
+          author: { login: "acme-switchboard[bot]", id: 318072483 },
+          state: "COMMENTED",
+          commitId: "c".repeat(40),
+          body: "LGTM: clean",
+        },
+        { author: { login: "alice" }, state: "APPROVED", commitId: "c".repeat(40), body: "" },
+      ]);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7/reviews?per_page=100");
+      stubFetch(() => new Response("nope", { status: 502 }));
+      expect(await fetchPullRequestReviews({ repo: "acme/api", number: 7 })).toBeUndefined();
+      stubFetch(() => new Response(JSON.stringify({ not: "a list" }), { status: 200 }));
+      expect(await fetchPullRequestReviews({ repo: "acme/api", number: 7 })).toBeUndefined();
+      vi.stubGlobal("fetch", async () => {
+        throw new Error("offline");
+      });
+      expect(await fetchPullRequestReviews({ repo: "acme/api", number: 7 })).toBeUndefined();
     });
 
     // The PR object lags the branch ref after a force-push; the ref is the head.

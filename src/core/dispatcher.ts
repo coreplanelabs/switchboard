@@ -52,6 +52,8 @@ import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
 import { shipPresetFor } from "./shipPipeline.js";
+import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
+import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import type { CoordinatorTag } from "./coordinator/contract.js";
@@ -130,6 +132,12 @@ export interface DispatchOptions {
    *  `submit_dispositions` records against them and the set rides the record.
    *  Absent for every other request. */
   fixRound?: { findingIds: string[] };
+  /** Set by the coordinator's spawn route for a plan unit's child (agent-ship
+   *  item 13): the unit's contract, rendered once here — into a coding child's
+   *  first user turn as its own text part, into a review child's system prompt
+   *  after the REVIEW TARGET block — so both children hold one object. Absent
+   *  for every other request. */
+  contract?: ChildContract;
 }
 
 /** How a request ended, for whoever started it (dispatch/outcome.ts): the
@@ -463,8 +471,19 @@ export async function dispatch(
     }
 
     // A resume continues the exact conversation the ledger held (item 38);
-    // the thread history was folded into it when the run started.
-    const messages = resume ? resume.plan.messages : buildMessages(history, directives.text, msg.images, msg.documents);
+    // the thread history was folded into it when the run started. A plan
+    // unit's contract (agent-ship item 13) rides a coding child's first user
+    // turn as its own text part after the request's text — the review child
+    // gets the same block in its system prompt (composePrompt below).
+    const contractBlock = opts.contract
+      ? renderContract(opts.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
+      : undefined;
+    const built = buildMessages(history, directives.text, msg.images, msg.documents);
+    const messages = resume
+      ? resume.plan.messages
+      : contractBlock !== undefined && agent.name !== "review"
+        ? withContractInFirstUserTurn(built, contractBlock)
+        : built;
 
     // Executor selection is context-aware: the agent's resource declarations
     // decide whether anything is provisioned at all (general gets nothing),
@@ -621,6 +640,7 @@ export async function dispatch(
       verifiedAtAttach,
       resume,
       root,
+      ...(contractBlock !== undefined && agent.name === "review" ? { contract: contractBlock } : {}),
     });
     const { mcpForRun, composeSystem, system } = prompt;
     // The PR head this run reviews — the resolved head, or the one adopted at

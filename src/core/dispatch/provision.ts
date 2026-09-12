@@ -658,6 +658,10 @@ export interface PromptContext {
   verifiedAtAttach: boolean;
   resume: ResumeContext | undefined;
   root: Span;
+  /** A plan unit's rendered contract for a review child (agent-ship item 13):
+   *  placed right after the REVIEW TARGET block, as the ship pipeline's review
+   *  round places it. Absent on every other request. */
+  contract?: string;
 }
 
 /**
@@ -790,6 +794,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
             ...(repoCtx.prSize ? { size: repoCtx.prSize } : {}),
           }
         : undefined,
+    ...(ctx.contract !== undefined ? { contract: ctx.contract } : {}),
     blocks: {
       memory: memoryBlock,
       config: configBlock,

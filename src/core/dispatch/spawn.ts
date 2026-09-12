@@ -64,6 +64,8 @@ export interface SpawnRequest {
   repo?: string;
   /** Whole minutes, at least 2: the child's `budget:` directive. */
   budget?: number;
+  /** The branch the child's thread binds to (`on branch <ref>`), when the caller names one; needs `repo`. */
+  ref?: string;
 }
 
 /** What `dispatch()` is told about a child's parent (`DispatchOptions.parent`):
@@ -129,12 +131,14 @@ export interface SpawnDeps<D extends SpawnCoreDeps = SpawnCoreDeps> {
 }
 
 /** The child's request text: the preset directive, a `budget:` directive when
- *  the parent narrowed it, the repository as `in <owner/name>:` for a preset
- *  that works in one, then the prompt — the message the requester would have
- *  typed by hand. */
+ *  the parent narrowed it, the repository as `in <owner/name>` for a preset
+ *  that works in one — with `on branch <ref>` when the child's thread must bind
+ *  to a branch (a coordinator's coding child on its unit's branch) — then the
+ *  prompt: the message the requester would have typed by hand. */
 export function childRequestText(request: SpawnRequest): string {
   const directives = [`agent:${request.preset}`, ...(request.budget !== undefined ? [`budget:${request.budget}`] : [])];
-  const repo = request.repo !== undefined ? ` in ${request.repo}:` : "";
+  const branch = request.ref !== undefined ? ` on branch ${request.ref}` : "";
+  const repo = request.repo !== undefined ? ` in ${request.repo}${branch}:` : "";
   return `${directives.join(" ")}${repo} ${request.prompt}`;
 }
 

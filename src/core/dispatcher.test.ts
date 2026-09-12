@@ -1,3 +1,4 @@
+import { contractFromTask, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { SELF_DESCRIPTION_HEADER, selfDescriptionBlock } from "./selfDescription.js";
@@ -1999,6 +2000,27 @@ describe("review post-step", () => {
       expect("dispositions" in rec).toBe(false);
     });
 
+    // docs/reference/specs/agent-ship.md item 13 — a coordinator's review child is
+    // dispatched with the same contract object its coding child was handed: the
+    // block enters the system prompt right after the REVIEW TARGET block, and
+    // the review's user turn is unchanged.
+    it("a review run dispatched with a contract carries the rendered block in its system prompt after the REVIEW TARGET block, its user turn unchanged", async () => {
+      const contract = contractFromTask({ task: "do the unit", rebase: { branch: "plan/p/u10", onto: "main" } });
+      const block = renderContract(contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text;
+      const { deps } = reviewDeps(async () => PR_HEAD);
+      const provider = deps.providers.get("anthropic") as Provider & { requests: CompletionRequest[] };
+      const text = "agent:review https://github.com/acme/api/pull/42";
+      await dispatch(deps, msg(text), fakeIO().io, { contract });
+      const system = provider.requests[0].system ?? "";
+      expect(system).toContain(block);
+      expect(system.indexOf("REVIEW TARGET")).toBeGreaterThan(-1);
+      expect(system.indexOf(block)).toBeGreaterThan(system.indexOf("REVIEW TARGET"));
+      const first = provider.requests[0].messages.find((m) => m.role === "user")!;
+      expect(first.content.flatMap((p) => (p.type === "text" ? [p.text] : []))).toEqual([
+        "https://github.com/acme/api/pull/42",
+      ]);
+    });
+
     it("current head unknown (fetch fails or answers nothing) → no note, never a false alarm", async () => {
       for (const fetchPrHead of [
         async () => undefined,
@@ -3494,6 +3516,50 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const noSink = dispositionAcks(rec2.events);
     expect(noSink.length).toBeGreaterThan(0);
     expect(noSink.every((s) => /not recorded/.test(s))).toBe(true);
+  });
+
+  // docs/reference/specs/agent-ship.md item 13 — a coordinator's coding child is
+  // dispatched with the unit's contract (`DispatchOptions.contract`): the
+  // rendered block is the first user turn's last text part, the request's
+  // text first, exactly as the ship pipeline's coding round places it.
+  it("a coding run dispatched with a contract carries the rendered block as its first user turn's last text part; without one the turn is the request alone", async () => {
+    const contract = contractFromTask({ task: "do the unit", rebase: { branch: "plan/p/u10", onto: "main" } });
+    const block = renderContract(contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text;
+    /** The description-then-answer provider with its requests recorded (a snapshot of each message list). */
+    const recording = () => {
+      const inner = describeThenAnswer(DESCRIPTION);
+      const requests: CompletionRequest[] = [];
+      const provider: Provider & { requests: CompletionRequest[] } = {
+        name: "fake",
+        requests,
+        async complete(req) {
+          requests.push({ ...req, messages: [...req.messages] });
+          return inner.complete(req);
+        },
+      };
+      return provider;
+    };
+    const firstUserTexts = (requests: CompletionRequest[]) => {
+      const first = requests[0]!.messages.find((m) => m.role === "user")!;
+      return first.content.flatMap((p) => (p.type === "text" ? [p.text] : []));
+    };
+    const provider = recording();
+    const deps = codingDeps(provider);
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    deps.openPullRequest = openSpy().fn;
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io, { contract });
+    const texts = firstUserTexts(provider.requests);
+    expect(texts[0]).toBe("fix it");
+    expect(texts.at(-1)).toBe(block);
+    expect(block).toContain("## Contract");
+    expect(block).toContain("Rebase `plan/p/u10` onto `main`");
+
+    const plainProvider = recording();
+    const plain = codingDeps(plainProvider);
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    plain.openPullRequest = openSpy().fn;
+    await dispatch(plain, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    expect(firstUserTexts(plainProvider.requests)).toEqual(["fix it"]);
   });
 
   it("a thread bound to an existing PR's head branch: the base is the PR's TRUE base ref, so a fix-round repush opens/edits instead of reading as 'nothing pushed'", async () => {

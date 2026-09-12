@@ -380,6 +380,10 @@ describe("childRequestText / maxChildrenOf", () => {
     expect(childRequestText({ preset: "explore", prompt: "time the suite", repo: "acme/api", budget: 30 })).toBe(
       "agent:explore budget:30 in acme/api: time the suite",
     );
+    // A coordinator's coding child binds its thread to the unit's branch.
+    expect(childRequestText({ preset: "coding", prompt: "do the unit", repo: "acme/api", ref: "plan/p/u10" })).toBe(
+      "agent:coding in acme/api on branch plan/p/u10: do the unit",
+    );
   });
 
   it("the lead names the child preset, the requester and the parent; a prompt is cut to one line", () => {
