@@ -132,6 +132,43 @@ describe("resident prompt variants", () => {
   });
 });
 
+// Feature: docs/reference/specs/execution.md item 10 — the model learns what
+// the image it runs in can do, or it never reaches for it: every prompt that
+// describes a workspace names the toolchain both execution images carry.
+describe("the workspace prompts name the image toolchain", () => {
+  const cold = { coding: AGENTS.coding.system, review: AGENTS.review.system, explore: AGENTS.explore.system };
+  const resident = { coding: AGENTS.coding.residentSystem!, review: AGENTS.review.residentSystem! };
+
+  it("every workspace prompt names Node, the native-module compilers, ffmpeg and the headless Chromium through playwright", () => {
+    for (const [name, sys] of Object.entries({ ...cold, ...resident })) {
+      expect(sys, name).toMatch(/Node 24/);
+      expect(sys, name).toMatch(/python3/);
+      expect(sys, name).toMatch(/g\+\+/);
+      expect(sys, name).toMatch(/ffmpeg/);
+      expect(sys, name).toContain("playwright screenshot");
+      expect(sys, name).toContain("playwright pdf");
+      expect(sys, name).toContain("require('playwright')");
+      expect(sys, name).toMatch(/video/i);
+    }
+  });
+
+  it("the cold prompts offer Docker; the resident prompts say there is none — the resident image has no engine", () => {
+    for (const [name, sys] of Object.entries(cold)) {
+      expect(sys, name).toContain("and Docker (the engine starts on the first `docker` call)");
+    }
+    for (const [name, sys] of Object.entries(resident)) {
+      expect(sys, name).toContain("no Docker");
+      expect(sys, name).not.toContain("Docker (the engine");
+    }
+  });
+
+  it("the prompts without a workspace name none of it", () => {
+    for (const name of ["general", "research", "conductor"]) {
+      expect(AGENTS[name].system, name).not.toMatch(/ffmpeg|playwright/);
+    }
+  });
+});
+
 // Feature: docs/reference/specs/distilled-diffs.md. The resident prompts use the
 // digest two ways: coding lets it shape the submitted PR description; review
 // orients with it before reading. Review READS the code — it never runs the

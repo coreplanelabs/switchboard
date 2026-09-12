@@ -64,3 +64,25 @@ describe.each(IMAGES)("%s", (path) => {
     expect(pins.map((p) => `line ${p.line}: ${p.tool}@${p.spec || "(no version)"}`)).toEqual([]);
   });
 });
+
+// The browser is a toolchain version like pnpm's: `playwright@latest` would
+// make the Chromium a run drives a property of the last image build, and a
+// Playwright minor moves the browser build with it.
+describe("the execution images' playwright", () => {
+  const EXECUTION_IMAGES = ["deploy/cloudflare-resident/Dockerfile", "deploy/cloudflare-sandbox/Dockerfile"] as const;
+  const pins = EXECUTION_IMAGES.map((path) =>
+    imagePins(readFileSync(resolve(ROOT, path), "utf8")).filter((p) => p.tool === "playwright"),
+  );
+
+  it("is one exact global install per image", () => {
+    for (const [i, path] of EXECUTION_IMAGES.entries()) {
+      expect(pins[i].length, `${path} installs playwright once`).toBe(1);
+      expect(pins[i][0].floating, `${path}: playwright@${pins[i][0]?.spec}`).toBe(false);
+    }
+  });
+
+  it("names the same version in both images", () => {
+    expect(pins[0][0]?.spec).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(new Set(pins.map((p) => p[0]?.spec)).size).toBe(1);
+  });
+});
