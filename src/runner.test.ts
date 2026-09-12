@@ -35,6 +35,7 @@ function agent(overrides: Partial<AgentDef> = {}): AgentDef {
     system: "you are a test",
     toolset: "full",
     machine: "none", // the runner never provisions: every test hands it an executor
+    identity: "none",
     maxTurns: 2,
     maxTokens: 1000,
     maxMinutes: 10,

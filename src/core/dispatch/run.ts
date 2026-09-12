@@ -8,6 +8,7 @@
 // is record.ts).
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
+import type { RunProfile } from "../../config/profile.js";
 import { mergeTools } from "../../runner.js";
 import { TOOLSETS } from "../../tools/workspace.js";
 import { makeWebCapability } from "../../tools/web.js";
@@ -98,6 +99,9 @@ export interface RunDeps
 export interface ClaimContext {
   msg: IncomingMessage;
   agent: AgentDef;
+  /** The run's effective profile: the budget the seed carries and the
+   *  read-only flag on the row are read from here, never from the preset. */
+  profile: RunProfile;
   resolved: ResolvedRequest;
   repoCtx: RepoContext;
   channelVisibility: ChannelVisibility;
@@ -136,6 +140,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     channelVisibility,
     run,
     registry,
+    profile,
     selection,
     requestRow,
     reserved,
@@ -183,7 +188,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
           ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
           ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
-          readonly: agent.toolset === "readonly",
+          readonly: profile.identity === "read",
           selection: resident === true ? "resident" : "sandbox",
           ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
           ...(requestRow !== undefined ? { request: requestRow } : {}),
@@ -196,7 +201,9 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools).map(
           ({ name, description, inputSchema }) => ({ name, description, inputSchema }),
         ),
-        seed: { messages, budgetMs: agent.maxMinutes * 60_000 },
+        // The seed carries the EFFECTIVE budget, so a resume runs on what
+        // this run was admitted with, not on the preset's own number.
+        seed: { messages, budgetMs: profile.minutes * 60_000 },
         // A stop asked of another container (`/runs/stop` there) reaches this
         // run through its heartbeat and is honored like a local one; a fence
         // (another generation took the run) is a hard stop — nothing more may

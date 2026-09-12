@@ -1,4 +1,5 @@
 import { getAgent } from "../agents/registry.js";
+import { declaredProfile } from "../config/profile.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { systemClock } from "./trace/index.js";
 import type { SpanSink, Tracer } from "./trace/types.js";
@@ -256,6 +257,10 @@ export async function dispatch(
     if ((await authorizeAgent(deps, { msg, io, refuse, agentName: resolved.agentName })).kind === "refused") return;
 
     const agent = getAgent(resolved.agentName);
+    // The run's effective profile (docs/decisions/0026-capability-profiles-and-request-routing.md):
+    // the machine class, identity and budget every stage below reads — the
+    // factory, the ledger row, the runner — never the preset's own fields.
+    const profile = declaredProfile(agent);
 
     // Thread admission (docs/reference/specs/thread-admission.md item 1) and the
     // carried run's row and inbox: the admission stage (dispatch/admission.ts).
@@ -300,6 +305,7 @@ export async function dispatch(
       msg,
       history,
       agent,
+      profile,
       resolved,
       resume,
       root,
@@ -344,6 +350,7 @@ export async function dispatch(
       closeLines,
       clock,
       agent,
+      profile,
       needsRepo,
       repoCtx,
     });
@@ -432,6 +439,7 @@ export async function dispatch(
     const reservation = await reserveRun(deps, {
       msg,
       agent,
+      profile,
       resolved,
       repoCtx,
       channelVisibility,
@@ -461,6 +469,7 @@ export async function dispatch(
       closeLines,
       clock,
       agent,
+      profile,
       repoCtx,
       root,
     });
@@ -566,6 +575,7 @@ export async function dispatch(
     ledgerRun = await claimRun(deps, {
       msg,
       agent,
+      profile,
       resolved,
       repoCtx,
       channelVisibility,
@@ -590,6 +600,7 @@ export async function dispatch(
       msg,
       io,
       agent,
+      profile,
       resolved,
       provider,
       model,

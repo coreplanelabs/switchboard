@@ -70,6 +70,15 @@ describe("githubRepoProbe", () => {
     expect(capture.headers?.has("authorization")).toBe(false);
   });
 
+  it("a run whose identity mints nothing (no scope) vets anonymously too: the credential resolver is never asked", async () => {
+    const capture: { url?: string; headers?: Headers } = {};
+    const token = vi.fn(async () => "ghs_write");
+    const probe = githubRepoProbe({ fetch: fetchAnswering(200, capture), token });
+    await expect(probe("acme/public")).resolves.toBe(true);
+    expect(token).not.toHaveBeenCalled();
+    expect(capture.headers?.has("authorization")).toBe(false);
+  });
+
   it("a slug that is not owner/name is refused before any request", async () => {
     const fetchSpy = fetchAnswering(200);
     const probe = githubRepoProbe({ scope: "read", fetch: fetchSpy, token: async () => "ghs_read" });

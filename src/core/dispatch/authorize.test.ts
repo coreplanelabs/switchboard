@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
+import { declaredProfile } from "../../config/profile.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
 import { NO_CAPABILITIES } from "../capabilities.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
@@ -133,7 +134,14 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     const admin = setup({ user: "slack:UADMIN" });
     const repoCtx: RepoContext = { rejectedRepo: "acme/new" };
     expect(
-      await authorizeRepo(admin.deps, { ...admin.gate, ...admin.cardCtx, agent: coding, needsRepo: true, repoCtx }),
+      await authorizeRepo(admin.deps, {
+        ...admin.gate,
+        ...admin.cardCtx,
+        agent: coding,
+        profile: declaredProfile(coding),
+        needsRepo: true,
+        repoCtx,
+      }),
     ).toEqual({
       kind: "refused",
       reason: "repo_not_onboarded",
@@ -145,14 +153,30 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     );
 
     const dev = setup({ user: "slack:UDEV" });
-    await authorizeRepo(dev.deps, { ...dev.gate, ...dev.cardCtx, agent: coding, needsRepo: true, repoCtx });
+    await authorizeRepo(dev.deps, {
+      ...dev.gate,
+      ...dev.cardCtx,
+      agent: coding,
+      profile: declaredProfile(coding),
+      needsRepo: true,
+      repoCtx,
+    });
     expect(dev.replies[0]).toMatch(/Ask .+ to onboard it \(`repo onboard acme\/new`\)/);
   });
 
   it("without a resident fleet there is nothing to onboard: the not-onboarded gate does not apply", async () => {
     const { deps, gate, cardCtx, replies } = setup({ residents: false });
     const repoCtx: RepoContext = { rejectedRepo: "acme/new" };
-    expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: coding, needsRepo: true, repoCtx })).toEqual({
+    expect(
+      await authorizeRepo(deps, {
+        ...gate,
+        ...cardCtx,
+        agent: coding,
+        profile: declaredProfile(coding),
+        needsRepo: true,
+        repoCtx,
+      }),
+    ).toEqual({
       kind: "allowed",
     });
     expect(replies).toEqual([]);
@@ -161,7 +185,16 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
   it("a repo the registry did not answer for is not guessed: refused as unverified, with the retry-or-URL reply", async () => {
     const { deps, gate, cardCtx, replies, refusals, closes } = setup({ user: "slack:UADMIN" });
     const repoCtx: RepoContext = { unverifiedRepo: "acme/api" };
-    expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: coding, needsRepo: true, repoCtx })).toEqual({
+    expect(
+      await authorizeRepo(deps, {
+        ...gate,
+        ...cardCtx,
+        agent: coding,
+        profile: declaredProfile(coding),
+        needsRepo: true,
+        repoCtx,
+      }),
+    ).toEqual({
       kind: "refused",
       reason: "repo_unverified",
     });
@@ -178,6 +211,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
         ...excluded.gate,
         ...excluded.cardCtx,
         agent: coding,
+        profile: declaredProfile(coding),
         needsRepo: true,
         repoCtx: { repo: "acme/secret" },
       }),
@@ -192,6 +226,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
         ...granted.gate,
         ...granted.cardCtx,
         agent: coding,
+        profile: declaredProfile(coding),
         needsRepo: true,
         repoCtx: { repo: "acme/api" },
       }),
@@ -204,6 +239,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
         ...open.gate,
         ...open.cardCtx,
         agent: coding,
+        profile: declaredProfile(coding),
         needsRepo: true,
         repoCtx: { repo: "acme/other" },
       }),
@@ -218,7 +254,14 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     const { deps, gate, cardCtx, replies } = setup({ user: "slack:UX" });
     const repoCtx: RepoContext = { repo: "acme/secret", rejectedRepo: "acme/new", unverifiedRepo: "acme/api" };
     expect(
-      await authorizeRepo(deps, { ...gate, ...cardCtx, agent: getAgent("general"), needsRepo: false, repoCtx }),
+      await authorizeRepo(deps, {
+        ...gate,
+        ...cardCtx,
+        agent: getAgent("general"),
+        profile: declaredProfile(getAgent("general")),
+        needsRepo: false,
+        repoCtx,
+      }),
     ).toEqual({ kind: "allowed" });
     expect(replies).toEqual([]);
   });
@@ -234,7 +277,16 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
       for (const residents of [true, false]) {
         const { deps, gate, cardCtx, replies, refusals, closes } = setup({ user: "slack:UADMIN", residents });
         const repoCtx: RepoContext = { rejectedRepo: "acme/hidden" };
-        expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: cold, needsRepo: true, repoCtx })).toEqual({
+        expect(
+          await authorizeRepo(deps, {
+            ...gate,
+            ...cardCtx,
+            agent: cold,
+            profile: declaredProfile(cold),
+            needsRepo: true,
+            repoCtx,
+          }),
+        ).toEqual({
           kind: "refused",
           reason: "repo_not_visible",
         });
@@ -252,7 +304,16 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     it("GitHub did not answer: refused as unverified, naming GitHub rather than the resident registry", async () => {
       const { deps, gate, cardCtx, replies, refusals, closes } = setup({ user: "slack:UADMIN" });
       const repoCtx: RepoContext = { unverifiedRepo: "acme/api" };
-      expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: cold, needsRepo: true, repoCtx })).toEqual({
+      expect(
+        await authorizeRepo(deps, {
+          ...gate,
+          ...cardCtx,
+          agent: cold,
+          profile: declaredProfile(cold),
+          needsRepo: true,
+          repoCtx,
+        }),
+      ).toEqual({
         kind: "refused",
         reason: "repo_unverified",
       });
@@ -271,6 +332,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
           ...excluded.gate,
           ...excluded.cardCtx,
           agent: cold,
+          profile: declaredProfile(cold),
           needsRepo: true,
           repoCtx: { repo: "acme/secret" },
         }),
@@ -281,6 +343,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
           ...open.gate,
           ...open.cardCtx,
           agent: cold,
+          profile: declaredProfile(cold),
           needsRepo: true,
           repoCtx: { repo: "acme/other" },
         }),

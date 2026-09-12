@@ -9,6 +9,7 @@
 // workspace attach.
 import type { ConfigStore } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
+import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives } from "../../directives.js";
 import type { Capabilities } from "../capabilities.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
@@ -95,15 +96,15 @@ export async function authorizeAgent(
  */
 export async function authorizeRepo(
   deps: AuthorizeDeps,
-  ctx: GateContext & GateCard & { agent: AgentDef; needsRepo: boolean; repoCtx: RepoContext },
+  ctx: GateContext & GateCard & { agent: AgentDef; profile: RunProfile; needsRepo: boolean; repoCtx: RepoContext },
 ): Promise<Gate<"repo_not_onboarded" | "repo_not_visible" | "repo_unverified" | "repo_access">> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, needsRepo, repoCtx } = ctx;
+  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, needsRepo, repoCtx } = ctx;
   // A `repo-cold` run's vet was GitHub's, not the registry's
   // (docs/reference/specs/execution.md item 18): a refused slug is a repository
   // this installation cannot see — a resident fleet, or its absence, has
   // nothing to do with it — and an unanswered one is GitHub's silence. Both
   // stop by name before any executor exists; neither ever mentions onboarding.
-  if (agent.machine === "repo-cold" && needsRepo && !repoCtx.repo) {
+  if (profile.machine === "repo-cold" && needsRepo && !repoCtx.repo) {
     if (repoCtx.rejectedRepo) {
       const slug = repoCtx.rejectedRepo;
       console.log(`[dispatch] ${msg.threadKey} not started: repo not visible (${slug}: GitHub answered 404)`);

@@ -12,6 +12,7 @@ import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } fr
 import type { ToolContext } from "../../tools/workspace.js";
 import type { Span } from "../trace/types.js";
 import { runAgent } from "../../runner.js";
+import { declaredProfile } from "../../config/profile.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
 import type { PrDescription } from "../prDescription.js";
 import { formatFinding, type Finding, type FindingDisposition } from "../reviewVerdict.js";
@@ -153,6 +154,7 @@ export async function runShipCodingChild(
     round: {
       threadKey: input.threadKey,
       agent: spec.agent,
+      profile: declaredProfile(spec.agent),
       repo: entry.repo,
       ref: entry.branch,
       headSha: opts.attachHeadSha,

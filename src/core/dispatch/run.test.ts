@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
+import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { RunRegistry } from "../runRegistry.js";
@@ -119,6 +120,7 @@ function setup() {
   const base = {
     msg: message,
     agent,
+    profile: declaredProfile(agent),
     resolved,
     repoCtx: { repo: "acme/api", ref: "main" },
     channelVisibility: "unknown" as const,

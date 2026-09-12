@@ -28,6 +28,19 @@ export function machineNeedsRepo(machine: MachineClass): boolean {
   return machine === "repo-cold" || machine === "repo-resident";
 }
 
+/** The identities a run can act as — the credential half of a profile
+ *  (docs/decisions/0026-capability-profiles-and-request-routing.md): the scope of
+ *  the GitHub credential minted for the run's machine, ordered `none < read <
+ *  write` (src/config/profile.ts holds the order and the boundary rule):
+ *  - `none`: no credential is minted. The run's tools act as nobody in its
+ *    machine (a `none` machine has no sandbox to hold one; the GitHub tools of
+ *    such an agent are REST calls in the bot process on the App credential).
+ *  - `read`: a read-scoped installation token (docs/reference/specs/execution.md
+ *    item 5), and a read-only worktree where the machine offers one.
+ *  - `write`: the write-scoped token a run needs to push and open pull requests. */
+export const IDENTITIES = ["none", "read", "write"] as const;
+export type Identity = (typeof IDENTITIES)[number];
+
 export interface AgentDef {
   name: string;
   description: string;
@@ -53,6 +66,11 @@ export interface AgentDef {
    *  provisions for its runs (`MACHINE_CLASSES`). `none` provisions nothing —
    *  no workspace, no sandbox, no credential. */
   machine: MachineClass;
+  /** Whom the agent's runs act as: the credential scope minted for the machine
+   *  (`IDENTITIES`) — never inferred from the toolset name. The read-only
+   *  worktree flag and the token the sandbox env and the `repo-cold` vet mint
+   *  read this, through the run's effective profile. */
+  identity: Identity;
   /** System prompt variant for resident-repo runs (docs/reference/specs/resident-repos.md):
    *  the workspace is a ready worktree — no cloning, no installs, no repo
    *  discovery, no gh CLI. Selected by the dispatcher AFTER executor
@@ -315,8 +333,10 @@ export const AGENTS: Record<string, AgentDef> = {
     system: GENERAL_SYSTEM,
     toolset: "assistant",
     // The GitHub tools are REST in the bot process, so a general ask never
-    // provisions a workspace or sandbox (docs/reference/specs/agent-general.md item 4).
+    // provisions a workspace or sandbox (docs/reference/specs/agent-general.md item 4)
+    // and mints no credential of its own.
     machine: "none",
+    identity: "none",
     maxTurns: 8, // a repo read is 2-3 calls (repos → tree → file); an issue action 1-2; still fast
     maxTokens: 16000,
     maxMinutes: 5,
@@ -337,6 +357,7 @@ export const AGENTS: Record<string, AgentDef> = {
     // No built-in effort: the deployment decides (`defaults.efforts.coding`,
     // `config set channel efforts.coding=…`, or `effort:` per request).
     machine: "repo-resident",
+    identity: "write", // pushes branches and opens pull requests
   },
   review: {
     name: "review",
@@ -345,6 +366,7 @@ export const AGENTS: Record<string, AgentDef> = {
     residentSystem: REVIEW_SYSTEM_RESIDENT,
     toolset: "readonly",
     machine: "repo-resident",
+    identity: "read", // a read-scoped token and a read-only worktree: it cannot post or push from inside
     maxTurns: 30, // backstop only; wall clock is the real budget (12 bound at ~4 min in practice)
     maxTokens: 64000,
     maxMinutes: 25, // safety net, not the mechanism — typical reviews land in ~5
@@ -365,6 +387,7 @@ export const AGENTS: Record<string, AgentDef> = {
     // clipped to the remaining wall clock, never by these numbers.
     toolset: "full",
     machine: "repo-resident",
+    identity: "write",
     maxTurns: 1,
     maxTokens: 16000,
     maxMinutes: 5,
@@ -376,6 +399,7 @@ export const AGENTS: Record<string, AgentDef> = {
     system: RESEARCH_SYSTEM,
     toolset: "web",
     machine: "none", // web I/O only; no workspace is provisioned
+    identity: "none",
     maxTurns: 12,
     maxTokens: 24000,
     maxMinutes: 8,

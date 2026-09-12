@@ -5,7 +5,8 @@ import type { Span } from "../core/trace/types.js";
 import type { ResidentStep } from "./residentStepTrace.js";
 import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
-import type { AgentDef } from "../agents/registry.js";
+import type { AgentDef, Identity } from "../agents/registry.js";
+import type { RunProfile } from "../config/profile.js";
 import { LocalExecutor, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
@@ -60,13 +61,18 @@ export interface ExecutorFactoryOptions {
 }
 
 /** What executor selection knows about the run it is provisioning for.
- *  The agent's machine class decides what is provisioned; repo/ref carry
- *  resident-repo inference (populated by the dispatcher's repo resolver;
- *  undefined means the per-thread path, no probe). */
+ *  The profile's machine class decides what is provisioned and its identity
+ *  whom the machine acts as; repo/ref carry resident-repo inference (populated
+ *  by the dispatcher's repo resolver; undefined means the per-thread path, no
+ *  probe). */
 export interface ExecutorContext {
   threadKey: string;
-  /** the resolved agent (never mutated here) */
+  /** the resolved agent (never mutated here) — named in the null executor's error */
   agent: AgentDef;
+  /** The run's EFFECTIVE profile (docs/decisions/0026-capability-profiles-and-request-routing.md):
+   *  the class provisioned and the identity minted are read from here and
+   *  never from `agent`, so nothing a boundary capped can leak back in. */
+  profile: RunProfile;
   /** inferred target repo, e.g. "org/name" */
   repo?: string;
   /** inferred git ref within `repo` */
@@ -142,11 +148,11 @@ export async function makeExecutor(
    *  probe and the attach become its `http.client` children (tracing.md item 21). */
   span?: Span,
 ): Promise<ExecutorSelection> {
-  // The agent's machine class decides what is provisioned
+  // The profile's machine class decides what is provisioned
   // (docs/reference/specs/execution.md item 18). `none` → nothing: no workspace
   // dir, no sandbox created or reconnected, no credential required. The
   // general and research agents land here.
-  const machine = ctx.agent.machine;
+  const machine = ctx.profile.machine;
   if (machine === "none") {
     return { executor: new NullExecutor(ctx.agent.name), backend: "local" };
   }
@@ -196,10 +202,10 @@ export async function makeExecutor(
         // still gets the worktree it came for; openResident adds ref@sha.
         const nonWarm =
           probe.state === "warm" ? undefined : oneLine(`${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
-        // Read-only agents (the review toolset) get a read-only worktree —
-        // decided from the agent's declared toolset, never from the prompt
+        // A `read` identity gets a read-only worktree — decided from the
+        // run's profile, never from the prompt
         // (docs/reference/specs/resident-repos.md item 50).
-        const readonly = ctx.agent.toolset === "readonly" ? true : undefined;
+        const readonly = ctx.profile.identity === "read" ? true : undefined;
         // The resolved PR head rides along so the resident fetches a mirror
         // whose ref tip lags it (item 51) instead of cloning a stale tip.
         return await openResident(
@@ -422,9 +428,14 @@ interface PerThreadInputs {
 }
 
 /** The per-thread inputs of a class that carries the checkout: the resolved
- *  repo and ref, and the run's GitHub credential in the env. */
+ *  repo and ref, and the run's GitHub credential — the profile's identity — in the env. */
 function perThreadCheckout(ctx: ExecutorContext): PerThreadInputs {
-  return { threadKey: ctx.threadKey, repo: ctx.repo, ref: ctx.ref, resolveEnvs: () => githubEnvs(ctx.agent) };
+  return {
+    threadKey: ctx.threadKey,
+    repo: ctx.repo,
+    ref: ctx.ref,
+    resolveEnvs: () => githubEnvs(ctx.profile.identity),
+  };
 }
 
 /** The per-thread backends (the pre-resident selection, unchanged). */
@@ -497,23 +508,27 @@ class NullExecutor implements Executor {
   }
 }
 
-/** The scope of the GitHub credential a run holds, decided from the agent's
- *  declared toolset — never from the prompt. Least-privilege: a `readonly`
- *  agent (the review agent) gets a READ-scoped token, so even though its
- *  sandbox has `gh` + the credential helper, it physically cannot
- *  post/review/push from inside — the deterministic review post is done by the
- *  bot process (githubComments.ts) with a write token, so this doesn't weaken
- *  it. A `full` agent (coding) gets the write-scoped token it needs to push and
- *  open PRs. The sandbox env (`githubEnvs`) and the `repo-cold` repository vet
+/** The scope of the GitHub credential a run holds, decided from its profile's
+ *  identity — never from the prompt, never from the toolset name.
+ *  Least-privilege: a `read` identity (the review agent) gets a READ-scoped
+ *  token, so even though its sandbox has `gh` + the credential helper, it
+ *  physically cannot post/review/push from inside — the deterministic review
+ *  post is done by the bot process (githubComments.ts) with a write token, so
+ *  this doesn't weaken it. A `write` identity (coding) gets the write-scoped
+ *  token it needs to push and open PRs. A `none` identity mints nothing. The
+ *  sandbox env (`githubEnvs`) and the `repo-cold` repository vet
  *  (`githubRepoProbe`) mint with this scope, so the vet sees what the run will. */
-export function githubTokenScopeFor(agent: AgentDef): GithubTokenScope {
-  return agent.toolset === "readonly" ? "read" : "write";
+export function githubTokenScopeFor(identity: Identity): GithubTokenScope | undefined {
+  return identity === "none" ? undefined : identity;
 }
 
 /** GitHub credential for the sandbox env: freshly-minted App installation
- *  token when a GitHub App is configured, else static GH_TOKEN, else none. */
-async function githubEnvs(agent: AgentDef): Promise<Record<string, string>> {
-  const token = await resolveGithubToken(githubTokenScopeFor(agent));
+ *  token when a GitHub App is configured, else static GH_TOKEN, else none —
+ *  and none at all for an identity that mints nothing. */
+async function githubEnvs(identity: Identity): Promise<Record<string, string>> {
+  const scope = githubTokenScopeFor(identity);
+  if (scope === undefined) return {};
+  const token = await resolveGithubToken(scope);
   return token ? { GH_TOKEN: token } : {};
 }
 

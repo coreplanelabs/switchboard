@@ -14,7 +14,8 @@
 // card, the channel reply's wording around a refusal) stay with the caller
 // except where the text IS the unit's contract (refusal replies, post notes).
 
-import type { AgentDef } from "../agents/registry.js";
+import type { AgentDef, Identity } from "../agents/registry.js";
+import type { RunProfile } from "../config/profile.js";
 import type { Effort } from "../effort.js";
 import type { ChatMessage, Provider } from "../providers/types.js";
 import { runAgent } from "../runner.js";
@@ -54,13 +55,13 @@ export type FetchPrCommits = (q: { repo: string; base: string; sha: string }) =>
 
 // ---- per-agent attach/release pairing ---------------------------------------
 
-/** Release mode paired to a round's agent: a readonly toolset holds nothing
- *  worth keeping → "always"; a writable one keeps a worktree with
- *  uncommitted/unpushed work → "if-clean". A hard stop means "tear it down
- *  now" (the abandoned command may still be running in there) → "always"
- *  regardless of the agent. */
-export function releaseModeFor(agent: AgentDef, opts: { hardStopped: boolean }): ReleaseMode {
-  return agent.toolset === "readonly" || opts.hardStopped ? "always" : "if-clean";
+/** Release mode paired to a round's identity: a `read` identity attached a
+ *  read-only worktree that holds nothing worth keeping → "always"; any other
+ *  keeps a worktree with uncommitted/unpushed work for the thread's follow-ups
+ *  → "if-clean". A hard stop means "tear it down now" (the abandoned command
+ *  may still be running in there) → "always" regardless of the identity. */
+export function releaseModeFor(identity: Identity, opts: { hardStopped: boolean }): ReleaseMode {
+  return identity === "read" || opts.hardStopped ? "always" : "if-clean";
 }
 
 /** One round's workspace: the executor selection made for the round's agent,
@@ -81,25 +82,34 @@ export interface RoundWorkspace {
 
 /**
  * Attach a workspace for one round: executor selection driven by the round's
- * `AgentDef` (its resource declarations decide whether anything is
- * provisioned; a readonly toolset gets a read-only resident worktree), with
- * the matching release bound to the same agent. `ResidentNeedsRefError`
+ * effective profile (its machine class decides whether anything is
+ * provisioned; a `read` identity gets a read-only resident worktree), with
+ * the matching release bound to the same identity. `ResidentNeedsRefError`
  * propagates to the caller (the ask-once flow).
  */
 export async function attachRoundWorkspace(input: {
   factory: ExecutorFactoryOptions;
-  round: { threadKey: string; agent: AgentDef; repo?: string; ref?: string; headSha?: string };
+  round: {
+    threadKey: string;
+    agent: AgentDef;
+    /** The round's effective profile — what is provisioned, and as whom. */
+    profile: RunProfile;
+    repo?: string;
+    ref?: string;
+    headSha?: string;
+  };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
    *  become its `http.client` children (docs/reference/specs/tracing.md item 21). */
   span?: Span;
 }): Promise<RoundWorkspace> {
-  const { agent } = input.round;
+  const { agent, profile } = input.round;
   const selection = await makeExecutor(
     input.factory,
     {
       threadKey: input.round.threadKey,
       agent,
+      profile,
       repo: input.round.repo,
       ref: input.round.ref,
       headSha: input.round.headSha,
@@ -109,7 +119,7 @@ export async function attachRoundWorkspace(input: {
   const release = async (opts: { hardStopped: boolean; span?: Span }): Promise<void> => {
     const { executor } = selection;
     if (!executor.release) return;
-    const mode = releaseModeFor(agent, opts);
+    const mode = releaseModeFor(profile.identity, opts);
     try {
       const r = await executor.release(mode, opts.span ? { span: opts.span } : undefined);
       console.log(`[release] ${input.logKey} ${r.released ? "released" : "kept"}${r.reason ? ` (${r.reason})` : ""}`);

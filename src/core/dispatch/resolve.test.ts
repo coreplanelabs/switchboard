@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
-import { getAgent, type MachineClass } from "../../agents/registry.js";
+import { getAgent, type Identity, type MachineClass } from "../../agents/registry.js";
+import { declaredProfile } from "../../config/profile.js";
 import { resetResidentProbeCache } from "../../execution/factory.js";
 import { resolveGithubToken } from "../../execution/githubApp.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
@@ -180,6 +181,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       msg: message,
       history,
       agent,
+      profile: declaredProfile(agent),
       resolved: resolvedFor("general"),
       resume: undefined,
       root: root(message).root,
@@ -209,6 +211,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       msg: message,
       history,
       agent,
+      profile: declaredProfile(agent),
       resolved: resolvedFor("coding"),
       resume: undefined,
       root: root(message).root,
@@ -221,6 +224,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       msg: message,
       history,
       agent,
+      profile: declaredProfile(agent),
       resolved: resolvedFor("coding"),
       resume: undefined,
       root: root(message).root,
@@ -243,6 +247,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       msg: message,
       history,
       agent: getAgent("coding"),
+      profile: declaredProfile(getAgent("coding")),
       resolved: resolvedFor("coding"),
       resume,
       root: root(message).root,
@@ -268,6 +273,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
         msg: message,
         history,
         agent: getAgent("coding"),
+        profile: declaredProfile(getAgent("coding")),
         resolved,
         resume: undefined,
         root: root(message).root,
@@ -305,20 +311,23 @@ describe("resolveTarget — the vet a machine class gets", () => {
     return calls;
   }
 
-  /** The target for a coding-shaped agent on `machine`, resolved by the production resolver. */
-  function target(machine: MachineClass) {
+  /** The target for a coding-shaped agent on `machine` (and, when given, another
+   *  identity), resolved by the production resolver. */
+  function target(machine: MachineClass, identity: Identity = "write") {
     const store = configStore(RESIDENT_YAML);
     const p = providers();
     const resolved = resolveRun(
       { config: store, providers: p.registry },
       { msg: message, directives: { agent: "coding", text: message.text }, history: [] },
     ).resolved;
+    const agent = { ...getAgent("coding"), machine, identity };
     return resolveTarget(
       { config: store, providers: p.registry },
       {
         msg: message,
         history: [],
-        agent: { ...getAgent("coding"), machine },
+        agent,
+        profile: declaredProfile(agent),
         resolved,
         resume: undefined,
         root: root(message).root,
@@ -349,7 +358,20 @@ describe("resolveTarget — the vet a machine class gets", () => {
     expect(out.needsRepo).toBe(true);
     expect(await out.repoCtxP).toEqual({ repo: "acme/api" });
     expect(calls).toEqual(["https://api.github.com/repos/acme/api"]);
-    expect(resolveGithubToken).toHaveBeenCalledWith("write"); // coding's toolset is `full`: the credential the sandbox gets
+    expect(resolveGithubToken).toHaveBeenCalledWith("write"); // coding's identity is `write`: the credential the sandbox gets
+  });
+
+  it("repo-cold on a `read` identity vets with a read token; on `none` it vets anonymously and mints nothing", async () => {
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.mocked(resolveGithubToken).mockClear();
+    stubFetch(() => new Response("{}", { status: 200 }));
+    expect(await target("repo-cold", "read").repoCtxP).toEqual({ repo: "acme/api" });
+    expect(resolveGithubToken).toHaveBeenCalledWith("read");
+    vi.mocked(resolveGithubToken).mockClear();
+    const calls = stubFetch(() => new Response("{}", { status: 200 }));
+    expect(await target("repo-cold", "none").repoCtxP).toEqual({ repo: "acme/api" });
+    expect(calls).toEqual(["https://api.github.com/repos/acme/api"]);
+    expect(resolveGithubToken).not.toHaveBeenCalled();
   });
 
   it("repo-cold: GitHub's 404 is a rejected slug and an unanswered vet is unverified — nothing binds, the registry stays untouched", async () => {

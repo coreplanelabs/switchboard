@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
+import { declaredProfile } from "../../config/profile.js";
 import { parseDirectives } from "../../directives.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { NullMemoryStore } from "../memory/index.js";
@@ -174,6 +175,7 @@ function request(d: ProvisionDeps, text: string, agentName = "general") {
     sticky,
     resolved,
     agent,
+    profile: declaredProfile(agent),
     shell,
     admitted,
     refusals,
@@ -392,6 +394,7 @@ describe("reserveRun — the ledger reservation before the attach", () => {
     const out = await reserveRun(d, {
       msg: r.message,
       agent: r.agent,
+      profile: r.profile,
       resolved: r.resolved,
       repoCtx: { repo: "acme/api", ref: "main" },
       channelVisibility: "unknown",
@@ -435,6 +438,7 @@ describe("reserveRun — the ledger reservation before the attach", () => {
     const base = {
       msg: r.message,
       agent: r.agent,
+      profile: r.profile,
       resolved: r.resolved,
       repoCtx: {},
       channelVisibility: "unknown" as const,
@@ -469,6 +473,7 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
       closeLines: () => ({}),
       clock: () => NOW,
       agent: r.agent,
+      profile: r.profile,
       repoCtx: {},
       root: r.root,
     });
@@ -495,6 +500,7 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
       closeLines: () => ({}),
       clock: () => NOW,
       agent: r.agent,
+      profile: r.profile,
       repoCtx: { repo: "acme/api" },
       root: r.root,
     });

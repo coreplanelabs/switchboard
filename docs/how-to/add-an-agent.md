@@ -5,7 +5,7 @@ Add a specialist agent (a prompt, a toolset and budgets) reachable as `agent:<na
 **You need:**
 
 - A checkout of the repository and the [contributing](../../CONTRIBUTING.md) loop. An agent is data in the tree, so this is a pull request, not a config change.
-- A toolset for it (`full`, `readonly`, `web`, `assistant`, `none`), the machine class its tools run on, and its turn, token and wall-clock budgets.
+- A toolset for it (`full`, `readonly`, `web`, `assistant`, `none`), the machine class its tools run on, the identity its runs act as, and its turn, token and wall-clock budgets.
 
 ## Define it
 
@@ -18,6 +18,7 @@ docs: {
   system: DOCS_SYSTEM,        // the prompt
   toolset: "readonly",
   machine: "repo-resident",   // the repository's resident, else a cold sandbox; "none" for an agent without a workspace
+  identity: "read",           // the credential its sandbox holds: a read-scoped token and a read-only worktree
   maxTurns: 20,               // a backstop; the wall clock is the real budget
   maxTokens: 24000,
   maxMinutes: 10,
@@ -30,6 +31,7 @@ Every field is documented on `AgentDef` in the same file.
 |---|---|
 | `toolset` | what the model may ask for ([The agents and their toolsets](../explanation/agents-and-toolsets.md) lists each) |
 | `machine` | where a run's tools execute: `repo-resident` provisions the target repository's resident when it is serviceable, else a cold sandbox with the checkout; `repo-cold` always the cold sandbox with the checkout, the repository vetted against GitHub and the resident never consulted; `blank` an empty sandbox with no repository and no credential; `none` provisions nothing |
+| `identity` | whom a run acts as: `write` mints the write-scoped GitHub token a run needs to push and open pull requests; `read` a read-scoped token and a read-only worktree; `none` no credential at all (a `none` machine, or a checkout cloned anonymously) |
 | `effort` (optional) | the agent's built-in effort, which every config layer beats |
 
 ## Give it a default model

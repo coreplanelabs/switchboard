@@ -13,6 +13,7 @@ import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import type { ToolContext } from "../../tools/workspace.js";
 import type { Span } from "../trace/types.js";
 import { runAgent } from "../../runner.js";
+import { declaredProfile } from "../../config/profile.js";
 import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdict } from "../reviewVerdict.js";
 import type { DigestReport } from "../diffDigest.js";
 import { normalizeHead } from "../reviewedHead.js";
@@ -126,7 +127,14 @@ export async function runShipReviewChild(
   if (!pf.ok) return { refusal: pf.reply };
   const ws = await attachRoundWorkspace({
     factory: input.factory,
-    round: { threadKey: input.threadKey, agent: spec.agent, repo: entry.repo, ref: entry.branch, headSha: pinned },
+    round: {
+      threadKey: input.threadKey,
+      agent: spec.agent,
+      profile: declaredProfile(spec.agent),
+      repo: entry.repo,
+      ref: entry.branch,
+      headSha: pinned,
+    },
     logKey,
   });
   const { executor, resident, binding, note } = ws.selection;

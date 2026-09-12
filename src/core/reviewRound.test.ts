@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENTS } from "../agents/registry.js";
+import { declaredProfile } from "../config/profile.js";
 import { resetResidentProbeCache } from "../execution/factory.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import {
@@ -27,14 +28,15 @@ const OTHER = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
 const THIRD = "1111111111111111111111111111111111111111";
 
 describe("releaseModeFor (per-agent attach/release pairing)", () => {
-  it("readonly agent → always; writable agent → if-clean", () => {
-    expect(releaseModeFor(AGENTS.review, { hardStopped: false })).toBe("always");
-    expect(releaseModeFor(AGENTS.coding, { hardStopped: false })).toBe("if-clean");
+  it("a read identity → always; a writing one → if-clean", () => {
+    expect(releaseModeFor("read", { hardStopped: false })).toBe("always");
+    expect(releaseModeFor("write", { hardStopped: false })).toBe("if-clean");
+    expect(releaseModeFor("none", { hardStopped: false })).toBe("if-clean");
   });
 
-  it("a hard stop forces always regardless of the agent", () => {
-    expect(releaseModeFor(AGENTS.coding, { hardStopped: true })).toBe("always");
-    expect(releaseModeFor(AGENTS.review, { hardStopped: true })).toBe("always");
+  it("a hard stop forces always regardless of the identity", () => {
+    expect(releaseModeFor("write", { hardStopped: true })).toBe("always");
+    expect(releaseModeFor("read", { hardStopped: true })).toBe("always");
   });
 });
 
@@ -81,7 +83,14 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
     const calls = residentStub({ ref: "patch-1", sha: HEAD });
     const round = await attachRoundWorkspace({
       factory: factoryOptions(),
-      round: { threadKey: "t-ro", agent: AGENTS.review, repo: "acme/api", ref: "patch-1", headSha: HEAD },
+      round: {
+        threadKey: "t-ro",
+        agent: AGENTS.review,
+        profile: declaredProfile(AGENTS.review),
+        repo: "acme/api",
+        ref: "patch-1",
+        headSha: HEAD,
+      },
       logKey: "t-ro",
     });
     expect(round.selection.resident).toBe(true);
@@ -96,7 +105,13 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
     const calls = residentStub({ ref: "main", sha: HEAD });
     const round = await attachRoundWorkspace({
       factory: factoryOptions(),
-      round: { threadKey: "t-rw", agent: AGENTS.coding, repo: "acme/api", ref: "main" },
+      round: {
+        threadKey: "t-rw",
+        agent: AGENTS.coding,
+        profile: declaredProfile(AGENTS.coding),
+        repo: "acme/api",
+        ref: "main",
+      },
       logKey: "t-rw",
     });
     const attach = calls.find((c) => c.path === "/attach");
@@ -110,7 +125,13 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
     const calls = residentStub({ ref: "main", sha: HEAD });
     const round = await attachRoundWorkspace({
       factory: factoryOptions(),
-      round: { threadKey: "t-hard", agent: AGENTS.coding, repo: "acme/api", ref: "main" },
+      round: {
+        threadKey: "t-hard",
+        agent: AGENTS.coding,
+        profile: declaredProfile(AGENTS.coding),
+        repo: "acme/api",
+        ref: "main",
+      },
       logKey: "t-hard",
     });
     await round.release({ hardStopped: true });
@@ -123,7 +144,7 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
         workspaceDir: mkdtempSync(join(tmpdir(), "swb-null-")),
         dataDir: mkdtempSync(join(tmpdir(), "swb-null-")),
       },
-      round: { threadKey: "t-none", agent: AGENTS.general },
+      round: { threadKey: "t-none", agent: AGENTS.general, profile: declaredProfile(AGENTS.general) },
       logKey: "t-none",
     });
     await expect(round.release({ hardStopped: false })).resolves.toBeUndefined();

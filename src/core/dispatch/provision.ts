@@ -12,6 +12,7 @@
 // what the inline code did.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { AGENTS, type AgentDef } from "../../agents/registry.js";
+import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
 import type { ResidentStep } from "../../execution/residentStepTrace.js";
@@ -417,6 +418,8 @@ export interface Reservation {
 export interface ReserveContext {
   msg: IncomingMessage;
   agent: AgentDef;
+  /** The run's effective profile: the row's read-only flag reads its identity. */
+  profile: RunProfile;
   resolved: ResolvedRequest;
   repoCtx: RepoContext;
   channelVisibility: ChannelVisibility;
@@ -443,6 +446,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
   const {
     msg,
     agent,
+    profile,
     resolved,
     repoCtx,
     channelVisibility,
@@ -477,7 +481,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
           ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
           ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
-          readonly: agent.toolset === "readonly",
+          readonly: profile.identity === "read",
           request: requestRow,
         },
         card: card.handle ?? null,
@@ -509,12 +513,14 @@ export type WorkspaceAttach = { kind: "attached"; round: RoundWorkspace } | { ki
  */
 export async function attachWorkspace(
   deps: ProvisionDeps,
-  ctx: GateContext & GateCard & { agent: AgentDef; repoCtx: RepoContext; root: Span },
+  ctx: GateContext & GateCard & { agent: AgentDef; profile: RunProfile; repoCtx: RepoContext; root: Span },
 ): Promise<WorkspaceAttach> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, repoCtx, root } = ctx;
-  // The workspace attach is paired with its release on the round's agent
-  // (reviewRound.ts): readonly toolset → readonly worktree +
-  // release("always"); writable → release("if-clean").
+  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root } = ctx;
+  // The workspace attach is paired with its release on the round's profile
+  // (reviewRound.ts): a `read` identity → readonly worktree +
+  // release("always"); any other → release("if-clean"). The factory is handed
+  // the EFFECTIVE profile — what is provisioned and as whom is read from it,
+  // never from the preset.
   let round: RoundWorkspace;
   try {
     // The attach is one `dispatch.workspace.attach` span naming its backend
@@ -539,7 +545,14 @@ export async function attachWorkspace(
             workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
             dataDir: deps.dataDir ?? "./data",
           },
-          round: { threadKey: msg.threadKey, agent, repo: repoCtx.repo, ref: repoCtx.ref, headSha: repoCtx.headSha },
+          round: {
+            threadKey: msg.threadKey,
+            agent,
+            profile,
+            repo: repoCtx.repo,
+            ref: repoCtx.ref,
+            headSha: repoCtx.headSha,
+          },
           logKey: msg.threadKey,
           span,
         });
