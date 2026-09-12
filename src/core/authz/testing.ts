@@ -153,6 +153,8 @@ export const ACTORS = {
     actions: new Set(["runs:read", "friction:write"]),
     channels: "all",
   }),
+  /** The ship coordinator's bearer: the one step grant, nothing else. */
+  coordinator: actor("service", "http:coordinator", { actions: new Set(["coordinator:step"]) }),
   /** An agent holding everything, acting for the non-member (never exceeds the principal). */
   agentForNonMember: actor(
     "agent",

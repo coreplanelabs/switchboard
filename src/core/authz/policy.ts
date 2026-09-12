@@ -175,6 +175,15 @@ export const POLICY: readonly Rule[] = [
   // ── schedules ────────────────────────────────────────────────────────────
   // Only the schedule shim's actor fires a schedule.
   { action: "schedule:fire", resource: "command", actorKinds: ["schedule"], when: [] },
+
+  // ── coordinator ──────────────────────────────────────────────────────────
+  // A coordinator step (`spawn`, `read-record`, `pr-check`, the instance
+  // creation): a machine identity holding the grant — the `coordinator`
+  // ingress bearer, granted `coordinator:step` by name — and never a person,
+  // an admin's `all` included: the steps are a program's, and the child a
+  // spawn starts is authorized as the requesting user the parent record
+  // names, not as whoever holds this grant.
+  { action: "coordinator:step", resource: "command", actorKinds: ["service"], when: [grant("coordinator:step")] },
 ];
 
 export const ACTOR_KINDS: readonly ActorKind[] = ["user", "service", "schedule", "agent"];

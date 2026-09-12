@@ -416,6 +416,16 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.token, command("friction.propose")],
     ],
   },
+  // A coordinator step is a machine's: the granted service identity passes;
+  // an admin's `all`, a token without the grant and the schedule actor do not.
+  "coordinator:step command [has-grant(coordinator:step)] kinds=service": {
+    allow: [[A.coordinator, command("coordinator.spawn")]],
+    deny: [
+      [A.admin, command("coordinator.spawn")],
+      [A.token, command("coordinator.spawn")],
+      [A.schedule, command("coordinator.spawn")],
+    ],
+  },
 };
 
 describe("POLICY coverage", () => {
