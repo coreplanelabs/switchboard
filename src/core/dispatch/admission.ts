@@ -70,6 +70,30 @@ export interface AdmissionDeps {
  *  the live run ends without consuming it (docs/reference/specs/thread-admission.md item 4). */
 export type DispatchFollowUp = FollowUpInput & { msg: IncomingMessage; io: ChannelIO };
 
+/** One follow-up as the slot's inbox holds it: the message's sender, link and
+ *  attachments on the runner's shape, the arrival time, the durable seq when
+ *  the ledger took a copy, and the handle a fresh turn would reply on. The one
+ *  literal every steer builds, so every path folds in the same thing. */
+function followUpOf(
+  msg: IncomingMessage,
+  text: string,
+  at: number,
+  opts: { io: ChannelIO; ledgerSeq?: number },
+): DispatchFollowUp {
+  return {
+    text,
+    userId: msg.userId,
+    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+    ...(msg.images !== undefined ? { images: msg.images } : {}),
+    ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
+    at,
+    ...(opts.ledgerSeq !== undefined ? { ledgerSeq: opts.ledgerSeq } : {}),
+    msg,
+    io: opts.io,
+  };
+}
+
 /** The process-wide admission map (one bot process = one map; the registry's
  *  singleton is the same shape of default). */
 export const defaultAdmission = new ThreadAdmission<DispatchFollowUp>();
@@ -109,18 +133,7 @@ export function followUpFromInbox(item: InboxItem, io: ChannelIO, fallbackAt: nu
   const restored = messageFromInbox(item.message, fallbackAt);
   if (!restored) return undefined;
   const { msg, at } = restored;
-  return {
-    text: msg.text,
-    userId: msg.userId,
-    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-    ...(msg.images !== undefined ? { images: msg.images } : {}),
-    ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-    at,
-    ledgerSeq: item.seq,
-    msg,
-    io,
-  };
+  return followUpOf(msg, msg.text, at, { io, ledgerSeq: item.seq });
 }
 
 /** Close a restart's row this dispatch will never run (item 42): the thread
@@ -315,18 +328,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       console.log(`[dispatch] ${msg.threadKey} the run finished during the steer — running the follow-up fresh`);
       return { kind: "redispatch" };
     }
-    claim.live.inbox.push({
-      text: directives.text,
-      userId: msg.userId,
-      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-      ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-      ...(msg.images !== undefined ? { images: msg.images } : {}),
-      ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-      at,
-      ...(ledgerSeq !== undefined ? { ledgerSeq } : {}),
-      msg,
-      io,
-    });
+    claim.live.inbox.push(followUpOf(msg, directives.text, at, { io, ledgerSeq }));
     console.log(
       `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
@@ -383,20 +385,8 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       // adopt-time re-read ran before this push landed, or after — either
       // way the inbox folds one seq in once): hand the item to it as well.
       const nowLive = admission.get(msg.threadKey);
-      if (nowLive && nowLive.runId === elsewhere.runId) {
-        nowLive.inbox.push({
-          text: directives.text,
-          userId: msg.userId,
-          ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-          ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-          ...(msg.images !== undefined ? { images: msg.images } : {}),
-          ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-          at: now,
-          ledgerSeq: seq,
-          msg,
-          io,
-        });
-      }
+      if (nowLive && nowLive.runId === elsewhere.runId)
+        nowLive.inbox.push(followUpOf(msg, directives.text, now, { io, ledgerSeq: seq }));
       console.log(
         `[dispatch] ${msg.threadKey} follow-up steered into run ${elsewhere.runId} live on another generation (durable seq ${seq}${nowLive ? ", now live here" : ""})`,
       );
