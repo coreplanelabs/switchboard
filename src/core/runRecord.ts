@@ -3,6 +3,7 @@ import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../confi
 import type { RunEvent } from "./runEvents.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
+import { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "./coordinator/contract.js";
 import {
   FRICTION_CATEGORIES,
   type CategoryTotals,
@@ -108,6 +109,15 @@ export interface RunRecord {
    *  `spawnChild()` names its parent, so a listing can draw the tree. Absent
    *  on every run a person or a schedule started. */
   parentRunId?: string;
+  /** The coordinator instance this run is a child of (item 48): the state
+   *  Worker's finish sends that instance `run finished:<id>` for a record
+   *  carrying it, and `read-record` answers only for a matching instance.
+   *  Absent on every run no coordinator spawned. */
+  parentInstanceId?: string;
+  /** The key the coordinator's spawn carried (`<parentInstanceId>:<step>`,
+   *  item 48), stored at the claim so a retried spawn finds its run. Present
+   *  exactly when `parentInstanceId` is — both or neither, never one alone. */
+  idempotencyKey?: string;
 }
 
 /** The profile as the record stores it: the run's effective profile plus the preset it came from. */
@@ -470,6 +480,19 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.profile !== undefined && !isRunProfileRecord(r.profile)) return false;
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))
+    return false;
+  // A coordinator's child (item 48): the instance id in the platform's alphabet
+  // and the key `<instance>:<step>` — both or neither; one alone is no tag.
+  if ((r.parentInstanceId === undefined) !== (r.idempotencyKey === undefined)) return false;
+  if (
+    r.parentInstanceId !== undefined &&
+    (typeof r.parentInstanceId !== "string" || !INSTANCE_ID_PATTERN.test(r.parentInstanceId))
+  )
+    return false;
+  if (
+    r.idempotencyKey !== undefined &&
+    (typeof r.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(r.idempotencyKey))
+  )
     return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   // Absent on records written before the stamp existed (read as `unknown`); present → a known value.

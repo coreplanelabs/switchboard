@@ -53,6 +53,7 @@ import { reclaimRuns, startReclaimSweep, closeReclaimed, type ReclaimOutcome } f
 import { launchResumes } from "./core/resumeLaunch.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
+import type { ChannelIO } from "./core/types.js";
 import { getAgent } from "./agents/registry.js";
 import { systemClock } from "./core/trace/index.js";
 import { resumeSlackIO } from "./channels/slack.js";
@@ -68,7 +69,10 @@ import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHo
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
-import { activeRunCount, type CoreDeps } from "./core/dispatcher.js";
+import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
+import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channels/adminCoordinator.js";
+import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
+import { findOpenPrByHead } from "./execution/githubPulls.js";
 import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
 import { writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
@@ -247,6 +251,10 @@ export async function runBot(): Promise<void> {
   // process without one carries the null write-through (nothing claimed).
   const generation = mintGeneration();
   const ledgerClient = capabilities.runLedger ? buildRunLedger(runHistoryCfg, processSecrets) : null;
+  // The coordinator's parent records (run-history item 49) live beside the
+  // ledger on the state Worker; without one, the null store knows no instance
+  // and the coordinator routes refuse every step by name.
+  const coordinatorInstances = buildCoordinatorInstanceStore(runHistoryCfg, processSecrets);
   const runLedger = ledgerClient
     ? createLedgerWriteThrough({
         ledger: ledgerClient,
@@ -401,6 +409,28 @@ export async function runBot(): Promise<void> {
   deps.commands = commands;
   // --- end command registry ---
   const { app, statusClient } = createSlackApp(deps);
+  // A thread's channel handle rebuilt from a stored row's parts, with no
+  // triggering event (run-history item 38): what a resumed run replies through
+  // and what a coordinator's child is dispatched into. Slack from the key's
+  // channel and ts (and the row's card, when it has one); HTTP and MCP have
+  // no thread to speak into, so their handle logs; any other platform, none.
+  const threadIoFor = (thread: { threadKey: string; userId: string; cardTs?: string }): ChannelIO | undefined => {
+    const [platform, channel, threadTs] = thread.threadKey.split(":");
+    if (platform === "slack" && channel && threadTs) {
+      return resumeSlackIO(
+        app.client,
+        {
+          channel,
+          threadTs,
+          user: thread.userId.replace(/^slack:/, ""),
+          ...(thread.cardTs ? { cardTs: thread.cardTs } : {}),
+        },
+        { statusClient },
+      );
+    }
+    if (platform === "http" || platform === "mcp") return nullChannelIO(thread.threadKey);
+    return undefined;
+  };
   // Channel facts for the run stamp (authorization.md item 7): with
   // the Slack adapter up, `conversations.info` decides whether a `slack:C…`
   // channel is public or private — cached per channel per TTL, `unknown` on any
@@ -439,6 +469,21 @@ export async function runBot(): Promise<void> {
   if (process.env.PORT) {
     const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL });
     const mcp = createMcpHandler(deps, { auth, commands, grantsFor: (id) => config.grantsFor(id) });
+    // The bot steps a ship coordinator calls (docs/reference/specs/http-ingress.md
+    // item 9): `POST /admin/coordinator/spawn|read-record|pr-check`, and the
+    // `authorize` question the shim asks before it creates an instance — for
+    // the `coordinator` bearer of the same token map, whose actor must hold
+    // `coordinator:step`. A spawn is a `dispatch()` as the requester the parent
+    // record names, into the unit's thread, tagged with the instance and key.
+    const coordinatorAdmin = createAdminCoordinatorHandler({
+      tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
+      grantsFor: (id) => config.grantsFor(id),
+      instances: coordinatorInstances,
+      runs: runsService,
+      dispatch: (msg, io, opts) => dispatch(deps, msg, io, opts),
+      ioFor: (instance) => threadIoFor({ threadKey: instance.threadKey, userId: instance.userId }),
+      findOpenPrByHead,
+    });
     // Scheduled jobs arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's
     // command as the `cron` identity — the `cron` entry of the same token map —
@@ -625,6 +670,10 @@ export async function runBot(): Promise<void> {
           grantsFor: (id) => config.grantsFor(id),
           spanLog,
         });
+        return;
+      }
+      if (isCoordinatorAdminPath(path)) {
+        coordinatorAdmin(req, res);
         return;
       }
       if (path === "/admin/crash") {
@@ -838,23 +887,12 @@ export async function runBot(): Promise<void> {
           return undefined;
         }
       },
-      ioFor: (row) => {
-        const [platform, channel, threadTs] = row.threadKey.split(":");
-        if (platform === "slack" && channel && threadTs) {
-          return resumeSlackIO(
-            app.client,
-            {
-              channel,
-              threadTs,
-              user: row.meta.userId.replace(/^slack:/, ""),
-              ...(row.card ? { cardTs: row.card.ts } : {}),
-            },
-            { statusClient },
-          );
-        }
-        if (platform === "http" || platform === "mcp") return nullChannelIO(row.threadKey);
-        return undefined;
-      },
+      ioFor: (row) =>
+        threadIoFor({
+          threadKey: row.threadKey,
+          userId: row.meta.userId,
+          ...(row.card ? { cardTs: row.card.ts } : {}),
+        }),
       close: async (run, why) => {
         const closed = await closeReclaimed(ledgerReclaim.client, generation, {
           row: run.row,

@@ -64,6 +64,11 @@ export interface LiveRunMeta {
   /** The run that spawned this one (item 46), so a reclaimed child's record
    *  still names its parent. Absent on every run a person or a schedule started. */
   parentRunId?: string;
+  /** The coordinator instance this run is a child of, and the key its spawn
+   *  carried (item 48) — stored at the claim, so a reclaimed child's record
+   *  still sends the parent its event and a retried spawn finds its run. */
+  parentInstanceId?: string;
+  idempotencyKey?: string;
   /** Which executor the run attached: what `makeExecutor` chose. */
   selection?: "resident" | "sandbox" | "local" | "none";
   /** The worktree path the system prompt names. */
@@ -146,8 +151,16 @@ export interface ClaimRequest {
   phase?: "attaching" | "live";
 }
 
+/** A refused claim names the run holding the thread — and the coordinator key
+ *  its row carries (item 48), so a retried spawn can tell its own child from
+ *  a busy thread. */
 export type ClaimResult =
-  { ok: true } | { ok: false; reason: "thread-live"; live: { runId: string; agent?: string; startedAt: number } };
+  | { ok: true }
+  | {
+      ok: false;
+      reason: "thread-live";
+      live: { runId: string; agent?: string; startedAt: number; idempotencyKey?: string };
+    };
 
 export type FenceResult = { ok: true } | { ok: false; reason: "fenced" | "unknown-run" };
 

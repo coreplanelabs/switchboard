@@ -34,6 +34,21 @@ describe("decideClaim — one live run per thread", () => {
     expect(decideClaim(live, { runId: "r1", gen: "g1" })).toEqual({ ok: true });
     expect(decideClaim(live, { runId: "r1", gen: "g2" })).toMatchObject({ ok: false, reason: "thread-live" });
   });
+
+  // docs/reference/specs/run-history.md item 48: a refused claim names the live
+  // run's idempotency key when it carries one, so a coordinator's retried spawn
+  // can tell "already spawned" from "busy" without a second read.
+  it("a refused claim carries the live run's idempotency key when it has one, and no key otherwise", () => {
+    const keyed = { runId: "r0", agent: "coding", startedAt: 1_000, ownerGen: "g1", idempotencyKey: "inst_1:u/0/c" };
+    expect(decideClaim(keyed, { runId: "r1", gen: "g1" })).toEqual({
+      ok: false,
+      reason: "thread-live",
+      live: { runId: "r0", agent: "coding", startedAt: 1_000, idempotencyKey: "inst_1:u/0/c" },
+    });
+    const plain = { runId: "r0", agent: "coding", startedAt: 1_000, ownerGen: "g1" };
+    const refused = decideClaim(plain, { runId: "r1", gen: "g1" });
+    expect(refused.ok === false && "idempotencyKey" in refused.live).toBe(false);
+  });
 });
 
 describe("checkFence — the owner generation on every write", () => {

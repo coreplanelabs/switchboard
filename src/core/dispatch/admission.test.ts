@@ -340,6 +340,60 @@ describe("admit — the thread admission claim", () => {
     expect(replies).toEqual([]);
   });
 
+  // docs/reference/specs/thread-admission.md item 8: a coordinator's spawn is a
+  // request of the bot's own, never a person's reply — a live run on the unit's
+  // thread refuses it by name with nothing said, so a retried spawn can never
+  // steer the child it meant to start (or a person's run) with its prompt.
+  describe("a coordinator's spawn onto a thread with a run in flight (item 8)", () => {
+    const tag = { parentInstanceId: "ship_acme_1", idempotencyKey: "ship_acme_1:u12/0/coding" };
+
+    it("a run live here refuses the spawn as coordinator_thread_live: nothing is pushed, nothing said, and the refusal is the dispatch's named outcome", async () => {
+      const admission = new ThreadAdmission<DispatchFollowUp>();
+      const claim = admission.claim(THREAD, { agent: "coding", now: 4_000 });
+      claim.live.runId = "run-1";
+      const ledger = new RecordingLedger({ pushSeq: () => 7 });
+      const { deps, ctx, replies, refusals } = setup("agent:coding do the unit", {
+        user: "slack:UADMIN",
+        admission,
+        ledger,
+      });
+      const outcome = await admit(deps, { ...ctx, coordinator: tag });
+      expect(outcome).toEqual({ kind: "refused", reason: "coordinator_thread_live" });
+      expect(refusals).toEqual(["coordinator_thread_live"]);
+      expect(ledger.pushes).toEqual([]);
+      expect(replies).toEqual([]);
+      expect(claim.live.inbox.size).toBe(0);
+      expect(admission.get(THREAD)).toBe(claim.live); // the live run keeps its slot
+    });
+
+    it("a run live on another generation refuses it the same way, the slot taken for the check released and no durable push made", async () => {
+      const elsewhere = new ThreadsElsewhere();
+      elsewhere.replace([{ threadKey: THREAD, runId: "run-far", startedAt: 5_000, meta: { agent: "coding" } }]);
+      const ledger = new RecordingLedger({ pushSeq: () => 3 });
+      const { deps, ctx, admission, replies, refusals } = setup("agent:coding do the unit", {
+        user: "slack:UADMIN",
+        ledger,
+        elsewhere,
+      });
+      expect(await admit(deps, { ...ctx, coordinator: tag })).toEqual({
+        kind: "refused",
+        reason: "coordinator_thread_live",
+      });
+      expect(refusals).toEqual(["coordinator_thread_live"]);
+      expect(ledger.pushes).toEqual([]);
+      expect(admission.get(THREAD)).toBeUndefined();
+      expect(replies).toEqual([]);
+    });
+
+    it("a free thread is claimed for the child as for any request (proceed)", async () => {
+      const { deps, ctx, admission } = setup("agent:coding do the unit", { user: "slack:UADMIN" });
+      const outcome = await admit(deps, { ...ctx, coordinator: tag });
+      expect(outcome.kind).toBe("proceed");
+      if (outcome.kind !== "proceed") return;
+      expect(admission.get(THREAD)).toBe(outcome.admitted);
+    });
+  });
+
   describe("a thread whose run is live on another generation (the boot gap, item 5)", () => {
     const far = (agent?: string) => {
       const elsewhere = new ThreadsElsewhere();

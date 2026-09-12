@@ -1,0 +1,94 @@
+import { describe, expect, it } from "vitest";
+import {
+  COORDINATOR_AUTHORIZE_PATH,
+  COORDINATOR_INSTANCES_PATH,
+  createInstanceResponse,
+  parseCreateInstanceRequest,
+  parseSubjectAuthorization,
+} from "./instancesRoute.js";
+
+// Feature: docs/reference/specs/http-ingress.md item 9 — the pure halves of
+// the shim's `POST /admin/coordinator/instances`: the body it accepts, how it
+// reads the bot's authorization answer, and the wire shape of each outcome.
+// The Workflow `create` itself is the shim's one line; everything decidable
+// without the platform is decided here and tested in plain Node.
+
+describe("the shim's instance route — the paths", () => {
+  it("names the route and the bot's authorize question", () => {
+    expect(COORDINATOR_INSTANCES_PATH).toBe("/admin/coordinator/instances");
+    expect(COORDINATOR_AUTHORIZE_PATH).toBe("/admin/coordinator/authorize");
+  });
+});
+
+describe("parseCreateInstanceRequest — the body", () => {
+  it("accepts an instance id in the platform's alphabet with a params object, defaulting params to {}", () => {
+    expect(parseCreateInstanceRequest(JSON.stringify({ id: "ship_acme_api_1", params: { plan: "p" } }))).toEqual({
+      ok: true,
+      id: "ship_acme_api_1",
+      params: { plan: "p" },
+    });
+    expect(parseCreateInstanceRequest(JSON.stringify({ id: "ship_acme_api_1" }))).toEqual({
+      ok: true,
+      id: "ship_acme_api_1",
+      params: {},
+    });
+  });
+
+  it("refuses non-JSON, a non-object, a missing or malformed id, and non-object params — by name", () => {
+    expect(parseCreateInstanceRequest("nope")).toEqual({ ok: false, reason: "body is not valid JSON" });
+    expect(parseCreateInstanceRequest("[]")).toEqual({ ok: false, reason: "body must be a JSON object" });
+    expect(parseCreateInstanceRequest("{}")).toMatchObject({ ok: false, reason: expect.stringContaining("id") });
+    expect(parseCreateInstanceRequest(JSON.stringify({ id: "has:colon" }))).toMatchObject({ ok: false });
+    expect(parseCreateInstanceRequest(JSON.stringify({ id: "a".repeat(101) }))).toMatchObject({ ok: false });
+    expect(parseCreateInstanceRequest(JSON.stringify({ id: "ok_1", params: [] }))).toEqual({
+      ok: false,
+      reason: "`params` must be an object",
+    });
+  });
+});
+
+describe("parseSubjectAuthorization — the bot's answer as the shim reads it", () => {
+  it("200 with a subject is allowed; 401/403/503 with an error are relayed; anything else is 503, fail-closed", () => {
+    expect(parseSubjectAuthorization(200, JSON.stringify({ ok: true, subject: "coordinator" }))).toEqual({
+      ok: true,
+      subject: "coordinator",
+    });
+    expect(parseSubjectAuthorization(403, JSON.stringify({ ok: false, error: "forbidden: no grant" }))).toEqual({
+      ok: false,
+      status: 403,
+      reason: "forbidden: no grant",
+    });
+    expect(parseSubjectAuthorization(401, JSON.stringify({ ok: false, error: "unauthorized" }))).toMatchObject({
+      ok: false,
+      status: 401,
+    });
+    expect(parseSubjectAuthorization(503, JSON.stringify({ ok: false, error: "disabled" }))).toMatchObject({
+      ok: false,
+      status: 503,
+    });
+    expect(parseSubjectAuthorization(200, JSON.stringify({ ok: true }))).toMatchObject({ ok: false, status: 503 });
+    expect(parseSubjectAuthorization(404, "not found")).toMatchObject({
+      ok: false,
+      status: 503,
+      reason: expect.stringContaining("HTTP 404"),
+    });
+    expect(parseSubjectAuthorization(500, "<html>")).toMatchObject({ ok: false, status: 503 });
+  });
+});
+
+describe("createInstanceResponse — the wire shape of each outcome", () => {
+  it("created is 201 with the id; a duplicate id is 409 with the existing instance's status; a failure is 502 with the reason", () => {
+    expect(createInstanceResponse({ kind: "created", id: "ship_1" })).toEqual({
+      status: 201,
+      body: { ok: true, id: "ship_1", created: true },
+    });
+    expect(createInstanceResponse({ kind: "duplicate", id: "ship_1", status: "running" })).toEqual({
+      status: 409,
+      body: { ok: false, error: "duplicate_instance", id: "ship_1", status: "running" },
+    });
+    expect(createInstanceResponse({ kind: "failed", id: "ship_1", reason: "boom" })).toEqual({
+      status: 502,
+      body: { ok: false, error: "create_failed", id: "ship_1", message: "boom" },
+    });
+  });
+});

@@ -94,6 +94,27 @@ describe("InMemoryRunLedger", () => {
     expect(await ledger.claim(claimReq("r1", "slack:C1:1.0"))).toEqual({ ok: true });
   });
 
+  // docs/reference/specs/run-history.md item 48: the key a coordinator's spawn
+  // carried is stored on the row at claim and named by the refusal a second
+  // claim on the thread meets.
+  it("a claim whose meta carries a coordinator's key stores it on the row, and a second claim on the thread is refused naming that key", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const req = claimReq("r1", "slack:C1:1.0");
+    await ledger.claim({
+      ...req,
+      meta: { ...req.meta, parentInstanceId: "ship_acme_1", idempotencyKey: "ship_acme_1:u/0/coding" },
+    });
+    expect(ledger.live.get("r1")?.meta).toMatchObject({
+      parentInstanceId: "ship_acme_1",
+      idempotencyKey: "ship_acme_1:u/0/coding",
+    });
+    expect(await ledger.claim(claimReq("r2", "slack:C1:1.0"))).toEqual({
+      ok: false,
+      reason: "thread-live",
+      live: { runId: "r1", agent: "review", startedAt: 1_000, idempotencyKey: "ship_acme_1:u/0/coding" },
+    });
+  });
+
   it("every owner write is fenced: another generation's step, append, state, finishing and finish answer fenced; an unknown run is named", async () => {
     const ledger = new InMemoryRunLedger(() => 0);
     await ledger.claim(claimReq("r1", "slack:C1:1.0"));

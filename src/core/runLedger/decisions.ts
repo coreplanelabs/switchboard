@@ -9,7 +9,7 @@ import type { ClaimResult, FenceResult, LivePhase } from "./types.js";
  *  after a lost response), anything else is refused with what the steer
  *  message needs. */
 export function decideClaim(
-  existing: { runId: string; agent?: string; startedAt: number; ownerGen: string } | undefined,
+  existing: { runId: string; agent?: string; startedAt: number; ownerGen: string; idempotencyKey?: string } | undefined,
   req: { runId: string; gen: string },
 ): ClaimResult {
   if (!existing) return { ok: true };
@@ -21,6 +21,7 @@ export function decideClaim(
       runId: existing.runId,
       ...(existing.agent !== undefined ? { agent: existing.agent } : {}),
       startedAt: existing.startedAt,
+      ...(existing.idempotencyKey !== undefined ? { idempotencyKey: existing.idempotencyKey } : {}),
     },
   };
 }

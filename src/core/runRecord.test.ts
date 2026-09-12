@@ -670,3 +670,29 @@ describe("isRunRecord — the parentRunId field", () => {
     expect(isRunRecord({ ...record(), parentRunId: "../other" })).toBe(false);
   });
 });
+
+// docs/reference/specs/run-history.md item 48: a coordinator's child names the
+// instance it belongs to and the key its spawn carried; every other record
+// carries neither.
+describe("isRunRecord — the coordinator fields (parentInstanceId, idempotencyKey)", () => {
+  it("accepts an instance id of the platform's shape and a key of `<instance>:<step>` — also after a JSON round-trip — and a record without them carries no key", () => {
+    const child = record({ parentInstanceId: "ship_acme_api_1", idempotencyKey: "ship_acme_api_1:u12/0/coding" });
+    expect(isRunRecord(child)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(child)))).toBe(true);
+    expect("parentInstanceId" in record()).toBe(false);
+    expect("idempotencyKey" in record()).toBe(false);
+  });
+
+  it("refuses an instance id outside the platform's alphabet or over 100 characters, a key without its step or with a bad shape, and either field alone — the tag is both or neither", () => {
+    const key = "ship_acme_api_1:u12/0/coding";
+    expect(isRunRecord({ ...record(), parentInstanceId: 7, idempotencyKey: key })).toBe(false);
+    expect(isRunRecord({ ...record(), parentInstanceId: "", idempotencyKey: key })).toBe(false);
+    expect(isRunRecord({ ...record(), parentInstanceId: "has:colon", idempotencyKey: key })).toBe(false);
+    expect(isRunRecord({ ...record(), parentInstanceId: "a".repeat(101), idempotencyKey: key })).toBe(false);
+    expect(isRunRecord({ ...record(), parentInstanceId: "ship_acme_api_1", idempotencyKey: "no-step" })).toBe(false);
+    expect(isRunRecord({ ...record(), parentInstanceId: "ship_acme_api_1", idempotencyKey: 7 })).toBe(false);
+    expect(isRunRecord({ ...record(), parentInstanceId: "ship_acme_api_1", idempotencyKey: "" })).toBe(false);
+    expect(isRunRecord(record({ parentInstanceId: "ship_acme_api_1" }))).toBe(false);
+    expect(isRunRecord(record({ idempotencyKey: key }))).toBe(false);
+  });
+});

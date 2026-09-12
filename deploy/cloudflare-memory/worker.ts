@@ -49,6 +49,14 @@ import {
   selectReclaim,
 } from "../../src/core/runLedger/decisions.ts";
 import {
+  IDEMPOTENCY_KEY_PATTERN,
+  INSTANCE_ID_PATTERN,
+  isCoordinatorInstance,
+  sendRunFinished,
+  type CoordinatorInstance,
+  type RunFinishedSend,
+} from "../../src/core/coordinator/contract.ts";
+import {
   GEN_PATTERN,
   type ClaimRequest,
   type ClaimResult,
@@ -136,6 +144,12 @@ export interface Env {
   RUN_TRANSCRIPTS: DurableObjectNamespace<RunTranscriptDO>;
   /** Delivery snapshots (delivery item 10): ONE DeliveryDO (named "delivery"), one snapshot per repository. */
   DELIVERY: DurableObjectNamespace<DeliveryDO>;
+  /** The ship coordinator Workflow in the bot's shim Worker (run-history item
+   *  47): where `RunHistoryDO.finish` sends `run finished:<runId>` for a record
+   *  carrying `parentInstanceId`. Optional: this Worker deploys without it (the
+   *  binding is a cross-script one, and the class must exist on the bot before
+   *  the state Worker may name it), and a finish then commits with no event. */
+  SHIP_COORDINATOR?: Workflow;
   MEMORY_TOKEN?: string;
 }
 
@@ -1155,6 +1169,47 @@ export class RunHistoryDO extends DurableObject<Env> {
         PRIMARY KEY (run_id, kind)
       );
     `);
+    // The coordinator's parent records (run-history item 49): one row per
+    // instance, written by the bot at the instance's creation and read by the
+    // spawn route for the requester, channel and thread every child acts as.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordinator_instances (
+        instance_id TEXT PRIMARY KEY,
+        json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  // ---- the coordinator's parent records (run-history item 49) -----------------
+
+  /** Idempotent for the same record; a different record under a taken id is refused. */
+  async putInstance(instance: CoordinatorInstance): Promise<{ ok: true } | { ok: false; reason: "exists" }> {
+    let out: { ok: true } | { ok: false; reason: "exists" } = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const text = JSON.stringify(instance);
+      const existing = this.sql
+        .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instance.id)
+        .toArray()[0];
+      if (existing) {
+        if (existing.json !== text) out = { ok: false, reason: "exists" };
+        return;
+      }
+      this.sql.exec(
+        `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)`,
+        instance.id,
+        text,
+        instance.createdAt,
+      );
+    });
+    return out;
+  }
+
+  async getInstance(id: string): Promise<CoordinatorInstance | null> {
+    const row = this.sql
+      .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, id)
+      .toArray()[0];
+    return row ? (JSON.parse(row.json) as CoordinatorInstance) : null;
   }
 
   // ---- the live-run ledger (run-history items 28–34) --------------------------
@@ -1182,6 +1237,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               agent: existing.meta.agent,
               startedAt: existing.startedAt,
               ownerGen: existing.ownerGen,
+              idempotencyKey: existing.meta.idempotencyKey,
             }
           : undefined,
         req,
@@ -1363,13 +1419,17 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
-  /** The finished record replaces the live rows in ONE transaction (item 33). Fenced. */
+  /** The finished record replaces the live rows in ONE transaction (item 33).
+   *  Fenced. Then, for a record carrying `parentInstanceId`, ONE `run
+   *  finished:<runId>` to that coordinator instance (item 47) — after the
+   *  commit, never inside it, and never able to undo it: a refused send (the
+   *  instance ended, no binding) is the answer's `event`, not an error. */
   async finish(
     runId: string,
     gen: string,
     record: RunRecord,
     proposal?: RunPolicyProposal,
-  ): Promise<FenceResult & { stored?: boolean }> {
+  ): Promise<FenceResult & { stored?: boolean; event?: RunFinishedSend["kind"] }> {
     let out: FenceResult & { stored?: boolean } = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const fence = checkFence(this.liveRow(runId), gen);
@@ -1381,9 +1441,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       this.deleteLiveRows([runId]);
       out = { ok: true, stored: put.stored };
     });
+    if (!out.ok) return out;
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
-    return out;
+    const event = await sendRunFinished(this.env.SHIP_COORDINATOR, record);
+    if (event.kind === "failed")
+      console.warn(`[runs/finish] ${runId} → run finished not delivered to ${event.instance}: ${event.reason}`);
+    return { ...out, event: event.kind };
   }
 
   /** The live rows go with no record (item 42): a reserved run that never
@@ -2335,6 +2399,8 @@ export class RunTranscriptDO extends DurableObject<Env> {
 }
 
 const LEDGER_ROUTES = new Set([
+  "/runs/coordinator/put",
+  "/runs/coordinator/get",
   "/runs/claim",
   "/runs/heartbeat",
   "/runs/append",
@@ -2398,6 +2464,20 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
   if (typeof r.startedAt !== "number" || !Number.isFinite(r.startedAt))
     return invalid("run.startedAt must be a number");
   if (typeof r.meta !== "object" || r.meta === null) return invalid("run.meta must be an object");
+  // A coordinator's tag (run-history item 48) is stored at the claim and read
+  // by the finish's send and the refusal a second claim meets: shaped or
+  // refused, and both fields or neither — one alone is no tag.
+  const meta = r.meta as Record<string, unknown>;
+  if ((meta.parentInstanceId === undefined) !== (meta.idempotencyKey === undefined))
+    return invalid("run.meta.parentInstanceId and run.meta.idempotencyKey come together or not at all");
+  if (meta.parentInstanceId !== undefined) {
+    if (typeof meta.parentInstanceId !== "string" || !INSTANCE_ID_PATTERN.test(meta.parentInstanceId))
+      return invalid("run.meta.parentInstanceId must be a Workflow instance id");
+  }
+  if (meta.idempotencyKey !== undefined) {
+    if (typeof meta.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(meta.idempotencyKey))
+      return invalid("run.meta.idempotencyKey must be <parentInstanceId>:<step>");
+  }
   if (typeof r.system !== "string") return invalid("run.system must be a string");
   if (!Array.isArray(r.tools)) return invalid("run.tools must be an array");
   if (r.card !== undefined && r.card !== null) {
@@ -2548,6 +2628,21 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     return json(r);
   }
 
+  // The coordinator's parent records (run-history item 49): the record whole,
+  // validated by the shared contract; a read by instance id.
+  if (pathname === "/runs/coordinator/put") {
+    if (!isCoordinatorInstance(b.instance))
+      return json({ error: "instance must be a coordinator instance record" }, 400);
+    const r = await stub.putInstance(b.instance);
+    console.log(`[runs/coordinator/put] ${key.value} ${b.instance.id} → ${r.ok ? "stored" : r.reason}`);
+    return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/coordinator/get") {
+    if (typeof b.id !== "string" || !INSTANCE_ID_PATTERN.test(b.id))
+      return json({ error: "id must be a Workflow instance id" }, 400);
+    return json({ instance: await stub.getInstance(b.id) });
+  }
+
   const runId = parseRunId(b.runId);
   if (!runId.ok) return json({ error: runId.error }, 400);
   if (pathname === "/runs/inbox") {
@@ -2611,7 +2706,9 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     if (parsed.value.record.id !== runId.value) return json({ error: "record.id must equal runId" }, 400);
     const r = await stub.finish(runId.value, g.value, parsed.value.record, parsed.value.proposal);
-    console.log(`[runs/finish] ${key.value} ${runId.value} ok=${r.ok}${r.ok ? ` stored=${r.stored}` : ` ${r.reason}`}`);
+    console.log(
+      `[runs/finish] ${key.value} ${runId.value} ok=${r.ok}${r.ok ? ` stored=${r.stored} event=${r.event}` : ` ${r.reason}`}`,
+    );
     return r.ok ? json(r) : json(r, 409);
   }
   return json({ error: "not found" }, 404);

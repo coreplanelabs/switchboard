@@ -12,6 +12,7 @@ import { isSpanRecord } from "../runEvents.js";
 import { fitRecordToBudget, type RunProfileRecord, type RunRecord, type RunStatus } from "../runRecord.js";
 import type { RunProfile } from "../../config/profile.js";
 import { redactHandoff, type Handoff } from "../ship/handoff.js";
+import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import { activityOfEvents } from "../runRegistry/activity.js";
 import type { RunSnapshot, RunSummary, SealResult } from "../runRegistry/projections.js";
@@ -127,6 +128,9 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
     channelVisibility: summary.channelVisibility ?? "unknown",
     repo: summary.repo,
     ...(summary.parentRunId !== undefined ? { parentRunId: summary.parentRunId } : {}),
+    ...(summary.parentInstanceId !== undefined && summary.idempotencyKey !== undefined
+      ? { coordinator: { parentInstanceId: summary.parentInstanceId, idempotencyKey: summary.idempotencyKey } }
+      : {}),
     finishedAt,
     status: "interrupted",
     diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated }),
@@ -176,6 +180,11 @@ export function reclaimedRunRecord(input: {
     // included); a row from before profiles existed leaves the record without one.
     ...(row.meta.profile && row.meta.agent ? { profile: { preset: row.meta.agent, ...row.meta.profile } } : {}),
     ...(row.meta.parentRunId !== undefined ? { parentRunId: row.meta.parentRunId } : {}),
+    // A coordinator's child keeps its instance and key on the close (item 48),
+    // so the state Worker's finish still sends the parent its event.
+    ...(row.meta.parentInstanceId !== undefined && row.meta.idempotencyKey !== undefined
+      ? { coordinator: { parentInstanceId: row.meta.parentInstanceId, idempotencyKey: row.meta.idempotencyKey } }
+      : {}),
     finishedAt,
     status,
     diagnosis: analyzeRunFriction(events, {
@@ -259,6 +268,9 @@ export function assembleRunRecord(input: {
   /** The run that spawned this one (run-history item 46). Omitted (not set
    *  undefined) for every run a person or a schedule started. */
   parentRunId?: string;
+  /** The coordinator instance the run is a child of and the key its spawn
+   *  carried (item 48). Omitted for every run no coordinator spawned. */
+  coordinator?: CoordinatorTag;
 }): RunRecord {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
@@ -296,6 +308,7 @@ export function assembleRunRecord(input: {
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
     ...(input.profile !== undefined ? { profile: input.profile } : {}),
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
+    ...coordinatorFields(input.coordinator),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }
@@ -321,6 +334,8 @@ export interface TombstoneContext {
   resume: ResumeContext | undefined;
   /** The run that spawned this one (item 46), when it is a child. */
   parentRunId?: string;
+  /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
+  coordinator?: CoordinatorTag;
 }
 
 /**
@@ -332,7 +347,8 @@ export interface TombstoneContext {
  * resume, whose record the ledger already holds.
  */
 export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
-  const { msg, agent, profile, resolved, repoCtx, channelVisibility, run, registry, resume, parentRunId } = ctx;
+  const { msg, agent, profile, resolved, repoCtx, channelVisibility, run, registry, resume, parentRunId, coordinator } =
+    ctx;
   // Tombstone-first: a provisional TERMINAL record — status
   // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
   // from the events published so far (the setup spans, request, run_meta,
@@ -365,6 +381,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
           repo: repoCtx.repo,
           profile: profileRecordOf(agent, profile),
           ...(parentRunId !== undefined ? { parentRunId } : {}),
+          ...(coordinator !== undefined ? { coordinator } : {}),
           finishedAt: startSnap.startedAt,
           status: "interrupted",
           diagnosis: analyzeRunFriction(startSnap.events, {
@@ -399,6 +416,8 @@ export interface FinishRecordContext {
   handoff?: Handoff;
   /** The run that spawned this one (item 46), when it is a child. */
   parentRunId?: string;
+  /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
+  coordinator?: CoordinatorTag;
 }
 
 /**
@@ -427,6 +446,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     ledgerRun,
     handoff,
     parentRunId,
+    coordinator,
   } = ctx;
   // A tracked run finishes through the ledger: the record replaces its
   // live rows in one transaction (a refused finish falls back to the store).
@@ -450,6 +470,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           seal,
           ...(handoff !== undefined ? { handoff } : {}),
           ...(parentRunId !== undefined ? { parentRunId } : {}),
+          ...(coordinator !== undefined ? { coordinator } : {}),
         }),
         { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
       ),

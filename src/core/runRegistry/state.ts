@@ -41,6 +41,12 @@ export interface RunMeta {
    *  summary and the record name the parent and a fan-out cap can count a
    *  parent's live children. */
   parentRunId?: string;
+  /** The coordinator instance this run is a child of, and the key its spawn
+   *  carried (run-history item 48): set by the dispatcher on a run a
+   *  coordinator spawned, so the live summary names them and a retried spawn
+   *  finds its run without the record. */
+  parentInstanceId?: string;
+  idempotencyKey?: string;
 }
 
 /** `seq` is the event's 1-based position in the run's stream (the registry's

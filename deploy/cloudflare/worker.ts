@@ -12,6 +12,15 @@
 import { Container, getContainer } from "@cloudflare/containers";
 import { parseHealthz } from "../../src/deploy/liveGate.ts";
 import {
+  COORDINATOR_AUTHORIZE_PATH,
+  COORDINATOR_INSTANCES_PATH,
+  createInstanceResponse,
+  parseCreateInstanceRequest,
+  parseSubjectAuthorization,
+  type CreateInstanceOutcome,
+} from "../../src/core/coordinator/instancesRoute.ts";
+import {
+  authenticateIngressBearer,
   authenticateRestart,
   decideRestart,
   parseRestartAuthorization,
@@ -34,6 +43,12 @@ import {
 import { systemClock } from "../../src/core/trace/clock.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
 import { shimRoute, stripTraceContext, withTraceContext, workerLogSink } from "../../src/core/trace/workerTrace.ts";
+import type { ShipCoordinatorParams } from "./coordinator";
+
+/** The ship coordinator's Workflow entrypoint is declared in coordinator.ts;
+ *  the Workflows binding resolves its `class_name` against this module
+ *  (wrangler.template.jsonc), so the entry exports it under that name. */
+export { ShipCoordinator } from "./coordinator";
 
 // The Worker's own spans (docs/reference/specs/tracing.md item 22): one `bot-shim.fetch`
 // root per routed request and one `cron.<schedule>` root per fired schedule,
@@ -42,8 +57,11 @@ import { shimRoute, stripTraceContext, withTraceContext, workerLogSink } from ".
 const tracer = createTracer({ clock: systemClock });
 const traceSinks = [workerLogSink((line) => console.log(line))];
 
-interface Env {
+export interface Env {
   SWITCHBOARD: DurableObjectNamespace<SwitchboardServer>;
+  /** The ship coordinator (coordinator.ts): `POST /admin/coordinator/instances`
+   *  creates its instances; the state Worker's finish sends them `run finished`. */
+  SHIP_COORDINATOR: Workflow<ShipCoordinatorParams>;
   // secrets (wrangler secret put ...)
   SLACK_BOT_TOKEN: string;
   SLACK_APP_TOKEN: string;
@@ -260,6 +278,65 @@ async function handleAdminRestart(request: Request, env: Env): Promise<Response>
   return json(res.status, res.body);
 }
 
+/** `POST /admin/coordinator/instances` — the one route that creates a ship
+ *  coordinator instance (docs/reference/specs/http-ingress.md item 9), the
+ *  Workflow being this Worker's. WHO: the bearer must be an entry of
+ *  SWITCHBOARD_INGRESS_TOKENS (401/503 here, an unknown bearer never touches
+ *  the container). WHETHER: the bot's config — the shim relays the bearer to
+ *  `POST /admin/coordinator/authorize`, where the policy table decides
+ *  `coordinator:step`, and creates only on a 200. Body `{ id, params? }`. */
+async function handleCoordinatorInstances(request: Request, env: Env): Promise<Response> {
+  const json = (status: number, body: Record<string, unknown>) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  if (request.method !== "POST")
+    return json(405, { ok: false, error: `method not allowed: POST ${COORDINATOR_INSTANCES_PATH}` });
+  const authorization = request.headers.get("authorization") ?? undefined;
+  const authn = authenticateIngressBearer(authorization, env.SWITCHBOARD_INGRESS_TOKENS, "coordinator");
+  if (!authn.ok) {
+    console.warn(`[coordinator] instances ${authn.status} — ${authn.reason}`);
+    return json(authn.status, { ok: false, error: authn.reason });
+  }
+  const parsed = parseCreateInstanceRequest(await request.text().catch(() => ""));
+  if (!parsed.ok) return json(400, { ok: false, error: parsed.reason });
+  let answer: Response;
+  try {
+    answer = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+      new Request(`${INTERNAL}${COORDINATOR_AUTHORIZE_PATH}`, {
+        method: "POST",
+        headers: { authorization: authorization ?? "" },
+      }),
+    );
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`[coordinator] instances ${parsed.id}: the bot could not be asked: ${reason}`);
+    return json(503, { ok: false, error: `coordinator disabled: the bot could not be asked (${reason})` });
+  }
+  const auth = parseSubjectAuthorization(answer.status, await answer.text().catch(() => ""));
+  if (!auth.ok) {
+    console.warn(`[coordinator] instances ${auth.status} — ${auth.reason}`);
+    return json(auth.status, { ok: false, error: auth.reason });
+  }
+  let outcome: CreateInstanceOutcome;
+  try {
+    await env.SHIP_COORDINATOR.create({ id: parsed.id, params: parsed.params });
+    outcome = { kind: "created", id: parsed.id };
+  } catch (err) {
+    // The engine refuses a taken id; read the existing instance back to say
+    // so. Anything else — the engine unreachable, a malformed param — is a
+    // failure by reason.
+    const reason = err instanceof Error ? err.message : String(err);
+    try {
+      const existing = await (await env.SHIP_COORDINATOR.get(parsed.id)).status();
+      outcome = { kind: "duplicate", id: parsed.id, status: existing.status };
+    } catch {
+      outcome = { kind: "failed", id: parsed.id, reason };
+    }
+  }
+  console.log(`[coordinator] ${auth.subject} → instance ${parsed.id}: ${outcome.kind}`);
+  const res = createInstanceResponse(outcome);
+  return json(res.status, res.body);
+}
+
 /** Record a firing on the state Worker's ScheduleDO (the /runs Scheduled panel
  *  reads it). Best-effort: a failure here is a log line — the run itself (if
  *  any) already happened and is its own record. */
@@ -283,11 +360,15 @@ export default {
     const root = tracer.start("bot-shim.fetch", { sinks: traceSinks, attrs: { route } });
     try {
       const forwarded = withTraceContext(inbound, root);
-      // The one route the Worker answers itself; everything else is the container's.
+      // The two routes the Worker answers itself — the restart and the
+      // coordinator's instance creation, both over bindings only this Worker
+      // holds; everything else is the container's.
       const res =
         pathname === "/admin/restart"
           ? await handleAdminRestart(forwarded, env)
-          : await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded);
+          : pathname === COORDINATOR_INSTANCES_PATH
+            ? await handleCoordinatorInstances(forwarded, env)
+            : await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded);
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {

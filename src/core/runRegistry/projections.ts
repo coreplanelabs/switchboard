@@ -60,6 +60,10 @@ export interface RunSummary {
   userName?: string;
   /** `RunMeta.parentRunId`: the run that spawned this one (run-history item 46). */
   parentRunId?: string;
+  /** `RunMeta.parentInstanceId` / `RunMeta.idempotencyKey`: the coordinator
+   *  instance a child belongs to and the key its spawn carried (item 48). */
+  parentInstanceId?: string;
+  idempotencyKey?: string;
   /** Present only once a stop has been requested. */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -130,6 +134,8 @@ export function summaryOf(run: RunState): RunSummary {
     ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m?.userName !== undefined ? { userName: m.userName } : {}),
     ...(m?.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
+    ...(m?.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
+    ...(m?.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
     finished: run.finished,
     startedAt: run.startedAt,
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),
