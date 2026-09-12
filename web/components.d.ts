@@ -34,11 +34,11 @@ declare module 'vue' {
     ThemeToggle: typeof import('./src/components/ThemeToggle.vue')['default']
     TimelineSection: typeof import('./src/components/run/TimelineSection.vue')['default']
     UApp: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/App.vue')['default']
-    UBadge: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/Badge.vue')['default']
     UButton: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/Button.vue')['default']
     UDropdownMenu: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/DropdownMenu.vue')['default']
     UIcon: typeof import('./../node_modules/@nuxt/ui/dist/runtime/vue/components/Icon.vue')['default']
     USlideover: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/Slideover.vue')['default']
+    UTabs: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/Tabs.vue')['default']
     UTooltip: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/Tooltip.vue')['default']
   }
 }

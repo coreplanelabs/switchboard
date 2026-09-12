@@ -842,22 +842,17 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
 
     <!-- The PR-review slideout: the pr-review module rendering the adapter's
          state. Nearly the viewport, because a diff beside its file list is the
-         content; the body's padding and scroll go — the panel's two columns
-         scroll on their own. The diff's two hues are the run page's status
-         colors, so an added line and a passed call read as one green. -->
+         content; the body's padding and scroll go — the panel scrolls its own
+         content under its header and tab row. The overlay and the content sit
+         above the shell's sticky header (z-20), which would otherwise paint
+         over the panel's title row. -->
     <USlideover
       v-model:open="prPanelOpen"
       :title="panelTitle(prReview.state)"
-      :ui="{ content: 'w-[min(96vw,90rem)] max-w-none' }"
+      :ui="{ overlay: 'z-30', content: 'z-30 w-[min(96vw,90rem)] max-w-none' }"
     >
       <template #content="{ close }">
-        <PrReviewPanel
-          :data="prReview.state"
-          :abridge="abridge"
-          closable
-          :style="{ '--pr-review-ins': 'var(--sb-ok)', '--pr-review-del': 'var(--sb-bad)' }"
-          @close="close()"
-        />
+        <PrReviewPanel :data="prReview.state" :abridge="abridge" closable @close="close()" />
       </template>
     </USlideover>
   </AppShell>

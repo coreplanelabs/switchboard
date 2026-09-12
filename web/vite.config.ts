@@ -19,8 +19,10 @@ export default defineConfig({
         },
       },
       // Bundle every icon the source uses (plus the theme's defaults) at build
-      // time: the CSP allows no runtime fetch from the Iconify API.
-      icon: { clientBundle: { scan: true } },
+      // time: the CSP allows no runtime fetch from the Iconify API. The scan
+      // reads `.ts` too — the nav's sections and the file list's language
+      // icons name theirs in plain modules, not templates.
+      icon: { clientBundle: { scan: { globInclude: ["**/*.{vue,ts}"] } } },
     }),
   ],
   resolve: {

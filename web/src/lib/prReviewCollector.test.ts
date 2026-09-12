@@ -77,7 +77,7 @@ describe("createPrReviewCollector", () => {
     expect(c.state.pr).toEqual({ repo: "acme/api", number: 42, headSha: "d".repeat(40) });
   });
 
-  it("folds a pr_description artifact into the description: title, TL;DR, the What & why section, the Tour with its anchors' shas, the remaining files, origin, completeness; a later artifact replaces the earlier", () => {
+  it("folds a pr_description artifact into the description: title, TL;DR, the What & why section, origin, completeness, the cut — the Tour and the remaining files stay on the record, unread; a later artifact replaces the earlier", () => {
     const c = createPrReviewCollector();
     c.handle(description());
     expect(c.state.ready).toBe(false); // a description alone is not a panel
@@ -85,74 +85,44 @@ describe("createPrReviewCollector", () => {
       title: "Retry webhook deliveries",
       tldr: "Deliveries are tried once today.",
       whatWhy: "A flaky receiver loses the event.\n\nThe policy is bounded.",
-      tour: [
-        {
-          title: "The retry loop",
-          description: "Five attempts, never on a 4xx.",
-          lookFor: "the 4xx early return",
-          anchor: { path: "src/webhooks/sender.ts", from: 31, to: 40, sha: "e".repeat(40) },
-        },
-        {
-          title: "The schedule",
-          description: "",
-          anchor: { path: "src/webhooks/retry.ts", from: 1, to: 7, sha: "e".repeat(40) },
-        },
-      ],
-      remaining: [{ path: "CHANGELOG.md", note: "the entry" }],
       origin: "parsed",
       complete: false,
       truncated: false,
-      headSha: "e".repeat(40),
     });
-    c.handle(description({ origin: "submitted", title: "Retry webhooks (v2)", tour: [], complete: true }));
+    c.handle(
+      description({ origin: "submitted", title: "Retry webhooks (v2)", tour: [], complete: true, truncated: true }),
+    );
     expect(c.state.description?.title).toBe("Retry webhooks (v2)"); // the later artifact wins, like the diffs
     expect(c.state.description?.origin).toBe("submitted");
-    expect(c.state.description?.tour).toEqual([]);
     expect(c.state.description?.complete).toBe(true);
+    expect(c.state.description?.truncated).toBe(true);
   });
 
-  it("the TL;DR falls back to the body's first paragraph; no What & why section → none; a bad head sha is dropped, a step's sha is optional", () => {
+  it("the TL;DR falls back to the body's first paragraph; no What & why section → none; a body that is not a string is no prose", () => {
     const c = createPrReviewCollector();
     c.handle(
       description({
         tldr: undefined,
         body: "# Heading\n\nFirst paragraph\nstill the first.\n\nSecond paragraph.",
-        headSha: "not a sha",
-        tour: [{ title: "T", description: "D", anchor: { path: "a.ts", from: 1, to: 1 } }],
       }),
     );
     expect(c.state.description?.tldr).toBe("First paragraph\nstill the first.");
     expect(c.state.description?.whatWhy).toBeUndefined();
-    expect(c.state.description?.headSha).toBeUndefined();
-    expect(c.state.description?.tour[0].anchor).toEqual({ path: "a.ts", from: 1, to: 1 });
+    c.handle(description({ tldr: undefined, body: 42 }));
+    expect(c.state.description?.tldr).toBeUndefined();
+    expect(c.state.description?.whatWhy).toBeUndefined();
   });
 
-  it("a malformed description changes nothing: a bad title, origin, a step without a title or with an inverted or non-positive range, a remaining entry without a note, a tour that is not a list", () => {
+  it("a malformed description changes nothing: a bad title or origin; a Tour of any shape is not read and lands the description regardless", () => {
     const c = createPrReviewCollector();
     c.handle(description());
     const before = JSON.parse(JSON.stringify(c.state.description));
-    const step = (anchor: Record<string, unknown>, over: Record<string, unknown> = {}) => ({
-      title: "T",
-      description: "D",
-      anchor,
-      ...over,
-    });
-    for (const bad of [
-      description({ title: "" }),
-      description({ title: 42 }),
-      description({ origin: "guessed" }),
-      description({ tour: "steps" }),
-      description({ tour: [step({ path: "a.ts", from: 1, to: 2 }, { title: "" })] }),
-      description({ tour: [step({ path: "a.ts", from: 5, to: 2 })] }),
-      description({ tour: [step({ path: "a.ts", from: 0, to: 2 })] }),
-      description({ tour: [step({ path: "", from: 1, to: 2 })] }),
-      description({ tour: [step({ path: "a.ts", from: 1, to: 2, sha: "nope" })] }),
-      description({ remaining: [{ path: "x" }] }),
-      description({ remaining: "x" }),
-    ]) {
+    for (const bad of [description({ title: "" }), description({ title: 42 }), description({ origin: "guessed" })]) {
       c.handle(bad);
     }
     expect(c.state.description).toEqual(before);
+    c.handle(description({ title: "Tour-less", tour: "steps", remaining: "x" }));
+    expect(c.state.description?.title).toBe("Tour-less");
   });
 
   it("the body helpers: firstParagraph skips headings and blank lines; markdownSection returns one ## section's text, case-insensitively, up to the next ## and without a fenced ##", () => {

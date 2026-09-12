@@ -10,6 +10,20 @@ import type { RunHistorySeed, RunLiveSeed } from "@core/channels/webSeed.js";
 import type { LiveFrame } from "@core/channels/liveView/sse.js";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
+// The review panel's diff renderer is @pierre/diffs; here it is a stub that
+// writes each file's name into its container (the panel's own tests cover the
+// hand-off), so the page tests need no highlighter. The parser stays real.
+vi.mock("@pierre/diffs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@pierre/diffs")>();
+  class FileDiff {
+    render({ fileDiff, fileContainer }: { fileDiff: { name: string }; fileContainer: HTMLElement }) {
+      fileContainer.textContent = `rendered ${fileDiff.name}`;
+    }
+    cleanUp() {}
+  }
+  return { ...actual, FileDiff };
+});
+
 const liveSeed: RunLiveSeed = {
   page: "run",
   mode: "live",
@@ -1262,7 +1276,7 @@ describe("PR-review panel wiring", () => {
     at: 3,
   } as const;
 
-  it("a history run with artifacts shows the button; opening it renders the panel with the PR link and the rendered diff", async () => {
+  it("a history run with artifacts shows the button; opening it renders the panel with the PR link, the file changed and its diff handed to the renderer", async () => {
     const wrapper = mountApp(RunPage, {
       seed: historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "looks correct", at: 9 }]),
     });
@@ -1274,12 +1288,17 @@ describe("PR-review panel wiring", () => {
     expect(panel).not.toBeNull();
     expect(panel!.textContent).toContain("acme/api#42");
     expect(panel!.textContent).toContain("full diff · git");
-    expect(panel!.textContent).toContain("NEW_MARKER");
+    await vi.waitFor(() =>
+      expect(panel!.querySelector('[data-file="src/a.ts"]')?.textContent).toBe("rendered src/a.ts"),
+    );
+    expect(panel!.querySelector('[data-testid="file-entry"]')?.textContent).toContain("src/a.ts");
     // The panel replaces the slideover's header, so the dialog's accessible
     // name has to come from somewhere rendered: the hidden DialogTitle the
     // slideover keeps from its `title`, which `aria-labelledby` points at.
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).not.toBeNull();
+    // Above the shell's sticky header (z-20), which would otherwise paint over the panel's title row.
+    expect(dialog!.className).toContain("z-30");
     const labelledBy = dialog!.getAttribute("aria-labelledby");
     expect(labelledBy).toBeTruthy();
     expect(document.getElementById(labelledBy!)?.textContent).toContain("acme/api#42");
@@ -1307,7 +1326,7 @@ describe("PR-review panel wiring", () => {
     wrapper.unmount();
   });
 
-  it("a seeded pr_description renders in the panel: the dialog is named by the PR's title, the TL;DR and the Tour sit above the files", async () => {
+  it("a seeded pr_description renders in the panel: the dialog is named by the PR's title, and the Description tab carries the TL;DR", async () => {
     const description: LiveFrame = {
       type: "review_artifact",
       artifact: "pr_description",
@@ -1339,8 +1358,11 @@ describe("PR-review panel wiring", () => {
     await wrapper.vm.$nextTick();
     const panel = document.querySelector('[data-testid="pr-review-panel"]')!;
     expect(panel.querySelector('[data-testid="pr-title"]')?.textContent).toContain("Retry webhook deliveries");
-    expect(panel.querySelector('[data-testid="description-tldr"]')?.textContent).toBe("The TL;DR.");
-    expect(panel.querySelectorAll('[data-testid="tour-step"]')).toHaveLength(1);
+    const tabs = Array.from(panel.querySelectorAll<HTMLElement>('[data-testid="panel-tabs"] [role="tab"]'));
+    expect(tabs.map((t) => t.textContent?.trim())).toEqual(["Files changed", "Description"]);
+    tabs[1].dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect(panel.querySelector('[data-testid="description-tldr"]')?.textContent?.trim()).toBe("The TL;DR.");
     const dialog = document.querySelector('[role="dialog"]')!;
     expect(document.getElementById(dialog.getAttribute("aria-labelledby")!)?.textContent).toContain(
       "Retry webhook deliveries",
