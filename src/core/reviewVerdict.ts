@@ -25,6 +25,7 @@
 // called blocking.
 
 import { normalizeHead } from "./reviewedHead.js";
+import { redactSecrets } from "./redact.js";
 
 export type ReviewVerdictKind = "approve" | "request_changes";
 
@@ -226,4 +227,70 @@ export function parseDispositionsInput(
     dispositions.push({ findingId, disposition, note });
   });
   return { dispositions, dropped };
+}
+
+// ---- the stored shapes (docs/reference/specs/run-history.md items 2 and 3) ---------------------------
+
+const VERDICT_KINDS: readonly string[] = ["approve", "request_changes"];
+const DISPOSITION_KINDS: readonly string[] = ["fixed", "declined"];
+
+const isRecordLike = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+
+function isFindingShape(v: unknown): v is Finding {
+  if (!isRecordLike(v)) return false;
+  return (
+    typeof v.id === "string" &&
+    (FINDING_SEVERITIES as readonly string[]).includes(v.severity as string) &&
+    typeof v.file === "string" &&
+    typeof v.title === "string" &&
+    (v.line === undefined || typeof v.line === "number")
+  );
+}
+
+/** Structural check on a verdict read back from a stored record: the kind, a
+ *  string summary, an optional string head, findings each with an id, a known
+ *  severity, a file and a title. Shape only, no bounds — what a record carries
+ *  was validated by `parseVerdictInput` on the way in and redacted since. */
+export function isReviewVerdictShape(v: unknown): v is ReviewVerdict {
+  if (!isRecordLike(v)) return false;
+  if (!VERDICT_KINDS.includes(v.verdict as string) || typeof v.summary !== "string") return false;
+  if (v.head !== undefined && typeof v.head !== "string") return false;
+  if (v.findings !== undefined && !(Array.isArray(v.findings) && v.findings.every(isFindingShape))) return false;
+  return true;
+}
+
+/** Structural check on a disposition set read back from a stored record. */
+export function isFindingDispositionsShape(v: unknown): v is FindingDisposition[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (d) =>
+        isRecordLike(d) &&
+        typeof d.findingId === "string" &&
+        DISPOSITION_KINDS.includes(d.disposition as string) &&
+        typeof d.note === "string",
+    )
+  );
+}
+
+/** Every string leaf of the verdict through the redaction seam — the summary,
+ *  each finding's file and title — the input untouched: what the one record
+ *  assembly writes. `droppedFindings` are parse notes for the model and never
+ *  ride a record. */
+export function redactVerdict(v: ReviewVerdict, redact: (s: string) => string = redactSecrets): ReviewVerdict {
+  return {
+    verdict: v.verdict,
+    summary: redact(v.summary),
+    ...(v.head !== undefined ? { head: v.head } : {}),
+    ...(v.findings !== undefined
+      ? { findings: v.findings.map((f) => ({ ...f, file: redact(f.file), title: redact(f.title) })) }
+      : {}),
+  };
+}
+
+export function redactDispositions(
+  dispositions: readonly FindingDisposition[],
+  redact: (s: string) => string = redactSecrets,
+): FindingDisposition[] {
+  return dispositions.map((d) => ({ findingId: d.findingId, disposition: d.disposition, note: redact(d.note) }));
 }

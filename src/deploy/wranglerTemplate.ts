@@ -61,6 +61,10 @@ export interface TemplateView {
   };
   /** The Cloudflare Access application in front of the bot, when the installation has one. */
   access: { teamDomain: string; aud: string } | undefined;
+  /** The bot Worker — every profile has one — as another Worker's template names it: the
+   *  state Worker binds the bot's `ShipCoordinator` Workflow across scripts by the bot's
+   *  script name (`{{bot.script}}`), and a Workflow's name carries its script's. */
+  bot: { script: string };
 }
 
 const hasImage = (kind: WorkerKind): kind is ImageKind => (IMAGE_KINDS as readonly string[]).includes(kind);
@@ -84,6 +88,7 @@ export function templateView(
     ...(hasImage(kind) ? { image: containerImage(kind, profile, published) } : {}),
     urls: { publicBaseUrl: urls.publicBaseUrl, stateWorkerUrl: urls.stateWorkerUrl },
     access: profile.access,
+    bot: { script: profile.workers.bot.script },
   };
 }
 

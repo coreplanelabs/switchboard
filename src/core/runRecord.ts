@@ -3,6 +3,12 @@ import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../confi
 import type { RunEvent } from "./runEvents.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
+import {
+  isFindingDispositionsShape,
+  isReviewVerdictShape,
+  type FindingDisposition,
+  type ReviewVerdict,
+} from "./reviewVerdict.js";
 import { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "./coordinator/contract.js";
 import {
   FRICTION_CATEGORIES,
@@ -33,6 +39,8 @@ const RUN_STATUSES: readonly RunStatus[] = ["completed", "stopped_soft", "stoppe
 
 /** Every `runs.*` id: checked before any store call. */
 export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+/** A reviewed head as the record stores it: the normalized sha (`normalizeHead`), 7 to 40 lowercase hex. */
+const REVIEW_HEAD_PATTERN = /^[0-9a-f]{7,40}$/;
 
 /** One finished run as the store keeps it. Events are already redacted and
  *  capped upstream (`runEvents.ts`); this layer adds no data. */
@@ -99,6 +107,17 @@ export interface RunRecord {
    *  three empty lists, distinguishable from none); absent on every other run
    *  and on records written before it existed. */
   handoff?: Handoff;
+  /** The verdict a review run submitted through `submit_verdict` (docs/reference/specs/agent-review.md),
+   *  redacted like every stored string — what a coordinator's `read-record`
+   *  answers for a review child. Present only on a run that submitted one. */
+  verdict?: ReviewVerdict;
+  /** The head a review run reviewed and posted against (7 to 40 lowercase hex),
+   *  after the settle; present only on a review run that pinned one. */
+  reviewHead?: string;
+  /** The dispositions a fix round submitted through `submit_dispositions`
+   *  (docs/reference/specs/agent-ship.md item 6), the last call's set, redacted;
+   *  present only on a coding run dispatched as a fix round that submitted one. */
+  dispositions?: FindingDisposition[];
   /** The effective profile the run was admitted with (docs/decisions/0026-capability-profiles-and-request-routing.md):
    *  the preset, its machine class and identity, the minutes it ran on and —
    *  when a boundary clipped the budget — the scope that did, so a reader can
@@ -477,6 +496,12 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // The handoff is checked for shape, not bounds (docs/reference/specs/agent-ship.md
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;
+  // The review's verdict and head and the fix round's dispositions (item 2):
+  // shape only, like the handoff — redaction may lengthen a stored string.
+  if (r.verdict !== undefined && !isReviewVerdictShape(r.verdict)) return false;
+  if (r.reviewHead !== undefined && (typeof r.reviewHead !== "string" || !REVIEW_HEAD_PATTERN.test(r.reviewHead)))
+    return false;
+  if (r.dispositions !== undefined && !isFindingDispositionsShape(r.dispositions)) return false;
   if (r.profile !== undefined && !isRunProfileRecord(r.profile)) return false;
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))

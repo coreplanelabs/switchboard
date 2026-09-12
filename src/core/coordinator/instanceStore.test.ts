@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { secretsFrom } from "../../secrets.js";
-import type { CoordinatorInstance } from "./contract.js";
+import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import {
   buildCoordinatorInstanceStore,
   InMemoryCoordinatorInstanceStore,
@@ -28,6 +28,7 @@ const instance: CoordinatorInstance = {
 /** A state Worker double: the two routes over an in-memory table, recording every request. */
 function workerDouble() {
   const rows = new Map<string, string>();
+  const units = new Map<string, string>();
   const calls: Array<{ path: string; body: Record<string, unknown>; auth: string | null }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -47,10 +48,30 @@ function workerDouble() {
       const text = rows.get(body.id as string);
       return Response.json({ instance: text ? JSON.parse(text) : null });
     }
+    if (path === "/runs/coordinator/units/put") {
+      for (const u of body.units as CoordinatorUnit[]) units.set(`${u.instanceId}/${u.unit}`, JSON.stringify(u));
+      return Response.json({ ok: true });
+    }
+    if (path === "/runs/coordinator/units/list") {
+      const out = [...units.entries()]
+        .filter(([k]) => k.startsWith(`${body.instanceId as string}/`))
+        .map(([, text]) => JSON.parse(text) as CoordinatorUnit);
+      return Response.json({ units: out });
+    }
     return Response.json({ error: "not found" }, { status: 404 });
   };
   return { fetchImpl, calls };
 }
+
+const unitRow = (unit: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
+  instanceId: instance.id,
+  unit,
+  slug: unit.toLowerCase(),
+  branch: `plan/orchestration/${unit.toLowerCase()}`,
+  dependsOn: [],
+  rounds: [],
+  ...over,
+});
 
 const contract = (name: string, make: () => CoordinatorInstanceStore) => {
   describe(name, () => {
@@ -62,6 +83,22 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
       expect(await store.put({ ...instance, branch: "other" })).toEqual({ ok: false, reason: "exists" });
       expect(await store.get(instance.id)).toEqual(instance);
       expect(await store.get("ship_none")).toBeNull();
+    });
+
+    // run-history item 50: the unit rows — written at creation, replaced whole
+    // as the runner reaches a unit, listed in the order first written.
+    it("putUnits writes the rows and listUnits reads an instance's back in first-written order; a row is replaced whole and keeps its place; another instance's rows never appear", async () => {
+      const store = make();
+      expect(await store.putUnits([unitRow("U12"), unitRow("U13", { dependsOn: ["U12"] })])).toEqual({ ok: true });
+      expect(await store.putUnits([{ ...unitRow("U99"), instanceId: "ship_other" }])).toEqual({ ok: true });
+      expect((await store.listUnits(instance.id)).map((u) => u.unit)).toEqual(["U12", "U13"]);
+      const reached = unitRow("U12", {
+        threadKey: "slack:C1:2.0",
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      });
+      expect(await store.putUnits([reached])).toEqual({ ok: true });
+      expect(await store.listUnits(instance.id)).toEqual([reached, unitRow("U13", { dependsOn: ["U12"] })]);
+      expect(await store.listUnits("ship_none")).toEqual([]);
     });
   });
 };
@@ -115,10 +152,12 @@ describe("WorkerCoordinatorInstanceStore — the wire", () => {
 });
 
 describe("NullCoordinatorInstanceStore and the builder", () => {
-  it("the null store knows no instance and refuses a put as unavailable", async () => {
+  it("the null store knows no instance and no unit, and refuses a put as unavailable", async () => {
     const store = new NullCoordinatorInstanceStore();
     expect(await store.get(instance.id)).toBeNull();
     expect(await store.put(instance)).toEqual({ ok: false, reason: "unavailable" });
+    expect(await store.listUnits(instance.id)).toEqual([]);
+    expect(await store.putUnits([unitRow("U12")])).toEqual({ ok: false, reason: "unavailable" });
   });
 
   it("the builder answers the Worker store for a Worker-backed run history and the null store otherwise (no config, a file store, a missing bearer)", () => {

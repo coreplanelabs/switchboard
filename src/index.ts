@@ -72,9 +72,11 @@ import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
 import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channels/adminCoordinator.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
-import { findOpenPrByHead } from "./execution/githubPulls.js";
+import { createBranchRef, fetchPullRequestReviews, findOpenPrByHead } from "./execution/githubPulls.js";
+import { RestGithubApi } from "./execution/githubApi.js";
+import { resolveGithubIdentity } from "./execution/githubApp.js";
 import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
-import { writeAbandonedRunRecords } from "./core/dispatch/record.js";
+import { channelVisibilityOf, writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters ---
@@ -340,6 +342,8 @@ export async function runBot(): Promise<void> {
     mcp,
     memory,
     runHistoryWriter,
+    // The coordinator's instance records and unit rows (run-history items 49 and 50): what the ship branch writes under `ship.coordinator: true`.
+    coordinatorInstances,
     runStore,
     threadsElsewhere,
     runLedger,
@@ -481,8 +485,17 @@ export async function runBot(): Promise<void> {
       instances: coordinatorInstances,
       runs: runsService,
       dispatch: (msg, io, opts) => dispatch(deps, msg, io, opts),
-      ioFor: (instance) => threadIoFor({ threadKey: instance.threadKey, userId: instance.userId }),
+      ioFor: (thread) => threadIoFor(thread),
       findOpenPrByHead,
+      // The App's GitHub reads for the plan, the specs, the rules and a unit's
+      // board issue; the branch create; the reviews and the identity the merge
+      // gate's "the verdict stands" question is answered from.
+      github: deps.githubApi ?? new RestGithubApi(),
+      createBranchRef,
+      fetchPrReviews: fetchPullRequestReviews,
+      selfIdentity: resolveGithubIdentity,
+      runHistoryWriter,
+      channelVisibilityOf: (channelId) => channelVisibilityOf(deps, channelId),
     });
     // Scheduled jobs arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's

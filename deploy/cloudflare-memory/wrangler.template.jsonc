@@ -38,6 +38,21 @@
       { "name": "DELIVERY", "class_name": "DeliveryDO" }
     ]
   },
+  // The bot shim's ship coordinator Workflow, bound across scripts by the bot's
+  // script name (docs/reference/specs/run-history.md item 47): `RunHistoryDO.finish`
+  // sends it `run finished:<runId>` for a record carrying `parentInstanceId`.
+  // The name is the bot's own Workflow name (`<bot script>-ship-coordinator`,
+  // deploy/cloudflare/wrangler.template.jsonc). The class is deployed with the
+  // bot, which deploys after this Worker — so this binding lands one release
+  // after the class did, never in the same one.
+  "workflows": [
+    {
+      "name": "{{bot.script}}-ship-coordinator",
+      "binding": "SHIP_COORDINATOR",
+      "class_name": "ShipCoordinator",
+      "script_name": "{{bot.script}}"
+    }
+  ],
   // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["MemoryDO"] },

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
-import type { CoordinatorInstance } from "../../src/core/coordinator/contract.ts";
+import type { CoordinatorInstance, CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import type { RunHistoryDO } from "./worker.ts";
 
 // Feature: docs/reference/specs/run-history.md items 28–34 — the live-run ledger on the
@@ -415,10 +415,18 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
   /** The Workflow binding as the object sees it, doubled: what `finish` sent, or
    *  an engine that refuses because the instance ended. Installed on the live
    *  object, so the send goes through the handler's own code path. */
-  async function coordinatorDouble(key: string, behaviour: "ok" | "not-running" = "ok"): Promise<Sent[]> {
+  async function coordinatorDouble(key: string, behaviour: "ok" | "not-running" | "absent" = "ok"): Promise<Sent[]> {
     const sent: Sent[] = [];
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
       const holder = inst as unknown as { env: Record<string, unknown> };
+      // `absent`: a state Worker deployed without the binding (the release
+      // before it bound the bot's class) — the pool's own binding is the stub
+      // Worker's, so absence is installed, never assumed.
+      if (behaviour === "absent") {
+        const { SHIP_COORDINATOR: _binding, ...without } = holder.env;
+        holder.env = without;
+        return;
+      }
       holder.env = {
         ...holder.env,
         SHIP_COORDINATOR: {
@@ -549,8 +557,9 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
     expect(((await post("/runs/get", { storeKey: key, id: "r1" })).data.record as RunRecord).status).toBe("completed");
   });
 
-  it("without a coordinator binding the finish commits as before and the response says no-binding", async () => {
+  it("a Worker without the coordinator binding (the release before it bound the bot's class) commits as before and answers no-binding", async () => {
     const key = storeKey();
+    await coordinatorDouble(key, "absent");
     await post(
       "/runs/claim",
       claimBody(key, "r1", "slack:C1:1.0", "g1", {
@@ -649,6 +658,70 @@ describe("run ledger — the coordinator instance record (item 49)", () => {
     expect(
       (await post("/runs/coordinator/get", { storeKey: key, id: instance.id }, { "content-type": "application/json" }))
         .status,
+    ).toBe(401);
+  });
+});
+
+describe("run ledger — the coordinator's unit rows (item 50)", () => {
+  const INSTANCE_ID = "ship_acme_api_1";
+  const unit = (name: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
+    instanceId: INSTANCE_ID,
+    unit: name,
+    slug: name.toLowerCase(),
+    branch: `plan/orchestration/${name.toLowerCase()}`,
+    dependsOn: [],
+    rounds: [],
+    ...over,
+  });
+
+  it("put writes the rows and list reads an instance's back in first-written order; a row is replaced whole and keeps its place; another instance's rows never appear; an unknown instance lists none", async () => {
+    const key = storeKey();
+    expect(
+      await post("/runs/coordinator/units/put", {
+        storeKey: key,
+        units: [unit("U12"), unit("U13", { dependsOn: ["U12"] })],
+      }),
+    ).toEqual({ status: 200, data: { ok: true } });
+    expect(
+      (
+        await post("/runs/coordinator/units/put", {
+          storeKey: key,
+          units: [{ ...unit("U99"), instanceId: "ship_other" }],
+        })
+      ).status,
+    ).toBe(200);
+    const listed = await post("/runs/coordinator/units/list", { storeKey: key, instanceId: INSTANCE_ID });
+    expect(listed.status).toBe(200);
+    expect((listed.data.units as CoordinatorUnit[]).map((u) => u.unit)).toEqual(["U12", "U13"]);
+    const reached = unit("U12", {
+      threadKey: "slack:C1:2.0",
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      rounds: [{ index: 0, agent: "coding", outcome: "started", at: 1_000 }],
+    });
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [reached] })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: INSTANCE_ID })).data).toEqual({
+      units: [reached, unit("U13", { dependsOn: ["U12"] })],
+    });
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: "ship_none" })).data).toEqual({
+      units: [],
+    });
+  });
+
+  it("validates: an empty list, a malformed row or instance id is 400; no bearer is 401", async () => {
+    const key = storeKey();
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [] })).status).toBe(400);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [{ unit: "U12" }] })).status).toBe(400);
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: "has:colon" })).status).toBe(400);
+    expect(
+      (
+        await post(
+          "/runs/coordinator/units/list",
+          { storeKey: key, instanceId: INSTANCE_ID },
+          {
+            "content-type": "application/json",
+          },
+        )
+      ).status,
     ).toBe(401);
   });
 });

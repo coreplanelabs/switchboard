@@ -12,6 +12,7 @@ import { isSpanRecord } from "../runEvents.js";
 import { fitRecordToBudget, type RunProfileRecord, type RunRecord, type RunStatus } from "../runRecord.js";
 import type { RunProfile } from "../../config/profile.js";
 import { redactHandoff, type Handoff } from "../ship/handoff.js";
+import { redactDispositions, redactVerdict, type FindingDisposition, type ReviewVerdict } from "../reviewVerdict.js";
 import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import { activityOfEvents } from "../runRegistry/activity.js";
@@ -261,6 +262,12 @@ export function assembleRunRecord(input: {
    *  as the tool accepted it; redacted HERE, the one assembly, so no caller
    *  can forget. Omitted (not set undefined) when the run submitted none. */
   handoff?: Handoff;
+  /** The verdict a review run submitted and the head it reviewed, the
+   *  dispositions a fix round submitted (run-history item 2) — redacted HERE
+   *  like the handoff. Each omitted when the run has none. */
+  verdict?: ReviewVerdict;
+  reviewHead?: string;
+  dispositions?: FindingDisposition[];
   /** The effective profile the run was admitted with, with its preset. Omitted
    *  when the caller has none (the drain's tombstone of a run whose registry
    *  row predates profiles). */
@@ -306,6 +313,9 @@ export function assembleRunRecord(input: {
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
+    ...(input.verdict !== undefined ? { verdict: redactVerdict(input.verdict) } : {}),
+    ...(input.reviewHead !== undefined ? { reviewHead: input.reviewHead } : {}),
+    ...(input.dispositions !== undefined ? { dispositions: redactDispositions(input.dispositions) } : {}),
     ...(input.profile !== undefined ? { profile: input.profile } : {}),
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
     ...coordinatorFields(input.coordinator),
@@ -414,6 +424,10 @@ export interface FinishRecordContext {
   ledgerRun: LedgerRun | undefined;
   /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
   handoff?: Handoff;
+  /** The verdict a review run submitted and the head it reviewed; the dispositions a fix round submitted. */
+  verdict?: ReviewVerdict;
+  reviewHead?: string;
+  dispositions?: FindingDisposition[];
   /** The run that spawned this one (item 46), when it is a child. */
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
@@ -445,6 +459,9 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     root,
     ledgerRun,
     handoff,
+    verdict,
+    reviewHead,
+    dispositions,
     parentRunId,
     coordinator,
   } = ctx;
@@ -469,6 +486,9 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           diagnosis,
           seal,
           ...(handoff !== undefined ? { handoff } : {}),
+          ...(verdict !== undefined ? { verdict } : {}),
+          ...(reviewHead !== undefined ? { reviewHead } : {}),
+          ...(dispositions !== undefined ? { dispositions } : {}),
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...(coordinator !== undefined ? { coordinator } : {}),
         }),

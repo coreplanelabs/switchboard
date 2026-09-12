@@ -20,16 +20,49 @@
 // answers every step with its own `at`, and that is the machine's time. Nothing
 // here carries a task's text or a thread's contents: a spawn's brief names the
 // unit and the runs whose records the bot reads to compose the child's turn.
+//
+// Worker-importable: the shim Worker's Workflow drives this machine, so the
+// module reaches nothing but node-free modules — the child presets' budgets
+// arrive in the input rather than from the agent registry.
 
-import { AGENTS } from "../../agents/registry.js";
 import type { ShipRoundOutcome } from "../runEvents.js";
 import type { RunStatus } from "../runRecord.js";
 import { normalizeHead, sameCommit } from "../reviewedHead.js";
 import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdictKind } from "../reviewVerdict.js";
-import { SHIP_ROUND_RESERVE_MS, shipInterruptedNote, type ShipCaps } from "../shipPipeline.js";
 import { parsePlanUnit, planUnitIds } from "./contract.js";
 
 const MIN = 60_000;
+
+/** What a pipeline runs under: the rounds cap from the `ship` config block, and
+ *  the wall clock from the parent's EFFECTIVE profile — the ship preset's
+ *  declared budget as the profile gate clipped it, never the block read again. */
+export interface ShipCaps {
+  maxRounds: number;
+  maxMinutes: number;
+}
+
+/** A round is dispatched only when at least this much of the pipeline budget
+ *  remains (the reservation check, agent-ship item 8): a child clipped below
+ *  this cannot do useful work, so the pipeline reports the cap instead of
+ *  burning an attach and a model turn on a doomed round. */
+export const SHIP_ROUND_RESERVE_MS = 3 * MIN;
+
+/** What a ship pipeline's thread and card say when the bot died under it (run-
+ *  history item 36): the work it did stands on GitHub with nobody driving it,
+ *  so the note names the PR when one was opened and the exact re-issue that
+ *  continues the loop — the same entry the preflight's resume-at-review takes
+ *  (agent-ship item 10). Without a PR the task itself is the re-issue: round 0
+ *  runs again on the pipeline's own deterministic branch. The coordinator says
+ *  the same when a child of its closed `interrupted`. */
+export function shipInterruptedNote(prUrl?: string): string {
+  const stands = prUrl
+    ? `Its work stands on GitHub: ${prUrl}.`
+    : "Whatever it pushed stands on its pipeline branch; no PR was opened yet.";
+  const reissue = prUrl
+    ? `To continue the review loop, re-issue \`agent:ship\` in this thread with only the PR URL (${prUrl}).`
+    : "To continue, re-issue `agent:ship` in this thread with the task — round 0 runs again on the same branch.";
+  return `⚠️ The bot restarted while this ship pipeline was running, so the pipeline stopped. ${stands} ${reissue}`;
+}
 
 // ---- the plan graph --------------------------------------------------------------------------------
 
@@ -363,6 +396,9 @@ export interface UnitPipelineInput {
   /** The pull request's base — the branch the unit is created from and rebased onto. */
   base: string;
   caps: ShipCaps;
+  /** Each child preset's own wall-clock budget (its `maxMinutes`), the number a
+   *  round's budget is clipped from — supplied by the bot, which holds the registry. */
+  childMinutes: Readonly<Record<ChildPreset, number>>;
   /** Who merges: the runner (a plan branch, under its grant) or a person (any other branch). */
   merge: "runner" | "person";
   /** Resume at review: an open pull request of ship's own the requester named. */
@@ -441,7 +477,7 @@ const remainingMs = (s: UnitPipelineState) => deadlineAt(s) - s.clock;
  *  wall clock (the in-process loop's `clip`), never under the two minutes a
  *  spawn accepts. */
 function budgetMinutesFor(s: UnitPipelineState, preset: ChildPreset): number {
-  return Math.max(2, Math.min(AGENTS[preset].maxMinutes, Math.floor(remainingMs(s) / MIN)));
+  return Math.max(2, Math.min(s.input.childMinutes[preset], Math.floor(remainingMs(s) / MIN)));
 }
 
 const roundStep = (s: UnitPipelineState, round: RoundRef) => `${s.input.unit.id}/${round.index}/${round.kind}`;

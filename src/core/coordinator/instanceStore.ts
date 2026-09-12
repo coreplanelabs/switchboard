@@ -12,19 +12,35 @@
 import type { Secrets } from "../../secrets.js";
 import type { RunHistoryConfig } from "../runStore.js";
 import { DEFAULT_RUN_STORE_TOKEN_ENV, RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "../runStoreWorker.js";
-import { isCoordinatorInstance, type CoordinatorInstance } from "./contract.js";
+import {
+  isCoordinatorInstance,
+  isCoordinatorUnit,
+  type CoordinatorInstance,
+  type CoordinatorUnit,
+} from "./contract.js";
 
 /** `exists`: a different record already holds the id (an identical put is
  *  idempotent); `unavailable`: no durable store in this process. */
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
+export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
 
 export interface CoordinatorInstanceStore {
   put(instance: CoordinatorInstance): Promise<PutInstanceResult>;
   get(id: string): Promise<CoordinatorInstance | null>;
+  /** The unit rows of an instance (run-history item 50), each replaced whole:
+   *  written at the instance's creation and rewritten as the runner reaches the
+   *  unit — its thread, its pull request, its rounds, its ending. */
+  putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult>;
+  /** An instance's unit rows in the order they were first written — the plan's. */
+  listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
 }
+
+const unitKey = (u: Pick<CoordinatorUnit, "instanceId" | "unit">) => `${u.instanceId}\0${u.unit}`;
 
 export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStore {
   private readonly rows = new Map<string, string>();
+  /** Insertion-ordered, so a replace keeps a row's place. */
+  private readonly units = new Map<string, string>();
   async put(instance: CoordinatorInstance): Promise<PutInstanceResult> {
     const text = JSON.stringify(instance);
     const existing = this.rows.get(instance.id);
@@ -36,6 +52,16 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     const text = this.rows.get(id);
     return text === undefined ? null : (JSON.parse(text) as CoordinatorInstance);
   }
+  async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
+    for (const u of units) this.units.set(unitKey(u), JSON.stringify(u));
+    return { ok: true };
+  }
+  async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
+    const out: CoordinatorUnit[] = [];
+    for (const [key, text] of this.units)
+      if (key.startsWith(`${instanceId}\0`)) out.push(JSON.parse(text) as CoordinatorUnit);
+    return out;
+  }
 }
 
 /** The store of a process without a durable state Worker: no instance exists
@@ -46,6 +72,12 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   }
   async get(_id: string): Promise<CoordinatorInstance | null> {
     return null;
+  }
+  async putUnits(_units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
+    return { ok: false, reason: "unavailable" };
+  }
+  async listUnits(_instanceId: string): Promise<CoordinatorUnit[]> {
+    return [];
   }
 }
 
@@ -103,6 +135,21 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     if (!isCoordinatorInstance(d.instance))
       throw new Error("coordinator store /runs/coordinator/get: the answer is not a coordinator instance");
     return d.instance;
+  }
+
+  async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
+    const r = await this.post("/runs/coordinator/units/put", { units });
+    const d = r.data as { ok?: unknown };
+    if (d.ok === true) return { ok: true };
+    throw new Error(`coordinator store /runs/coordinator/units/put: unexpected answer (HTTP ${r.status})`);
+  }
+
+  async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
+    const r = await this.post("/runs/coordinator/units/list", { instanceId });
+    const d = r.data as { units?: unknown };
+    if (!Array.isArray(d.units) || !d.units.every(isCoordinatorUnit))
+      throw new Error("coordinator store /runs/coordinator/units/list: the answer is not a list of unit rows");
+    return d.units;
   }
 }
 

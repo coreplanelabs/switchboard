@@ -71,18 +71,32 @@ describe("the coordinator module — the Workflow entrypoint leaves worker.ts, w
 
 describe("the coordinator holds no credential", () => {
   const source = read("coordinator.ts");
-  it("names none of the secrets the shim forwards into the container, and makes no fetch of its own", () => {
+  it("names none of the secrets the shim forwards into the container; its only fetch is the container binding's, presented with the coordinator bearer from the token map — no bare fetch, no other origin", () => {
     for (const name of CREDENTIALS) expect(source, name).not.toContain(name);
-    expect(source).not.toMatch(/\bfetch\(/);
+    expect(source).not.toMatch(/(?<![.\w])fetch\(/);
+    expect(source).toMatch(/getContainer\(env\.SWITCHBOARD, INSTANCE\)\.fetch\(/);
+    expect(source).toContain(
+      "tokenForSubject(parseIngressTokenMap(env.SWITCHBOARD_INGRESS_TOKENS).tokens, COORDINATOR_IDENTITY)",
+    );
+    expect(source).not.toMatch(/https?:\/\/(?!switchboard-keepalive\.internal)/);
+  });
+  it("runs the plan runner's driver and nothing of its own: `run()` is one `runPlan` over the platform's step and the container bot", () => {
+    expect(source).toMatch(/return runPlan\(workflowSteps\(step\), containerBot\(this\.env\), event\.instanceId\);/);
   });
 });
 
-describe("the state Worker's template carries no coordinator binding yet", () => {
-  it("a cross-script binding to a class that has never deployed would fail the state Worker's own deploy (memory deploys before the bot), so it waits for this class to be live", () => {
+describe("the state Worker's template binds this class across scripts", () => {
+  it("names the same class and the same Workflow name pattern as the shim's own binding, by the bot's script", () => {
     const memory = readFileSync(
       fileURLToPath(new URL("../cloudflare-memory/wrangler.template.jsonc", import.meta.url)),
       "utf8",
     );
-    expect(memory).not.toMatch(/"workflows"/);
+    const block = /"workflows":\s*\[([^\]]*)\]/.exec(memory)?.[1] ?? "";
+    expect(block).toContain('"binding": "SHIP_COORDINATOR"');
+    expect(block).toContain(`"class_name": "${boundClassName()}"`);
+    expect(block).toContain('"script_name": "{{bot.script}}"');
+    expect(block).toContain('"name": "{{bot.script}}-ship-coordinator"');
+    // The shim names its Workflow `{{script}}-ship-coordinator` under its own script — the same name once rendered.
+    expect(read("wrangler.template.jsonc")).toContain('"name": "{{script}}-ship-coordinator"');
   });
 });

@@ -399,6 +399,57 @@ export async function fetchPullRequestFacts(pr: {
   };
 }
 
+/** One review on a pull request as the coordinator reads it back: who posted
+ *  it, GitHub's state, the head it was pinned to and its body — enough to tell
+ *  whether the bot's own verdict stands on the pull request at a given head. */
+export interface PullRequestReview {
+  author?: { login?: string; id?: number };
+  state: string;
+  commitId?: string;
+  body: string;
+}
+
+/** GET /repos/{repo}/pulls/{n}/reviews (one page of 100, oldest first as GitHub
+ *  lists them) → the reviews, or undefined when the fetch fails or the answer
+ *  is not a list. Never throws. */
+export async function fetchPullRequestReviews(pr: {
+  repo: string;
+  number: number;
+}): Promise<PullRequestReview[] | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}/reviews?per_page=100`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const rows = (await res.json().catch(() => null)) as unknown;
+  if (!Array.isArray(rows)) return undefined;
+  return rows.flatMap((r) => {
+    const row = r as { user?: { login?: unknown; id?: unknown }; state?: unknown; commit_id?: unknown; body?: unknown };
+    if (typeof row.state !== "string") return [];
+    return [
+      {
+        ...(row.user && (typeof row.user.login === "string" || typeof row.user.id === "number")
+          ? {
+              author: {
+                ...(typeof row.user.login === "string" ? { login: row.user.login } : {}),
+                ...(typeof row.user.id === "number" ? { id: row.user.id } : {}),
+              },
+            }
+          : {}),
+        state: row.state,
+        ...(typeof row.commit_id === "string" ? { commitId: row.commit_id } : {}),
+        body: typeof row.body === "string" ? row.body : "",
+      },
+    ];
+  });
+}
+
 async function requireToken(): Promise<string> {
   const token = await resolveGithubToken();
   if (!token) {

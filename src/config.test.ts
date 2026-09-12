@@ -716,6 +716,21 @@ describe("ship caps block (agent:ship pipeline)", () => {
     expect(() => store(YAML_FIXTURE + 'ship: "nope"\n')).toThrow(/ship must be a mapping/);
   });
 
+  // docs/reference/specs/agent-ship.md item 16: the plan runner is a switch,
+  // off unless the block says `true`; a non-boolean is refused at load so a
+  // typo cannot read as "on".
+  it("ship.coordinator: absent is off, `true` and `false` parse, anything else is refused by name", async () => {
+    expect(store().config.ship?.coordinator).toBeUndefined();
+    expect(store(YAML_FIXTURE + "ship:\n  coordinator: true\n").config.ship).toEqual({ coordinator: true });
+    expect(store(YAML_FIXTURE + "ship:\n  coordinator: false\n  maxRounds: 2\n").config.ship).toEqual({
+      coordinator: false,
+      maxRounds: 2,
+    });
+    expect(() => store(YAML_FIXTURE + 'ship:\n  coordinator: "yes"\n')).toThrow(
+      /ship\.coordinator must be true or false/,
+    );
+  });
+
   it("resolveShipCaps: defaults 3 rounds / 120 minutes; configured values win", async () => {
     expect(resolveShipCaps(undefined)).toEqual({
       maxRounds: SHIP_DEFAULT_MAX_ROUNDS,

@@ -215,6 +215,37 @@ describe("assembleRunRecord — the handoff on the record", () => {
     const record = assembleRunRecord(base());
     expect("handoff" in record).toBe(false);
     expect("profile" in record).toBe(false);
+    for (const key of ["verdict", "reviewHead", "dispositions"]) expect(key in record).toBe(false);
+  });
+
+  // docs/reference/specs/run-history.md item 2: the review's verdict and reviewed
+  // head and the fix round's dispositions ride the record, every string leaf
+  // redacted here, in the one assembly.
+  it("carries the verdict, the reviewed head and the dispositions with every string leaf redacted, and the record still validates", () => {
+    const token = `ghp_${"a".repeat(24)}`;
+    const head = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const record = assembleRunRecord({
+      ...base(),
+      verdict: {
+        verdict: "request_changes",
+        summary: `leaks ${token}`,
+        findings: [{ id: "F1", severity: "minor", file: "src/a.ts", title: `see ${token}` }],
+      },
+      reviewHead: head,
+      dispositions: [{ findingId: "F1", disposition: "declined", note: `because ${token}` }],
+    });
+    expect(record.verdict).toEqual({
+      verdict: "request_changes",
+      summary: "leaks «redacted-github-token»",
+      findings: [{ id: "F1", severity: "minor", file: "src/a.ts", title: "see «redacted-github-token»" }],
+    });
+    expect(record.reviewHead).toBe(head);
+    expect(record.dispositions).toEqual([
+      { findingId: "F1", disposition: "declined", note: "because «redacted-github-token»" },
+    ]);
+    expect(JSON.stringify(record)).not.toContain("ghp_");
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
   });
 
   // docs/reference/specs/run-history.md: the effective profile the run was

@@ -18,7 +18,12 @@ import type { McpToolsForRun } from "../../mcp/source.js";
 import { currentPrHeadSha, prCommitsSince, type RepoContext } from "../repoContext.js";
 import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";
 import { parseHandoff, type Handoff } from "../ship/handoff.js";
-import { parseVerdictInput, type ReviewVerdict } from "../reviewVerdict.js";
+import {
+  parseDispositionsInput,
+  parseVerdictInput,
+  type FindingDisposition,
+  type ReviewVerdict,
+} from "../reviewVerdict.js";
 import { parseDigestReport, type DigestReport } from "../diffDigest.js";
 import { settleReviewedHead, type makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "../codingPrPostStep.js";
@@ -123,6 +128,11 @@ export interface RunLoopContext {
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
   coordinator?: CoordinatorTag;
+  /** This coding run answers a review's findings (a ship fix round dispatched
+   *  as a run — agent-ship item 6): `submit_dispositions` records against these
+   *  ids and the set rides the record. Absent on every other run, where the
+   *  tool answers that nothing was recorded. */
+  fixRound?: { findingIds: string[] };
 }
 
 /**
@@ -171,6 +181,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     wait,
     parentRunId,
     coordinator,
+    fixRound,
   } = ctx;
   // The def the runner and the post-run turns read: the preset with the
   // EFFECTIVE budget (its deadline, wrap-up warning and budget label read
@@ -357,6 +368,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     handoff = h;
     ledgerRun?.setState({ handoff: h });
   };
+  // A fix round's dispositions (agent-ship item 6), set only through
+  // submit_dispositions against the review's finding ids — the last call
+  // wins — and restored like the handoff; recorded on the finish record.
+  const restoredDispositions = fixRound
+    ? parseDispositionsInput({ dispositions: restored.dispositions })?.dispositions
+    : undefined;
+  let dispositions: FindingDisposition[] | undefined = restoredDispositions;
+  const onDispositions = (d: FindingDisposition[]) => {
+    dispositions = d;
+    ledgerRun?.setState({ dispositions: d });
+  };
   // The commit actually checked out in the run's workspace when the model
   // finished — read by us, not reported by the model — for the reviewed-head
   // guard below. Undefined when the cwd is not a git repo (cold sandbox root).
@@ -423,6 +445,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     onDigest,
     onPrDescription,
     onHandoff,
+    ...(fixRound ? { knownFindingIds: fixRound.findingIds, onDispositions } : {}),
   };
   try {
     answer = await runAgent({
@@ -734,6 +757,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       root,
       ledgerRun,
       ...(handoff !== undefined ? { handoff } : {}),
+      ...(verdict !== undefined ? { verdict } : {}),
+      ...(reviewHead !== undefined ? { reviewHead } : {}),
+      ...(dispositions !== undefined ? { dispositions } : {}),
       ...(parentRunId !== undefined ? { parentRunId } : {}),
       ...(coordinator !== undefined ? { coordinator } : {}),
     });

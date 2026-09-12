@@ -110,6 +110,13 @@ export interface RunView {
    *  live on another generation, or persisted; absent on every other run. */
   parentInstanceId?: string;
   idempotencyKey?: string;
+  /** The typed artifacts a finished run's record carries (run-history item 2) —
+   *  the review's verdict and reviewed head, the fix round's dispositions, the
+   *  coding child's handoff. Persisted rows only: a live view has none yet. */
+  verdict?: RunRecord["verdict"];
+  reviewHead?: string;
+  dispositions?: RunRecord["dispositions"];
+  handoff?: RunRecord["handoff"];
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
   /** The generation driving this run when it is not this process (run-history

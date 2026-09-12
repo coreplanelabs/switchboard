@@ -52,8 +52,10 @@ import {
   IDEMPOTENCY_KEY_PATTERN,
   INSTANCE_ID_PATTERN,
   isCoordinatorInstance,
+  isCoordinatorUnit,
   sendRunFinished,
   type CoordinatorInstance,
+  type CoordinatorUnit,
   type RunFinishedSend,
 } from "../../src/core/coordinator/contract.ts";
 import {
@@ -168,6 +170,8 @@ const SCHEDULES_OBJECT = "schedules";
 const MAX_LIMIT = 50;
 /** Candidates per write batch (the reflection pass emits ≤6). */
 const MAX_BATCH = 50;
+/** Unit rows one put may carry: a plan has tens of units, never hundreds. */
+const MAX_UNITS_PER_PUT = 200;
 const MAX_TEXT_CHARS = 4000;
 const MAX_KEYWORDS = 20;
 const MAX_KEYWORD_CHARS = 64;
@@ -1179,6 +1183,18 @@ export class RunHistoryDO extends DurableObject<Env> {
         created_at INTEGER NOT NULL
       );
     `);
+    // The units of the plan an instance runs (run-history item 50): one row per
+    // (instance, unit), replaced whole as the runner reaches the unit; the
+    // rowid keeps the order the rows were first written — the plan's.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordinator_units (
+        instance_id TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (instance_id, unit)
+      );
+    `);
   }
 
   // ---- the coordinator's parent records (run-history item 49) -----------------
@@ -1210,6 +1226,32 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, id)
       .toArray()[0];
     return row ? (JSON.parse(row.json) as CoordinatorInstance) : null;
+  }
+
+  // ---- the units of the plan an instance runs (run-history item 50) -----------
+
+  /** Each row replaced whole under its (instance, unit); a replace keeps the row's place. */
+  async putUnits(units: CoordinatorUnit[], now: number): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      for (const u of units) {
+        this.sql.exec(
+          `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
+          u.instanceId,
+          u.unit,
+          JSON.stringify(u),
+          now,
+        );
+      }
+    });
+    return { ok: true };
+  }
+
+  async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
+    return this.sql
+      .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? ORDER BY rowid`, instanceId)
+      .toArray()
+      .map((r) => JSON.parse(r.json) as CoordinatorUnit);
   }
 
   // ---- the live-run ledger (run-history items 28–34) --------------------------
@@ -2401,6 +2443,8 @@ export class RunTranscriptDO extends DurableObject<Env> {
 const LEDGER_ROUTES = new Set([
   "/runs/coordinator/put",
   "/runs/coordinator/get",
+  "/runs/coordinator/units/put",
+  "/runs/coordinator/units/list",
   "/runs/claim",
   "/runs/heartbeat",
   "/runs/append",
@@ -2641,6 +2685,22 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (typeof b.id !== "string" || !INSTANCE_ID_PATTERN.test(b.id))
       return json({ error: "id must be a Workflow instance id" }, 400);
     return json({ instance: await stub.getInstance(b.id) });
+  }
+  // The units of the plan an instance runs (run-history item 50): rows
+  // validated by the shared contract, each replaced whole; a list by instance.
+  if (pathname === "/runs/coordinator/units/put") {
+    if (!Array.isArray(b.units) || b.units.length === 0 || b.units.length > MAX_UNITS_PER_PUT)
+      return json({ error: `units must be a non-empty array of at most ${MAX_UNITS_PER_PUT} unit rows` }, 400);
+    if (!b.units.every(isCoordinatorUnit)) return json({ error: "every unit must be a coordinator unit row" }, 400);
+    const units = b.units as CoordinatorUnit[];
+    const r = await stub.putUnits(units, now);
+    console.log(`[runs/coordinator/units/put] ${key.value} ${units[0]!.instanceId} ${units.length} row(s)`);
+    return json(r);
+  }
+  if (pathname === "/runs/coordinator/units/list") {
+    if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
+      return json({ error: "instanceId must be a Workflow instance id" }, 400);
+    return json({ units: await stub.listUnits(b.instanceId) });
   }
 
   const runId = parseRunId(b.runId);

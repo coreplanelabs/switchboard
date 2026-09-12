@@ -44,6 +44,7 @@ import { systemClock } from "../../src/core/trace/clock.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
 import { shimRoute, stripTraceContext, withTraceContext, workerLogSink } from "../../src/core/trace/workerTrace.ts";
 import type { ShipCoordinatorParams } from "./coordinator";
+import { INSTANCE, INTERNAL } from "./shared";
 
 /** The ship coordinator's Workflow entrypoint is declared in coordinator.ts;
  *  the Workflows binding resolves its `class_name` against this module
@@ -134,9 +135,6 @@ function containerEnv(env: Env): Record<string, string> {
   }
   return vars;
 }
-
-const INSTANCE = "singleton";
-const INTERNAL = "https://switchboard-keepalive.internal";
 
 export class SwitchboardServer extends Container<Env> {
   defaultPort = 8080; // the bot's health endpoint (PORT=8080 in the image)
