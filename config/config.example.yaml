@@ -48,6 +48,21 @@ defaults:
   # provider default. Skipped for models without effort support.
   # efforts:
   #   coding: medium
+  # A boundary caps what ANY run in a scope may have — never grants — on the
+  # three axes of a run's profile (docs/reference/specs/routing-and-config.md item 2):
+  # maxMinutes (the wall-clock budget; at least 2), maxIdentity (the credential
+  # a run acts as: none < read < write) and machines (the classes its tools may
+  # execute on: none, blank, repo-cold, repo-resident). Unlike every other
+  # setting, boundaries INTERSECT across defaults, channel and user — the
+  # smallest budget, the lowest identity, the classes every layer allows — so a
+  # channel or a user can only tighten what is set here. A budget above a cap is
+  # clipped (the card and the run record say so); a preset whose identity or
+  # class is above a cap is refused by name before any executor exists. Absent →
+  # nothing is capped and every preset runs exactly its declared profile.
+  # boundary:
+  #   maxMinutes: 120
+  #   maxIdentity: write
+  #   machines: [none, blank, repo-cold, repo-resident]
 
 # PR reviews and the reading diff (docs/reference/specs/reading-diff.md). Every
 # review records its full `git diff`; the ABRIDGED version (meat.dev, run on
@@ -72,6 +87,12 @@ defaults:
 #       review: anthropic/claude-opus-5
 #     efforts:
 #       coding: medium
+#     # Cap this channel's runs (see defaults.boundary): here every run acts
+#     # with at most a read credential — `agent:coding` is refused by name,
+#     # `agent:review` runs — and no run gets more than 45 minutes.
+#     boundary:
+#       maxMinutes: 45
+#       maxIdentity: read
 
 # Static per-user defaults (user ID -> scope).
 # users:

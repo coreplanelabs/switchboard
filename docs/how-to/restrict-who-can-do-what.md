@@ -54,6 +54,21 @@ grants:
 
 Unlisted repositories stay open; slugs are case-insensitive.
 
+## Cap what a channel's runs may have
+
+```yaml
+channels:
+  slack:C012345:
+    boundary:
+      maxMinutes: 45                     # every run here is clipped to 45 minutes
+      maxIdentity: read                  # a preset that needs `write` (coding, ship) is refused by name
+      machines: [none, repo-resident]    # a preset on another class is refused
+```
+
+Or from chat, with `config:write`: `@switchboard config set channel --boundary.maxIdentity read`.
+
+A boundary is not a grant and not a restriction: `restrict` says who may run a preset, a boundary says how much any run in the scope may have — its wall-clock budget, the credential it acts as (`none < read < write`), the machine class its tools execute on. A budget above the cap is clipped and the card says so; an identity or class above the cap is refused before a card, a thread claim or an executor exists, naming the preset, the cap and whose boundary it is. Boundaries intersect across `defaults`, the channel and the user — the smallest budget, the lowest identity, the classes every layer allows — so nobody can widen one from below: `config set me --boundary.…` is open to everyone because it can only tighten.
+
 ## Allow channel configuration
 
 ```yaml
@@ -115,7 +130,7 @@ grants:
     repos: [acme/payments]
 ```
 
-Everything unnamed stays open: `review`, `research`, `general`, other repositories.
+Everything unnamed stays open: `review`, `research`, `general`, other repositories. Add a `boundary` under a channel to cap what even the granted may have there.
 
 ## Next
 

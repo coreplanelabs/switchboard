@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
+import { declaredProfile } from "../../config/profile.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
 import { NO_CAPABILITIES } from "../capabilities.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
@@ -15,6 +16,7 @@ import {
   authorizeAgent,
   authorizeAttachedHead,
   authorizePrHead,
+  authorizeProfile,
   authorizeRepo,
   type AuthorizeDeps,
   type GateCard,
@@ -133,7 +135,14 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     const admin = setup({ user: "slack:UADMIN" });
     const repoCtx: RepoContext = { rejectedRepo: "acme/new" };
     expect(
-      await authorizeRepo(admin.deps, { ...admin.gate, ...admin.cardCtx, agent: coding, needsRepo: true, repoCtx }),
+      await authorizeRepo(admin.deps, {
+        ...admin.gate,
+        ...admin.cardCtx,
+        agent: coding,
+        profile: declaredProfile(coding),
+        needsRepo: true,
+        repoCtx,
+      }),
     ).toEqual({
       kind: "refused",
       reason: "repo_not_onboarded",
@@ -145,14 +154,30 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     );
 
     const dev = setup({ user: "slack:UDEV" });
-    await authorizeRepo(dev.deps, { ...dev.gate, ...dev.cardCtx, agent: coding, needsRepo: true, repoCtx });
+    await authorizeRepo(dev.deps, {
+      ...dev.gate,
+      ...dev.cardCtx,
+      agent: coding,
+      profile: declaredProfile(coding),
+      needsRepo: true,
+      repoCtx,
+    });
     expect(dev.replies[0]).toMatch(/Ask .+ to onboard it \(`repo onboard acme\/new`\)/);
   });
 
   it("without a resident fleet there is nothing to onboard: the not-onboarded gate does not apply", async () => {
     const { deps, gate, cardCtx, replies } = setup({ residents: false });
     const repoCtx: RepoContext = { rejectedRepo: "acme/new" };
-    expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: coding, needsRepo: true, repoCtx })).toEqual({
+    expect(
+      await authorizeRepo(deps, {
+        ...gate,
+        ...cardCtx,
+        agent: coding,
+        profile: declaredProfile(coding),
+        needsRepo: true,
+        repoCtx,
+      }),
+    ).toEqual({
       kind: "allowed",
     });
     expect(replies).toEqual([]);
@@ -161,7 +186,16 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
   it("a repo the registry did not answer for is not guessed: refused as unverified, with the retry-or-URL reply", async () => {
     const { deps, gate, cardCtx, replies, refusals, closes } = setup({ user: "slack:UADMIN" });
     const repoCtx: RepoContext = { unverifiedRepo: "acme/api" };
-    expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: coding, needsRepo: true, repoCtx })).toEqual({
+    expect(
+      await authorizeRepo(deps, {
+        ...gate,
+        ...cardCtx,
+        agent: coding,
+        profile: declaredProfile(coding),
+        needsRepo: true,
+        repoCtx,
+      }),
+    ).toEqual({
       kind: "refused",
       reason: "repo_unverified",
     });
@@ -178,6 +212,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
         ...excluded.gate,
         ...excluded.cardCtx,
         agent: coding,
+        profile: declaredProfile(coding),
         needsRepo: true,
         repoCtx: { repo: "acme/secret" },
       }),
@@ -192,6 +227,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
         ...granted.gate,
         ...granted.cardCtx,
         agent: coding,
+        profile: declaredProfile(coding),
         needsRepo: true,
         repoCtx: { repo: "acme/api" },
       }),
@@ -204,6 +240,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
         ...open.gate,
         ...open.cardCtx,
         agent: coding,
+        profile: declaredProfile(coding),
         needsRepo: true,
         repoCtx: { repo: "acme/other" },
       }),
@@ -218,7 +255,14 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     const { deps, gate, cardCtx, replies } = setup({ user: "slack:UX" });
     const repoCtx: RepoContext = { repo: "acme/secret", rejectedRepo: "acme/new", unverifiedRepo: "acme/api" };
     expect(
-      await authorizeRepo(deps, { ...gate, ...cardCtx, agent: getAgent("general"), needsRepo: false, repoCtx }),
+      await authorizeRepo(deps, {
+        ...gate,
+        ...cardCtx,
+        agent: getAgent("general"),
+        profile: declaredProfile(getAgent("general")),
+        needsRepo: false,
+        repoCtx,
+      }),
     ).toEqual({ kind: "allowed" });
     expect(replies).toEqual([]);
   });
@@ -234,7 +278,16 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
       for (const residents of [true, false]) {
         const { deps, gate, cardCtx, replies, refusals, closes } = setup({ user: "slack:UADMIN", residents });
         const repoCtx: RepoContext = { rejectedRepo: "acme/hidden" };
-        expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: cold, needsRepo: true, repoCtx })).toEqual({
+        expect(
+          await authorizeRepo(deps, {
+            ...gate,
+            ...cardCtx,
+            agent: cold,
+            profile: declaredProfile(cold),
+            needsRepo: true,
+            repoCtx,
+          }),
+        ).toEqual({
           kind: "refused",
           reason: "repo_not_visible",
         });
@@ -252,7 +305,16 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     it("GitHub did not answer: refused as unverified, naming GitHub rather than the resident registry", async () => {
       const { deps, gate, cardCtx, replies, refusals, closes } = setup({ user: "slack:UADMIN" });
       const repoCtx: RepoContext = { unverifiedRepo: "acme/api" };
-      expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: cold, needsRepo: true, repoCtx })).toEqual({
+      expect(
+        await authorizeRepo(deps, {
+          ...gate,
+          ...cardCtx,
+          agent: cold,
+          profile: declaredProfile(cold),
+          needsRepo: true,
+          repoCtx,
+        }),
+      ).toEqual({
         kind: "refused",
         reason: "repo_unverified",
       });
@@ -271,6 +333,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
           ...excluded.gate,
           ...excluded.cardCtx,
           agent: cold,
+          profile: declaredProfile(cold),
           needsRepo: true,
           repoCtx: { repo: "acme/secret" },
         }),
@@ -281,6 +344,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
           ...open.gate,
           ...open.cardCtx,
           agent: cold,
+          profile: declaredProfile(cold),
           needsRepo: true,
           repoCtx: { repo: "acme/other" },
         }),
@@ -465,5 +529,89 @@ describe("authorizeAttachedHead — the attached-head guard on the resident path
     ).toBe("allowed");
     expect(asked).toEqual([]);
     expect(moved.releases).toEqual([]);
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 4: the profile gate, beside
+// the agent gate and before the thread is claimed — an identity or a machine
+// class above a boundary's cap is refused by name (the axis, the cap, its
+// scope, how to get it raised); a clipped budget is allowed and carried.
+describe("authorizeProfile — the profile gate, before the thread is claimed", () => {
+  const coding = getAgent("coding");
+
+  it("an admitted profile passes through unchanged — a clipped budget included — with no reply", async () => {
+    const { deps, gate, replies, refusals } = setup();
+    const profile = {
+      machine: "repo-resident" as const,
+      identity: "write" as const,
+      minutes: 10,
+      boundedBy: "channel" as const,
+    };
+    expect(await authorizeProfile(deps, { ...gate, agent: coding, resolution: { kind: "profile", profile } })).toEqual({
+      kind: "allowed",
+      profile,
+    });
+    expect(replies).toEqual([]);
+    expect(refusals).toEqual([]);
+  });
+
+  it("an identity above the cap is refused under the dispatch's refusal wrap, naming the axis, the cap, its scope and how to get it raised — per scope", async () => {
+    const cases = [
+      {
+        scope: "channel" as const,
+        reply:
+          "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Run it in a channel that allows `write`, or ask <@slack:UADMIN> to raise this channel's boundary.",
+      },
+      {
+        scope: "user" as const,
+        reply:
+          "🚫 `coding` needs a `write` credential; your own boundary caps runs at `read`. Raise your own boundary with `config set me --boundary.maxIdentity write`, or drop your overrides with `config clear me`.",
+      },
+      {
+        scope: "defaults" as const,
+        reply:
+          "🚫 `coding` needs a `write` credential; the installation's default boundary caps runs at `read`. Ask <@slack:UADMIN> to raise `defaults.boundary` in the configuration.",
+      },
+    ];
+    for (const { scope, reply } of cases) {
+      const { deps, gate, replies, refusals } = setup();
+      expect(
+        await authorizeProfile(deps, {
+          ...gate,
+          agent: coding,
+          resolution: { kind: "refused", refusal: { axis: "identity", needs: "write", cap: "read", scope } },
+        }),
+      ).toEqual({ kind: "refused", reason: "profile_bounded" });
+      expect(refusals).toEqual(["profile_bounded"]);
+      expect(replies).toEqual([reply]);
+    }
+  });
+
+  it("a class outside the set is refused naming the class, the allowed set and every scope that excludes it, with one way forward per scope", async () => {
+    const one = setup();
+    await authorizeProfile(one.deps, {
+      ...one.gate,
+      agent: coding,
+      resolution: {
+        kind: "refused",
+        refusal: { axis: "machine", needs: "repo-resident", allowed: ["none"], scopes: ["channel"] },
+      },
+    });
+    expect(one.replies).toEqual([
+      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary allows only `none`. Run it in a channel that allows `repo-resident`, or ask <@slack:UADMIN> to raise this channel's boundary.",
+    ]);
+    const two = setup();
+    await authorizeProfile(two.deps, {
+      ...two.gate,
+      agent: coding,
+      resolution: {
+        kind: "refused",
+        refusal: { axis: "machine", needs: "repo-resident", allowed: ["none", "blank"], scopes: ["channel", "user"] },
+      },
+    });
+    expect(two.replies).toEqual([
+      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary and your own boundary allow only `none`, `blank`. Run it in a channel that allows `repo-resident`, or ask <@slack:UADMIN> to raise this channel's boundary; raise your own boundary with `config set me --boundary.machines <classes including repo-resident>`, or drop your overrides with `config clear me`.",
+    ]);
+    expect(two.refusals).toEqual(["profile_bounded"]);
   });
 });

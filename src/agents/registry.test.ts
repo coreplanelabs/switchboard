@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS } from "../core/ship/contract.js";
-import { AGENTS, getAgent } from "./registry.js";
+import { AGENTS, getAgent, IDENTITIES } from "./registry.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
 // docs/reference/specs/agent-coding.md — budgets, toolsets, and prompt guarantees are
@@ -69,6 +69,18 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.review.machine).toBe("repo-resident");
     expect(AGENTS.general.machine).toBe("none");
     expect(AGENTS.research.machine).toBe("none");
+  });
+
+  it("identity declarations: every preset names the credential its runs act as — coding and ship write, review read, general and research none", () => {
+    // The identity axis of a profile (docs/reference/specs/execution.md item 5):
+    // the scope of the GitHub credential minted for the run's machine — never
+    // derived from the toolset name, so a boundary can cap it by name.
+    for (const agent of Object.values(AGENTS)) expect(IDENTITIES).toContain(agent.identity);
+    expect(AGENTS.coding.identity).toBe("write");
+    expect(AGENTS.ship.identity).toBe("write");
+    expect(AGENTS.review.identity).toBe("read");
+    expect(AGENTS.general.identity).toBe("none");
+    expect(AGENTS.research.identity).toBe("none");
   });
 
   it("getAgent throws on unknown agents, naming the available ones", () => {

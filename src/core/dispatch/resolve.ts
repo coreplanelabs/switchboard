@@ -7,6 +7,7 @@
 // that judge the result are authorize.ts.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { machineNeedsRepo, type AgentDef } from "../../agents/registry.js";
+import { effectiveProfile, type ProfileResolution, type RunProfile } from "../../config/profile.js";
 import {
   lastThreadDirectives,
   parseDirectives,
@@ -98,7 +99,38 @@ export function resolveRun(
   return { sticky, resolved };
 }
 
-/** The provider and model behind the resolved ref, whether the agent's machine
+/**
+ * The effective profile of this request (docs/reference/specs/routing-and-config.md
+ * item 2; docs/decisions/0026-capability-profiles-and-request-routing.md):
+ * preset ∩ boundary, computed once, here, once the preset is known — the
+ * lookup stays after the agent gate, so a caller who may not run the agent is
+ * refused before its preset is even read. Pure resolution: the profile gate
+ * (`authorizeProfile`) judges the outcome. A resume keeps the profile its row
+ * was admitted with — the clipped budget and what clipped it — rather than
+ * re-reading the preset; the boundaries on the path today are still asked,
+ * so an identity or class a tightened cap no longer allows refuses the resume
+ * by name like a fresh request, while its budget is the row's. A row written
+ * before profiles existed resolves like a fresh request.
+ */
+export function resolveProfile(ctx: {
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  resume: ResumeContext | undefined;
+}): ProfileResolution {
+  const carried = ctx.resume?.row.meta.profile;
+  const declared = carried
+    ? { machine: carried.machine, identity: carried.identity, maxMinutes: carried.minutes }
+    : ctx.agent;
+  // Boundaries only ever narrow: a directive budget is the next unit's (none
+  // is parsed yet), so the caller's own boundary is empty here.
+  const resolution = effectiveProfile(declared, {}, ctx.resolved.boundary);
+  if (resolution.kind === "profile" && carried?.boundedBy && !resolution.profile.boundedBy) {
+    return { kind: "profile", profile: { ...resolution.profile, boundedBy: carried.boundedBy } };
+  }
+  return resolution;
+}
+
+/** The provider and model behind the resolved ref, whether the run's machine
  *  class carries a repository, and the target's resolution in flight. */
 export interface ResolvedTarget {
   provider: Provider;
@@ -112,6 +144,9 @@ export interface ResolveTargetContext {
   msg: IncomingMessage;
   history: HistoryItem[];
   agent: AgentDef;
+  /** The run's effective profile: its class decides whether a repository is
+   *  resolved, its identity which credential vets a bare slug. */
+  profile: RunProfile;
   resolved: ResolvedRequest;
   resume: ResumeContext | undefined;
   root: Span;
@@ -121,18 +156,18 @@ export interface ResolveTargetContext {
  * The provider behind the model ref (an unknown provider throws here, before
  * any card), and the target repo/ref/PR resolution, STARTED — a promise the
  * caller awaits after the ack card, so the GitHub round trip overlaps the
- * memory read. A resume carries its repo context; an agent whose machine class
+ * memory read. A resume carries its repo context; a run whose machine class
  * carries no repository resolves none.
  */
 export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): ResolvedTarget {
-  const { msg, history, agent, resolved, resume, root } = ctx;
+  const { msg, history, profile, resolved, resume, root } = ctx;
   const { provider: providerName, model } = parseModelRef(resolved.modelRef);
   const provider = deps.providers.get(providerName);
 
   // Target repo/ref for resident environments, resolved BEFORE the model
   // turn: explicit signals in the message, else the repo this thread
   // already established (from history — restart-safe, never stored). The
-  // gate belongs with the machine class: an agent whose class carries no
+  // gate belongs with the machine class: a run whose class carries no
   // checkout (`none`, the general default) never resolves or gates a repo, so
   // a workspace-less follow-up in a repo-mentioning thread is not wrongly
   // refused and a PR-URL never triggers a wasted GitHub REST call for it.
@@ -141,7 +176,7 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
   // never bind a repo; an injected resolver (tests) is called as before.
   // STARTED here (a promise) so the GitHub round trip overlaps the memory
   // read below; awaited after the ack.
-  const needsRepo = machineNeedsRepo(agent.machine);
+  const needsRepo = machineNeedsRepo(profile.machine);
   const repoCtxP: Promise<RepoContext> = root.span("dispatch.repo_context", () =>
     resume
       ? Promise.resolve(resume.repoCtx)
@@ -149,7 +184,7 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
         ? Promise.resolve(
             deps.resolveRepoContext
               ? deps.resolveRepoContext(msg, history)
-              : resolveRepoContext(msg, history, ...repoVetFor(agent, deps.config.config.execution?.resident)),
+              : resolveRepoContext(msg, history, ...repoVetFor(profile, deps.config.config.execution?.resident)),
           ).then((ctx) => ctx ?? {})
         : Promise.resolve({}),
   );
@@ -161,14 +196,16 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
  * The vet a bare `owner/name` gets, by machine class (docs/reference/specs/execution.md
  * item 18). `repo-resident` asks the resident registry: the onboarded probe,
  * and the listing that resolves a bare `in <name>`. `repo-cold` asks GitHub
- * with the run's own credential and never the registry, so a registry outage
- * can neither refuse nor delay it; bare names cannot be resolved without the
- * listing and stay prose.
+ * with the run's own credential — the profile's identity; `none` vets
+ * anonymously — and never the registry, so a registry outage can neither
+ * refuse nor delay it; bare names cannot be resolved without the listing and
+ * stay prose.
  */
 function repoVetFor(
-  agent: AgentDef,
+  profile: RunProfile,
   resident: ResidentExecutionConfig | undefined,
 ): [probe: RepoProbe | undefined, slugs: ResidentSlugs | undefined] {
-  if (agent.machine === "repo-cold") return [githubRepoProbe({ scope: githubTokenScopeFor(agent) }), undefined];
+  if (profile.machine === "repo-cold")
+    return [githubRepoProbe({ scope: githubTokenScopeFor(profile.identity) }), undefined];
   return [residentOnboardedProbe(resident), residentSlugsLister(resident)];
 }

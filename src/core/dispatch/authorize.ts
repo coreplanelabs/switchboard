@@ -9,6 +9,7 @@
 // workspace attach.
 import type { ConfigStore } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
+import type { BoundaryScope, ProfileRefusal, ProfileResolution, RunProfile } from "../../config/profile.js";
 import type { RequestDirectives } from "../../directives.js";
 import type { Capabilities } from "../capabilities.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
@@ -85,6 +86,91 @@ export async function authorizeAgent(
   return { kind: "allowed" };
 }
 
+/** How the profile gate ended: the run goes on with its effective profile — a
+ *  clipped budget carried on it — or it was refused. */
+export type ProfileGate = { kind: "allowed"; profile: RunProfile } | { kind: "refused"; reason: "profile_bounded" };
+
+/**
+ * The profile gate (docs/reference/specs/routing-and-config.md item 4; record
+ * 0026): beside the agent gate and before the thread is claimed, so a refused
+ * profile leaves no card, no run, no row and no workspace. The resolve stage
+ * already computed preset ∩ boundary; this gate turns a refusal — an identity
+ * or a machine class above a boundary's cap, never clipped — into one named
+ * reply: the axis, the cap, the scope that set it, and how to get it raised. A
+ * clipped budget is allowed; the clip rides the profile to the card and the
+ * record.
+ */
+export async function authorizeProfile(
+  deps: AuthorizeDeps,
+  ctx: GateContext & { agent: AgentDef; resolution: ProfileResolution },
+): Promise<ProfileGate> {
+  const { msg, io, refuse, agent, resolution } = ctx;
+  if (resolution.kind === "profile") return { kind: "allowed", profile: resolution.profile };
+  const { refusal } = resolution;
+  console.log(`[dispatch] ${msg.threadKey} not started: profile bounded (${agent.name}: ${refusalSummary(refusal)})`);
+  await refuse("profile_bounded", () => io.reply(profileRefusalReply(agent.name, refusal, deps.config.adminsHint())));
+  return { kind: "refused", reason: "profile_bounded" };
+}
+
+/** `identity write > read (channel)` — the one-line log form of a refusal. */
+function refusalSummary(refusal: ProfileRefusal): string {
+  return refusal.axis === "identity"
+    ? `identity ${refusal.needs} > ${refusal.cap} (${refusal.scope})`
+    : `machine ${refusal.needs} not in ${refusal.allowed.join(",")} (${refusal.scopes.join(",")})`;
+}
+
+/** The scope a boundary came from, as the thread reads it. */
+function boundaryOf(scope: BoundaryScope): string {
+  switch (scope) {
+    case "channel":
+      return "this channel's boundary";
+    case "user":
+      return "your own boundary";
+    case "defaults":
+      return "the installation's default boundary";
+    case "directive":
+      return "this message's own budget";
+  }
+}
+
+/** One way forward per scope that refused, lowercase so the clauses join. */
+function wayForward(scope: BoundaryScope, axis: string, needs: string, adminsHint: string): string {
+  switch (scope) {
+    case "channel":
+      return `run it in a channel that allows \`${needs}\`, or ask ${adminsHint} to raise this channel's boundary`;
+    case "user":
+      return `raise your own boundary with \`config set me --boundary.${axis} ${needs}\`, or drop your overrides with \`config clear me\``;
+    case "defaults":
+      return `ask ${adminsHint} to raise \`defaults.boundary\` in the configuration`;
+    case "directive":
+      return "send the message again without the budget directive";
+  }
+}
+
+/** The 🚫 reply of a bounded profile, in record 0026's wording: what the preset
+ *  needs, what the boundary allows and whose it is, then the way forward. */
+export function profileRefusalReply(agentName: string, refusal: ProfileRefusal, adminsHint: string): string {
+  const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  if (refusal.axis === "identity") {
+    const how = wayForward(refusal.scope, "maxIdentity", refusal.needs, adminsHint);
+    return `🚫 \`${agentName}\` needs a \`${refusal.needs}\` credential; ${boundaryOf(refusal.scope)} caps runs at \`${refusal.cap}\`. ${capitalize(how)}.`;
+  }
+  const scopes = refusal.scopes.map(boundaryOf);
+  const who = scopes.length > 1 ? `${scopes.join(" and ")} allow` : `${scopes[0] ?? "the boundary"} allows`;
+  const allowed = refusal.allowed.map((m) => `\`${m}\``).join(", ");
+  const how = refusal.scopes
+    .map((scope) =>
+      wayForward(
+        scope,
+        "machines",
+        scope === "user" ? `<classes including ${refusal.needs}>` : refusal.needs,
+        adminsHint,
+      ),
+    )
+    .join("; ");
+  return `🚫 \`${agentName}\` runs on a \`${refusal.needs}\` machine; ${who} only ${allowed}. ${capitalize(how)}.`;
+}
+
 /**
  * The repository gates, once the target has landed and the ack card is up: a
  * repo-needing agent whose bare slug its vet refused — the resident registry's
@@ -95,15 +181,15 @@ export async function authorizeAgent(
  */
 export async function authorizeRepo(
   deps: AuthorizeDeps,
-  ctx: GateContext & GateCard & { agent: AgentDef; needsRepo: boolean; repoCtx: RepoContext },
+  ctx: GateContext & GateCard & { agent: AgentDef; profile: RunProfile; needsRepo: boolean; repoCtx: RepoContext },
 ): Promise<Gate<"repo_not_onboarded" | "repo_not_visible" | "repo_unverified" | "repo_access">> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, needsRepo, repoCtx } = ctx;
+  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, needsRepo, repoCtx } = ctx;
   // A `repo-cold` run's vet was GitHub's, not the registry's
   // (docs/reference/specs/execution.md item 18): a refused slug is a repository
   // this installation cannot see — a resident fleet, or its absence, has
   // nothing to do with it — and an unanswered one is GitHub's silence. Both
   // stop by name before any executor exists; neither ever mentions onboarding.
-  if (agent.machine === "repo-cold" && needsRepo && !repoCtx.repo) {
+  if (profile.machine === "repo-cold" && needsRepo && !repoCtx.repo) {
     if (repoCtx.rejectedRepo) {
       const slug = repoCtx.rejectedRepo;
       console.log(`[dispatch] ${msg.threadKey} not started: repo not visible (${slug}: GitHub answered 404)`);

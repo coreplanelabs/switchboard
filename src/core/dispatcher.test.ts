@@ -10371,3 +10371,183 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     ]);
   });
 });
+
+// Feature: docs/reference/specs/routing-and-config.md items 2 and 4 — a boundary
+// on a scope caps what any run in it may have (record 0026): the profile gate
+// refuses an identity or a machine class above a cap before any executor
+// exists, and clips a budget above it. Proven end to end with the factory
+// stubbed, the way "no registry command starts a run" is proven: never called
+// on a refused profile, always called with the intersected one.
+describe("boundaries: the profile gate, before any executor exists", () => {
+  const BOUNDED_YAML = `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+    coding: anthropic/coding-model
+    review: anthropic/review-model
+channels:
+  "slack:CREAD":
+    boundary:
+      maxIdentity: read
+  "slack:CSHORT":
+    boundary:
+      maxMinutes: 10
+  "slack:CNOMACHINE":
+    boundary:
+      machines: [none]
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+workspaceDir: __WORKDIR__
+`;
+  const inChannel = (channel: string, text: string, user = "slack:UADMIN") => ({
+    channelId: `slack:${channel}`,
+    userId: user,
+    threadKey: `slack:${channel}:1.0`,
+    text,
+  });
+  /** A provider that answers at once and records the ledger's row and step records as they stood at its first call. */
+  function observingProvider(ledger: InMemoryRunLedger, runId: string) {
+    const requests: CompletionRequest[] = [];
+    const seen: { row?: ReturnType<InMemoryRunLedger["live"]["get"]>; steps?: unknown } = {};
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        if (requests.length === 1) {
+          seen.row = structuredClone(ledger.live.get(runId));
+          seen.steps = structuredClone(ledger.steps.get(runId));
+        }
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      },
+    };
+    return { provider, requests, seen };
+  }
+  /** The deps of a run under `BOUNDED_YAML`: a fixed run id, a recording store and ledger, a resolved repository. */
+  function bounded(runId: string) {
+    const ledger = new InMemoryRunLedger();
+    const observed = observingProvider(ledger, runId);
+    const registry = new RunRegistry({ genId: () => runId, genToken: () => "tok" });
+    const store = new InMemoryRunStore();
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(BOUNDED_YAML, observed.provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-B",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    return { deps, store, writer, ledger, ...observed };
+  }
+
+  beforeEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+    vi.mocked(runAgent).mockClear();
+  });
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+    vi.mocked(runAgent).mockClear();
+  });
+
+  it("identity above the cap: `agent:coding` in a channel bounded to `read` is refused by name before any card, thread claim, ledger row or executor; `agent:review` in the same channel is admitted with its declared profile", async () => {
+    const ledger = new InMemoryRunLedger();
+    const provider = capturingProvider();
+    const deps = makeDeps(BOUNDED_YAML, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = vi.spyOn(admission, "claim");
+    deps.admission = admission;
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-B",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CREAD", "agent:coding fix it"), io);
+    expect(replies).toEqual([
+      "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Run it in a channel that allows `write`, or ask <@slack:UADMIN> to raise this channel's boundary.",
+    ]);
+    expect(statuses).toEqual([]); // refused before the ack card: nothing to close
+    expect(claim).not.toHaveBeenCalled(); // no thread claimed
+    expect(ledger.live.size).toBe(0); // no row reserved
+    expect(makeExecutor).not.toHaveBeenCalled(); // no executor of any kind
+    expect(provider.requests).toHaveLength(0);
+    // review declares `read`: admitted, and the factory gets exactly its declared profile.
+    const second = fakeIO();
+    await dispatch(deps, inChannel("CREAD", "agent:review look at it"), second.io);
+    expect(provider.requests).toHaveLength(1);
+    expect(makeExecutor).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual({
+      machine: "repo-resident",
+      identity: "read",
+      minutes: 25,
+    });
+  });
+
+  it("machine class outside the set: coding (repo-resident) in a channel whose boundary allows only `none` is refused naming the class and the scope; a general ask in the same channel runs", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(BOUNDED_YAML, provider);
+    deps.resolveRepoContext = () => ({ repo: "acme/api" });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, inChannel("CNOMACHINE", "agent:coding fix it"), io);
+    expect(replies).toEqual([
+      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary allows only `none`. Run it in a channel that allows `repo-resident`, or ask <@slack:UADMIN> to raise this channel's boundary.",
+    ]);
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(0);
+    const second = fakeIO();
+    await dispatch(deps, inChannel("CNOMACHINE", "hello there"), second.io);
+    expect(second.replies).toContain("answer");
+  });
+
+  it("a budget above the cap is clipped, never refused: the factory, the ledger row and its seed, the runner, the card and the record all carry the intersected profile, and the shared preset is untouched", async () => {
+    const { deps, store, writer, requests, seen } = bounded("run-b");
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CSHORT", "agent:coding fix it"), io);
+    await writer.settled();
+    expect(requests).toHaveLength(1);
+    expect(replies.some((r) => r.includes("answer"))).toBe(true);
+    const profile = { machine: "repo-resident", identity: "write", minutes: 10, boundedBy: "channel" };
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(profile);
+    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(10); // the runner's deadline is the clipped budget
+    expect(AGENTS.coding.maxMinutes).toBe(45); // the shared def is never mutated
+    // The ledger row and its seed carry the clip, so a resume runs on it (run-history's resume rule).
+    expect(seen.row?.meta).toMatchObject({ agent: "coding", readonly: false, profile });
+    expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: 10 * 60_000 })]);
+    const rec = (await store.get("run-b"))!;
+    expect(rec.profile).toEqual({ preset: "coding", ...profile });
+    expect(
+      statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 10 min (channel boundary; preset asks 45)")),
+    ).toBe(true);
+  });
+
+  it("with no boundary on the path a request provisions exactly as before: the factory gets the preset's declared profile, the record says so without a clip, and the card carries no budget line", async () => {
+    const { deps, store, writer, seen } = bounded("run-u");
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:coding fix it"), io);
+    await writer.settled();
+    const declared = { machine: "repo-resident", identity: "write", minutes: 45 };
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(declared);
+    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(45);
+    expect(seen.row?.meta).toMatchObject({ agent: "coding", readonly: false, profile: declared });
+    expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: 45 * 60_000 })]);
+    expect((await store.get("run-u"))!.profile).toEqual({ preset: "coding", ...declared });
+    expect(statuses.map((s) => JSON.stringify(s)).some((s) => s.includes("budget"))).toBe(false);
+  });
+});

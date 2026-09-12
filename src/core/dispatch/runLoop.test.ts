@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
+import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import type { Provider } from "../../providers/types.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
@@ -111,6 +112,7 @@ function setup(answer: string | Error) {
     msg: message,
     io,
     agent,
+    profile: declaredProfile(agent),
     resolved,
     provider: provider(answer),
     model: "general-model",

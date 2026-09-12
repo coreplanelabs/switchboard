@@ -25,17 +25,19 @@ import {
   type ResumeContext,
 } from "./dispatch/admission.js";
 import { answerChatCommand, answerOperation, type FastPathDeps } from "./dispatch/fastPath.js";
-import { readRequest, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
+import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
 import {
   authorizeAgent,
   authorizeAttachedHead,
   authorizePrHead,
+  authorizeProfile,
   authorizeRepo,
   type AuthorizeDeps,
 } from "./dispatch/authorize.js";
 import { buildMessages } from "./dispatch/messages.js";
 import {
   attachWorkspace,
+  budgetClipLabel,
   composePrompt,
   openAckCard,
   registerRun,
@@ -256,6 +258,21 @@ export async function dispatch(
     if ((await authorizeAgent(deps, { msg, io, refuse, agentName: resolved.agentName })).kind === "refused") return;
 
     const agent = getAgent(resolved.agentName);
+    // The run's effective profile (dispatch/resolve.ts; record 0026): preset ∩
+    // the boundaries on the path — and the profile gate (dispatch/authorize.ts)
+    // right after the agent gate and before the thread is claimed, so an
+    // identity or class a boundary caps is refused by name with no card, no
+    // row and no executor. Every stage below reads the profile — the factory,
+    // the ledger row, the runner — never the preset's own fields.
+    const profileGate = await authorizeProfile(deps, {
+      msg,
+      io,
+      refuse,
+      agent,
+      resolution: resolveProfile({ agent, resolved, resume }),
+    });
+    if (profileGate.kind === "refused") return;
+    const { profile } = profileGate;
 
     // Thread admission (docs/reference/specs/thread-admission.md item 1) and the
     // carried run's row and inbox: the admission stage (dispatch/admission.ts).
@@ -300,6 +317,7 @@ export async function dispatch(
       msg,
       history,
       agent,
+      profile,
       resolved,
       resume,
       root,
@@ -344,6 +362,7 @@ export async function dispatch(
       closeLines,
       clock,
       agent,
+      profile,
       needsRepo,
       repoCtx,
     });
@@ -379,6 +398,13 @@ export async function dispatch(
       });
       return;
     }
+
+    // A boundary that clipped this run's budget is named on the card from
+    // here — through the attach and the run — the way a resident note is
+    // (dispatch/provision.ts). After the ship fork: the pipeline's budget is
+    // the `ship` config block's until the ship preset declares its own.
+    const clip = budgetClipLabel(agent, profile);
+    if (clip) shell.setLabel(`${shell.label} · ${clip}`);
 
     // A resume continues the exact conversation the ledger held (item 38);
     // the thread history was folded into it when the run started.
@@ -432,6 +458,7 @@ export async function dispatch(
     const reservation = await reserveRun(deps, {
       msg,
       agent,
+      profile,
       resolved,
       repoCtx,
       channelVisibility,
@@ -461,6 +488,7 @@ export async function dispatch(
       closeLines,
       clock,
       agent,
+      profile,
       repoCtx,
       root,
     });
@@ -518,6 +546,7 @@ export async function dispatch(
     const prompt = await composePrompt(deps, {
       msg,
       agent,
+      profile,
       resolved,
       directives,
       sticky,
@@ -560,12 +589,13 @@ export async function dispatch(
     }
     // Tombstone-first (dispatch/record.ts): a provisional interrupted record
     // the moment the run loop owns the run; the finish write replaces it.
-    writeTombstone(deps, { msg, agent, resolved, repoCtx, channelVisibility, run, registry, resume });
+    writeTombstone(deps, { msg, agent, profile, resolved, repoCtx, channelVisibility, run, registry, resume });
     // The ledger claim (dispatch/run.ts), once the prompt exists: the reserved
     // row promoted, or a resume's adopted row re-subscribed.
     ledgerRun = await claimRun(deps, {
       msg,
       agent,
+      profile,
       resolved,
       repoCtx,
       channelVisibility,
@@ -590,6 +620,7 @@ export async function dispatch(
       msg,
       io,
       agent,
+      profile,
       resolved,
       provider,
       model,

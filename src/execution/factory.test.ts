@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { secretsFrom } from "../secrets.js";
 import { AGENTS, type AgentDef } from "../agents/registry.js";
+import { declaredProfile } from "../config/profile.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { LocalExecutor } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
@@ -16,7 +17,7 @@ import {
 } from "./factory.js";
 import { resolveGithubToken } from "./githubApp.js";
 
-// The sandbox's GitHub credential is minted per toolset (least-privilege), so
+// The sandbox's GitHub credential is minted per identity (least-privilege), so
 // mock the mint to a scope-tagged token: the test asserts the SCOPE requested
 // and the token that lands in the sandbox env, without JWT signing or network.
 vi.mock("./githubApp.js", async (importOriginal) => {
@@ -37,7 +38,10 @@ function dirs(): Pick<ExecutorFactoryOptions, "workspaceDir" | "dataDir"> {
   return { workspaceDir: join(dir, "workspaces"), dataDir: join(dir, "data") };
 }
 
-const ctx = (agentName: string) => ({ threadKey: "slack:CX:1.0", agent: AGENTS[agentName] });
+/** The context a dispatch hands the factory: the preset and its declared
+ *  profile — the run's effective profile when no boundary caps anything. */
+const ctxOf = (agent: AgentDef) => ({ threadKey: "slack:CX:1.0", agent, profile: declaredProfile(agent) });
+const ctx = (agentName: string) => ctxOf(AGENTS[agentName]);
 
 describe("makeExecutor per-agent provisioning", () => {
   afterEach(() => {
@@ -105,7 +109,7 @@ describe("makeExecutor per-agent provisioning", () => {
   // Security: the review agent's sandbox has `gh` + the credential
   // helper, so a write-capable GH_TOKEN there would let the model — or a
   // prompt-injected diff — post/review/push. Least-privilege closes it at the
-  // token: a `readonly` toolset gets a READ-scoped token, a `full` toolset gets
+  // token: a `read` identity gets a READ-scoped token, a `write` identity gets
   // WRITE. (The bot-process review post uses its own write token, unaffected.)
   const envOf = (ex: unknown) =>
     (ex as { opts: { resolveEnvs: () => Promise<Record<string, string>> } }).opts.resolveEnvs();
@@ -117,8 +121,8 @@ describe("makeExecutor per-agent provisioning", () => {
       execution: { type: "cloudflare", url: "https://sandbox.example" },
       ...dirs(),
     };
-    const review = await makeExecutor(cf, ctx("review")); // toolset "readonly"
-    const coding = await makeExecutor(cf, ctx("coding")); // toolset "full"
+    const review = await makeExecutor(cf, ctx("review")); // identity "read"
+    const coding = await makeExecutor(cf, ctx("coding")); // identity "write"
 
     // …and the scoped token is exactly what lands in the sandbox env.
     expect((await envOf(review.executor)).GH_TOKEN).toBe("ghs_read");
@@ -170,8 +174,7 @@ describe("makeExecutor resident selection", () => {
   });
 
   const repoCtx = () => ({
-    threadKey: "slack:CX:1.0",
-    agent: AGENTS.coding,
+    ...ctxOf(AGENTS.coding),
     repo: "jshttp/vary",
     ref: "master",
   });
@@ -201,10 +204,7 @@ describe("makeExecutor resident selection", () => {
   it("ctx.repo undefined → per-thread path with ZERO probe calls (total input contract)", async () => {
     stubEnvs();
     const { fn } = stubFetch();
-    const { executor, note, binding } = await makeExecutor(residentOpts(), {
-      threadKey: "slack:CX:1.0",
-      agent: AGENTS.coding,
-    });
+    const { executor, note, binding } = await makeExecutor(residentOpts(), ctxOf(AGENTS.coding));
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(note).toBeUndefined();
     expect(binding).toBeUndefined(); // nothing attached on the per-thread path
@@ -294,10 +294,10 @@ describe("makeExecutor resident selection", () => {
     expect(bodies[2]?.refHint).toBe("master"); // re-attach on the resident's default
   });
 
-  // docs/reference/specs/resident-repos.md item 50: the review agent (toolset "readonly")
-  // attaches read-only; coding (toolset "full") attaches writable. The bot
-  // decides from the agent's declared toolset — never from the prompt.
-  it("a readonly-toolset agent attaches with readonly:true; a full-toolset agent's body has no readonly field", async () => {
+  // docs/reference/specs/resident-repos.md item 50: the review agent (identity
+  // `read`) attaches read-only; coding (identity `write`) attaches writable. The
+  // bot decides from the run's profile — never from the prompt.
+  it("a read-identity agent attaches with readonly:true; a write-identity agent's body has no readonly field", async () => {
     stubEnvs();
     const attachOk = {
       workspace: "/workspace/threads/x/master",
@@ -312,7 +312,7 @@ describe("makeExecutor resident selection", () => {
       { body: { state: "warm", reason: "" } },
       { body: attachOk },
     );
-    await makeExecutor(residentOpts(), { ...repoCtx(), agent: AGENTS.review });
+    await makeExecutor(residentOpts(), { ...repoCtx(), ...ctxOf(AGENTS.review) });
     expect(bodies[1]?.readonly).toBe(true);
     await makeExecutor(residentOpts(), repoCtx()); // AGENTS.coding
     expect(bodies[3]).not.toHaveProperty("readonly");
@@ -339,7 +339,7 @@ describe("makeExecutor resident selection", () => {
     );
     await makeExecutor(residentOpts(), {
       ...repoCtx(),
-      agent: AGENTS.review,
+      ...ctxOf(AGENTS.review),
       headSha: "47c4230692cbc5961682532afb822e9c2f1f40b7",
     });
     expect(bodies[1]).toMatchObject({
@@ -612,8 +612,7 @@ describe("makeExecutor machine classes", () => {
     vi.mocked(resolveGithubToken).mockClear();
     const fetchSpy = poisonFetch();
     const { executor, note, resident, binding, backend } = await makeExecutor(bothBackends(), {
-      threadKey: "slack:CX:1.0",
-      agent: agentOn("blank"),
+      ...ctxOf(agentOn("blank")),
       repo: "jshttp/vary",
       ref: "master",
     });
@@ -633,7 +632,7 @@ describe("makeExecutor machine classes", () => {
 
   it("blank (local) → a per-thread workspace directory, empty", async () => {
     const d = dirs();
-    const { executor, backend } = await makeExecutor({ ...d }, { threadKey: "slack:CX:1.0", agent: agentOn("blank") });
+    const { executor, backend } = await makeExecutor({ ...d }, ctxOf(agentOn("blank")));
     expect(executor).toBeInstanceOf(LocalExecutor);
     expect(backend).toBe("local");
     expect(existsSync(join(d.workspaceDir, "slack_CX_1.0"))).toBe(true);
@@ -645,8 +644,7 @@ describe("makeExecutor machine classes", () => {
     vi.mocked(resolveGithubToken).mockClear();
     const fetchSpy = poisonFetch();
     const { executor, note, resident, binding, backend } = await makeExecutor(bothBackends(), {
-      threadKey: "slack:CX:1.0",
-      agent: agentOn("repo-cold"),
+      ...ctxOf(agentOn("repo-cold")),
       repo: "jshttp/vary",
       ref: "master",
     });
@@ -657,15 +655,55 @@ describe("makeExecutor machine classes", () => {
     expect(binding).toBeUndefined();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(optsOf(executor)).toMatchObject({ repo: "jshttp/vary", ref: "master" });
-    // The credential is the run's, scoped like the sandbox token today: a
-    // `full` toolset writes, a `readonly` one reads.
+    // The credential is the run's, scoped by the profile's identity: a `write`
+    // identity writes, a `read` one reads.
     await expect(optsOf(executor).resolveEnvs()).resolves.toEqual({ GH_TOKEN: "ghs_write" });
     const readonly = await makeExecutor(bothBackends(), {
-      threadKey: "slack:CX:1.0",
-      agent: agentOn("repo-cold", AGENTS.review),
+      ...ctxOf(agentOn("repo-cold", AGENTS.review)),
       repo: "jshttp/vary",
     });
     await expect(optsOf(readonly.executor).resolveEnvs()).resolves.toEqual({ GH_TOKEN: "ghs_read" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  // Record 0026's invariant (c): the factory provisions from the run's
+  // EFFECTIVE profile and nothing else — the preset's own fields are never
+  // read again here. Proven by handing it a context whose preset and profile
+  // disagree on every axis.
+  it("provisions from the profile, never from the preset: the class and identity the context's profile names win over the agent's own fields", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.mocked(resolveGithubToken).mockClear();
+    const fetchSpy = poisonFetch();
+    // A repo-resident/write preset whose profile says `none`: nothing is provisioned.
+    const nothing = await makeExecutor(bothBackends(), {
+      threadKey: "slack:CX:1.0",
+      agent: AGENTS.coding,
+      profile: { machine: "none", identity: "none", minutes: 45 },
+      repo: "jshttp/vary",
+    });
+    await expect(nothing.executor.exec("echo hi")).rejects.toThrow(/machine class "none"/);
+    expect(nothing.backend).toBe("local");
+    // A `full`-toolset preset whose profile says identity `read`: the sandbox holds a READ token.
+    const reading = await makeExecutor(bothBackends(), {
+      threadKey: "slack:CX:1.0",
+      agent: AGENTS.coding,
+      profile: { machine: "repo-cold", identity: "read", minutes: 45 },
+      repo: "jshttp/vary",
+    });
+    await expect(optsOf(reading.executor).resolveEnvs()).resolves.toEqual({ GH_TOKEN: "ghs_read" });
+    expect(resolveGithubToken).toHaveBeenLastCalledWith("read");
+    // Identity `none` on a class with a checkout: the checkout is cloned anonymously, no token is minted.
+    vi.mocked(resolveGithubToken).mockClear();
+    const anonymous = await makeExecutor(bothBackends(), {
+      threadKey: "slack:CX:1.0",
+      agent: AGENTS.coding,
+      profile: { machine: "repo-cold", identity: "none", minutes: 45 },
+      repo: "jshttp/vary",
+    });
+    expect(optsOf(anonymous.executor)).toMatchObject({ repo: "jshttp/vary" });
+    await expect(optsOf(anonymous.executor).resolveEnvs()).resolves.toEqual({});
+    expect(resolveGithubToken).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -673,10 +711,7 @@ describe("makeExecutor machine classes", () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     const fetchSpy = poisonFetch();
-    const { executor, note } = await makeExecutor(bothBackends(), {
-      threadKey: "slack:CX:1.0",
-      agent: agentOn("repo-cold"),
-    });
+    const { executor, note } = await makeExecutor(bothBackends(), ctxOf(agentOn("repo-cold")));
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(note).toBeUndefined();
     expect(optsOf(executor).repo).toBeUndefined();

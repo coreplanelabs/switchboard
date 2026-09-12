@@ -10,7 +10,8 @@ import type { ShipConfig } from "../core/shipPipeline.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
 import { parseGrantsConfig, parseRestrictConfig, type Restriction } from "../core/authz/grants.js";
 import type { Grants } from "../core/authz/types.js";
-import { AGENTS } from "../agents/registry.js";
+import { AGENTS, IDENTITIES, MACHINE_CLASSES, type Identity, type MachineClass } from "../agents/registry.js";
+import type { Boundary } from "./profile.js";
 import { assertUrlAllowed } from "../tools/web.js";
 import {
   isMcpServerEntry,
@@ -114,6 +115,70 @@ export function validateScopeEfforts(
   }
 }
 
+/** The keys a boundary may carry — held equal to `Boundary` by the type checker. */
+const BOUNDARY_KEYS: Record<keyof Boundary, true> = { maxMinutes: true, maxIdentity: true, machines: true };
+
+/** The smallest budget a boundary may set: the bash tool keeps a 60-second
+ *  reserve before the deadline, so a shorter run could never run a command. */
+export const MIN_BOUNDARY_MINUTES = 2;
+
+/**
+ * One boundary, wherever config can carry it: a mapping of the three axes and
+ * nothing else — `maxMinutes` an integer of at least `MIN_BOUNDARY_MINUTES`,
+ * `maxIdentity` one of `IDENTITIES`, `machines` a list naming at least one of
+ * `MACHINE_CLASSES` (an empty list would refuse every preset, which is a
+ * lockout, not a cap — `restrict.agents` is the tool for that). Every finding
+ * names the path; the caller decides what to do with it (the load throws, the
+ * chat command refuses by name).
+ */
+export function boundaryProblem(path: string, raw: unknown): string | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${path} must be a mapping`;
+  for (const key of unknownKeys(raw, BOUNDARY_KEYS)) return `${path}: unknown field ${key}`;
+  const b = raw as Record<keyof Boundary, unknown>;
+  if (
+    b.maxMinutes !== undefined &&
+    (!Number.isInteger(b.maxMinutes) || (b.maxMinutes as number) < MIN_BOUNDARY_MINUTES)
+  )
+    return `${path}.maxMinutes must be an integer >= ${MIN_BOUNDARY_MINUTES}`;
+  if (b.maxIdentity !== undefined && !IDENTITIES.includes(b.maxIdentity as Identity))
+    return `${path}.maxIdentity is "${String(b.maxIdentity)}" — valid identities: ${IDENTITIES.join(", ")}`;
+  if (b.machines !== undefined) {
+    if (!Array.isArray(b.machines)) return `${path}.machines must be a list of classes`;
+    if (b.machines.length === 0) return `${path}.machines must name at least one class`;
+    for (const m of b.machines as unknown[]) {
+      if (!MACHINE_CLASSES.includes(m as MachineClass))
+        return `${path}.machines names "${String(m)}" — valid classes: ${MACHINE_CLASSES.join(", ")}`;
+    }
+  }
+  return undefined;
+}
+
+/** Reject a malformed boundary wherever config can carry one (`defaults`, the
+ *  static scopes, a hand-edited overrides document), naming the path
+ *  (docs/reference/specs/routing-and-config.md item 2). The chat command
+ *  validates on write with the same rule; this holds the files to it at load. */
+export function validateBoundaries(
+  layer: {
+    channels?: Record<string, Scope>;
+    users?: Record<string, Scope>;
+    defaults?: { boundary?: unknown };
+  },
+  source: string,
+): void {
+  const check = (path: string, raw: unknown) => {
+    if (raw === undefined) return;
+    const problem = boundaryProblem(path, raw);
+    if (problem) throw new Error(`${source}: ${problem}`);
+  };
+  check("defaults.boundary", layer.defaults?.boundary);
+  for (const [kind, scopes] of [
+    ["channels", layer.channels],
+    ["users", layer.users],
+  ] as const) {
+    for (const [id, scope] of Object.entries(scopes ?? {})) check(`${kind}.${id}.boundary`, scope.boundary);
+  }
+}
+
 /**
  * Every `mcpServers` map a config layer can carry (docs/reference/specs/mcp-tools.md items
  * 11 + 14), static or stored: names are slugs, URLs http(s) and not an internal
@@ -186,6 +251,7 @@ export function validateConfig(cfg: AppConfig): void {
   // exists; either way it must not read as a working setting.
   for (const key of unknownKeys(cfg, CONFIG_KEYS)) throw new Error(`config.yaml: unknown key \`${key}\``);
   validateScopeEfforts(cfg, "config.yaml");
+  validateBoundaries(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
   if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
     throw new Error(

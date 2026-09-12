@@ -77,7 +77,7 @@ commands:
   help show            — What Switchboard can do: agents, per-request directives, and every chat command.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
-  config set           — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+  config set           — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -208,7 +208,7 @@ exports[`capability surfaces — cloud-full > help on chat 1`] = `
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
-• \`config set\` — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+• \`config set\` — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
 • \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
@@ -295,7 +295,7 @@ commands:
   help show            — What Switchboard can do: agents, per-request directives, and every chat command.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
-  config set           — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+  config set           — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -405,7 +405,7 @@ exports[`capability surfaces — local-full > help on chat 1`] = `
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
-• \`config set\` — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+• \`config set\` — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
 • \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
@@ -483,7 +483,7 @@ commands:
   help show            — What Switchboard can do: agents, per-request directives, and every chat command.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
-  config set           — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+  config set           — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -563,7 +563,7 @@ exports[`capability surfaces — minimal > help on chat 1`] = `
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted.
-• \`config set\` — Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.
+• \`config set\` — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
 • \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*

@@ -9,6 +9,7 @@
 // capabilities are run.ts.
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
+import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { runAgent } from "../../runner.js";
 import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
 import type { ChatMessage, Provider } from "../../providers/types.js";
@@ -72,6 +73,8 @@ export interface RunLoopContext {
   msg: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
+  /** The run's effective profile: the budget the runner is handed is its minutes. */
+  profile: RunProfile;
   resolved: ResolvedRequest;
   provider: Provider;
   model: string;
@@ -119,7 +122,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   const {
     msg,
     io,
-    agent,
+    profile,
     resolved,
     provider,
     model,
@@ -146,6 +149,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     publishText,
     ending,
   } = ctx;
+  // The def the runner and the post-run turns read: the preset with the
+  // EFFECTIVE budget (its deadline, wrap-up warning and budget label read
+  // `maxMinutes`) — a copy, never the shared registry entry.
+  const agent = budgetedAgent(ctx.agent, profile);
   const { executor, binding } = round.selection;
   let reviewHead = ctx.reviewHead;
   let lastActivityAt = ctx.loopStartedAt;
@@ -689,6 +696,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       run,
       snap,
       agent,
+      profile,
       resolved,
       msg,
       channelVisibility,

@@ -1,4 +1,5 @@
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
+import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
 import type { RunEvent } from "./runEvents.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
@@ -97,6 +98,48 @@ export interface RunRecord {
    *  three empty lists, distinguishable from none); absent on every other run
    *  and on records written before it existed. */
   handoff?: Handoff;
+  /** The effective profile the run was admitted with (docs/decisions/0026-capability-profiles-and-request-routing.md):
+   *  the preset, its machine class and identity, the minutes it ran on and —
+   *  when a boundary clipped the budget — the scope that did, so a reader can
+   *  tell a clipped budget from a declared one. Absent on records written
+   *  before profiles existed. */
+  profile?: RunProfileRecord;
+}
+
+/** The profile as the record stores it: the run's effective profile plus the preset it came from. */
+export type RunProfileRecord = RunProfile & { preset: string };
+
+// The vocabularies the profile is checked against, typed against the unions
+// (a class or identity added without a row here fails to compile) — the record
+// contract stays node-free and imports the registry's types only.
+const MACHINE_CLASSES_IN_RECORD: Record<MachineClass, true> = {
+  none: true,
+  blank: true,
+  "repo-cold": true,
+  "repo-resident": true,
+};
+const IDENTITIES_IN_RECORD: Record<Identity, true> = { none: true, read: true, write: true };
+const BOUNDARY_SCOPES_IN_RECORD: Record<BoundaryScope, true> = {
+  defaults: true,
+  channel: true,
+  user: true,
+  directive: true,
+};
+
+/** Structural check on a stored profile (item 3's rule for the field). */
+function isRunProfileRecord(v: unknown): v is RunProfileRecord {
+  if (typeof v !== "object" || v === null) return false;
+  const p = v as Record<string, unknown>;
+  if (typeof p.preset !== "string") return false;
+  if (typeof p.machine !== "string" || !Object.hasOwn(MACHINE_CLASSES_IN_RECORD, p.machine)) return false;
+  if (typeof p.identity !== "string" || !Object.hasOwn(IDENTITIES_IN_RECORD, p.identity)) return false;
+  if (!isFiniteNumber(p.minutes) || p.minutes <= 0) return false;
+  if (
+    p.boundedBy !== undefined &&
+    (typeof p.boundedBy !== "string" || !Object.hasOwn(BOUNDARY_SCOPES_IN_RECORD, p.boundedBy))
+  )
+    return false;
+  return true;
 }
 
 /** A run as a listing shows it: the record minus its events. `diagnosis` stays —
@@ -419,6 +462,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // The handoff is checked for shape, not bounds (docs/reference/specs/agent-ship.md
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;
+  if (r.profile !== undefined && !isRunProfileRecord(r.profile)) return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   // Absent on records written before the stamp existed (read as `unknown`); present → a known value.
   if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility))

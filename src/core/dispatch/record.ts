@@ -9,7 +9,8 @@ import { STATIC_CHANNEL_DIRECTORY } from "../authz/channelDirectory.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { isSpanRecord } from "../runEvents.js";
-import { fitRecordToBudget, type RunRecord, type RunStatus } from "../runRecord.js";
+import { fitRecordToBudget, type RunProfileRecord, type RunRecord, type RunStatus } from "../runRecord.js";
+import type { RunProfile } from "../../config/profile.js";
 import { redactHandoff, type Handoff } from "../ship/handoff.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import { activityOfEvents } from "../runRegistry/activity.js";
@@ -170,6 +171,9 @@ export function reclaimedRunRecord(input: {
     },
     channelVisibility: row.meta.channelVisibility ?? "unknown",
     repo: row.meta.repo,
+    // The row carries the profile the run was admitted with (a clipped budget
+    // included); a row from before profiles existed leaves the record without one.
+    ...(row.meta.profile && row.meta.agent ? { profile: { preset: row.meta.agent, ...row.meta.profile } } : {}),
     finishedAt,
     status,
     diagnosis: analyzeRunFriction(events, {
@@ -246,6 +250,10 @@ export function assembleRunRecord(input: {
    *  as the tool accepted it; redacted HERE, the one assembly, so no caller
    *  can forget. Omitted (not set undefined) when the run submitted none. */
   handoff?: Handoff;
+  /** The effective profile the run was admitted with, with its preset. Omitted
+   *  when the caller has none (the drain's tombstone of a run whose registry
+   *  row predates profiles). */
+  profile?: RunProfileRecord;
 }): RunRecord {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
@@ -281,14 +289,22 @@ export function assembleRunRecord(input: {
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
+    ...(input.profile !== undefined ? { profile: input.profile } : {}),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
+}
+
+/** The record's profile for a run: its effective profile under the preset's name. */
+function profileRecordOf(agent: AgentDef, profile: RunProfile): RunProfileRecord {
+  return { preset: agent.name, ...profile };
 }
 
 /** What `writeTombstone` reads off the dispatch. */
 export interface TombstoneContext {
   msg: IncomingMessage;
   agent: AgentDef;
+  /** The run's effective profile: the record says what the run was admitted with. */
+  profile: RunProfile;
   resolved: ResolvedRequest;
   repoCtx: RepoContext;
   channelVisibility: ChannelVisibility;
@@ -306,7 +322,7 @@ export interface TombstoneContext {
  * resume, whose record the ledger already holds.
  */
 export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
-  const { msg, agent, resolved, repoCtx, channelVisibility, run, registry, resume } = ctx;
+  const { msg, agent, profile, resolved, repoCtx, channelVisibility, run, registry, resume } = ctx;
   // Tombstone-first: a provisional TERMINAL record — status
   // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
   // from the events published so far (the setup spans, request, run_meta,
@@ -337,6 +353,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
           msg,
           channelVisibility,
           repo: repoCtx.repo,
+          profile: profileRecordOf(agent, profile),
           finishedAt: startSnap.startedAt,
           status: "interrupted",
           diagnosis: analyzeRunFriction(startSnap.events, {
@@ -356,6 +373,8 @@ export interface FinishRecordContext {
   run: RunHandle;
   snap: RunSnapshot | null;
   agent: AgentDef;
+  /** The run's effective profile: the record says what the run was admitted with. */
+  profile: RunProfile;
   resolved: ResolvedRequest;
   msg: IncomingMessage;
   channelVisibility: ChannelVisibility;
@@ -383,6 +402,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     run,
     snap,
     agent,
+    profile,
     resolved,
     msg,
     channelVisibility,
@@ -409,6 +429,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           msg,
           channelVisibility,
           repo: repoCtx.repo,
+          profile: profileRecordOf(agent, profile),
           finishedAt,
           status: failedAfterFinish && status === "completed" ? "failed" : status,
           diagnosis,

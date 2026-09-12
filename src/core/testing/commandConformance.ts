@@ -514,9 +514,11 @@ export const FIELD_HINTS: SampleHints = {
   // deploy.*: `--only` and `--skip` must not cancel each other out (an empty plan is refused).
   only: "memory",
   skip: "sandbox",
-  // config.set: per-agent maps keyed by a real agent name.
+  // config.set: per-agent maps keyed by a real agent name; a boundary whose
+  // machines list names real classes (the generic object sample would not).
   models: { general: "anthropic/general-model" },
   efforts: { general: "low" },
+  boundary: { maxMinutes: 45, maxIdentity: "read", machines: "none,repo-cold" },
   // mcp.*: the seeded server and a URL the SSRF guard admits.
   name: FIXTURE.mcpServer,
   url: "https://mcp.example.com/mcp",

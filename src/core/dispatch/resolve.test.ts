@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
-import { getAgent, type MachineClass } from "../../agents/registry.js";
+import { getAgent, type Identity, type MachineClass } from "../../agents/registry.js";
+import { declaredProfile } from "../../config/profile.js";
 import { resetResidentProbeCache } from "../../execution/factory.js";
 import { resolveGithubToken } from "../../execution/githubApp.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
@@ -12,7 +13,7 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
 import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
 import type { ResumeContext } from "./admission.js";
-import { readRequest, resolveRun, resolveTarget, type ResolveDeps } from "./resolve.js";
+import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./resolve.js";
 
 // Feature: docs/reference/specs/routing-and-config.md items 1–3 — the resolve
 // stage's own contract: the request read (directives stripped, history
@@ -180,6 +181,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       msg: message,
       history,
       agent,
+      profile: declaredProfile(agent),
       resolved: resolvedFor("general"),
       resume: undefined,
       root: root(message).root,
@@ -209,6 +211,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       msg: message,
       history,
       agent,
+      profile: declaredProfile(agent),
       resolved: resolvedFor("coding"),
       resume: undefined,
       root: root(message).root,
@@ -221,6 +224,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       msg: message,
       history,
       agent,
+      profile: declaredProfile(agent),
       resolved: resolvedFor("coding"),
       resume: undefined,
       root: root(message).root,
@@ -243,6 +247,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       msg: message,
       history,
       agent: getAgent("coding"),
+      profile: declaredProfile(getAgent("coding")),
       resolved: resolvedFor("coding"),
       resume,
       root: root(message).root,
@@ -268,6 +273,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
         msg: message,
         history,
         agent: getAgent("coding"),
+        profile: declaredProfile(getAgent("coding")),
         resolved,
         resume: undefined,
         root: root(message).root,
@@ -305,20 +311,23 @@ describe("resolveTarget — the vet a machine class gets", () => {
     return calls;
   }
 
-  /** The target for a coding-shaped agent on `machine`, resolved by the production resolver. */
-  function target(machine: MachineClass) {
+  /** The target for a coding-shaped agent on `machine` (and, when given, another
+   *  identity), resolved by the production resolver. */
+  function target(machine: MachineClass, identity: Identity = "write") {
     const store = configStore(RESIDENT_YAML);
     const p = providers();
     const resolved = resolveRun(
       { config: store, providers: p.registry },
       { msg: message, directives: { agent: "coding", text: message.text }, history: [] },
     ).resolved;
+    const agent = { ...getAgent("coding"), machine, identity };
     return resolveTarget(
       { config: store, providers: p.registry },
       {
         msg: message,
         history: [],
-        agent: { ...getAgent("coding"), machine },
+        agent,
+        profile: declaredProfile(agent),
         resolved,
         resume: undefined,
         root: root(message).root,
@@ -349,7 +358,20 @@ describe("resolveTarget — the vet a machine class gets", () => {
     expect(out.needsRepo).toBe(true);
     expect(await out.repoCtxP).toEqual({ repo: "acme/api" });
     expect(calls).toEqual(["https://api.github.com/repos/acme/api"]);
-    expect(resolveGithubToken).toHaveBeenCalledWith("write"); // coding's toolset is `full`: the credential the sandbox gets
+    expect(resolveGithubToken).toHaveBeenCalledWith("write"); // coding's identity is `write`: the credential the sandbox gets
+  });
+
+  it("repo-cold on a `read` identity vets with a read token; on `none` it vets anonymously and mints nothing", async () => {
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.mocked(resolveGithubToken).mockClear();
+    stubFetch(() => new Response("{}", { status: 200 }));
+    expect(await target("repo-cold", "read").repoCtxP).toEqual({ repo: "acme/api" });
+    expect(resolveGithubToken).toHaveBeenCalledWith("read");
+    vi.mocked(resolveGithubToken).mockClear();
+    const calls = stubFetch(() => new Response("{}", { status: 200 }));
+    expect(await target("repo-cold", "none").repoCtxP).toEqual({ repo: "acme/api" });
+    expect(calls).toEqual(["https://api.github.com/repos/acme/api"]);
+    expect(resolveGithubToken).not.toHaveBeenCalled();
   });
 
   it("repo-cold: GitHub's 404 is a rejected slug and an unanswered vet is unverified — nothing binds, the registry stays untouched", async () => {
@@ -373,5 +395,70 @@ describe("resolveTarget — the vet a machine class gets", () => {
     expect(await out.repoCtxP).toEqual({});
     expect(calls).toEqual([]);
     expect(resolveGithubToken).not.toHaveBeenCalled();
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 2: the effective profile is
+// preset ∩ boundary, computed once in the resolve stage; the gate judges it.
+describe("resolveProfile — the effective profile once the preset is known", () => {
+  const BOUNDED_YAML = `${YAML}channels:
+  "slack:CX":
+    boundary:
+      maxMinutes: 10
+      maxIdentity: read
+`;
+  const resolvedIn = (yaml: string, agent: string) => {
+    const store = configStore(yaml);
+    return store.resolve({ channelId: "slack:CX", userId: "slack:UX", request: { agent } });
+  };
+
+  it("with no boundary on the path every preset resolves to its declared profile", () => {
+    for (const name of ["general", "coding", "review"]) {
+      const agent = getAgent(name);
+      expect(resolveProfile({ agent, resolved: resolvedIn(YAML, name), resume: undefined })).toEqual({
+        kind: "profile",
+        profile: declaredProfile(agent),
+      });
+    }
+  });
+
+  it("a bounded channel clips a budget above its cap naming the scope, and refuses an identity above its cap", () => {
+    const review = getAgent("review");
+    expect(resolveProfile({ agent: review, resolved: resolvedIn(BOUNDED_YAML, "review"), resume: undefined })).toEqual({
+      kind: "profile",
+      profile: { machine: "repo-resident", identity: "read", minutes: 10, boundedBy: "channel" },
+    });
+    const coding = getAgent("coding");
+    expect(resolveProfile({ agent: coding, resolved: resolvedIn(BOUNDED_YAML, "coding"), resume: undefined })).toEqual({
+      kind: "refused",
+      refusal: { axis: "identity", needs: "write", cap: "read", scope: "channel" },
+    });
+  });
+
+  it("a resume keeps the profile its row was admitted with — the clipped budget and what clipped it — rather than re-reading the preset; the current boundaries still refuse an identity or class above their cap", () => {
+    const coding = getAgent("coding");
+    const carried = {
+      machine: "repo-resident" as const,
+      identity: "write" as const,
+      minutes: 12,
+      boundedBy: "channel" as const,
+    };
+    const resume = { row: { meta: { profile: carried } } } as unknown as ResumeContext;
+    // The channel's boundary is gone by the resume: the row's clip stands.
+    expect(resolveProfile({ agent: coding, resolved: resolvedIn(YAML, "coding"), resume })).toEqual({
+      kind: "profile",
+      profile: carried,
+    });
+    // A boundary tightened meanwhile: the identity cap refuses the resume by name like a fresh request.
+    expect(resolveProfile({ agent: coding, resolved: resolvedIn(BOUNDED_YAML, "coding"), resume })).toEqual({
+      kind: "refused",
+      refusal: { axis: "identity", needs: "write", cap: "read", scope: "channel" },
+    });
+    // A row written before profiles existed resolves like a fresh request.
+    const legacy = { row: { meta: {} } } as unknown as ResumeContext;
+    expect(resolveProfile({ agent: coding, resolved: resolvedIn(YAML, "coding"), resume: legacy })).toEqual({
+      kind: "profile",
+      profile: declaredProfile(coding),
+    });
   });
 });
