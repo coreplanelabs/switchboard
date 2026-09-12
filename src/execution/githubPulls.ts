@@ -275,6 +275,8 @@ export interface PullRequestFacts {
    *  opened against a non-default base must not resume against the default). */
   baseRef?: string;
   htmlUrl?: string;
+  /** The pull request's title as GitHub has it — the squash commit's title when the runner merges. */
+  title?: string;
 }
 
 /**
@@ -364,6 +366,7 @@ export async function fetchPullRequestFacts(pr: {
   if (!res.ok) return undefined;
   const data = (await res.json().catch(() => null)) as {
     state?: unknown;
+    title?: unknown;
     html_url?: unknown;
     user?: { login?: unknown; id?: unknown };
     head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } };
@@ -396,7 +399,90 @@ export async function fetchPullRequestFacts(pr: {
     sameRepoHead,
     ...(typeof data.base?.ref === "string" && data.base.ref ? { baseRef: data.base.ref } : {}),
     ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
+    ...(typeof data.title === "string" && data.title ? { title: data.title } : {}),
   };
+}
+
+// ---- the plan runner's merge (docs/reference/specs/http-ingress.md item 9; record 0031's merge grant) ----
+
+export type MergeResult = { ok: true; sha: string } | { ok: false; status: number; reason: string };
+
+/** `PUT /repos/{repo}/pulls/{n}/merge`: a squash at exactly `sha` — GitHub
+ *  refuses when the head moved — with `<title> (#n)` as the commit's title and
+ *  an empty body, the shape the repository's own squash setting gives a
+ *  person's merge. GitHub's refusal (405: not mergeable — a conflict, a branch
+ *  protection; 409: the head is not `sha`; 422) is an answer with its status
+ *  and words, never a throw; a call that fails throws, like every write here. */
+export async function mergePullRequest(
+  pr: { repo: string; number: number },
+  opts: { sha: string; title: string },
+): Promise<MergeResult> {
+  const token = await requireToken();
+  const res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}/merge`, {
+    method: "PUT",
+    headers: apiHeaders(token, true),
+    body: JSON.stringify({
+      merge_method: "squash",
+      sha: opts.sha,
+      commit_title: `${opts.title} (#${pr.number})`,
+      commit_message: "",
+    }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const text = await res.text().catch(() => "");
+  let body: { sha?: unknown; message?: unknown } | null;
+  try {
+    body = JSON.parse(text) as { sha?: unknown; message?: unknown };
+  } catch {
+    body = null;
+  }
+  if (res.ok) {
+    const sha = typeof body?.sha === "string" && /^[0-9a-f]{40}$/.test(body.sha) ? body.sha : undefined;
+    if (sha === undefined) throw new Error(`merge of ${pr.repo}#${pr.number} answered without a merge commit sha`);
+    return { ok: true, sha };
+  }
+  if (res.status === 405 || res.status === 409 || res.status === 422) {
+    const reason = typeof body?.message === "string" && body.message ? body.message : redactAndCap(text, 300);
+    return { ok: false, status: res.status, reason };
+  }
+  throw new Error(`merge failed for ${pr.repo}#${pr.number}: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+}
+
+/** What the checks at a commit say: the runs still queued or in progress and
+ *  the runs that ended in anything but success, skipped or neutral. */
+export interface CommitChecks {
+  total: number;
+  pending: string[];
+  failed: string[];
+}
+
+const GREEN_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
+
+/** `GET /repos/{repo}/commits/{sha}/check-runs` (one page of 100) → the checks
+ *  at the sha, or undefined when GitHub cannot be read or the answer is not
+ *  the route's. Never throws — the caller treats unknown as not green. */
+export async function fetchCommitChecks(repo: string, sha: string): Promise<CommitChecks | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs?per_page=100`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as { check_runs?: unknown } | null;
+  if (!data || !Array.isArray(data.check_runs)) return undefined;
+  const out: CommitChecks = { total: 0, pending: [], failed: [] };
+  for (const run of data.check_runs as Array<{ name?: unknown; status?: unknown; conclusion?: unknown }>) {
+    const name = typeof run.name === "string" ? run.name : "(unnamed)";
+    out.total++;
+    if (run.status !== "completed") out.pending.push(name);
+    else if (typeof run.conclusion !== "string" || !GREEN_CONCLUSIONS.has(run.conclusion)) out.failed.push(name);
+  }
+  return out;
 }
 
 /** One review on a pull request as the coordinator reads it back: who posted

@@ -26,6 +26,7 @@ const T0 = 1_700_000_000_000;
 const INSTANCE = "plan-fixture";
 const PR_URL = "https://github.com/acme/api/pull/7";
 const HEAD = "a".repeat(40);
+const MERGED = "9".repeat(40);
 
 const row = (unit: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
   instanceId: INSTANCE,
@@ -155,7 +156,7 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
 }
 
 describe("the plan runner's driver — the Workflow body over the step runner (item 9)", () => {
-  it("a one-unit plan runs coding, then review to approve, and ends merge-ready for a person: the steps in order under the machine's names, every spawn typed by its brief and clipped budget, every wait typed `run finished:<runId>` for the budget plus five minutes and followed by a read-record, the round boundaries and the ending told to the bot, the finish completed", async () => {
+  it("a one-unit plan runs coding, then review to approve, then the runner's merge at the approved head, and ends merged: the steps in order under the machine's names, every spawn typed by its brief and clipped budget, every wait typed `run finished:<runId>` for the budget plus five minutes and followed by a read-record, the round boundaries and the ending told to the bot, the finish completed", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({
       plan: [planAnswer([row("U10")])],
@@ -165,14 +166,15 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
       "pr-check": [prOpen(T0 + 10 * MIN)],
       round: [acked(), acked(), acked(), acked()],
-      "unit-end": [ok({ ok: true, told: true }, T0 + 20 * MIN)],
-      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 20 * MIN)],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 21 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 21 * MIN)],
     });
     const summary = await runPlan(s.runner, b.client, INSTANCE);
     expect(summary).toEqual({
       instance: INSTANCE,
       planId: "fixture",
-      units: { U10: "merge_ready" },
+      units: { U10: "merged" },
       outcome: "completed",
     });
     expect(s.names()).toEqual([
@@ -190,9 +192,12 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/1/review/wait/1",
       "U10/1/review/read/1",
       "U10/note/4",
+      "U10/merge/1",
       "U10/end",
       "finish",
     ]);
+    // The merge is asked for at exactly the head the review approved.
+    expect(b.of("merge")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD }]);
     // Every step retries under the one policy; the spawn alone has the longer timeout (an attach can take minutes).
     for (const t of s.taken) {
       if (t.kind !== "do") continue;
@@ -244,10 +249,64 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string }; pr: unknown; unit: string }>;
     expect(end.unit).toBe("U10");
     expect(end.pr).toEqual({ number: 7, url: PR_URL });
-    expect(end.ending.kind).toBe("merge_ready");
-    expect(end.ending.report).toContain("✅ Merge-ready after 1 review round: " + PR_URL);
-    expect(end.ending.report).toContain("a person's merge");
+    expect(end.ending.kind).toBe("merged");
+    expect(end.ending.report).toContain(`✅ Merged after 1 review round: ${PR_URL} (squash \`${MERGED.slice(0, 7)}\`)`);
+    expect(end.ending.report).toContain("plan:merge");
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
+  });
+
+  it("the merge's pending poll: checks still running answer pending, the runner sleeps the poll and asks again under the next step name, and a merge GitHub refuses ends the unit merge_refused with the refusal in its report; a task string's ship branch is a person's merge — the machine ends merge-ready and never asks", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [
+        ok({ ok: true, outcome: "pending", reason: "2 check(s) still running" }, T0 + 21 * MIN),
+        ok(
+          { ok: true, outcome: "refused", reason: "GitHub refused the merge (HTTP 405): not mergeable" },
+          T0 + 27 * MIN,
+        ),
+      ],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merge_refused" });
+    expect(summary.outcome).toBe("failed");
+    expect(s.names().slice(-5)).toEqual(["U10/merge/1", "U10/merge/sleep/1", "U10/merge/2", "U10/end", "finish"]);
+    expect(s.taken.find((t) => t.name === "U10/merge/sleep/1")).toEqual({
+      kind: "sleep",
+      name: "U10/merge/sleep/1",
+      ms: 5 * MIN,
+    });
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
+    expect(end.ending.kind).toBe("merge_refused");
+    expect(end.ending.report).toContain("GitHub refused the merge (HTTP 405): not mergeable");
+    expect(end.ending.report).toContain("A person decides");
+
+    // A task unit: the ship branch is not a plan branch, so the merge is a person's.
+    const t = steps({ "task/0/coding/wait/1": "event", "task/1/review/wait/1": "event" });
+    const tb = bot({
+      plan: [planAnswer([row("task", { slug: "task", branch: "ship/warm-the-cache-abc123" })])],
+      "unit-start": [started("task")],
+      branch: [ok({ ok: true, branch: "ship/warm-the-cache-abc123", base: "main" })],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const task = await runPlan(t.runner, tb.client, INSTANCE);
+    expect(task.units).toEqual({ task: "merge_ready" });
+    expect(task.outcome).toBe("completed");
+    expect(tb.of("merge")).toEqual([]);
+    expect(t.names().filter((n) => n.includes("merge"))).toEqual([]);
   });
 
   it("a wait that times out is confirmed by read-record like an event: a live child is waited on again under the next step name, a finished one advances; a spawn answered busy naming the run holding the thread waits on that run, one without a run id sleeps the busy retry", async () => {
@@ -310,8 +369,13 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
   });
 
-  it("units run in the plan's order, one at a time; a dependent of a unit that ended merge-ready — a person's merge, under the merge policy of every branch today — is blocked, told so as its own ending without a thread, and the plan finishes failed; a unit whose branch could not be created ends aborted and blocks its dependents the same way; a unit blocked by a blocked unit the plan lists after it is told so, never an ending that is not there", async () => {
-    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+  it("units run in the plan's order, one at a time; a merged unit frees its dependents, which start with the rebase onto the base that now carries it; a unit whose merge GitHub refused blocks its dependents, each told so as its own ending without a thread, and the plan finishes failed; a unit whose branch could not be created ends aborted and blocks its dependents the same way; a unit blocked by a blocked unit the plan lists after it is told so, never an ending that is not there", async () => {
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+      "U11/0/coding/wait/1": "event",
+      "U11/1/review/wait/1": "event",
+    });
     const b = bot({
       plan: [
         planAnswer([
@@ -320,44 +384,73 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
           // U22 waits on U21, which the plan lists AFTER it and which U20's failure blocks.
           row("U22", { dependsOn: ["U21"] }),
           row("U11", { dependsOn: ["U10"] }),
+          row("U12", { dependsOn: ["U11"] }),
           row("U21", { dependsOn: ["U20"] }),
         ]),
       ],
-      "unit-start": [started("U10"), started("U20")],
-      branch: [branched("U10"), ok({ ok: false, reason: "HTTP 422 reference already exists" }, T0 + 30 * MIN)],
-      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
-      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
-      "pr-check": [prOpen(T0 + 10 * MIN)],
-      round: [acked(), acked(), acked(), acked()],
-      "unit-end": [acked(), acked(), acked(), acked(), acked()],
+      "unit-start": [started("U10"), started("U20"), started("U11")],
+      branch: [
+        branched("U10"),
+        ok({ ok: false, reason: "HTTP 422 reference already exists" }, T0 + 30 * MIN),
+        branched("U11"),
+      ],
+      spawn: [
+        spawned("run-c0"),
+        spawned("run-r1", T0 + 10 * MIN),
+        spawned("run-c1", T0 + 31 * MIN),
+        spawned("run-r2", T0 + 35 * MIN),
+      ],
+      "read-record": [
+        codingDone("run-c0", T0 + 10 * MIN),
+        reviewApproved("run-r1", T0 + 20 * MIN),
+        codingDone("run-c1", T0 + 35 * MIN),
+        reviewApproved("run-r2", T0 + 40 * MIN),
+      ],
+      "pr-check": [prOpen(T0 + 10 * MIN), prOpen(T0 + 35 * MIN)],
+      round: [acked(), acked(), acked(), acked(), acked(), acked(), acked(), acked()],
+      merge: [
+        ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN),
+        ok(
+          { ok: true, outcome: "refused", reason: "GitHub refused the merge (HTTP 405): not mergeable" },
+          T0 + 41 * MIN,
+        ),
+      ],
+      "unit-end": [acked(), acked(), acked(), acked(), acked(), acked()],
       finish: [acked()],
     });
     const summary = await runPlan(s.runner, b.client, INSTANCE);
     expect(summary.units).toEqual({
-      U10: "merge_ready",
+      U10: "merged",
       U20: "aborted",
+      U11: "merge_refused",
       U22: "blocked",
-      U11: "blocked",
+      U12: "blocked",
       U21: "blocked",
     });
     expect(summary.outcome).toBe("failed");
-    expect(s.names().filter((n) => n.endsWith("/start"))).toEqual(["U10/start", "U20/start"]);
+    expect(s.names().filter((n) => n.endsWith("/start"))).toEqual(["U10/start", "U20/start", "U11/start"]);
+    // The dependent's coding child is briefed with the rebase onto the base — which carries the merged unit.
+    expect(b.of("spawn")[2]).toMatchObject({
+      unit: "U11",
+      brief: { kind: "contract", unit: "U11", rebase: { branch: "plan/fixture/u11", onto: "main" } },
+    });
     const ends = b.of("unit-end") as Array<{ unit: string; ending: { kind: string; report: string } }>;
     expect(ends.map((e) => [e.unit, e.ending.kind])).toEqual([
-      ["U10", "merge_ready"],
+      ["U10", "merged"],
       ["U20", "aborted"],
+      ["U11", "merge_refused"],
       ["U22", "blocked"],
-      ["U11", "blocked"],
+      ["U12", "blocked"],
       ["U21", "blocked"],
     ]);
     expect(ends[1]!.ending.report).toContain("Could not create the pipeline branch `plan/fixture/u20`");
-    expect(ends[2]!.ending.report).toBe(
+    expect(ends[3]!.ending.report).toBe(
       "⛔ Blocked: U22 waits on U21, which is blocked itself. Re-issue the plan naming the remaining units once it is resolved.",
     );
-    expect(ends[3]!.ending.report).toBe(
-      "⛔ Blocked: U11 waits on U10, which ended merge_ready — a person's merge. Re-issue the plan naming the remaining units once it is merged.",
+    expect(ends[4]!.ending.report).toBe(
+      "⛔ Blocked: U12 waits on U11, which ended merge_refused. Re-issue the plan naming the remaining units once it is resolved.",
     );
-    expect(ends[4]!.ending.report).toContain("waits on U20, which ended aborted");
+    expect(ends[5]!.ending.report).toContain("waits on U20, which ended aborted");
     for (const e of ends) expect(e.ending.report).not.toContain("undefined");
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
   });

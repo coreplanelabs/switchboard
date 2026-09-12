@@ -72,7 +72,14 @@ import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
 import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channels/adminCoordinator.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
-import { createBranchRef, fetchPullRequestReviews, findOpenPrByHead } from "./execution/githubPulls.js";
+import {
+  createBranchRef,
+  fetchCommitChecks,
+  fetchPullRequestFacts,
+  fetchPullRequestReviews,
+  findOpenPrByHead,
+  mergePullRequest,
+} from "./execution/githubPulls.js";
 import { RestGithubApi } from "./execution/githubApi.js";
 import { resolveGithubIdentity } from "./execution/githubApp.js";
 import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
@@ -493,6 +500,10 @@ export async function runBot(): Promise<void> {
       github: deps.githubApi ?? new RestGithubApi(),
       createBranchRef,
       fetchPrReviews: fetchPullRequestReviews,
+      // The merge step (record 0031's merge grant): the pull request as GitHub has it, the checks at its head, the squash.
+      fetchPrFacts: fetchPullRequestFacts,
+      fetchCommitChecks,
+      mergePullRequest,
       selfIdentity: resolveGithubIdentity,
       runHistoryWriter,
       channelVisibilityOf: (channelId) => channelVisibilityOf(deps, channelId),

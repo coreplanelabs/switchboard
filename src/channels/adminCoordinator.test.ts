@@ -14,7 +14,13 @@ import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { isRunRecord, type RunRecord } from "../core/runRecord.js";
 import type { ChannelIO, IncomingMessage, StatusUpdate } from "../core/types.js";
-import type { OpenPrRef, PullRequestReview } from "../execution/githubPulls.js";
+import type {
+  CommitChecks,
+  MergeResult,
+  OpenPrRef,
+  PullRequestFacts,
+  PullRequestReview,
+} from "../execution/githubPulls.js";
 import { InMemoryGithubApi, type IssueSummary } from "../execution/githubApi.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
@@ -29,18 +35,23 @@ import {
 // Feature: docs/reference/specs/http-ingress.md item 9 — the bot steps a ship
 // coordinator calls behind the `coordinator` bearer whose actor holds
 // `coordinator:step`: `spawn`, `read-record`, `pr-check`, the plan runner's own
-// `plan`, `unit-start`, `branch`, `round`, `unit-end` and `finish`, and the
+// `plan`, `unit-start`, `branch`, `round`, `unit-end`, `merge` and `finish`, and the
 // shim's `authorize` question. The spawn never takes an actor from its caller:
 // the requester, channel and thread come from the parent ship record (a plan
 // unit's from its own row), and a retried spawn meets its own child by the key
 // on the child's row. Every answer carries `at`, the bot's clock.
 const NOW = 1_700_000_000_000;
 const TOKENS = new Secret(
-  JSON.stringify({ "tok-coord": { subject: "coordinator" }, "tok-ops": { subject: "ops" } }),
+  JSON.stringify({
+    "tok-coord": { subject: "coordinator" },
+    "tok-step": { subject: "stepper" },
+    "tok-ops": { subject: "ops" },
+  }),
   "SWITCHBOARD_INGRESS_TOKENS",
 );
 const GRANTS: Record<string, Grants> = {
-  "http:coordinator": { actions: new Set(["coordinator:step"]), channels: new Set(), repos: new Set() },
+  "http:coordinator": { actions: new Set(["coordinator:step", "plan:merge"]), channels: new Set(), repos: new Set() },
+  "http:stepper": { actions: new Set(["coordinator:step"]), channels: new Set(), repos: new Set() },
   "http:ops": { actions: new Set(["deploy:write", "runs:read"]), channels: new Set(), repos: new Set() },
 };
 const INSTANCE: CoordinatorInstance = {
@@ -108,6 +119,10 @@ function harness(
     reviews?: PullRequestReview[];
     self?: GithubIdentity;
     ioFor?: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
+    /** The merge step's GitHub: the pull request's facts, the checks at the head, the squash's answer. */
+    prFacts?: PullRequestFacts | Error;
+    checks?: CommitChecks | Error;
+    merge?: MergeResult | Error;
   } = {},
 ) {
   let n = 0;
@@ -128,6 +143,7 @@ function harness(
   const branches: Array<[string, string, string]> = [];
   const threadsAsked: Array<{ threadKey: string; userId: string; cardTs?: string }> = [];
   const written: RunRecord[] = [];
+  const merges: Array<{ pr: { repo: string; number: number }; opts: { sha: string; title: string } }> = [];
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
   const deps: AdminCoordinatorDeps = {
     tokens: "tokens" in over ? over.tokens : TOKENS,
@@ -154,6 +170,19 @@ function harness(
     },
     fetchPrReviews: async () => over.reviews,
     selfIdentity: async () => over.self ?? { login: "acme-switchboard[bot]", id: 4242 },
+    fetchPrFacts: async () => {
+      if (over.prFacts instanceof Error) throw over.prFacts;
+      return over.prFacts;
+    },
+    fetchCommitChecks: async () => {
+      if (over.checks instanceof Error) throw over.checks;
+      return over.checks;
+    },
+    mergePullRequest: async (pr, opts) => {
+      merges.push({ pr, opts });
+      if (over.merge instanceof Error) throw over.merge;
+      return over.merge ?? { ok: true, sha: "9".repeat(40) };
+    },
     runHistoryWriter: {
       write: (record: RunRecord) => void written.push(record),
       pending: () => 0,
@@ -176,6 +205,7 @@ function harness(
     branches,
     threadsAsked,
     written,
+    merges,
     github,
   };
 }
@@ -239,7 +269,7 @@ describe("the coordinator routes — the bearer (item 9)", () => {
         )
       ).status,
     ).toBe(405);
-    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}merge`, {}), h.deps)).status).toBe(404);
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}explode`, {}), h.deps)).status).toBe(404);
   });
 });
 
@@ -593,7 +623,7 @@ describe("createAdminCoordinatorHandler — the node adapter decides the door fr
     const h = harness();
     const handler = createAdminCoordinatorHandler(h.deps);
     const cases: Array<[string, string, string | null, number]> = [
-      ["POST", `${COORDINATOR_ADMIN_PREFIX}merge`, "Bearer tok-coord", 404],
+      ["POST", `${COORDINATOR_ADMIN_PREFIX}explode`, "Bearer tok-coord", 404],
       ["GET", `${COORDINATOR_ADMIN_PREFIX}spawn`, "Bearer tok-coord", 405],
       ["POST", `${COORDINATOR_ADMIN_PREFIX}spawn`, null, 401],
       ["POST", `${COORDINATOR_ADMIN_PREFIX}spawn`, "Bearer tok-ops", 403],
@@ -1217,5 +1247,267 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       text: "Plan fixture ended (completed):\n✅ U10 — merge_ready — https://github.com/acme/api/pull/7\n• U11 — not started",
     });
     expect((await call(h, "finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "won" })).status).toBe(400);
+  });
+});
+
+// Feature: docs/reference/specs/http-ingress.md item 9 — the runner's merge
+// (record 0031's merge grant): a plan branch's pull request, squashed by the
+// bot at exactly the approved head once the bot's own review approves there
+// and every check is green; refused by reason otherwise, so a person decides.
+describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull request (item 9)", () => {
+  const HEAD = "a".repeat(40);
+  const MERGED = "9".repeat(40);
+  const PLAN_INSTANCE: CoordinatorInstance = {
+    ...INSTANCE,
+    id: "plan-fixture",
+    plan: { id: "fixture", path: "docs/plans/fixture.md" },
+    caps: { maxRounds: 2, maxMinutes: 45 },
+    runId: "run-parent",
+  };
+  const row = (over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
+    instanceId: PLAN_INSTANCE.id,
+    unit: "U10",
+    slug: "u10-warm",
+    branch: "plan/fixture/u10-warm",
+    dependsOn: [],
+    rounds: [],
+    threadKey: "slack:C1:2.0",
+    pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    ...over,
+  });
+  const facts = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
+    state: "open",
+    author: { login: "acme-switchboard[bot]", id: 4242 },
+    headRef: "plan/fixture/u10-warm",
+    headSha: HEAD,
+    sameRepoHead: true,
+    baseRef: "main",
+    title: "feat(cache): warm on wake",
+    ...over,
+  });
+  const approving: PullRequestReview[] = [
+    { author: { login: "acme-switchboard[bot]", id: 4242 }, state: "COMMENTED", commitId: HEAD, body: "LGTM: clean" },
+  ];
+  const green: CommitChecks = { total: 3, pending: [], failed: [] };
+  const body = { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", prNumber: 7, headSha: HEAD };
+  async function mergeHarness(over: Parameters<typeof harness>[0] = {}, unit: Partial<CoordinatorUnit> = {}) {
+    const h = harness({ prFacts: facts(), reviews: approving, checks: green, ...over });
+    await h.instances.put(PLAN_INSTANCE);
+    await h.instances.putUnits([row(unit)]);
+    return h;
+  }
+  const call = (h: ReturnType<typeof harness>, step: string, b: Record<string, unknown>) =>
+    handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${step}`, b), h.deps);
+  const merge = (h: ReturnType<typeof harness>, b: Record<string, unknown> = body, auth?: string) =>
+    handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}merge`, b, auth), h.deps);
+
+  it("every guard green: the bot squashes the pull request at exactly the approved head with the title as the commit, and answers merged with the squash's sha", async () => {
+    const h = await mergeHarness();
+    expect(await merge(h)).toEqual({ status: 200, body: { ok: true, outcome: "merged", sha: MERGED, at: NOW } });
+    expect(h.merges).toEqual([
+      { pr: { repo: "acme/api", number: 7 }, opts: { sha: HEAD, title: "feat(cache): warm on wake" } },
+    ]);
+    // A seven-hex approved head still pins the squash to what GitHub has.
+    const short = await mergeHarness();
+    expect((await merge(short, { ...body, headSha: HEAD.slice(0, 7) })).body).toMatchObject({ outcome: "merged" });
+  });
+
+  it("the grant decides first: a coordinator bearer without plan:merge is refused naming the grant, and nothing is asked of GitHub", async () => {
+    const h = await mergeHarness();
+    expect(await merge(h, body, "Bearer tok-step")).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        outcome: "refused",
+        reason: 'the runner holds no plan:merge grant (grants["http:stepper"] in config.yaml) — a person merges',
+        at: NOW,
+      },
+    });
+    expect(h.merges).toEqual([]);
+  });
+
+  it("the branch decides, never the requester: a task instance, a branch of another shape and a branch of another plan wait for a person; the release pull request is refused by name", async () => {
+    const task = harness({ prFacts: facts({ headRef: "ship/fix-x-abc123" }), reviews: approving, checks: green });
+    await task.instances.put(INSTANCE);
+    await task.instances.putUnits([
+      {
+        instanceId: INSTANCE.id,
+        unit: "task",
+        slug: "task",
+        branch: "ship/fix-x-abc123",
+        dependsOn: [],
+        rounds: [],
+        pr: { number: 7, url: "u" },
+      },
+    ]);
+    expect((await merge(task, { ...body, parentInstanceId: INSTANCE.id, unit: "task" })).body).toMatchObject({
+      outcome: "refused",
+      reason: "`ship/fix-x-abc123` is not a branch of plan `(none)` — waits for a person's merge",
+    });
+    const other = await mergeHarness({}, { branch: "plan/other-plan/u10-warm" });
+    expect((await merge(other)).body).toMatchObject({
+      outcome: "refused",
+      reason: "`plan/other-plan/u10-warm` is not a branch of plan `fixture` — waits for a person's merge",
+    });
+    expect(other.merges).toEqual([]);
+    const release = await mergeHarness({
+      prFacts: facts({ headRef: "release-please--branches--main", title: "chore(main): release 1.206.0" }),
+    });
+    expect((await merge(release)).body).toMatchObject({
+      outcome: "refused",
+      reason: "acme/api#7 is the release pull request — always a person's merge, never the runner's",
+    });
+    const releaseByTitle = await mergeHarness({ prFacts: facts({ title: "chore(main): release 1.206.0" }) });
+    expect((await merge(releaseByTitle)).body).toMatchObject({
+      outcome: "refused",
+      reason: expect.stringContaining("release pull request"),
+    });
+  });
+
+  it("the pull request must be open, head the unit's branch and stand at the approved head; the bot's approving review must be pinned there — each refusal names what is off, and GitHub silent on the reviews is a passing 502", async () => {
+    expect((await merge(await mergeHarness({ prFacts: facts({ state: "closed" }) }))).body).toMatchObject({
+      outcome: "refused",
+      reason: "acme/api#7 is closed",
+    });
+    expect(
+      (await merge(await mergeHarness({ prFacts: facts({ headRef: "plan/fixture/u11-other" }) }))).body,
+    ).toMatchObject({
+      outcome: "refused",
+      reason: "acme/api#7 heads `plan/fixture/u11-other`, not the unit's branch `plan/fixture/u10-warm`",
+    });
+    expect((await merge(await mergeHarness({ prFacts: facts({ headSha: "b".repeat(40) }) }))).body).toMatchObject({
+      outcome: "refused",
+      reason: `the head of acme/api#7 moved: \`${"b".repeat(7)}\` is not the approved \`${HEAD.slice(0, 7)}\``,
+    });
+    const otherAuthor = await mergeHarness({
+      reviews: [{ author: { login: "alice" }, state: "APPROVED", commitId: HEAD, body: "LGTM: clean" }],
+    });
+    expect((await merge(otherAuthor)).body).toMatchObject({
+      outcome: "refused",
+      reason: `no approving review by the bot stands on acme/api#7 at \`${HEAD.slice(0, 7)}\``,
+    });
+    const changes = await mergeHarness({
+      reviews: [
+        {
+          author: { login: "acme-switchboard[bot]", id: 4242 },
+          state: "COMMENTED",
+          commitId: HEAD,
+          body: "Changes requested: x",
+        },
+      ],
+    });
+    expect((await merge(changes)).body).toMatchObject({
+      outcome: "refused",
+      reason: expect.stringContaining("no approving review"),
+    });
+    const silent = await mergeHarness({ reviews: undefined });
+    expect(await merge(silent)).toEqual({
+      status: 502,
+      body: { ok: false, error: "github_unavailable", message: "the reviews of acme/api#7 could not be read", at: NOW },
+    });
+    expect(silent.merges).toEqual([]);
+  });
+
+  it("the checks at the head: red is a refusal naming the runs, running or none yet is pending for the machine's poll, unreadable is a passing 502", async () => {
+    const red = await mergeHarness({ checks: { total: 3, pending: [], failed: ["ci / bot / lint"] } });
+    expect((await merge(red)).body).toMatchObject({
+      outcome: "refused",
+      reason: `CI is red at \`${HEAD.slice(0, 7)}\`: ci / bot / lint`,
+    });
+    const running = await mergeHarness({
+      checks: { total: 3, pending: ["ci / bot / test 1 of 4", "ci / web"], failed: [] },
+    });
+    expect(await merge(running)).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        outcome: "pending",
+        reason: `2 check(s) still running at \`${HEAD.slice(0, 7)}\`: ci / bot / test 1 of 4, ci / web`,
+        at: NOW,
+      },
+    });
+    const none = await mergeHarness({ checks: { total: 0, pending: [], failed: [] } });
+    expect((await merge(none)).body).toMatchObject({
+      outcome: "pending",
+      reason: `no check has reported at \`${HEAD.slice(0, 7)}\` yet`,
+    });
+    const unreadable = await mergeHarness({ checks: undefined });
+    expect((await merge(unreadable)).status).toBe(502);
+    for (const h of [red, running, none, unreadable]) expect(h.merges).toEqual([]);
+  });
+
+  it("GitHub's own refusal of the squash — a conflict, a branch protection, a head that moved between the check and the merge — is answered as refused in GitHub's words; the pull request unreadable or the merge call failing is a passing 502; a malformed body is 400 and an unknown instance or unit 404", async () => {
+    const conflict = await mergeHarness({ merge: { ok: false, status: 405, reason: "Pull Request is not mergeable" } });
+    expect((await merge(conflict)).body).toMatchObject({
+      outcome: "refused",
+      reason: "GitHub refused the merge of acme/api#7 (HTTP 405): Pull Request is not mergeable",
+    });
+    const unreadable = await mergeHarness({ prFacts: undefined });
+    expect(await merge(unreadable)).toEqual({
+      status: 502,
+      body: { ok: false, error: "github_unavailable", message: "acme/api#7 could not be read", at: NOW },
+    });
+    const threw = await mergeHarness({ merge: new Error("HTTP 502 bad gateway") });
+    expect((await merge(threw)).status).toBe(502);
+    const h = await mergeHarness();
+    for (const bad of [
+      { ...body, prNumber: "7" },
+      { ...body, prNumber: 0 },
+      { ...body, headSha: "xyz" },
+      { ...body, unit: undefined },
+      { ...body, parentInstanceId: "has:colon" },
+    ])
+      expect((await merge(h, bad)).status, JSON.stringify(bad)).toBe(400);
+    expect((await merge(h, { ...body, parentInstanceId: "plan-none" })).status).toBe(404);
+    expect((await merge(h, { ...body, unit: "U99" })).status).toBe(404);
+    expect(h.merges).toEqual([]);
+  });
+
+  it("unit-end leaves the unit's ending on its board issue as the runner's handoff — the report under a line naming the unit, the ending and the pull request; a unit without an issue leaves none; a failed comment never fails the step", async () => {
+    const h = await mergeHarness({ issues: [] });
+    await h.instances.putUnits([row({ issue: 834 })]);
+    // The in-memory GitHub needs the issue to exist for the comment.
+    await h.github.createIssue("acme/api", { title: "U10: Warm the cache (unit)", body: "" });
+    const issue = (await h.github.listIssues("acme/api", { state: "open", limit: 10 }))[0]!;
+    await h.instances.putUnits([row({ issue: issue.number })]);
+    expect(
+      (
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: {
+            kind: "merge_refused",
+            report: "⚠️ The review approved acme/api#7 but the runner did not merge it: conflict",
+          },
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        })
+      ).status,
+    ).toBe(200);
+    const { comments } = await h.github.getIssue("acme/api", issue.number);
+    expect(comments.map((c) => c.body)).toEqual([
+      "**Plan runner — U10 ended `merge_refused`** · https://github.com/acme/api/pull/7\n\n⚠️ The review approved acme/api#7 but the runner did not merge it: conflict",
+    ]);
+    const noIssue = await mergeHarness();
+    expect(
+      (
+        await call(noIssue, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "aborted", report: "x" },
+        })
+      ).status,
+    ).toBe(200);
+    const gone = await mergeHarness();
+    await gone.instances.putUnits([row({ issue: 4242 })]);
+    expect(
+      (
+        await call(gone, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "aborted", report: "x" },
+        })
+      ).body,
+    ).toMatchObject({ ok: true });
+    expect(gone.logs.some((l) => l.includes("the board comment could not be posted"))).toBe(true);
   });
 });

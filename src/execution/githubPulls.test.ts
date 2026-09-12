@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createBranchRef,
   fetchPullRequestFacts,
+  fetchCommitChecks,
   fetchPullRequestReviews,
   fetchRepoShipInfo,
   findOpenPrByHead,
+  mergePullRequest,
   openPullRequest,
   updatePullRequest,
 } from "./githubPulls.js";
@@ -475,6 +477,102 @@ describe("githubPulls", () => {
       const calls = stubFetch(() => new Response(JSON.stringify(openPr), { status: 200 }));
       expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.state).toBe("open");
       expect((calls[0].init.headers as Record<string, string>).authorization).toBeUndefined();
+    });
+  });
+
+  // The plan runner's merge (docs/reference/specs/http-ingress.md item 9; record 0031's merge grant):
+  // the bot squashes a plan branch's pull request itself at the approved head,
+  // the title as the commit and an empty body, and reads the checks at the head.
+  describe("the plan runner's merge — mergePullRequest and fetchCommitChecks", () => {
+    it("the facts carry the pull request's title", async () => {
+      stubToken();
+      const titled = {
+        state: "open",
+        title: "feat(x): the thing",
+        html_url: "https://github.com/acme/api/pull/7",
+        user: { login: "acme-switchboard[bot]", id: 318072483 },
+        head: { ref: "ship/fix-x-abc123", sha: "c".repeat(40), repo: { full_name: "acme/api" } },
+      };
+      stubFetch(() => new Response(JSON.stringify(titled), { status: 200 }));
+      const facts = await fetchPullRequestFacts({ repo: "acme/api", number: 7 });
+      expect(facts, JSON.stringify(facts)).toMatchObject({ state: "open", title: "feat(x): the thing" });
+    });
+
+    it("mergePullRequest squashes at exactly the approved head with `<title> (#n)` as the commit and an empty body; GitHub's refusal is an answer with its status and words; a failed call throws", async () => {
+      stubToken();
+      const calls = stubFetch(
+        () => new Response(JSON.stringify({ sha: "9".repeat(40), merged: true }), { status: 200 }),
+      );
+      expect(
+        await mergePullRequest({ repo: "acme/api", number: 7 }, { sha: "c".repeat(40), title: "feat(x): the thing" }),
+      ).toEqual({ ok: true, sha: "9".repeat(40) });
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7/merge");
+      expect(calls[0].init.method).toBe("PUT");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({
+        merge_method: "squash",
+        sha: "c".repeat(40),
+        commit_title: "feat(x): the thing (#7)",
+        commit_message: "",
+      });
+      for (const [status, message] of [
+        [405, "Pull Request is not mergeable"],
+        [409, "Head branch was modified. Review and try the merge again."],
+        [422, "Base branch was modified"],
+      ] as const) {
+        stubFetch(() => new Response(JSON.stringify({ message }), { status }));
+        expect(await mergePullRequest({ repo: "acme/api", number: 7 }, { sha: "c".repeat(40), title: "t" })).toEqual({
+          ok: false,
+          status,
+          reason: message,
+        });
+      }
+      stubFetch(() => new Response("bad gateway", { status: 502 }));
+      await expect(
+        mergePullRequest({ repo: "acme/api", number: 7 }, { sha: "c".repeat(40), title: "t" }),
+      ).rejects.toThrow(/HTTP 502/);
+      stubFetch(() => new Response(JSON.stringify({ merged: true }), { status: 200 }));
+      await expect(
+        mergePullRequest({ repo: "acme/api", number: 7 }, { sha: "c".repeat(40), title: "t" }),
+      ).rejects.toThrow(/without a merge commit sha/);
+    });
+
+    it("fetchCommitChecks names the runs still going and the runs that did not succeed — skipped and neutral count as green; a failed fetch or an answer that is not the route's is undefined, never a throw", async () => {
+      stubToken();
+      const calls = stubFetch(
+        () =>
+          new Response(
+            JSON.stringify({
+              check_runs: [
+                { name: "ci / bot / lint", status: "completed", conclusion: "success" },
+                { name: "ci / deploy the docs site", status: "completed", conclusion: "skipped" },
+                { name: "analyze", status: "completed", conclusion: "neutral" },
+                { name: "ci / bot / test 1 of 4", status: "in_progress", conclusion: null },
+                { name: "ci / web", status: "queued" },
+                { name: "ci / package", status: "completed", conclusion: "failure" },
+                { status: "completed", conclusion: "cancelled" },
+              ],
+            }),
+            { status: 200 },
+          ),
+      );
+      expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toEqual({
+        total: 7,
+        pending: ["ci / bot / test 1 of 4", "ci / web"],
+        failed: ["ci / package", "(unnamed)"],
+      });
+      expect(calls[0].url).toBe(
+        `https://api.github.com/repos/acme/api/commits/${"c".repeat(40)}/check-runs?per_page=100`,
+      );
+      stubFetch(() => new Response(JSON.stringify({ check_runs: [] }), { status: 200 }));
+      expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toEqual({ total: 0, pending: [], failed: [] });
+      stubFetch(() => new Response("nope", { status: 502 }));
+      expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toBeUndefined();
+      stubFetch(() => new Response(JSON.stringify({ not: "checks" }), { status: 200 }));
+      expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toBeUndefined();
+      vi.stubGlobal("fetch", async () => {
+        throw new Error("offline");
+      });
+      expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toBeUndefined();
     });
   });
 });

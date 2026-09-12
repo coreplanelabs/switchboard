@@ -18,11 +18,14 @@
 // timeout alike — is confirmed by a `read-record` before the machine acts on it.
 //
 // Units run one at a time in the plan's order, each once its in-play
-// dependencies are done. `done` is merged, and under the merge policy of every
-// branch today (`person`) nothing is: a dependent of a merge-ready unit is
-// blocked, told so as its own ending, and the plan finishes `failed` so the
-// summary says which units are left for the plan's re-issue. Node-free: the
-// shim Worker imports this by relative path.
+// dependencies are done. `done` is merged: a plan branch's pull request is the
+// runner's to squash (the `merge` step, under `plan:merge`) once the review
+// approved at its head and the checks are green, so its dependents start on a
+// base that carries it; a unit that ended any other way — a refused merge, a
+// cap, a stop — blocks its dependents, each told so as its own ending, and the
+// plan finishes `failed` so the summary says which units are left for the
+// plan's re-issue. A task string's ship branch waits for a person. Node-free:
+// the shim Worker imports this by relative path.
 
 import {
   applyReturn,
@@ -30,6 +33,7 @@ import {
   nextAction,
   openPlanCursor,
   openUnitPipeline,
+  parsePlanBranch,
   readyUnits,
   renderUnitReport,
   settleUnit,
@@ -68,7 +72,7 @@ export interface StepRunner {
 }
 
 export type CoordinatorStepRoute =
-  "plan" | "unit-start" | "branch" | "spawn" | "read-record" | "pr-check" | "round" | "unit-end" | "finish";
+  "plan" | "unit-start" | "branch" | "spawn" | "read-record" | "pr-check" | "round" | "unit-end" | "merge" | "finish";
 
 /** What a step stores: the bot's reply as the wire carried it — its status and
  *  its text, read the same way on replay. Two numbers and a string, so the
@@ -257,6 +261,15 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
   throw new UnreadableAnswer("pr-check", a, "state");
 }
 
+function mergeReturn(step: string, a: BotAnswer): StepReturn {
+  const { ok, outcome, sha, reason, at } = a.body;
+  if (ok === true && outcome === "merged" && typeof sha === "string")
+    return { type: "merge", step, outcome: "merged", sha, at };
+  if (ok === true && (outcome === "pending" || outcome === "refused") && typeof reason === "string")
+    return { type: "merge", step, outcome, reason, at };
+  throw new UnreadableAnswer("merge", a, "outcome");
+}
+
 // ---- the steps ----------------------------------------------------------------------------------------
 
 /** One bot call inside a step: a reply that is not the bot's answer and a
@@ -343,9 +356,15 @@ async function perform(
       await step.sleep(action.step, action.ms);
       return { type: "sleep", step: action.step };
     case "merge":
-      // Unreachable while every branch's merge is a person's: the machine asks
-      // for a merge only under `merge: "runner"`.
-      throw new Error(`the runner does not merge (${action.step}): every branch waits for a person's merge`);
+      return mergeReturn(
+        action.step,
+        answerOf(
+          "merge",
+          await step.do(action.step, STEP_CONFIG, () =>
+            call(bot, "merge", { ...tag, prNumber: action.prNumber, headSha: action.headSha }),
+          ),
+        ),
+      );
   }
 }
 
@@ -370,7 +389,11 @@ async function runUnit(
       base: plan.base,
       caps: plan.caps,
       childMinutes: plan.childMinutes,
-      merge: "person",
+      // The branch decides who merges (record 0031's merge grant): a plan
+      // branch the runner opened is the runner's to squash once the review
+      // approved at its head and the checks are green; any other branch — a
+      // task string's ship branch — waits for a person.
+      merge: parsePlanBranch(node.branch) !== undefined ? "runner" : "person",
     },
     start.at,
   );
