@@ -205,15 +205,27 @@ describe("toolset wiring", () => {
   const writes = GITHUB_ISSUE_WRITE_TOOLS.map((t) => t.name);
 
   it("reads are in every toolset with a tool loop; issue writes only in assistant (general) and full (coding); none stays empty", () => {
-    for (const key of ["full", "readonly", "web", "assistant"])
+    for (const key of ["full", "readonly", "web", "assistant", "explore"])
       expect(names(key), key).toEqual(expect.arrayContaining(reads));
     expect(names("full")).toEqual(expect.arrayContaining(writes));
     expect(names("assistant")).toEqual(expect.arrayContaining(writes));
-    for (const key of ["readonly", "web"]) for (const w of writes) expect(names(key), `${key} ${w}`).not.toContain(w);
+    for (const key of ["readonly", "web", "explore"])
+      for (const w of writes) expect(names(key), `${key} ${w}`).not.toContain(w);
     expect(names("none")).toEqual([]);
   });
 
   it("assistant has no shell, no file writes, no verdict/PR submission — GitHub + web_fetch + status only", () => {
     expect(names("assistant").sort()).toEqual(["web_fetch", "update_status", ...reads, ...writes].sort());
+  });
+
+  // docs/reference/specs/agent-explore.md item 2: the investigation preset's
+  // reach — a shell and file reads, the web (search included), the skill tools
+  // and the GitHub reads; nothing that writes a file, submits a verdict, a
+  // description, dispositions or a handoff, or writes an issue.
+  it("explore holds bash, read_file, update_status, web_fetch, web_search, the skill tools and the GitHub reads — no write_file, no submit_*, no issue writes", () => {
+    expect(names("explore").sort()).toEqual(
+      ["bash", "read_file", "update_status", "web_fetch", "web_search", "list_skills", "use_skill", ...reads].sort(),
+    );
+    expect(names("explore").filter((n) => n.startsWith("submit_"))).toEqual([]);
   });
 });

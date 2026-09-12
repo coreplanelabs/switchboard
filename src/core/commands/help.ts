@@ -24,7 +24,7 @@ export interface HelpCommandDeps {
 const defineCommand = commandDefiner<HelpCommandDeps>();
 
 export const DIRECTIVES_HELP =
-  "`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42` (effort: low | medium | high — lower = faster turns)";
+  "`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42` (effort: low | medium | high — lower = faster turns; budget: whole minutes, at least 2 — narrows this run's wall clock, never widens it)";
 
 /** The help text around the command list — shared by both renderings. */
 function helpFrame(output: JsonValue, commandList: (commands: CommandShape[]) => string[]): string {

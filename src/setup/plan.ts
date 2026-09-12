@@ -115,8 +115,10 @@ const SECRET_ENV_NAMES = [
 /** The example's OpenAI-compatible provider: its name is the env var's prefix and the model ref's provider. */
 const OPENAI_PROVIDER = "openai";
 const OPENAI_KEY_ENV = "OPENAI_API_KEY";
-/** The agents `config.example.yaml` gives a default model. */
-const DEFAULT_MODEL_AGENTS = ["general", "coding", "review"] as const;
+/** The agents `config.example.yaml` gives a default model — every one of them
+ *  moves to the endpoint's model, or an OpenAI-only installation would name a
+ *  provider it does not have. */
+const DEFAULT_MODEL_AGENTS = ["general", "coding", "review", "explore"] as const;
 
 export function planInit(answers: InitAnswers, templates: InitTemplates, world: InitWorld): InitPlan {
   const problems = answerProblems(answers);

@@ -49,7 +49,7 @@ describe("renderFourSeams", () => {
     for (const seam of SEAMS) expect(out).toContain(`subgraph ${seam.id} ["${seam.name} — ${seam.role}"]`);
     const channel = SEAMS.find((s) => s.id === "channel")!;
     for (const way of channel.implementations) expect(out).toContain(`["${way}"]`);
-    expect(out).toContain('AG["general · coding · review · ship · research"]');
+    expect(out).toContain('AG["general · coding · review · ship · research · explore"]');
     expect(out).toContain('E["local · sandbox · resident"]');
     expect(out).toContain('D{"Dispatcher<br/>directives · config layers · authorization"}');
     expect(out).toContain('C1 & C2 & C3 -->|"message"| D');

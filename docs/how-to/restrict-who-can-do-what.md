@@ -130,7 +130,7 @@ grants:
     repos: [acme/payments]
 ```
 
-Everything unnamed stays open: `review`, `research`, `general`, other repositories. Add a `boundary` under a channel to cap what even the granted may have there.
+Everything unnamed stays open: `review`, `research`, `explore`, `general`, other repositories. Add a `boundary` under a channel to cap what even the granted may have there.
 
 ## Next
 

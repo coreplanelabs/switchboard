@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
+import { declaredProfile } from "../../config/profile.js";
 import { parseDirectives } from "../../directives.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { NO_CAPABILITIES } from "../capabilities.js";
@@ -103,6 +104,9 @@ function setup(userId: string) {
   const ending = createRunEnding({ registry });
   const ctx = {
     agent: getAgent("ship"),
+    // The parent's effective profile, as the gate admitted it: the preset's
+    // declared 120 clipped to 45 by a channel boundary.
+    profile: { ...declaredProfile(getAgent("ship")), minutes: 45, boundedBy: "channel" as const },
     modelRef: "anthropic/general-model",
     label: "*ship* · acme/api",
     startedAt: NOW,
@@ -162,6 +166,26 @@ describe("runShipBranch — the agent:ship fork", () => {
       status: "completed",
       agent: "ship",
       replyOk: true,
+    });
+  });
+
+  // agent-ship.md item 8: the pipeline's wall clock is the parent's EFFECTIVE
+  // profile's minutes — the preset's declared budget as the gate clipped it —
+  // never the `ship` config block read again; the rounds cap still comes from
+  // the block. The record carries the profile like every run's.
+  it("the pipeline runs on the parent's effective budget: `caps.maxMinutes` is the profile's minutes (the channel's 45, not the preset's 120), `maxRounds` the config block's, and the record carries the ship profile with its clip", async () => {
+    const s = setup("slack:UADMIN");
+    vi.mocked(runShipPipeline).mockResolvedValue({ status: "completed", reply: "shipped: acme/api#7 is merge-ready" });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(vi.mocked(runShipPipeline).mock.calls[0][0].caps).toEqual({ maxRounds: 3, maxMinutes: 45 });
+    s.ending.drain(true);
+    await s.writer.settled();
+    expect((await s.store.get("run-s"))?.profile).toEqual({
+      preset: "ship",
+      machine: "repo-resident",
+      identity: "write",
+      minutes: 45,
+      boundedBy: "channel",
     });
   });
 

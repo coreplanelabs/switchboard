@@ -1,5 +1,5 @@
 import { fmtEffectiveBoundary, type Scope } from "../config.js";
-import type { BoundaryScope, EffectiveBoundary } from "../config/profile.js";
+import { clipSourceLabel, type BoundaryScope, type EffectiveBoundary } from "../config/profile.js";
 import { EFFORT_LEVELS, type Effort } from "../effort.js";
 
 // Config awareness (docs/reference/specs/routing-and-config.md behavior 8). The config
@@ -25,10 +25,11 @@ export interface ConfigAwarenessInput {
   channel: Scope;
   /** Effective user scope (static config merged with runtime overrides). */
   user: Scope;
-  /** `agent:`/`model:`/`effort:` parsed from THIS message. */
+  /** `agent:`/`model:`/`effort:`/`budget:` parsed from THIS message. */
   messageDirective: DirectiveSet;
-  /** `agent:`/`model:`/`effort:` carried from an earlier message in the thread (stickiness). */
-  threadDirective: DirectiveSet;
+  /** `agent:`/`model:`/`effort:` carried from an earlier message in the thread
+   *  (stickiness); a budget is never carried, so the set has none. */
+  threadDirective: Omit<DirectiveSet, "budget">;
   /** Whether the invoking user may run `config set channel`. */
   canEditChannelConfig: boolean;
   /** The boundary in force on this run's path (docs/reference/specs/routing-and-config.md
@@ -36,9 +37,12 @@ export interface ConfigAwarenessInput {
    *  no line (byte-identical to before boundaries existed). */
   boundary?: EffectiveBoundary;
   /** The budget this run actually has, against the preset's own; `boundedBy`
-   *  names the scope whose boundary clipped it. Absent, or equal to the
-   *  preset's with nothing clipping → no line. */
-  budget?: { minutes: number; presetMinutes: number; boundedBy?: BoundaryScope };
+   *  names the scope whose boundary clipped it — or `directive` when the
+   *  message's own `budget:` did — and `directive` is that directive's value
+   *  when the message carried one, so a directive that narrowed nothing is
+   *  said to have. Absent, or equal to the preset's with nothing clipping and
+   *  no directive → no line. */
+  budget?: { minutes: number; presetMinutes: number; boundedBy?: BoundaryScope; directive?: number };
   /** External MCP servers (docs/reference/specs/mcp-tools.md item 17): whether the
    *  self-serve registry is on, and which servers answered / did not for THIS
    *  run — so an agent never says "I cannot load MCPs" when a user can add one.
@@ -46,7 +50,7 @@ export interface ConfigAwarenessInput {
   mcp?: { registryOn: boolean; served: string[]; unavailable: string[] };
 }
 
-type DirectiveSet = { agent?: string; model?: string; effort?: Effort };
+type DirectiveSet = { agent?: string; model?: string; effort?: Effort; budget?: number };
 
 export const CONFIG_AWARENESS_HEADER = "Switchboard runtime config for this run:";
 
@@ -111,8 +115,17 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
   }
   if (i.budget?.boundedBy !== undefined) {
     lines.push(
-      `Budget: ${i.budget.minutes} min (clipped by the ${i.budget.boundedBy} boundary; the preset asks ${i.budget.presetMinutes}).`,
+      `Budget: ${i.budget.minutes} min (clipped by the ${clipSourceLabel(i.budget.boundedBy)}; the preset asks ${i.budget.presetMinutes}).`,
     );
+  }
+  // A `budget:` directive that did not win — at or above the preset's own
+  // budget, or above a boundary that clipped tighter — narrowed nothing, and
+  // the model is told so, or it would answer "you asked for 200" to "how long
+  // do you have?".
+  if (i.budget?.directive !== undefined && i.budget.boundedBy !== "directive") {
+    const stands =
+      i.budget.boundedBy === undefined ? `the preset's ${i.budget.presetMinutes} min` : `${i.budget.minutes} min`;
+    lines.push(`This message's \`budget:${i.budget.directive}\` narrowed nothing: the run's budget is ${stands}.`);
   }
 
   const channelGate = i.canEditChannelConfig ? "per-channel" : "per-channel; restricted for this user — ask an admin";
@@ -123,9 +136,9 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
   lines.push(
     "Users inspect and tune settings: `config show`, " +
       `\`config set me --agent <name> --model <provider>/<model> --effort ${levels}\` (per-user; \`--models.<agent>\` / \`--efforts.<agent>\` per agent), ` +
-      `\`config set channel …\` (${channelGate}), \`config instructions me "<free text>"\` ` +
-      "(custom instructions; `config instructions channel …` channel-wide), `config clear me|channel`, " +
-      "and per-message `agent:<name>` / `model:<provider>/<model>` / `effort:<level>` directives.",
+      `\`config set channel …\` (${channelGate}), \`config instructions me|channel "<free text>"\` ` +
+      "(custom instructions), `config clear me|channel`, " +
+      "and per-message `agent:<name>` / `model:<provider>/<model>` / `effort:<level>` / `budget:<minutes>` directives.",
     "When asked about your settings or tuning, answer from this block — you are not stateless or untunable.",
   );
   return lines.join("\n");
@@ -152,5 +165,6 @@ function fmtDirective(d: DirectiveSet): string | undefined {
   if (d.agent) parts.push(`agent:${d.agent}`);
   if (d.model) parts.push(`model:${d.model}`);
   if (d.effort) parts.push(`effort:${d.effort}`);
+  if (d.budget !== undefined) parts.push(`budget:${d.budget}`);
   return parts.length > 0 ? parts.join(" ") : undefined;
 }

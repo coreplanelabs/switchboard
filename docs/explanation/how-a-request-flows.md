@@ -13,7 +13,7 @@ flowchart LR
     end
     D{"Dispatcher<br/>directives · config layers · authorization"}
     subgraph agent ["Agent — what runs"]
-        AG["general · coding · review · ship · research"]
+        AG["general · coding · review · ship · research · explore"]
     end
     subgraph provider ["Provider — the model"]
         P["Anthropic · OpenAI-compatible"]
@@ -40,7 +40,7 @@ The seams are Channel, Provider, Executor and Agent. The dispatcher sits between
 | Channel | `ChannelIO` + `IncomingMessage` (`src/core/types.ts`) | Slack (Socket Mode), the CLI's `ask`, HTTP ingress, MCP | agents, models, where tools run |
 | Provider | `Provider` (`src/providers/types.ts`) | Anthropic; OpenAI-compatible (OpenAI, Groq, Ollama, vLLM) | Slack, authorization, where tools run |
 | Executor | `Executor` (`src/execution/executor.ts`) | the bot host; an E2B or Cloudflare sandbox per thread; a resident | which agent, model or channel asked |
-| Agent | `AgentDef` data (`src/agents/registry.ts`) | `general`, `coding`, `review`, `ship`, `research` | the channel, the executor |
+| Agent | `AgentDef` data (`src/agents/registry.ts`) | `general`, `coding`, `review`, `ship`, `research`, `explore` | the channel, the executor |
 
 Every seam has two or more implementations; the second proves the interface ([decision 0001](../decisions/0001-seams-with-two-implementations.md)). Only the dispatcher starts a run ([decision 0002](../decisions/0002-dispatcher-is-the-only-orchestrator.md)). Identifiers are platform-namespaced (`slack:C…`, `slack:U…`, `slack:C…:<ts>`) so scopes, grants and memory key on them.
 

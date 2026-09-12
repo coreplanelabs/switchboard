@@ -191,10 +191,12 @@ export interface AppConfig {
   review?: { readingDiff?: import("./core/readingDiff.js").ReadingDiffConfig };
   /**
    * agent:ship pipeline caps (docs/reference/specs/agent-ship.md item 8): `maxRounds`
-   * review rounds (default 3) and `maxMinutes` of pipeline wall clock
-   * (default 120) — whichever hits first ends the loop, and each child round
-   * runs its own agent budget clipped to the remaining pipeline time.
-   * Deployment-level like `review`; validated at load.
+   * review rounds (default 3) and `maxMinutes`, the ship preset's declared
+   * wall-clock budget (default the registry's 120) — a profile field, so a
+   * scope's boundary or a `budget:` directive clips it per run; whichever cap
+   * hits first ends the loop, and each child round runs its own agent budget
+   * clipped to the remaining pipeline time. Deployment-level like `review`;
+   * validated at load.
    */
   ship?: ShipConfig;
   /** Slack adapter behavior that is not pure transport. */

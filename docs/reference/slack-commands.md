@@ -19,8 +19,11 @@ Placed right after the mention, before the request text:
 | `agent:<name>` | `agent:review` | run this agent for this message only |
 | `model:<provider>/<model>` | `model:openai/gpt-5` | use this model for this message only |
 | `effort:<low\|medium\|high\|xhigh\|max>` | `effort:low` | how hard the model thinks this turn |
+| `budget:<minutes>` | `budget:30` | cap this run's wall clock, in whole minutes (at least 2); it only ever narrows the agent's own budget or a boundary's, and the card says what it did |
 
 Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix #42`.
+
+`agent:`, `model:` and `effort:` are sticky in a thread — a follow-up without them keeps the last ones used. `budget:` is not: it bounds the one run it rides on; a lower budget on every turn is a boundary (`config set me --boundary.maxMinutes <n>`).
 
 ## Every command you can run in chat
 

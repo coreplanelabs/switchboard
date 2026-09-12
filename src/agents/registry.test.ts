@@ -79,6 +79,7 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.coding.identity).toBe("write");
     expect(AGENTS.ship.identity).toBe("write");
     expect(AGENTS.review.identity).toBe("read");
+    expect(AGENTS.explore.identity).toBe("read");
     expect(AGENTS.general.identity).toBe("none");
     expect(AGENTS.research.identity).toBe("none");
   });
@@ -368,17 +369,32 @@ describe("coding prompts: the PR-description content contract (submitted object)
   });
 });
 
-// Feature: docs/reference/specs/agent-ship.md item 1 — `agent:ship` resolves through the
-// registry like every directive, but the ship branch in dispatch() never calls
-// runAgent with THIS def: children run on the coding/review defs (clipped), so
-// ship's budgets are placeholders and its prompt is never sent to a model.
+// Feature: docs/reference/specs/agent-ship.md items 1 and 8 — `agent:ship` resolves
+// through the registry like every directive, but the ship branch in dispatch()
+// never calls runAgent with THIS def: children run on the coding/review defs
+// clipped to the pipeline's remaining wall clock. Its `maxMinutes` IS the
+// pipeline's wall clock — the ship preset's declared budget, which a
+// deployment's `ship.maxMinutes` knob replaces and a boundary or a `budget:`
+// directive clips like any preset's; turns and tokens stay placeholders.
 describe("ship agent (docs/reference/specs/agent-ship.md)", () => {
-  it("ship: repo-resident machine class, full toolset, placeholder budgets (never used for a model call)", () => {
+  it("ship: repo-resident machine class, full toolset, the pipeline's default wall clock as its budget; turns and tokens are placeholders (never used for a model call)", () => {
     expect(AGENTS.ship.machine).toBe("repo-resident");
     expect(AGENTS.ship.toolset).toBe("full");
     expect(AGENTS.ship.maxTurns).toBe(1);
     expect(AGENTS.ship.maxTokens).toBe(16000);
-    expect(AGENTS.ship.maxMinutes).toBe(5);
+    expect(AGENTS.ship.maxMinutes).toBe(120);
+  });
+
+  it("ship's child presets run within ship's own profile — coding and review declare an identity at or under `write` and ship's own machine class — so the parent's profile gate covers every round", () => {
+    // The pipeline's rounds never re-enter dispatch(): a boundary is judged
+    // against the ship preset once, before the fork. That is sound only while
+    // every child's class equals the parent's and its identity is at or under
+    // the parent's on `none < read < write` — which this pins.
+    const rank = (i: string) => IDENTITIES.indexOf(i as (typeof IDENTITIES)[number]);
+    for (const child of [AGENTS.coding, AGENTS.review]) {
+      expect(child.machine, child.name).toBe(AGENTS.ship.machine);
+      expect(rank(child.identity), child.name).toBeLessThanOrEqual(rank(AGENTS.ship.identity));
+    }
   });
 
   it("ship's prompt says it is never sent to a model, and getAgent resolves the directive", () => {
@@ -650,5 +666,45 @@ describe("review prompts: the unit contract check (agent-review item 17)", () =>
     const step = (sys: string) => sys.slice(sys.indexOf("3b. UNIT CONTRACT"), sys.indexOf("4. REPORT"));
     expect(step(AGENTS.review.system)).toBe(step(AGENTS.review.residentSystem!));
     expect(step(AGENTS.review.system).length).toBeGreaterThan(300);
+  });
+});
+
+// Feature: docs/reference/specs/agent-explore.md — the long, read-only
+// investigation preset: the first `repo-cold` agent, on a read credential, with
+// a two-hour budget, whose deliverable is a claim table and who never opens a
+// pull request. Its prompt carries the one fact about the cold sandbox a long
+// job depends on: a command is capped at twenty minutes, and a job past it is
+// detached with `setsid -f` (a `nohup` job dies with the command that started it).
+describe("explore agent (docs/reference/specs/agent-explore.md)", () => {
+  it("explore: repo-cold machine class, read identity, the explore toolset, 120 minutes, turns and tokens sized for a long investigation", () => {
+    expect(AGENTS.explore.machine).toBe("repo-cold");
+    expect(AGENTS.explore.identity).toBe("read");
+    expect(AGENTS.explore.toolset).toBe("explore");
+    expect(AGENTS.explore.maxMinutes).toBe(120);
+    expect(AGENTS.explore.maxTurns).toBeGreaterThanOrEqual(100);
+    expect(AGENTS.explore.maxTokens).toBeGreaterThanOrEqual(64000);
+    expect(AGENTS.explore.cacheTtl).toBe("1h"); // a long step must not outlive the 5-minute cache entry
+    expect(AGENTS.explore.effort).toBeUndefined(); // the config layers decide, as for coding
+    expect(AGENTS.explore.residentSystem).toBeUndefined(); // never a resident: the class is cold
+    expect(getAgent("explore")).toBe(AGENTS.explore);
+  });
+
+  it("explore's prompt: the deliverable is a claim table with commands and numbers, a job over the command cap is detached with setsid -f, and it never opens a pull request or pushes", () => {
+    const sys = AGENTS.explore.system;
+    expect(sys).toMatch(/claim table/i);
+    expect(sys).toMatch(/the exact command/i);
+    expect(sys).toMatch(/number/i);
+    expect(sys).toContain("setsid -f");
+    expect(sys).toMatch(/20 minutes/);
+    expect(sys).not.toMatch(/nohup/); // the wrong tool is not named, so it cannot be copied
+    expect(sys).toMatch(/NEVER open a pull request/);
+    expect(sys).toMatch(/never commit or push/i);
+    expect(sys).not.toContain("submit_pr_description");
+    // the tools it holds are named, so a request about one of our repos is answered from the repo
+    for (const tool of ["bash", "read_file", "web_search", "web_fetch", "github_file", "github_search_code"])
+      expect(sys).toContain(tool);
+    // the credential is read-scoped and the prompt says so
+    expect(sys).toMatch(/read-scoped/);
+    expect(sys).toContain("update_status");
   });
 });

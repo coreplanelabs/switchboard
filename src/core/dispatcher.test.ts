@@ -7478,6 +7478,68 @@ workspaceDir: __WORKDIR__
     expect(AGENTS.review.maxMinutes).toBe(25);
   });
 
+  // agent-ship.md item 8 with routing-and-config items 2 and 4: the pipeline's
+  // wall clock IS the ship preset's declared budget, so a boundary or a
+  // `budget:` directive clips it like any preset's — the children then run
+  // under the parent's effective profile, clipped to what remains of it.
+  it("a channel boundary clips the ship pipeline's wall clock: the preset's 120 becomes the channel's 10, every child is clipped to it, the card names the clip and the record carries the ship profile", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider, SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 10\n');
+    const store = new InMemoryRunStore();
+    const registry = new RunRegistry({ genId: () => "run-shipb", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+    );
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    await deps.runHistoryWriter.settled();
+    expect(replies[replies.length - 1]).toContain("Merge-ready");
+    const runs = vi.mocked(runAgent).mock.calls.map((c) => c[0]);
+    expect(runs).toHaveLength(2);
+    for (const r of runs) expect(r.agent.maxMinutes, r.agent.name).toBeLessThanOrEqual(10);
+    expect(
+      statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 10 min (channel boundary; preset asks 120)")),
+    ).toBe(true);
+    const profile = { preset: "ship", machine: "repo-resident", identity: "write", minutes: 10, boundedBy: "channel" };
+    expect((await store.get("run-shipb"))!.profile).toEqual(profile);
+    expect(AGENTS.ship.maxMinutes).toBe(120); // the shared def is never mutated
+  });
+
+  it("`agent:ship budget:10` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxMinutes: 60\n");
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+    );
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:ship budget:10 in acme/api: fix the login redirect", "slack:UADMIN"), io);
+    const runs = vi.mocked(runAgent).mock.calls.map((c) => c[0]);
+    expect(runs).toHaveLength(2);
+    for (const r of runs) expect(r.agent.maxMinutes, r.agent.name).toBeLessThanOrEqual(10);
+    expect(
+      statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 10 min (budget directive; preset asks 60)")),
+    ).toBe(true);
+  });
+
   it("a thread reply during a ship run is folded into the live child round, and every child runs on the thread's ONE inbox (ship steers like every agent)", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
     let ids = 0;
@@ -10549,5 +10611,215 @@ workspaceDir: __WORKDIR__
     expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: 45 * 60_000 })]);
     expect((await store.get("run-u"))!.profile).toEqual({ preset: "coding", ...declared });
     expect(statuses.map((s) => JSON.stringify(s)).some((s) => s.includes("budget"))).toBe(false);
+  });
+});
+
+// docs/reference/specs/agent-explore.md — the first `repo-cold` preset end to
+// end through dispatch(): the cold path PR 1 built gets its first real user.
+describe("agent:explore — the first repo-cold preset", () => {
+  /** A deployment with a Cloudflare sandbox AND a resident fleet: a `repo-resident`
+   *  preset would probe the registry here; `explore` must never. */
+  const EXPLORE_YAML = `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+    explore: anthropic/explore-model
+execution:
+  type: cloudflare
+  url: https://sandbox.example
+  resident:
+    baseUrl: https://resident.example
+channels:
+  "slack:CSHORT":
+    boundary:
+      maxMinutes: 45
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+workspaceDir: __WORKDIR__
+`;
+  const inChannel = (channel: string, text: string) => ({
+    channelId: `slack:${channel}`,
+    userId: "slack:UADMIN",
+    threadKey: `slack:${channel}:1.0`,
+    text,
+  });
+  /** Every URL the dispatch fetches: GitHub's repository lookup answers 200,
+   *  anything else — the resident Worker above all — is an unexpected call. */
+  function recordingFetch() {
+    const urls: string[] = [];
+    const fetchSpy = vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      urls.push(url);
+      if (url === "https://api.github.com/repos/acme/api") return new Response("{}", { status: 200 });
+      throw new Error(`unexpected network call: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    return urls;
+  }
+  /** The deps of an explore run: a fixed run id, a recording store, the production repo resolver. */
+  function exploreDeps(runId: string, provider: Provider) {
+    const registry = new RunRegistry({ genId: () => runId, genToken: () => "tok" });
+    const store = new InMemoryRunStore();
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(EXPLORE_YAML, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    return { deps, store, writer };
+  }
+
+  beforeEach(() => {
+    // The read-scoped vet and the sandbox env mint from GH_TOKEN (no App
+    // configured); the sandbox client is constructed with its bearer, never called.
+    vi.stubEnv("GH_TOKEN", "ghp_read_only_fixture");
+    vi.stubEnv("SANDBOX_TOKEN", "sbx");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "res-op");
+    vi.mocked(makeExecutor).mockClear();
+    vi.mocked(runAgent).mockClear();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.mocked(makeExecutor).mockClear();
+    vi.mocked(runAgent).mockClear();
+  });
+
+  it("agent:explore against a deployment with a resident fleet reaches the factory with `repo-cold` and identity `read`, vets the repository against GitHub once, and never calls the resident Worker", async () => {
+    const urls = recordingFetch();
+    const provider = capturingProvider("11 of 16 claims hold");
+    const { deps, store, writer } = exploreDeps("run-x", provider);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore in acme/api: how long does the test suite take?"), io);
+    await writer.settled();
+    expect(replies).toContain("11 of 16 claims hold");
+    expect(makeExecutor).toHaveBeenCalledTimes(1);
+    const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
+    expect(ctx.agent.name).toBe("explore");
+    expect(ctx.repo).toBe("acme/api");
+    expect(ctx.profile).toEqual({ machine: "repo-cold", identity: "read", minutes: 120 });
+    await expect(vi.mocked(makeExecutor).mock.results[0].value).resolves.toMatchObject({ backend: "sandbox" });
+    // The runner ran the explore preset's own def — 120 minutes, the explore toolset.
+    expect(vi.mocked(runAgent).mock.calls[0][0].agent).toMatchObject({ name: "explore", maxMinutes: 120 });
+    // One GitHub lookup with the run's credential; the resident registry and Worker untouched.
+    expect(urls).toEqual(["https://api.github.com/repos/acme/api"]);
+    expect(urls.some((u) => u.includes("resident.example"))).toBe(false);
+    expect((await store.get("run-x"))!.profile).toEqual({
+      preset: "explore",
+      machine: "repo-cold",
+      identity: "read",
+      minutes: 120,
+    });
+  });
+
+  // docs/reference/specs/routing-and-config.md items 1–4: the `budget:`
+  // directive is the caller's own boundary on one run — it narrows and never
+  // widens, the card says what it did, and the record carries the clip.
+  it("`agent:explore budget:30` runs 30 minutes as `boundedBy: directive` — at the factory, on the runner's def, on the card and on the record", async () => {
+    recordingFetch();
+    const provider = capturingProvider();
+    const { deps, store, writer } = exploreDeps("run-b30", provider);
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore budget:30 in acme/api: time the suite"), io);
+    await writer.settled();
+    expect(provider.requests).toHaveLength(1);
+    const profile = { machine: "repo-cold", identity: "read", minutes: 30, boundedBy: "directive" };
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(profile);
+    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(30);
+    expect(AGENTS.explore.maxMinutes).toBe(120); // the shared def is never mutated
+    expect((await store.get("run-b30"))!.profile).toEqual({ preset: "explore", ...profile });
+    expect(
+      statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 30 min (budget directive; preset asks 120)")),
+    ).toBe(true);
+    // The model is told what set its budget: the directive line and the clip line of the config block.
+    const system = provider.requests[0].system ?? "";
+    expect(system).toContain("This message's `agent:explore budget:30` directive");
+    expect(system).toContain("Budget: 30 min (clipped by the budget directive; the preset asks 120).");
+  });
+
+  it("`agent:explore budget:200` runs the preset's 120 — a directive never widens — and the card says the directive narrowed nothing", async () => {
+    recordingFetch();
+    const provider = capturingProvider();
+    const { deps, store, writer } = exploreDeps("run-b200", provider);
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore budget:200 in acme/api: time the suite"), io);
+    await writer.settled();
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual({
+      machine: "repo-cold",
+      identity: "read",
+      minutes: 120,
+    });
+    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(120);
+    expect((await store.get("run-b200"))!.profile).toEqual({
+      preset: "explore",
+      machine: "repo-cold",
+      identity: "read",
+      minutes: 120,
+    });
+    expect(
+      statuses.map((s) => JSON.stringify(s)).some((s) => s.includes("budget:200 narrowed nothing (preset asks 120)")),
+    ).toBe(true);
+    expect(provider.requests[0].system ?? "").toContain("This message's `budget:200` narrowed nothing");
+  });
+
+  it("`agent:explore` in a channel bounded to 45 minutes runs 45 and the record says `channel`; a `budget:30` under that cap is the directive's clip", async () => {
+    recordingFetch();
+    const provider = capturingProvider();
+    const { deps, store, writer } = exploreDeps("run-c45", provider);
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CSHORT", "agent:explore in acme/api: time the suite"), io);
+    await writer.settled();
+    const clipped = { machine: "repo-cold", identity: "read", minutes: 45, boundedBy: "channel" };
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(clipped);
+    expect((await store.get("run-c45"))!.profile).toEqual({ preset: "explore", ...clipped });
+    expect(
+      statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 45 min (channel boundary; preset asks 120)")),
+    ).toBe(true);
+    // A directive above the channel's cap changes nothing, and the card says so beside the channel's clip.
+    const second = exploreDeps("run-c45b", capturingProvider());
+    const io2 = fakeIO();
+    await dispatch(second.deps, inChannel("CSHORT", "agent:explore budget:60 in acme/api: time the suite"), io2.io);
+    expect(
+      io2.statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 45 min (channel boundary; preset asks 120; budget:60 narrowed nothing)")),
+    ).toBe(true);
+    // A directive under the cap is the tighter one: the directive's clip.
+    const third = exploreDeps("run-c45c", capturingProvider());
+    const io3 = fakeIO();
+    await dispatch(third.deps, inChannel("CSHORT", "agent:explore budget:30 in acme/api: time the suite"), io3.io);
+    expect(vi.mocked(makeExecutor).mock.calls[2][1].profile).toEqual({
+      machine: "repo-cold",
+      identity: "read",
+      minutes: 30,
+      boundedBy: "directive",
+    });
+  });
+
+  it("`budget:1` is refused inline naming the rule — no card, no model call, no executor", async () => {
+    recordingFetch();
+    const provider = capturingProvider();
+    const { deps } = exploreDeps("run-bad", provider);
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore budget:1 in acme/api: time the suite"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatch(/Invalid budget "1"/);
+    expect(replies[0]).toMatch(/budget:<minutes> takes a whole number of minutes, at least 2/);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
   });
 });

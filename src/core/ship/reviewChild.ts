@@ -125,6 +125,12 @@ export async function runShipReviewChild(
     repoCtx: { repo: entry.repo, pr: prNumber, headSha: pinned },
   });
   if (!pf.ok) return { refusal: pf.reply };
+  // The round attaches on the child preset's own class and identity: both
+  // within the parent ship run's, which the profile gate judged before the
+  // fork (the same class; `read` under the parent's `write`), so a boundary
+  // that admitted the pipeline admits every round. Its budget is the parent's
+  // effective wall clock, reaching the child through `clip` below
+  // (agent-ship.md item 8).
   const ws = await attachRoundWorkspace({
     factory: input.factory,
     round: {

@@ -29,7 +29,7 @@
 //     next step, and a reply between rounds is read by the next child. The
 //     orchestrator itself never reads the inbox — it has no model turn.
 
-import type { AgentDef } from "../agents/registry.js";
+import { AGENTS, type AgentDef } from "../agents/registry.js";
 import type { ChatMessage } from "../providers/types.js";
 import type { PullRequestFacts } from "../execution/githubPulls.js";
 import type { Span } from "../core/trace/types.js";
@@ -49,28 +49,45 @@ import { runShipReviewChild, type ReviewChildDeps, type ReviewChildGithub } from
 // ---- config (`ship` block, docs/reference/specs/agent-ship.md item 8) -------------------
 
 /** The `ship` config block: pipeline caps, resolved at deployment level like
- *  the sibling `review` block (no per-scope layering exists for these blocks —
- *  a per-thread cap override is a follow-up if live runs want one). */
+ *  the sibling `review` block. `maxRounds` is the pipeline's own; `maxMinutes`
+ *  is the ship preset's declared budget in this deployment — a profile field
+ *  (docs/decisions/0026-capability-profiles-and-request-routing.md), so a
+ *  channel or user boundary and a `budget:` directive clip it per run like any
+ *  preset's, which is the per-scope layering these caps have. */
 export interface ShipConfig {
   /** Review rounds per pipeline (>= 1). Default 3. */
   maxRounds?: number;
-  /** Pipeline wall-clock budget in minutes (>= 1). Default 120. */
+  /** The ship preset's declared wall-clock budget in minutes (>= 1). Default:
+   *  the registry's `AGENTS.ship.maxMinutes` (120). */
   maxMinutes?: number;
 }
 
+/** What the round loop runs under: the rounds cap from the config block, and
+ *  the wall clock from the parent run's EFFECTIVE profile — the preset's
+ *  declared budget as the profile gate clipped it, never the block read again. */
 export interface ShipCaps {
   maxRounds: number;
   maxMinutes: number;
 }
 
 export const SHIP_DEFAULT_MAX_ROUNDS = 3;
-export const SHIP_DEFAULT_MAX_MINUTES = 120;
+/** One number: the ship preset's own declared budget is the default the knob replaces. */
+export const SHIP_DEFAULT_MAX_MINUTES = AGENTS.ship.maxMinutes;
 
 export function resolveShipCaps(cfg: ShipConfig | undefined): ShipCaps {
   return {
     maxRounds: cfg?.maxRounds ?? SHIP_DEFAULT_MAX_ROUNDS,
     maxMinutes: cfg?.maxMinutes ?? SHIP_DEFAULT_MAX_MINUTES,
   };
+}
+
+/** The ship preset as this deployment declares it (docs/reference/specs/agent-ship.md
+ *  item 8): the registry's def with the `ship.maxMinutes` knob as its budget —
+ *  the one number the run's profile is resolved from, so a boundary clips it,
+ *  a `budget:` directive narrows it, and the pipeline's wall clock is the
+ *  effective profile's minutes. Always a copy; `AGENTS.ship` is never mutated. */
+export function shipPresetFor(cfg: ShipConfig | undefined): AgentDef {
+  return { ...AGENTS.ship, maxMinutes: resolveShipCaps(cfg).maxMinutes };
 }
 
 /** A round is dispatched only when at least this much of the pipeline budget

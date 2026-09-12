@@ -149,6 +149,12 @@ export async function runShipCodingChild(
       )
     : opts.messages;
   const spec = input.child("coding");
+  // The round attaches on the child preset's own class and identity: both
+  // within the parent ship run's, which the profile gate judged before the
+  // fork (the same class; `write` at the parent's own rung), so a boundary that
+  // admitted the pipeline admits every round. Its budget is the parent's
+  // effective wall clock, reaching the child through `clip` below
+  // (agent-ship.md item 8).
   const ws = await attachRoundWorkspace({
     factory: input.factory,
     round: {

@@ -1,6 +1,7 @@
 // Agent definitions. An agent is a system prompt + toolset + machine class + turn budget.
 import type { Effort } from "../effort.js";
 import type { CacheTtl } from "../providers/types.js";
+import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
 import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS } from "../core/ship/contract.js";
 // Which model runs it is resolved separately by the config layers, so any
 // agent can run on any configured provider/model.
@@ -45,8 +46,8 @@ export interface AgentDef {
   name: string;
   description: string;
   system: string;
-  /** key into TOOLSETS: "full" | "readonly" | "web" | "assistant" | "none" */
-  toolset: "full" | "readonly" | "web" | "assistant" | "none";
+  /** key into TOOLSETS: "full" | "readonly" | "web" | "assistant" | "explore" | "none" */
+  toolset: "full" | "readonly" | "web" | "assistant" | "explore" | "none";
   /** backstop only — the wall clock below is the real budget */
   maxTurns: number;
   maxTokens: number;
@@ -325,6 +326,33 @@ Your tools work without a workspace: the GitHub tools — \`github_repos\` (the 
 
 You cannot run commands, clone repositories, edit code, or review pull requests, and you cannot search the web. Other Switchboard agents can: for code changes or PRs tell the user to re-send with \`agent:coding\`; for a PR review, \`agent:review\`; for a web-research question, \`agent:research\` (e.g. "\`agent:coding fix the failing login test in acme/api\`", "\`agent:research compare X and Y\`"). Delete an issue only when the user explicitly asked to delete it (closing is an update).`;
 
+// The explore agent (docs/reference/specs/agent-explore.md): a long, read-only
+// investigation — "run our CI locally and validate the claims", "how long does
+// the suite really take", "does this dependency bump break the build" — that
+// no other preset could hold: a shell AND the web AND two hours. It is the
+// first `repo-cold` preset: a per-thread sandbox with the checkout, a
+// read-scoped credential, and never the resident a review depends on, so a
+// two-hour memory-hungry job cannot degrade anyone else's run. The prompt is
+// record 0026's: the deliverable is a claim table with commands and numbers,
+// a job past the per-command cap is detached with `setsid -f` (every command
+// runs under `timeout … bash -c` whose process group is reaped when it
+// returns, so a `nohup` job dies with the command that started it), and it
+// never opens a pull request — an investigation that must push is a second
+// preset, not a directive.
+const EXPLORE_SYSTEM = `You are Switchboard's explore agent: a long, read-only investigation of a repository, answering a request from Slack.
+
+You work in a fresh sandbox with a shell (bash), read_file, and a read-scoped GitHub credential: git and gh are authenticated for reads, so clone the target repository into your workspace first (\`gh repo clone <owner/name>\` or \`git clone\`; check out the ref the request names), install what you need and run whatever the investigation calls for — builds, test suites, benchmarks, \`act\` (Docker is available). You cannot push. Your other tools: \`web_search\` and \`web_fetch\` (sources and pages), the GitHub reads — \`github_repos\`, \`github_tree\` / \`github_file\` (browse and read our repos at any ref), \`github_search_code\`, \`github_issue_list\` / \`github_issue_get\` — and \`list_skills\` / \`use_skill\`.
+
+THE DELIVERABLE IS A CLAIM TABLE. Turn the request into the claims it makes or asks about — explicit ones ("the suite runs in 4 minutes") and the implicit ones a careful engineer would check — and verify each one by running it, not by reading about it. One row per claim: the claim, the exact command you ran to check it, the number or output it produced, and a verdict (holds / does not hold / could not check — and why). Numbers over adjectives: measure a duration, count the failures, quote the version. Say what you did not get to.
+
+TIME. Your budget is up to two hours — less when a boundary or the request's \`budget:\` directive clipped it, which the runtime-config block above says — and the wrap-up warning tells you when to stop starting new checks. A single command is capped at ${BASH_TIMEOUT_MAX_MS / 60_000} minutes (pass the bash tool's \`timeoutMs\`, up to ${BASH_TIMEOUT_MAX_MS} ms, for a long one). A job that needs longer — a full suite, a build, a pipeline run — is started detached and polled across tool calls: \`setsid -f sh -c '<command> > /tmp/job.log 2>&1; echo $? > /tmp/job.exit'\`, then \`tail -n 40 /tmp/job.log\` and \`cat /tmp/job.exit\` on later calls (a plain background job dies with the command that started it; a \`setsid -f\` job outlives it). Batch commands into few tool calls; never explore file by file.
+
+READ-ONLY: NEVER open a pull request, and never commit or push — no branch, no \`gh pr create\`, no PR or issue write of any kind. You hold a read credential and your job is to find out, not to change. If the investigation shows a change is needed, say exactly what and where in your write-up and point the user at \`agent:coding\`.
+
+Maintain the user-facing status card with the update_status tool: post your plan as a checklist (○ pending) once you have it, and update items as they start (✱) and finish (✓ — only after they actually happened). Items are short outcomes ("Clone and install", "Time the full suite"), never commands.
+
+Report outcomes faithfully: a check you could not run is "could not check", never a guess. Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks — render the claim table as aligned rows inside a code block). Your final message is posted to Slack: lead with the overall verdict in one line, then the claim table, then what a follow-up should do.`;
+
 export const AGENTS: Record<string, AgentDef> = {
   general: {
     name: "general",
@@ -382,15 +410,19 @@ export const AGENTS: Record<string, AgentDef> = {
     system:
       "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
     // Full toolset and the coding machine class, so repo and PR resolution
-    // gate a ship thread like a coding one; placeholder budgets — the pipeline
-    // is bounded by the `ship` config caps and by each child's own budgets
-    // clipped to the remaining wall clock, never by these numbers.
+    // gate a ship thread like a coding one. `maxMinutes` is the pipeline's
+    // wall clock (docs/reference/specs/agent-ship.md item 8): the ship preset's
+    // declared budget, which a deployment's `ship.maxMinutes` knob replaces
+    // (`shipPresetFor`) and a boundary or a `budget:` directive clips like any
+    // preset's; every child round runs its own agent's budget clipped to what
+    // remains of it. Turns and tokens are placeholders: no model call is ever
+    // made with this def.
     toolset: "full",
     machine: "repo-resident",
     identity: "write",
     maxTurns: 1,
     maxTokens: 16000,
-    maxMinutes: 5,
+    maxMinutes: 120,
   },
   research: {
     name: "research",
@@ -404,6 +436,24 @@ export const AGENTS: Record<string, AgentDef> = {
     maxTokens: 24000,
     maxMinutes: 8,
     effort: "medium",
+  },
+  explore: {
+    name: "explore",
+    description:
+      "Long, read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR. Up to two hours.",
+    system: EXPLORE_SYSTEM,
+    toolset: "explore",
+    // Always a cold per-thread sandbox with the checkout, never the resident a
+    // review depends on: a two-hour job shares no container with anyone.
+    machine: "repo-cold",
+    identity: "read", // a read-scoped token: it can clone and read, never push — whatever the caller holds
+    maxTurns: 150, // a backstop for a two-hour loop of batched checks; the wall clock is the budget
+    maxTokens: 64000,
+    maxMinutes: 120,
+    // A detached job polled across calls makes long steps: a 5m cache entry
+    // would expire between them, so the 2× write buys reads for the whole run.
+    cacheTtl: "1h",
+    // No built-in effort: the deployment decides, as for coding.
   },
 };
 

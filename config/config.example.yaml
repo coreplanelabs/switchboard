@@ -41,6 +41,7 @@ defaults:
     general: anthropic/claude-haiku-4-5
     coding: anthropic/claude-opus-5
     review: anthropic/claude-opus-5
+    explore: anthropic/claude-opus-5 # the two-hour read-only investigation (docs/reference/specs/agent-explore.md)
   # Default model effort per agent: low | medium | high (how hard the model
   # thinks per turn; lower = much faster turns). Same layering as models —
   # per-channel/user `effort` / `efforts.<agent>` and a per-request `effort:`
@@ -270,10 +271,13 @@ workspaceDir: ./workspaces
 # <task>` runs the coding → review → fix loop to LGTM as one pipeline: at most
 # `maxRounds` review rounds and `maxMinutes` minutes of wall clock — whichever
 # hits first ends the loop, and each child round's own budget is clipped to the
-# remaining pipeline time. Defaults shown; both must be integers >= 1.
+# remaining pipeline time. `maxMinutes` is the ship preset's declared budget:
+# a channel or user `boundary.maxMinutes` and a per-message `budget:` directive
+# clip it like any preset's, and the card says so. Defaults shown; both must be
+# integers >= 1.
 # ship:
 #   maxRounds: 3      # review rounds per pipeline
-#   maxMinutes: 120   # pipeline wall-clock budget in minutes
+#   maxMinutes: 120   # the ship preset's wall-clock budget in minutes (the registry's default)
 
 # Spend reporting: GET /costs (Access-gated). Optional. See docs/reference/specs/costs.md.
 # costs:

@@ -118,7 +118,7 @@ describe("configAwarenessBlock — effort", () => {
     expect(text).toContain("user override: effort `low`");
     expect(text).toContain("This message's `effort:low` directive");
     expect(text).toContain(`--effort <${EFFORT_LEVELS.join("|")}>`);
-    expect(text).toContain("`effort:<level>` directives");
+    expect(text).toContain("`effort:<level>` / `budget:<minutes>` directives");
   });
 
   it("names every level of the effort ladder — the list is derived from EFFORT_LEVELS, never hand-typed", () => {
@@ -230,5 +230,49 @@ describe("configAwarenessBlock — boundaries and the budget", () => {
     });
     expect(block).toContain("Boundary in force: maxMinutes 60 (defaults)");
     expect(block).not.toContain("Budget:");
+  });
+
+  // routing-and-config item 8 with items 1–2: the `budget:` directive is named
+  // beside the other three, attributed when this message carried it, and the
+  // budget line says when it clipped — or that it narrowed nothing.
+  it("names the budget directive beside the other three, attributes a message's budget directive, and says when the directive clipped the budget", () => {
+    const block = configAwarenessBlock({
+      ...base,
+      agentName: "explore",
+      messageDirective: { agent: "explore", budget: 30 },
+      budget: { minutes: 30, presetMinutes: 120, boundedBy: "directive", directive: 30 },
+    });
+    expect(block).toContain("`budget:<minutes>`");
+    expect(block).toContain(
+      "This message's `agent:explore budget:30` directive set the agent/model/effort for this run.",
+    );
+    expect(block).toContain("Budget: 30 min (clipped by the budget directive; the preset asks 120).");
+    expect(block).not.toContain("narrowed nothing");
+  });
+
+  it("a budget directive at or above what stands is said to have narrowed nothing — against the preset's own budget, or against a boundary that clipped tighter", () => {
+    const loose = configAwarenessBlock({
+      ...base,
+      agentName: "explore",
+      messageDirective: { budget: 200 },
+      budget: { minutes: 120, presetMinutes: 120, directive: 200 },
+    });
+    expect(loose).toContain("This message's `budget:200` narrowed nothing: the run's budget is the preset's 120 min.");
+    expect(loose).not.toContain("Budget:");
+    const clipped = configAwarenessBlock({
+      ...base,
+      agentName: "explore",
+      boundary: { maxMinutes: { value: 45, scope: "channel" } },
+      messageDirective: { budget: 60 },
+      budget: { minutes: 45, presetMinutes: 120, boundedBy: "channel", directive: 60 },
+    });
+    expect(clipped).toContain("Budget: 45 min (clipped by the channel boundary; the preset asks 120).");
+    expect(clipped).toContain("This message's `budget:60` narrowed nothing: the run's budget is 45 min.");
+  });
+
+  it("is byte-identical to before when the message carries no budget directive", () => {
+    expect(configAwarenessBlock({ ...base, budget: { minutes: 5, presetMinutes: 5 } })).toBe(
+      configAwarenessBlock(base),
+    );
   });
 });

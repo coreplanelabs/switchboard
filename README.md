@@ -46,7 +46,7 @@ flowchart LR
     end
     D{"Dispatcher<br/>directives · config layers · authorization"}
     subgraph agent ["Agent — what runs"]
-        AG["general · coding · review · ship · research"]
+        AG["general · coding · review · ship · research · explore"]
     end
     subgraph provider ["Provider — the model"]
         P["Anthropic · OpenAI-compatible"]

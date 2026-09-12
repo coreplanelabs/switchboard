@@ -9,6 +9,7 @@ import { configAwarenessBlock } from "../configAwareness.js";
 import { selfDescriptionBlock } from "../selfDescription.js";
 import { customInstructionsBlock } from "../customInstructions.js";
 import { AGENTS, getAgent, type AgentDef } from "../../agents/registry.js";
+import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { systemClock } from "../trace/index.js";
@@ -33,7 +34,7 @@ import { skillGuidanceBlock } from "../../skills/index.js";
 import { isSpanRecord, redactSecrets, type RunEvent } from "../runEvents.js";
 import type { LiveThread } from "../threadAdmission.js";
 import { utf8ByteLength, type RunStatus } from "../runRecord.js";
-import { assembleRunRecord, channelVisibilityOf } from "./record.js";
+import { assembleRunRecord, channelVisibilityOf, profileRecordOf } from "./record.js";
 import {
   activityLine,
   attachmentSuffix,
@@ -100,8 +101,15 @@ export interface ShipDeps
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
  *  pipeline must not re-derive, because the gates already ran against them. */
 export interface ShipContext {
-  /** AGENTS["ship"] — labels and run meta only; never handed to runAgent. */
+  /** The ship preset as this deployment declares it (`shipPresetFor`: its
+   *  budget is the `ship.maxMinutes` knob) — labels and run meta only; never
+   *  handed to runAgent. */
   agent: AgentDef;
+  /** The run's effective profile (docs/reference/specs/agent-ship.md item 8):
+   *  the preset's declared budget as the profile gate clipped it, the
+   *  identity and class it admitted. Its minutes are the pipeline's wall
+   *  clock; the ledger row and the record carry it like every run's. */
+  profile: RunProfile;
   /** The modelRef resolved for the ship request — recorded on the run, never
    *  called; child rounds resolve their own per-agent models. */
   modelRef: string;
@@ -148,7 +156,8 @@ export async function runShipBranch(
   // `closeLines` keeps its default owner (`agent`): a ship run's children are
   // agent runs, so its `run.command` grafts — none today — would count as
   // getting ready, never as a command's own tools.
-  const { agent, card, directives, history, repoCtx, label, ending, trace, closeLines, refuse, doneLines } = ctx;
+  const { agent, profile, card, directives, history, repoCtx, label, ending, trace, closeLines, refuse, doneLines } =
+    ctx;
   const root = trace.root;
   const clock = deps.clock ?? systemClock;
   // The same one-builder card shell as the main path, on the same label and clock.
@@ -259,6 +268,7 @@ export async function runShipBranch(
           finished: false,
           truncated: startSnap.truncated,
         }),
+        profile: profileRecordOf(agent, profile),
       }),
       { provisional: true },
     );
@@ -285,6 +295,7 @@ export async function runShipBranch(
         ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
         ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
         ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
+        profile,
       },
       card: card.handle ?? null,
       system: "",
@@ -370,7 +381,12 @@ export async function runShipBranch(
       effort: spec.effort,
       channel: scopes.channel,
       user: scopes.user,
-      messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
+      messageDirective: {
+        agent: directives.agent,
+        model: directives.model,
+        effort: directives.effort,
+        budget: directives.budget,
+      },
       threadDirective: { agent: ctx.sticky.agent, model: ctx.sticky.model, effort: ctx.sticky.effort },
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
       // No `mcp` here: ship rounds receive no MCP tools yet (docs/reference/specs/mcp-tools.md
@@ -412,7 +428,11 @@ export async function runShipBranch(
         dataDir: deps.dataDir ?? "./data",
       },
       threadKey: msg.threadKey,
-      caps: resolveShipCaps(deps.config.config.ship),
+      // The rounds cap is the config block's; the wall clock is the parent's
+      // effective budget — the preset's declared `ship.maxMinutes` as a
+      // boundary or a `budget:` directive clipped it (agent-ship.md item 8) —
+      // so every child round is clipped to what remains of THAT.
+      caps: { ...resolveShipCaps(deps.config.config.ship), maxMinutes: profile.minutes },
       control: run.control,
       inbox: ctx.live.inbox, // thread follow-ups steered into this run reach the child round in flight (thread-admission item 2)
       onEvent,
@@ -502,6 +522,7 @@ export async function runShipBranch(
             // The last coding round's handoff (agent-ship.md item 14) — the
             // pipeline's, so the ship record carries what its child handed back.
             ...(outcome?.handoff !== undefined ? { handoff: outcome.handoff } : {}),
+            profile: profileRecordOf(agent, profile),
           }),
           { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
         ),

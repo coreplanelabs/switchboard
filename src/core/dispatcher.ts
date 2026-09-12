@@ -51,6 +51,7 @@ import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
+import { shipPresetFor } from "./shipPipeline.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
@@ -257,19 +258,24 @@ export async function dispatch(
     // before the thread is claimed.
     if ((await authorizeAgent(deps, { msg, io, refuse, agentName: resolved.agentName })).kind === "refused") return;
 
-    const agent = getAgent(resolved.agentName);
+    // The preset as this deployment declares it: the registry's def, except
+    // ship, whose declared budget is the `ship.maxMinutes` knob
+    // (docs/reference/specs/agent-ship.md item 8) — so the profile below, the
+    // card's budget line and the pipeline's wall clock read one number.
+    const agent = resolved.agentName === "ship" ? shipPresetFor(deps.config.config.ship) : getAgent(resolved.agentName);
     // The run's effective profile (dispatch/resolve.ts; record 0026): preset ∩
-    // the boundaries on the path — and the profile gate (dispatch/authorize.ts)
-    // right after the agent gate and before the thread is claimed, so an
-    // identity or class a boundary caps is refused by name with no card, no
-    // row and no executor. Every stage below reads the profile — the factory,
-    // the ledger row, the runner — never the preset's own fields.
+    // the request's `budget:` directive ∩ the boundaries on the path — and the
+    // profile gate (dispatch/authorize.ts) right after the agent gate and
+    // before the thread is claimed, so an identity or class a boundary caps is
+    // refused by name with no card, no row and no executor. Every stage below
+    // reads the profile — the factory, the ledger row, the runner — never the
+    // preset's own fields.
     const profileGate = await authorizeProfile(deps, {
       msg,
       io,
       refuse,
       agent,
-      resolution: resolveProfile({ agent, resolved, resume }),
+      resolution: resolveProfile({ agent, resolved, resume, budget: directives.budget }),
     });
     if (profileGate.kind === "refused") return;
     const { profile } = profileGate;
@@ -368,6 +374,14 @@ export async function dispatch(
     });
     if (repoGate.kind === "refused") return;
 
+    // A boundary or a `budget:` directive that clipped this run's budget — or
+    // a directive that narrowed nothing — is named on the card from here,
+    // through the attach and the run, the way a resident note is
+    // (dispatch/provision.ts). Before the ship fork: a ship pipeline's wall
+    // clock is its clipped budget too, and its card says so.
+    const clip = budgetClipLabel(agent, profile, directives.budget);
+    if (clip) shell.setLabel(`${shell.label} · ${clip}`);
+
     // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the
     // repo gates above, BEFORE the top-level attach — ship names its own
     // pipeline branch and each child round attaches its own workspace
@@ -380,6 +394,7 @@ export async function dispatch(
       clearInterval(setupHeartbeat);
       await runShipBranch(deps, msg, io, {
         agent,
+        profile,
         modelRef: resolved.modelRef,
         label: shell.label,
         startedAt,
@@ -398,13 +413,6 @@ export async function dispatch(
       });
       return;
     }
-
-    // A boundary that clipped this run's budget is named on the card from
-    // here — through the attach and the run — the way a resident note is
-    // (dispatch/provision.ts). After the ship fork: the pipeline's budget is
-    // the `ship` config block's until the ship preset declares its own.
-    const clip = budgetClipLabel(agent, profile);
-    if (clip) shell.setLabel(`${shell.label} · ${clip}`);
 
     // A resume continues the exact conversation the ledger held (item 38);
     // the thread history was folded into it when the run started.

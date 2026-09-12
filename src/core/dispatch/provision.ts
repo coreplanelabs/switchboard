@@ -12,7 +12,7 @@
 // what the inline code did.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { AGENTS, type AgentDef } from "../../agents/registry.js";
-import type { RunProfile } from "../../config/profile.js";
+import { clipSourceLabel, type RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
 import type { ResidentStep } from "../../execution/residentStepTrace.js";
@@ -193,15 +193,24 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
 }
 
 /**
- * The card's budget line when a boundary clipped the run's budget
- * (docs/reference/specs/routing-and-config.md item 4): `budget 45 min (channel
- * boundary; preset asks 120)`, appended to the card's label the way a resident
- * note is, so the clip is visible where the run is watched. Undefined when the
- * preset's own budget stands — the card is then exactly what it was.
+ * The card's budget line (docs/reference/specs/routing-and-config.md item 4):
+ * what clipped the run's budget below the preset's own — `budget 45 min
+ * (channel boundary; preset asks 120)`, `budget 30 min (budget directive;
+ * preset asks 120)` — and, when the request carried a `budget:` directive that
+ * did not win, that it narrowed nothing: `budget:200 narrowed nothing (preset
+ * asks 120)` alone, or appended to the clip of the boundary that was tighter.
+ * Appended to the card's label the way a resident note is, so the clip is
+ * visible where the run is watched. Undefined when the preset's own budget
+ * stands and no directive was sent — the card is then exactly what it was.
  */
-export function budgetClipLabel(agent: AgentDef, profile: RunProfile): string | undefined {
-  if (profile.boundedBy === undefined) return undefined;
-  return `budget ${profile.minutes} min (${profile.boundedBy} boundary; preset asks ${agent.maxMinutes})`;
+export function budgetClipLabel(agent: AgentDef, profile: RunProfile, budgetDirective?: number): string | undefined {
+  const idle = budgetDirective !== undefined && profile.boundedBy !== "directive";
+  if (profile.boundedBy === undefined) {
+    return idle ? `budget:${budgetDirective} narrowed nothing (preset asks ${agent.maxMinutes})` : undefined;
+  }
+  const facts = [`${clipSourceLabel(profile.boundedBy)}; preset asks ${agent.maxMinutes}`];
+  if (idle) facts.push(`budget:${budgetDirective} narrowed nothing`);
+  return `budget ${profile.minutes} min (${facts.join("; ")})`;
 }
 
 /** The run as every surface sees it from the reservation on: its registry row,
@@ -690,7 +699,12 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     effort: resolved.effort,
     channel: scopes.channel,
     user: scopes.user,
-    messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
+    messageDirective: {
+      agent: directives.agent,
+      model: directives.model,
+      effort: directives.effort,
+      budget: directives.budget,
+    },
     threadDirective: { agent: sticky.agent, model: sticky.model, effort: sticky.effort },
     canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
     // The boundary in force and the budget this run actually has — the same
@@ -700,6 +714,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
       minutes: profile.minutes,
       presetMinutes: agent.maxMinutes,
       ...(profile.boundedBy !== undefined ? { boundedBy: profile.boundedBy } : {}),
+      ...(directives.budget !== undefined ? { directive: directives.budget } : {}),
     },
     mcp: {
       registryOn: deps.capabilities.mcp,
