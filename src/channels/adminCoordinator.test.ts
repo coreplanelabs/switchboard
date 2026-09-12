@@ -700,6 +700,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       body: {
         ok: true,
         planId: "fixture",
+        repo: "acme/api",
         base: "main",
         caps: { maxRounds: 2, maxMinutes: 45 },
         childMinutes: { coding: 45, review: 25 },

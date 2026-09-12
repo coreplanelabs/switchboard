@@ -19,6 +19,8 @@
 export const COORDINATOR_IDENTITY = "coordinator";
 /** The policy action every coordinator step is decided on (authorization.md item 2). */
 export const COORDINATOR_STEP_ACTION = "coordinator:step";
+/** Where the bot answers the steps: `POST <prefix><step>` on the container, forwarded by the shim like every `/admin/*` path. */
+export const COORDINATOR_STEP_PATH_PREFIX = "/admin/coordinator/";
 
 /** A Workflow instance id: the platform's own alphabet, at most 100 characters. */
 export const INSTANCE_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}$/;

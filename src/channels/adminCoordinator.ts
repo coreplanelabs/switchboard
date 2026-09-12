@@ -48,6 +48,7 @@ import type { ChannelVisibility } from "../core/authz/types.js";
 import { composeChild, TASK_UNIT, type BriefReaders } from "../core/coordinator/briefs.js";
 import {
   COORDINATOR_STEP_ACTION,
+  COORDINATOR_STEP_PATH_PREFIX,
   idempotencyKeyFor,
   INSTANCE_ID_PATTERN,
   STEP_NAME_PATTERN,
@@ -78,7 +79,7 @@ import type { OpenPrRef, PullRequestReview } from "../execution/githubPulls.js";
 import type { Secret } from "../secrets.js";
 import { readBody, type IngressResponse } from "./http.js";
 
-export const COORDINATOR_ADMIN_PREFIX = "/admin/coordinator/";
+export const COORDINATOR_ADMIN_PREFIX = COORDINATOR_STEP_PATH_PREFIX;
 export function isCoordinatorAdminPath(path: string): boolean {
   return path.startsWith(COORDINATOR_ADMIN_PREFIX) && path.length > COORDINATOR_ADMIN_PREFIX.length;
 }
@@ -709,6 +710,7 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
   return json(200, {
     ok: true,
     ...(instance.plan !== undefined ? { planId: instance.plan.id } : {}),
+    repo: instance.repo,
     base: instance.base ?? "main",
     caps: instance.caps ?? resolveShipCaps(undefined),
     childMinutes: { coding: AGENTS.coding.maxMinutes, review: AGENTS.review.maxMinutes },

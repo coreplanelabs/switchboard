@@ -71,9 +71,17 @@ describe("the coordinator module — the Workflow entrypoint leaves worker.ts, w
 
 describe("the coordinator holds no credential", () => {
   const source = read("coordinator.ts");
-  it("names none of the secrets the shim forwards into the container, and makes no fetch of its own", () => {
+  it("names none of the secrets the shim forwards into the container; its only fetch is the container binding's, presented with the coordinator bearer from the token map — no bare fetch, no other origin", () => {
     for (const name of CREDENTIALS) expect(source, name).not.toContain(name);
-    expect(source).not.toMatch(/\bfetch\(/);
+    expect(source).not.toMatch(/(?<![.\w])fetch\(/);
+    expect(source).toMatch(/getContainer\(env\.SWITCHBOARD, INSTANCE\)\.fetch\(/);
+    expect(source).toContain(
+      "tokenForSubject(parseIngressTokenMap(env.SWITCHBOARD_INGRESS_TOKENS).tokens, COORDINATOR_IDENTITY)",
+    );
+    expect(source).not.toMatch(/https?:\/\/(?!switchboard-keepalive\.internal)/);
+  });
+  it("runs the plan runner's driver and nothing of its own: `run()` is one `runPlan` over the platform's step and the container bot", () => {
+    expect(source).toMatch(/return runPlan\(workflowSteps\(step\), containerBot\(this\.env\), event\.instanceId\);/);
   });
 });
 
