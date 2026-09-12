@@ -130,7 +130,7 @@ grants:
     repos: [acme/payments]
 ```
 
-Everything unnamed stays open: `review`, `research`, `explore`, `general`, other repositories. Add a `boundary` under a channel to cap what even the granted may have there.
+Everything unnamed stays open: `review`, `research`, `explore`, `conductor`, `general`, other repositories. Add a `boundary` under a channel to cap what even the granted may have there. `conductor` starts child runs as the person who asked — each child passes these same gates as that person, so it grants nothing they lack — and the example config lists it under `restrict.agents` for a deployment that wants fan-out closed by default: uncomment one line.
 
 ## Next
 

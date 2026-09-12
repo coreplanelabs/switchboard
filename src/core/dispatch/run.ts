@@ -22,6 +22,7 @@ import type { RepoContext } from "../repoContext.js";
 import type { PrCommitList } from "../headMoved.js";
 import { REPLAY_EVERYTHING, type RunHandle, type RunRegistry } from "../runRegistry.js";
 import type { RunStore } from "../runStore.js";
+import type { RunsService } from "../runsService.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
@@ -52,6 +53,15 @@ export interface RunDeps
    * item 16: a Null Object, never a branch), so the lookup simply finds nothing.
    */
   runStore: RunStore;
+  /**
+   * The runs service behind the `list_runs` / `get_run_status` tools
+   * (docs/reference/specs/agent-conductor.md item 4): the ONE service every
+   * surface reads — the command registry's, the run pages' — so a run sees
+   * other runs exactly as its requester would. Production wires the service
+   * it builds (src/index.ts); absent → one over the registry and `runStore`,
+   * without a ledger's foreign rows.
+   */
+  runs?: RunsService;
   /**
    * The GitHub API behind the `github_*` tools (docs/reference/specs/github-tools.md).
    * Absent → the production REST client on the App credential; tests inject an
@@ -120,6 +130,8 @@ export interface ClaimContext {
   card: StatusHandle;
   clock: Clock;
   root: Span;
+  /** The run that spawned this one (run-history item 46), when it is a child. */
+  parentRunId?: string;
 }
 
 /**
@@ -151,6 +163,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     card,
     clock,
     root,
+    parentRunId,
   } = ctx;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
@@ -190,6 +203,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
           readonly: profile.identity === "read",
           profile,
+          ...(parentRunId !== undefined ? { parentRunId } : {}),
           selection: resident === true ? "resident" : "sandbox",
           ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
           ...(requestRow !== undefined ? { request: requestRow } : {}),

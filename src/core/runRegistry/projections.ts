@@ -58,6 +58,8 @@ export interface RunSummary {
   sourceUrl?: string;
   /** `RunMeta.userName`: who started it, resolved. */
   userName?: string;
+  /** `RunMeta.parentRunId`: the run that spawned this one (run-history item 46). */
+  parentRunId?: string;
   /** Present only once a stop has been requested. */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -127,6 +129,7 @@ export function summaryOf(run: RunState): RunSummary {
     ...(m?.repo !== undefined ? { repo: m.repo } : {}),
     ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m?.userName !== undefined ? { userName: m.userName } : {}),
+    ...(m?.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
     finished: run.finished,
     startedAt: run.startedAt,
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),

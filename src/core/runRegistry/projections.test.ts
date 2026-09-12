@@ -71,4 +71,25 @@ describe("RunRegistry.snapshot — record inputs", () => {
     expect("receivedAt" in (reg.snapshot(plain.id, plain.token) ?? {})).toBe(false);
     expect("receivedAt" in (reg.listActive().find((r) => r.id === plain.id) ?? {})).toBe(false);
   });
+
+  // docs/reference/specs/run-history.md item 46: a spawned child's live summary
+  // names its parent, so a listing can draw the tree; a run with no parent
+  // carries no key.
+  it("carries parentRunId from the RunMeta onto the summary and the index feed, and omits it when absent", () => {
+    const { reg } = testRegistry();
+    const events: IndexEvent[] = [];
+    reg.subscribeIndex((e) => events.push(e));
+    const child = reg.create("c", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:9",
+      parentRunId: "run-parent",
+    });
+    const plain = reg.create("p", { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:2" });
+    expect(reg.getById(child.id)?.parentRunId).toBe("run-parent");
+    expect(events.find((e) => e.type === "upsert" && e.run.id === child.id)).toMatchObject({
+      run: { parentRunId: "run-parent" },
+    });
+    expect("parentRunId" in (reg.getById(plain.id) ?? {})).toBe(false);
+  });
 });

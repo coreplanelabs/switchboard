@@ -5,7 +5,7 @@ Add a specialist agent (a prompt, a toolset and budgets) reachable as `agent:<na
 **You need:**
 
 - A checkout of the repository and the [contributing](../../CONTRIBUTING.md) loop. An agent is data in the tree, so this is a pull request, not a config change.
-- A toolset for it (`full`, `readonly`, `web`, `assistant`, `explore`, `none`), the machine class its tools run on, the identity its runs act as, and its turn, token and wall-clock budgets.
+- A toolset for it (`full`, `readonly`, `web`, `assistant`, `explore`, `conductor`, `none`), the machine class its tools run on, the identity its runs act as, and its turn, token and wall-clock budgets.
 
 ## Define it
 

@@ -480,6 +480,13 @@ describe("budgetClipLabel — the card's budget line", () => {
     );
   });
 
+  // routing-and-config item 20: a spawned child clipped to what its parent had left.
+  it("names the parent run's budget when a child was clipped to what its parent had left", () => {
+    expect(budgetClipLabel(explore, { ...declared, minutes: 7, boundedBy: "parent" })).toBe(
+      "budget 7 min (parent run's budget; preset asks 120)",
+    );
+  });
+
   it("says when a directive narrowed nothing — alone against the preset, or beside the boundary that clipped tighter", () => {
     expect(budgetClipLabel(explore, declared, 200)).toBe("budget:200 narrowed nothing (preset asks 120)");
     expect(budgetClipLabel(explore, { ...declared, minutes: 45, boundedBy: "channel" }, 60)).toBe(

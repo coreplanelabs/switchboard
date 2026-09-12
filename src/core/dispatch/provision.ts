@@ -252,6 +252,8 @@ export interface RegisterRunContext {
   registry: RunRegistry;
   shell: CardShell;
   admitted: LiveThread<DispatchFollowUp>;
+  /** The run that spawned this one (run-history item 46), when it is a child. */
+  parentRunId?: string;
 }
 
 /**
@@ -280,6 +282,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     registry,
     shell,
     admitted,
+    parentRunId,
   } = ctx;
   // The reservation (item 42): the run's row BEFORE the workspace attach —
   // identity, request, card, no prompt — so a kill during a slow attach (a
@@ -333,6 +336,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(parentRunId !== undefined ? { parentRunId } : {}),
     },
     // Under the run's id, at the card's start (the reservation's, or the
     // carried row's) — a resume replays its events, a restart starts them
@@ -454,6 +458,8 @@ export interface ReserveContext {
   hooks: RunHooks;
   admitted: LiveThread<DispatchFollowUp>;
   root: Span;
+  /** The run that spawned this one (run-history item 46), when it is a child. */
+  parentRunId?: string;
 }
 
 /**
@@ -480,6 +486,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     hooks,
     admitted,
     root,
+    parentRunId,
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
@@ -504,6 +511,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
           readonly: profile.identity === "read",
           profile,
+          ...(parentRunId !== undefined ? { parentRunId } : {}),
           request: requestRow,
         },
         card: card.handle ?? null,

@@ -7,6 +7,7 @@ import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
 import type { SelfImprovementConfig } from "../core/selfImprovement.js";
 import type { RunHistoryConfig } from "../core/runStore.js";
 import type { ShipConfig } from "../core/shipPipeline.js";
+import type { SpawnConfig } from "../core/dispatch/spawn.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
 import { parseGrantsConfig, parseRestrictConfig, type Restriction } from "../core/authz/grants.js";
 import type { Grants } from "../core/authz/types.js";
@@ -47,6 +48,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   dashboard: true,
   review: true,
   ship: true,
+  spawn: true,
   slack: true,
   runHistory: true,
   runtimeOverrides: true,
@@ -278,6 +280,7 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.ship !== undefined) validateShip(cfg.ship);
+  if (cfg.spawn !== undefined) validateSpawn(cfg.spawn);
   validateDashboardConfig(cfg.dashboard);
 }
 
@@ -307,6 +310,20 @@ function validateShip(ship: ShipConfig): void {
     if (v !== undefined && (!Number.isInteger(v) || v < 1))
       throw new Error(`config.yaml: ship.${key} must be an integer >= 1`);
   }
+}
+
+/** The `spawn` block's keys, held equal to `SpawnConfig` the way the top-level keys are. */
+const SPAWN_KEYS: Record<keyof SpawnConfig, true> = { maxChildren: true };
+
+/** `spawn.maxChildren` (docs/reference/specs/agent-conductor.md item 5): the fan-out
+ *  cap, enforced at load so a typo cannot silently become "no cap" — the same
+ *  rule the ship caps are held to. */
+function validateSpawn(spawn: SpawnConfig): void {
+  if (typeof spawn !== "object" || spawn === null) throw new Error("config.yaml: spawn must be a mapping");
+  for (const key of unknownKeys(spawn, SPAWN_KEYS)) throw new Error(`config.yaml: spawn.${key} is not a known key`);
+  const v = spawn.maxChildren;
+  if (v !== undefined && (!Number.isInteger(v) || v < 1))
+    throw new Error("config.yaml: spawn.maxChildren must be an integer >= 1");
 }
 
 /** `tracing.log` (docs/reference/specs/tracing.md): the two verbosity levels the log sink

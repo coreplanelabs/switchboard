@@ -16,6 +16,8 @@ import { distillDiffStats, type DigestReport } from "../core/diffDigest.js";
 import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS, type GithubCapability } from "./github.js";
 import { listSkillsTool, useSkillTool } from "./skills.js";
+import { RUN_TOOLS, type RunsReadCapability } from "./runs.js";
+import type { SpawnCapability } from "../core/dispatch/spawn.js";
 import type { SkillStore } from "../skills/index.js";
 import type { RunEvent } from "../core/runEvents.js";
 
@@ -56,6 +58,16 @@ export interface ToolContext {
   /** The calling agent's name — scopes list_skills/use_skill so an agent only
    *  sees and loads skills declared for it. */
   agentName?: string;
+  /** The run's spawn capability behind `spawn_run` (docs/reference/specs/agent-conductor.md
+   *  item 3): built by the dispatcher once the run is registered — the run's id
+   *  and depth fixed, the remaining wall clock read at every call. Absent
+   *  (a unit context, a round outside `dispatch()`) → the null capability,
+   *  which refuses honestly. */
+  spawn?: SpawnCapability;
+  /** The reads behind `list_runs` / `get_run_status`: the runs service and the
+   *  REQUESTER's actor, so a run sees exactly what the person who asked may
+   *  see. Absent → the tools report themselves unavailable. */
+  runs?: RunsReadCapability;
   /** Publish a typed event into the run's visibility stream (the same stream
    *  the runner's `tool_call`/`tool_result` go to). For facts a tool knows
    *  that the runner cannot see — which skill was loaded, later which artifact
@@ -675,5 +687,10 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     useSkillTool,
     ...GITHUB_READ_TOOLS,
   ],
+  /** The conductor (docs/reference/specs/agent-conductor.md): the three run
+   *  tools — the only toolset that holds them, so no other preset can start a
+   *  run — beside the GitHub reads, URL reading and the status card. No shell,
+   *  no files, no writes: a conductor coordinates and never does a child's job. */
+  conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
   none: [],
 };

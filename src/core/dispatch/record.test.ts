@@ -233,6 +233,30 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect(isRunRecord(record)).toBe(true);
     expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
   });
+
+  // docs/reference/specs/run-history.md item 46: a spawned child's record names
+  // the run that started it; every other record carries no key.
+  it("carries parentRunId for a spawned child, and the record still validates; no parent → no key", () => {
+    const child = assembleRunRecord({ ...base(), parentRunId: "run-parent" });
+    expect(child.parentRunId).toBe("run-parent");
+    expect(isRunRecord(child)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(child)))).toBe(true);
+    expect("parentRunId" in assembleRunRecord(base())).toBe(false);
+  });
+
+  it("the drain deadline's interrupted record carries the parent the registry row names (a child abandoned mid-flight still points at its parent)", () => {
+    const registry = new RunRegistry({ genId: () => "run-child", genToken: () => "tok", now: () => 1000 });
+    const run = registry.create("research · child", {
+      agent: "research",
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:2.0",
+      parentRunId: "run-parent",
+    });
+    const record = interruptedRunRecord(registry.getById(run.id)!, registry.snapshotById(run.id)!, 5000);
+    expect(record).toMatchObject({ id: "run-child", status: "interrupted", parentRunId: "run-parent" });
+    expect(isRunRecord(record)).toBe(true);
+  });
 });
 
 describe("registerFinishRecord — the finish record, written by the drain after the reply", () => {

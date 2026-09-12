@@ -8,15 +8,26 @@ import type { AgentDef, Identity, MachineClass } from "../agents/registry.js";
 
 export type { Identity, MachineClass };
 
-/** Where a cap on the profile came from — named on a clip and on a refusal. */
-export type BoundaryScope = "defaults" | "channel" | "user" | "directive";
-export const BOUNDARY_SCOPES: readonly BoundaryScope[] = ["defaults", "channel", "user", "directive"];
+/** Where a cap on the profile came from — named on a clip and on a refusal.
+ *  `parent` is the wall clock a spawning run had left when it started a child
+ *  (docs/reference/specs/routing-and-config.md item 20): a boundary on the
+ *  minutes axis alone, never on the identity or the class. */
+export type BoundaryScope = "defaults" | "channel" | "user" | "directive" | "parent";
+export const BOUNDARY_SCOPES: readonly BoundaryScope[] = ["defaults", "channel", "user", "directive", "parent"];
 
 /** The clip's source as the card and the config block name it: a scope's cap
  *  is `<scope> boundary`, the caller's own `budget:` directive is `budget
- *  directive` — one wording for every surface that says what clipped a run. */
+ *  directive`, a spawning run's remaining wall clock is `parent run's budget`
+ *  — one wording for every surface that says what clipped a run. */
 export function clipSourceLabel(scope: BoundaryScope): string {
-  return scope === "directive" ? "budget directive" : `${scope} boundary`;
+  switch (scope) {
+    case "directive":
+      return "budget directive";
+    case "parent":
+      return "parent run's budget";
+    default:
+      return `${scope} boundary`;
+  }
 }
 
 /** What one run may have: the three axes, and — when a boundary clipped the
@@ -127,6 +138,24 @@ export function intersectBoundaries(layers: readonly ScopedBoundary[]): Effectiv
     }
   }
   return out.maxMinutes || out.maxIdentity || out.machines ? out : undefined;
+}
+
+/**
+ * The boundaries on a child's path with its parent's remaining wall clock as
+ * one more layer (docs/reference/specs/routing-and-config.md item 20): the
+ * whole minutes the parent has left cap the child's minutes, attributed to
+ * `parent`, when that is tighter than every cap already on the path. The
+ * identity and the class are untouched — a parent hands a child time, never a
+ * credential or a machine. The same object comes back when the parent's clock
+ * is not the tightest cap, so a caller can tell "nothing changed" apart.
+ */
+export function boundedByParent(
+  boundary: EffectiveBoundary | undefined,
+  parentRemainingMs: number,
+): EffectiveBoundary | undefined {
+  const minutes = Math.floor(parentRemainingMs / 60_000);
+  if (boundary?.maxMinutes && boundary.maxMinutes.value <= minutes) return boundary;
+  return { ...boundary, maxMinutes: { value: minutes, scope: "parent" } };
 }
 
 /** Why a profile was refused: the axis, what the preset needs, what the

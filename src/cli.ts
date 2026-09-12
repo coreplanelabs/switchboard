@@ -81,7 +81,7 @@ import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
 import { residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
-import type { ChannelIO, RunReceipt, StatusHandle, StatusUpdate } from "./core/types.js";
+import type { ChannelIO, OpenedThread, RunReceipt, StatusHandle, StatusUpdate } from "./core/types.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
@@ -332,23 +332,42 @@ export class ConsoleIO implements ChannelIO {
    *  before that, and forever when no run was started (a config reply such as
    *  `help`, a refusal before a run existed). */
   finished: RunReceipt | undefined;
-  constructor(private readonly out: NodeJS.WritableStream = process.stdout) {}
+  /** How many child threads this one has opened; the next child's number. */
+  private children = 0;
+  constructor(
+    private readonly out: NodeJS.WritableStream = process.stdout,
+    /** This conversation's key — what a child thread's key derives from. */
+    private readonly threadKey: string = "cli",
+    /** Prefixed to every line a child writes, so two runs on one stream stay legible. */
+    private readonly prefix: string = "",
+  ) {}
   async reply(text: string): Promise<void> {
-    this.out.write("\n" + text + "\n");
+    this.out.write("\n" + this.prefix + text + "\n");
   }
   runFinished(receipt: RunReceipt): void {
     this.finished = receipt;
   }
   async status(initial: StatusUpdate): Promise<StatusHandle> {
-    console.error(initial.title);
+    console.error(this.prefix + initial.title);
     return {
       update: (f) =>
-        console.error([f.title, f.link?.url, f.detail].filter(Boolean).join(" | ").split("\n").join(" | ")),
-      done: async (f) => console.error(f.title),
+        console.error(
+          this.prefix + [f.title, f.link?.url, f.detail].filter(Boolean).join(" | ").split("\n").join(" | "),
+        ),
+      done: async (f) => console.error(this.prefix + f.title),
     };
   }
   async history(): Promise<[]> {
     return [];
+  }
+  /** A child run's thread on the harness (docs/reference/specs/thread-admission.md
+   *  item 6): the lead printed like a reply, a key derived from this one
+   *  (`<thread>/child-<n>`), and a channel whose every line wears the child's prefix. */
+  async openThread(lead: string): Promise<OpenedThread> {
+    const n = ++this.children;
+    await this.reply(lead);
+    const threadKey = `${this.threadKey}/child-${n}`;
+    return { thread: { threadKey }, io: new ConsoleIO(this.out, threadKey, `${this.prefix}[child-${n}] `) };
   }
 }
 
@@ -621,7 +640,7 @@ async function main(): Promise<void> {
   // The request's root (docs/reference/specs/tracing.md): the CLI's receipt is now.
   const receivedAt = systemClock();
   const trace = startRequestRoot(deps, { channel: "cli", receivedAt });
-  const io = new ConsoleIO();
+  const io = new ConsoleIO(process.stdout, parsed.threadKey);
   await dispatch(
     deps,
     { channelId: "cli:local", userId: "cli:local", threadKey: parsed.threadKey, text: parsed.text, receivedAt },

@@ -95,6 +95,37 @@ describe("RunsService.getRun", () => {
     expectNoToken(withMessages);
   });
 
+  // docs/reference/specs/run-history.md item 46: a spawned child's view names its
+  // parent, live and persisted alike; a run with no parent carries no key.
+  it("carries parentRunId from a live child's RunMeta and from a persisted child's record; no parent → no key", async () => {
+    const { reg, svc, store } = setup();
+    const child = reg.create("research · child", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:9",
+      parentRunId: "run-parent",
+    });
+    const plain = reg.create("general · plain", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:8",
+    });
+    await store!.put(record("r-child", NOW - DAY, { parentRunId: "run-parent" }));
+    const live = await svc.getRun(child.id);
+    expect(live.ok && live.value.parentRunId).toBe("run-parent");
+    const none = await svc.getRun(plain.id);
+    expect(none.ok && "parentRunId" in none.value).toBe(false);
+    const persisted = await svc.getRun("r-child");
+    expect(persisted.ok && persisted.value.parentRunId).toBe("run-parent");
+    const listed = await svc.listRuns({ status: "all", visibleTo: ALL });
+    expect(listed.runs.map((r) => [r.id, r.parentRunId])).toEqual(
+      expect.arrayContaining([
+        [child.id, "run-parent"],
+        ["r-child", "run-parent"],
+      ]),
+    );
+  });
+
   it("returns a persisted run in the same shape (finished:true, persisted:true), events only on include", async () => {
     const { svc, store } = setup();
     await store!.put(record("r1", NOW - DAY));

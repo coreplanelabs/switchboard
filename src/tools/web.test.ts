@@ -540,6 +540,8 @@ describe("toolset + agent wiring", () => {
     expect(names("full")).not.toContain("web_search");
     expect(names("readonly")).toContain("web_fetch");
     expect(names("readonly")).not.toContain("web_search");
+    expect(names("conductor")).toContain("web_fetch");
+    expect(names("conductor")).not.toContain("web_search");
     expect(names("none")).toEqual([]);
   });
 

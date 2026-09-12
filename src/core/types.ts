@@ -126,6 +126,19 @@ export interface RunReceipt {
   status: RunFinalStatus;
 }
 
+/** A thread a channel opened for a child run (docs/reference/specs/thread-admission.md
+ *  item 6): the key the child is dispatched on and the handle its replies,
+ *  card and history go through. */
+export interface OpenedThread {
+  thread: {
+    /** The new thread's key, namespaced like every thread key (`slack:C…:<ts>`). */
+    threadKey: string;
+    /** A link to the thread's lead message on its platform, when the platform has one. */
+    sourceUrl?: string;
+  };
+  io: ChannelIO;
+}
+
 /** What the core needs from a channel to serve one request. */
 export interface ChannelIO {
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
@@ -160,4 +173,14 @@ export interface ChannelIO {
    * background; Slack/CLI need nothing from it. Optional, like runFinished.
    */
   runStarted?(started: { id: string }): void;
+  /**
+   * Open a thread of this channel's own for a child run
+   * (docs/reference/specs/thread-admission.md item 6): post `lead` where a new
+   * thread can start — top-level in this conversation's channel — and hand
+   * back the thread's key and a handle bound to it. Optional: a single-shot
+   * channel (HTTP, MCP) has no thread to open, and a spawn from such a channel
+   * is refused by name (`spawn_unsupported`); it never falls back to the
+   * parent's own thread.
+   */
+  openThread?(lead: string): Promise<OpenedThread>;
 }

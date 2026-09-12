@@ -38,6 +38,7 @@ import type {
   HistoryItem,
   ImageAttachment,
   IncomingMessage,
+  OpenedThread,
   StatusHandle,
   StatusUpdate,
 } from "../core/types.js";
@@ -495,6 +496,37 @@ export class SlackIO implements ChannelIO {
         text: chunk,
       });
     }
+  }
+
+  /** A child run's thread of its own (docs/reference/specs/slack-channel.md item
+   *  11): the lead is posted top-level in this conversation's channel — a
+   *  Slack thread hangs off a top-level message, never off a reply — and the
+   *  thread's IO is built from the posted `ts` the way `resumeSlackIO` builds
+   *  one from a row's parts: the same requester, the same clients and budget,
+   *  no triggering event. The permalink rides as the thread's `sourceUrl` when
+   *  the team URL is known. */
+  async openThread(lead: string): Promise<OpenedThread> {
+    const posted = await this.client.chat.postMessage({ channel: this.ev.channel, text: mdToMrkdwn(lead) });
+    // The thread is keyed by the lead's `ts`: an answer without one is refused
+    // by name (the spawn relays it as `spawn_failed`), never a thread on `undefined`.
+    const ts = posted.ts;
+    if (typeof ts !== "string" || ts === "")
+      throw new Error(
+        `[slack] chat.postMessage answered without a ts for the child thread's lead in ${this.ev.channel}`,
+      );
+    const team = await resolveTeamUrl(this.client);
+    const io = new SlackIO(
+      this.client,
+      { channel: this.ev.channel, user: this.ev.user, text: "", ts, threadTs: ts, botUserId: this.ev.botUserId },
+      { statusClient: this.opts.statusClient, statusBudget: this.opts.statusBudget },
+    );
+    return {
+      thread: {
+        threadKey: `${PLATFORM}:${this.ev.channel}:${ts}`,
+        ...(team ? { sourceUrl: slackPermalink(team, this.ev.channel, ts, ts) } : {}),
+      },
+      io,
+    };
   }
 
   async status(initial: StatusUpdate): Promise<StatusHandle> {

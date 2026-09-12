@@ -275,6 +275,24 @@ describe("askExitCode — what the `ask` process exits with (the ConsoleIO chann
     await io.reply("four");
     expect(chunks.join("")).toBe("\nfour\n");
   });
+
+  // docs/reference/specs/thread-admission.md item 6: the harness opens a child
+  // thread of its own — a derived key, the child's output prefixed so two runs
+  // on one stream stay legible.
+  it("ConsoleIO.openThread derives the child's key from the parent's (`<thread>/child-<n>`), prints the lead, and prefixes the child's replies; a second child gets the next number", async () => {
+    const chunks: string[] = [];
+    const out = { write: (chunk: string) => (chunks.push(chunk), true) } as unknown as NodeJS.WritableStream;
+    const io = new ConsoleIO(out, "cli:work");
+    const first = await io.openThread("↳ research child");
+    const second = await io.openThread("↳ another");
+    expect(first.thread).toEqual({ threadKey: "cli:work/child-1" });
+    expect(second.thread).toEqual({ threadKey: "cli:work/child-2" });
+    await first.io.reply("child answer");
+    expect(chunks.join("")).toBe("\n↳ research child\n\n↳ another\n\n[child-1] child answer\n");
+    // A child's own child derives from the child's key, and its output nests the prefix.
+    const grandchild = await first.io.openThread!("↳ deeper");
+    expect(grandchild.thread.threadKey).toBe("cli:work/child-1/child-1");
+  });
 });
 
 describe("runCommand", () => {

@@ -9,6 +9,7 @@ import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
 import type { ShipConfig } from "./core/shipPipeline.js";
+import type { SpawnConfig } from "./core/dispatch/spawn.js";
 import type { DashboardConfig } from "./core/dashboardAuthConfig.js";
 import { hasAction } from "./core/authz/authorize.js";
 import {
@@ -199,6 +200,13 @@ export interface AppConfig {
    * validated at load.
    */
   ship?: ShipConfig;
+  /**
+   * The fan-out cap a spawning run meets (docs/reference/specs/agent-conductor.md
+   * item 5): `maxChildren` live children per run (default 3, at least 1); a
+   * spawn past it is refused by name until one finishes. Deployment-level like
+   * `ship`; validated at load.
+   */
+  spawn?: SpawnConfig;
   /** Slack adapter behavior that is not pure transport. */
   slack?: SlackConfig;
   /**

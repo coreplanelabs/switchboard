@@ -36,6 +36,11 @@ export interface RunMeta {
   /** Our process saw the message that started this run (docs/reference/specs/tracing.md);
    *  the run's duration opens here, falling back to `startedAt` when absent. */
   receivedAt?: number;
+  /** The run that spawned this one (docs/reference/specs/run-history.md item 46):
+   *  set by the dispatcher on a child started through `spawnChild()`, so the
+   *  summary and the record name the parent and a fan-out cap can count a
+   *  parent's live children. */
+  parentRunId?: string;
 }
 
 /** `seq` is the event's 1-based position in the run's stream (the registry's

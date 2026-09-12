@@ -45,7 +45,7 @@ export const SEAMS = [
     role: "what runs",
     lead: "What runs.",
     body: "A system prompt, a toolset and a budget, kept as data in a registry. Five ship, and a new one is a registry entry — the dispatcher that runs them never changes.",
-    implementations: ["general", "coding", "review", "ship", "research", "explore"],
+    implementations: ["general", "coding", "review", "ship", "research", "explore", "conductor"],
     link: "/how-to/add-an-agent",
     cta: "Add an agent",
   },

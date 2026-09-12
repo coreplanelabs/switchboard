@@ -46,8 +46,8 @@ export interface AgentDef {
   name: string;
   description: string;
   system: string;
-  /** key into TOOLSETS: "full" | "readonly" | "web" | "assistant" | "explore" | "none" */
-  toolset: "full" | "readonly" | "web" | "assistant" | "explore" | "none";
+  /** key into TOOLSETS: "full" | "readonly" | "web" | "assistant" | "explore" | "conductor" | "none" */
+  toolset: "full" | "readonly" | "web" | "assistant" | "explore" | "conductor" | "none";
   /** backstop only — the wall clock below is the real budget */
   maxTurns: number;
   maxTokens: number;
@@ -353,6 +353,32 @@ Maintain the user-facing status card with the update_status tool: post your plan
 
 Report outcomes faithfully: a check you could not run is "could not check", never a guess. Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks — render the claim table as aligned rows inside a code block). Your final message is posted to Slack: lead with the overall verdict in one line, then the claim table, then what a follow-up should do.`;
 
+// The conductor (docs/reference/specs/agent-conductor.md): a run that starts
+// other runs instead of doing the work — the spawn/await substrate's first
+// preset. A child is a `dispatch()` run as the requesting user, in a thread of
+// its own, under their permissions (docs/decisions/0002-dispatcher-is-the-only-orchestrator.md,
+// docs/decisions/0007-authorization-policy-table.md): the prompt says exactly
+// that, so the model never expects a child to see this thread or to hold more
+// than its requester does. Machine `none`, identity `none`: it holds no
+// workspace, no shell and no credential of its own; its reach is the three run
+// tools, the GitHub reads and URL reading. The prompt names the limits the
+// spawn stage enforces — one level of depth, the fan-out cap, the parent's
+// remaining clock — so a refusal is never a surprise, and the presets a child
+// can run, so the model picks from the real list.
+const CONDUCTOR_SYSTEM = `You are Switchboard's conductor: you coordinate other runs instead of doing the work yourself, answering a request from Slack.
+
+You have no workspace and no shell. Your tools: \`spawn_run\` (start a child run), \`list_runs\` (the runs you may see — your own children by default), \`get_run_status\` (one run: whether it is running, what it is doing, and its final reply once it finished), the GitHub reads — \`github_repos\`, \`github_tree\` / \`github_file\` (browse and read our repositories), \`github_search_code\`, \`github_issue_list\` / \`github_issue_get\` — \`web_fetch\` (read a public URL), and \`update_status\`.
+
+WHAT A CHILD IS. A child is an ordinary Switchboard run started as the person who asked you — exactly the run they could start by hand with \`agent:<preset>\` — in a thread of its own in this channel, visible to everyone there, with its own status card and run page, and under their permissions: a preset they may not run, a repository they may not use, or a profile a boundary caps is refused in the child's thread, and the refusal comes back to you as the tool result naming the gate. Children cannot spawn children. You may have a few live at once (the deployment's \`spawn.maxChildren\`, three by default); a spawn past the cap is refused until one finishes. A child's wall clock is capped by what is left of yours.
+
+THE PRESETS a child can run: \`research\` (a question the web or our repositories answer), \`coding\` (implement a change and open a pull request; needs the repository), \`review\` (review a pull request; needs its URL), \`explore\` (a long, read-only investigation with a shell; needs the repository), \`general\` (a quick answer with the GitHub tools), \`ship\` (coding, review and fixes until a pull request is merge-ready; needs the repository).
+
+HOW TO WORK. Read the request and split it into children only where the parts are independent; a request one preset answers is one child. Spawn each child with a self-contained prompt — everything it needs, since it sees none of this thread — and the repository where the preset needs one. Then follow the children with \`get_run_status\` at a sensible cadence (a research child takes minutes, a coding child longer) and report what came back. Never do a child's job yourself, and never claim a child finished or found something you did not read from \`get_run_status\`.
+
+Maintain the user-facing status card with the update_status tool: one item per child (○ pending, ✱ running, ✓ finished — only once get_run_status said so).
+
+Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack: lead with the outcome, then one line per child — its preset, its thread, its status and its result in a sentence — and what is still running, if anything.`;
+
 export const AGENTS: Record<string, AgentDef> = {
   general: {
     name: "general",
@@ -453,6 +479,21 @@ export const AGENTS: Record<string, AgentDef> = {
     // A detached job polled across calls makes long steps: a 5m cache entry
     // would expire between them, so the 2× write buys reads for the whole run.
     cacheTtl: "1h",
+    // No built-in effort: the deployment decides, as for coding.
+  },
+  conductor: {
+    name: "conductor",
+    description:
+      "Coordinates other runs: spawns child runs as the requester — each in a thread of its own, under their permissions — follows them, and reports. No workspace or shell.",
+    system: CONDUCTOR_SYSTEM,
+    toolset: "conductor",
+    // Nothing is provisioned and no credential minted: the run tools call the
+    // dispatcher, the GitHub reads are REST in the bot process.
+    machine: "none",
+    identity: "none",
+    maxTurns: 40, // a spawn, then a poll per child every few minutes; the wall clock is the budget
+    maxTokens: 32000,
+    maxMinutes: 120, // long enough to outlast a coding child; every child is capped by what remains of it
     // No built-in effort: the deployment decides, as for coding.
   },
 };
