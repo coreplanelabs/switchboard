@@ -205,13 +205,24 @@ describe("toolset wiring", () => {
   const writes = GITHUB_ISSUE_WRITE_TOOLS.map((t) => t.name);
 
   it("reads are in every toolset with a tool loop; issue writes only in assistant (general) and full (coding); none stays empty", () => {
-    for (const key of ["full", "readonly", "web", "assistant", "explore"])
+    for (const key of ["full", "readonly", "web", "assistant", "explore", "conductor"])
       expect(names(key), key).toEqual(expect.arrayContaining(reads));
     expect(names("full")).toEqual(expect.arrayContaining(writes));
     expect(names("assistant")).toEqual(expect.arrayContaining(writes));
-    for (const key of ["readonly", "web", "explore"])
+    for (const key of ["readonly", "web", "explore", "conductor"])
       for (const w of writes) expect(names(key), `${key} ${w}`).not.toContain(w);
     expect(names("none")).toEqual([]);
+  });
+
+  // docs/reference/specs/agent-conductor.md item 2: the three run tools, the
+  // GitHub reads, URL reading and the status card — no shell, no files, no
+  // writes; and the run tools are in no other toolset (dark by default).
+  it("conductor holds spawn_run, list_runs, get_run_status, web_fetch, update_status and the GitHub reads — no shell, no files, no submit_*, no issue writes; no other toolset holds a run tool", () => {
+    expect(names("conductor").sort()).toEqual(
+      ["spawn_run", "list_runs", "get_run_status", "web_fetch", "update_status", ...reads].sort(),
+    );
+    for (const key of Object.keys(TOOLSETS).filter((k) => k !== "conductor"))
+      for (const t of ["spawn_run", "list_runs", "get_run_status"]) expect(names(key), `${key} ${t}`).not.toContain(t);
   });
 
   it("assistant has no shell, no file writes, no verdict/PR submission — GitHub + web_fetch + status only", () => {

@@ -53,6 +53,8 @@ import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
 import { shipPresetFor } from "./shipPipeline.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
+import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
+import type { DispatchOutcome } from "./dispatch/outcome.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
 import type { CardShell } from "./statusCardFrame.js";
@@ -110,14 +112,29 @@ export interface DispatchOptions {
   /** A fresh turn's wait behind the run it was parked on (the `queued …
    *  behind the previous run` caption; a `request` attr; never a duration term). */
   queuedBehindMs?: number;
+  /** Set by `spawnChild()` alone (dispatch/spawn.ts; routing-and-config item
+   *  20): this request is a child run — the run that spawned it, its depth,
+   *  and the wall clock the parent had left, which the child's effective
+   *  profile takes as one more boundary. Absent for every request a person, a
+   *  schedule or a resume started. */
+  parent?: ParentRun;
 }
+
+/** How a request ended, for whoever started it (dispatch/outcome.ts): the
+ *  request's status and, when a gate ended it, that gate's name — what a
+ *  spawning parent relays to its model as a named tool result. */
+export type { DispatchOutcome } from "./dispatch/outcome.js";
 
 export async function dispatch(
   deps: CoreDeps,
   msg: IncomingMessage,
   io: ChannelIO,
   opts: DispatchOptions = {},
-): Promise<void> {
+): Promise<DispatchOutcome> {
+  // How this request ends, for the caller: every exit below returns this one
+  // object and the outer finally stamps its status before the promise settles,
+  // so the function resolves exactly when it did before it answered anything.
+  const ended: DispatchOutcome = { status: "completed" };
   const resume = opts.resume;
   const restart = opts.restart;
   const clock = deps.clock ?? systemClock;
@@ -150,6 +167,7 @@ export async function dispatch(
   let refused = false;
   const refuse = <T>(outcome: string, fn: () => Promise<T>) => {
     refused = true;
+    ended.refusal ??= outcome;
     return root.span("dispatch.refuse", fn, { attrs: { outcome } });
   };
   // The card's shape and queued lines at a close (docs/reference/specs/tracing.md item 5):
@@ -241,14 +259,14 @@ export async function dispatch(
     // Stage A (dispatch/fastPath.ts): a message that names a registered chat
     // command is answered inline — never a model turn, and before the history
     // fetch, so a command costs none.
-    if (await answerChatCommand(deps, { msg, io, ending, trace })) return;
+    if (await answerChatCommand(deps, { msg, io, ending, trace })) return ended;
 
     const { directives, history } = await readRequest({ msg, io, root });
 
     // The natural-language op fast path (dispatch/fastPath.ts): a conservative
     // op form is the registry command it names; an op that cannot serve falls
     // through to the agent.
-    if (await answerOperation(deps, { msg, io, ending, trace, directives, history })) return;
+    if (await answerOperation(deps, { msg, io, ending, trace, directives, history })) return ended;
 
     // The (agent, model, effort) this request resolves to (dispatch/resolve.ts):
     // a directive, else the thread's sticky one, else the config scopes.
@@ -256,7 +274,8 @@ export async function dispatch(
 
     // The agent gate (dispatch/authorize.ts), against the RESOLVED agent and
     // before the thread is claimed.
-    if ((await authorizeAgent(deps, { msg, io, refuse, agentName: resolved.agentName })).kind === "refused") return;
+    if ((await authorizeAgent(deps, { msg, io, refuse, agentName: resolved.agentName })).kind === "refused")
+      return ended;
 
     // The preset as this deployment declares it: the registry's def, except
     // ship, whose declared budget is the `ship.maxMinutes` knob
@@ -264,20 +283,27 @@ export async function dispatch(
     // card's budget line and the pipeline's wall clock read one number.
     const agent = resolved.agentName === "ship" ? shipPresetFor(deps.config.config.ship) : getAgent(resolved.agentName);
     // The run's effective profile (dispatch/resolve.ts; record 0026): preset ∩
-    // the request's `budget:` directive ∩ the boundaries on the path — and the
-    // profile gate (dispatch/authorize.ts) right after the agent gate and
-    // before the thread is claimed, so an identity or class a boundary caps is
-    // refused by name with no card, no row and no executor. Every stage below
-    // reads the profile — the factory, the ledger row, the runner — never the
-    // preset's own fields.
+    // the request's `budget:` directive ∩ the boundaries on the path — a
+    // child's parent's remaining wall clock among them (routing-and-config
+    // item 20) — and the profile gate (dispatch/authorize.ts) right after the
+    // agent gate and before the thread is claimed, so an identity or class a
+    // boundary caps is refused by name with no card, no row and no executor.
+    // Every stage below reads the profile — the factory, the ledger row, the
+    // runner — never the preset's own fields.
     const profileGate = await authorizeProfile(deps, {
       msg,
       io,
       refuse,
       agent,
-      resolution: resolveProfile({ agent, resolved, resume, budget: directives.budget }),
+      resolution: resolveProfile({
+        agent,
+        resolved,
+        resume,
+        budget: directives.budget,
+        ...(opts.parent ? { parentRemainingMs: opts.parent.remainingMs } : {}),
+      }),
     });
-    if (profileGate.kind === "refused") return;
+    if (profileGate.kind === "refused") return ended;
     const { profile } = profileGate;
 
     // Thread admission (docs/reference/specs/thread-admission.md item 1) and the
@@ -307,8 +333,12 @@ export async function dispatch(
       },
     };
     const outcome = await admit(deps, admissionCtx);
-    if (outcome.kind === "redispatch") return dispatch(deps, msg, io);
-    if (outcome.kind !== "proceed") return;
+    // A redispatch (the boot-gap steer that found its row gone) is a request
+    // of its own — its own root, no resume or restart — but the same message:
+    // a child stays its parent's child, so `parent` rides along, and its
+    // outcome is the one the caller gets.
+    if (outcome.kind === "redispatch") return dispatch(deps, msg, io, opts.parent ? { parent: opts.parent } : {});
+    if (outcome.kind !== "proceed") return ended;
     admitted = outcome.admitted;
     const taken = await adoptCarriedRun(deps, admissionCtx);
     ledgerRun = taken.ledgerRun;
@@ -372,7 +402,7 @@ export async function dispatch(
       needsRepo,
       repoCtx,
     });
-    if (repoGate.kind === "refused") return;
+    if (repoGate.kind === "refused") return ended;
 
     // A boundary or a `budget:` directive that clipped this run's budget — or
     // a directive that narrowed nothing — is named on the card from here,
@@ -411,7 +441,7 @@ export async function dispatch(
         refuse,
         doneLines,
       });
-      return;
+      return ended;
     }
 
     // A resume continues the exact conversation the ledger held (item 38);
@@ -436,12 +466,14 @@ export async function dispatch(
       directives,
       repoCtx,
     });
-    if (headPreflight.kind === "refused") return;
+    if (headPreflight.kind === "refused") return ended;
 
     // The reservation (item 42): the run's row on every surface BEFORE the
     // workspace attach (dispatch/provision.ts) — the registry row, its label and
     // link, the request and context events — then, for a fresh request, the
     // ledger row. `registered` the moment the row exists: a later throw discards it.
+    // A child names its parent on every row (run-history item 46).
+    const parentRunId = opts.parent?.runId;
     const registration = await registerRun(deps, {
       msg,
       io,
@@ -460,6 +492,7 @@ export async function dispatch(
       registry,
       shell,
       admitted,
+      parentRunId,
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
@@ -479,6 +512,7 @@ export async function dispatch(
       hooks: reservationHooks,
       admitted,
       root,
+      parentRunId,
     });
     if (reservation) {
       reserved = reservation.reserved;
@@ -500,7 +534,7 @@ export async function dispatch(
       repoCtx,
       root,
     });
-    if (attach.kind === "refused") return;
+    if (attach.kind === "refused") return ended;
     const { round } = attach;
     const { executor, note, resident } = round.selection;
     if (fencedWhileAttaching) {
@@ -511,7 +545,7 @@ export async function dispatch(
         `[dispatch] ${msg.threadKey} run ${runId}: another generation took the run during the attach — stopping here, it restarts there`,
       );
       if (executor.release) await executor.release("always").catch(() => {});
-      return;
+      return ended;
     }
 
     // Attach-head check (dispatch/authorize.ts): for a PR review on the resident
@@ -530,7 +564,7 @@ export async function dispatch(
       repoCtx,
       root,
     });
-    if (headGate.kind === "refused") return;
+    if (headGate.kind === "refused") return ended;
     repoCtx = headGate.repoCtx;
     const verifiedAtAttach = headGate.verifiedAtAttach;
     // The run's meta went out at the reservation with the head as resolved
@@ -597,7 +631,18 @@ export async function dispatch(
     }
     // Tombstone-first (dispatch/record.ts): a provisional interrupted record
     // the moment the run loop owns the run; the finish write replaces it.
-    writeTombstone(deps, { msg, agent, profile, resolved, repoCtx, channelVisibility, run, registry, resume });
+    writeTombstone(deps, {
+      msg,
+      agent,
+      profile,
+      resolved,
+      repoCtx,
+      channelVisibility,
+      run,
+      registry,
+      resume,
+      parentRunId,
+    });
     // The ledger claim (dispatch/run.ts), once the prompt exists: the reserved
     // row promoted, or a resume's adopted row re-subscribed.
     ledgerRun = await claimRun(deps, {
@@ -620,7 +665,15 @@ export async function dispatch(
       card,
       clock,
       root,
+      parentRunId,
     });
+    // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
+    // agent-conductor.md): spawn a child as this run, and read the runs its
+    // REQUESTER may. Only a toolset that holds the run tools reaches either.
+    const { spawn, runs } = runToolCapabilities(
+      { core: deps, dispatch, registry, clock },
+      { runId: run.id, depth: opts.parent?.depth ?? 0, agentName: agent.name, msg, io },
+    );
     // The agent loop (dispatch/runLoop.ts): the model turn, the follow-up inbox,
     // the settle and the post-steps, the finish. A throw propagates to the
     // outer catch after the workspace is released.
@@ -656,6 +709,9 @@ export async function dispatch(
       channelVisibility,
       publishText,
       ending,
+      spawn,
+      runs,
+      parentRunId,
     });
     const {
       answer,
@@ -699,7 +755,7 @@ export async function dispatch(
       releaseWorkspace,
       root,
     });
-    if (delivery.kind === "fenced") return;
+    if (delivery.kind === "fenced") return ended;
 
     // After the reply (dispatch/reply.ts): the memory reflection pass and the
     // deterministic review post-step.
@@ -723,6 +779,7 @@ export async function dispatch(
       carried,
       root,
     });
+    return ended;
   } catch (err) {
     caught = true;
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -786,9 +843,9 @@ export async function dispatch(
     const stopMode = settled.kind === "handed-on" ? undefined : settled.stopMode;
     // The request is over: its root ends here, after the seal and the tail,
     // with how it went — before the fresh turn below starts a root of its own.
-    root.end(caught ? "error" : "ok", {
-      status: caught ? "failed" : refused ? "refused" : stopMode ? "stopped" : "completed",
-    });
+    // The same status is the caller's outcome.
+    ended.status = caught ? "failed" : refused ? "refused" : stopMode ? "stopped" : "completed";
+    root.end(caught ? "error" : "ok", { status: ended.status });
     if (settled.kind === "handed-on") {
       const fresh = prepareFreshTurn(deps, { agent: settled.agent, pending: settled.pending, clock });
       await dispatch(deps, fresh.msg, fresh.io, fresh.opts).catch((err: unknown) =>
@@ -811,4 +868,7 @@ export async function dispatch(
     void ledgerRun?.close();
     activeRuns--;
   }
+  // Reached from the catch alone (every path in the try returns): the failed
+  // request's outcome, its status stamped by the finally above.
+  return ended;
 }

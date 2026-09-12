@@ -109,7 +109,7 @@ defaults:
 # bypassed via directives or config scopes. Names must be registered agents /
 # owner/name slugs, or the load fails.
 # restrict:
-#   agents: [coding]
+#   agents: [coding, conductor]   # conductor: fan-out closed unless granted (docs/reference/specs/agent-conductor.md)
 #   repos: [acme/api]
 #
 # `grants`: what ANY actor holds, in one shape, keyed by its platform-namespaced
@@ -278,6 +278,15 @@ workspaceDir: ./workspaces
 # ship:
 #   maxRounds: 3      # review rounds per pipeline
 #   maxMinutes: 120   # the ship preset's wall-clock budget in minutes (the registry's default)
+
+# The fan-out cap a spawning run meets (docs/reference/specs/agent-conductor.md).
+# `agent:conductor` starts child runs as the person who asked — each an
+# ordinary run in a thread of its own, under that person's permissions — and
+# at most `maxChildren` of one run's children are live at once: a spawn past
+# the cap is refused by name until a child finishes. A child cannot spawn.
+# Default shown; an integer >= 1.
+# spawn:
+#   maxChildren: 3
 
 # Spend reporting: GET /costs (Access-gated). Optional. See docs/reference/specs/costs.md.
 # costs:

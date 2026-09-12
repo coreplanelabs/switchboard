@@ -286,6 +286,45 @@ describe("SlackIO.status on a resumed run (existing card)", () => {
   });
 });
 
+// docs/reference/specs/slack-channel.md item 11: a child run's thread of its own —
+// the lead posted top-level in the parent's channel, the thread IO built from
+// the posted `ts` the way `resumeSlackIO` builds one from a row's parts.
+describe("SlackIO.openThread (docs/reference/specs/slack-channel.md item 11)", () => {
+  const ev = { channel: "C1", user: "UA", text: "spawn", ts: "1.5", threadTs: "1.0", botUserId: "UBOT" };
+  function client(teamUrl?: string) {
+    const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true, ts: "77.1" }));
+    const test = vi.fn(async () => ({ ok: true, ...(teamUrl ? { url: teamUrl } : {}) }));
+    const c = { chat: { postMessage }, auth: { test } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    return { c, postMessage };
+  }
+
+  it("posts the lead top-level in the parent's channel (no thread_ts, mrkdwn), keys the thread by the posted ts, and the returned IO replies under that ts", async () => {
+    const { c, postMessage } = client();
+    const opened = await new SlackIO(c, ev).openThread("↳ *research* child");
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(postMessage.mock.calls[0][0]).toEqual({ channel: "C1", text: "↳ *research* child" });
+    expect(opened.thread.threadKey).toBe("slack:C1:77.1");
+    // No team URL known (and none cached yet in this process): no sourceUrl key.
+    expect("sourceUrl" in opened.thread).toBe(false);
+    await opened.io.reply("child answer");
+    expect(postMessage).toHaveBeenCalledTimes(2);
+    expect(postMessage.mock.calls[1][0]).toMatchObject({ channel: "C1", thread_ts: "77.1", text: "child answer" });
+  });
+
+  it("carries the lead's permalink as the thread's sourceUrl when the team URL is known", async () => {
+    const known = client("https://acme.slack.com/");
+    const opened = await new SlackIO(known.c, ev).openThread("lead");
+    expect(opened.thread.sourceUrl).toBe("https://acme.slack.com/archives/C1/p771");
+  });
+
+  it("a chat.postMessage answer without a ts is refused by name — never a thread keyed on `undefined`", async () => {
+    const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
+    const test = vi.fn(async () => ({ ok: true }));
+    const c = { chat: { postMessage }, auth: { test } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    await expect(new SlackIO(c, ev).openThread("lead")).rejects.toThrow(/chat\.postMessage answered without a ts/);
+  });
+});
+
 describe("SlackIO.attach (docs/reference/specs/slack-channel.md item 10)", () => {
   const ev = { channel: "C1", user: "UA", text: "hi", ts: "3.0", threadTs: "1.0", botUserId: "UBOT" };
   const file = {

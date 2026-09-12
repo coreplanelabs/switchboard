@@ -61,6 +61,9 @@ export interface LiveRunMeta {
    *  budget instead of re-reading the preset's. Absent on rows written before
    *  profiles existed. */
   profile?: RunProfile;
+  /** The run that spawned this one (item 46), so a reclaimed child's record
+   *  still names its parent. Absent on every run a person or a schedule started. */
+  parentRunId?: string;
   /** Which executor the run attached: what `makeExecutor` chose. */
   selection?: "resident" | "sandbox" | "local" | "none";
   /** The worktree path the system prompt names. */

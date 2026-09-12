@@ -648,4 +648,25 @@ describe("isRunRecord — the profile field", () => {
     expect(isRunRecord({ ...record(), profile: { ...profile, preset: 1 } })).toBe(false);
     expect(isRunRecord({ ...record(), profile: "coding" })).toBe(false);
   });
+
+  it("accepts `parent` as a clip scope: a child clipped to its parent's remaining budget validates", () => {
+    expect(isRunRecord(record({ profile: { ...profile, boundedBy: "parent" } }))).toBe(true);
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md item 46 — a spawned child's record
+// names the run that started it.
+describe("isRunRecord — the parentRunId field", () => {
+  it("accepts a parentRunId of the run-id shape — also after a JSON round-trip — and a record without one carries no key", () => {
+    expect(isRunRecord(record({ parentRunId: "run-parent_1" }))).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record({ parentRunId: "run-parent_1" }))))).toBe(true);
+    expect("parentRunId" in record()).toBe(false);
+    expect(isRunRecord(record())).toBe(true);
+  });
+
+  it("refuses a parentRunId that is not a run id: a non-string, an empty string, a path", () => {
+    expect(isRunRecord({ ...record(), parentRunId: 7 })).toBe(false);
+    expect(isRunRecord({ ...record(), parentRunId: "" })).toBe(false);
+    expect(isRunRecord({ ...record(), parentRunId: "../other" })).toBe(false);
+  });
 });

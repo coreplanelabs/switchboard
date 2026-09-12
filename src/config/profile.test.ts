@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { AGENTS } from "../agents/registry.js";
 import {
+  BOUNDARY_SCOPES,
+  boundedByParent,
   budgetedAgent,
+  clipSourceLabel,
   declaredProfile,
   effectiveProfile,
   identityWithin,
@@ -177,6 +180,36 @@ describe("effectiveProfile — preset ∩ directives ∩ boundary, clip or refus
       kind: "profile",
       profile: declaredProfile(AGENTS.general),
     });
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 20 — a child run's
+// effective profile takes the parent's remaining wall clock as one more
+// boundary, on the minutes axis alone, attributed to `parent`.
+describe("boundedByParent — the parent's remaining wall clock as one more boundary", () => {
+  it("caps the minutes at the whole minutes the parent has left, attributed to `parent`, and touches no other axis", () => {
+    const channel = intersectBoundaries([layer("channel", { maxIdentity: "read", maxMinutes: 45 })]);
+    expect(boundedByParent(channel, 7 * 60_000 + 59_000)).toEqual({
+      maxMinutes: { value: 7, scope: "parent" },
+      maxIdentity: { value: "read", scope: "channel" },
+    });
+    expect(boundedByParent(undefined, 30 * 60_000)).toEqual({ maxMinutes: { value: 30, scope: "parent" } });
+  });
+
+  it("a parent with more time left than the tightest cap on the path changes nothing", () => {
+    const channel = intersectBoundaries([layer("channel", { maxMinutes: 10 })]);
+    expect(boundedByParent(channel, 60 * 60_000)).toBe(channel);
+    expect(boundedByParent(channel, 10 * 60_000)).toBe(channel);
+  });
+
+  it("the profile then clips as for any boundary: the child of a parent with 5 minutes left runs 5 as `parent`; the source label reads `parent run's budget`", () => {
+    const bounded = boundedByParent(undefined, 5 * 60_000 + 200);
+    expect(effectiveProfile(AGENTS.research, {}, bounded)).toEqual({
+      kind: "profile",
+      profile: { machine: "none", identity: "none", minutes: 5, boundedBy: "parent" },
+    });
+    expect(clipSourceLabel("parent")).toBe("parent run's budget");
+    expect(BOUNDARY_SCOPES).toContain("parent");
   });
 });
 

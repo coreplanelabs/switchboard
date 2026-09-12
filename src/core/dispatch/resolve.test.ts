@@ -481,4 +481,38 @@ describe("resolveProfile — the effective profile once the preset is known", ()
       profile: declaredProfile(coding),
     });
   });
+
+  // docs/reference/specs/routing-and-config.md item 20: a spawned child takes the
+  // wall clock its parent had left as one more boundary — on the minutes alone.
+  it("a spawning parent's remaining wall clock is one more boundary: it clips the child's minutes as `parent`, a parent with more time left changes nothing, and a tighter scope boundary keeps the attribution", () => {
+    const research = getAgent("research");
+    expect(
+      resolveProfile({
+        agent: research,
+        resolved: resolvedIn(YAML, "research"),
+        resume: undefined,
+        parentRemainingMs: 5 * 60_000 + 30_000,
+      }),
+    ).toEqual({ kind: "profile", profile: { machine: "none", identity: "none", minutes: 5, boundedBy: "parent" } });
+    expect(
+      resolveProfile({
+        agent: research,
+        resolved: resolvedIn(YAML, "research"),
+        resume: undefined,
+        parentRemainingMs: 60 * 60_000,
+      }),
+    ).toEqual({ kind: "profile", profile: declaredProfile(research) });
+    // The channel caps at 10, under the parent's 30: the channel is what clipped the review preset's 25.
+    expect(
+      resolveProfile({
+        agent: getAgent("review"),
+        resolved: resolvedIn(BOUNDED_YAML, "review"),
+        resume: undefined,
+        parentRemainingMs: 30 * 60_000,
+      }),
+    ).toEqual({
+      kind: "profile",
+      profile: { machine: "repo-resident", identity: "read", minutes: 10, boundedBy: "channel" },
+    });
+  });
 });

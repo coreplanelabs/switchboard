@@ -82,6 +82,7 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.explore.identity).toBe("read");
     expect(AGENTS.general.identity).toBe("none");
     expect(AGENTS.research.identity).toBe("none");
+    expect(AGENTS.conductor.identity).toBe("none");
   });
 
   it("getAgent throws on unknown agents, naming the available ones", () => {
@@ -675,6 +676,36 @@ describe("review prompts: the unit contract check (agent-review item 17)", () =>
 // pull request. Its prompt carries the one fact about the cold sandbox a long
 // job depends on: a command is capped at twenty minutes, and a job past it is
 // detached with `setsid -f` (a `nohup` job dies with the command that started it).
+describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
+  it("conductor: machine none, identity none, the conductor toolset, 120 minutes so it can outlast its children, no built-in effort and no resident prompt", () => {
+    expect(AGENTS.conductor.machine).toBe("none");
+    expect(AGENTS.conductor.identity).toBe("none");
+    expect(AGENTS.conductor.toolset).toBe("conductor");
+    expect(AGENTS.conductor.maxMinutes).toBe(120);
+    expect(AGENTS.conductor.maxTurns).toBeGreaterThanOrEqual(30);
+    expect(AGENTS.conductor.effort).toBeUndefined();
+    expect(AGENTS.conductor.residentSystem).toBeUndefined();
+    expect(getAgent("conductor")).toBe(AGENTS.conductor);
+  });
+
+  it("conductor's prompt says what a child is — a run the requester could start by hand, in its own thread, visible to the channel, under their permissions — names its tools, the depth and fan-out limits, and forbids doing a child's job or claiming a result it did not read", () => {
+    const sys = AGENTS.conductor.system;
+    for (const tool of ["spawn_run", "list_runs", "get_run_status", "update_status", "web_fetch", "github_file"])
+      expect(sys).toContain(tool);
+    expect(sys).toMatch(/start by hand/);
+    expect(sys).toMatch(/thread of its own/);
+    expect(sys).toMatch(/visible to everyone/);
+    expect(sys).toMatch(/refused/);
+    expect(sys).toMatch(/cannot spawn children/);
+    expect(sys).toMatch(/spawn\.maxChildren/);
+    expect(sys).toMatch(/what is left of yours/);
+    expect(sys).toMatch(/[Nn]ever do a child's job yourself/);
+    expect(sys).toMatch(/never claim a child finished/);
+    // Every preset a child can run is named, so the model picks from the real list.
+    for (const preset of ["research", "coding", "review", "explore", "general"]) expect(sys).toContain(`\`${preset}\``);
+  });
+});
+
 describe("explore agent (docs/reference/specs/agent-explore.md)", () => {
   it("explore: repo-cold machine class, read identity, the explore toolset, 120 minutes, turns and tokens sized for a long investigation", () => {
     expect(AGENTS.explore.machine).toBe("repo-cold");

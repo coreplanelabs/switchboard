@@ -7,7 +7,7 @@
 // that judge the result are authorize.ts.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { machineNeedsRepo, type AgentDef } from "../../agents/registry.js";
-import { effectiveProfile, type ProfileResolution, type RunProfile } from "../../config/profile.js";
+import { boundedByParent, effectiveProfile, type ProfileResolution, type RunProfile } from "../../config/profile.js";
 import {
   lastThreadDirectives,
   parseDirectives,
@@ -112,7 +112,11 @@ export function resolveRun(
  * re-reading the preset; the boundaries on the path today are still asked,
  * so an identity or class a tightened cap no longer allows refuses the resume
  * by name like a fresh request, while its budget is the row's. A row written
- * before profiles existed resolves like a fresh request.
+ * before profiles existed resolves like a fresh request. A spawned child
+ * (item 20) takes the wall clock its parent had left as one more boundary on
+ * the minutes — `boundedBy: "parent"` when that was the tightest cap — and
+ * nothing on the other two axes: a parent hands a child time, never a
+ * credential or a machine.
  */
 export function resolveProfile(ctx: {
   agent: AgentDef;
@@ -120,16 +124,18 @@ export function resolveProfile(ctx: {
   resume: ResumeContext | undefined;
   /** The request's `budget:` directive, in minutes; absent when it sent none. */
   budget?: number;
+  /** For a spawned child: the parent's remaining wall clock at the spawn, in ms. */
+  parentRemainingMs?: number;
 }): ProfileResolution {
   const carried = ctx.resume?.row.meta.profile;
   const declared = carried
     ? { machine: carried.machine, identity: carried.identity, maxMinutes: carried.minutes }
     : ctx.agent;
-  const resolution = effectiveProfile(
-    declared,
-    ctx.budget !== undefined ? { budget: ctx.budget } : {},
-    ctx.resolved.boundary,
-  );
+  const boundary =
+    ctx.parentRemainingMs !== undefined
+      ? boundedByParent(ctx.resolved.boundary, ctx.parentRemainingMs)
+      : ctx.resolved.boundary;
+  const resolution = effectiveProfile(declared, ctx.budget !== undefined ? { budget: ctx.budget } : {}, boundary);
   if (resolution.kind === "profile" && carried?.boundedBy && !resolution.profile.boundedBy) {
     return { kind: "profile", profile: { ...resolution.profile, boundedBy: carried.boundedBy } };
   }

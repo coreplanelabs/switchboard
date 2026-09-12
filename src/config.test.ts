@@ -28,6 +28,7 @@ import {
   SHIP_DEFAULT_MAX_ROUNDS,
   shipPresetFor,
 } from "./core/shipPipeline.js";
+import { DEFAULT_MAX_CHILDREN, maxChildrenOf } from "./core/dispatch/spawn.js";
 import { OpenAICompatProvider } from "./providers/openaiCompat.js";
 import { ProviderRegistry } from "./providers/registry.js";
 
@@ -676,6 +677,30 @@ describe("selfImprovement", () => {
 // Feature: docs/reference/specs/agent-ship.md item 8 — the `ship` caps block: pipeline
 // wall clock + review-round cap, deployment-level like the sibling `review`
 // block, validated at load so a typo cannot silently become "no cap".
+// Feature: docs/reference/specs/agent-conductor.md item 5 — the fan-out cap a
+// spawning run meets, one knob validated at load like the ship caps.
+describe("spawn block (spawn.maxChildren)", () => {
+  it("parses maxChildren; an absent block leaves the field unset and the cap at its default of 3", () => {
+    const s = store(YAML_FIXTURE + "spawn:\n  maxChildren: 5\n");
+    expect(s.config.spawn).toEqual({ maxChildren: 5 });
+    expect(maxChildrenOf(s.config.spawn)).toBe(5);
+    expect(store().config.spawn).toBeUndefined();
+    expect(maxChildrenOf(undefined)).toBe(DEFAULT_MAX_CHILDREN);
+    expect(maxChildrenOf({})).toBe(3);
+  });
+
+  it("refuses 0, a fraction, a non-mapping and an unknown key at load, naming the key", () => {
+    expect(() => store(YAML_FIXTURE + "spawn:\n  maxChildren: 0\n")).toThrow(
+      /spawn\.maxChildren must be an integer >= 1/,
+    );
+    expect(() => store(YAML_FIXTURE + "spawn:\n  maxChildren: 2.5\n")).toThrow(
+      /spawn\.maxChildren must be an integer >= 1/,
+    );
+    expect(() => store(YAML_FIXTURE + 'spawn: "three"\n')).toThrow(/spawn must be a mapping/);
+    expect(() => store(YAML_FIXTURE + "spawn:\n  maxDepth: 2\n")).toThrow(/spawn\.maxDepth is not a known key/);
+  });
+});
+
 describe("ship caps block (agent:ship pipeline)", () => {
   it("parses maxRounds/maxMinutes; absent block leaves the field unset", async () => {
     const s = store(YAML_FIXTURE + "ship:\n  maxRounds: 2\n  maxMinutes: 30\n");
@@ -1355,9 +1380,33 @@ describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
   it("per-actor goldens: with no boundary set, every preset admits and refuses per actor kind exactly as canRunAgent does, and resolves its declared profile", () => {
     const s = store();
     const baseline: Record<string, Record<string, boolean>> = {
-      "slack:URANDOM": { general: true, coding: false, review: true, ship: true, research: true, explore: true },
-      "slack:UDEV": { general: true, coding: true, review: true, ship: true, research: true, explore: true },
-      "slack:UADMIN": { general: true, coding: true, review: true, ship: true, research: true, explore: true },
+      "slack:URANDOM": {
+        general: true,
+        coding: false,
+        review: true,
+        ship: true,
+        research: true,
+        explore: true,
+        conductor: true,
+      },
+      "slack:UDEV": {
+        general: true,
+        coding: true,
+        review: true,
+        ship: true,
+        research: true,
+        explore: true,
+        conductor: true,
+      },
+      "slack:UADMIN": {
+        general: true,
+        coding: true,
+        review: true,
+        ship: true,
+        research: true,
+        explore: true,
+        conductor: true,
+      },
     };
     expect(Object.keys(baseline["slack:URANDOM"]).sort()).toEqual(Object.keys(AGENTS).sort());
     for (const [actor, byAgent] of Object.entries(baseline)) {

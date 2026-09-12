@@ -18,7 +18,7 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
-import { activeRunCount, dispatch, type CoreDeps } from "./dispatcher.js";
+import { activeRunCount, dispatch, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
 import { setShutdownNotice } from "./dispatch/run.js";
 import { durableInboxMessage, type DispatchFollowUp } from "./dispatch/admission.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
@@ -9804,6 +9804,37 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(elsewhere.get("slack:CX:1.0")).toBeUndefined();
   });
 
+  // routing-and-config item 20: a redispatch is a request of its own, but the
+  // same message — a spawned child that takes the boot-gap path stays its
+  // parent's child.
+  it("a spawned child whose thread the boot-gap map names with a row the ledger no longer has is redispatched WITH its parent: the fresh run carries parentRunId and the parent's clock as its boundary", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const { deps, registry, store, writer } = wired(capturingProvider("child answer"), { ledger });
+    const elsewhere = new ThreadsElsewhere();
+    // A stale entry for the child's thread: the row is gone, so the durable push
+    // is refused and the message runs fresh (the redispatch).
+    elsewhere.replace([
+      { threadKey: "slack:CX:9.0", runId: "run-gone", startedAt: 5_000, meta: { agent: "research" } },
+    ]);
+    deps.threadsElsewhere = elsewhere;
+    deps.admission = new ThreadAdmission();
+    const io = fakeIO();
+    await dispatch(
+      deps,
+      { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:9.0", text: "agent:research what changed?" },
+      io.io,
+      { parent: { runId: "run-p", depth: 1, remainingMs: 5 * 60_000 } },
+    );
+    await writer.settled();
+    expect(io.replies.at(-1)).toBe("child answer");
+    expect(registry.getById("run-l")).toMatchObject({ agent: "research", parentRunId: "run-p" });
+    expect(await store.get("run-l")).toMatchObject({
+      parentRunId: "run-p",
+      profile: { preset: "research", machine: "none", identity: "none", minutes: 5, boundedBy: "parent" },
+    });
+    expect(elsewhere.get("slack:CX:9.0")).toBeUndefined();
+  });
+
   it("a resumed run inherits the follow-ups the durable inbox holds past its last record (item 40) — the reclaim's snapshot plus what landed before the launch, re-read at adopt: folded in at its first boundary, recorded as inputs; the ack was the admitting generation's, none is sent again", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const transcript: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "hello there" }] }];
@@ -10022,7 +10053,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
     };
     let deps!: CoreDeps;
-    let resumeRun: Promise<void> | undefined;
+    let resumeRun: Promise<DispatchOutcome> | undefined;
     let slotAtResumeClaim: "free" | "taken" | undefined;
     // The resumed dispatch is held between its claim (and re-read) and its card
     // — in production the card, the repo resolution and the workspace attach
@@ -10821,5 +10852,240 @@ workspaceDir: __WORKDIR__
     expect(statuses).toEqual([]);
     expect(provider.requests).toHaveLength(0);
     expect(makeExecutor).not.toHaveBeenCalled();
+  });
+});
+
+// Feature: docs/reference/specs/agent-conductor.md; docs/reference/specs/routing-and-config.md
+// item 20 (the child pipeline); docs/reference/specs/thread-admission.md item 6
+// (a child is its own thread); docs/reference/specs/run-history.md item 46
+// (`parentRunId`). A conductor's child is a `dispatch()` run as the requesting
+// user through the full pipeline — the agent gate, the profile gate with the
+// parent's remaining budget intersected, admission on the child's own thread —
+// and a refusal at any gate reaches the parent as a named tool result.
+describe("agent:conductor — a run that spawns child runs through dispatch()", () => {
+  const CONDUCTOR_YAML = `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+    conductor: anthropic/conductor-model
+    research: anthropic/research-model
+    coding: anthropic/coding-model
+channels:
+  "slack:CREAD":
+    boundary:
+      maxIdentity: read
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+restrict:
+  agents: [coding]
+workspaceDir: __WORKDIR__
+`;
+  const PARENT_THREAD = "slack:CX:1.0";
+  const CHILD_THREAD = "slack:CX:9.0";
+  const inChannel = (channel: string, text: string, user = "slack:UADMIN") => ({
+    channelId: `slack:${channel}`,
+    userId: user,
+    userName: "alice",
+    threadKey: `slack:${channel}:1.0`,
+    text,
+    sourceUrl: "https://acme.slack.com/archives/CX/p10",
+  });
+  /** The texts of a request's tool results — what the model was told a tool answered. */
+  const toolResultTexts = (req: CompletionRequest): string[] => {
+    const last = req.messages.at(-1);
+    if (!last || typeof last.content === "string") return [];
+    return last.content
+      .filter((p) => p.type === "tool_result")
+      .map((p) => (typeof p.content === "string" ? p.content : JSON.stringify(p.content)));
+  };
+  /**
+   * A scripted provider for a tree: a request holding `spawn_run` is a
+   * conductor's — its first turn spawns what `spawns` lists (one call each),
+   * its next turn echoes the tool results as its answer; any other request is a
+   * child's, answered with `childAnswer`. Every request is kept, and the
+   * admission slots are read at the child's turn so the test can see the
+   * parent's slot untouched while the child runs.
+   */
+  function treeProvider(
+    spawns: Array<Record<string, unknown>>,
+    childAnswer: string,
+    admission?: ThreadAdmission<DispatchFollowUp>,
+  ) {
+    const requests: CompletionRequest[] = [];
+    const slotsAtChildTurn: Record<string, string | undefined> = {};
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        const conducts = req.tools?.some((t) => t.name === "spawn_run") ?? false;
+        const firstText = typeof req.messages[0]?.content === "string" ? req.messages[0].content : "";
+        const isChildConductor = conducts && firstText.includes("[child]");
+        if (conducts && toolResultTexts(req).length === 0) {
+          const asks = isChildConductor ? [{ preset: "research", prompt: "grandchild?" }] : spawns;
+          return {
+            content: asks.map((input, i) => ({ type: "tool_use" as const, id: `t${i + 1}`, name: "spawn_run", input })),
+            stopReason: "tool_use",
+          };
+        }
+        if (conducts)
+          return { content: [{ type: "text", text: toolResultTexts(req).join("\n") }], stopReason: "end_turn" };
+        if (admission) {
+          slotsAtChildTurn.parent = admission.get(PARENT_THREAD)?.agent;
+          slotsAtChildTurn.child = admission.get(CHILD_THREAD)?.agent;
+        }
+        return { content: [{ type: "text", text: childAnswer }], stopReason: "end_turn" };
+      },
+    };
+    return { provider, requests, slotsAtChildTurn };
+  }
+  /** A parent channel whose `openThread` hands out one recording child channel on `CHILD_THREAD`. */
+  function treeIO() {
+    const parent = fakeIO();
+    const child = fakeIO();
+    const leads: string[] = [];
+    parent.io.openThread = async (lead) => {
+      leads.push(lead);
+      return { thread: { threadKey: CHILD_THREAD, sourceUrl: "https://acme.slack.com/archives/CX/p90" }, io: child.io };
+    };
+    return { parent, child, leads };
+  }
+  /** The deps of a tree: ids minted in order (the parent, then the child), a recording store, the process admission map. */
+  function treeDeps(provider: Provider) {
+    const ids = ["run-parent", "run-child", "run-third"];
+    const registry = new RunRegistry({ genId: () => ids.shift() ?? "run-more", genToken: () => "tok" });
+    const store = new InMemoryRunStore();
+    const writer = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const deps = makeDeps(CONDUCTOR_YAML, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.admission = admission;
+    return { deps, registry, store, writer, admission };
+  }
+  const agentsProvisioned = () => vi.mocked(makeExecutor).mock.calls.map((c) => c[1].agent.name);
+
+  beforeEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+    vi.mocked(runAgent).mockClear();
+  });
+  afterEach(() => {
+    vi.mocked(makeExecutor).mockClear();
+    vi.mocked(runAgent).mockClear();
+  });
+
+  it("spawns a research child as the requester in a thread of its own: the child runs the full pipeline with its budget clipped to the parent's remaining minutes as `parent`, its record and live summary carry parentRunId, the parent's tool result names the child, and the parent's own thread slot is untouched", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const { provider, requests, slotsAtChildTurn } = treeProvider(
+      [{ preset: "research", prompt: "what is a Durable Object?" }],
+      "A Durable Object is a single-instance coordination point.",
+      admission,
+    );
+    const t = treeDeps(provider);
+    t.deps.admission = admission;
+    const { parent, child, leads } = treeIO();
+    // `budget:6` on the conductor: the child's research preset asks 8 minutes,
+    // the parent has at most 6 left at the spawn, so the child runs the whole
+    // minutes the parent had — 6, or 5 once a millisecond of the parent's clock
+    // has gone — as `parent`.
+    await dispatch(t.deps, inChannel("CX", "agent:conductor budget:6 look into durable objects"), parent.io);
+    await vi.waitFor(() => expect(t.registry.getById("run-child")?.finished).toBe(true));
+    await t.writer.settled();
+    const childMinutes = (await t.store.get("run-child"))!.profile!.minutes;
+    expect([5, 6]).toContain(childMinutes);
+
+    // The parent's answer echoes the tool result: the child's id, thread and link.
+    expect(parent.replies).toHaveLength(1);
+    expect(parent.replies[0]).toContain("spawned a research run: run-child in thread slack:CX:9.0");
+    expect(parent.replies[0]).toContain("https://acme.slack.com/archives/CX/p90");
+    // The lead in the channel names the child, the requester and the parent.
+    expect(leads).toHaveLength(1);
+    expect(leads[0]).toContain("*research*");
+    expect(leads[0]).toContain("alice");
+    // The child answered in its own thread; the parent's thread saw none of it.
+    expect(child.replies).toEqual(["A Durable Object is a single-instance coordination point."]);
+    // Both runs were provisioned, each on its own class (`none`), the child as the requester.
+    expect(agentsProvisioned()).toEqual(["conductor", "research"]);
+    const childRecord = (await t.store.get("run-child"))!;
+    expect(childRecord).toMatchObject({
+      agent: "research",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: CHILD_THREAD,
+      status: "completed",
+      parentRunId: "run-parent",
+      profile: { preset: "research", machine: "none", identity: "none", minutes: childMinutes, boundedBy: "parent" },
+    });
+    expect(t.registry.getById("run-child")).toMatchObject({ parentRunId: "run-parent", agent: "research" });
+    expect("parentRunId" in (await t.store.get("run-parent"))!).toBe(false);
+    // The card and the config block say what clipped the child.
+    expect(
+      child.statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes(`budget ${childMinutes} min (parent run's budget; preset asks 8)`)),
+    ).toBe(true);
+    const childRequest = requests.find((r) => !r.tools?.some((tool) => tool.name === "spawn_run"))!;
+    expect(childRequest.system).toContain(
+      `Budget: ${childMinutes} min (clipped by the parent run's budget; the preset asks 8).`,
+    );
+    expect(vi.mocked(runAgent).mock.calls.find((c) => c[0].agent.name === "research")![0].agent.maxMinutes).toBe(
+      childMinutes,
+    );
+    // Admission: the parent held its own slot while the child ran on a slot of its own.
+    expect(slotsAtChildTurn).toEqual({ parent: "conductor", child: "research" });
+    expect(admission.get(PARENT_THREAD)).toBeUndefined();
+    expect(admission.get(CHILD_THREAD)).toBeUndefined();
+  });
+
+  it("a child for a requester without `agent:run:<preset>` ends at the agent gate: the allowlist refusal in the child's thread, the parent's tool result naming `agent_allowlist`, and the child never reaches the factory", async () => {
+    const { provider } = treeProvider([{ preset: "coding", prompt: "fix the login test", repo: "acme/api" }], "unused");
+    const t = treeDeps(provider);
+    const { parent, child } = treeIO();
+    await dispatch(t.deps, inChannel("CX", "agent:conductor fix the login test in acme/api", "slack:UX"), parent.io);
+    expect(child.replies).toHaveLength(1);
+    expect(child.replies[0]).toContain("You're not on the allowlist for the `coding` agent");
+    expect(child.statuses).toEqual([]); // refused before any card
+    expect(parent.replies[0]).toContain("spawn refused (agent_allowlist)");
+    expect(parent.replies[0]).toContain("not on the allowlist");
+    expect(agentsProvisioned()).toEqual(["conductor"]);
+    expect(t.registry.getById("run-child")).toBeNull();
+  });
+
+  it("a child whose preset needs `write` in a channel bounded to `read` ends at the profile gate — the parent, identity `none`, runs there — and the parent is told by the gate's name", async () => {
+    const { provider } = treeProvider([{ preset: "coding", prompt: "fix the login test", repo: "acme/api" }], "unused");
+    const t = treeDeps(provider);
+    const { parent, child } = treeIO();
+    await dispatch(t.deps, inChannel("CREAD", "agent:conductor fix the login test in acme/api"), parent.io);
+    expect(child.replies).toHaveLength(1);
+    expect(child.replies[0]).toContain("`coding` needs a `write` credential");
+    expect(child.replies[0]).toContain("this channel's boundary");
+    expect(parent.replies[0]).toContain("spawn refused (profile_bounded)");
+    expect(agentsProvisioned()).toEqual(["conductor"]);
+    expect(t.registry.getById("run-child")).toBeNull();
+  });
+
+  it("a child cannot spawn: a conductor child's own spawn_run is refused `spawn_depth`, and no grandchild exists", async () => {
+    const { provider } = treeProvider([{ preset: "conductor", prompt: "[child] spawn something" }], "unused");
+    const t = treeDeps(provider);
+    const { parent, child } = treeIO();
+    await dispatch(t.deps, inChannel("CX", "agent:conductor delegate this"), parent.io);
+    await vi.waitFor(() => expect(t.registry.getById("run-child")?.finished).toBe(true));
+    expect(parent.replies[0]).toContain("spawned a conductor run: run-child");
+    // The child conductor's answer echoes ITS tool result: the depth refusal.
+    expect(child.replies).toHaveLength(1);
+    expect(child.replies[0]).toContain("spawn refused (spawn_depth)");
+    expect(child.replies[0]).toContain("itself a child");
+    expect(agentsProvisioned()).toEqual(["conductor", "conductor"]);
+    expect(t.registry.getById("run-third")).toBeNull();
   });
 });

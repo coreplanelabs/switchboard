@@ -130,6 +130,8 @@ function boundaryOf(scope: BoundaryScope): string {
       return "the installation's default boundary";
     case "directive":
       return "this message's own budget";
+    case "parent":
+      return "the parent run's remaining budget";
   }
 }
 
@@ -144,6 +146,11 @@ function wayForward(scope: BoundaryScope, axis: string, needs: string, adminsHin
       return `ask ${adminsHint} to raise \`defaults.boundary\` in the configuration`;
     case "directive":
       return "send the message again without the budget directive";
+    case "parent":
+      // Unreachable today: a parent bounds the minutes alone (`boundedByParent`),
+      // and the minutes axis clips instead of refusing. Named so the switch
+      // stays exhaustive when a scope is added.
+      return "spawn it from a run with more time left";
   }
 }
 

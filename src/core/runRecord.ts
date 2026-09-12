@@ -104,6 +104,10 @@ export interface RunRecord {
    *  tell a clipped budget from a declared one. Absent on records written
    *  before profiles existed. */
   profile?: RunProfileRecord;
+  /** The run that spawned this one (item 46): a child started through
+   *  `spawnChild()` names its parent, so a listing can draw the tree. Absent
+   *  on every run a person or a schedule started. */
+  parentRunId?: string;
 }
 
 /** The profile as the record stores it: the run's effective profile plus the preset it came from. */
@@ -124,6 +128,7 @@ const BOUNDARY_SCOPES_IN_RECORD: Record<BoundaryScope, true> = {
   channel: true,
   user: true,
   directive: true,
+  parent: true,
 };
 
 /** Structural check on a stored profile (item 3's rule for the field). */
@@ -463,6 +468,9 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;
   if (r.profile !== undefined && !isRunProfileRecord(r.profile)) return false;
+  // A parent is named by a run id (item 46): the same shape as the record's own.
+  if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))
+    return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   // Absent on records written before the stamp existed (read as `unknown`); present → a known value.
   if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility))

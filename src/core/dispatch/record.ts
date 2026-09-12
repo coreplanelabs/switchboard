@@ -126,6 +126,7 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
     },
     channelVisibility: summary.channelVisibility ?? "unknown",
     repo: summary.repo,
+    ...(summary.parentRunId !== undefined ? { parentRunId: summary.parentRunId } : {}),
     finishedAt,
     status: "interrupted",
     diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated }),
@@ -174,6 +175,7 @@ export function reclaimedRunRecord(input: {
     // The row carries the profile the run was admitted with (a clipped budget
     // included); a row from before profiles existed leaves the record without one.
     ...(row.meta.profile && row.meta.agent ? { profile: { preset: row.meta.agent, ...row.meta.profile } } : {}),
+    ...(row.meta.parentRunId !== undefined ? { parentRunId: row.meta.parentRunId } : {}),
     finishedAt,
     status,
     diagnosis: analyzeRunFriction(events, {
@@ -254,6 +256,9 @@ export function assembleRunRecord(input: {
    *  when the caller has none (the drain's tombstone of a run whose registry
    *  row predates profiles). */
   profile?: RunProfileRecord;
+  /** The run that spawned this one (run-history item 46). Omitted (not set
+   *  undefined) for every run a person or a schedule started. */
+  parentRunId?: string;
 }): RunRecord {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
@@ -290,6 +295,7 @@ export function assembleRunRecord(input: {
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
     ...(input.profile !== undefined ? { profile: input.profile } : {}),
+    ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }
@@ -313,6 +319,8 @@ export interface TombstoneContext {
   run: RunHandle;
   registry: RunRegistry;
   resume: ResumeContext | undefined;
+  /** The run that spawned this one (item 46), when it is a child. */
+  parentRunId?: string;
 }
 
 /**
@@ -324,7 +332,7 @@ export interface TombstoneContext {
  * resume, whose record the ledger already holds.
  */
 export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
-  const { msg, agent, profile, resolved, repoCtx, channelVisibility, run, registry, resume } = ctx;
+  const { msg, agent, profile, resolved, repoCtx, channelVisibility, run, registry, resume, parentRunId } = ctx;
   // Tombstone-first: a provisional TERMINAL record — status
   // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
   // from the events published so far (the setup spans, request, run_meta,
@@ -356,6 +364,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
           channelVisibility,
           repo: repoCtx.repo,
           profile: profileRecordOf(agent, profile),
+          ...(parentRunId !== undefined ? { parentRunId } : {}),
           finishedAt: startSnap.startedAt,
           status: "interrupted",
           diagnosis: analyzeRunFriction(startSnap.events, {
@@ -388,6 +397,8 @@ export interface FinishRecordContext {
   ledgerRun: LedgerRun | undefined;
   /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
   handoff?: Handoff;
+  /** The run that spawned this one (item 46), when it is a child. */
+  parentRunId?: string;
 }
 
 /**
@@ -415,6 +426,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     root,
     ledgerRun,
     handoff,
+    parentRunId,
   } = ctx;
   // A tracked run finishes through the ledger: the record replaces its
   // live rows in one transaction (a refused finish falls back to the store).
@@ -437,6 +449,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           diagnosis,
           seal,
           ...(handoff !== undefined ? { handoff } : {}),
+          ...(parentRunId !== undefined ? { parentRunId } : {}),
         }),
         { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
       ),
