@@ -12,8 +12,11 @@ import {
   renderDeliveryReport,
   resolveDeliveryRange,
   runFactsOf,
+  SNAPSHOT_EVERY_MINUTES,
+  snapshotAgeText,
   weekStartOf,
   type DeliveryIdentities,
+  type DeliverySource,
   type PullRequestFacts,
   type RunFact,
 } from "./delivery.js";
@@ -627,6 +630,20 @@ describe("renderDeliveryReport", () => {
     expect(text).toContain(`Week of ${dayOf("2026-08-24T00:00:00Z")}: nothing merged`);
     expect(text).toContain("newest pull requests only");
   });
+  it("names the snapshot's time and age on the first line when the report carries one, and says nothing about it when it does not", () => {
+    const at = "2026-09-11T13:51:00Z";
+    const now = Date.parse("2026-09-11T14:03:30Z");
+    const text = renderDeliveryReport({ ...report(), snapshotAt: at }, now);
+    expect(text.split("\n")[0]).toBe(
+      `acme/api · ${SINCE} → ${UNTIL} · 1 week · as of ${dayOf(at)} 13:51 UTC, 12 minutes ago`,
+    );
+    expect(renderDeliveryReport(report(), now).split("\n")[0]).toBe(`acme/api · ${SINCE} → ${UNTIL} · 1 week`);
+    expect(snapshotAgeText(at, now)).toBe("12 minutes ago");
+    expect(snapshotAgeText(at, Date.parse("2026-09-11T13:51:20Z"))).toBe("just now");
+    expect(snapshotAgeText(at, Date.parse("2026-09-11T14:52:00Z"))).toBe("61 minutes ago");
+    expect(snapshotAgeText(at, Date.parse("2026-09-11T16:30:00Z"))).toBe("3 hours ago");
+    expect(snapshotAgeText(at, Date.parse("2026-09-14T16:30:00Z"))).toBe("3 days ago");
+  });
 });
 
 describe("parseDeliveryConfig", () => {
@@ -639,11 +656,29 @@ describe("parseDeliveryConfig", () => {
       reviewers: ["acme-review[bot]"],
       agentLogins: ["shipbot"],
       agentCoauthors: [],
+      snapshot: { everyMinutes: 60 },
     });
-    expect(parseDeliveryConfig({})).toEqual({ repos: [], reviewers: [], agentLogins: [], agentCoauthors: [] });
+    expect(parseDeliveryConfig({})).toEqual({
+      repos: [],
+      reviewers: [],
+      agentLogins: [],
+      agentCoauthors: [],
+      snapshot: { everyMinutes: 60 },
+    });
     expect(() => parseDeliveryConfig({ repos: "acme/api" })).toThrow(/delivery\.repos/);
     expect(() => parseDeliveryConfig({ repos: ["not a slug"] })).toThrow(/delivery\.repos/);
     expect(() => parseDeliveryConfig("yes")).toThrow(/delivery: must be a mapping/);
+  });
+  it("snapshot.everyMinutes is the refresh interval — a whole number of minutes within bounds, 60 by default; anything else throws by name", () => {
+    expect(parseDeliveryConfig({ snapshot: { everyMinutes: 15 } })!.snapshot).toEqual({ everyMinutes: 15 });
+    expect(parseDeliveryConfig({ snapshot: {} })!.snapshot).toEqual({ everyMinutes: 60 });
+    expect(SNAPSHOT_EVERY_MINUTES).toEqual({ default: 60, min: 5, max: 1440 });
+    for (const bad of [0, 4, 1441, 7.5, "60", null]) {
+      expect(() => parseDeliveryConfig({ snapshot: { everyMinutes: bad } })).toThrow(
+        /delivery\.snapshot\.everyMinutes must be a whole number of minutes between 5 and 1440/,
+      );
+    }
+    expect(() => parseDeliveryConfig({ snapshot: [] })).toThrow(/delivery\.snapshot must be a mapping/);
   });
 });
 
@@ -675,6 +710,23 @@ describe("createDeliveryService / NullDeliveryService", () => {
     // An unconfigured repository is still readable by name (the command's --repo).
     const other = await service.report("acme/web", { weeks: 1 });
     expect(other.totals.prsMerged).toBe(0);
+  });
+
+  it("stamps the report with when its facts were read — the source's read time when it names one, else now — and hands `fresh` to the source", async () => {
+    const plain = createDeliveryService(undefined, source, { now });
+    const stampedNow = await plain.report("acme/api", { weeks: 1 });
+    expect(stampedNow.snapshotAt).toBe(now().toISOString());
+    const stamped: DeliverySource = {
+      fetchPullRequests: () =>
+        Promise.resolve({ prs: TRUNK_PASS, truncated: false, fetchedAt: "2026-09-11T13:00:00Z" }),
+    };
+    const fromSnapshot = await createDeliveryService(undefined, stamped, { now }).report("acme/api", { weeks: 1 });
+    expect(fromSnapshot.snapshotAt).toBe("2026-09-11T13:00:00Z");
+    expect(fromSnapshot.totals.prsMerged).toBe(6);
+    const recording = new InMemoryDeliverySource({ "acme/api": TRUNK_PASS });
+    await createDeliveryService(undefined, recording, { now }).report("acme/api", { weeks: 1, fresh: true });
+    await createDeliveryService(undefined, recording, { now }).report("acme/api", { weeks: 1 });
+    expect(recording.calls.map((c) => c.fresh)).toEqual([true, undefined]);
   });
 
   it("refuses a repository that is not `owner/name`", async () => {

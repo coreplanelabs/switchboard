@@ -641,7 +641,7 @@ describe("run history routes", () => {
     expect(await res.json()).toEqual({
       ok: true,
       build: { commit: "unknown" },
-      features: ["memory", "schedules", "runs", "config"],
+      features: ["memory", "schedules", "runs", "config", "delivery"],
     });
   });
 

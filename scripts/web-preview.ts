@@ -1124,7 +1124,12 @@ function page(pathname: string, all: boolean): { title: string; seed: PageSeed; 
   if (pathname.startsWith("/delivery"))
     return {
       title: "acme/api delivery",
-      seed: { page: "delivery", report: DELIVERY, repos: ["acme/api", "acme/web"] },
+      seed: {
+        page: "delivery",
+        // The snapshot the page serves was read twelve minutes before the preview's clock.
+        report: { ...DELIVERY, snapshotAt: new Date(NOW - 12 * 60_000).toISOString() },
+        repos: ["acme/api", "acme/web"],
+      },
     };
   return null;
 }

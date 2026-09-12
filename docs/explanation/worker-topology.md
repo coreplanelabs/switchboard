@@ -57,7 +57,7 @@ A finished run is written to the state Worker after the reply ([Runs: live, then
 flowchart TB
     BOT["Bot<br/>Slack + model keys only<br/>no GH_TOKEN, no tool execution"]
 
-    STATE[("State Worker<br/>ConfigDO · MemoryDO<br/>RunHistoryDO · ScheduleDO")]
+    STATE[("State Worker<br/>ConfigDO · MemoryDO<br/>RunHistoryDO · ScheduleDO · DeliveryDO")]
     RESIDENT[["Resident Worker<br/>own GitHub App key<br/>mints 1h repo-scoped tokens"]]
     SANDBOX[["Sandbox Worker<br/>proxy only, no persistent state"]]
 

@@ -114,7 +114,7 @@ One table per group. "Who can run it" is what the authorization policy decides f
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `delivery report [--repo <string>] [--since <string>] [--weeks <integer>]` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — read from GitHub and the run history; nothing written. | admins |
+| `delivery report [--repo <string>] [--since <string>] [--weeks <integer>] [--fresh]` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written. | admins |
 
 <!-- /generated:chat-commands -->
 

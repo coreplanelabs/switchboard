@@ -1,19 +1,25 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { snapshotAgeText } from "@core/core/delivery.js";
 import AppShell from "../components/AppShell.vue";
 import { useSeed } from "../lib/seed";
-import { ciCell, findingsCell, hours, monthDay, pct, ratio, tilesOf } from "../lib/delivery";
+import { ciCell, findingsCell, freshHref, hours, monthDay, pct, ratio, snapshotTime, tilesOf } from "../lib/delivery";
+import { useWallClock } from "../lib/wallClock";
 
 // The delivery page: how work reaches `main` in one repository, per week and
-// per unit, read live from GitHub and the run history per request. The costs
-// page's shape — tiles, a table per grouping, the method one click away —
-// on the same shell and tokens; no chart, the numbers are the picture.
+// per unit, from the repository's snapshot of GitHub's facts (its age in the
+// footer; `?fresh=1` reads GitHub now) and the run history. The costs page's
+// shape — tiles, a table per grouping, the method one click away — on the same
+// shell and tokens; no chart, the numbers are the picture.
 
 const seed = useSeed("delivery");
 const report = computed(() => seed?.report ?? null);
 const repos = computed(() => seed?.repos ?? []);
 const tiles = computed(() => (report.value ? tilesOf(report.value) : []));
 const ranges = [1, 2, 4, 8, 13];
+/** The snapshot's age ticks by the minute while the page is open. */
+const now = useWallClock(undefined, 60_000);
+const search = typeof window === "undefined" ? "" : window.location.search;
 const th = "border-b border-muted bg-(--ui-bg-muted) px-2.5 py-1.5 text-xs font-medium text-muted whitespace-nowrap";
 const td = "border-b border-muted px-2.5 py-1.5";
 </script>
@@ -165,15 +171,20 @@ const td = "border-b border-muted px-2.5 py-1.5";
       </p>
     </section>
 
-    <!-- The method matters and stays — one click away instead of standing prose. -->
+    <!-- When the facts were read, always in view; the method one click away instead of standing prose. -->
     <footer class="border-t border-default pt-3.5 text-xs text-dimmed">
+      <p v-if="report.snapshotAt" class="mb-2 font-mono tabular-nums text-muted">
+        As of {{ snapshotTime(report.snapshotAt) }}, {{ snapshotAgeText(report.snapshotAt, now) }} ·
+        <a class="text-primary hover:underline" :href="freshHref(search)">read GitHub now</a>
+      </p>
       <details>
         <summary class="cursor-pointer text-muted">How these numbers are computed</summary>
         <div class="mt-2 grid gap-1.5">
           <div>
-            <b>Live.</b> Every load reads GitHub (the merged pull requests in range, each one's timeline and its
-            branch's workflow runs, the board issue its body links) and the run history you may see — nothing cached,
-            nothing stored.
+            <b>Snapshot.</b> GitHub's record of the merged pull requests (each one's timeline and its branch's workflow
+            runs, the board issue its body links) is read on an interval and kept as a snapshot the page, its JSON twin
+            and <code>delivery report</code> serve; <code>?fresh=1</code> reads GitHub now. The run history you may see
+            joins on every load.
           </div>
           <div>
             <b>Issue → merge</b> runs from the linked board issue's opening (a closing keyword or a

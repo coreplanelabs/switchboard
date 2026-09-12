@@ -294,7 +294,7 @@ workspaceDir: ./workspaces
 #       anthropicWorkspaceId: wrkspc_...          # this app's Anthropic workspace
 
 # Delivery indicators: GET /delivery and `delivery report` (docs/reference/specs/delivery.md).
-# Optional. Needs a GitHub credential (the App triple or GH_TOKEN); read-only.
+# Optional. Needs a GitHub credential (the App triple or GH_TOKEN); read-only on GitHub.
 # delivery:
 #   repos: [acme/api, acme/web]          # the repositories the page serves; the first is its default
 #                                        #   (`delivery report --repo owner/name` needs no entry here)
@@ -302,6 +302,10 @@ workspaceDir: ./workspaces
 #                                        #   beside this installation's own App identity
 #   agentLogins: []                      # logins that are agents beyond the `[bot]` suffix
 #   agentCoauthors: [Claude]             # `Co-Authored-By:` names that mark a commit as an agent's
+#   snapshot:                            # each repository's facts are read from GitHub on an interval and
+#     everyMinutes: 60                   #   served from that snapshot (its age on the page; `?fresh=1` /
+#                                        #   `--fresh` read now); 5–1440 minutes, default 60. Kept on the
+#                                        #   state Worker any `*.worker` block below names; in memory without one
 
 # Dashboard authentication (docs/reference/specs/access-gate.md). Everything the dashboard
 # serves — /runs*, /residents*, /costs*, /mcp/connect/*, and every /api/* command

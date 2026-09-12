@@ -1,9 +1,11 @@
 import { systemClock } from "./trace/clock.js";
 
 // Delivery indicators: what the run history and the pull requests' own facts
-// say about how work reaches `main`, per week and per unit (a board issue),
-// with nothing written anywhere. The four leading indicators the published
-// accounts of agent-run development name, in this repository's terms:
+// say about how work reaches `main`, per week and per unit (a board issue).
+// Nothing is written to GitHub; its facts are read on an interval and kept as a
+// snapshot (src/core/deliverySnapshot.ts) the report is computed from. The four
+// leading indicators the published accounts of agent-run development name, in
+// this repository's terms:
 //
 //   issue → merge    from a unit's board issue (or the pull request's own
 //                    opening when none is linked) to its merge;
@@ -196,6 +198,9 @@ export interface DeliveryReport {
   totals: DeliveryIndicators;
   identities: DeliveryIdentities;
   truncated: boolean;
+  /** ISO 8601 — when the pull requests' facts were read from GitHub: the snapshot's time, or
+   *  the live read's. The service stamps it; a report built straight from facts has none. */
+  snapshotAt?: string;
 }
 
 // ---- the arithmetic ---------------------------------------------------------------------
@@ -529,10 +534,30 @@ function indicatorLines(x: DeliveryIndicators): string[] {
   ];
 }
 
+/** `just now`, `12 minutes ago`, `3 hours ago`, `2 days ago` — how old the snapshot is, for a footer or a head line. */
+export function snapshotAgeText(snapshotAt: string, nowMs: number): string {
+  const minutes = Math.max(0, Math.floor((nowMs - Date.parse(snapshotAt)) / 60_000));
+  if (!Number.isFinite(minutes)) return "";
+  const unit = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"} ago`;
+  if (minutes < 1) return "just now";
+  if (minutes < 90) return unit(minutes, "minute");
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return unit(hours, "hour");
+  return unit(Math.round(hours / 24), "day");
+}
+
+/** `as of <YYYY-MM-DD> <hh:mm> UTC, 12 minutes ago` — the snapshot's time and age. */
+function asOf(snapshotAt: string, nowMs: number): string {
+  return `as of ${snapshotAt.slice(0, 10)} ${snapshotAt.slice(11, 16)} UTC, ${snapshotAgeText(snapshotAt, nowMs)}`;
+}
+
 /** One block per week, then the units — single-spaced lines, so chat carries them as they are. */
-export function renderDeliveryReport(report: DeliveryReport): string {
+export function renderDeliveryReport(report: DeliveryReport, nowMs: number = systemClock()): string {
   const lines: string[] = [
-    `${report.repo} · ${report.range.since} → ${report.range.until} · ${report.range.weeks} week${report.range.weeks === 1 ? "" : "s"}`,
+    [
+      `${report.repo} · ${report.range.since} → ${report.range.until} · ${report.range.weeks} week${report.range.weeks === 1 ? "" : "s"}`,
+      ...(report.snapshotAt !== undefined ? [asOf(report.snapshotAt, nowMs)] : []),
+    ].join(" · "),
   ];
   if (report.truncated) lines.push("(the newest pull requests only — the fetch stopped before the range's start)");
   for (const w of report.weeks) {
@@ -580,16 +605,43 @@ export interface DeliveryConfig {
   agentLogins: string[];
   /** Co-author names an agent-made commit carries. */
   agentCoauthors: string[];
+  /** The snapshot the page and the command serve (src/core/deliverySnapshot.ts). */
+  snapshot: {
+    /** Minutes between two reads of a configured repository's facts from GitHub. */
+    everyMinutes: number;
+  };
 }
 
+/** `delivery.snapshot.everyMinutes`: the default and the bounds a value must keep. */
+export const SNAPSHOT_EVERY_MINUTES = Object.freeze({ default: 60, min: 5, max: 1440 });
+
 /** `owner/name`: two path segments of word characters, dots and dashes, neither of them dots alone. */
-const REPO_SLUG = /^(?!\.+\/)[\w.-]+\/(?!\.+$)[\w.-]+$/;
+export const REPO_SLUG = /^(?!\.+\/)[\w.-]+\/(?!\.+$)[\w.-]+$/;
 
 function stringList(raw: unknown, what: string, valid: (s: string) => boolean = () => true): string[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw) || !raw.every((s) => typeof s === "string" && s !== "" && valid(s)))
     throw new Error(`${what} must be a list of ${what.endsWith("repos") ? "owner/name repositories" : "names"}`);
   return raw as string[];
+}
+
+/** `delivery.snapshot`: absent → the default interval; a value outside the bounds or not a whole number throws by name. */
+function snapshotConfig(raw: unknown): DeliveryConfig["snapshot"] {
+  if (raw === undefined) return { everyMinutes: SNAPSHOT_EVERY_MINUTES.default };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    throw new Error("delivery.snapshot must be a mapping");
+  const every = (raw as Record<string, unknown>).everyMinutes;
+  if (every === undefined) return { everyMinutes: SNAPSHOT_EVERY_MINUTES.default };
+  if (
+    typeof every !== "number" ||
+    !Number.isInteger(every) ||
+    every < SNAPSHOT_EVERY_MINUTES.min ||
+    every > SNAPSHOT_EVERY_MINUTES.max
+  )
+    throw new Error(
+      `delivery.snapshot.everyMinutes must be a whole number of minutes between ${SNAPSHOT_EVERY_MINUTES.min} and ${SNAPSHOT_EVERY_MINUTES.max}`,
+    );
+  return { everyMinutes: every };
 }
 
 /** Validates the `delivery:` config block. Absent → undefined (no default repository). */
@@ -602,6 +654,7 @@ export function parseDeliveryConfig(raw: unknown): DeliveryConfig | undefined {
     reviewers: stringList(r.reviewers, "delivery.reviewers"),
     agentLogins: stringList(r.agentLogins, "delivery.agentLogins"),
     agentCoauthors: stringList(r.agentCoauthors, "delivery.agentCoauthors"),
+    snapshot: snapshotConfig(r.snapshot),
   };
 }
 
@@ -611,19 +664,30 @@ export interface DeliveryFetch {
   prs: PullRequestFacts[];
   /** The source stopped before the range's start (a page cap); the newest are in. */
   truncated: boolean;
+  /** ISO 8601 — every pull request merged at or after this instant is in `prs`: the range's start
+   *  on a complete read, the oldest update the capped listing reached otherwise. A source that does
+   *  not say is complete from the range's start. */
+  completeFrom?: string;
+  /** ISO 8601 — when the facts were read from GitHub, when the source knows (a snapshot's time). */
+  fetchedAt?: string;
 }
 
-/** Where the pull requests' facts come from: GitHub in production, memory in tests. */
+export interface DeliveryFetchOptions {
+  /** Read GitHub now, whatever a snapshot holds, and refresh the snapshot. */
+  fresh?: boolean;
+}
+
+/** Where the pull requests' facts come from: GitHub in production (behind the snapshot), memory in tests. */
 export interface DeliverySource {
-  fetchPullRequests(repo: string, range: DeliveryRange): Promise<DeliveryFetch>;
+  fetchPullRequests(repo: string, range: DeliveryRange, opts?: DeliveryFetchOptions): Promise<DeliveryFetch>;
 }
 
 /** The second implementation (AGENTS.md invariant 2) and the test double: a map of repo → facts. */
 export class InMemoryDeliverySource implements DeliverySource {
-  readonly calls: Array<{ repo: string; range: DeliveryRange }> = [];
+  readonly calls: Array<{ repo: string; range: DeliveryRange; fresh?: boolean }> = [];
   constructor(private readonly byRepo: Readonly<Record<string, PullRequestFacts[]>> = {}) {}
-  fetchPullRequests(repo: string, range: DeliveryRange): Promise<DeliveryFetch> {
-    this.calls.push({ repo, range });
+  fetchPullRequests(repo: string, range: DeliveryRange, opts?: DeliveryFetchOptions): Promise<DeliveryFetch> {
+    this.calls.push({ repo, range, ...(opts?.fresh ? { fresh: true } : {}) });
     return Promise.resolve({ prs: this.byRepo[repo] ?? [], truncated: false });
   }
 }
@@ -631,6 +695,8 @@ export class InMemoryDeliverySource implements DeliverySource {
 export interface DeliveryReportOptions {
   since?: string;
   weeks?: number;
+  /** Read GitHub now instead of the snapshot, and refresh it. */
+  fresh?: boolean;
   /** The caller's finished runs of the repository over the resolved range — what the history adds. */
   runs?: (range: DeliveryRange) => Promise<RunFact[]>;
 }
@@ -640,7 +706,9 @@ export interface DeliveryService {
   unavailable(): string | undefined;
   /** The configured repositories; the first is the page's default. */
   repos(): string[];
-  /** Live read for one repository over the resolved range; throws on upstream failure. */
+  /** The report for one repository over the resolved range — from the snapshot when one fits the
+   *  range, a live read otherwise or on `fresh`; stamped with when its facts were read. Throws on
+   *  upstream failure. */
   report(repo: string, opts: DeliveryReportOptions): Promise<DeliveryReport>;
 }
 
@@ -678,9 +746,10 @@ export function createDeliveryService(
     repos: () => [...(cfg?.repos ?? [])],
     async report(repo, o) {
       if (!REPO_SLUG.test(repo)) throw new Error(`repository must be owner/name, got ${JSON.stringify(repo)}`);
-      const range = resolveDeliveryRange({ since: o.since, weeks: o.weeks }, now());
+      const at = now();
+      const range = resolveDeliveryRange({ since: o.since, weeks: o.weeks }, at);
       const [fetched, process, runs] = await Promise.all([
-        source.fetchPullRequests(repo, range),
+        source.fetchPullRequests(repo, range, o.fresh ? { fresh: true } : undefined),
         opts.identities?.() ?? Promise.resolve<Partial<DeliveryIdentities>>({}),
         o.runs?.(range) ?? Promise.resolve<RunFact[]>([]),
       ]);
@@ -689,14 +758,18 @@ export function createDeliveryService(
         agentLogins: [...new Set([...(cfg?.agentLogins ?? []), ...(process.agentLogins ?? [])])],
         agentCoauthors: [...new Set([...(cfg?.agentCoauthors ?? []), ...(process.agentCoauthors ?? [])])],
       };
-      return buildDeliveryReport({
-        repo,
-        range,
-        prs: fetched.prs,
-        runs,
-        identities,
-        truncated: fetched.truncated,
-      });
+      return {
+        ...buildDeliveryReport({
+          repo,
+          range,
+          prs: fetched.prs,
+          runs,
+          identities,
+          truncated: fetched.truncated,
+        }),
+        // A source behind a snapshot says when it read; a bare one read just now.
+        snapshotAt: fetched.fetchedAt ?? at.toISOString(),
+      };
     },
   };
 }

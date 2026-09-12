@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import DeliveryPage from "./DeliveryPage.vue";
 import { mountApp } from "../testing/mount";
 import type { DeliveryReport, PullRequestFacts } from "@core/core/delivery.js";
 import { buildDeliveryReport } from "@core/core/delivery.js";
 import type { DeliverySeed } from "@core/channels/webSeed.js";
-import { hours, monthDay, pct, tilesOf } from "../lib/delivery";
+import { freshHref, hours, monthDay, pct, snapshotTime, tilesOf } from "../lib/delivery";
 
 // The delivery page against the mounted Vue page: the tiles, the two tables,
 // the switchers, the method, and hostile text kept as text.
@@ -166,6 +166,23 @@ describe("DeliveryPage", () => {
     expect(t).toContain("Claude");
     expect(t).toContain("GET /delivery/acme/api.json");
   });
+
+  it("the footer says when the facts were read and how long ago, and offers a live read that keeps the range", () => {
+    vi.useFakeTimers({ now: Date.parse("2026-09-11T14:03:30Z") });
+    try {
+      const w = mountApp(DeliveryPage, { seed: seed({ ...report(), snapshotAt: "2026-09-11T13:51:00Z" }) });
+      const footer = w.find("footer").text();
+      expect(footer).toContain("As of Sep 11, 13:51 UTC, 12 minutes ago");
+      expect(w.find('footer a[href="?fresh=1"]').text()).toContain("read GitHub now");
+      expect(footer).toContain("snapshot");
+      expect(footer).not.toContain("nothing stored");
+      // A report with no read time (a bare source) says nothing about one.
+      const bare = mountApp(DeliveryPage, { seed: seed() });
+      expect(bare.find("footer").text()).not.toContain("As of");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("delivery formatters", () => {
@@ -178,5 +195,14 @@ describe("delivery formatters", () => {
     expect(pct(5 / 6)).toBe("83%");
     expect(monthDay(day("2026-09-07T00:00:00Z"))).toBe("Sep 7");
     expect(monthDay("garbage")).toBe("garbage");
+  });
+  it("the snapshot's time reads as month-day and UTC clock; the fresh link keeps the page's query", () => {
+    expect(snapshotTime("2026-09-11T13:51:00Z")).toBe("Sep 11, 13:51 UTC");
+    expect(snapshotTime("garbage")).toBe("garbage");
+    expect(freshHref("")).toBe("?fresh=1");
+    expect(freshHref("?weeks=2")).toBe("?weeks=2&fresh=1");
+    expect(freshHref(`?since=${day("2026-09-01T00:00:00Z")}&fresh=1`)).toBe(
+      `?since=${day("2026-09-01T00:00:00Z")}&fresh=1`,
+    );
   });
 });

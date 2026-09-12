@@ -66,7 +66,7 @@ function seedOf(html: string): DeliverySeed {
 function fakeService(
   impl: (
     repo: string,
-    opts: { since?: string; weeks?: number; runs?: (range: DeliveryRange) => Promise<RunFact[]> },
+    opts: { since?: string; weeks?: number; fresh?: boolean; runs?: (range: DeliveryRange) => Promise<RunFact[]> },
   ) => Promise<DeliveryReport>,
   repos = ["acme/api"],
 ): DeliveryService {
@@ -164,7 +164,7 @@ describe("createDeliveryViewHandler", () => {
     expect(io.headers.allow).toBe("GET");
   });
 
-  it("serves the first repository on the bare index, LIVE per request, with the hardened page headers and the report + repositories as the seed", async () => {
+  it("serves the first repository on the bare index, asking the service on every request, with the hardened page headers and the report + repositories as the seed", async () => {
     let calls = 0;
     const h = createDeliveryViewHandler(
       {
@@ -201,13 +201,13 @@ describe("createDeliveryViewHandler", () => {
     expect(calls).toBe(2);
   });
 
-  it("passes ?weeks and ?since through and 404s a repository that is not configured (the page serves the configured ones only)", async () => {
+  it("passes ?weeks, ?since and ?fresh=1 through and 404s a repository that is not configured (the page serves the configured ones only)", async () => {
     const seen: unknown[] = [];
     const h = createDeliveryViewHandler(
       {
         service: fakeService(
           (repo, opts) => {
-            seen.push([repo, opts.weeks, opts.since]);
+            seen.push([repo, opts.weeks, opts.since, opts.fresh]);
             return Promise.resolve(report(repo));
           },
           ["acme/api", "acme/web"],
@@ -222,9 +222,17 @@ describe("createDeliveryViewHandler", () => {
     const s = fakeReqRes("GET", `/delivery/acme/api?since=${"2026-09-01T00:00:00Z".slice(0, 10)}`);
     h(s.req, s.res, ctx(viewer));
     await tick();
+    const f = fakeReqRes("GET", "/delivery/acme/api.json?weeks=1&fresh=1");
+    h(f.req, f.res, ctx(viewer));
+    await tick();
+    const notFresh = fakeReqRes("GET", "/delivery/acme/api?fresh=0");
+    h(notFresh.req, notFresh.res, ctx(viewer));
+    await tick();
     expect(seen).toEqual([
-      ["acme/web", 2, undefined],
-      ["acme/api", undefined, "2026-09-01T00:00:00Z".slice(0, 10)],
+      ["acme/web", 2, undefined, undefined],
+      ["acme/api", undefined, "2026-09-01T00:00:00Z".slice(0, 10), undefined],
+      ["acme/api", 1, undefined, true],
+      ["acme/api", undefined, undefined, undefined],
     ]);
     const miss = fakeReqRes("GET", "/delivery/acme/nope");
     expect(h(miss.req, miss.res, ctx(viewer))).toBe(true);
@@ -279,8 +287,11 @@ describe("createDeliveryViewHandler", () => {
     expect(seedOf(asAdmin.body()).report.totals.agentRuns).toEqual({ count: 2, minutes: 10 });
   });
 
-  it("serves the JSON twin for agents with no-store", async () => {
-    const h = createDeliveryViewHandler({ service: fakeService(() => Promise.resolve(report())) }, shell);
+  it("serves the JSON twin for agents with no-store, the snapshot's time in it", async () => {
+    const h = createDeliveryViewHandler(
+      { service: fakeService(() => Promise.resolve({ ...report(), snapshotAt: "2026-09-11T13:51:00Z" })) },
+      shell,
+    );
     const io = fakeReqRes("GET", "/delivery/acme/api.json");
     h(io.req, io.res, ctx(viewer));
     await tick();
@@ -290,6 +301,7 @@ describe("createDeliveryViewHandler", () => {
     const parsed = JSON.parse(io.body()) as DeliveryReport;
     expect(parsed.repo).toBe("acme/api");
     expect(parsed.totals.prsMerged).toBe(1);
+    expect(parsed.snapshotAt).toBe("2026-09-11T13:51:00Z");
   });
 
   it("a renderer that throws once the report is in hand is one 502 with the reason — the headers are written once, never a 200 and then a 502", async () => {
