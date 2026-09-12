@@ -14,7 +14,7 @@ The loop: call the model, run the tool calls it asks for, append the results, re
 | `ship` | Coding, review, fixes, until LGTM. A person merges. | Never sent to a model; each round runs `coding` or `review`. | `repo-resident` | The `ship` config block |
 | `research` | Web search and URL reading, plus repository and issue reads; no workspace. | `web`: search, URL fetch, status, GitHub reads. | `none` | 12 turns, 8 min, effort `medium` |
 
-GitHub *read* tools need no workspace and are in every tool loop; issue *writes* are only in `assistant` and `full`. The machine class is where the tools execute: `none` provisions nothing, and `repo-resident` is the onboarded repository's resident when it is serviceable, else a cold per-thread sandbox with the checkout.
+GitHub *read* tools need no workspace and are in every tool loop; issue *writes* are only in `assistant` and `full`. The machine class is where the tools execute: `none` provisions nothing, and `repo-resident` is the onboarded repository's resident when it is serviceable, else a cold per-thread sandbox with the checkout. Two further classes exist for presets to come: `repo-cold`, a per-thread sandbox with the checkout that never touches the resident (the repository is vetted against GitHub instead), and `blank`, an empty per-thread sandbox with no repository and no credential ([Execution and sandboxes](../reference/specs/execution.md)).
 
 ## The toolset is the boundary, not the wall
 

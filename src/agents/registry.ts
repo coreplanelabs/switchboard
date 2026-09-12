@@ -7,19 +7,25 @@ import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS } from "../core/ship/contra
 
 /** The machine classes a run's tools can execute on — the machine half of a
  *  profile's reach (docs/decisions/0026-capability-profiles-and-request-routing.md),
- *  provisioned by the executor factory from the class alone:
+ *  provisioned by the executor factory from the class alone
+ *  (docs/reference/specs/execution.md item 18):
  *  - `none`: no executor. The agent's tools run in the bot process, or it has none.
+ *  - `blank`: a per-thread sandbox with an empty workspace — no repository is
+ *    resolved and no credential is minted.
+ *  - `repo-cold`: a per-thread sandbox with the checkout and the run's
+ *    credential; bare repository names are vetted against GitHub with that
+ *    credential, and the resident registry and Worker are never consulted.
  *  - `repo-resident`: the target repository's onboarded resident when it is
  *    serviceable, else a per-thread sandbox with the checkout and a named note;
  *    bare repository names are vetted against the resident registry. */
-export const MACHINE_CLASSES = ["none", "repo-resident"] as const;
+export const MACHINE_CLASSES = ["none", "blank", "repo-cold", "repo-resident"] as const;
 export type MachineClass = (typeof MACHINE_CLASSES)[number];
 
 /** Whether a class carries a repository checkout — the one fact repository
  *  resolution and the repository gates read off the class: a run on a class
  *  without one never resolves or gates a repository. */
 export function machineNeedsRepo(machine: MachineClass): boolean {
-  return machine === "repo-resident";
+  return machine === "repo-cold" || machine === "repo-resident";
 }
 
 export interface AgentDef {

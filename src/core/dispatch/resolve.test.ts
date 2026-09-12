@@ -1,9 +1,11 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
-import { getAgent } from "../../agents/registry.js";
+import { getAgent, type MachineClass } from "../../agents/registry.js";
+import { resetResidentProbeCache } from "../../execution/factory.js";
+import { resolveGithubToken } from "../../execution/githubApp.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
 import type { Provider } from "../../providers/types.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
@@ -18,6 +20,16 @@ import { readRequest, resolveRun, resolveTarget, type ResolveDeps } from "./reso
 // stickiness, and the target's resolution started as a promise. What the
 // resolved triple does to a run (the card label, the model call, the gates) is
 // proven end to end through `dispatch()` in `src/core/dispatcher.test.ts`.
+
+// The repo-cold vet mints the run's credential; the mock answers a scope-tagged
+// token so the tests assert the scope asked for without a key or the network.
+vi.mock("../../execution/githubApp.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../../execution/githubApp.js")>();
+  return {
+    ...mod,
+    resolveGithubToken: vi.fn(async (scope?: "read" | "write") => `ghs_${scope ?? "write"}`),
+  };
+});
 
 const NOW = 10_000;
 
@@ -37,10 +49,21 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 `;
 
-function configStore(): ConfigStore {
+/** The same deployment with a Cloudflare sandbox AND a resident fleet configured. */
+const RESIDENT_YAML =
+  YAML +
+  `
+execution:
+  type: cloudflare
+  url: https://sandbox.example
+  resident:
+    baseUrl: https://resident.example
+`;
+
+function configStore(yaml = YAML): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-resolve-"));
   const path = join(dir, "config.yaml");
-  writeFileSync(path, YAML);
+  writeFileSync(path, yaml);
   return new ConfigStore(path, join(dir, "overrides.json"));
 }
 
@@ -251,5 +274,104 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       }),
     ).toThrow(/Unknown provider "nowhere"/);
     expect(calls).toEqual([]);
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 18 — which vet a bare
+// `owner/name` gets is the machine class's: `repo-resident` asks the resident
+// registry, `repo-cold` asks GitHub with the run's credential and never the
+// registry, `blank` resolves no repository at all. Proven against the
+// PRODUCTION resolver (no injected seam) with the network stubbed, on a
+// deployment that has both a sandbox and a resident fleet configured.
+describe("resolveTarget — the vet a machine class gets", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    resetResidentProbeCache();
+  });
+
+  const message = msg("fix the login bug in acme/api");
+
+  /** Every fetch answered by `answer`; the URLs asked for are kept in order. */
+  function stubFetch(answer: (url: string) => Response) {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        calls.push(String(url));
+        return answer(String(url));
+      }),
+    );
+    return calls;
+  }
+
+  /** The target for a coding-shaped agent on `machine`, resolved by the production resolver. */
+  function target(machine: MachineClass) {
+    const store = configStore(RESIDENT_YAML);
+    const p = providers();
+    const resolved = resolveRun(
+      { config: store, providers: p.registry },
+      { msg: message, directives: { agent: "coding", text: message.text }, history: [] },
+    ).resolved;
+    return resolveTarget(
+      { config: store, providers: p.registry },
+      {
+        msg: message,
+        history: [],
+        agent: { ...getAgent("coding"), machine },
+        resolved,
+        resume: undefined,
+        root: root(message).root,
+      },
+    );
+  }
+
+  it("repo-resident: the slug is vetted against the resident registry — one GET /status, no GitHub call", async () => {
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.mocked(resolveGithubToken).mockClear();
+    const calls = stubFetch(() => new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 }));
+    const out = target("repo-resident");
+    expect(out.needsRepo).toBe(true);
+    expect(await out.repoCtxP).toEqual({ repo: "acme/api" });
+    expect(calls).toHaveLength(1);
+    const asked = new URL(calls[0]);
+    expect(asked.host).toBe("resident.example");
+    expect(asked.pathname).toBe("/status");
+    expect(asked.searchParams.get("resource")).toBe("repo:acme/api");
+    expect(resolveGithubToken).not.toHaveBeenCalled();
+  });
+
+  it("repo-cold: the same slug is vetted against GitHub with the run's credential — the resident registry is never asked", async () => {
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.mocked(resolveGithubToken).mockClear();
+    const calls = stubFetch(() => new Response("{}", { status: 200 }));
+    const out = target("repo-cold");
+    expect(out.needsRepo).toBe(true);
+    expect(await out.repoCtxP).toEqual({ repo: "acme/api" });
+    expect(calls).toEqual(["https://api.github.com/repos/acme/api"]);
+    expect(resolveGithubToken).toHaveBeenCalledWith("write"); // coding's toolset is `full`: the credential the sandbox gets
+  });
+
+  it("repo-cold: GitHub's 404 is a rejected slug and an unanswered vet is unverified — nothing binds, the registry stays untouched", async () => {
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    const refused = stubFetch(() => new Response("{}", { status: 404 }));
+    expect(await target("repo-cold").repoCtxP).toEqual({ rejectedRepo: "acme/api" });
+    expect(refused).toEqual(["https://api.github.com/repos/acme/api"]);
+    const silent = stubFetch(() => {
+      throw new TypeError("fetch failed");
+    });
+    expect(await target("repo-cold").repoCtxP).toEqual({ unverifiedRepo: "acme/api" });
+    expect(silent).toEqual(["https://api.github.com/repos/acme/api"]);
+  });
+
+  it("blank: no repository is resolved and no vet of any kind runs", async () => {
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.mocked(resolveGithubToken).mockClear();
+    const calls = stubFetch(() => new Response("{}", { status: 200 }));
+    const out = target("blank");
+    expect(out.needsRepo).toBe(false);
+    expect(await out.repoCtxP).toEqual({});
+    expect(calls).toEqual([]);
+    expect(resolveGithubToken).not.toHaveBeenCalled();
   });
 });

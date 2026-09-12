@@ -222,6 +222,71 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     ).toEqual({ kind: "allowed" });
     expect(replies).toEqual([]);
   });
+
+  // docs/reference/specs/execution.md item 18: a `repo-cold` run's bare slug was
+  // vetted against GitHub, not the resident registry, so its refusals name
+  // GitHub and the installation — never onboarding, whether or not a resident
+  // fleet exists.
+  describe("a repo-cold agent's repository was vetted against GitHub", () => {
+    const cold = { ...getAgent("coding"), name: "explore", machine: "repo-cold" as const };
+
+    it("GitHub answered 404: refused as not visible, naming the repository and the installation, with or without residents", async () => {
+      for (const residents of [true, false]) {
+        const { deps, gate, cardCtx, replies, refusals, closes } = setup({ user: "slack:UADMIN", residents });
+        const repoCtx: RepoContext = { rejectedRepo: "acme/hidden" };
+        expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: cold, needsRepo: true, repoCtx })).toEqual({
+          kind: "refused",
+          reason: "repo_not_visible",
+        });
+        expect(refusals).toEqual(["repo_not_visible"]);
+        expect(closedReasons(closes).join("\n")).toContain("repo not visible");
+        expect(replies).toHaveLength(1);
+        expect(replies[0]).toBe(
+          "📦 `acme/hidden` is not a repository this installation can see — GitHub answered 404 — so I did not start an *explore* run for it. " +
+            "The repository is outside the Switchboard GitHub App installation (`github_repos` lists the reachable ones), or the name is wrong.",
+        );
+        expect(replies[0]).not.toContain("onboard");
+      }
+    });
+
+    it("GitHub did not answer: refused as unverified, naming GitHub rather than the resident registry", async () => {
+      const { deps, gate, cardCtx, replies, refusals, closes } = setup({ user: "slack:UADMIN" });
+      const repoCtx: RepoContext = { unverifiedRepo: "acme/api" };
+      expect(await authorizeRepo(deps, { ...gate, ...cardCtx, agent: cold, needsRepo: true, repoCtx })).toEqual({
+        kind: "refused",
+        reason: "repo_unverified",
+      });
+      expect(refusals).toEqual(["repo_unverified"]);
+      expect(closedReasons(closes).join("\n")).toContain("repo could not be verified");
+      expect(replies[0]).toBe(
+        "⚠️ I couldn't verify `acme/api` against GitHub — it didn't answer — so I did not start an *explore* run rather than guess which repository you meant. Try again in a minute.",
+      );
+      expect(replies[0]).not.toContain("resident registry");
+    });
+
+    it("a visible repository passes the same access gate as every other class", async () => {
+      const excluded = setup({ user: "slack:UDEV" });
+      expect(
+        await authorizeRepo(excluded.deps, {
+          ...excluded.gate,
+          ...excluded.cardCtx,
+          agent: cold,
+          needsRepo: true,
+          repoCtx: { repo: "acme/secret" },
+        }),
+      ).toEqual({ kind: "refused", reason: "repo_access" });
+      const open = setup({ user: "slack:UX" });
+      expect(
+        await authorizeRepo(open.deps, {
+          ...open.gate,
+          ...open.cardCtx,
+          agent: cold,
+          needsRepo: true,
+          repoCtx: { repo: "acme/other" },
+        }),
+      ).toEqual({ kind: "allowed" });
+    });
+  });
 });
 
 describe("authorizePrHead — the PR head preflight", () => {

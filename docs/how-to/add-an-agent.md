@@ -29,7 +29,7 @@ Every field is documented on `AgentDef` in the same file.
 | Field | What it decides |
 |---|---|
 | `toolset` | what the model may ask for ([The agents and their toolsets](../explanation/agents-and-toolsets.md) lists each) |
-| `machine` | where a run's tools execute: `repo-resident` provisions the target repository's resident when it is serviceable, else a cold sandbox with the checkout; `none` provisions nothing |
+| `machine` | where a run's tools execute: `repo-resident` provisions the target repository's resident when it is serviceable, else a cold sandbox with the checkout; `repo-cold` always the cold sandbox with the checkout, the repository vetted against GitHub and the resident never consulted; `blank` an empty sandbox with no repository and no credential; `none` provisions nothing |
 | `effort` (optional) | the agent's built-in effort, which every config layer beats |
 
 ## Give it a default model

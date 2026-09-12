@@ -11,7 +11,7 @@ import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ResidentExecutor, ResidentNeedsRefError, type ResidentBinding, type ResidentStatusProbe } from "./resident.js";
 import { repoResourceId } from "../core/residentAdmin.js";
-import { resolveGithubToken } from "./githubApp.js";
+import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 import { isServiceable } from "./residentState.js";
 import { systemClock } from "../core/trace/clock.js";
 import { processSecrets, type Secret, type Secrets } from "../secrets.js";
@@ -45,9 +45,10 @@ export interface ExecutionConfig {
   url?: string;
   /**
    * Resident repo environments (deploy/cloudflare-resident/): when set AND
-   * the request resolved a target repo (ctx.repo), a warm resident serves the
-   * thread; any other resident state falls back to the per-thread backend
-   * above with a named note. No ctx.repo → per-thread, no probe.
+   * the request resolved a target repo (ctx.repo) for a `repo-resident` run,
+   * a warm resident serves the thread; any other resident state falls back to
+   * the per-thread backend above with a named note. No ctx.repo → per-thread,
+   * no probe. The `blank` and `repo-cold` classes never consult it.
    */
   resident?: ResidentExecutionConfig;
 }
@@ -141,15 +142,34 @@ export async function makeExecutor(
    *  probe and the attach become its `http.client` children (tracing.md item 21). */
   span?: Span,
 ): Promise<ExecutorSelection> {
-  // The agent's machine class decides what is provisioned. `none` → nothing:
-  // no workspace dir, no sandbox created or reconnected, no credential
-  // required. The general and research agents land here.
-  if (ctx.agent.machine === "none") {
+  // The agent's machine class decides what is provisioned
+  // (docs/reference/specs/execution.md item 18). `none` → nothing: no workspace
+  // dir, no sandbox created or reconnected, no credential required. The
+  // general and research agents land here.
+  const machine = ctx.agent.machine;
+  if (machine === "none") {
     return { executor: new NullExecutor(ctx.agent.name), backend: "local" };
   }
+  // `blank` → the per-thread backend with an empty workspace: no repository,
+  // whatever the context carries (a blank run never resolves one), and no
+  // credential (nothing says this run acts as anyone). No resident probe.
+  if (machine === "blank") {
+    return {
+      executor: await makePerThreadExecutor(opts, { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }),
+      backend: perThreadBackend(opts),
+    };
+  }
+  // `repo-cold` → the per-thread backend with the checkout and the run's
+  // credential, even when the repository has a serviceable resident: the
+  // resident registry and Worker are never consulted, so an outage there can
+  // neither refuse nor delay the run. Cold is the class, not a fallback, so
+  // there is no note.
+  if (machine === "repo-cold") {
+    return { executor: await makePerThreadExecutor(opts, perThreadCheckout(ctx)), backend: perThreadBackend(opts) };
+  }
 
-  // Resident selection: only when a target repo was resolved AND the
-  // resident backend is configured. A SERVICEABLE state → ResidentExecutor;
+  // `repo-resident`. Resident selection: only when a target repo was resolved
+  // AND the resident backend is configured. A SERVICEABLE state → ResidentExecutor;
   // anything else (engine-owned state, probe timeout, outage) → the per-thread
   // backend below, with the reason carried in `note` (never a silent
   // stall). A repo that is simply not onboarded also runs per-thread, but
@@ -218,7 +238,7 @@ export async function makeExecutor(
   }
 
   return {
-    executor: await makePerThreadExecutor(opts, ctx),
+    executor: await makePerThreadExecutor(opts, perThreadCheckout(ctx)),
     note,
     backend: perThreadBackend(opts),
     ...(failedAttach ? { trace: failedAttach.steps } : {}),
@@ -390,9 +410,26 @@ export function localWorkspaceDir(baseDir: string, threadKey: string): string {
   return resolve(baseDir, safe);
 }
 
+/** What a per-thread backend is built from: the thread, the checkout it
+ *  clones (absent = an empty workspace) and the env each command gets. */
+interface PerThreadInputs {
+  threadKey: string;
+  /** the repository to clone and the ref to check out; absent = an empty workspace */
+  repo?: string;
+  ref?: string;
+  /** the sandbox env, resolved per command (docs/reference/specs/execution.md item 5) */
+  resolveEnvs: () => Promise<Record<string, string>>;
+}
+
+/** The per-thread inputs of a class that carries the checkout: the resolved
+ *  repo and ref, and the run's GitHub credential in the env. */
+function perThreadCheckout(ctx: ExecutorContext): PerThreadInputs {
+  return { threadKey: ctx.threadKey, repo: ctx.repo, ref: ctx.ref, resolveEnvs: () => githubEnvs(ctx.agent) };
+}
+
 /** The per-thread backends (the pre-resident selection, unchanged). */
-async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: ExecutorContext): Promise<Executor> {
-  const { threadKey } = ctx;
+async function makePerThreadExecutor(opts: ExecutorFactoryOptions, input: PerThreadInputs): Promise<Executor> {
+  const { threadKey } = input;
   const type = opts.execution?.type ?? "local";
 
   if (type === "local") {
@@ -410,9 +447,9 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: Executor
       threadKey,
       timeoutMs: (opts.execution?.timeoutMinutes ?? 30) * 60_000,
       statePath: resolve(opts.dataDir, "sandboxes.json"),
-      resolveEnvs: () => githubEnvs(ctx.agent),
-      repo: ctx.repo,
-      ref: ctx.ref,
+      resolveEnvs: input.resolveEnvs,
+      repo: input.repo,
+      ref: input.ref,
     });
   }
 
@@ -427,9 +464,9 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: Executor
       url: opts.execution.url,
       token: token.reveal(),
       threadKey,
-      resolveEnvs: () => githubEnvs(ctx.agent),
-      repo: ctx.repo,
-      ref: ctx.ref,
+      resolveEnvs: input.resolveEnvs,
+      repo: input.repo,
+      ref: input.ref,
     });
   }
 
@@ -445,7 +482,7 @@ class NullExecutor implements Executor {
   private fail(): never {
     throw new Error(
       `Agent "${this.agentName}" runs on machine class "none", so it has no execution workspace. ` +
-        `Declare a machine class that provisions one (\`machine: "repo-resident"\`) if its tools need one.`,
+        `Declare a machine class that provisions one (\`repo-resident\`, \`repo-cold\` or \`blank\`) if its tools need one.`,
     );
   }
 
@@ -460,18 +497,23 @@ class NullExecutor implements Executor {
   }
 }
 
+/** The scope of the GitHub credential a run holds, decided from the agent's
+ *  declared toolset — never from the prompt. Least-privilege: a `readonly`
+ *  agent (the review agent) gets a READ-scoped token, so even though its
+ *  sandbox has `gh` + the credential helper, it physically cannot
+ *  post/review/push from inside — the deterministic review post is done by the
+ *  bot process (githubComments.ts) with a write token, so this doesn't weaken
+ *  it. A `full` agent (coding) gets the write-scoped token it needs to push and
+ *  open PRs. The sandbox env (`githubEnvs`) and the `repo-cold` repository vet
+ *  (`githubRepoProbe`) mint with this scope, so the vet sees what the run will. */
+export function githubTokenScopeFor(agent: AgentDef): GithubTokenScope {
+  return agent.toolset === "readonly" ? "read" : "write";
+}
+
 /** GitHub credential for the sandbox env: freshly-minted App installation
- *  token when a GitHub App is configured, else static GH_TOKEN, else none.
- *
- *  Least-privilege by toolset: a `readonly` agent (the review agent) gets a
- *  READ-scoped token, so even though its sandbox has `gh` + the credential
- *  helper, it physically cannot post/review/push from inside — the deterministic
- *  review post is done by the bot process (githubComments.ts) with a write
- *  token, so this doesn't weaken it. A `full` agent (coding) gets the
- *  write-scoped token it needs to push and open PRs. */
+ *  token when a GitHub App is configured, else static GH_TOKEN, else none. */
 async function githubEnvs(agent: AgentDef): Promise<Record<string, string>> {
-  const scope = agent.toolset === "readonly" ? "read" : "write";
-  const token = await resolveGithubToken(scope);
+  const token = await resolveGithubToken(githubTokenScopeFor(agent));
   return token ? { GH_TOKEN: token } : {};
 }
 
