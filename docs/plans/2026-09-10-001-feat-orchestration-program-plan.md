@@ -171,7 +171,7 @@ flowchart LR
     U12 --> U13[U13 ship Workflow]
     G4([distribution series]) --> U14[U14 deploy stage]
     U13 --> U14
-    U14 --> U15[U15 retire the round loop]
+    U13 --> U15[U15 retire the round loop]
     U16[U16 child contract] --> U13
     U16 --> U17[U17 handoffs as data]
     U17 --> U13
@@ -502,9 +502,9 @@ Seven phases, in dependency order; the harness track runs in parallel with the r
 
 - **Goal**: One ship implementation, and every follow-up this plan inherited has a disposition.
 - **Requirements**: R16, R23
-- **Dependencies**: U14 receipted.
+- **Dependencies**: U13 receipted live — a plan run under `ship.coordinator: true` has carried two units through review to a merge the runner made (the same trigger U14's status names); U14 stays deferred with its own trigger and is not a dependency.
 - **Files**: `src/core/shipPipeline.ts` (delete `runShipPipeline` and its endings; keep `resolveShipCaps`, `shipRoundHeader`, `shipInterruptedNote` where the coordinator still uses them), `src/core/ship/childRound.ts`, `codingChild.ts`, `reviewChild.ts` (each child becomes the preset the spawn route dispatches, so the child modules shrink to the prompt blocks); `src/core/dispatch/ship.ts`; `docs/plans/2026-09-08-003-feat-ship-restart-plan.md` (status `superseded`, `superseded_by` this plan); `docs/reference/specs/agent-ship.md`.
-- **Approach**: delete the loop once U14's receipt is posted; mark the ship-restart plan superseded (its D1 "tell, do not restart" stands as the coordinator's behaviour on an interrupted child; its follow-ups "hand ship runs off on SIGTERM" and "automatic restart" are moot because the parent no longer lives in the process); the durable-runs D4 follow-up (idempotent exec results) stays deferred with its trigger (a measured kill-inside-a-command rate from `load -- rollover`).
+- **Approach**: delete the loop once U13's live receipt is posted (the runner has merged two units on staging under the flag and the in-process path has served no request since the flag went on); mark the ship-restart plan superseded (its D1 "tell, do not restart" stands as the coordinator's behaviour on an interrupted child; its follow-ups "hand ship runs off on SIGTERM" and "automatic restart" are moot because the parent no longer lives in the process); the durable-runs D4 follow-up (idempotent exec results) stays deferred with its trigger (a measured kill-inside-a-command rate from `load -- rollover`).
 - **Test scenarios**:
   - `runShipPipeline` and its ending helpers are gone; the ship child modules export only what the spawn route needs (a source-scan test).
   - `decisions:check` accepts the superseded status and the resolving link.
