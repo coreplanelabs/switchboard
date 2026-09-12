@@ -5,6 +5,7 @@
 
 import type { ChatMessage, ToolDef } from "../../providers/types.js";
 import type { ChannelVisibility } from "../authz/types.js";
+import type { RunProfile } from "../../config/profile.js";
 import type { RunEvent } from "../runEvents.js";
 
 /** How long a generation's claim on a run lasts without a heartbeat. */
@@ -55,6 +56,11 @@ export interface LiveRunMeta {
   headSha?: string;
   pr?: number;
   readonly?: boolean;
+  /** The effective profile the run was admitted with — its class, identity,
+   *  the budget it runs on and what clipped it — so a resume keeps the clipped
+   *  budget instead of re-reading the preset's. Absent on rows written before
+   *  profiles existed. */
+  profile?: RunProfile;
   /** Which executor the run attached: what `makeExecutor` chose. */
   selection?: "resident" | "sandbox" | "local" | "none";
   /** The worktree path the system prompt names. */

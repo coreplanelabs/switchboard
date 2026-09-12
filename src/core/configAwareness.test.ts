@@ -189,3 +189,46 @@ describe("configAwarenessBlock — MCP (docs/reference/specs/mcp-tools.md item 1
     expect(off).not.toContain("MCP");
   });
 });
+
+// Feature: docs/reference/specs/routing-and-config.md item 8 — the block names the
+// boundary in force and the budget it clipped, so an agent asked "how long do
+// you have?" answers from fact; with no boundary the block is byte-identical
+// to before the feature.
+describe("configAwarenessBlock — boundaries and the budget", () => {
+  it("is byte-identical to before when no boundary is in force and the budget is the preset's own", () => {
+    expect(configAwarenessBlock({ ...base, budget: { minutes: 5, presetMinutes: 5 } })).toBe(
+      configAwarenessBlock(base),
+    );
+  });
+
+  it("names the boundary in force per axis with its scope, that a boundary caps and never grants, how one is set, and the clipped budget with what clipped it", () => {
+    const block = configAwarenessBlock({
+      ...base,
+      agentName: "coding",
+      boundary: {
+        maxMinutes: { value: 10, scope: "channel" },
+        maxIdentity: { value: "write", scope: "user" },
+        machines: { value: ["none", "repo-resident"], by: [{ scope: "channel", machines: ["none", "repo-resident"] }] },
+      },
+      budget: { minutes: 10, presetMinutes: 45, boundedBy: "channel" },
+    });
+    expect(block).toContain(
+      "Boundary in force: maxMinutes 10 (channel), maxIdentity `write` (user), machines `none`, `repo-resident` (channel)",
+    );
+    expect(block).toMatch(/caps what any run in its scope may have and never grants/);
+    expect(block).toContain(
+      "`config set me --boundary.maxMinutes <n> --boundary.maxIdentity <none|read|write> --boundary.machines <a,b>`",
+    );
+    expect(block).toContain("Budget: 10 min (clipped by the channel boundary; the preset asks 45).");
+  });
+
+  it("a boundary that clipped nothing is named without a budget line", () => {
+    const block = configAwarenessBlock({
+      ...base,
+      boundary: { maxMinutes: { value: 60, scope: "defaults" } },
+      budget: { minutes: 5, presetMinutes: 5 },
+    });
+    expect(block).toContain("Boundary in force: maxMinutes 60 (defaults)");
+    expect(block).not.toContain("Budget:");
+  });
+});

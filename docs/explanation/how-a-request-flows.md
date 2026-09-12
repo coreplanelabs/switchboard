@@ -58,7 +58,7 @@ sequenceDiagram
     A->>D: IncomingMessage
     D->>D: parse directives → agent:coding
     D->>D: resolve config (request > thread > user > channel > defaults)
-    D->>D: authorize: may this caller run coding, against this repo?
+    D->>D: authorize: may this caller run coding? does the scope's boundary allow its profile? against this repo?
     D->>D: assemble history from the thread
     loop until the model stops, or the budget runs out
         D->>P: complete(messages, tools)

@@ -16,6 +16,7 @@ import {
   authorizeAgent,
   authorizeAttachedHead,
   authorizePrHead,
+  authorizeProfile,
   authorizeRepo,
   type AuthorizeDeps,
   type GateCard,
@@ -528,5 +529,89 @@ describe("authorizeAttachedHead — the attached-head guard on the resident path
     ).toBe("allowed");
     expect(asked).toEqual([]);
     expect(moved.releases).toEqual([]);
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 4: the profile gate, beside
+// the agent gate and before the thread is claimed — an identity or a machine
+// class above a boundary's cap is refused by name (the axis, the cap, its
+// scope, how to get it raised); a clipped budget is allowed and carried.
+describe("authorizeProfile — the profile gate, before the thread is claimed", () => {
+  const coding = getAgent("coding");
+
+  it("an admitted profile passes through unchanged — a clipped budget included — with no reply", async () => {
+    const { deps, gate, replies, refusals } = setup();
+    const profile = {
+      machine: "repo-resident" as const,
+      identity: "write" as const,
+      minutes: 10,
+      boundedBy: "channel" as const,
+    };
+    expect(await authorizeProfile(deps, { ...gate, agent: coding, resolution: { kind: "profile", profile } })).toEqual({
+      kind: "allowed",
+      profile,
+    });
+    expect(replies).toEqual([]);
+    expect(refusals).toEqual([]);
+  });
+
+  it("an identity above the cap is refused under the dispatch's refusal wrap, naming the axis, the cap, its scope and how to get it raised — per scope", async () => {
+    const cases = [
+      {
+        scope: "channel" as const,
+        reply:
+          "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Run it in a channel that allows `write`, or ask <@slack:UADMIN> to raise this channel's boundary.",
+      },
+      {
+        scope: "user" as const,
+        reply:
+          "🚫 `coding` needs a `write` credential; your own boundary caps runs at `read`. Raise your own boundary with `config set me --boundary.maxIdentity write`, or drop your overrides with `config clear me`.",
+      },
+      {
+        scope: "defaults" as const,
+        reply:
+          "🚫 `coding` needs a `write` credential; the installation's default boundary caps runs at `read`. Ask <@slack:UADMIN> to raise `defaults.boundary` in the configuration.",
+      },
+    ];
+    for (const { scope, reply } of cases) {
+      const { deps, gate, replies, refusals } = setup();
+      expect(
+        await authorizeProfile(deps, {
+          ...gate,
+          agent: coding,
+          resolution: { kind: "refused", refusal: { axis: "identity", needs: "write", cap: "read", scope } },
+        }),
+      ).toEqual({ kind: "refused", reason: "profile_bounded" });
+      expect(refusals).toEqual(["profile_bounded"]);
+      expect(replies).toEqual([reply]);
+    }
+  });
+
+  it("a class outside the set is refused naming the class, the allowed set and every scope that excludes it, with one way forward per scope", async () => {
+    const one = setup();
+    await authorizeProfile(one.deps, {
+      ...one.gate,
+      agent: coding,
+      resolution: {
+        kind: "refused",
+        refusal: { axis: "machine", needs: "repo-resident", allowed: ["none"], scopes: ["channel"] },
+      },
+    });
+    expect(one.replies).toEqual([
+      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary allows only `none`. Run it in a channel that allows `repo-resident`, or ask <@slack:UADMIN> to raise this channel's boundary.",
+    ]);
+    const two = setup();
+    await authorizeProfile(two.deps, {
+      ...two.gate,
+      agent: coding,
+      resolution: {
+        kind: "refused",
+        refusal: { axis: "machine", needs: "repo-resident", allowed: ["none", "blank"], scopes: ["channel", "user"] },
+      },
+    });
+    expect(two.replies).toEqual([
+      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary and your own boundary allow only `none`, `blank`. Run it in a channel that allows `repo-resident`, or ask <@slack:UADMIN> to raise this channel's boundary; raise your own boundary with `config set me --boundary.machines <classes including repo-resident>`, or drop your overrides with `config clear me`.",
+    ]);
+    expect(two.refusals).toEqual(["profile_bounded"]);
   });
 });

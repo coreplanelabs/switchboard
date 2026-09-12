@@ -615,3 +615,37 @@ describe("capEvent on a review_artifact", () => {
     expect(capped.bytes).toBeGreaterThan(MAX_EVENT_BYTES);
   });
 });
+
+// docs/reference/specs/run-history.md: the `profile` field — the effective
+// profile a run was admitted with (its preset, class, identity, minutes and
+// what clipped the budget), typed when present, absent on records written
+// before it existed.
+describe("isRunRecord — the profile field", () => {
+  const profile = {
+    preset: "coding",
+    machine: "repo-resident" as const,
+    identity: "write" as const,
+    minutes: 10,
+    boundedBy: "channel" as const,
+  };
+
+  it("accepts a profile of the typed shape — also after a JSON round-trip — with or without a clip, and a record without one", () => {
+    expect(isRunRecord(record({ profile }))).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record({ profile }))))).toBe(true);
+    expect(isRunRecord(record({ profile: { preset: "general", machine: "none", identity: "none", minutes: 5 } }))).toBe(
+      true,
+    );
+    expect("profile" in record()).toBe(false);
+    expect(isRunRecord(record())).toBe(true);
+  });
+
+  it("refuses a malformed profile: an unknown class or identity, a non-positive or non-numeric budget, an unknown clip scope, a preset that is not a string, a non-object", () => {
+    expect(isRunRecord({ ...record(), profile: { ...profile, machine: "laptop" } })).toBe(false);
+    expect(isRunRecord({ ...record(), profile: { ...profile, identity: "admin" } })).toBe(false);
+    expect(isRunRecord({ ...record(), profile: { ...profile, minutes: 0 } })).toBe(false);
+    expect(isRunRecord({ ...record(), profile: { ...profile, minutes: "10" } })).toBe(false);
+    expect(isRunRecord({ ...record(), profile: { ...profile, boundedBy: "nowhere" } })).toBe(false);
+    expect(isRunRecord({ ...record(), profile: { ...profile, preset: 1 } })).toBe(false);
+    expect(isRunRecord({ ...record(), profile: "coding" })).toBe(false);
+  });
+});

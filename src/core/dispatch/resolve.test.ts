@@ -13,7 +13,7 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
 import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
 import type { ResumeContext } from "./admission.js";
-import { readRequest, resolveRun, resolveTarget, type ResolveDeps } from "./resolve.js";
+import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./resolve.js";
 
 // Feature: docs/reference/specs/routing-and-config.md items 1–3 — the resolve
 // stage's own contract: the request read (directives stripped, history
@@ -395,5 +395,70 @@ describe("resolveTarget — the vet a machine class gets", () => {
     expect(await out.repoCtxP).toEqual({});
     expect(calls).toEqual([]);
     expect(resolveGithubToken).not.toHaveBeenCalled();
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 2: the effective profile is
+// preset ∩ boundary, computed once in the resolve stage; the gate judges it.
+describe("resolveProfile — the effective profile once the preset is known", () => {
+  const BOUNDED_YAML = `${YAML}channels:
+  "slack:CX":
+    boundary:
+      maxMinutes: 10
+      maxIdentity: read
+`;
+  const resolvedIn = (yaml: string, agent: string) => {
+    const store = configStore(yaml);
+    return store.resolve({ channelId: "slack:CX", userId: "slack:UX", request: { agent } });
+  };
+
+  it("with no boundary on the path every preset resolves to its declared profile", () => {
+    for (const name of ["general", "coding", "review"]) {
+      const agent = getAgent(name);
+      expect(resolveProfile({ agent, resolved: resolvedIn(YAML, name), resume: undefined })).toEqual({
+        kind: "profile",
+        profile: declaredProfile(agent),
+      });
+    }
+  });
+
+  it("a bounded channel clips a budget above its cap naming the scope, and refuses an identity above its cap", () => {
+    const review = getAgent("review");
+    expect(resolveProfile({ agent: review, resolved: resolvedIn(BOUNDED_YAML, "review"), resume: undefined })).toEqual({
+      kind: "profile",
+      profile: { machine: "repo-resident", identity: "read", minutes: 10, boundedBy: "channel" },
+    });
+    const coding = getAgent("coding");
+    expect(resolveProfile({ agent: coding, resolved: resolvedIn(BOUNDED_YAML, "coding"), resume: undefined })).toEqual({
+      kind: "refused",
+      refusal: { axis: "identity", needs: "write", cap: "read", scope: "channel" },
+    });
+  });
+
+  it("a resume keeps the profile its row was admitted with — the clipped budget and what clipped it — rather than re-reading the preset; the current boundaries still refuse an identity or class above their cap", () => {
+    const coding = getAgent("coding");
+    const carried = {
+      machine: "repo-resident" as const,
+      identity: "write" as const,
+      minutes: 12,
+      boundedBy: "channel" as const,
+    };
+    const resume = { row: { meta: { profile: carried } } } as unknown as ResumeContext;
+    // The channel's boundary is gone by the resume: the row's clip stands.
+    expect(resolveProfile({ agent: coding, resolved: resolvedIn(YAML, "coding"), resume })).toEqual({
+      kind: "profile",
+      profile: carried,
+    });
+    // A boundary tightened meanwhile: the identity cap refuses the resume by name like a fresh request.
+    expect(resolveProfile({ agent: coding, resolved: resolvedIn(BOUNDED_YAML, "coding"), resume })).toEqual({
+      kind: "refused",
+      refusal: { axis: "identity", needs: "write", cap: "read", scope: "channel" },
+    });
+    // A row written before profiles existed resolves like a fresh request.
+    const legacy = { row: { meta: {} } } as unknown as ResumeContext;
+    expect(resolveProfile({ agent: coding, resolved: resolvedIn(YAML, "coding"), resume: legacy })).toEqual({
+      kind: "profile",
+      profile: declaredProfile(coding),
+    });
   });
 });

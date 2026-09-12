@@ -192,6 +192,18 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
   return { shell, card, heartbeat };
 }
 
+/**
+ * The card's budget line when a boundary clipped the run's budget
+ * (docs/reference/specs/routing-and-config.md item 4): `budget 45 min (channel
+ * boundary; preset asks 120)`, appended to the card's label the way a resident
+ * note is, so the clip is visible where the run is watched. Undefined when the
+ * preset's own budget stands — the card is then exactly what it was.
+ */
+export function budgetClipLabel(agent: AgentDef, profile: RunProfile): string | undefined {
+  if (profile.boundedBy === undefined) return undefined;
+  return `budget ${profile.minutes} min (${profile.boundedBy} boundary; preset asks ${agent.maxMinutes})`;
+}
+
 /** The run as every surface sees it from the reservation on: its registry row,
  *  the id the row and the record share, the channel-visibility stamp, the live
  *  page link, and the two publishers the dispatch keeps for the narrative
@@ -482,6 +494,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
           ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
           readonly: profile.identity === "read",
+          profile,
           request: requestRow,
         },
         card: card.handle ?? null,
@@ -606,6 +619,8 @@ export interface ComposedPrompt {
 export interface PromptContext {
   msg: IncomingMessage;
   agent: AgentDef;
+  /** The run's effective profile: the config block names its budget and what clipped it. */
+  profile: RunProfile;
   resolved: ResolvedRequest;
   directives: RequestDirectives;
   sticky: ThreadDirectives;
@@ -631,6 +646,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
   const {
     msg,
     agent,
+    profile,
     resolved,
     directives,
     sticky,
@@ -677,6 +693,14 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
     threadDirective: { agent: sticky.agent, model: sticky.model, effort: sticky.effort },
     canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
+    // The boundary in force and the budget this run actually has — the same
+    // values the gate judged, so "how long do you have?" is answered from fact.
+    ...(resolved.boundary ? { boundary: resolved.boundary } : {}),
+    budget: {
+      minutes: profile.minutes,
+      presetMinutes: agent.maxMinutes,
+      ...(profile.boundedBy !== undefined ? { boundedBy: profile.boundedBy } : {}),
+    },
     mcp: {
       registryOn: deps.capabilities.mcp,
       served: mcpForRun.servers.filter((s) => s.toolCount !== undefined).map((s) => s.server),

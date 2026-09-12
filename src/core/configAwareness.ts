@@ -1,4 +1,5 @@
-import type { Scope } from "../config.js";
+import { fmtEffectiveBoundary, type Scope } from "../config.js";
+import type { BoundaryScope, EffectiveBoundary } from "../config/profile.js";
 import { EFFORT_LEVELS, type Effort } from "../effort.js";
 
 // Config awareness (docs/reference/specs/routing-and-config.md behavior 8). The config
@@ -30,6 +31,14 @@ export interface ConfigAwarenessInput {
   threadDirective: DirectiveSet;
   /** Whether the invoking user may run `config set channel`. */
   canEditChannelConfig: boolean;
+  /** The boundary in force on this run's path (docs/reference/specs/routing-and-config.md
+   *  item 2), intersected across the scopes with each axis's scope. Absent →
+   *  no line (byte-identical to before boundaries existed). */
+  boundary?: EffectiveBoundary;
+  /** The budget this run actually has, against the preset's own; `boundedBy`
+   *  names the scope whose boundary clipped it. Absent, or equal to the
+   *  preset's with nothing clipping → no line. */
+  budget?: { minutes: number; presetMinutes: number; boundedBy?: BoundaryScope };
   /** External MCP servers (docs/reference/specs/mcp-tools.md item 17): whether the
    *  self-serve registry is on, and which servers answered / did not for THIS
    *  run — so an agent never says "I cannot load MCPs" when a user can add one.
@@ -89,6 +98,21 @@ export function configAwarenessBlock(i: ConfigAwarenessInput): string {
         "External MCP servers: none connected for you or org-wide yet. Anyone can connect one for their own runs with `mcp add <name> --url <url>` (a one-time link takes the token; never paste tokens in chat); admins add org-wide ones with `--scope org`. `mcp list` shows what exists.",
       );
     }
+  }
+
+  // The boundary in force and the budget it clipped: a cap on what any run in
+  // the scope may have, never a grant — so an agent asked how long it has, or
+  // why it cannot push here, answers from the values the gate judged.
+  if (i.boundary) {
+    lines.push(
+      `Boundary in force: ${fmtEffectiveBoundary(i.boundary)} — a boundary caps what any run in its scope may have and never grants; a preset above a cap is refused, a budget above it clipped. ` +
+        "Users set their own with `config set me --boundary.maxMinutes <n> --boundary.maxIdentity <none|read|write> --boundary.machines <a,b>` (it can only tighten the channel's and the defaults'); `config set channel --boundary.…` caps a channel.",
+    );
+  }
+  if (i.budget?.boundedBy !== undefined) {
+    lines.push(
+      `Budget: ${i.budget.minutes} min (clipped by the ${i.budget.boundedBy} boundary; the preset asks ${i.budget.presetMinutes}).`,
+    );
   }
 
   const channelGate = i.canEditChannelConfig ? "per-channel" : "per-channel; restricted for this user — ask an admin";

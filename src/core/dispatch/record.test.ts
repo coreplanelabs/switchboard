@@ -11,6 +11,7 @@ import {
 } from "./record.js";
 import type { ResolvedRequest } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
+import { declaredProfile } from "../../config/profile.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { analyzeRunFriction } from "../runFriction.js";
@@ -128,6 +129,7 @@ describe("writeTombstone — the provisional interrupted record at the loop's st
     writeTombstone(deps, {
       msg,
       agent,
+      profile: declaredProfile(agent),
       resolved,
       repoCtx: {},
       channelVisibility: "unknown",
@@ -142,6 +144,7 @@ describe("writeTombstone — the provisional interrupted record at the loop's st
       status: "interrupted",
       agent: "general",
       model: "anthropic/general-model",
+      profile: { preset: "general", machine: "none", identity: "none", minutes: 5 },
     });
     expect(writes[0].record.finishedAt).toBe(writes[0].record.startedAt);
     expect(writes[0].record.events.map((e) => e.type)).toEqual(["input"]);
@@ -160,6 +163,7 @@ describe("writeTombstone — the provisional interrupted record at the loop's st
     writeTombstone(deps, {
       msg,
       agent,
+      profile: declaredProfile(agent),
       resolved,
       repoCtx: {},
       channelVisibility: "unknown",
@@ -208,6 +212,26 @@ describe("assembleRunRecord — the handoff on the record", () => {
   it("no handoff → no key (the record's JSON is exactly what the store measures)", () => {
     const record = assembleRunRecord(base());
     expect("handoff" in record).toBe(false);
+    expect("profile" in record).toBe(false);
+  });
+
+  // docs/reference/specs/run-history.md: the effective profile the run was
+  // admitted with rides the record — the preset named, so a reader can tell a
+  // clipped budget from a declared one.
+  it("carries the run's effective profile with its preset, and the record still validates", () => {
+    const record = assembleRunRecord({
+      ...base(),
+      profile: { preset: "coding", machine: "repo-resident", identity: "write", minutes: 10, boundedBy: "channel" },
+    });
+    expect(record.profile).toEqual({
+      preset: "coding",
+      machine: "repo-resident",
+      identity: "write",
+      minutes: 10,
+      boundedBy: "channel",
+    });
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
   });
 });
 
@@ -241,6 +265,7 @@ describe("registerFinishRecord — the finish record, written by the drain after
       run,
       snap,
       agent,
+      profile: { machine: "none", identity: "none", minutes: 3, boundedBy: "channel" },
       resolved,
       msg,
       channelVisibility: "unknown",
@@ -259,6 +284,14 @@ describe("registerFinishRecord — the finish record, written by the drain after
     const { ending, writes } = finished();
     ending.drain(true);
     expect(writes).toHaveLength(1);
+    // So does the effective profile, with its preset and the clip it ran under.
+    expect(writes[0].record.profile).toEqual({
+      preset: "general",
+      machine: "none",
+      identity: "none",
+      minutes: 3,
+      boundedBy: "channel",
+    });
     expect(writes[0].record.handoff).toEqual({
       deviations: [],
       followUps: [{ what: "split the file", where: "src/x.ts" }],

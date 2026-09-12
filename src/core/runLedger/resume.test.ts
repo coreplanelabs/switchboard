@@ -230,4 +230,15 @@ describe("planResume", () => {
       }),
     ).toMatchObject({ kind: "interrupted", why: /no tool calls/ });
   });
+
+  it("the budget a resume runs on is the step record's remainingMs — the seed carries the run's EFFECTIVE budget (a clipped one included), so nothing is ever re-derived from a preset", () => {
+    const messages = [user("go")];
+    const plan = planResume({
+      transcript: complete(messages),
+      // The seed record of a run admitted with a 10-minute budget under a channel boundary (the preset asks 45).
+      lastStep: step({ step: 0, turnIndex: 1, inFlight: [], remainingMs: 10 * 60_000, turn: 0 }),
+      tools: TOOLS,
+    });
+    expect(plan).toMatchObject({ kind: "resume", remainingMs: 10 * 60_000, settlements: [], step: 0 });
+  });
 });

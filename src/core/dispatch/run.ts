@@ -189,6 +189,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
           ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
           readonly: profile.identity === "read",
+          profile,
           selection: resident === true ? "resident" : "sandbox",
           ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
           ...(requestRow !== undefined ? { request: requestRow } : {}),

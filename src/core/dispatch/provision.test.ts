@@ -525,6 +525,7 @@ describe("composePrompt — the system prompt for the first turn", () => {
     const out = await composePrompt(d, {
       msg: r.message,
       agent: r.agent,
+      profile: r.profile,
       resolved: r.resolved,
       directives: r.directives,
       sticky: r.sticky,
@@ -557,6 +558,7 @@ describe("composePrompt — the system prompt for the first turn", () => {
     const out = await composePrompt(d, {
       msg: r.message,
       agent: r.agent,
+      profile: r.profile,
       resolved: r.resolved,
       directives: r.directives,
       sticky: r.sticky,

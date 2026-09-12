@@ -417,3 +417,116 @@ describe("config instructions", () => {
     }
   });
 });
+
+// Feature: docs/reference/specs/routing-and-config.md items 2 and 5 — a boundary
+// is set from chat like every other scope setting: `--boundary.<axis>` on
+// `config set`, the channel form under `config:write`, `me` self-service (a
+// user boundary can only tighten what the channel and the defaults allow).
+describe("config set --boundary.<axis> and config show's effective boundary", () => {
+  it("`me` is self-service: the dotted axes land on the user scope as one boundary (machines split on commas) and the reply summarizes it", async () => {
+    const config = store();
+    const commands = bind(config);
+    const { text } = await say(
+      commands,
+      "config set me --boundary.maxMinutes 45 --boundary.maxIdentity read --boundary.machines none,repo-cold",
+      chat(config, "slack:UX"),
+    );
+    expect(text).toBe(
+      'Updated your scope. Now: {"boundary":{"maxMinutes":45,"maxIdentity":"read","machines":["none","repo-cold"]}}',
+    );
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({
+      boundary: { maxMinutes: 45, maxIdentity: "read", machines: ["none", "repo-cold"] },
+    });
+    expect(config.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).boundary).toEqual({
+      maxMinutes: { value: 45, scope: "user" },
+      maxIdentity: { value: "read", scope: "user" },
+      machines: { value: ["none", "repo-cold"], by: [{ scope: "user", machines: ["none", "repo-cold"] }] },
+    });
+  });
+
+  it("the channel form rides config:write like every channel write; the dotted form nests through the shared grammar", async () => {
+    const gated = store();
+    const commands = bind(gated);
+    expect(parseInvocation(commands.get("config.set")!, ["channel", "--boundary.maxMinutes", "45"])).toEqual({
+      kind: "invoke",
+      input: { args: ["channel"], options: { boundary: { maxMinutes: "45" } } },
+    });
+    expect(
+      await commands.invoke(
+        "config.set",
+        { args: ["channel"], options: { boundary: { maxMinutes: "45" } } },
+        chat(gated, "slack:UX"),
+      ),
+    ).toMatchObject({ ok: false, error: "unauthorized", message: "Channel config changes are restricted." });
+    expect(gated.scopes("slack:CX", "slack:UX").channel).toEqual({});
+    expect(
+      (
+        await commands.invoke(
+          "config.set",
+          { args: ["channel"], options: { boundary: { maxMinutes: "45" } } },
+          chat(gated, "slack:UADMIN"),
+        )
+      ).ok,
+    ).toBe(true);
+    expect(gated.scopes("slack:CX", "slack:UX").channel).toEqual({ boundary: { maxMinutes: 45 } });
+  });
+
+  it("an invalid axis value is refused as `invalid_input` by name, never echoing the value: minutes under 2, an unknown identity, an unknown class, an empty class list", async () => {
+    const config = store();
+    const commands = bind(config);
+    const me = chat(config, "slack:UX");
+    expect(
+      await commands.invoke("config.set", { args: ["me"], options: { boundary: { maxMinutes: "1" } } }, me),
+    ).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: expect.stringMatching(/^boundary\.maxMinutes: expected/),
+    });
+    expect(
+      await commands.invoke("config.set", { args: ["me"], options: { boundary: { maxMinutes: "soon" } } }, me),
+    ).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: expect.stringMatching(/^boundary\.maxMinutes: expected/),
+    });
+    expect(
+      await commands.invoke("config.set", { args: ["me"], options: { boundary: { maxIdentity: "admin" } } }, me),
+    ).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: 'boundary.maxIdentity: expected one of "none", "read", "write"',
+    });
+    const badClass = await commands.invoke(
+      "config.set",
+      { args: ["me"], options: { boundary: { machines: "none,laptop" } } },
+      me,
+    );
+    expect(badClass).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: "boundary.machines: expected a comma-separated list of none, blank, repo-cold, repo-resident",
+    });
+    expect(JSON.stringify(badClass)).not.toContain("laptop");
+    expect(
+      await commands.invoke("config.set", { args: ["me"], options: { boundary: { machines: "" } } }, me),
+    ).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(await commands.invoke("config.set", { args: ["me"], options: { boundary: {} } }, me)).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: expect.stringMatching(/^nothing to set/),
+    });
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
+  });
+
+  it("config show prints the effective boundary once one is in force, the same text ConfigStore.describe produces", async () => {
+    const config = store();
+    const commands = bind(config);
+    await say(commands, "config set me --boundary.maxMinutes 20", chat(config, "slack:UX"));
+    const { res, text } = await say(commands, "config show", chat(config, "slack:UX"));
+    expect(text).toContain("*Effective boundary:* maxMinutes 20 (user)");
+    expect(text).toBe(config.describe("slack:CX", "slack:UX"));
+    expect(res.ok && res.value).toMatchObject({
+      effective: { boundary: { maxMinutes: { value: 20, scope: "user" } } },
+    });
+  });
+});

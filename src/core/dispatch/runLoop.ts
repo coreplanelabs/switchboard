@@ -696,6 +696,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       run,
       snap,
       agent,
+      profile,
       resolved,
       msg,
       channelVisibility,

@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { formatConfigDescription, type ConfigDescription, type Scope } from "../../config.js";
-import { MAX_INSTRUCTIONS_LENGTH } from "../../config/validate.js";
+import { boundaryProblem, MAX_INSTRUCTIONS_LENGTH, MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
+import type { Boundary } from "../../config/profile.js";
+import { IDENTITIES, MACHINE_CLASSES, type MachineClass } from "../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
 import { authorize } from "../authz/authorize.js";
 import {
@@ -15,7 +17,8 @@ import {
 
 // The `config.*` registrations (phase 4b): runtime config on the typed model.
 //   config show [--channel <id>]
-//   config set <channel|me> [--agent x] [--model p/m] [--models.<agent> p/m] [--effort e] [--efforts.<agent> e] [--channel <id>]
+//   config set <channel|me> [--agent x] [--model p/m] [--models.<agent> p/m] [--effort e] [--efforts.<agent> e]
+//                           [--boundary.maxMinutes n] [--boundary.maxIdentity none|read|write] [--boundary.machines a,b] [--channel <id>]
 //   config clear <channel|me> [--channel <id>]
 //   config instructions <channel|me> [text…] [--channel <id>]
 // The caller's own channel (`caller.origin`) is the default target; `--channel`
@@ -65,6 +68,28 @@ const effort = z.enum(EFFORT_LEVELS);
  *  schemas without anyone retyping the list. */
 const effortLevels = `<${EFFORT_LEVELS.join("|")}>`;
 const modelRef = z.string().min(1);
+/** The boundary axes as dotted options (`--boundary.maxMinutes 45`): the
+ *  minutes coerced from the chat grammar's string, the identity one of the
+ *  ladder, the classes a comma-separated list the handler splits and checks
+ *  against `MACHINE_CLASSES` (docs/reference/specs/routing-and-config.md item 5). */
+const boundaryOption = z
+  .object({
+    maxMinutes: z.coerce
+      .number()
+      .int()
+      .min(MIN_BOUNDARY_MINUTES)
+      .optional()
+      .describe(`cap the wall-clock budget of every run in this scope (minutes, >= ${MIN_BOUNDARY_MINUTES})`),
+    maxIdentity: z
+      .enum(IDENTITIES)
+      .optional()
+      .describe(`cap the identity runs may act as <${IDENTITIES.join("|")}> — a preset above it is refused`),
+    machines: z
+      .string()
+      .optional()
+      .describe(`the machine classes runs may execute on, comma-separated from ${MACHINE_CLASSES.join(", ")}`),
+  })
+  .optional();
 
 /** The channel a channel-scoped read/write targets: `--channel`, else the
  *  caller's origin; a machine caller with neither must name one. */
@@ -128,12 +153,13 @@ export const configSet = defineCommand({
     models: z.record(z.string(), modelRef).optional().describe("per-agent model: --models.<agent> provider/model"),
     effort: effort.optional().describe(`force a model effort ${effortLevels}`),
     efforts: z.record(z.string(), effort).optional().describe(`per-agent effort: --efforts.<agent> ${effortLevels}`),
+    boundary: boundaryOption,
     channel: channelOption,
   }),
   action: "config:write",
   effect: "write",
   describe:
-    "Set the agent, model, or effort for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>.",
+    "Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
   render: (output) => {
     const o = output as JsonObject;
     return `Updated ${who(o.scope as "channel" | "me")} scope. Now: ${JSON.stringify(o.effective)}`;
@@ -162,10 +188,29 @@ export const configSet = defineCommand({
     if (options.models) patch.models = options.models;
     if (options.effort !== undefined) patch.effort = options.effort as Effort;
     if (options.efforts) patch.efforts = options.efforts as Record<string, Effort>;
+    if (options.boundary) {
+      // The list arrives as one comma-separated token; the boundary is then
+      // held to the load-time rule, so a typo is refused by name here exactly
+      // as it would be in config.yaml — and the value is never echoed.
+      const { machines, ...axes } = options.boundary;
+      const boundary: Boundary = { ...axes };
+      if (machines !== undefined) {
+        const classes = machines.split(",").map((m) => m.trim());
+        if (classes.length === 0 || classes.some((m) => !MACHINE_CLASSES.includes(m as MachineClass)))
+          throw new CommandError(
+            "invalid_input",
+            `boundary.machines: expected a comma-separated list of ${MACHINE_CLASSES.join(", ")}`,
+          );
+        boundary.machines = classes as MachineClass[];
+      }
+      const problem = boundaryProblem("boundary", boundary);
+      if (problem) throw new CommandError("invalid_input", problem);
+      if (Object.keys(boundary).length > 0) patch.boundary = boundary;
+    }
     if (Object.keys(patch).length === 0)
       throw new CommandError(
         "invalid_input",
-        "nothing to set: pass --agent, --model, --models.<agent>, --effort, or --efforts.<agent>",
+        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, or --boundary.<maxMinutes|maxIdentity|machines>",
       );
     let effective: Scope;
     if (args.scope === "channel") {

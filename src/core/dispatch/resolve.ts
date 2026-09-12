@@ -7,7 +7,7 @@
 // that judge the result are authorize.ts.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { machineNeedsRepo, type AgentDef } from "../../agents/registry.js";
-import type { RunProfile } from "../../config/profile.js";
+import { effectiveProfile, type ProfileResolution, type RunProfile } from "../../config/profile.js";
 import {
   lastThreadDirectives,
   parseDirectives,
@@ -97,6 +97,37 @@ export function resolveRun(
     },
   });
   return { sticky, resolved };
+}
+
+/**
+ * The effective profile of this request (docs/reference/specs/routing-and-config.md
+ * item 2; docs/decisions/0026-capability-profiles-and-request-routing.md):
+ * preset ∩ boundary, computed once, here, once the preset is known — the
+ * lookup stays after the agent gate, so a caller who may not run the agent is
+ * refused before its preset is even read. Pure resolution: the profile gate
+ * (`authorizeProfile`) judges the outcome. A resume keeps the profile its row
+ * was admitted with — the clipped budget and what clipped it — rather than
+ * re-reading the preset; the boundaries on the path today are still asked,
+ * so an identity or class a tightened cap no longer allows refuses the resume
+ * by name like a fresh request, while its budget is the row's. A row written
+ * before profiles existed resolves like a fresh request.
+ */
+export function resolveProfile(ctx: {
+  agent: AgentDef;
+  resolved: ResolvedRequest;
+  resume: ResumeContext | undefined;
+}): ProfileResolution {
+  const carried = ctx.resume?.row.meta.profile;
+  const declared = carried
+    ? { machine: carried.machine, identity: carried.identity, maxMinutes: carried.minutes }
+    : ctx.agent;
+  // Boundaries only ever narrow: a directive budget is the next unit's (none
+  // is parsed yet), so the caller's own boundary is empty here.
+  const resolution = effectiveProfile(declared, {}, ctx.resolved.boundary);
+  if (resolution.kind === "profile" && carried?.boundedBy && !resolution.profile.boundedBy) {
+    return { kind: "profile", profile: { ...resolution.profile, boundedBy: carried.boundedBy } };
+  }
+  return resolution;
 }
 
 /** The provider and model behind the resolved ref, whether the run's machine

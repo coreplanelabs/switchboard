@@ -17,6 +17,8 @@ import {
   type Overrides,
 } from "./config.js";
 import { MAX_INSTRUCTIONS_LENGTH } from "./config/validate.js";
+import { declaredProfile, effectiveProfile } from "./config/profile.js";
+import { AGENTS } from "./agents/registry.js";
 import { hasAction } from "./core/authz/authorize.js";
 import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";
@@ -1288,5 +1290,154 @@ describe("dashboard", () => {
     expect(() => store(`${YAML_FIXTURE}\ndashboard:\n  mode: none\n`)).toThrow(/dashboard\.mode is not a known key/);
     expect(() => store(`${YAML_FIXTURE}\ndashboard:\n  auth: token\n`)).toThrow(/dashboard\.token\.actor/);
     expect(() => store(`${YAML_FIXTURE}\ndashboard: none\n`)).toThrow(/dashboard must be a mapping/);
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 2 — a boundary is a
+// scope setting that caps the three profile axes and never grants; unlike every
+// other setting it INTERSECTS across the layers (record 0026).
+describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
+  const ALL_CLASSES = ["none", "blank", "repo-cold", "repo-resident"] as const;
+  const BOUNDED = YAML_FIXTURE.replace("defaults:\n", "defaults:\n  boundary:\n    maxMinutes: 120\n")
+    .replace(
+      "channels:\n",
+      `channels:\n  "slack:CBOUND":\n    boundary:\n      maxMinutes: 45\n      maxIdentity: write\n      machines: [none, blank, repo-cold, repo-resident]\n`,
+    )
+    .replace(
+      "users:\n",
+      `users:\n  "slack:UBOUND":\n    boundary:\n      maxMinutes: 60\n      maxIdentity: read\n      machines: [none, repo-resident]\n`,
+    );
+  const withChannelBoundary = (body: string) =>
+    YAML_FIXTURE.replace("channels:\n", `channels:\n  "slack:CBAD":\n    boundary:\n${body}`);
+
+  it("resolve() returns the intersected boundary beside the triple — the smallest minutes, the lowest identity, the classes every layer allows, each naming its scope — and no key at all when no layer sets one", () => {
+    const s = store(BOUNDED);
+    expect(s.resolve({ channelId: "slack:CBOUND", userId: "slack:UBOUND", request: {} }).boundary).toEqual({
+      maxMinutes: { value: 45, scope: "channel" },
+      maxIdentity: { value: "read", scope: "user" },
+      machines: {
+        value: ["none", "repo-resident"],
+        by: [
+          { scope: "channel", machines: [...ALL_CLASSES] },
+          { scope: "user", machines: ["none", "repo-resident"] },
+        ],
+      },
+    });
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).boundary).toEqual({
+      maxMinutes: { value: 120, scope: "defaults" },
+    });
+    // Nothing set anywhere: the request resolves exactly as it always did.
+    expect(store().resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} })).toEqual({
+      agentName: "general",
+      modelRef: "anthropic/general-model",
+    });
+  });
+
+  it("per-actor goldens: with no boundary set, every preset admits and refuses per actor kind exactly as canRunAgent does, and resolves its declared profile", () => {
+    const s = store();
+    const baseline: Record<string, Record<string, boolean>> = {
+      "slack:URANDOM": { general: true, coding: false, review: true, ship: true, research: true },
+      "slack:UDEV": { general: true, coding: true, review: true, ship: true, research: true },
+      "slack:UADMIN": { general: true, coding: true, review: true, ship: true, research: true },
+    };
+    expect(Object.keys(baseline["slack:URANDOM"]).sort()).toEqual(Object.keys(AGENTS).sort());
+    for (const [actor, byAgent] of Object.entries(baseline)) {
+      for (const [name, admits] of Object.entries(byAgent)) {
+        expect(s.canRunAgent(actor, name), `${actor} ${name}`).toBe(admits);
+        const r = s.resolve({ channelId: "slack:CX", userId: actor, request: { agent: name } });
+        expect(effectiveProfile(AGENTS[name], {}, r.boundary), `${actor} ${name}`).toEqual({
+          kind: "profile",
+          profile: declaredProfile(AGENTS[name]),
+        });
+      }
+    }
+  });
+
+  it("a boundary never grants: the policy table's answer is untouched by any boundary, however wide", () => {
+    const s = store(BOUNDED);
+    expect(s.canRunAgent("slack:URANDOM", "coding")).toBe(false); // CBOUND allows `write`; the grant is still missing
+    expect(s.canRunAgent("slack:UDEV", "coding")).toBe(true);
+  });
+
+  it("a user boundary tightens a channel's and never loosens it, runtime overrides included; the runtime boundary replaces the scope's static one whole, like every other setting", async () => {
+    const s = store(BOUNDED);
+    await s.setChannelOverride("slack:CX", { boundary: { maxMinutes: 30, maxIdentity: "read" } });
+    await s.setUserOverride("slack:UX", { boundary: { maxMinutes: 500, maxIdentity: "write", machines: ["none"] } });
+    expect(s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).boundary).toEqual({
+      maxMinutes: { value: 30, scope: "channel" },
+      maxIdentity: { value: "read", scope: "channel" },
+      machines: { value: ["none"], by: [{ scope: "user", machines: ["none"] }] },
+    });
+    // The static channel boundary of CBOUND is replaced whole by a runtime one.
+    await s.setChannelOverride("slack:CBOUND", { boundary: { maxMinutes: 20 } });
+    expect(s.scopes("slack:CBOUND", "slack:UX").channel.boundary).toEqual({ maxMinutes: 20 });
+    // Clearing the override lets the static boundary show through again.
+    await s.clearChannelOverride("slack:CBOUND");
+    expect(s.scopes("slack:CBOUND", "slack:UX").channel.boundary).toEqual({
+      maxMinutes: 45,
+      maxIdentity: "write",
+      machines: [...ALL_CLASSES],
+    });
+  });
+
+  it("load-time validation names the path: a maxMinutes under 2 or fractional, an unknown identity, an unknown class, an empty class list, an unknown field, a non-mapping — under channels, users and defaults alike", () => {
+    expect(() => store(withChannelBoundary("      maxMinutes: 1\n"))).toThrow(
+      /channels\.slack:CBAD\.boundary\.maxMinutes must be an integer >= 2/,
+    );
+    expect(() => store(withChannelBoundary("      maxMinutes: 2.5\n"))).toThrow(
+      /channels\.slack:CBAD\.boundary\.maxMinutes must be an integer >= 2/,
+    );
+    expect(() => store(withChannelBoundary("      maxIdentity: admin\n"))).toThrow(
+      /channels\.slack:CBAD\.boundary\.maxIdentity is "admin" — valid identities: none, read, write/,
+    );
+    expect(() => store(withChannelBoundary("      machines: [laptop]\n"))).toThrow(
+      /channels\.slack:CBAD\.boundary\.machines names "laptop" — valid classes: none, blank, repo-cold, repo-resident/,
+    );
+    expect(() => store(withChannelBoundary("      machines: []\n"))).toThrow(
+      /channels\.slack:CBAD\.boundary\.machines must name at least one class/,
+    );
+    expect(() => store(withChannelBoundary("      machines: none\n"))).toThrow(
+      /channels\.slack:CBAD\.boundary\.machines must be a list/,
+    );
+    expect(() => store(withChannelBoundary("      maxHours: 2\n"))).toThrow(
+      /channels\.slack:CBAD\.boundary: unknown field maxHours/,
+    );
+    expect(() => store(YAML_FIXTURE.replace("channels:\n", `channels:\n  "slack:CBAD":\n    boundary: 45\n`))).toThrow(
+      /channels\.slack:CBAD\.boundary must be a mapping/,
+    );
+    expect(() => store(YAML_FIXTURE.replace("defaults:\n", "defaults:\n  boundary:\n    maxMinutes: 0\n"))).toThrow(
+      /defaults\.boundary\.maxMinutes must be an integer >= 2/,
+    );
+    expect(() =>
+      store(YAML_FIXTURE.replace("users:\n", `users:\n  "slack:UBAD":\n    boundary:\n      maxIdentity: root\n`)),
+    ).toThrow(/users\.slack:UBAD\.boundary\.maxIdentity is "root"/);
+    // A boundary that caps nothing is legal: an empty mapping names no axis.
+    expect(() =>
+      store(YAML_FIXTURE.replace("channels:\n", `channels:\n  "slack:CNONE":\n    boundary: {}\n`)),
+    ).not.toThrow();
+  });
+
+  it("a hand-edited overrides document is held to the same rule at load, naming the backing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, YAML_FIXTURE);
+    const overrides = join(dir, "overrides.json");
+    writeFileSync(overrides, JSON.stringify({ users: { "slack:UX": { boundary: { maxMinutes: 1 } } } }));
+    expect(() => new ConfigStore(cfg, overrides)).toThrow(
+      /overrides.*users\.slack:UX\.boundary\.maxMinutes must be an integer >= 2/,
+    );
+  });
+
+  it("config show renders the effective boundary with each axis's scope and every scope's own boundary; nothing when none is set", () => {
+    const s = store(BOUNDED);
+    const shown = s.describe("slack:CBOUND", "slack:UBOUND");
+    expect(shown).toContain(
+      "*Effective boundary:* maxMinutes 45 (channel), maxIdentity `read` (user), machines `none`, `repo-resident` (channel, user)",
+    );
+    expect(shown).toMatch(
+      /\*Channel scope:\*.*boundary maxMinutes=45 maxIdentity=write machines=none,blank,repo-cold,repo-resident/,
+    );
+    expect(shown).toMatch(/\*Your scope:\*.*boundary maxMinutes=60 maxIdentity=read machines=none,repo-resident/);
+    expect(store().describe("slack:CX", "slack:UX")).not.toMatch(/boundary/i);
   });
 });

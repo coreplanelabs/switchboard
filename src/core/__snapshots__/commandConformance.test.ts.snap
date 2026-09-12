@@ -105,6 +105,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "object",
       },
       {
+        "name": "boundary",
+        "required": false,
+        "type": "object",
+      },
+      {
         "name": "channel",
         "required": false,
         "type": "string",

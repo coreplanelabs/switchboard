@@ -27,6 +27,7 @@ import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
 import { AGENTS } from "./agents/registry.js";
 import type { McpServerEntry } from "./mcp/registry.js";
 import {
+  validateBoundaries,
   validateConfig,
   validateGrants,
   validateInstructions,
@@ -34,6 +35,13 @@ import {
   validateRestrict,
   validateScopeEfforts,
 } from "./config/validate.js";
+import {
+  intersectBoundaries,
+  type Boundary,
+  type BoundaryScope,
+  type EffectiveBoundary,
+  type ScopedBoundary,
+} from "./config/profile.js";
 
 // Configuration is layered. Lowest to highest precedence:
 //   1. defaults (config.yaml `defaults`, incl. per-agent default models)
@@ -53,6 +61,16 @@ export interface Scope {
   effort?: Effort;
   /** Per-agent effort overrides for this scope (same shape as `models`). */
   efforts?: Record<string, Effort>;
+  /**
+   * A cap on what any run in this scope may have (docs/decisions/0026-capability-profiles-and-request-routing.md):
+   * `maxMinutes`, `maxIdentity` (`none < read < write`), `machines`. Unlike
+   * every other setting, which the most specific scope replaces, boundaries
+   * INTERSECT across the layers (`resolve()`), so a user's boundary can only
+   * tighten the channel's and the defaults'. A boundary never grants: the
+   * policy table's answer (who may run a preset) is untouched by it.
+   * Validated at load (`validateBoundaries`) and on write (`config set`).
+   */
+  boundary?: Boundary;
   /**
    * Free-text custom instructions folded into the system prompt as ADVISORY
    * content only. Channel text applies to every run in the
@@ -93,6 +111,8 @@ export interface AppConfig {
     maxTokens?: number;
     /** Org-wide MCP servers pinned by the operator (docs/reference/specs/mcp-tools.md item 11). */
     mcpServers?: Record<string, McpServerEntry>;
+    /** The installation-wide boundary: the cap every run meets first (`Scope.boundary`). */
+    boundary?: Boundary;
   };
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
@@ -412,6 +432,12 @@ export interface ResolvedRequest {
   /** Resolved through the config layers only; undefined = no layer set it (the
    *  agent definition, then the provider default, decide downstream). */
   effort?: Effort;
+  /** The boundaries on the request's path, intersected (`defaults`, then the
+   *  channel, then the user — each axis naming the scope whose cap won).
+   *  Absent when no layer sets one: the request then resolves exactly as it
+   *  did before boundaries existed. The effective profile is computed from it
+   *  once the preset is known (`src/core/dispatch/resolve.ts`). */
+  boundary?: EffectiveBoundary;
 }
 
 /** Where runtime overrides are persisted, chosen from `config.yaml` (item 12):
@@ -564,6 +590,7 @@ export class ConfigStore {
     doc.users ??= {};
     validateInstructions(doc, `overrides (${this.backing.describe()})`);
     validateScopeEfforts(doc, `overrides (${this.backing.describe()})`);
+    validateBoundaries(doc, `overrides (${this.backing.describe()})`);
     validateMcpServers(
       { channels: doc.channels, users: doc.users, defaults: doc.org },
       `overrides (${this.backing.describe()})`,
@@ -675,11 +702,16 @@ export class ConfigStore {
   }
 
   /**
-   * Resolve which agent, model, and effort serve a request.
-   * Agent:  request directive > user scope > channel scope > default.
-   * Model:  request directive > (user > channel) forced model
-   *         > (user > channel > defaults) per-agent model.
-   * Effort: the same ladder as model; unset at every layer → undefined.
+   * Resolve which agent, model, and effort serve a request, and the boundary
+   * every run on this path meets.
+   * Agent:    request directive > user scope > channel scope > default.
+   * Model:    request directive > (user > channel) forced model
+   *           > (user > channel > defaults) per-agent model.
+   * Effort:   the same ladder as model; unset at every layer → undefined.
+   * Boundary: NOT a ladder — the defaults', the channel's and the user's
+   *           boundaries intersect (the smallest budget, the lowest identity,
+   *           the classes every layer allows), so a scope can only tighten what
+   *           the layers below it allow; no layer set → absent.
    */
   resolve(opts: {
     channelId: string;
@@ -690,6 +722,7 @@ export class ConfigStore {
     const us = this.userScope(opts.userId);
 
     const agentName = opts.request.agent ?? us.agent ?? ch.agent ?? this.config.defaults.agent;
+    const boundary = intersectBoundaries(this.boundaryLayers(ch, us));
 
     const modelRef =
       opts.request.model ??
@@ -712,7 +745,23 @@ export class ConfigStore {
       ch.efforts?.[agentName] ??
       this.config.defaults.efforts?.[agentName];
 
-    return { agentName, modelRef, ...(effort !== undefined ? { effort } : {}) };
+    return {
+      agentName,
+      modelRef,
+      ...(effort !== undefined ? { effort } : {}),
+      ...(boundary !== undefined ? { boundary } : {}),
+    };
+  }
+
+  /** The boundary layers on a path, in resolution order, keeping only the
+   *  scopes that set one — `intersectBoundaries` names each axis's scope from it. */
+  private boundaryLayers(channel: Scope, user: Scope): ScopedBoundary[] {
+    const layers: Array<[BoundaryScope, Boundary | undefined]> = [
+      ["defaults", this.config.defaults.boundary],
+      ["channel", channel.boundary],
+      ["user", user.boundary],
+    ];
+    return layers.flatMap(([scope, boundary]) => (boundary ? [{ scope, boundary }] : []));
   }
 
   // ---- authorization gates ----------------------------------------------------
@@ -856,6 +905,7 @@ export class ConfigStore {
         agent: resolved.agentName,
         model: resolved.modelRef,
         ...(resolved.effort ? { effort: resolved.effort } : {}),
+        ...(resolved.boundary ? { boundary: resolved.boundary } : {}),
       },
       defaults: {
         agent: this.config.defaults.agent,
@@ -901,7 +951,8 @@ function mergeScope(current: Scope | undefined, patch: Scope): Scope {
 }
 
 export interface ConfigDescription {
-  effective: { agent: string; model: string; effort?: Effort };
+  /** The boundary is the intersection of every scope's, each axis naming the scope that set it. */
+  effective: { agent: string; model: string; effort?: Effort; boundary?: EffectiveBoundary };
   defaults: { agent: string; models: Record<string, string>; efforts?: Record<string, Effort> };
   channel: Scope;
   user: Scope;
@@ -929,6 +980,7 @@ export function formatConfigDescription(d: ConfigDescription): string {
       : "";
   const lines = [
     `*Effective for you in this channel:* ${effective}`,
+    ...(d.effective.boundary ? [`*Effective boundary:* ${fmtEffectiveBoundary(d.effective.boundary)}`] : []),
     `*Defaults:* ${defaults}${orgMcp}`,
     `*Channel scope:* ${fmtScope(d.channel)}`,
     `*Your scope:* ${fmtScope(d.user)}`,
@@ -956,7 +1008,30 @@ function fmtScope(s: Scope): string {
         .map((n) => `\`${n}\``)
         .join(" ")}`,
     );
+  if (s.boundary) parts.push(`boundary ${fmtBoundary(s.boundary)}`);
   return parts.length > 0 ? parts.join(", ") : "_none_";
+}
+
+/** One scope's own boundary, axis by axis: `maxMinutes=45 maxIdentity=read machines=none,repo-cold`. */
+function fmtBoundary(b: Boundary): string {
+  const parts: string[] = [];
+  if (b.maxMinutes !== undefined) parts.push(`maxMinutes=${b.maxMinutes}`);
+  if (b.maxIdentity !== undefined) parts.push(`maxIdentity=${b.maxIdentity}`);
+  if (b.machines !== undefined) parts.push(`machines=${b.machines.join(",")}`);
+  return parts.length > 0 ? parts.join(" ") : "(caps nothing)";
+}
+
+/** The intersected boundary with each axis's scope: what `config show` and the
+ *  awareness block print. Shared so the two surfaces cannot drift. */
+export function fmtEffectiveBoundary(b: EffectiveBoundary): string {
+  const parts: string[] = [];
+  if (b.maxMinutes) parts.push(`maxMinutes ${b.maxMinutes.value} (${b.maxMinutes.scope})`);
+  if (b.maxIdentity) parts.push(`maxIdentity \`${b.maxIdentity.value}\` (${b.maxIdentity.scope})`);
+  if (b.machines)
+    parts.push(
+      `machines ${b.machines.value.map((m) => `\`${m}\``).join(", ")} (${b.machines.by.map((l) => l.scope).join(", ")})`,
+    );
+  return parts.join(", ");
 }
 
 function fmtModels(m: Record<string, string>): string {
