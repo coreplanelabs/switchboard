@@ -52,6 +52,7 @@ export function isPullRequestFacts(v: unknown): v is PullRequestFacts {
     typeof p.author === "string" &&
     isInstant(p.createdAt) &&
     isInstant(p.mergedAt) &&
+    (p.updatedAt === undefined || isInstant(p.updatedAt)) &&
     (p.firstHeadSha === undefined || typeof p.firstHeadSha === "string") &&
     Array.isArray(p.ci) &&
     Array.isArray(p.reviews) &&

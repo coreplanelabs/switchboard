@@ -81,6 +81,9 @@ export interface PullRequestFacts {
   createdAt: string;
   /** ISO 8601 — every fact here is a MERGED pull request. */
   mergedAt: string;
+  /** ISO 8601 — GitHub's `updated_at` of the pull request when these facts were read; an incremental
+   *  read re-reads a listed row only when this moved. Absent on facts read before it was kept. */
+  updatedAt?: string;
   /** The head CI first ran on; absent when nothing recorded a head. */
   firstHeadSha?: string;
   ci: CiRunFact[];
@@ -675,6 +678,11 @@ export interface DeliveryFetch {
 export interface DeliveryFetchOptions {
   /** Read GitHub now, whatever a snapshot holds, and refresh the snapshot. */
   fresh?: boolean;
+  /** An incremental read (the snapshot's refresh): only the pull requests touched at or after `since`
+   *  — the listing is newest-touched first, so the first older row ends it — and, of those, only the
+   *  rows whose update time `known` does not already hold for their number; a held row's stored facts
+   *  stand. The fetch is then complete from `since`, not from the range's start. */
+  touched?: { since: string; known: ReadonlyMap<number, string> };
 }
 
 /** Where the pull requests' facts come from: GitHub in production (behind the snapshot), memory in tests. */
@@ -682,13 +690,36 @@ export interface DeliverySource {
   fetchPullRequests(repo: string, range: DeliveryRange, opts?: DeliveryFetchOptions): Promise<DeliveryFetch>;
 }
 
-/** The second implementation (AGENTS.md invariant 2) and the test double: a map of repo → facts. */
+/** The second implementation (AGENTS.md invariant 2) and the test double: a map of repo → facts.
+ *  An incremental read answers the rows touched since the instant (by `updatedAt`, else `mergedAt`)
+ *  whose update time the caller does not hold, complete from that instant. */
 export class InMemoryDeliverySource implements DeliverySource {
-  readonly calls: Array<{ repo: string; range: DeliveryRange; fresh?: boolean }> = [];
-  constructor(private readonly byRepo: Readonly<Record<string, PullRequestFacts[]>> = {}) {}
+  readonly calls: Array<{
+    repo: string;
+    range: DeliveryRange;
+    fresh?: boolean;
+    touched?: DeliveryFetchOptions["touched"];
+  }> = [];
+  constructor(private byRepo: Readonly<Record<string, PullRequestFacts[]>> = {}) {}
+  /** Replace what a repository answers (a test moving GitHub on). */
+  set(repo: string, prs: PullRequestFacts[]): void {
+    this.byRepo = { ...this.byRepo, [repo]: prs };
+  }
   fetchPullRequests(repo: string, range: DeliveryRange, opts?: DeliveryFetchOptions): Promise<DeliveryFetch> {
-    this.calls.push({ repo, range, ...(opts?.fresh ? { fresh: true } : {}) });
-    return Promise.resolve({ prs: this.byRepo[repo] ?? [], truncated: false });
+    this.calls.push({
+      repo,
+      range,
+      ...(opts?.fresh ? { fresh: true } : {}),
+      ...(opts?.touched ? { touched: opts.touched } : {}),
+    });
+    const all = this.byRepo[repo] ?? [];
+    const touched = opts?.touched;
+    if (!touched) return Promise.resolve({ prs: all, truncated: false });
+    const since = Date.parse(touched.since);
+    const prs = all.filter(
+      (p) => Date.parse(p.updatedAt ?? p.mergedAt) >= since && touched.known.get(p.number) !== p.updatedAt,
+    );
+    return Promise.resolve({ prs, truncated: false, completeFrom: touched.since });
   }
 }
 

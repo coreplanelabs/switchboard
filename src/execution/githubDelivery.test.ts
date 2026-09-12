@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_MAX_PULL_PAGES,
   firstHeadOf,
   GithubDeliverySource,
   linkedIssueNumber,
@@ -259,6 +260,17 @@ describe("parsePullListPage / selectMerged", () => {
     const after = { ...items[0], number: 2, mergedAt: "2026-09-14T00:00:00Z" };
     expect(selectMerged([last, after], RANGE).merged.map((m) => m.number)).toEqual([1]);
   });
+
+  it("an incremental read's cutoff is the instant it goes back to: a row touched before it ends the read and is not this read's, even when merged inside the range", () => {
+    const wide = { since: "2026-08-31T00:00:00Z".slice(0, 10), until: RANGE.until, weeks: 2 };
+    const items = parsePullListPage(PULLS_PAGE);
+    // Over two weeks row 800 (merged the week before) is in range and, on a full read, selected.
+    expect(selectMerged(items, wide)).toEqual({ merged: [items[0], items[2]], olderSeen: false });
+    // An incremental read since the tenth: 800 was last touched on the first, so it ended the
+    // listing and its stored facts stand; 917 was touched after and is re-read.
+    expect(selectMerged(items, wide, "2026-09-10T00:00:00Z")).toEqual({ merged: [items[0]], olderSeen: true });
+    expect(selectMerged(items, wide, "2026-09-12T00:00:00Z")).toEqual({ merged: [], olderSeen: true });
+  });
 });
 
 describe("parseTimeline", () => {
@@ -426,6 +438,8 @@ describe("GithubDeliverySource", () => {
       number: 917,
       author: "alice",
       createdAt: "2026-09-10T23:59:09Z",
+      // The listing's update time rides along: a later incremental read skips the row while it holds.
+      updatedAt: "2026-09-11T16:10:06Z",
       mergedAt: "2026-09-11T00:18:40Z",
       firstHeadSha: FIRST_HEAD,
       issue: { number: 825, title: "The durable mutex and idempotent step methods", createdAt: "2026-09-10T03:00:12Z" },
@@ -480,6 +494,65 @@ describe("GithubDeliverySource", () => {
     expect(all.prs).toHaveLength(200);
     expect(all.truncated).toBe(false);
     expect(all.completeFrom).toBe(`${RANGE.since}T00:00:00Z`);
+    // The default cap: eight pages, the newest 800 closed pull requests.
+    expect(DEFAULT_MAX_PULL_PAGES).toBe(8);
+  });
+
+  it("an incremental read lists the rows touched since the instant it goes back to, re-reads only those whose update time the caller does not already hold, and is complete from that instant — from the oldest update reached when the cap ends it first", async () => {
+    const wide = { since: "2026-08-31T00:00:00Z".slice(0, 10), until: RANGE.until, weeks: 2 };
+    const listing = "/repos/acme/api/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1";
+    // Row 917 was touched after the tenth; 800 (merged in range) before it — so the listing stops
+    // at page one and 800's stored facts stand, whatever they hold.
+    const gh = fakeGithub(ROUTES);
+    const source = new GithubDeliverySource({ fetch: gh.fetch, token: async () => "t" });
+    const touched = await source.fetchPullRequests(REPO, wide, {
+      touched: { since: "2026-09-10T00:00:00Z", known: new Map([[800, "2026-09-01T10:00:00Z"]]) },
+    });
+    expect(touched.prs.map((p) => p.number)).toEqual([917]);
+    expect(touched.truncated).toBe(false);
+    expect(touched.completeFrom).toBe("2026-09-10T00:00:00Z");
+    expect(gh.calls.map((c) => c.url).sort()).toEqual(Object.keys(ROUTES).sort());
+    // A listed row whose update time the caller holds is not re-read: the listing is the only call.
+    const held = fakeGithub(ROUTES);
+    const unchanged = await new GithubDeliverySource({ fetch: held.fetch, token: async () => "t" }).fetchPullRequests(
+      REPO,
+      wide,
+      { touched: { since: "2026-09-10T00:00:00Z", known: new Map([[917, "2026-09-11T16:10:06Z"]]) } },
+    );
+    expect(unchanged.prs).toEqual([]);
+    expect(unchanged.completeFrom).toBe("2026-09-10T00:00:00Z");
+    expect(held.calls.map((c) => c.url)).toEqual([listing]);
+    // A row the caller holds at an OLDER update time was touched since: it is re-read.
+    const stale = fakeGithub(ROUTES);
+    const reread = await new GithubDeliverySource({ fetch: stale.fetch, token: async () => "t" }).fetchPullRequests(
+      REPO,
+      wide,
+      { touched: { since: "2026-09-10T00:00:00Z", known: new Map([[917, "2026-09-11T10:00:00Z"]]) } },
+    );
+    expect(reread.prs.map((p) => p.number)).toEqual([917]);
+    // The cap ends an incremental read too: complete only from the oldest update it reached.
+    const fullPage = Array.from({ length: 100 }, (_, i) => ({
+      ...PULLS_PAGE[0],
+      number: 1000 + i,
+      head: { ref: `b${i}`, sha: HEAD },
+      body: "",
+      updated_at: `2026-09-11T16:${String(59 - Math.floor(i / 2)).padStart(2, "0")}:00Z`,
+    }));
+    const routes: Record<string, unknown> = {
+      [listing]: fullPage,
+      "/repos/acme/api/actions/runs": { workflow_runs: [] },
+    };
+    for (const p of fullPage) routes[`/repos/acme/api/issues/${p.number}/timeline?per_page=100&page=1`] = [];
+    const capped = fakeGithub(routes);
+    const cut = await new GithubDeliverySource({
+      fetch: capped.fetch,
+      token: async () => "t",
+      maxPullPages: 1,
+      concurrency: 50,
+    }).fetchPullRequests(REPO, wide, { touched: { since: "2026-09-10T00:00:00Z", known: new Map() } });
+    expect(cut.prs).toHaveLength(100);
+    expect(cut.truncated).toBe(true);
+    expect(cut.completeFrom).toBe("2026-09-11T16:10:00Z");
   });
 
   it("a missing issue, disabled Actions and an empty timeline degrade to absent facts; a failing timeline read throws with the status and a capped body", async () => {
