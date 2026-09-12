@@ -32,6 +32,7 @@ import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import { resolveRun } from "./resolve.js";
 import {
   attachWorkspace,
+  budgetClipLabel,
   composePrompt,
   openAckCard,
   registerRun,
@@ -456,6 +457,34 @@ describe("reserveRun — the ledger reservation before the attach", () => {
     ).toBeUndefined();
     expect(d.ledger.reserved).toEqual([]);
     expect(r.admitted.runId).toBeUndefined();
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 4: the card's budget line —
+// what clipped the run's budget, and what a `budget:` directive did or did not do.
+describe("budgetClipLabel — the card's budget line", () => {
+  const explore = getAgent("explore");
+  const declared = declaredProfile(explore);
+
+  it("is absent when the preset's own budget stands and no directive was sent", () => {
+    expect(budgetClipLabel(explore, declared)).toBeUndefined();
+    expect(budgetClipLabel(explore, declared, undefined)).toBeUndefined();
+  });
+
+  it("names the scope that clipped and the preset's own budget — a boundary as `<scope> boundary`, the caller's directive as `budget directive`", () => {
+    expect(budgetClipLabel(explore, { ...declared, minutes: 45, boundedBy: "channel" })).toBe(
+      "budget 45 min (channel boundary; preset asks 120)",
+    );
+    expect(budgetClipLabel(explore, { ...declared, minutes: 30, boundedBy: "directive" }, 30)).toBe(
+      "budget 30 min (budget directive; preset asks 120)",
+    );
+  });
+
+  it("says when a directive narrowed nothing — alone against the preset, or beside the boundary that clipped tighter", () => {
+    expect(budgetClipLabel(explore, declared, 200)).toBe("budget:200 narrowed nothing (preset asks 120)");
+    expect(budgetClipLabel(explore, { ...declared, minutes: 45, boundedBy: "channel" }, 60)).toBe(
+      "budget 45 min (channel boundary; preset asks 120; budget:60 narrowed nothing)",
+    );
   });
 });
 

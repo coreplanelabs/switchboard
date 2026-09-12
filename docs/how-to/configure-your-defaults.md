@@ -75,6 +75,8 @@ Directives in the message always win and persist nothing:
 @switchboard agent:ship model:anthropic/claude-opus-5 effort:high in acme/api: fix issue #42
 ```
 
+`budget:<minutes>` caps that one run's wall clock (whole minutes, at least 2) and only ever narrows: `agent:explore budget:30 …` runs thirty minutes instead of the agent's two hours, and the card says so; a `budget:` above the agent's own budget or a boundary's cap changes nothing, and the card says that too.
+
 ## Undo
 
 ```

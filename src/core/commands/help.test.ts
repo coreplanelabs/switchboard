@@ -44,7 +44,7 @@ describe("help.show", () => {
       "*Switchboard* — send me a request. Agents:\n• `general` — answers questions\n• `coding` — ships PRs",
     );
     expect(text).toContain(
-      "*Per-request directives* (anywhere in the message):\n`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42`",
+      "*Per-request directives* (anywhere in the message):\n`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42`",
     );
     expect(text).toContain("*Commands*");
     expect(text).toContain("  runs list   — list runs");

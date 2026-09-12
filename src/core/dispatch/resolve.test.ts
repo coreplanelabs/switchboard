@@ -435,6 +435,26 @@ describe("resolveProfile — the effective profile once the preset is known", ()
     });
   });
 
+  it("a `budget:` directive is the caller's own boundary: it narrows the preset's minutes as `directive`, a value at or above the preset changes nothing, and a tighter scope boundary wins the attribution", () => {
+    const explore = getAgent("explore");
+    expect(
+      resolveProfile({ agent: explore, resolved: resolvedIn(YAML, "explore"), resume: undefined, budget: 30 }),
+    ).toEqual({
+      kind: "profile",
+      profile: { machine: "repo-cold", identity: "read", minutes: 30, boundedBy: "directive" },
+    });
+    expect(
+      resolveProfile({ agent: explore, resolved: resolvedIn(YAML, "explore"), resume: undefined, budget: 200 }),
+    ).toEqual({ kind: "profile", profile: declaredProfile(explore) });
+    // The channel caps at 10: below the directive's 30, so the channel is what clipped.
+    expect(
+      resolveProfile({ agent: explore, resolved: resolvedIn(BOUNDED_YAML, "explore"), resume: undefined, budget: 30 }),
+    ).toEqual({
+      kind: "profile",
+      profile: { machine: "repo-cold", identity: "read", minutes: 10, boundedBy: "channel" },
+    });
+  });
+
   it("a resume keeps the profile its row was admitted with — the clipped budget and what clipped it — rather than re-reading the preset; the current boundaries still refuse an identity or class above their cap", () => {
     const coding = getAgent("coding");
     const carried = {

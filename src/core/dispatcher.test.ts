@@ -10658,4 +10658,106 @@ workspaceDir: __WORKDIR__
       minutes: 120,
     });
   });
+
+  // docs/reference/specs/routing-and-config.md items 1–4: the `budget:`
+  // directive is the caller's own boundary on one run — it narrows and never
+  // widens, the card says what it did, and the record carries the clip.
+  it("`agent:explore budget:30` runs 30 minutes as `boundedBy: directive` — at the factory, on the runner's def, on the card and on the record", async () => {
+    recordingFetch();
+    const provider = capturingProvider();
+    const { deps, store, writer } = exploreDeps("run-b30", provider);
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore budget:30 in acme/api: time the suite"), io);
+    await writer.settled();
+    expect(provider.requests).toHaveLength(1);
+    const profile = { machine: "repo-cold", identity: "read", minutes: 30, boundedBy: "directive" };
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(profile);
+    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(30);
+    expect(AGENTS.explore.maxMinutes).toBe(120); // the shared def is never mutated
+    expect((await store.get("run-b30"))!.profile).toEqual({ preset: "explore", ...profile });
+    expect(
+      statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 30 min (budget directive; preset asks 120)")),
+    ).toBe(true);
+    // The model is told what set its budget: the directive line and the clip line of the config block.
+    const system = provider.requests[0].system ?? "";
+    expect(system).toContain("This message's `agent:explore budget:30` directive");
+    expect(system).toContain("Budget: 30 min (clipped by the budget directive; the preset asks 120).");
+  });
+
+  it("`agent:explore budget:200` runs the preset's 120 — a directive never widens — and the card says the directive narrowed nothing", async () => {
+    recordingFetch();
+    const provider = capturingProvider();
+    const { deps, store, writer } = exploreDeps("run-b200", provider);
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore budget:200 in acme/api: time the suite"), io);
+    await writer.settled();
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual({
+      machine: "repo-cold",
+      identity: "read",
+      minutes: 120,
+    });
+    expect(vi.mocked(runAgent).mock.calls[0][0].agent.maxMinutes).toBe(120);
+    expect((await store.get("run-b200"))!.profile).toEqual({
+      preset: "explore",
+      machine: "repo-cold",
+      identity: "read",
+      minutes: 120,
+    });
+    expect(
+      statuses.map((s) => JSON.stringify(s)).some((s) => s.includes("budget:200 narrowed nothing (preset asks 120)")),
+    ).toBe(true);
+    expect(provider.requests[0].system ?? "").toContain("This message's `budget:200` narrowed nothing");
+  });
+
+  it("`agent:explore` in a channel bounded to 45 minutes runs 45 and the record says `channel`; a `budget:30` under that cap is the directive's clip", async () => {
+    recordingFetch();
+    const provider = capturingProvider();
+    const { deps, store, writer } = exploreDeps("run-c45", provider);
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CSHORT", "agent:explore in acme/api: time the suite"), io);
+    await writer.settled();
+    const clipped = { machine: "repo-cold", identity: "read", minutes: 45, boundedBy: "channel" };
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(clipped);
+    expect((await store.get("run-c45"))!.profile).toEqual({ preset: "explore", ...clipped });
+    expect(
+      statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 45 min (channel boundary; preset asks 120)")),
+    ).toBe(true);
+    // A directive above the channel's cap changes nothing, and the card says so beside the channel's clip.
+    const second = exploreDeps("run-c45b", capturingProvider());
+    const io2 = fakeIO();
+    await dispatch(second.deps, inChannel("CSHORT", "agent:explore budget:60 in acme/api: time the suite"), io2.io);
+    expect(
+      io2.statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 45 min (channel boundary; preset asks 120; budget:60 narrowed nothing)")),
+    ).toBe(true);
+    // A directive under the cap is the tighter one: the directive's clip.
+    const third = exploreDeps("run-c45c", capturingProvider());
+    const io3 = fakeIO();
+    await dispatch(third.deps, inChannel("CSHORT", "agent:explore budget:30 in acme/api: time the suite"), io3.io);
+    expect(vi.mocked(makeExecutor).mock.calls[2][1].profile).toEqual({
+      machine: "repo-cold",
+      identity: "read",
+      minutes: 30,
+      boundedBy: "directive",
+    });
+  });
+
+  it("`budget:1` is refused inline naming the rule — no card, no model call, no executor", async () => {
+    recordingFetch();
+    const provider = capturingProvider();
+    const { deps } = exploreDeps("run-bad", provider);
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore budget:1 in acme/api: time the suite"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatch(/Invalid budget "1"/);
+    expect(replies[0]).toMatch(/budget:<minutes> takes a whole number of minutes, at least 2/);
+    expect(statuses).toEqual([]);
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+  });
 });

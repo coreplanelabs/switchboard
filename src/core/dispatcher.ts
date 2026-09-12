@@ -259,17 +259,18 @@ export async function dispatch(
 
     const agent = getAgent(resolved.agentName);
     // The run's effective profile (dispatch/resolve.ts; record 0026): preset ∩
-    // the boundaries on the path — and the profile gate (dispatch/authorize.ts)
-    // right after the agent gate and before the thread is claimed, so an
-    // identity or class a boundary caps is refused by name with no card, no
-    // row and no executor. Every stage below reads the profile — the factory,
-    // the ledger row, the runner — never the preset's own fields.
+    // the request's `budget:` directive ∩ the boundaries on the path — and the
+    // profile gate (dispatch/authorize.ts) right after the agent gate and
+    // before the thread is claimed, so an identity or class a boundary caps is
+    // refused by name with no card, no row and no executor. Every stage below
+    // reads the profile — the factory, the ledger row, the runner — never the
+    // preset's own fields.
     const profileGate = await authorizeProfile(deps, {
       msg,
       io,
       refuse,
       agent,
-      resolution: resolveProfile({ agent, resolved, resume }),
+      resolution: resolveProfile({ agent, resolved, resume, budget: directives.budget }),
     });
     if (profileGate.kind === "refused") return;
     const { profile } = profileGate;
@@ -399,11 +400,11 @@ export async function dispatch(
       return;
     }
 
-    // A boundary that clipped this run's budget is named on the card from
-    // here — through the attach and the run — the way a resident note is
-    // (dispatch/provision.ts). After the ship fork: the pipeline's budget is
-    // the `ship` config block's until the ship preset declares its own.
-    const clip = budgetClipLabel(agent, profile);
+    // A boundary or a `budget:` directive that clipped this run's budget — or
+    // a directive that narrowed nothing — is named on the card from here,
+    // through the attach and the run, the way a resident note is
+    // (dispatch/provision.ts).
+    const clip = budgetClipLabel(agent, profile, directives.budget);
     if (clip) shell.setLabel(`${shell.label} · ${clip}`);
 
     // A resume continues the exact conversation the ledger held (item 38);

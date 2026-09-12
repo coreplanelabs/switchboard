@@ -32,6 +32,8 @@ Wall-clock time is an agent's real budget, and effort decides how much of each t
 
 ## Boundaries intersect, they do not override
 
+A `budget:<minutes>` directive is the caller's own boundary on one message: it narrows that run's wall clock below the agent's budget and never widens it, the card says what it did (`budget 30 min (budget directive; preset asks 120)`, or that it narrowed nothing), and unlike the other three directives it is never sticky — a thread that wants a lower budget on every turn sets a user boundary.
+
 A boundary (`maxMinutes`, `maxIdentity`, `machines`) is the one scope setting that does not ride the ladder. The installation's, the channel's and the user's boundaries are intersected — the smallest budget, the lowest identity, the machine classes every one of them allows — because a cap that a more specific scope could replace would not be a cap: anyone could widen it with `config set me`.
 
 Intersection is what makes a user boundary safe to leave open to everyone: it can tighten what the channel allows and never loosen it. The preset's own profile is the starting point, the boundaries narrow it, and the result — the effective profile — is what the run is provisioned with. A budget above a cap is clipped and the card says so; an identity or a machine class above a cap is refused before anything starts, because a preset that needs to push cannot do its job with a read token.

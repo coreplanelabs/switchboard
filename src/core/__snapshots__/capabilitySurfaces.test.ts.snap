@@ -200,7 +200,7 @@ exports[`capability surfaces — cloud-full > help on chat 1`] = `
 • \`explore\` — Long, read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR. Up to two hours.
 
 *Per-request directives* (anywhere in the message):
-\`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42\` (effort: low | medium | high — lower = faster turns)
+\`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes, at least 2 — narrows this run's wall clock, never widens it)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
@@ -398,7 +398,7 @@ exports[`capability surfaces — local-full > help on chat 1`] = `
 • \`explore\` — Long, read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR. Up to two hours.
 
 *Per-request directives* (anywhere in the message):
-\`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42\` (effort: low | medium | high — lower = faster turns)
+\`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes, at least 2 — narrows this run's wall clock, never widens it)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
@@ -557,7 +557,7 @@ exports[`capability surfaces — minimal > help on chat 1`] = `
 • \`explore\` — Long, read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR. Up to two hours.
 
 *Per-request directives* (anywhere in the message):
-\`agent:review model:anthropic/claude-opus-5 effort:low look at PR 42\` (effort: low | medium | high — lower = faster turns)
+\`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42\` (effort: low | medium | high — lower = faster turns; budget: whole minutes, at least 2 — narrows this run's wall clock, never widens it)
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*

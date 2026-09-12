@@ -102,9 +102,11 @@ export function resolveRun(
 /**
  * The effective profile of this request (docs/reference/specs/routing-and-config.md
  * item 2; docs/decisions/0026-capability-profiles-and-request-routing.md):
- * preset ∩ boundary, computed once, here, once the preset is known — the
- * lookup stays after the agent gate, so a caller who may not run the agent is
- * refused before its preset is even read. Pure resolution: the profile gate
+ * preset ∩ directives ∩ boundary, computed once, here, once the preset is
+ * known — the lookup stays after the agent gate, so a caller who may not run
+ * the agent is refused before its preset is even read. The request's
+ * `budget:` directive enters as the caller's own boundary on this run: it
+ * narrows the minutes and never widens them. Pure resolution: the profile gate
  * (`authorizeProfile`) judges the outcome. A resume keeps the profile its row
  * was admitted with — the clipped budget and what clipped it — rather than
  * re-reading the preset; the boundaries on the path today are still asked,
@@ -116,14 +118,18 @@ export function resolveProfile(ctx: {
   agent: AgentDef;
   resolved: ResolvedRequest;
   resume: ResumeContext | undefined;
+  /** The request's `budget:` directive, in minutes; absent when it sent none. */
+  budget?: number;
 }): ProfileResolution {
   const carried = ctx.resume?.row.meta.profile;
   const declared = carried
     ? { machine: carried.machine, identity: carried.identity, maxMinutes: carried.minutes }
     : ctx.agent;
-  // Boundaries only ever narrow: a directive budget is the next unit's (none
-  // is parsed yet), so the caller's own boundary is empty here.
-  const resolution = effectiveProfile(declared, {}, ctx.resolved.boundary);
+  const resolution = effectiveProfile(
+    declared,
+    ctx.budget !== undefined ? { budget: ctx.budget } : {},
+    ctx.resolved.boundary,
+  );
   if (resolution.kind === "profile" && carried?.boundedBy && !resolution.profile.boundedBy) {
     return { kind: "profile", profile: { ...resolution.profile, boundedBy: carried.boundedBy } };
   }

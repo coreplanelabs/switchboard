@@ -57,6 +57,41 @@ describe("parseDirectives — effort", () => {
   });
 });
 
+// docs/reference/specs/routing-and-config.md items 1–3: `budget:<minutes>` is
+// the caller's own boundary on ONE run — parsed and stripped like the other
+// three, validated at parse (whole minutes, at least the boundary minimum),
+// and never sticky: a thread that wants a lower budget on every turn sets a
+// user boundary instead.
+describe("parseDirectives — budget", () => {
+  it("extracts budget:<minutes> as a number and strips it, like agent/model/effort", () => {
+    const d = parseDirectives("agent:explore budget:30 time the suite");
+    expect(d.agent).toBe("explore");
+    expect(d.budget).toBe(30);
+    expect(d.text).toBe("time the suite");
+    expect(parseDirectives("budget=45 hi").budget).toBe(45); // the `=` spelling the other directives take
+    expect(parseDirectives("just a question").budget).toBeUndefined();
+  });
+
+  it("refuses anything but a whole number of minutes of at least 2, naming the rule", () => {
+    for (const bad of ["budget:1", "budget:0", "budget:abc", "budget:2.5", "budget:-5", "budget:30m"]) {
+      expect(() => parseDirectives(`${bad} do it`), bad).toThrow(
+        /budget:<minutes> takes a whole number of minutes, at least 2/,
+      );
+      expect(() => parseDirectives(`${bad} do it`), bad).toThrow(/Invalid budget "/);
+    }
+    expect(parseDirectives("budget:2 ok").budget).toBe(2);
+  });
+
+  it("is never sticky: a thread carrying budget:30 hands the follow-up its agent, and no budget", () => {
+    const sticky = lastThreadDirectives([
+      { role: "user", text: "agent:explore budget:30 time the suite" },
+      { role: "assistant", text: "done" },
+    ]);
+    expect(sticky).toEqual({ agent: "explore" });
+    expect("budget" in sticky).toBe(false);
+  });
+});
+
 describe("lastThreadDirectives (thread stickiness)", () => {
   it("returns the last agent/model directives from user turns", () => {
     const sticky = lastThreadDirectives([

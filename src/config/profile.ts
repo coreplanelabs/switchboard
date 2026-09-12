@@ -12,6 +12,13 @@ export type { Identity, MachineClass };
 export type BoundaryScope = "defaults" | "channel" | "user" | "directive";
 export const BOUNDARY_SCOPES: readonly BoundaryScope[] = ["defaults", "channel", "user", "directive"];
 
+/** The clip's source as the card and the config block name it: a scope's cap
+ *  is `<scope> boundary`, the caller's own `budget:` directive is `budget
+ *  directive` — one wording for every surface that says what clipped a run. */
+export function clipSourceLabel(scope: BoundaryScope): string {
+  return scope === "directive" ? "budget directive" : `${scope} boundary`;
+}
+
 /** What one run may have: the three axes, and — when a boundary clipped the
  *  budget — the scope that did. Identity and class are never clipped: a
  *  profile above a cap on those axes is refused before any executor exists. */

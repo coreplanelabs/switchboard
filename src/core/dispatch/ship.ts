@@ -370,7 +370,12 @@ export async function runShipBranch(
       effort: spec.effort,
       channel: scopes.channel,
       user: scopes.user,
-      messageDirective: { agent: directives.agent, model: directives.model, effort: directives.effort },
+      messageDirective: {
+        agent: directives.agent,
+        model: directives.model,
+        effort: directives.effort,
+        budget: directives.budget,
+      },
       threadDirective: { agent: ctx.sticky.agent, model: ctx.sticky.model, effort: ctx.sticky.effort },
       canEditChannelConfig: deps.config.canEditChannelConfig(msg.userId),
       // No `mcp` here: ship rounds receive no MCP tools yet (docs/reference/specs/mcp-tools.md
