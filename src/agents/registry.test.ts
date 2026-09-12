@@ -61,12 +61,14 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.research.system).not.toContain("github_issue_create");
   });
 
-  it("resource declarations: coding and review require a repo; general declares none", () => {
-    // Agents declare the resources they need; the general-purpose agent
-    // runs without a repo, so executor selection provisions it nothing.
-    expect(AGENTS.coding.resources?.repo).toBe("required");
-    expect(AGENTS.review.resources?.repo).toBe("required");
-    expect(AGENTS.general.resources?.repo).toBeUndefined();
+  it("machine class declarations: coding and review run on repo-resident; general and research on none", () => {
+    // Every preset declares the machine class its runs are provisioned on
+    // (docs/reference/specs/execution.md item 7); the general-purpose agent
+    // runs on none, so executor selection provisions it nothing.
+    expect(AGENTS.coding.machine).toBe("repo-resident");
+    expect(AGENTS.review.machine).toBe("repo-resident");
+    expect(AGENTS.general.machine).toBe("none");
+    expect(AGENTS.research.machine).toBe("none");
   });
 
   it("getAgent throws on unknown agents, naming the available ones", () => {
@@ -359,8 +361,8 @@ describe("coding prompts: the PR-description content contract (submitted object)
 // runAgent with THIS def: children run on the coding/review defs (clipped), so
 // ship's budgets are placeholders and its prompt is never sent to a model.
 describe("ship agent (docs/reference/specs/agent-ship.md)", () => {
-  it("ship: repo required, full toolset, placeholder budgets (never used for a model call)", () => {
-    expect(AGENTS.ship.resources?.repo).toBe("required");
+  it("ship: repo-resident machine class, full toolset, placeholder budgets (never used for a model call)", () => {
+    expect(AGENTS.ship.machine).toBe("repo-resident");
     expect(AGENTS.ship.toolset).toBe("full");
     expect(AGENTS.ship.maxTurns).toBe(1);
     expect(AGENTS.ship.maxTokens).toBe(16000);

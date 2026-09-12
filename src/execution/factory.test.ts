@@ -27,9 +27,10 @@ vi.mock("./githubApp.js", async (importOriginal) => {
   };
 });
 
-// Feature: docs/reference/specs/execution.md — per-agent executor provisioning: agents
-// declare the resources they need (AgentDef.resources); an agent that declares
-// no repo gets a null executor and no sandbox/workspace is ever provisioned.
+// Feature: docs/reference/specs/execution.md — per-agent executor provisioning: each
+// agent declares the machine class its runs are provisioned on
+// (AgentDef.machine); an agent on `none` gets a null executor and no
+// sandbox/workspace is ever provisioned.
 
 function dirs(): Pick<ExecutorFactoryOptions, "workspaceDir" | "dataDir"> {
   const dir = mkdtempSync(join(tmpdir(), "swb-factory-"));
@@ -58,15 +59,15 @@ describe("makeExecutor per-agent provisioning", () => {
     );
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(backend).toBe("local"); // a null executor runs nothing anywhere: its spans say `local` (docs/reference/specs/tracing.md)
-    // Tools reaching a resource-less agent's executor is a config bug — it
-    // must surface legibly, not crash or provision anything.
-    await expect(ex.exec("echo hi")).rejects.toThrow(/no repo resource/);
+    // Tools reaching a machine-less agent's executor is a config bug — it
+    // must surface legibly, naming the class, not crash or provision anything.
+    await expect(ex.exec("echo hi")).rejects.toThrow(/machine class "none"/);
   });
 
   it("an agent declaring no repo gets a null executor with e2b configured (no API key needed)", async () => {
     vi.stubEnv("E2B_API_KEY", "");
     const { executor: ex } = await makeExecutor({ execution: { type: "e2b" }, ...dirs() }, ctx("general"));
-    await expect(ex.readFile("x")).rejects.toThrow(/no repo resource/);
+    await expect(ex.readFile("x")).rejects.toThrow(/machine class "none"/);
   });
 
   it("an agent declaring no repo creates no workspace directory in local mode", async () => {

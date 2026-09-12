@@ -59,9 +59,9 @@ export interface ExecutorFactoryOptions {
 }
 
 /** What executor selection knows about the run it is provisioning for.
- *  The agent's resource declarations drive whether anything is provisioned at
- *  all; repo/ref carry resident-repo inference (populated by the dispatcher's
- *  repo resolver; undefined means the per-thread path, no probe). */
+ *  The agent's machine class decides what is provisioned; repo/ref carry
+ *  resident-repo inference (populated by the dispatcher's repo resolver;
+ *  undefined means the per-thread path, no probe). */
 export interface ExecutorContext {
   threadKey: string;
   /** the resolved agent (never mutated here) */
@@ -141,10 +141,10 @@ export async function makeExecutor(
    *  probe and the attach become its `http.client` children (tracing.md item 21). */
   span?: Span,
 ): Promise<ExecutorSelection> {
-  // Agents declare the resources they need. No repo declared → nothing
-  // to provision: no workspace dir, no sandbox created or reconnected, no
-  // credential required. The general agent (toolset "none") lands here.
-  if (ctx.agent.resources?.repo !== "required") {
+  // The agent's machine class decides what is provisioned. `none` → nothing:
+  // no workspace dir, no sandbox created or reconnected, no credential
+  // required. The general and research agents land here.
+  if (ctx.agent.machine === "none") {
     return { executor: new NullExecutor(ctx.agent.name), backend: "local" };
   }
 
@@ -436,16 +436,16 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, ctx: Executor
   throw new Error(`Unknown execution.type "${type}" (valid: local, e2b, cloudflare)`);
 }
 
-/** Executor for agents that declare no repo resource. Provisions nothing; a
- *  tool call reaching it is a wiring bug (an agent with tools but no declared
- *  resources) and surfaces as a legible tool error, not a crash. */
+/** Executor for the `none` machine class. Provisions nothing; a tool call
+ *  reaching it is a wiring bug (an agent with workspace tools on a machine-less
+ *  class) and surfaces as a legible tool error, not a crash. */
 class NullExecutor implements Executor {
   constructor(private agentName: string) {}
 
   private fail(): never {
     throw new Error(
-      `Agent "${this.agentName}" declares no repo resource, so it has no execution workspace. ` +
-        `Declare resources: { repo: "required" } on the agent if its tools need one.`,
+      `Agent "${this.agentName}" runs on machine class "none", so it has no execution workspace. ` +
+        `Declare a machine class that provisions one (\`machine: "repo-resident"\`) if its tools need one.`,
     );
   }
 

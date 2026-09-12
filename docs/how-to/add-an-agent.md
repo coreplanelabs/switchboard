@@ -5,7 +5,7 @@ Add a specialist agent (a prompt, a toolset and budgets) reachable as `agent:<na
 **You need:**
 
 - A checkout of the repository and the [contributing](../../CONTRIBUTING.md) loop. An agent is data in the tree, so this is a pull request, not a config change.
-- A toolset for it (`full`, `readonly`, `web`, `assistant`, `none`) and its turn, token and wall-clock budgets.
+- A toolset for it (`full`, `readonly`, `web`, `assistant`, `none`), the machine class its tools run on, and its turn, token and wall-clock budgets.
 
 ## Define it
 
@@ -17,10 +17,10 @@ docs: {
   description: "Answers questions about a repository's documentation; read-only.",
   system: DOCS_SYSTEM,        // the prompt
   toolset: "readonly",
+  machine: "repo-resident",   // the repository's resident, else a cold sandbox; "none" for an agent without a workspace
   maxTurns: 20,               // a backstop; the wall clock is the real budget
   maxTokens: 24000,
   maxMinutes: 10,
-  resources: { repo: "required" }, // a workspace is provisioned; omit for an agent that needs none
 },
 ```
 
@@ -29,7 +29,7 @@ Every field is documented on `AgentDef` in the same file.
 | Field | What it decides |
 |---|---|
 | `toolset` | what the model may ask for ([The agents and their toolsets](../explanation/agents-and-toolsets.md) lists each) |
-| `resources` | whether a run needs a repository checkout; without it no workspace or sandbox is provisioned |
+| `machine` | where a run's tools execute: `repo-resident` provisions the target repository's resident when it is serviceable, else a cold sandbox with the checkout; `none` provisions nothing |
 | `effort` (optional) | the agent's built-in effort, which every config layer beats |
 
 ## Give it a default model

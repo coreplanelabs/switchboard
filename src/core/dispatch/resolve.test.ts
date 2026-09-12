@@ -152,7 +152,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       },
     };
     const agent = getAgent("general");
-    expect(agent.resources?.repo).toBeUndefined();
+    expect(agent.machine).toBe("none");
     const out = resolveTarget(deps, {
       msg: message,
       history,
@@ -181,7 +181,7 @@ describe("resolveTarget — the provider, and the target repo/ref/PR started", (
       },
     };
     const agent = getAgent("coding");
-    expect(agent.resources?.repo).toBe("required");
+    expect(agent.machine).toBe("repo-resident");
     const first = resolveTarget(deps, {
       msg: message,
       history,

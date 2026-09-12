@@ -6,7 +6,7 @@
 // the memory read and lands after the ack card. Pure resolution — the gates
 // that judge the result are authorize.ts.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
-import type { AgentDef } from "../../agents/registry.js";
+import { machineNeedsRepo, type AgentDef } from "../../agents/registry.js";
 import {
   lastThreadDirectives,
   parseDirectives,
@@ -92,8 +92,8 @@ export function resolveRun(
   return { sticky, resolved };
 }
 
-/** The provider and model behind the resolved ref, whether the agent needs a
- *  repository, and the target's resolution in flight. */
+/** The provider and model behind the resolved ref, whether the agent's machine
+ *  class carries a repository, and the target's resolution in flight. */
 export interface ResolvedTarget {
   provider: Provider;
   model: string;
@@ -115,8 +115,8 @@ export interface ResolveTargetContext {
  * The provider behind the model ref (an unknown provider throws here, before
  * any card), and the target repo/ref/PR resolution, STARTED — a promise the
  * caller awaits after the ack card, so the GitHub round trip overlaps the
- * memory read. A resume carries its repo context; an agent that declares no
- * repository resolves none.
+ * memory read. A resume carries its repo context; an agent whose machine class
+ * carries no repository resolves none.
  */
 export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): ResolvedTarget {
   const { msg, history, agent, resolved, resume, root } = ctx;
@@ -126,16 +126,16 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
   // Target repo/ref for resident environments, resolved BEFORE the model
   // turn: explicit signals in the message, else the repo this thread
   // already established (from history — restart-safe, never stored). The
-  // gate belongs with the resource declaration: an agent that declares no
-  // repo (e.g. the toolless general default) never resolves or gates one, so
-  // a toolless follow-up in a repo-mentioning thread is not wrongly refused
-  // and a PR-URL never triggers a wasted GitHub REST call for it.
+  // gate belongs with the machine class: an agent whose class carries no
+  // checkout (`none`, the general default) never resolves or gates a repo, so
+  // a workspace-less follow-up in a repo-mentioning thread is not wrongly
+  // refused and a PR-URL never triggers a wasted GitHub REST call for it.
   // The production resolver vets bare `owner/name` tokens against the
   // resident registry (an onboarded-resource probe from the resident
   // config) so prose shaped like a slug can never bind a repo; an injected
   // resolver (tests) is called as before. STARTED here (a promise) so the
   // GitHub round trip overlaps the memory read below; awaited after the ack.
-  const needsRepo = agent.resources?.repo === "required";
+  const needsRepo = machineNeedsRepo(agent.machine);
   const repoCtxP: Promise<RepoContext> = root.span("dispatch.repo_context", () =>
     resume
       ? Promise.resolve(resume.repoCtx)
