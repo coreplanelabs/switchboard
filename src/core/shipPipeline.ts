@@ -62,13 +62,11 @@ export interface ShipConfig {
   maxMinutes?: number;
 }
 
-/** What the round loop runs under: the rounds cap from the config block, and
- *  the wall clock from the parent run's EFFECTIVE profile — the preset's
- *  declared budget as the profile gate clipped it, never the block read again. */
-export interface ShipCaps {
-  maxRounds: number;
-  maxMinutes: number;
-}
+/** The caps' shape, the reservation and the interrupted note live with the
+ *  coordinator's machine (ship/coordinator.ts, Worker-importable) and are the
+ *  loop's too: one definition for the in-process pipeline and the runner. */
+import { SHIP_ROUND_RESERVE_MS, shipInterruptedNote, type ShipCaps } from "./ship/coordinator.js";
+export { SHIP_ROUND_RESERVE_MS, shipInterruptedNote, type ShipCaps };
 
 export const SHIP_DEFAULT_MAX_ROUNDS = 3;
 /** One number: the ship preset's own declared budget is the default the knob replaces. */
@@ -88,30 +86,6 @@ export function resolveShipCaps(cfg: ShipConfig | undefined): ShipCaps {
  *  effective profile's minutes. Always a copy; `AGENTS.ship` is never mutated. */
 export function shipPresetFor(cfg: ShipConfig | undefined): AgentDef {
   return { ...AGENTS.ship, maxMinutes: resolveShipCaps(cfg).maxMinutes };
-}
-
-/** A round is dispatched only when at least this much of the pipeline budget
- *  remains (the reservation check, spec item 8): a child clipped below this
- *  cannot do useful work, so the pipeline reports the cap instead of burning
- *  an attach + model turn on a doomed round. */
-export const SHIP_ROUND_RESERVE_MS = 3 * 60_000;
-
-// ---- the interrupted pipeline's note (run-history item 36) ---------------------
-
-/** What a ship pipeline's thread and card say when the bot died under it (run-
- *  history item 36): the work it did stands on GitHub with nobody driving it,
- *  so the note names the PR when one was opened and the exact re-issue that
- *  continues the loop — the same entry the preflight's resume-at-review takes
- *  (spec item 10). Without a PR the task itself is the re-issue: round 0 runs
- *  again on the pipeline's own deterministic branch. */
-export function shipInterruptedNote(prUrl?: string): string {
-  const stands = prUrl
-    ? `Its work stands on GitHub: ${prUrl}.`
-    : "Whatever it pushed stands on its pipeline branch; no PR was opened yet.";
-  const reissue = prUrl
-    ? `To continue the review loop, re-issue \`agent:ship\` in this thread with only the PR URL (${prUrl}).`
-    : "To continue, re-issue `agent:ship` in this thread with the task — round 0 runs again on the same branch.";
-  return `⚠️ The bot restarted while this ship pipeline was running, so the pipeline stopped. ${stands} ${reissue}`;
 }
 
 // ---- round visibility (spec item 12) ------------------------------------------

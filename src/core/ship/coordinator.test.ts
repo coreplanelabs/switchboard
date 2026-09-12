@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AGENTS } from "../../agents/registry.js";
-import { SHIP_ROUND_RESERVE_MS, shipInterruptedNote, shipRoundHeader } from "../shipPipeline.js";
+import { shipRoundHeader } from "../shipPipeline.js";
 import type { Finding, FindingDisposition } from "../reviewVerdict.js";
 import {
   applyReturn,
@@ -17,6 +16,8 @@ import {
   planInstanceId,
   readyUnits,
   renderUnitReport,
+  SHIP_ROUND_RESERVE_MS,
+  shipInterruptedNote,
   settleUnit,
   startUnit,
   unitBranch,
@@ -100,6 +101,8 @@ const HEAD_B = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1";
 const HEAD_C = "c3d4e5f60718293a4b5c6d7e8f9012345678a1b2";
 const T0 = 1_700_000_000_000;
 const MIN = 60_000;
+/** The child presets' own budgets as the bot supplies them (the registry's coding 45, review 25). */
+const CHILD_MINUTES = { coding: 45, review: 25 } as const;
 
 const FINDING: Finding = { id: "F1", severity: "minor", file: "src/a.ts", line: 3, title: "off by one" };
 const FIXED: FindingDisposition = { findingId: "F1", disposition: "fixed", note: "counted from zero" };
@@ -111,6 +114,7 @@ function input(over: Partial<UnitPipelineInput> = {}): UnitPipelineInput {
     repo: REPO,
     base: "main",
     caps: { maxRounds: 3, maxMinutes: 120 },
+    childMinutes: CHILD_MINUTES,
     merge: "runner",
     ...over,
   };
@@ -293,7 +297,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
       step: "U10/0/coding",
       preset: "coding",
       round: { index: 0, kind: "coding" },
-      budgetMinutes: AGENTS.coding.maxMinutes,
+      budgetMinutes: CHILD_MINUTES.coding,
       brief: { kind: "contract", unit: "U10", rebase: { branch: input().unit.branch, onto: "main" } },
     });
     d.answer({ type: "spawn", outcome: "spawned", runId: "run-c0", at: T0 });
@@ -302,7 +306,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
       type: "wait",
       step: "U10/0/coding/wait/1",
       runId: "run-c0",
-      timeoutMs: AGENTS.coding.maxMinutes * MIN + WAIT_MARGIN_MS,
+      timeoutMs: CHILD_MINUTES.coding * MIN + WAIT_MARGIN_MS,
     });
     d.answer({ type: "wait", outcome: "event" });
     expect(d.action).toMatchObject({ type: "read-record", step: "U10/0/coding/read/1", runId: "run-c0" });
@@ -318,7 +322,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
       step: "U10/1/review",
       preset: "review",
       round: { index: 1, kind: "review" },
-      budgetMinutes: AGENTS.review.maxMinutes,
+      budgetMinutes: CHILD_MINUTES.review,
       brief: { kind: "review", pr: 7, headSha: HEAD_A, round: 1, unit: "U10" },
     });
     runChild(
