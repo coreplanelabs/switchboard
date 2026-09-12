@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.206.0](https://github.com/coreplanelabs/switchboard/compare/v1.205.0...v1.206.0) (2026-09-12)
+
+
+### Features
+
+* **core:** the delivery snapshot refreshes incrementally and its first read reaches the newest 800 pull requests; a cut-short read says which weeks are incomplete on the page, the JSON and the command ([#975](https://github.com/coreplanelabs/switchboard/issues/975)) ([c7b82c5](https://github.com/coreplanelabs/switchboard/commit/c7b82c595052333e457c86b61066239e59d5cad4))
+* **deploy:** every execution image carries python3, g++, ffmpeg and a headless Chromium — a run screenshots, reads video frames and encodes video, and native modules build ([#985](https://github.com/coreplanelabs/switchboard/issues/985)) ([3351395](https://github.com/coreplanelabs/switchboard/commit/335139542cc000b5db05069fba0e1ee74b8101cb))
+* **dispatcher:** a run can spawn a child run through dispatch() as the requesting user — in a thread of its own, one level deep, under a fan-out cap, its budget bounded by the parent's remaining clock, parentRunId on its record ([#974](https://github.com/coreplanelabs/switchboard/issues/974)) ([018c1be](https://github.com/coreplanelabs/switchboard/commit/018c1be867bcbbd8a806840f99dd4b4c9929171a))
+* **dispatcher:** a run steers a live child through the inbox a thread reply takes and awaits its children within its own budget — each child's end comes back as data, an interrupted child reported and never restarted ([#978](https://github.com/coreplanelabs/switchboard/issues/978)) ([92887a4](https://github.com/coreplanelabs/switchboard/commit/92887a4c4af7c2f5049ac15a6b0dd43e270f84a5))
+* **runs:** the state Worker's finish sends a coordinator instance run finished for every terminal record of its child, and the bot answers the coordinator's spawn, read-record and pr-check steps behind a dedicated bearer ([#979](https://github.com/coreplanelabs/switchboard/issues/979)) ([b028d06](https://github.com/coreplanelabs/switchboard/commit/b028d06ca5c3df4d1d90ad6db14c7464e31b417f))
+* **ship:** the plan runner merges — a plan branch's pull request is squashed under plan:merge once the review approved at its head and the checks are green, and a re-issued plan resumes by attempts ([#982](https://github.com/coreplanelabs/switchboard/issues/982)) ([6dba8dd](https://github.com/coreplanelabs/switchboard/commit/6dba8ddefc57f81d487bb60a8ba5a0489f800405))
+* **ship:** the plan runner runs — the ShipCoordinator Workflow drives the machine over the bot's steps, and ship.coordinator hands a request to it ([#981](https://github.com/coreplanelabs/switchboard/issues/981)) ([b0efd29](https://github.com/coreplanelabs/switchboard/commit/b0efd294b399b0ea23c3a02ed1963d788b2cb2ed))
+* **ship:** the plan runner's state machine decides every ship ending over the coordinator's step returns and walks a plan's units in dependency order ([#980](https://github.com/coreplanelabs/switchboard/issues/980)) ([9cbe209](https://github.com/coreplanelabs/switchboard/commit/9cbe209618415edffe50999f719e3d75c0642daa))
+
+
+### Bug fixes
+
+* **deploy:** every container image ships Node 24 — the resident and sandbox copy it from an exact node stage instead of inheriting the base's Node 22 ([#977](https://github.com/coreplanelabs/switchboard/issues/977)) ([cb9ccbc](https://github.com/coreplanelabs/switchboard/commit/cb9ccbc1a2aebe8b317040c95b17ae1e512da1c6))
+
+
+### Documentation
+
+* **ship:** the loop's retirement waits on the runner's live receipt, not on the deferred deploy stage ([#983](https://github.com/coreplanelabs/switchboard/issues/983)) ([5e01f05](https://github.com/coreplanelabs/switchboard/commit/5e01f0503c07a52c6c85d4cdd6dec8c0b7b3e97c))
+
 ## [1.205.0](https://github.com/coreplanelabs/switchboard/compare/v1.204.0...v1.205.0) (2026-09-12)
 
 
