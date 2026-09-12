@@ -22,7 +22,12 @@ import { AGENTS } from "./agents/registry.js";
 import { hasAction } from "./core/authz/authorize.js";
 import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";
-import { resolveShipCaps, SHIP_DEFAULT_MAX_MINUTES, SHIP_DEFAULT_MAX_ROUNDS } from "./core/shipPipeline.js";
+import {
+  resolveShipCaps,
+  SHIP_DEFAULT_MAX_MINUTES,
+  SHIP_DEFAULT_MAX_ROUNDS,
+  shipPresetFor,
+} from "./core/shipPipeline.js";
 import { OpenAICompatProvider } from "./providers/openaiCompat.js";
 import { ProviderRegistry } from "./providers/registry.js";
 
@@ -694,6 +699,20 @@ describe("ship caps block (agent:ship pipeline)", () => {
     expect(resolveShipCaps({})).toEqual({ maxRounds: 3, maxMinutes: 120 });
     expect(resolveShipCaps({ maxRounds: 1 })).toEqual({ maxRounds: 1, maxMinutes: 120 });
     expect(resolveShipCaps({ maxRounds: 5, maxMinutes: 45 })).toEqual({ maxRounds: 5, maxMinutes: 45 });
+  });
+
+  // docs/reference/specs/agent-ship.md item 8: the pipeline's wall clock is the
+  // ship preset's declared budget — ONE number. The registry's def carries the
+  // default; a deployment's `ship.maxMinutes` knob replaces it in the preset
+  // the profile is resolved from, and nothing else reads the knob.
+  it("shipPresetFor: the ship preset as this deployment declares it — the registry's def with `ship.maxMinutes` as its budget, the default being the def's own; always a copy", () => {
+    expect(SHIP_DEFAULT_MAX_MINUTES).toBe(AGENTS.ship.maxMinutes);
+    expect(shipPresetFor(undefined)).toEqual(AGENTS.ship);
+    expect(shipPresetFor(undefined)).not.toBe(AGENTS.ship);
+    expect(shipPresetFor({ maxRounds: 1 })).toEqual(AGENTS.ship);
+    expect(shipPresetFor({ maxMinutes: 45 })).toEqual({ ...AGENTS.ship, maxMinutes: 45 });
+    expect(shipPresetFor({ maxMinutes: 45 }).maxMinutes).toBe(resolveShipCaps({ maxMinutes: 45 }).maxMinutes);
+    expect(AGENTS.ship.maxMinutes).toBe(120); // the shared def is never mutated
   });
 
   it("the example config (config/config.example.yaml) still loads through ConfigStore", async () => {

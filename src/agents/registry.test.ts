@@ -369,17 +369,32 @@ describe("coding prompts: the PR-description content contract (submitted object)
   });
 });
 
-// Feature: docs/reference/specs/agent-ship.md item 1 — `agent:ship` resolves through the
-// registry like every directive, but the ship branch in dispatch() never calls
-// runAgent with THIS def: children run on the coding/review defs (clipped), so
-// ship's budgets are placeholders and its prompt is never sent to a model.
+// Feature: docs/reference/specs/agent-ship.md items 1 and 8 — `agent:ship` resolves
+// through the registry like every directive, but the ship branch in dispatch()
+// never calls runAgent with THIS def: children run on the coding/review defs
+// clipped to the pipeline's remaining wall clock. Its `maxMinutes` IS the
+// pipeline's wall clock — the ship preset's declared budget, which a
+// deployment's `ship.maxMinutes` knob replaces and a boundary or a `budget:`
+// directive clips like any preset's; turns and tokens stay placeholders.
 describe("ship agent (docs/reference/specs/agent-ship.md)", () => {
-  it("ship: repo-resident machine class, full toolset, placeholder budgets (never used for a model call)", () => {
+  it("ship: repo-resident machine class, full toolset, the pipeline's default wall clock as its budget; turns and tokens are placeholders (never used for a model call)", () => {
     expect(AGENTS.ship.machine).toBe("repo-resident");
     expect(AGENTS.ship.toolset).toBe("full");
     expect(AGENTS.ship.maxTurns).toBe(1);
     expect(AGENTS.ship.maxTokens).toBe(16000);
-    expect(AGENTS.ship.maxMinutes).toBe(5);
+    expect(AGENTS.ship.maxMinutes).toBe(120);
+  });
+
+  it("ship's child presets run within ship's own profile — coding and review declare an identity at or under `write` and ship's own machine class — so the parent's profile gate covers every round", () => {
+    // The pipeline's rounds never re-enter dispatch(): a boundary is judged
+    // against the ship preset once, before the fork. That is sound only while
+    // every child's class equals the parent's and its identity is at or under
+    // the parent's on `none < read < write` — which this pins.
+    const rank = (i: string) => IDENTITIES.indexOf(i as (typeof IDENTITIES)[number]);
+    for (const child of [AGENTS.coding, AGENTS.review]) {
+      expect(child.machine, child.name).toBe(AGENTS.ship.machine);
+      expect(rank(child.identity), child.name).toBeLessThanOrEqual(rank(AGENTS.ship.identity));
+    }
   });
 
   it("ship's prompt says it is never sent to a model, and getAgent resolves the directive", () => {

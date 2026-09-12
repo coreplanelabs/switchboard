@@ -7478,6 +7478,68 @@ workspaceDir: __WORKDIR__
     expect(AGENTS.review.maxMinutes).toBe(25);
   });
 
+  // agent-ship.md item 8 with routing-and-config items 2 and 4: the pipeline's
+  // wall clock IS the ship preset's declared budget, so a boundary or a
+  // `budget:` directive clips it like any preset's — the children then run
+  // under the parent's effective profile, clipped to what remains of it.
+  it("a channel boundary clips the ship pipeline's wall clock: the preset's 120 becomes the channel's 10, every child is clipped to it, the card names the clip and the record carries the ship profile", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider, SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 10\n');
+    const store = new InMemoryRunStore();
+    const registry = new RunRegistry({ genId: () => "run-shipb", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+    );
+    const { io, replies, statuses } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    await deps.runHistoryWriter.settled();
+    expect(replies[replies.length - 1]).toContain("Merge-ready");
+    const runs = vi.mocked(runAgent).mock.calls.map((c) => c[0]);
+    expect(runs).toHaveLength(2);
+    for (const r of runs) expect(r.agent.maxMinutes, r.agent.name).toBeLessThanOrEqual(10);
+    expect(
+      statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 10 min (channel boundary; preset asks 120)")),
+    ).toBe(true);
+    const profile = { preset: "ship", machine: "repo-resident", identity: "write", minutes: 10, boundedBy: "channel" };
+    expect((await store.get("run-shipb"))!.profile).toEqual(profile);
+    expect(AGENTS.ship.maxMinutes).toBe(120); // the shared def is never mutated
+  });
+
+  it("`agent:ship budget:10` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names", async () => {
+    const provider = shipProvider({
+      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
+      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    });
+    const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxMinutes: 60\n");
+    queueWorkspaces(
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+    );
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:ship budget:10 in acme/api: fix the login redirect", "slack:UADMIN"), io);
+    const runs = vi.mocked(runAgent).mock.calls.map((c) => c[0]);
+    expect(runs).toHaveLength(2);
+    for (const r of runs) expect(r.agent.maxMinutes, r.agent.name).toBeLessThanOrEqual(10);
+    expect(
+      statuses
+        .map((s) => JSON.stringify(s))
+        .some((s) => s.includes("budget 10 min (budget directive; preset asks 60)")),
+    ).toBe(true);
+  });
+
   it("a thread reply during a ship run is folded into the live child round, and every child runs on the thread's ONE inbox (ship steers like every agent)", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
     let ids = 0;

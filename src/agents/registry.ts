@@ -410,15 +410,19 @@ export const AGENTS: Record<string, AgentDef> = {
     system:
       "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
     // Full toolset and the coding machine class, so repo and PR resolution
-    // gate a ship thread like a coding one; placeholder budgets — the pipeline
-    // is bounded by the `ship` config caps and by each child's own budgets
-    // clipped to the remaining wall clock, never by these numbers.
+    // gate a ship thread like a coding one. `maxMinutes` is the pipeline's
+    // wall clock (docs/reference/specs/agent-ship.md item 8): the ship preset's
+    // declared budget, which a deployment's `ship.maxMinutes` knob replaces
+    // (`shipPresetFor`) and a boundary or a `budget:` directive clips like any
+    // preset's; every child round runs its own agent's budget clipped to what
+    // remains of it. Turns and tokens are placeholders: no model call is ever
+    // made with this def.
     toolset: "full",
     machine: "repo-resident",
     identity: "write",
     maxTurns: 1,
     maxTokens: 16000,
-    maxMinutes: 5,
+    maxMinutes: 120,
   },
   research: {
     name: "research",

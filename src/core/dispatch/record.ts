@@ -294,8 +294,10 @@ export function assembleRunRecord(input: {
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }
 
-/** The record's profile for a run: its effective profile under the preset's name. */
-function profileRecordOf(agent: AgentDef, profile: RunProfile): RunProfileRecord {
+/** The record's profile for a run: its effective profile under the preset's
+ *  name — what every writer of a record with a profile (the main path's
+ *  tombstone and finish, the ship branch's) hands `assembleRunRecord`. */
+export function profileRecordOf(agent: AgentDef, profile: RunProfile): RunProfileRecord {
   return { preset: agent.name, ...profile };
 }
 
