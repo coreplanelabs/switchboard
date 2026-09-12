@@ -5,6 +5,7 @@ import {
   createInstanceResponse,
   parseCreateInstanceRequest,
   parseSubjectAuthorization,
+  readCreateInstanceAnswer,
 } from "./instancesRoute.js";
 
 // Feature: docs/reference/specs/http-ingress.md item 9 — the pure halves of
@@ -90,5 +91,38 @@ describe("createInstanceResponse — the wire shape of each outcome", () => {
       status: 502,
       body: { ok: false, error: "create_failed", id: "ship_1", message: "boom" },
     });
+  });
+});
+
+describe("readCreateInstanceAnswer — the shim's answer as the bot reads it", () => {
+  it("201 created, 409 duplicate with the existing instance's status, 502 failed with the reason; anything else — the door's 401/403, non-JSON, a shim without the route — is unanswered by reason", () => {
+    expect(readCreateInstanceAnswer(201, JSON.stringify({ ok: true, id: "plan-x", created: true }))).toEqual({
+      kind: "created",
+      id: "plan-x",
+    });
+    expect(
+      readCreateInstanceAnswer(
+        409,
+        JSON.stringify({ ok: false, error: "duplicate_instance", id: "plan-x", status: "complete" }),
+      ),
+    ).toEqual({ kind: "duplicate", id: "plan-x", status: "complete" });
+    expect(
+      readCreateInstanceAnswer(409, JSON.stringify({ ok: false, error: "duplicate_instance", id: "plan-x" })),
+    ).toEqual({
+      kind: "duplicate",
+      id: "plan-x",
+    });
+    expect(
+      readCreateInstanceAnswer(
+        502,
+        JSON.stringify({ ok: false, error: "create_failed", id: "plan-x", message: "engine down" }),
+      ),
+    ).toEqual({ kind: "failed", id: "plan-x", reason: "engine down" });
+    expect(readCreateInstanceAnswer(403, JSON.stringify({ ok: false, error: "forbidden: no grant" }))).toEqual({
+      kind: "unanswered",
+      reason: "HTTP 403 — forbidden: no grant",
+    });
+    expect(readCreateInstanceAnswer(404, "not found")).toEqual({ kind: "unanswered", reason: "HTTP 404 — not found" });
+    expect(readCreateInstanceAnswer(201, "<html>")).toEqual({ kind: "unanswered", reason: "HTTP 201 — <html>" });
   });
 });

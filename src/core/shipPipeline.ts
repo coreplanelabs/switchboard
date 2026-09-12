@@ -60,6 +60,10 @@ export interface ShipConfig {
   /** The ship preset's declared wall-clock budget in minutes (>= 1). Default:
    *  the registry's `AGENTS.ship.maxMinutes` (120). */
   maxMinutes?: number;
+  /** `true` hands every `agent:ship` request to the plan runner — the
+   *  `ShipCoordinator` Workflow in the bot's shim Worker — instead of the
+   *  in-process round loop (agent-ship.md item 16). Default `false`: the loop. */
+  coordinator?: boolean;
 }
 
 /** The caps' shape, the reservation and the interrupted note live with the

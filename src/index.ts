@@ -342,6 +342,8 @@ export async function runBot(): Promise<void> {
     mcp,
     memory,
     runHistoryWriter,
+    // The coordinator's instance records and unit rows (run-history items 49 and 50): what the ship branch writes under `ship.coordinator: true`.
+    coordinatorInstances,
     runStore,
     threadsElsewhere,
     runLedger,

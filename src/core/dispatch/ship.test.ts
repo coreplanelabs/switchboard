@@ -16,9 +16,10 @@ import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
 import { NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
 import { InMemoryRunStore, NullRunStore } from "../runStore.js";
+import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { runShipPipeline } from "../shipPipeline.js";
 import { ThreadAdmission } from "../threadAdmission.js";
-import type { ChannelIO, StatusUpdate } from "../types.js";
+import type { ChannelIO, StatusHandle, StatusUpdate } from "../types.js";
 import type { DispatchFollowUp } from "./admission.js";
 import { runShipBranch, type ShipDeps } from "./ship.js";
 
@@ -58,17 +59,17 @@ restrict:
   repos: ["acme/api"]
 `;
 
-function configStore(): ConfigStore {
+function configStore(extra = ""): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-ship-"));
   const path = join(dir, "config.yaml");
-  writeFileSync(path, YAML);
+  writeFileSync(path, YAML + extra);
   return new ConfigStore(path, join(dir, "overrides.json"));
 }
 
 /** Everything `dispatch()` hands the ship branch for one request, with a
  *  recording channel, card and registry, and a real writer over an in-memory store. */
-function setup(userId: string) {
-  const config = configStore();
+function setup(userId: string, configExtra = "") {
+  const config = configStore(configExtra);
   const store = new InMemoryRunStore();
   const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
   const deps: ShipDeps = {
@@ -110,7 +111,10 @@ function setup(userId: string) {
     modelRef: "anthropic/general-model",
     label: "*ship* · acme/api",
     startedAt: NOW,
-    card: { update: (f: StatusUpdate) => void frames.push(f), done: async (f: StatusUpdate) => void closes.push(f) },
+    card: {
+      update: (f: StatusUpdate) => void frames.push(f),
+      done: async (f: StatusUpdate) => void closes.push(f),
+    } as StatusHandle,
     directives: parseDirectives(text),
     sticky: {},
     history: [],
@@ -229,5 +233,93 @@ describe("runShipBranch — the agent:ship fork", () => {
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-s"))!.status).toBe("failed");
+  });
+});
+
+// docs/reference/specs/agent-ship.md item 16 — `ship.coordinator: true` hands the
+// request to the plan runner: the records are written under the request's own
+// run id, the shim is asked for the instance, the run ends completed with where
+// the plan runs, and no in-process round runs. Off (the default) and on a
+// resume, the branch is the round loop as before.
+describe("runShipBranch — the hand-off to the plan runner (item 16)", () => {
+  beforeEach(() => {
+    vi.stubEnv("PUBLIC_BASE_URL", "");
+    vi.mocked(runShipPipeline).mockReset();
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  function coordinated(userId: string) {
+    const s = setup(userId, "ship:\n  coordinator: true\n");
+    const instances = new InMemoryCoordinatorInstanceStore();
+    const created: string[] = [];
+    s.deps.coordinatorInstances = instances;
+    s.deps.createCoordinatorInstance = async (id) => {
+      created.push(id);
+      return { kind: "created", id };
+    };
+    s.ctx.card.handle = { channel: "CX", ts: "1.5" };
+    return { ...s, instances, created };
+  }
+
+  it("on: the task becomes a one-unit instance named by the run — the record carries the requester, thread, card, caps (the profile's minutes) and run id, the shim is asked, the reply says where it runs, the run ends completed and no pipeline round runs", async () => {
+    const s = coordinated("slack:UADMIN");
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(runShipPipeline).not.toHaveBeenCalled();
+    expect(s.created).toEqual(["ship-run-s"]);
+    expect(await s.instances.get("ship-run-s")).toMatchObject({
+      id: "ship-run-s",
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: THREAD,
+      repo: "acme/api",
+      base: "main",
+      caps: { maxRounds: 3, maxMinutes: 45 },
+      card: { channel: "CX", ts: "1.5" },
+      runId: "run-s",
+      label: "*ship* · acme/api",
+    });
+    expect((await s.instances.listUnits("ship-run-s")).map((u) => u.unit)).toEqual(["task"]);
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).toMatch(/^🧭 Handed to the plan runner `ship-run-s`: the task runs on `ship\//);
+    expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed", agent: "ship" });
+    expect(s.closes).toHaveLength(1);
+    expect(JSON.stringify(s.closes[0])).toContain("✅");
+    s.ending.drain(true);
+    await s.writer.settled();
+    expect(await s.store.get("run-s")).toMatchObject({ id: "run-s", status: "completed", agent: "ship" });
+  });
+
+  it("on, the shim refuses: the reply names the reason, the card closes ⚠️, the run still ends completed (the request was answered) and nothing ran", async () => {
+    const s = coordinated("slack:UADMIN");
+    s.deps.createCoordinatorInstance = async (id) => ({ kind: "failed", id, reason: "engine down" });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(runShipPipeline).not.toHaveBeenCalled();
+    expect(s.replies).toEqual([
+      "⚠️ The plan runner could not be started: engine down. Nothing ran; re-issue the request to try again.",
+    ]);
+    expect(JSON.stringify(s.closes[0])).toContain("⚠️");
+    expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  it("on, without an instance store in the process: refused by name before the shim is asked", async () => {
+    const s = coordinated("slack:UADMIN");
+    delete s.deps.coordinatorInstances;
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.created).toEqual([]);
+    expect(s.replies[0]).toContain("⚠️ The plan runner needs run history on the state Worker");
+  });
+
+  it("off (the default): the round loop runs and the shim is never asked", async () => {
+    const s = setup("slack:UADMIN");
+    const created: string[] = [];
+    s.deps.createCoordinatorInstance = async (id) => {
+      created.push(id);
+      return { kind: "created", id };
+    };
+    vi.mocked(runShipPipeline).mockResolvedValue({ status: "completed", reply: "shipped" });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(runShipPipeline).toHaveBeenCalledTimes(1);
+    expect(created).toEqual([]);
   });
 });

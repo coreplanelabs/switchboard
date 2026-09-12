@@ -27,6 +27,11 @@ import {
   type PullRequestFacts,
 } from "../../execution/githubPulls.js";
 import { resolveGithubIdentity, type GithubIdentity } from "../../execution/githubApp.js";
+import { processSecrets } from "../../secrets.js";
+import { handOffToCoordinator } from "../coordinator/handOff.js";
+import { createInstanceViaShim } from "../coordinator/instancesClient.js";
+import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
+import type { CreateInstanceAnswer } from "../coordinator/instancesRoute.js";
 import { resolveShipCaps, runShipPipeline, shipRoundHeader, type ShipOutcome } from "../shipPipeline.js";
 import { shipPreflight } from "../ship/preflight.js";
 import type { ShipBlocks, ShipChildSpec } from "../ship/childRound.js";
@@ -96,6 +101,20 @@ export interface ShipDeps
    * assert the call without a network call.
    */
   postIssueComment?: (repo: string, number: number, body: string) => Promise<{ url: string }>;
+  /**
+   * The coordinator's instance records and unit rows on the state Worker
+   * (run-history items 49 and 50) — what `ship.coordinator: true` writes before
+   * it asks for the Workflow instance. Absent (a process without run history
+   * on the Worker): the hand-off refuses by name and nothing runs.
+   */
+  coordinatorInstances?: CoordinatorInstanceStore;
+  /**
+   * The bot's request for a coordinator instance: `POST /admin/coordinator/instances`
+   * on its own shim with the `coordinator` bearer (agent-ship.md item 16).
+   * Default: `createInstanceViaShim` over `PUBLIC_BASE_URL` and the process's
+   * token map. Injectable so tests see the id without a network call.
+   */
+  createCoordinatorInstance?: (id: string) => Promise<CreateInstanceAnswer>;
 }
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
@@ -415,58 +434,91 @@ export async function runShipBranch(
   // One GitHub capability for the children's `github_*` tools and for the
   // parent's own issue-comment write (the handoff post, agent-ship.md item 14).
   const githubCap = githubCapabilityFor(deps, msg.userId);
+  // The pipeline's caps: the rounds cap is the config block's; the wall clock
+  // is the parent's effective budget — the preset's declared `ship.maxMinutes`
+  // as a boundary or a `budget:` directive clipped it (agent-ship.md item 8) —
+  // so every child round is clipped to what remains of THAT.
+  const caps = { ...resolveShipCaps(deps.config.config.ship), maxMinutes: profile.minutes };
+  // `ship.coordinator: true` (agent-ship.md item 16): the request becomes a
+  // plan runner instance — the bot writes the records, asks its shim for the
+  // Workflow, and this run ends with where the plan runs; the runner's steps
+  // call back into the bot from there. A resume at review stays in-process:
+  // the runner takes a plan or a task, not an open pull request.
+  const handOff = deps.config.config.ship?.coordinator === true && entry.resume === undefined;
   try {
-    outcome = await runShipPipeline({
-      span: root,
-      entry,
-      round0Messages: buildMessages(history, directives.text, msg.images, msg.documents),
-      child,
-      blocks,
-      factory: {
-        execution: deps.config.config.execution,
-        workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
-        dataDir: deps.dataDir ?? "./data",
-      },
-      threadKey: msg.threadKey,
-      // The rounds cap is the config block's; the wall clock is the parent's
-      // effective budget — the preset's declared `ship.maxMinutes` as a
-      // boundary or a `budget:` directive clipped it (agent-ship.md item 8) —
-      // so every child round is clipped to what remains of THAT.
-      caps: { ...resolveShipCaps(deps.config.config.ship), maxMinutes: profile.minutes },
-      control: run.control,
-      inbox: ctx.live.inbox, // thread follow-ups steered into this run reach the child round in flight (thread-admission item 2)
-      onEvent,
-      onProgress,
-      reportProgress,
-      publish: (e) => {
-        registry.publish(run.id, e);
-        // A round's `started` boundary retitles the card's round header (the
-        // settle events stay stream-only — the next round or the close frame
-        // takes over the card).
-        if (e.type === "ship_round" && e.outcome === "started") {
-          roundHeader = shipRoundHeader(e);
-          card.update(currentFrame());
-        }
-      },
-      reply: (text) => io.reply(text),
-      web: webCapability(),
-      skills: deps.skills,
-      githubTools: githubCap,
-      github: {
-        createBranchRef: deps.createBranchRef ?? createBranchRef,
-        openPullRequest: deps.openPullRequest ?? openPullRequest,
-        findOpenPrByHead: deps.findOpenPrByHead ?? findOpenPrByHead,
-        postReviewComment: deps.postReviewComment ?? postReviewComment,
-        postIssueComment:
-          deps.postIssueComment ?? ((repo, number, body) => githubCap.api.commentIssue(repo, number, body)),
-        fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-        fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
-        prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
-        fetchRepoShipInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
-      },
-      redactDescription: redactPrDescription,
-      logKey: msg.threadKey,
-    });
+    outcome = handOff
+      ? await root.span("dispatch.ship_hand_off", () =>
+          handOffToCoordinator(
+            {
+              readFile: (repo, path, ref) => githubCap.api.readFile(repo, path, ref),
+              instances: deps.coordinatorInstances ?? new NullCoordinatorInstanceStore(),
+              create:
+                deps.createCoordinatorInstance ??
+                ((id) =>
+                  createInstanceViaShim(
+                    { baseUrl: process.env.PUBLIC_BASE_URL, tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS") },
+                    id,
+                  )),
+            },
+            {
+              entry,
+              requestText: directives.text,
+              msg,
+              runId: run.id,
+              label,
+              caps,
+              ...(card.handle !== undefined ? { card: card.handle } : {}),
+              now: clock(),
+            },
+          ),
+        )
+      : await runShipPipeline({
+          span: root,
+          entry,
+          round0Messages: buildMessages(history, directives.text, msg.images, msg.documents),
+          child,
+          blocks,
+          factory: {
+            execution: deps.config.config.execution,
+            workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
+            dataDir: deps.dataDir ?? "./data",
+          },
+          threadKey: msg.threadKey,
+          caps,
+          control: run.control,
+          inbox: ctx.live.inbox, // thread follow-ups steered into this run reach the child round in flight (thread-admission item 2)
+          onEvent,
+          onProgress,
+          reportProgress,
+          publish: (e) => {
+            registry.publish(run.id, e);
+            // A round's `started` boundary retitles the card's round header (the
+            // settle events stay stream-only — the next round or the close frame
+            // takes over the card).
+            if (e.type === "ship_round" && e.outcome === "started") {
+              roundHeader = shipRoundHeader(e);
+              card.update(currentFrame());
+            }
+          },
+          reply: (text) => io.reply(text),
+          web: webCapability(),
+          skills: deps.skills,
+          githubTools: githubCap,
+          github: {
+            createBranchRef: deps.createBranchRef ?? createBranchRef,
+            openPullRequest: deps.openPullRequest ?? openPullRequest,
+            findOpenPrByHead: deps.findOpenPrByHead ?? findOpenPrByHead,
+            postReviewComment: deps.postReviewComment ?? postReviewComment,
+            postIssueComment:
+              deps.postIssueComment ?? ((repo, number, body) => githubCap.api.commentIssue(repo, number, body)),
+            fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+            fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
+            prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
+            fetchRepoShipInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
+          },
+          redactDescription: redactPrDescription,
+          logKey: msg.threadKey,
+        });
     // The run record is the source of truth: the report enters the stream
     // BEFORE finish() below (a publish on a finished run is a no-op).
     publishText("answer", outcome.reply);

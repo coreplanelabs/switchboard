@@ -95,3 +95,28 @@ export function createInstanceResponse(outcome: CreateInstanceOutcome): {
       return { status: 502, body: { ok: false, error: "create_failed", id: outcome.id, message: outcome.reason } };
   }
 }
+
+/** The shim's answer as the bot reads it back (the reverse direction of
+ *  `createInstanceResponse`): the three outcomes by their wire shape, and
+ *  `unanswered` by reason for anything else — the door's 401/403, a shim
+ *  without the route, a body that is not the route's. */
+export type CreateInstanceAnswer = CreateInstanceOutcome | { kind: "unanswered"; reason: string };
+
+export function readCreateInstanceAnswer(status: number, text: string): CreateInstanceAnswer {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = undefined;
+  }
+  const body = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+  if (body !== undefined && typeof body.id === "string") {
+    if (status === 201 && body.ok === true && body.created === true) return { kind: "created", id: body.id };
+    if (status === 409 && body.error === "duplicate_instance")
+      return { kind: "duplicate", id: body.id, ...(typeof body.status === "string" ? { status: body.status } : {}) };
+    if (status === 502 && body.error === "create_failed")
+      return { kind: "failed", id: body.id, reason: typeof body.message === "string" ? body.message : "create_failed" };
+  }
+  const detail = typeof body?.error === "string" ? body.error : text.slice(0, 200);
+  return { kind: "unanswered", reason: `HTTP ${status} — ${detail}` };
+}

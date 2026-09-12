@@ -284,6 +284,10 @@ workspaceDir: ./workspaces
 # ship:
 #   maxRounds: 3      # review rounds per pipeline
 #   maxMinutes: 120   # the ship preset's wall-clock budget in minutes (the registry's default)
+#   coordinator: false # true hands every agent:ship request to the plan runner — the ShipCoordinator
+#                      # Workflow in the bot Worker — instead of the in-process round loop; needs the
+#                      # `coordinator` ingress entry, its grant, run history on the state Worker and
+#                      # PUBLIC_BASE_URL (see docs/how-to/turn-features-on-and-off.md)
 
 # The fan-out cap a spawning run meets (docs/reference/specs/agent-conductor.md).
 # `agent:conductor` starts child runs as the person who asked — each an

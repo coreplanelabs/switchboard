@@ -310,6 +310,10 @@ function validateShip(ship: ShipConfig): void {
     if (v !== undefined && (!Number.isInteger(v) || v < 1))
       throw new Error(`config.yaml: ship.${key} must be an integer >= 1`);
   }
+  // The plan runner is a switch, not a knob: anything but a boolean is a typo
+  // that must not read as "on".
+  if (ship.coordinator !== undefined && typeof ship.coordinator !== "boolean")
+    throw new Error("config.yaml: ship.coordinator must be true or false");
 }
 
 /** The `spawn` block's keys, held equal to `SpawnConfig` the way the top-level keys are. */
