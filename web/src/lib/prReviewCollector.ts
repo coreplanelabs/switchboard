@@ -1,19 +1,13 @@
 import { reactive } from "vue";
-import {
-  SHA_RE,
-  type PrDescriptionData,
-  type PrReviewData,
-  type ReadingDiff,
-  type TourStep,
-} from "../modules/pr-review/types";
+import { SHA_RE, type PrDescriptionData, type PrReviewData, type ReadingDiff } from "../modules/pr-review/types";
 
 // Switchboard's adapter from run events to the pr-review module's contract
 // (docs/reference/specs/reading-diff.md item 12). This is the runs-specific half the module
 // deliberately does not know about: `run_meta` carries which PR the review is
 // of, `review_artifact` events carry the reading diffs and the PR's
-// description (item 7: its title names the panel, its TL;DR and Tour open the
-// left column). Runs stay unique to Switchboard; another host of the module
-// writes its own adapter.
+// description (item 7: its title names the panel, its prose fills the
+// Description tab). Runs stay unique to Switchboard; another host of the
+// module writes its own adapter.
 
 export interface PrReviewState extends PrReviewData {
   /** True once the stream identified a PR review with at least one diff —
@@ -68,35 +62,12 @@ export function markdownSection(body: string, heading: string): string | undefin
   return text === "" ? undefined : text;
 }
 
-function tourStepFrom(v: unknown): TourStep | undefined {
-  if (!isRecord(v) || !nonEmpty(v.title) || typeof v.description !== "string" || !isRecord(v.anchor)) return undefined;
-  const a = v.anchor;
-  if (!nonEmpty(a.path) || !positiveInt(a.from) || !positiveInt(a.to) || a.to < a.from) return undefined;
-  if (a.sha !== undefined && !(typeof a.sha === "string" && SHA_RE.test(a.sha))) return undefined;
-  return {
-    title: v.title,
-    description: v.description,
-    ...(nonEmpty(v.lookFor) ? { lookFor: v.lookFor } : {}),
-    anchor: { path: a.path, from: a.from, to: a.to, ...(typeof a.sha === "string" ? { sha: a.sha } : {}) },
-  };
-}
-
-/** The `pr_description` artifact projected onto the module's shape, or
- *  undefined when any part of it is malformed (the frame then changes nothing). */
+/** The `pr_description` artifact projected onto the module's shape — the
+ *  title, the prose and what kind of copy it is — or undefined when its title
+ *  or origin is malformed (the frame then changes nothing). The artifact's
+ *  Tour rides along in the record for the PR body; the panel does not render it. */
 export function descriptionFrom(o: Record<string, unknown>): PrDescriptionData | undefined {
   if (!nonEmpty(o.title) || (o.origin !== "submitted" && o.origin !== "parsed")) return undefined;
-  if (!Array.isArray(o.tour) || !Array.isArray(o.remaining)) return undefined;
-  const tour: TourStep[] = [];
-  for (const s of o.tour) {
-    const step = tourStepFrom(s);
-    if (!step) return undefined;
-    tour.push(step);
-  }
-  const remaining: { path: string; note: string }[] = [];
-  for (const r of o.remaining) {
-    if (!isRecord(r) || !nonEmpty(r.path) || typeof r.note !== "string") return undefined;
-    remaining.push({ path: r.path, note: r.note });
-  }
   const body = typeof o.body === "string" ? o.body : "";
   const tldr = nonEmpty(o.tldr) ? o.tldr : firstParagraph(body);
   const whatWhy = markdownSection(body, "What & why");
@@ -104,12 +75,9 @@ export function descriptionFrom(o: Record<string, unknown>): PrDescriptionData |
     title: o.title,
     ...(tldr !== undefined ? { tldr } : {}),
     ...(whatWhy !== undefined ? { whatWhy } : {}),
-    tour,
-    remaining,
     origin: o.origin,
     complete: o.complete === true,
     truncated: o.truncated === true,
-    ...(typeof o.headSha === "string" && SHA_RE.test(o.headSha) ? { headSha: o.headSha } : {}),
   };
 }
 

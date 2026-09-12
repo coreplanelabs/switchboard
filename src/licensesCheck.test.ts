@@ -114,6 +114,15 @@ describe("licenses-check evaluate", () => {
     expect(evaluate(withException, { exceptions: { ...EXCEPTIONS, "@acme/odd": "MIT upstream" } })).toEqual([]);
   });
 
+  it("matches SPDX identifiers case-insensitively, as the specification reads them: a manifest's `apache-2.0` is Apache-2.0", () => {
+    const lowercase = {
+      "@pierre/diffs@1.3.6": { licenses: "apache-2.0", path: "/x/node_modules/@pierre/diffs" },
+      "shouty@1.0.0": { licenses: "(mit OR GPL-3.0)", path: "/x/node_modules/shouty" },
+      "viral@1.0.0": { licenses: "gpl-3.0", path: "/x/node_modules/viral" },
+    };
+    expect(evaluate(lowercase).map((o) => o.id)).toEqual(["viral@1.0.0"]);
+  });
+
   it("accepts an OR expression when one alternative is allowed, and a list when every entry is", () => {
     const mixed = {
       "either@1.0.0": { licenses: "(GPL-3.0 OR MIT)" },

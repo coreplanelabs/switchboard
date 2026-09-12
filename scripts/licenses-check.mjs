@@ -53,7 +53,11 @@ export const EXCEPTIONS = {
  * Pure: no I/O. Returns the offending entries; an empty list means the gate passes.
  */
 export function evaluate(report, { allowed = ALLOWED_LICENSES, exceptions = EXCEPTIONS } = {}) {
-  const allowedSet = new Set(allowed);
+  // SPDX identifiers are case-insensitive by the SPDX specification, and
+  // manifests do spell them in lowercase (`apache-2.0`); the set is matched
+  // the way the specification reads them.
+  const allowedSet = new Set(allowed.map((l) => l.toLowerCase()));
+  const isAllowed = (l) => allowedSet.has(String(l).trim().toLowerCase());
   const offending = [];
   for (const [id, info] of Object.entries(report)) {
     const name = id.startsWith("@") ? `@${id.slice(1).split("@")[0]}` : id.split("@")[0];
@@ -62,11 +66,11 @@ export function evaluate(report, { allowed = ALLOWED_LICENSES, exceptions = EXCE
     // A package may declare `(A OR B)`; accept it when any alternative is allowed.
     const ok = licenses.every(
       (l) =>
-        allowedSet.has(l) ||
+        isAllowed(l) ||
         String(l)
           .replace(/^\(|\)$/g, "")
           .split(" OR ")
-          .some((alt) => allowedSet.has(alt.trim())),
+          .some(isAllowed),
     );
     if (!ok) offending.push({ id, licenses: licenses.join(", "), path: info.path ?? "" });
   }

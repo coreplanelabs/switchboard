@@ -31,37 +31,15 @@ export interface ReadingDiff {
   summary?: string;
 }
 
-/** Where a Tour step points: a path and an inclusive 1-based line range on
- *  the new side, plus the head the anchor was rendered at when known. */
-export interface TourAnchor {
-  path: string;
-  from: number;
-  to: number;
-  /** 7–40 hex. Compared with the reviewed head: a step anchored at another
-   *  head may point at lines that have since moved. */
-  sha?: string;
-}
-
-/** One step of the PR description's Tour, reader-first: what the change is,
- *  the explanation, an optional pointer at what to scrutinize, the code. */
-export interface TourStep {
-  title: string;
-  description: string;
-  lookFor?: string;
-  anchor: TourAnchor;
-}
-
 /** The PR's description as the panel renders it — the host projects its own
- *  description object (submitted or parsed from the PR body) onto this. */
+ *  description object (submitted or parsed from the PR body) onto this: the
+ *  title names the panel, the prose fills the Description tab. */
 export interface PrDescriptionData {
   /** The PR's title: the header's text. */
   title: string;
   tldr?: string;
   /** The "What & why" prose, when the host could separate it from the body. */
   whatWhy?: string;
-  tour: TourStep[];
-  /** The touched files the Tour did not cover, one note each. */
-  remaining: { path: string; note: string }[];
   /** `submitted`: the typed object the PR was opened from; `parsed`: read back
    *  from the PR body, possibly short of sections. */
   origin: "submitted" | "parsed";
@@ -69,8 +47,6 @@ export interface PrDescriptionData {
   complete: boolean;
   /** The body was cut before it was read. */
   truncated: boolean;
-  /** The head the description was produced at (7–40 hex). */
-  headSha?: string;
 }
 
 /** Everything the panel renders. */
@@ -78,14 +54,14 @@ export interface PrReviewData {
   pr: PrRef;
   readingDiffs: ReadingDiff[];
   /** The PR's description when the host knows it; the header names the PR
-   *  by its title then, and the left column opens on the TL;DR and the Tour. */
+   *  by its title then, and the Description tab carries its prose. */
   description?: PrDescriptionData;
 }
 
 /** The abridging of the full diff, when the host can ask for one: `absent`
  *  offers the button, `running` shows the wait, `failed` names the reason and
  *  offers a retry; `done` renders nothing — the abridged diff has arrived in
- *  `readingDiffs` by then and the tabs take over. The host owns the request
+ *  `readingDiffs` by then and its tab takes over. The host owns the request
  *  and the polling; the panel only renders the state and calls `start`. */
 export type AbridgeState =
   { state: "absent" } | { state: "running" } | { state: "done" } | { state: "failed"; reason: string };
@@ -127,23 +103,6 @@ export function prLinks(pr: PrRef): { pr?: string; files?: string; commit?: stri
   return out;
 }
 
-/** One file of the PR on GitHub at the reviewed head, the lines selected —
- *  where a Tour step goes when its file lies past the recorded diff's cap.
- *  The same discipline as `prLinks`: a shape-verified repo and head, and a
- *  path of plain segments (none empty, `.` or `..`, no backslash, no control
- *  character), each URL-encoded; anything else is no link. */
-export function fileLink(pr: PrRef, anchor: { path: string; from?: number; to?: number }): string | undefined {
-  if (!pr.repo || !REPO_RE.test(pr.repo) || !pr.headSha || !SHA_RE.test(pr.headSha)) return undefined;
-  const segments = anchor.path.split("/");
-  // eslint-disable-next-line no-control-regex -- a control character is what is being refused
-  const unsafe = /[\\\u0000-\u001f]/;
-  if (segments.some((s) => s === "" || s === "." || s === ".." || unsafe.test(s))) return undefined;
-  const path = segments.map(encodeURIComponent).join("/");
-  const { from, to } = anchor;
-  const lines = from === undefined ? "" : to === undefined || to === from ? `#L${from}` : `#L${from}-L${to}`;
-  return `https://github.com/${pr.repo}/blob/${pr.headSha}/${path}${lines}`;
-}
-
 /** The diff a reader should see first: the abridged one when a producer made
  *  it, else the full diff, else null. */
 export function preferredDiff(diffs: readonly ReadingDiff[]): ReadingDiff | null {
@@ -165,4 +124,16 @@ export function truncatedExplanation(chars: number): string {
 /** Reader-facing label per producer. */
 export function poweredByLabel(poweredBy: ReadingDiff["poweredBy"]): string {
   return poweredBy === "meat" ? "reading diff · meat" : "full diff · git";
+}
+
+/** The muted line under a description that is less than the whole: read back
+ *  from the PR body and short of the house shape, or cut before it was read.
+ *  Nothing for a submitted or complete one. */
+export function descriptionNote(
+  description: Pick<PrDescriptionData, "origin" | "complete" | "truncated">,
+): string | undefined {
+  const parts: string[] = [];
+  if (description.origin === "parsed" && !description.complete) parts.push("read back from the PR body");
+  if (description.truncated) parts.push("the body was cut before it was read");
+  return parts.length > 0 ? parts.join("; ") : undefined;
 }
