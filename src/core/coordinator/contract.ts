@@ -19,6 +19,9 @@
 export const COORDINATOR_IDENTITY = "coordinator";
 /** The policy action every coordinator step is decided on (authorization.md item 2). */
 export const COORDINATOR_STEP_ACTION = "coordinator:step";
+/** The plan runner's merge, its own action on the same bearer (record 0031's merge grant): a
+ *  plan branch's pull request is merged by the runner only under it; withdrawn, every merge is a person's. */
+export const PLAN_MERGE_ACTION = "plan:merge";
 /** Where the bot answers the steps: `POST <prefix><step>` on the container, forwarded by the shim like every `/admin/*` path. */
 export const COORDINATOR_STEP_PATH_PREFIX = "/admin/coordinator/";
 

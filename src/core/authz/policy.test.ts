@@ -426,6 +426,18 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.schedule, command("coordinator.spawn")],
     ],
   },
+  // The plan runner's merge is its own grant, held by the same bearer: a
+  // coordinator bearer without it, an admin's `all`, a token and the schedule
+  // actor are all refused — withdrawing the grant returns every merge to a person.
+  "plan:merge command [has-grant(plan:merge)] kinds=service": {
+    allow: [[A.runner, command("coordinator.merge")]],
+    deny: [
+      [A.coordinator, command("coordinator.merge")],
+      [A.admin, command("coordinator.merge")],
+      [A.token, command("coordinator.merge")],
+      [A.schedule, command("coordinator.merge")],
+    ],
+  },
 };
 
 describe("POLICY coverage", () => {

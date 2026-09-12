@@ -155,6 +155,8 @@ export const ACTORS = {
   }),
   /** The ship coordinator's bearer: the one step grant, nothing else. */
   coordinator: actor("service", "http:coordinator", { actions: new Set(["coordinator:step"]) }),
+  /** The same bearer as the plan runner holds it: the step grant and the merge grant. */
+  runner: actor("service", "http:coordinator", { actions: new Set(["coordinator:step", "plan:merge"]) }),
   /** An agent holding everything, acting for the non-member (never exceeds the principal). */
   agentForNonMember: actor(
     "agent",
