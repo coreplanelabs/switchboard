@@ -26,9 +26,10 @@ export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" }
 
 export interface CoordinatorInstanceStore {
   put(instance: CoordinatorInstance): Promise<PutInstanceResult>;
-  /** The record written over whatever the id holds — for the leftover of an
-   *  attempt whose Workflow instance was never created, once the shim has said
-   *  so. Never `exists`; the same `unavailable` as `put`. */
+  /** The record written over whatever the id holds and the id's unit rows
+   *  dropped — an attempt starting over: the leftover of one whose Workflow
+   *  instance was never created, once the shim has said so. Never `exists`;
+   *  the same `unavailable` as `put`. */
   replace(instance: CoordinatorInstance): Promise<PutInstanceResult>;
   get(id: string): Promise<CoordinatorInstance | null>;
   /** The unit rows of an instance (run-history item 50), each replaced whole:
@@ -54,6 +55,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   }
   async replace(instance: CoordinatorInstance): Promise<PutInstanceResult> {
     this.rows.set(instance.id, JSON.stringify(instance));
+    for (const key of [...this.units.keys()]) if (key.startsWith(`${instance.id}\0`)) this.units.delete(key);
     return { ok: true };
   }
   async get(id: string): Promise<CoordinatorInstance | null> {

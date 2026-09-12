@@ -1221,16 +1221,20 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
-  /** The record written over whatever the id holds — the leftover of an
-   *  attempt whose Workflow instance was never created, once the shim said so. */
+  /** The record written over whatever the id holds and the id's unit rows
+   *  dropped, in one transaction — an attempt starting over: the leftover of one
+   *  whose Workflow instance was never created, once the shim said so. */
   async replaceInstance(instance: CoordinatorInstance): Promise<{ ok: true }> {
-    this.sql.exec(
-      `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)
-       ON CONFLICT(instance_id) DO UPDATE SET json = excluded.json, created_at = excluded.created_at`,
-      instance.id,
-      JSON.stringify(instance),
-      instance.createdAt,
-    );
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(
+        `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)
+         ON CONFLICT(instance_id) DO UPDATE SET json = excluded.json, created_at = excluded.created_at`,
+        instance.id,
+        JSON.stringify(instance),
+        instance.createdAt,
+      );
+      this.sql.exec(`DELETE FROM coordinator_units WHERE instance_id = ?`, instance.id);
+    });
     return { ok: true };
   }
 

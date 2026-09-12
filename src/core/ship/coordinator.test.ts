@@ -204,9 +204,14 @@ describe("the plan graph — units, their dependencies, their branches", () => {
     expect(() => planIdOf("docs/plans/")).toThrow();
   });
 
-  it("planInstanceId names the plan, so a second runner for one plan meets the engine's duplicate-id refusal", () => {
+  it("planInstanceId names the plan and, from the second, its attempt, so a second runner for one attempt meets the engine's duplicate-id refusal and a re-issue gets the next id", () => {
     expect(planInstanceId(PLAN_ID)).toBe(`plan-${PLAN_ID}`);
+    expect(planInstanceId(PLAN_ID, 1)).toBe(`plan-${PLAN_ID}`);
+    expect(planInstanceId(PLAN_ID, 2)).toBe(`plan-${PLAN_ID}-2`);
+    expect(planInstanceId(PLAN_ID, 12)).toBe(`plan-${PLAN_ID}-12`);
     expect(planInstanceId("x".repeat(200))).toHaveLength(100);
+    expect(planInstanceId("x".repeat(200), 3)).toHaveLength(100);
+    expect(planInstanceId("x".repeat(200), 3).endsWith("-3")).toBe(true);
   });
 
   it("parseShipPlanRequest reads `plan <path> [units U<n>, U<m>]` and nothing else", () => {

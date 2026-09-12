@@ -47,6 +47,7 @@ function workerDouble() {
     if (path === "/runs/coordinator/replace") {
       const inst = body.instance as CoordinatorInstance;
       rows.set(inst.id, JSON.stringify(inst));
+      for (const key of [...units.keys()]) if (key.startsWith(`${inst.id}/`)) units.delete(key);
       return Response.json({ ok: true });
     }
     if (path === "/runs/coordinator/get") {
@@ -93,12 +94,15 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
     // A re-issue over the leftover of an attempt whose create failed: the
     // record is written over whatever the id holds, once the shim said no
     // instance exists — the one write that is never `exists`.
-    it("replace writes the record over whatever the id holds — a different record, or none — and get reads the new one back", async () => {
+    it("replace writes the record over whatever the id holds — a different record, or none — drops the id's unit rows and no other instance's, and get reads the new one back", async () => {
       const store = make();
       expect(await store.put(instance)).toEqual({ ok: true });
+      await store.putUnits([unitRow("U12"), unitRow("U13"), { ...unitRow("U12"), instanceId: "ship_other" }]);
       const again = { ...instance, runId: "run-s2", createdAt: 2_000 };
       expect(await store.replace(again)).toEqual({ ok: true });
       expect(await store.get(instance.id)).toEqual(again);
+      expect(await store.listUnits(instance.id)).toEqual([]);
+      expect((await store.listUnits("ship_other")).map((u) => u.unit)).toEqual(["U12"]);
       expect(await store.replace({ ...again, id: "ship_fresh" })).toEqual({ ok: true });
       expect(await store.get("ship_fresh")).toEqual({ ...again, id: "ship_fresh" });
     });

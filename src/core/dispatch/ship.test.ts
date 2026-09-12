@@ -257,6 +257,7 @@ describe("runShipBranch — the hand-off to the plan runner (item 16)", () => {
       created.push(id);
       return { kind: "created", id };
     };
+    s.deps.fetchCoordinatorInstanceStatus = async () => ({ kind: "absent" });
     s.ctx.card.handle = { channel: "CX", ts: "1.5" };
     return { ...s, instances, created };
   }

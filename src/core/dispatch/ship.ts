@@ -29,9 +29,9 @@ import {
 import { resolveGithubIdentity, type GithubIdentity } from "../../execution/githubApp.js";
 import { processSecrets } from "../../secrets.js";
 import { handOffToCoordinator } from "../coordinator/handOff.js";
-import { createInstanceViaShim } from "../coordinator/instancesClient.js";
+import { createInstanceViaShim, fetchInstanceStatusViaShim } from "../coordinator/instancesClient.js";
 import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
-import type { CreateInstanceAnswer } from "../coordinator/instancesRoute.js";
+import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
 import { resolveShipCaps, runShipPipeline, shipRoundHeader, type ShipOutcome } from "../shipPipeline.js";
 import { shipPreflight } from "../ship/preflight.js";
 import type { ShipBlocks, ShipChildSpec } from "../ship/childRound.js";
@@ -115,6 +115,12 @@ export interface ShipDeps
    * token map. Injectable so tests see the id without a network call.
    */
   createCoordinatorInstance?: (id: string) => Promise<CreateInstanceAnswer>;
+  /**
+   * The bot's read of an earlier attempt's instance status on its own shim
+   * (`GET /admin/coordinator/instances/<id>`), before a plan is re-issued.
+   * Default: `fetchInstanceStatusViaShim` over the same base URL and token map.
+   */
+  fetchCoordinatorInstanceStatus?: (id: string) => Promise<InstanceStatusAnswer>;
 }
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
@@ -456,6 +462,13 @@ export async function runShipBranch(
                 deps.createCoordinatorInstance ??
                 ((id) =>
                   createInstanceViaShim(
+                    { baseUrl: process.env.PUBLIC_BASE_URL, tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS") },
+                    id,
+                  )),
+              status:
+                deps.fetchCoordinatorInstanceStatus ??
+                ((id) =>
+                  fetchInstanceStatusViaShim(
                     { baseUrl: process.env.PUBLIC_BASE_URL, tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS") },
                     id,
                   )),
