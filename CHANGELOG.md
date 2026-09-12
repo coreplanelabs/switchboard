@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.204.0](https://github.com/coreplanelabs/switchboard/compare/v1.203.0...v1.204.0) (2026-09-12)
+
+
+### Features
+
+* **agents:** every preset declares the machine class its runs are provisioned on — none, blank, repo-cold or repo-resident — and only repo-resident consults the resident registry ([#964](https://github.com/coreplanelabs/switchboard/issues/964)) ([f1650bb](https://github.com/coreplanelabs/switchboard/commit/f1650bb1fc6d5c10bd4e494fb978ca37e468789b))
+* **coding:** the pi spike driver — the five coding tasks on pi's RPC harness, every tool call previewed against the policy, pi's events mapped to the run stream, a dry run on the scripted provider ([#965](https://github.com/coreplanelabs/switchboard/issues/965)) ([9c909ed](https://github.com/coreplanelabs/switchboard/commit/9c909ed14ae90e7a290df76b2a0fee0f6b8d6bc8))
+
+
+### Documentation
+
+* **ship:** the orchestration program absorbs record 0026 slice one and spawn/await as five units, and the plan runner holds plan:merge for plan branches ([#957](https://github.com/coreplanelabs/switchboard/issues/957)) ([2202d0d](https://github.com/coreplanelabs/switchboard/commit/2202d0d48dc4747a2eca0c50bfb7773b0c4d25bc))
+
 ## [1.203.0](https://github.com/coreplanelabs/switchboard/compare/v1.202.1...v1.203.0) (2026-09-11)
 
 
