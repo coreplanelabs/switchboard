@@ -79,6 +79,28 @@ describe("settlementFor — D4", () => {
       text: "Tool mcp_acme_search is not available after the bot restarted; continue without it.",
     });
   });
+
+  // docs/reference/specs/agent-conductor.md item 8: a wait is a read and runs
+  // again; a steer pushed into a child's inbox is a mutation whose effect the
+  // restart made unknowable, so it gets the restart result — never a second push.
+  it("the run tools settle by the same rule: `await_runs` (side-effect free) runs again at a resume; `send_to_run` and `spawn_run` get the restart result", () => {
+    const withRunTools = new Map<string, KnownTool>([
+      ...toolMap,
+      ["await_runs", { name: "await_runs", sideEffectFree: true }],
+      ["send_to_run", { name: "send_to_run" }],
+      ["spawn_run", { name: "spawn_run" }],
+    ]);
+    const awaited = call("a", "await_runs", { ids: ["run-1", "run-2"] });
+    expect(settlementFor(awaited, withRunTools)).toEqual({ toolUse: awaited, action: "rerun" });
+    expect(settlementFor(call("s", "send_to_run", { id: "run-1", text: "narrow it" }), withRunTools)).toMatchObject({
+      action: "synthetic",
+      text: expect.stringMatching(/restarted while this send_to_run call was in flight.*re-check/),
+    });
+    expect(settlementFor(call("p", "spawn_run", { preset: "research", prompt: "x" }), withRunTools)).toMatchObject({
+      action: "synthetic",
+      text: expect.stringMatching(/restarted while this spawn_run call was in flight/),
+    });
+  });
 });
 
 describe("planResume", () => {

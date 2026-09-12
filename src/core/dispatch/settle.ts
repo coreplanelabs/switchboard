@@ -31,14 +31,20 @@ export interface SettleContext {
   control: RunControl | undefined;
 }
 
+/** A person's follow-up: one with a channel handle to answer on. The other
+ *  kind — a steer a run sent (`from`) — never reaches a settlement. */
+export type PersonFollowUp = DispatchFollowUp & { io: ChannelIO };
+
+const fromPerson = (p: DispatchFollowUp): p is PersonFollowUp => p.from === undefined && p.io !== undefined;
+
 /** How the thread was settled. `stopMode` is what the request's root reports. */
 export type Settlement =
   /** Nothing was left unconsumed. */
   | { kind: "quiet"; stopMode: StopMode | undefined }
   /** An operator stopped the run: the follow-ups are not run; `tellDropped` tells each sender. */
-  | { kind: "dropped"; stopMode: StopMode; pending: DispatchFollowUp[] }
+  | { kind: "dropped"; stopMode: StopMode; pending: PersonFollowUp[] }
   /** The run ended by itself: the follow-ups are handed on as one fresh turn for this agent. */
-  | { kind: "handed-on"; agent: string; pending: DispatchFollowUp[] };
+  | { kind: "handed-on"; agent: string; pending: PersonFollowUp[] };
 
 /**
  * Thread admission item 4: free the thread, and settle what the run never
@@ -46,15 +52,22 @@ export type Settlement =
  * sandbox) hands its unconsumed follow-ups on as ONE fresh turn — on the most
  * recent sender's channel handle, so the reply lands where they asked — never
  * a silent drop. A run an operator stopped does not: the stop meant "no more
- * work here", and each sender is told their follow-up was not run. Synchronous
- * on purpose: the quiet path awaits nothing, exactly as the inline code did,
- * so nothing that rides on the dispatch's microtask order (a reflection
- * scheduled after the reply) moves.
+ * work here", and each sender is told their follow-up was not run. A steer a
+ * run sent (thread-admission item 7) is neither: a program's message has no
+ * one to answer and is never run fresh — the parent reads the child's end
+ * through its own tools — so it is set aside with a log line. Synchronous on
+ * purpose: the quiet path awaits nothing, exactly as the inline code did, so
+ * nothing that rides on the dispatch's microtask order (a reflection scheduled
+ * after the reply) moves.
  */
 export function settleThread(deps: Pick<AdmissionDeps, "admission">, ctx: SettleContext): Settlement {
   const { msg, admitted, runLoopStarted, control } = ctx;
   const admission = deps.admission ?? defaultAdmission;
-  const pending = admitted ? admission.release(msg.threadKey, admitted) : [];
+  const released = admitted ? admission.release(msg.threadKey, admitted) : [];
+  const pending = released.filter(fromPerson);
+  const fromRuns = released.length - pending.length;
+  if (fromRuns > 0)
+    console.log(`[dispatch] ${msg.threadKey} ${fromRuns} steer(s) from a parent run never read — not run fresh`);
   // A stop counts once the run loop had the run: a stop relayed during an
   // attach that then refused stopped nothing, and the follow-ups run fresh.
   const stopMode: StopMode | undefined = runLoopStarted ? control?.requested : undefined;
@@ -70,7 +83,7 @@ export function settleThread(deps: Pick<AdmissionDeps, "admission">, ctx: Settle
 }
 
 /** Each dropped follow-up's sender is told it was not run — one `post.followups` span. */
-export async function tellDropped(root: Span, pending: DispatchFollowUp[]): Promise<void> {
+export async function tellDropped(root: Span, pending: PersonFollowUp[]): Promise<void> {
   await root.span("post.followups", async () => {
     for (const p of pending) await p.io.reply(FOLLOW_UP_DROPPED_BY_STOP).catch(() => {});
   });
@@ -97,7 +110,7 @@ export interface FreshTurn {
  */
 export function prepareFreshTurn(
   deps: RequestTraceDeps,
-  ctx: { agent: string; pending: DispatchFollowUp[]; clock: Clock },
+  ctx: { agent: string; pending: PersonFollowUp[]; clock: Clock },
 ): FreshTurn {
   const { agent, pending, clock } = ctx;
   const merged = mergeFollowUps(pending)!;

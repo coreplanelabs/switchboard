@@ -51,6 +51,7 @@ import { InMemoryFrictionLedger, RunStoreFrictionLedger, type FrictionLedger } f
 import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
+import { createRunsService } from "./runsService.js";
 import type { RepoContext } from "./repoContext.js";
 import { isRunRecord, type RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter.js";
@@ -10971,6 +10972,10 @@ workspaceDir: __WORKDIR__
     deps.runRegistry = registry;
     deps.runHistoryWriter = writer;
     deps.admission = admission;
+    // The one runs service every surface reads, over the store the writer
+    // writes — the run tools' reads reach a finished child's record through it.
+    deps.runStore = store;
+    deps.runs = createRunsService({ registry, store });
     return { deps, registry, store, writer, admission };
   }
   const agentsProvisioned = () => vi.mocked(makeExecutor).mock.calls.map((c) => c[1].agent.name);
@@ -11087,5 +11092,189 @@ workspaceDir: __WORKDIR__
     expect(child.replies[0]).toContain("itself a child");
     expect(agentsProvisioned()).toEqual(["conductor", "conductor"]);
     expect(t.registry.getById("run-third")).toBeNull();
+  });
+
+  // docs/reference/specs/agent-conductor.md item 8, thread-admission item 7:
+  // steer and await, end to end through the real runner, registry and inbox.
+  /** The text parts of a request's last user turn — where a drained follow-up rides. */
+  const lastUserTexts = (req: CompletionRequest): string[] => {
+    const last = req.messages.at(-1);
+    if (!last || last.role !== "user" || typeof last.content === "string") return [];
+    return (last.content as Array<{ type: string; text?: string }>)
+      .filter((p) => p.type === "text")
+      .map((p) => p.text ?? "");
+  };
+  /**
+   * A conductor that spawns one research child, then steers it and awaits it
+   * in one turn, then answers with what the tools returned; a child whose
+   * first turn is held until the steer sits in its inbox — so the steer rides
+   * its first results turn and its answer quotes it.
+   */
+  function steerAndAwaitProvider(admission: ThreadAdmission<DispatchFollowUp>) {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        const conducts = req.tools?.some((t) => t.name === "spawn_run") ?? false;
+        if (conducts) {
+          const results = toolResultTexts(req);
+          const spawned = results.find((r) => r.startsWith("spawned a research run: "));
+          if (results.length === 0)
+            return {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "t1",
+                  name: "spawn_run",
+                  input: { preset: "research", prompt: "what is a DO?" },
+                },
+              ],
+              stopReason: "tool_use",
+            };
+          if (spawned && results.length === 1) {
+            const childId = /run: (\S+) in thread/.exec(spawned)![1];
+            return {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "t2",
+                  name: "send_to_run",
+                  input: { id: childId, text: "narrow it to Workers" },
+                },
+                { type: "tool_use", id: "t3", name: "await_runs", input: { ids: [childId] } },
+              ],
+              stopReason: "tool_use",
+            };
+          }
+          return { content: [{ type: "text", text: results.join("\n---\n") }], stopReason: "end_turn" };
+        }
+        // The child: the first turn waits for the parent's steer to land, then
+        // makes one bookkeeping call so the steer rides its results turn.
+        if (!req.messages.some((m) => m.role === "assistant")) {
+          await vi.waitFor(() => expect(admission.get(CHILD_THREAD)?.inbox.size).toBe(1));
+          return {
+            content: [{ type: "tool_use", id: "c1", name: "update_status", input: { checklist: "○ reading" } }],
+            stopReason: "tool_use",
+          };
+        }
+        const heard = lastUserTexts(req).some((t) => t.includes("narrow it to Workers"));
+        return {
+          content: [{ type: "text", text: `heard: ${heard ? "narrow it to Workers" : "nothing"}` }],
+          stopReason: "end_turn",
+        };
+      },
+    };
+    return { provider, requests };
+  }
+
+  it("send_to_run steers a live child through the inbox a thread reply takes — the child reads it at its next step as the requester's follow-up, its record's `input` names the parent run — and await_runs returns when the child's end frame lands, with its final reply as data", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const { provider, requests } = steerAndAwaitProvider(admission);
+    const t = treeDeps(provider);
+    t.deps.admission = admission;
+    const { parent, child } = treeIO();
+    await dispatch(t.deps, inChannel("CX", "agent:conductor look into durable objects"), parent.io);
+    await t.writer.settled();
+    // The child heard the steer on its next step and answered from it, in its own thread.
+    expect(child.replies).toEqual(["heard: narrow it to Workers"]);
+    const childRecord = (await t.store.get("run-child"))!;
+    const inputs = childRecord.events.filter((e) => e.type === "input");
+    expect(inputs).toHaveLength(2); // the request, then the steer
+    expect(inputs[1]).toMatchObject({
+      type: "input",
+      text: "narrow it to Workers",
+      source: { user: "alice", run: "run-parent", url: "https://acme.slack.com/archives/CX/p10" },
+    });
+    expect(childRecord.status).toBe("completed");
+    // The child's request carried the steer with the follow-up header, and nothing was acked in the child's thread.
+    const childSteerTurn = requests.find(
+      (r) => !r.tools?.some((x) => x.name === "spawn_run") && lastUserTexts(r).some((x) => /Follow-up/.test(x)),
+    );
+    expect(childSteerTurn).toBeDefined();
+    // The parent's answer echoes both tool results: the steer folded in, the await's report with the child's reply.
+    expect(parent.replies).toHaveLength(1);
+    expect(parent.replies[0]).toContain("steered: folded into the research run run-child");
+    const report = JSON.parse(parent.replies[0].split("\n---\n").find((s) => s.startsWith("{"))!) as {
+      ended: string;
+      runs: Array<Record<string, unknown>>;
+    };
+    expect(report.ended).toBe("all_ended");
+    expect(report.runs).toHaveLength(1);
+    expect(report.runs[0]).toMatchObject({
+      id: "run-child",
+      status: "completed",
+      agent: "research",
+      parentRunId: "run-parent",
+    });
+    expect(String(report.runs[0].finalReply)).toContain("heard: narrow it to Workers");
+    expect(String(report.runs[0].finalReply)).toMatch(/untrusted/i);
+    expect(agentsProvisioned()).toEqual(["conductor", "research"]);
+    expect(admission.get(PARENT_THREAD)).toBeUndefined();
+    expect(admission.get(CHILD_THREAD)).toBeUndefined();
+  });
+
+  /** A conductor that only awaits the given ids, then answers with the report. */
+  function awaitOnlyProvider(ids: string[]) {
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        const results = toolResultTexts(req);
+        if (results.length === 0)
+          return {
+            content: [{ type: "tool_use", id: "t1", name: "await_runs", input: { ids } }],
+            stopReason: "tool_use",
+          };
+        return { content: [{ type: "text", text: results.join("\n") }], stopReason: "end_turn" };
+      },
+    };
+    return provider;
+  }
+
+  it("a parent awaiting a child that another generation finished (a store record, no registry frame) returns from the record; a child that closed `interrupted` comes back as `interrupted` and nothing restarts it", async () => {
+    const t = treeDeps(awaitOnlyProvider(["run-far", "run-cut"]));
+    const record = (id: string, status: RunRecord["status"], text?: string): RunRecord => {
+      const events: RunEvent[] = text ? [{ type: "answer", text, seq: 1 }] : [];
+      return {
+        id,
+        label: "research · child",
+        agent: "research",
+        model: "anthropic/research-model",
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: `slack:CX:${id}`,
+        channelVisibility: "public",
+        // Recent, so the store's retention keeps the record (the store runs on the real clock here).
+        startedAt: Date.now() - 20_000,
+        finishedAt: Date.now() - 10_000,
+        status,
+        eventCount: events.length,
+        storedEventCount: events.length,
+        truncated: false,
+        events,
+        diagnosis: analyzeRunFriction(events),
+        parentRunId: "run-parent",
+      };
+    };
+    await t.store.put(record("run-far", "completed", "Workers are isolates."));
+    await t.store.put(record("run-cut", "interrupted"));
+    const { parent } = treeIO();
+    const startedAt = Date.now();
+    await dispatch(t.deps, inChannel("CX", "agent:conductor collect the write-ups"), parent.io);
+    expect(Date.now() - startedAt).toBeLessThan(4_000); // decided on the first read, no poll
+    expect(parent.replies).toHaveLength(1);
+    const report = JSON.parse(parent.replies[0]) as { ended: string; runs: Array<Record<string, unknown>> };
+    expect(report.ended).toBe("all_ended");
+    expect(report.runs.map((r) => [r.id, r.status])).toEqual([
+      ["run-far", "completed"],
+      ["run-cut", "interrupted"],
+    ]);
+    expect(String(report.runs[0].finalReply)).toContain("Workers are isolates.");
+    expect("finalReply" in report.runs[1]).toBe(false);
+    // Nothing was restarted: one run provisioned (the conductor), no run for either id anywhere live.
+    expect(agentsProvisioned()).toEqual(["conductor"]);
+    expect(t.registry.getById("run-far")).toBeNull();
+    expect(t.registry.getById("run-cut")).toBeNull();
+    expect((await t.store.get("run-cut"))!.status).toBe("interrupted");
   });
 });

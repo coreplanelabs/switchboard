@@ -4,7 +4,13 @@ import { RunControl } from "../runRegistry/runControl.js";
 import { ThreadAdmission } from "../threadAdmission.js";
 import type { ChannelIO } from "../types.js";
 import type { DispatchFollowUp } from "./admission.js";
-import { FOLLOW_UP_DROPPED_BY_STOP, prepareFreshTurn, settleThread, tellDropped } from "./settle.js";
+import {
+  FOLLOW_UP_DROPPED_BY_STOP,
+  prepareFreshTurn,
+  settleThread,
+  tellDropped,
+  type PersonFollowUp,
+} from "./settle.js";
 
 // Feature: docs/reference/specs/thread-admission.md item 4 — the settle stage's
 // own contract: the slot is freed, a quiet thread settles quiet, a stopped run's
@@ -25,7 +31,7 @@ function io(replies: string[]): ChannelIO {
   };
 }
 
-function followUp(text: string, at: number, replies: string[], user = "slack:UY"): DispatchFollowUp {
+function followUp(text: string, at: number, replies: string[], user = "slack:UY"): PersonFollowUp {
   return { text, userId: user, at, msg: { ...msg, userId: user, text, ts: `${at}` } as never, io: io(replies) };
 }
 
@@ -72,9 +78,56 @@ describe("settleThread — the thread when the request is over", () => {
     expect(s.admission.get(THREAD)).toBeUndefined();
     // Nothing is sent until the dispatch asks — the slot is already free by then.
     expect(a).toEqual([]);
-    await tellDropped(s.root, (out as { pending: DispatchFollowUp[] }).pending);
+    await tellDropped(s.root, (out as { pending: PersonFollowUp[] }).pending);
     expect(a).toEqual([FOLLOW_UP_DROPPED_BY_STOP]);
     expect(b).toEqual([FOLLOW_UP_DROPPED_BY_STOP]);
+  });
+
+  // docs/reference/specs/thread-admission.md item 7: a steer a run sent is a
+  // program's message — unconsumed at the child's end it is neither run fresh
+  // nor answered; the parent reads the child's end through its own tools.
+  it("a steer a run sent (`from`, no handle) is never handed on nor told: alone it settles quiet; beside a person's follow-up only the person's is handed on or dropped", async () => {
+    const s = setup();
+    const fromRun: DispatchFollowUp = {
+      text: "narrow it",
+      userId: "slack:UX",
+      at: NOW + 1,
+      from: { runId: "run-parent" },
+      msg: { ...msg, text: "narrow it" } as never,
+    };
+    s.admitted.inbox.push(fromRun);
+    const alone = settleThread(
+      { admission: s.admission },
+      { msg, admitted: s.admitted, runLoopStarted: true, control: new RunControl() },
+    );
+    expect(alone).toEqual({ kind: "quiet", stopMode: undefined });
+    expect(s.admission.get(THREAD)).toBeUndefined();
+
+    const t = setup();
+    const replies: string[] = [];
+    t.admitted.inbox.push(fromRun);
+    t.admitted.inbox.push(followUp("and this", NOW + 2, replies));
+    const handed = settleThread(
+      { admission: t.admission },
+      { msg, admitted: t.admitted, runLoopStarted: true, control: new RunControl() },
+    );
+    expect(handed).toMatchObject({ kind: "handed-on", agent: "coding" });
+    expect((handed as { pending: DispatchFollowUp[] }).pending.map((p) => p.text)).toEqual(["and this"]);
+
+    const u = setup();
+    const told: string[] = [];
+    u.admitted.inbox.push(fromRun);
+    u.admitted.inbox.push(followUp("and that", NOW + 2, told));
+    const control = new RunControl();
+    control.requestStop("soft");
+    const dropped = settleThread(
+      { admission: u.admission },
+      { msg, admitted: u.admitted, runLoopStarted: true, control },
+    );
+    expect(dropped).toMatchObject({ kind: "dropped", stopMode: "soft" });
+    expect((dropped as { pending: DispatchFollowUp[] }).pending.map((p) => p.text)).toEqual(["and that"]);
+    await tellDropped(u.root, (dropped as { pending: PersonFollowUp[] }).pending);
+    expect(told).toEqual([FOLLOW_UP_DROPPED_BY_STOP]);
   });
 
   it("a stop relayed before the run loop had the run stopped nothing: the follow-ups are handed on, pinned to the slot's agent", async () => {

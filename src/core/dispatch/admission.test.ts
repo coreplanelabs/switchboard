@@ -26,6 +26,7 @@ import {
   durableInboxMessage,
   foldCarriedInbox,
   followUpFromInbox,
+  steerRun,
   type AdmissionContext,
   type AdmissionDeps,
   type DispatchFollowUp,
@@ -564,5 +565,118 @@ describe("followUpFromInbox — a durable inbox item back as a follow-up", () =>
       0,
     )!;
     expect(odd.images).toEqual([{ mediaType: "image/png", data: "QUJD" }]);
+  });
+
+  it("a steer a run sent survives the round trip: the durable row names the sending run, and the follow-up read back carries `from` — so a resumed child never runs it fresh", () => {
+    const { io } = fakeIO();
+    const from = { runId: "run-parent" };
+    const row = durableInboxMessage(msg("narrow it to Workers", "slack:UY"), "narrow it to Workers", 7_000, from);
+    expect(row).toMatchObject({ text: "narrow it to Workers", userId: "slack:UY", fromRunId: "run-parent" });
+    const restored = followUpFromInbox({ seq: 3, message: row }, io, 0)!;
+    expect(restored).toMatchObject({ text: "narrow it to Workers", userId: "slack:UY", at: 7_000, from, ledgerSeq: 3 });
+    // A person's row carries no `fromRunId`, and reads back with no `from`.
+    const person = followUpFromInbox(
+      { seq: 4, message: durableInboxMessage(msg("also", "slack:UY"), "also", 8_000) },
+      io,
+      0,
+    )!;
+    expect("from" in person).toBe(false);
+  });
+});
+
+// Feature: docs/reference/specs/thread-admission.md item 7, docs/reference/specs/agent-conductor.md
+// item 8 — `steerRun`: the steer a parent run makes into a live child through
+// `send_to_run`. The same gate a thread reply passes (the sender must be
+// allowed to run the live agent), the same durable copy first, the same
+// in-memory inbox the runner drains — with the sending run named on the item
+// and no channel handle, since a program's message is never run fresh.
+describe("steerRun — a run steers a live run through the inbox a thread reply takes", () => {
+  const CHILD_THREAD = "slack:CX:9.0";
+  const sender = {
+    userId: "slack:UX",
+    userName: "alice",
+    channelId: "slack:CX",
+    sourceUrl: "https://acme.slack.com/archives/CX/p10",
+    from: { runId: "run-parent" },
+  };
+  const target = { runId: "run-child", threadKey: CHILD_THREAD, agent: "general" };
+
+  it("into a child live here: the durable copy first (its seq rides the item), then the child's inbox — the requester as the sender, the parent run as `from`, the parent's thread as the link, no handle — and no reply anywhere", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = admission.claim(CHILD_THREAD, { agent: "general", now: 4_000 });
+    claim.live.runId = "run-child";
+    const ledger = new RecordingLedger({ pushSeq: () => 11 });
+    const deps = { config: configStore(), runLedger: ledger, clock: () => NOW, admission };
+    const out = await steerRun(deps, sender, target, "narrow it to Workers");
+    expect(out).toEqual({ kind: "steered", where: "here", at: NOW, ledgerSeq: 11 });
+    expect(ledger.pushes).toHaveLength(1);
+    expect(ledger.pushes[0].runId).toBe("run-child");
+    expect(ledger.pushes[0].message).toMatchObject({
+      text: "narrow it to Workers",
+      userId: "slack:UX",
+      userName: "alice",
+      channelId: "slack:CX",
+      threadKey: CHILD_THREAD,
+      sourceUrl: sender.sourceUrl,
+      at: NOW,
+      fromRunId: "run-parent",
+    });
+    const [item] = claim.live.inbox.drain();
+    expect(item).toMatchObject({
+      text: "narrow it to Workers",
+      userId: "slack:UX",
+      userName: "alice",
+      sourceUrl: sender.sourceUrl,
+      at: NOW,
+      ledgerSeq: 11,
+      from: { runId: "run-parent" },
+    });
+    expect(item.io).toBeUndefined();
+    expect(item.msg).toMatchObject({ threadKey: CHILD_THREAD, userId: "slack:UX", text: "narrow it to Workers" });
+    expect(admission.get(CHILD_THREAD)).toBe(claim.live); // the child keeps its slot
+  });
+
+  it("into a child live on another generation (no slot here): the durable inbox alone, `elsewhere`", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const ledger = new RecordingLedger({ pushSeq: () => 12 });
+    const deps = { config: configStore(), runLedger: ledger, clock: () => NOW, admission };
+    expect(await steerRun(deps, sender, target, "narrow it")).toEqual({
+      kind: "steered",
+      where: "elsewhere",
+      at: NOW,
+      ledgerSeq: 12,
+    });
+    expect(ledger.pushes).toHaveLength(1);
+  });
+
+  it("a slot on the thread that holds a DIFFERENT run is not the target: the item goes to the ledger alone, never onto the other run", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const other = admission.claim(CHILD_THREAD, { agent: "general" });
+    other.live.runId = "run-newer";
+    const ledger = new RecordingLedger({ pushSeq: () => 13 });
+    const deps = { config: configStore(), runLedger: ledger, clock: () => NOW, admission };
+    expect(await steerRun(deps, sender, target, "narrow it")).toMatchObject({ kind: "steered", where: "elsewhere" });
+    expect(other.live.inbox.size).toBe(0);
+  });
+
+  it("no slot here and a push the ledger refuses: the run is not live — nothing lands anywhere", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const ledger = new RecordingLedger();
+    const deps = { config: configStore(), runLedger: ledger, clock: () => NOW, admission };
+    expect(await steerRun(deps, sender, target, "narrow it")).toEqual({ kind: "not_live" });
+  });
+
+  it("a sender the live agent's allowlist excludes is refused before anything is pushed: being heard by an agent counts as running it", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = admission.claim(CHILD_THREAD, { agent: "coding" });
+    claim.live.runId = "run-child";
+    const ledger = new RecordingLedger({ pushSeq: () => 14 });
+    const deps = { config: configStore(), runLedger: ledger, clock: () => NOW, admission };
+    expect(await steerRun(deps, sender, { ...target, agent: "coding" }, "narrow it")).toEqual({
+      kind: "refused",
+      reason: "live_agent_allowlist",
+    });
+    expect(ledger.pushes).toEqual([]);
+    expect(claim.live.inbox.size).toBe(0);
   });
 });

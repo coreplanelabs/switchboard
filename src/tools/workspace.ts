@@ -16,7 +16,8 @@ import { distillDiffStats, type DigestReport } from "../core/diffDigest.js";
 import { webFetchTool, webSearchTool, type WebCapability } from "./web.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS, type GithubCapability } from "./github.js";
 import { listSkillsTool, useSkillTool } from "./skills.js";
-import { RUN_TOOLS, type RunsReadCapability } from "./runs.js";
+import { RUN_TOOLS, type RunsReadCapability, type SteerCapability } from "./runs.js";
+import type { WaitCapability } from "../core/dispatch/awaitChildren.js";
 import type { SpawnCapability } from "../core/dispatch/spawn.js";
 import type { SkillStore } from "../skills/index.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -68,6 +69,16 @@ export interface ToolContext {
    *  REQUESTER's actor, so a run sees exactly what the person who asked may
    *  see. Absent → the tools report themselves unavailable. */
   runs?: RunsReadCapability;
+  /** The steer behind `send_to_run` (docs/reference/specs/agent-conductor.md
+   *  item 8): into a live child's inbox as the requester, through the path a
+   *  thread reply takes. Built by the dispatcher beside `runs`; absent → the
+   *  tool reports itself unavailable. */
+  steer?: SteerCapability;
+  /** What `await_runs` watches while it waits (agent-conductor item 8): this
+   *  run's own stop control and inbox, the registry's end frames, the clock
+   *  and sleep the wait is paced by. Built by the dispatcher; absent → the
+   *  tool reports itself unavailable. */
+  wait?: WaitCapability;
   /** Publish a typed event into the run's visibility stream (the same stream
    *  the runner's `tool_call`/`tool_result` go to). For facts a tool knows
    *  that the runner cannot see — which skill was loaded, later which artifact
@@ -687,10 +698,11 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     useSkillTool,
     ...GITHUB_READ_TOOLS,
   ],
-  /** The conductor (docs/reference/specs/agent-conductor.md): the three run
-   *  tools — the only toolset that holds them, so no other preset can start a
-   *  run — beside the GitHub reads, URL reading and the status card. No shell,
-   *  no files, no writes: a conductor coordinates and never does a child's job. */
+  /** The conductor (docs/reference/specs/agent-conductor.md): the five run
+   *  tools — the only toolset that holds them, so no other preset can start,
+   *  steer or await a run — beside the GitHub reads, URL reading and the status
+   *  card. No shell, no files, no writes: a conductor coordinates and never
+   *  does a child's job. */
   conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
   none: [],
 };

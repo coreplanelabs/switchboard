@@ -16,6 +16,12 @@ import { runAgent, type StepReport } from "./runner.js";
 import type { RunnableTool } from "./tools/workspace.js";
 import { InMemorySkillStore } from "./skills/index.js";
 import { FollowUpInbox, type FollowUpInput } from "./core/threadAdmission.js";
+import { ALL_GRANTS } from "./core/authz/grants.js";
+import type { Actor } from "./core/authz/types.js";
+import { AWAIT_POLL_MS, waitCapabilityFor } from "./core/dispatch/awaitChildren.js";
+import { RunRegistry } from "./core/runRegistry.js";
+import { createRunsService } from "./core/runsService.js";
+import { RUN_DEADLINE_RESERVE_MS } from "./execution/bashTimeout.js";
 import { createTracer } from "./core/trace/tracer.js";
 import { createRunStreamSink } from "./core/trace/runStreamSink.js";
 import { recordingSink } from "./core/testing/recordingSink.js";
@@ -2197,6 +2203,135 @@ describe("follow-up inbox (docs/reference/specs/thread-admission.md)", () => {
     });
     expect(inbox.size).toBe(1);
     expect(JSON.stringify(provider.requests)).not.toContain("late thought");
+  });
+
+  // docs/reference/specs/agent-conductor.md item 8: a steer a parent run sent
+  // through `send_to_run` is drained like any follow-up, and the stream's
+  // `input` event names the sending run beside the requester and the link.
+  it("a follow-up a run sent (`from`) is drained like any other, and its `input` event's source names that run", async () => {
+    const inbox = new FollowUpInbox();
+    let calls = 0;
+    const provider = scripted([bashUse("t1"), text("done")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      if (calls++ === 0) inbox.push(followUp("narrow it to Workers", { from: { runId: "run-parent" } }));
+      return inner(req);
+    };
+    const events: RunEvent[] = [];
+    await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor },
+      inbox,
+      onEvent: (e) => events.push(e),
+    });
+    expect(events.find((e) => e.type === "input")).toMatchObject({
+      type: "input",
+      text: "narrow it to Workers",
+      source: { user: "bob", url: "https://s/2", run: "run-parent" },
+    });
+    const content = lastUserContent(provider.requests[1]);
+    expect((content[1] as { type: "text"; text: string }).text).toContain("narrow it to Workers");
+  });
+});
+
+// docs/reference/specs/run-loop.md item 16, docs/reference/specs/agent-conductor.md
+// item 8: a tool call that WAITS (`await_runs`) is bounded like any tool the
+// runner runs — a hard stop ends its wait at once through the context's
+// signal, and the wall clock it is handed is the run's, so the wait hands
+// back at the wrap-up reserve and the run still writes up in time.
+describe("a waiting tool call (await_runs) under the runner's stop and clock", () => {
+  const lastUserContent = (req: CompletionRequest) => req.messages[req.messages.length - 1].content;
+  const awaitUse = (id: string, ids: string[]): CompletionResult => ({
+    content: [{ type: "tool_use", id, name: "await_runs", input: { ids } }],
+    stopReason: "tool_use",
+  });
+  /** A child that never ends, in a registry the wait's reads go through. */
+  function neverEndingChild() {
+    const registry = new RunRegistry({ genId: () => "run-child", genToken: () => "tok" });
+    const child = registry.create("research · child", {
+      agent: "research",
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:9",
+      channelVisibility: "public",
+      parentRunId: "run-p",
+    });
+    const service = createRunsService({ registry, store: null });
+    const runs = { service, actor: { kind: "user", id: "slack:UX", grants: ALL_GRANTS } as Actor, runId: "run-p" };
+    return { registry, child, runs };
+  }
+
+  it("a hard stop mid-wait aborts the waiting call at once: the sleep is cut by the context's signal, no finale runs, the answer is the abort line", async () => {
+    const { child, runs, registry } = neverEndingChild();
+    const control = new RunControl();
+    let sleepSignal: AbortSignal | undefined;
+    const wait = waitCapabilityFor({
+      registry,
+      control,
+      inbox: new FollowUpInbox(),
+      clock: Date.now,
+      sleep: (_ms, signal) =>
+        new Promise((resolve) => {
+          sleepSignal = signal;
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        }),
+    });
+    const provider = scripted([awaitUse("t1", [child.id]), text("should never be asked")]);
+    const inner = provider.complete.bind(provider);
+    provider.complete = async (req) => {
+      const r = await inner(req);
+      // The stop lands while the wait is in flight (after the first turn returned).
+      setTimeout(() => control.requestStop("hard"), 5);
+      return r;
+    };
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ toolset: "conductor", maxTurns: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor, runs, wait },
+      control,
+    });
+    expect(answer).toContain("aborted");
+    expect(sleepSignal?.aborted).toBe(true); // the wait's own sleep saw the hard signal
+    expect(provider.requests).toHaveLength(1); // no finale, no further turn
+  });
+
+  it("the wait hands back at the run's wrap-up reserve, not at the deadline: the model gets the `budget` report with the child still running and a turn left to write up", async () => {
+    const { child, runs, registry } = neverEndingChild();
+    let at = 1_000_000;
+    const now = () => at;
+    const slept: number[] = [];
+    const wait = waitCapabilityFor({
+      registry,
+      control: new RunControl(),
+      inbox: new FollowUpInbox(),
+      clock: now,
+      sleep: async (ms) => {
+        slept.push(ms);
+        at += ms;
+      },
+    });
+    const provider = scripted([awaitUse("t1", [child.id]), text("compiled")]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ toolset: "conductor", maxTurns: 3, maxMinutes: 3 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: fakeExecutor, runs, wait },
+      now,
+    });
+    expect(answer).toBe("compiled"); // the loop still had the reserve to take the next turn
+    // The wait ran the run's clock down to the reserve and no further.
+    expect(at).toBe(1_000_000 + 3 * 60_000 - RUN_DEADLINE_RESERVE_MS);
+    expect(slept.at(-1)).toBeLessThanOrEqual(AWAIT_POLL_MS);
+    const result = lastUserContent(provider.requests[1])[0] as { type: "tool_result"; content: string };
+    const report = JSON.parse(result.content) as { ended: string; runs: Array<{ id: string; status: string }> };
+    expect(report.ended).toBe("budget");
+    expect(report.runs).toEqual([expect.objectContaining({ id: child.id, status: "running" })]);
   });
 });
 

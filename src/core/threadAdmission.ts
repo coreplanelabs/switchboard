@@ -44,6 +44,11 @@ export interface FollowUpInput {
    *  how far the run has consumed the durable inbox. Absent when the ledger
    *  is off, refused the push, or the run had no row yet. */
   ledgerSeq?: number;
+  /** The run that sent it, when a run did rather than a person — a parent's
+   *  `send_to_run` (docs/reference/specs/agent-conductor.md item 8). The
+   *  stream's `input` event names it, and the settle never runs it fresh:
+   *  a program's message has no one to answer. Absent on a thread reply. */
+  from?: { runId: string };
 }
 
 /**
