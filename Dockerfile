@@ -1,7 +1,10 @@
 # Switchboard — single-process Slack bot (Socket Mode, no inbound port needed).
 # git + gh are installed because the coding/review agents shell out to them.
 
-FROM node:24-slim AS build
+# Node at the exact tag every image in this repository shares (the execution
+# images copy theirs from the same one); its major is .nvmrc's, and
+# src/deploy/imageNode.test.ts holds both.
+FROM node:24.21.0-slim AS build
 WORKDIR /app
 # One lockfile covers every workspace. npm needs each workspace's manifest on
 # disk to resolve the tree, so the manifests are copied before the install;
@@ -28,7 +31,7 @@ RUN npm run build
 # Runtime dependencies alone: the bot's production dependencies, no dev tools,
 # no web toolchain — a clean install rather than a prune, so nothing hoisted
 # for the build survives into the image.
-FROM node:24-slim AS deps
+FROM node:24.21.0-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY web/package.json ./web/
@@ -53,7 +56,7 @@ RUN npm ci --omit=dev --workspaces=false --include-workspace-root
 FROM docker.io/library/golang:1.27.1-bookworm AS meat
 RUN CGO_ENABLED=0 go install meat.dev/cmd/meat@f39f41dfe7b5b37a12b35fdfbaecc7e779855bd3
 
-FROM node:24-slim
+FROM node:24.21.0-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \

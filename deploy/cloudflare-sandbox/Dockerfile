@@ -1,5 +1,15 @@
 # Sandbox container image: the @cloudflare/sandbox base plus git + gh, so the
 # coding/review agents work out of the box.
+
+# The Node this image ships (copied in below), at the exact tag every image in
+# this repository shares — its major is .nvmrc's, which is what CI runs and
+# the install script requires. `--platform`: the cloudflare/sandbox base below
+# publishes linux/amd64 only, so the stage the binary is copied from must be
+# amd64 too — a bare FROM on an arm64 host resolves it to arm64 and the copied
+# binary cannot run in the base (check:image on Apple silicon failed exactly
+# so). src/deploy/imageNode.test.ts holds the tag, its major and the platform.
+FROM --platform=linux/amd64 docker.io/library/node:24.21.0-slim AS node
+
 # The tag MUST match the @cloudflare/sandbox version in package.json exactly
 # (no 'latest' tag exists) — bump both together.
 FROM docker.io/cloudflare/sandbox:0.12.9
@@ -41,14 +51,28 @@ RUN apt-get update \
 # execs the real client. src/deploy/sandboxDocker.test.ts holds its shape.
 COPY --chmod=0755 docker-wrapper.sh /usr/local/bin/docker
 
-# Node comes from the base: the published 0.12.9 image ships Node 22.23 (copied
-# from node:22-slim, with npm; no NodeSource deb), so the retarget-and-upgrade
-# layer the 0.3.x image needed is gone. This repo pins `engines: node
-# >=22` (undici@8 needs Node 22's `webidl.util.markAsUncloneable`), and a
-# review run that falls back off the resident onto a fresh sandbox must load
-# the full vitest suite; the assertion fails the build if a base bump ever
-# lands below 22. (The resident image gets Node 24 from its 0.13.0-next base.)
-RUN node --version | grep -Eq '^v(2[2-9]|[3-9][0-9])\.'
+# Node 24, not the base's. The published 0.12.9 base ships Node 22.23.2
+# (copied from node:22-slim: the binary at /usr/local/bin/node, npm and
+# corepack under /usr/local/lib/node_modules, npm/npx symlinked into it), while
+# this repository builds and tests on Node 24 (.nvmrc, CI) and its published
+# CLI requires `>=24`. A run that exercised the suite inside this image read a
+# different `verify` than CI did: `npm ci` warned on the CLI package's engines,
+# and tests that pass in CI failed here. So Node comes from the official image
+# at an exact tag, in the `node` stage above: the base's npm tree is removed
+# first (no file of npm 10 survives under npm 11), then the binary, npm's tree
+# and the headers (node-gyp compiles native addons against them without a
+# download) land at the base's own paths, so its npm/npx symlinks keep
+# resolving. The container server (/container-server/sandbox, a bun-compiled
+# binary) does not run on this Node, so only what a run's commands see moves.
+# The grep fails the BUILD, not a run, if a bump ever lands another version
+# here; src/deploy/imageNode.test.ts holds it equal to the stage's tag.
+RUN rm -rf /usr/local/lib/node_modules /usr/local/include/node
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=node /usr/local/include/node /usr/local/include/node
+RUN node --version | grep -qx 'v24.21.0' \
+  && npm --version >/dev/null \
+  && npx --version >/dev/null
 
 # pnpm: the base image ships Node + npm (corepack is under
 # /usr/local/lib/node_modules but not on PATH) and not pnpm, so coding runs in pnpm repos hit

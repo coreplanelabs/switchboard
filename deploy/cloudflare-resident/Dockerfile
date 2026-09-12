@@ -1,6 +1,16 @@
 # Resident container image: the @cloudflare/sandbox base (Ubuntu 22.04; already
-# ships git, curl, jq, Node 24, npm, bun, cloudflared) plus GitHub tooling and
-# a pool of unprivileged users.
+# ships git, curl, jq, npm, bun, cloudflared and a Node 22 this image replaces
+# with Node 24 below) plus GitHub tooling and a pool of unprivileged users.
+
+# The Node this image ships (copied in below), at the exact tag every image in
+# this repository shares — its major is .nvmrc's, which is what CI runs and
+# the install script requires. `--platform`: the cloudflare/sandbox base below
+# publishes linux/amd64 only, so the stage the binary is copied from must be
+# amd64 too — a bare FROM on an arm64 host resolves it to arm64 and the copied
+# binary cannot run in the base (check:image on Apple silicon failed exactly
+# so). src/deploy/imageNode.test.ts holds the tag, its major and the platform.
+FROM --platform=linux/amd64 docker.io/library/node:24.21.0-slim AS node
+
 # The tag MUST match the @cloudflare/sandbox version in package.json exactly
 # (no 'latest' tag exists on the @next line) — bump both together.
 FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
@@ -32,7 +42,29 @@ ENV CI=1 \
     UV_THREADPOOL_SIZE=4 \
     NODE_OPTIONS=--max-old-space-size=1536
 
-# pnpm + yarn: the base ships Node 24 + npm + bun but neither pnpm nor yarn, so a
+# Node 24, not the base's. The 0.13.0-next base ships Node 22.23.2 like the
+# 0.12.9 one (copied from node:22-slim: the binary at /usr/local/bin/node, npm
+# and corepack under /usr/local/lib/node_modules, npm/npx symlinked into it),
+# while this repository builds and tests on Node 24 (.nvmrc, CI) and its
+# published CLI requires `>=24` — so a repository validated here read a
+# different `verify` than CI did. Node comes from the official image at an
+# exact tag, in the `node` stage above, the same way the sandbox image does it
+# (deploy/cloudflare-sandbox/Dockerfile): the base's npm tree removed first,
+# then the binary, npm's tree and the headers at the base's own paths, so its
+# npm/npx symlinks keep resolving; the container server is a bun-compiled
+# binary and does not run on this Node. The grep fails the BUILD if a bump
+# lands another version; src/deploy/imageNode.test.ts holds it equal to the
+# stage's tag. This layer sits before the package managers below so they are
+# installed by this Node's npm, into this tree.
+RUN rm -rf /usr/local/lib/node_modules /usr/local/include/node
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=node /usr/local/include/node /usr/local/include/node
+RUN node --version | grep -qx 'v24.21.0' \
+  && npm --version >/dev/null \
+  && npx --version >/dev/null
+
+# pnpm + yarn: the base ships npm + bun but neither pnpm nor yarn, so a
 # repo whose onboard table is detected as pnpm or yarn (resident-repos item 52 —
 # every manager `detectCommands` can emit must exist here, or the table fails
 # deterministically at provision) couldn't be provisioned (install → build).
