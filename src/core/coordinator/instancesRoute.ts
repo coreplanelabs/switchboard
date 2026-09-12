@@ -120,3 +120,62 @@ export function readCreateInstanceAnswer(status: number, text: string): CreateIn
   const detail = typeof body?.error === "string" ? body.error : text.slice(0, 200);
   return { kind: "unanswered", reason: `HTTP ${status} — ${detail}` };
 }
+
+/** `GET /admin/coordinator/instances/<id>` — the platform's status of one instance, read by the shim. */
+export const COORDINATOR_INSTANCE_STATUS_PREFIX = `${COORDINATOR_INSTANCES_PATH}/`;
+
+/** The instance id a status path names, or undefined for any other path. */
+export function parseInstanceStatusPath(pathname: string): string | undefined {
+  if (!pathname.startsWith(COORDINATOR_INSTANCE_STATUS_PREFIX)) return undefined;
+  const id = pathname.slice(COORDINATOR_INSTANCE_STATUS_PREFIX.length);
+  return INSTANCE_ID_PATTERN.test(id) ? id : undefined;
+}
+
+/** How the status read ended on the shim: the platform's status word, no such
+ *  instance, or the engine failing by reason. */
+export type InstanceStatusOutcome =
+  | { kind: "status"; id: string; status: string }
+  | { kind: "absent"; id: string }
+  | { kind: "failed"; id: string; reason: string };
+
+export function instanceStatusResponse(outcome: InstanceStatusOutcome): {
+  status: number;
+  body: Record<string, unknown>;
+} {
+  switch (outcome.kind) {
+    case "status":
+      return { status: 200, body: { ok: true, id: outcome.id, status: outcome.status } };
+    case "absent":
+      return { status: 404, body: { ok: false, error: "no_instance", id: outcome.id } };
+    case "failed":
+      return { status: 502, body: { ok: false, error: "status_failed", id: outcome.id, message: outcome.reason } };
+  }
+}
+
+/** The Workflows binding's own word for an id it has never seen — the error
+ *  `Workflow.get(id)` throws, carrying the platform's `instance.not_found` code.
+ *  Nothing else reads as absence: a failure whose text merely mentions "not
+ *  found" is a failure, because a wrong absence lets a re-issue write over a
+ *  live runner's records. */
+export function isInstanceNotFound(message: string): boolean {
+  return /\binstance\.not_found\b/i.test(message);
+}
+
+/** The status answer as the bot reads it back: the word, `absent`, or `unanswered` by reason for anything else. */
+export type InstanceStatusAnswer =
+  { kind: "status"; status: string } | { kind: "absent" } | { kind: "unanswered"; reason: string };
+
+export function readInstanceStatusAnswer(status: number, text: string): InstanceStatusAnswer {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = undefined;
+  }
+  const body = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+  if (status === 200 && body?.ok === true && typeof body.status === "string" && body.status !== "")
+    return { kind: "status", status: body.status };
+  if (status === 404 && body?.error === "no_instance") return { kind: "absent" };
+  const detail = typeof body?.error === "string" ? body.error : text.slice(0, 200);
+  return { kind: "unanswered", reason: `HTTP ${status} — ${detail}` };
+}

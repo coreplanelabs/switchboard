@@ -15,6 +15,9 @@ import {
   COORDINATOR_AUTHORIZE_PATH,
   COORDINATOR_INSTANCES_PATH,
   createInstanceResponse,
+  instanceStatusResponse,
+  isInstanceNotFound,
+  parseInstanceStatusPath,
   parseCreateInstanceRequest,
   parseSubjectAuthorization,
   type CreateInstanceOutcome,
@@ -335,6 +338,57 @@ async function handleCoordinatorInstances(request: Request, env: Env): Promise<R
   return json(res.status, res.body);
 }
 
+/** `GET /admin/coordinator/instances/<id>` — the platform's status of one
+ *  instance (docs/reference/specs/http-ingress.md item 9), read by the bot
+ *  before a plan is re-issued: still running, ended, or never created (the
+ *  leftover of a create that failed). The same door as the create: the bearer
+ *  in the map, the bot's `authorize` answer. The engine's own `instance.not_found`
+ *  is 404; any other failure is 502 by reason — never read as absence, because a
+ *  wrong absence would let a re-issue write over a live runner's records. */
+async function handleCoordinatorInstanceStatus(request: Request, env: Env, id: string): Promise<Response> {
+  const json = (status: number, body: Record<string, unknown>) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  if (request.method !== "GET")
+    return json(405, {
+      ok: false,
+      error: `method not allowed: ${request.method} — ${COORDINATOR_INSTANCES_PATH}/<id> answers GET only`,
+    });
+  const authorization = request.headers.get("authorization") ?? undefined;
+  const authn = authenticateIngressBearer(authorization, env.SWITCHBOARD_INGRESS_TOKENS, "coordinator");
+  if (!authn.ok) {
+    console.warn(`[coordinator] instance status ${authn.status} — ${authn.reason}`);
+    return json(authn.status, { ok: false, error: authn.reason });
+  }
+  let answer: Response;
+  try {
+    answer = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+      new Request(`${INTERNAL}${COORDINATOR_AUTHORIZE_PATH}`, {
+        method: "POST",
+        headers: { authorization: authorization ?? "" },
+      }),
+    );
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return json(503, { ok: false, error: `coordinator disabled: the bot could not be asked (${reason})` });
+  }
+  const auth = parseSubjectAuthorization(answer.status, await answer.text().catch(() => ""));
+  if (!auth.ok) return json(auth.status, { ok: false, error: auth.reason });
+  let outcome: Parameters<typeof instanceStatusResponse>[0];
+  try {
+    const status = await (await env.SHIP_COORDINATOR.get(id)).status();
+    outcome = { kind: "status", id, status: status.status };
+  } catch (err) {
+    // Absence is only the engine's own word for it — the `instance.not_found`
+    // code the Workflows binding throws for an id it has never seen. Any other
+    // failure, whatever its text says, is a failure by reason: a wrong absence
+    // would let a re-issue write over a live runner's records.
+    const reason = err instanceof Error ? err.message : String(err);
+    outcome = isInstanceNotFound(reason) ? { kind: "absent", id } : { kind: "failed", id, reason };
+  }
+  const res = instanceStatusResponse(outcome);
+  return json(res.status, res.body);
+}
+
 /** Record a firing on the state Worker's ScheduleDO (the /runs Scheduled panel
  *  reads it). Best-effort: a failure here is a log line — the run itself (if
  *  any) already happened and is its own record. */
@@ -358,15 +412,18 @@ export default {
     const root = tracer.start("bot-shim.fetch", { sinks: traceSinks, attrs: { route } });
     try {
       const forwarded = withTraceContext(inbound, root);
-      // The two routes the Worker answers itself — the restart and the
-      // coordinator's instance creation, both over bindings only this Worker
-      // holds; everything else is the container's.
+      // The routes the Worker answers itself — the restart, the coordinator's
+      // instance creation and an instance's status, all over bindings only this
+      // Worker holds; everything else is the container's.
+      const statusId = parseInstanceStatusPath(pathname);
       const res =
         pathname === "/admin/restart"
           ? await handleAdminRestart(forwarded, env)
           : pathname === COORDINATOR_INSTANCES_PATH
             ? await handleCoordinatorInstances(forwarded, env)
-            : await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded);
+            : statusId !== undefined
+              ? await handleCoordinatorInstanceStatus(forwarded, env, statusId)
+              : await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded);
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {

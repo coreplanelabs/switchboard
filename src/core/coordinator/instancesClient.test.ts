@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Secret } from "../../secrets.js";
-import { createInstanceViaShim } from "./instancesClient.js";
+import { createInstanceViaShim, fetchInstanceStatusViaShim } from "./instancesClient.js";
 
 // Feature: docs/reference/specs/http-ingress.md item 9 — how the bot asks its
 // own shim for a coordinator instance: `POST <PUBLIC_BASE_URL>/admin/coordinator/instances`
@@ -87,6 +87,39 @@ describe("createInstanceViaShim — the bot's request for a coordinator instance
       reason:
         "SWITCHBOARD_INGRESS_TOKENS has no single `coordinator` entry — the bot cannot present the coordinator bearer",
     });
+    expect(sent.calls).toEqual([]);
+  });
+});
+
+describe("fetchInstanceStatusViaShim — an earlier attempt's instance, as the platform has it", () => {
+  it("GETs the instance's status path with the coordinator bearer and reads the word, the absence, or an unanswered reason; no base URL or bearer sends nothing", async () => {
+    const running = fetchDouble(200, { ok: true, id: "plan-fixture", status: "running" });
+    expect(
+      await fetchInstanceStatusViaShim(
+        { baseUrl: "https://bot.example/", tokens: TOKENS, fetch: running.impl },
+        "plan-fixture",
+      ),
+    ).toEqual({ kind: "status", status: "running" });
+    expect(running.calls[0]!.url).toBe("https://bot.example/admin/coordinator/instances/plan-fixture");
+    expect(running.calls[0]!.init.method).toBe("GET");
+    expect(running.calls[0]!.init.headers).toEqual({ authorization: "Bearer tok-coord" });
+    const absent = fetchDouble(404, { ok: false, error: "no_instance", id: "plan-fixture" });
+    expect(
+      await fetchInstanceStatusViaShim(
+        { baseUrl: "https://bot.example", tokens: TOKENS, fetch: absent.impl },
+        "plan-fixture",
+      ),
+    ).toEqual({ kind: "absent" });
+    const down: typeof fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    expect(
+      await fetchInstanceStatusViaShim({ baseUrl: "https://bot.example", tokens: TOKENS, fetch: down }, "plan-fixture"),
+    ).toEqual({ kind: "unanswered", reason: "the shim could not be reached: ECONNREFUSED" });
+    const sent = fetchDouble(200, {});
+    expect(
+      await fetchInstanceStatusViaShim({ baseUrl: undefined, tokens: TOKENS, fetch: sent.impl }, "plan-fixture"),
+    ).toEqual({ kind: "unanswered", reason: "PUBLIC_BASE_URL is not set — the bot cannot address its own shim" });
     expect(sent.calls).toEqual([]);
   });
 });

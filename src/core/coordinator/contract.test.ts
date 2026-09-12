@@ -108,6 +108,10 @@ describe("isCoordinatorInstance — the parent ship record", () => {
     expect(isCoordinatorInstance({ ...full, caps: { maxRounds: "3", maxMinutes: 45 } })).toBe(false);
     expect(isCoordinatorInstance({ ...full, card: { channel: "C1" } })).toBe(false);
     expect(isCoordinatorInstance({ ...full, runId: 7 })).toBe(false);
+    // A re-issue's attempt is the second or later; the first carries none.
+    expect(isCoordinatorInstance({ ...full, attempt: 2 })).toBe(true);
+    expect(isCoordinatorInstance({ ...full, attempt: 1 })).toBe(false);
+    expect(isCoordinatorInstance({ ...full, attempt: 2.5 })).toBe(false);
   });
 });
 

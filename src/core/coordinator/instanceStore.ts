@@ -26,6 +26,10 @@ export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" }
 
 export interface CoordinatorInstanceStore {
   put(instance: CoordinatorInstance): Promise<PutInstanceResult>;
+  /** The record written over whatever the id holds — for the leftover of an
+   *  attempt whose Workflow instance was never created, once the shim has said
+   *  so. Never `exists`; the same `unavailable` as `put`. */
+  replace(instance: CoordinatorInstance): Promise<PutInstanceResult>;
   get(id: string): Promise<CoordinatorInstance | null>;
   /** The unit rows of an instance (run-history item 50), each replaced whole:
    *  written at the instance's creation and rewritten as the runner reaches the
@@ -48,6 +52,10 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     this.rows.set(instance.id, text);
     return { ok: true };
   }
+  async replace(instance: CoordinatorInstance): Promise<PutInstanceResult> {
+    this.rows.set(instance.id, JSON.stringify(instance));
+    return { ok: true };
+  }
   async get(id: string): Promise<CoordinatorInstance | null> {
     const text = this.rows.get(id);
     return text === undefined ? null : (JSON.parse(text) as CoordinatorInstance);
@@ -68,6 +76,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
  *  and none can be written, so every coordinator route answers by name. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   async put(_instance: CoordinatorInstance): Promise<PutInstanceResult> {
+    return { ok: false, reason: "unavailable" };
+  }
+  async replace(_instance: CoordinatorInstance): Promise<PutInstanceResult> {
     return { ok: false, reason: "unavailable" };
   }
   async get(_id: string): Promise<CoordinatorInstance | null> {
@@ -126,6 +137,13 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     if (r.status === 409 && d.reason === "exists") return { ok: false, reason: "exists" };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/put: unexpected answer (HTTP ${r.status})`);
+  }
+
+  async replace(instance: CoordinatorInstance): Promise<PutInstanceResult> {
+    const r = await this.post("/runs/coordinator/replace", { instance });
+    const d = r.data as { ok?: unknown };
+    if (d.ok === true) return { ok: true };
+    throw new Error(`coordinator store /runs/coordinator/replace: unexpected answer (HTTP ${r.status})`);
   }
 
   async get(id: string): Promise<CoordinatorInstance | null> {

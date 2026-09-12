@@ -105,6 +105,10 @@ export interface CoordinatorInstance {
   /** The run id the bot writes the parent's record under when the instance ends, and the card's label. */
   runId?: string;
   label?: string;
+  /** Which attempt of the plan this instance runs (a re-issue after an earlier
+   *  attempt ended reruns the units not merged under `plan-<plan-id>-<attempt>`);
+   *  absent for the first. */
+  attempt?: number;
 }
 
 /** One unit of the plan an instance runs (a task string is a plan of one unit,
@@ -161,6 +165,7 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
     return false;
   if (r.card !== undefined && !(isObject(r.card) && isText(r.card.channel) && isText(r.card.ts))) return false;
   if (!isOptionalText(r.runId) || !isOptionalText(r.label)) return false;
+  if (r.attempt !== undefined && !(Number.isInteger(r.attempt) && (r.attempt as number) >= 2)) return false;
   return true;
 }
 
