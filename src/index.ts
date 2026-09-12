@@ -17,7 +17,8 @@ import { makeShellRenderer } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
 import { createDeliveryViewHandler } from "./channels/deliveryView.js";
-import { NullDeliveryService, parseDeliveryConfig } from "./core/delivery.js";
+import { NullDeliveryService, parseDeliveryConfig, SNAPSHOT_EVERY_MINUTES } from "./core/delivery.js";
+import { buildDeliverySnapshotStore } from "./core/deliverySnapshotStore.js";
 import {
   AnthropicCostReportSource,
   CloudflareGraphqlUsageSource,
@@ -73,7 +74,7 @@ import { writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters ---
-import { buildCoreCommands, deliveryServiceFromConfig } from "./core/commandCatalogue.js";
+import { buildCoreCommands, deliveryFromConfig } from "./core/commandCatalogue.js";
 import { accessActor, createCommandHttpHandler, isCommandPath, serviceTokenAllowed } from "./channels/commandHttp.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 // --- end command registry adapters ---
@@ -351,11 +352,23 @@ export async function runBot(): Promise<void> {
     new NullScheduleStore();
   // Delivery indicators (docs/reference/specs/delivery.md): ONE service for the
   // `/delivery` page and `delivery report`, GitHub over the App's read token
-  // with the `delivery:` config; without a GitHub credential the Null Object
-  // answers the page's 503 and the command is hidden by its capability.
-  const deliveryService = capabilities.github
-    ? deliveryServiceFromConfig(parseDeliveryConfig(config.config.delivery))
-    : new NullDeliveryService();
+  // behind a per-repository snapshot kept on the state Worker (in memory
+  // without one), with the `delivery:` config; without a GitHub credential the
+  // Null Object answers the page's 503 and the command is hidden by its
+  // capability. The refresh loop is this process's own minute tick: it keeps
+  // every configured repository's snapshot within `delivery.snapshot.everyMinutes`.
+  const deliveryWarn = (m: string) => console.warn(`[delivery] ${m}`);
+  const deliveryConfig = parseDeliveryConfig(config.config.delivery);
+  const delivery = capabilities.github
+    ? deliveryFromConfig(deliveryConfig, {
+        snapshots: buildDeliverySnapshotStore(config.config, processSecrets, deliveryWarn),
+        warn: deliveryWarn,
+      })
+    : undefined;
+  const deliveryService = delivery?.service ?? new NullDeliveryService();
+  const deliveryEveryMinutes = deliveryConfig?.snapshot.everyMinutes ?? SNAPSHOT_EVERY_MINUTES.default;
+  if (delivery && deliveryService.repos().length > 0)
+    delivery.source.startRefreshLoop({ repos: deliveryService.repos(), everyMinutes: deliveryEveryMinutes });
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
     secrets: processSecrets,
@@ -493,7 +506,7 @@ export async function runBot(): Promise<void> {
       ? "GET /delivery (503 — no GitHub credential)"
       : deliveryService.repos().length === 0
         ? "GET /delivery (503 — no delivery.repos)"
-        : `GET /delivery (${deliveryService.repos().join(",")})`;
+        : `GET /delivery (${deliveryService.repos().join(",")}; snapshot every ${deliveryEveryMinutes} min)`;
     const tokenCount = Object.keys(auth.tokens).length;
     const liveViewState = process.env.PUBLIC_BASE_URL
       ? "GET /runs (index) + /runs/:id (live view)"

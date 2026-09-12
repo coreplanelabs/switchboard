@@ -10,6 +10,8 @@ import {
 } from "../../src/core/memory/engine.ts";
 import { tokenize } from "../../src/core/memory/scorer.ts";
 import { FIRING_DETAIL_MAX, isScheduleFiring, type ScheduleFiring } from "../../src/core/schedules.ts";
+import { REPO_SLUG } from "../../src/core/delivery.ts";
+import { isDeliverySnapshot, type DeliverySnapshot } from "../../src/core/deliverySnapshotStore.ts";
 import {
   applyRetention,
   clampRetentionPolicy,
@@ -127,8 +129,13 @@ export interface Env {
   CONFIG: DurableObjectNamespace<ConfigDO>;
   /** Live-run transcripts (run-history item 32): one RunTranscriptDO per live run, named by run id. */
   RUN_TRANSCRIPTS: DurableObjectNamespace<RunTranscriptDO>;
+  /** Delivery snapshots (delivery item 10): ONE DeliveryDO (named "delivery"), one snapshot per repository. */
+  DELIVERY: DurableObjectNamespace<DeliveryDO>;
   MEMORY_TOKEN?: string;
 }
+
+/** The single DeliveryDO's name — every repository's snapshot lives in one object. */
+const DELIVERY_OBJECT = "delivery";
 
 /** The single ConfigDO's name. */
 const CONFIG_OBJECT = "config";
@@ -698,6 +705,112 @@ function parseStored<T>(text: string, guard: (v: unknown) => v is T): T | null {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Durable Object: delivery snapshots, one per repository
+// ---------------------------------------------------------------------------
+
+// The delivery page's snapshot (docs/reference/specs/delivery.md item 10): the
+// merged pull requests' facts over the snapshot window, as GitHub gave them,
+// and when they were read. A busy repository's window is a few MB — the review
+// bodies and every workflow run of every branch — so a snapshot is stored as
+// one row per pull request under a meta row, never as one JSON value (the
+// per-row limit is 2 MB). A put replaces the repository's snapshot whole, in
+// one transaction; a get reassembles it in pull request number order.
+
+/** One pull request's facts may not exceed a fraction of the row limit; the fence names the pull request. */
+const MAX_PULL_REQUEST_FACTS_BYTES = 1024 * 1024;
+
+export class DeliveryDO extends DurableObject<Env> {
+  private readonly sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS snapshots (
+        repo TEXT PRIMARY KEY,
+        snapshot_at TEXT NOT NULL,
+        meta TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS pull_requests (
+        repo TEXT NOT NULL,
+        number INTEGER NOT NULL,
+        facts TEXT NOT NULL,
+        PRIMARY KEY (repo, number)
+      );
+    `);
+  }
+
+  /** Replace the repository's snapshot: the meta row and one row per pull request, in one transaction. */
+  async put(snapshot: DeliverySnapshot): Promise<number> {
+    const { prs, ...meta } = snapshot;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`DELETE FROM pull_requests WHERE repo = ?`, snapshot.repo);
+      for (const pr of prs) {
+        this.sql.exec(
+          `INSERT OR REPLACE INTO pull_requests (repo, number, facts) VALUES (?, ?, ?)`,
+          snapshot.repo,
+          pr.number,
+          JSON.stringify(pr),
+        );
+      }
+      this.sql.exec(
+        `INSERT OR REPLACE INTO snapshots (repo, snapshot_at, meta) VALUES (?, ?, ?)`,
+        snapshot.repo,
+        snapshot.snapshotAt,
+        JSON.stringify(meta),
+      );
+    });
+    return prs.length;
+  }
+
+  /** The repository's snapshot, pull requests in number order; null when none was stored. */
+  async get(repo: string): Promise<DeliverySnapshot | null> {
+    const row = this.sql.exec<{ meta: string }>(`SELECT meta FROM snapshots WHERE repo = ?`, repo).toArray()[0];
+    if (!row) return null;
+    const prs = this.sql
+      .exec<{ facts: string }>(`SELECT facts FROM pull_requests WHERE repo = ? ORDER BY number`, repo)
+      .toArray()
+      .map((r) => JSON.parse(r.facts) as DeliverySnapshot["prs"][number]);
+    return { ...(JSON.parse(row.meta) as Omit<DeliverySnapshot, "prs">), prs };
+  }
+}
+
+const DELIVERY_ROUTES = new Set(["/delivery/get", "/delivery/put"]);
+
+async function handleDelivery(pathname: string, body: unknown, env: Env): Promise<Response> {
+  const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+  const dO = env.DELIVERY.get(env.DELIVERY.idFromName(DELIVERY_OBJECT));
+  if (pathname === "/delivery/get") {
+    if (typeof b.repo !== "string" || !REPO_SLUG.test(b.repo)) return json({ error: "repo must be owner/name" }, 400);
+    const snapshot = await dO.get(b.repo);
+    console.log(
+      `[delivery/get] ${b.repo} -> ${snapshot ? `${snapshot.prs.length} pull requests as of ${snapshot.snapshotAt}` : "none"}`,
+    );
+    return json({ snapshot });
+  }
+  if (pathname === "/delivery/put") {
+    if (!isDeliverySnapshot(b.snapshot))
+      return json(
+        { error: "snapshot must be a DeliverySnapshot (repo, snapshotAt, range, prs[], truncated, completeFrom)" },
+        400,
+      );
+    const encoder = new TextEncoder();
+    const oversized = b.snapshot.prs.find(
+      (pr) => encoder.encode(JSON.stringify(pr)).byteLength > MAX_PULL_REQUEST_FACTS_BYTES,
+    );
+    if (oversized)
+      return json(
+        { error: `pull request ${oversized.number}'s facts must be at most ${MAX_PULL_REQUEST_FACTS_BYTES} bytes` },
+        413,
+      );
+    const prs = await dO.put(b.snapshot);
+    console.log(`[delivery/put] ${b.snapshot.repo} <- ${prs} pull requests as of ${b.snapshot.snapshotAt}`);
+    return json({ ok: true, prs });
+  }
+  return json({ error: "not found" }, 404);
 }
 
 /** Documents are small; a body over this is refused before storage. */
@@ -2180,6 +2293,16 @@ const LEDGER_ROUTES = new Set([
 
 /** Routes whose bodies may carry a record, a transcript chunk, or an event batch. */
 const WIDE_BODY_ROUTES = new Set(["/runs/put", "/runs/finish", "/runs/append", "/runs/transcript/write"]);
+/** A delivery snapshot: every merged pull request's reviews and its branch's workflow runs over
+ *  the window — a busy repository's runs to a few MB (measured: 291 pull requests, 2.1 MB). */
+const MAX_SNAPSHOT_BODY_BYTES = 8 * 1024 * 1024;
+
+/** The request body ceiling per route, decided after routing and before the parse. */
+function bodyFenceFor(pathname: string): number {
+  if (WIDE_BODY_ROUTES.has(pathname)) return MAX_RUN_PUT_BODY_BYTES;
+  if (pathname === "/delivery/put") return MAX_SNAPSHOT_BODY_BYTES;
+  return MAX_BODY_BYTES;
+}
 
 const gen = (v: unknown): Validated<string> =>
   typeof v === "string" && GEN_PATTERN.test(v)
@@ -2486,6 +2609,7 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
 
 const ROUTES = new Set([
   ...CONFIG_ROUTES,
+  ...DELIVERY_ROUTES,
   "/retrieve",
   "/write",
   "/list",
@@ -2513,7 +2637,7 @@ interface Admission {
 async function handleRequest(request: Request, env: Env, admission: Admission): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/healthz" && request.method === "GET")
-    return json({ ok: true, build: BUILD, features: ["memory", "schedules", "runs", "config"] });
+    return json({ ok: true, build: BUILD, features: ["memory", "schedules", "runs", "config", "delivery"] });
   if (!admission.known) return json({ error: "not found" }, 404);
   if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
   if (!admission.authorized) return json({ error: "unauthorized" }, 401);
@@ -2533,8 +2657,9 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
     return json({ error: "body must declare a numeric Content-Length" }, 411);
   }
   // The ledger's bulk routes carry a finished record, a transcript chunk, or
-  // an event batch (32 × 64 KiB) and share /runs/put's fence.
-  const maxBodyBytes = WIDE_BODY_ROUTES.has(url.pathname) ? MAX_RUN_PUT_BODY_BYTES : MAX_BODY_BYTES;
+  // an event batch (32 × 64 KiB) and share /runs/put's fence; a delivery
+  // snapshot carries a whole window of pull request facts and has its own.
+  const maxBodyBytes = bodyFenceFor(url.pathname);
   if (Number(header) > maxBodyBytes) {
     return json({ error: `body must be at most ${maxBodyBytes} bytes` }, 413);
   }
@@ -2563,6 +2688,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
   }
   if (url.pathname.startsWith("/runs/")) return handleRuns(url.pathname, body, env);
   if (url.pathname.startsWith("/config/")) return handleConfig(url.pathname, body, env);
+  if (url.pathname.startsWith("/delivery/")) return handleDelivery(url.pathname, body, env);
 
   if (url.pathname === "/retrieve") {
     const parsed = parseRetrieve(body);

@@ -36,7 +36,9 @@ import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 // The parsers are pure and unit-tested against the API's recorded shapes; the
 // class only fetches, pages and joins. A 404 on the issue or on Actions is an
 // absent fact, not a failure; any other non-2xx throws with the status and a
-// redacted, capped body so the page can answer 502 without a stack.
+// redacted, capped body so the page can answer 502 without a stack. In
+// production this source sits behind the snapshot (src/core/deliverySnapshot.ts):
+// it is read on an interval and on `fresh`, not on every request.
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const PAGE_SIZE = 100;
@@ -305,15 +307,22 @@ export class GithubDeliverySource implements DeliverySource {
     };
     const json = async (res: Response): Promise<unknown> => (res.status === 404 ? undefined : res.json());
 
-    // 1. The merged pull requests in range, newest-touched first.
+    // 1. The merged pull requests in range, newest-touched first. The oldest
+    //    update the listing reached bounds what a capped read is complete for:
+    //    a pull request merged after that instant was updated after it, so it
+    //    is among the rows read.
     const merged: PullListItem[] = [];
     let truncated = false;
+    let oldestUpdated: PullListItem | undefined;
     for (let page = 1; ; page++) {
       const res = await get(
         "pulls",
         `/repos/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=${PAGE_SIZE}&page=${page}`,
       );
       const items = parsePullListPage(await json(res));
+      for (const item of items) {
+        if (!oldestUpdated || Date.parse(item.updatedAt) < Date.parse(oldestUpdated.updatedAt)) oldestUpdated = item;
+      }
       const selected = selectMerged(items, range);
       merged.push(...selected.merged);
       if (selected.olderSeen || items.length < PAGE_SIZE) break;
@@ -322,6 +331,7 @@ export class GithubDeliverySource implements DeliverySource {
         break;
       }
     }
+    const completeFrom = truncated && oldestUpdated ? oldestUpdated.updatedAt : `${range.since}T00:00:00Z`;
 
     // 2. Each pull request's facts, a few at a time; issues read once each.
     const issues = new Map<number, Promise<LinkedIssueFact | undefined>>();
@@ -372,6 +382,6 @@ export class GithubDeliverySource implements DeliverySource {
         ...(issue ? { issue } : {}),
       };
     });
-    return { prs, truncated };
+    return { prs, truncated, completeFrom };
   }
 }

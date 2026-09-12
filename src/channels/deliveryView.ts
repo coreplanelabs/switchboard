@@ -10,8 +10,9 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 // Delivery page: an Access-gated, read-only browser view of how work reaches
 // `main` — `GET /delivery` (the first configured repository),
 // `/delivery/<owner>/<name>`, and a JSON twin at `/delivery/<owner>/<name>.json`
-// for agents. Reads GitHub and the run history LIVE on every request (nothing
-// cached, nothing stored) — docs/reference/specs/delivery.md.
+// for agents. The service answers from the repository's snapshot (its age is in
+// the report as `snapshotAt`) and reads GitHub live on `?fresh=1`; the run
+// history joins live on every request — docs/reference/specs/delivery.md.
 //
 // Auth: like /runs, /residents and /costs this surface has no token of its own
 // — the dashboard's identity gate is the "who", re-verified fail-closed in
@@ -99,6 +100,7 @@ export function createDeliveryViewHandler(
     }
     const weeksParam = url.searchParams.get("weeks");
     const sinceParam = url.searchParams.get("since");
+    const fresh = url.searchParams.get("fresh") === "1";
     const runs = async (range: DeliveryRange): Promise<RunFact[]> => {
       if (!deps.runs) return [];
       const page = await deps.runs.listRuns({
@@ -113,6 +115,7 @@ export function createDeliveryViewHandler(
       .report(repo, {
         ...(weeksParam !== null ? { weeks: Number(weeksParam) } : {}),
         ...(sinceParam !== null ? { since: sinceParam } : {}),
+        ...(fresh ? { fresh } : {}),
         runs,
       })
       .then((report) => {

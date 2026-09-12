@@ -26,6 +26,12 @@ import { resolveGithubIdentity } from "../execution/githubApp.js";
 import { GithubDeliverySource } from "../execution/githubDelivery.js";
 import { ResidentOperations } from "../execution/resident.js";
 import { createDeliveryService, NullDeliveryService, parseDeliveryConfig, type DeliveryService } from "./delivery.js";
+import { SnapshottingDeliverySource } from "./deliverySnapshot.js";
+import {
+  buildDeliverySnapshotStore,
+  InMemoryDeliverySnapshotStore,
+  type DeliverySnapshotStore,
+} from "./deliverySnapshotStore.js";
 import {
   CommandRegistry,
   bindCommands,
@@ -225,7 +231,13 @@ export function buildCoreCommands(
   const delivery = once(async (): Promise<DeliveryService> => {
     if (wiring.delivery) return wiring.delivery();
     if (wiring.capabilities && !wiring.capabilities.github) return new NullDeliveryService();
-    return deliveryServiceFromConfig(parseDeliveryConfig((await cfg()).config.delivery));
+    // The CLI reads (and, on a first or `--fresh` read, writes) the same snapshot the bot serves.
+    const config = (await cfg()).config;
+    const warn = (m: string) => wiring.warn(`[delivery] ${m}`);
+    return deliveryFromConfig(parseDeliveryConfig(config.delivery), {
+      snapshots: buildDeliverySnapshotStore(config, wiring.secrets, warn),
+      warn,
+    }).service;
   });
   const deps: CoreCommandDeps = {
     help: {
@@ -293,14 +305,31 @@ export function buildCoreCommands(
   return bindCommands(registry, deps);
 }
 
-/** The production delivery service: GitHub over the App's read-scoped token, the
+export interface DeliveryWiring {
+  /** The service the page and the command share. */
+  service: DeliveryService;
+  /** The snapshot in front of GitHub — what the bot's refresh loop keeps within the interval. */
+  source: SnapshottingDeliverySource;
+}
+
+/** The production delivery service: GitHub over the App's read-scoped token
+ *  behind the snapshot (on the store handed in; in memory without one), the
  *  review agent's verdicts recognised by the App's own login beside any the
  *  config names (the identity is looked up once per process, on first use). */
-export function deliveryServiceFromConfig(cfg: ReturnType<typeof parseDeliveryConfig>): DeliveryService {
-  return createDeliveryService(cfg, new GithubDeliverySource(), {
+export function deliveryFromConfig(
+  cfg: ReturnType<typeof parseDeliveryConfig>,
+  opts: { snapshots?: DeliverySnapshotStore; warn?: (message: string) => void } = {},
+): DeliveryWiring {
+  const source = new SnapshottingDeliverySource(
+    new GithubDeliverySource(),
+    opts.snapshots ?? new InMemoryDeliverySnapshotStore(),
+    { ...(opts.warn ? { warn: opts.warn } : {}) },
+  );
+  const service = createDeliveryService(cfg, source, {
     identities: async () => {
       const identity = await resolveGithubIdentity();
       return identity ? { reviewers: [identity.login] } : {};
     },
   });
+  return { service, source };
 }

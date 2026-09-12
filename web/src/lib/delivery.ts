@@ -24,6 +24,21 @@ export function monthDay(date: string): string {
   return `${months[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
+/** The snapshot's instant → `Sep 11, 13:51 UTC`; anything unparsable is shown as given. */
+export function snapshotTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const two = (n: number): string => String(n).padStart(2, "0");
+  return `${monthDay(d.toISOString().slice(0, 10))}, ${two(d.getUTCHours())}:${two(d.getUTCMinutes())} UTC`;
+}
+
+/** The page's own query with `fresh=1` set — the live-read link keeps the range the viewer chose. */
+export function freshHref(search: string): string {
+  const params = new URLSearchParams(search);
+  params.set("fresh", "1");
+  return `?${params.toString()}`;
+}
+
 export interface DeliveryTile {
   label: string;
   value: string;

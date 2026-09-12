@@ -545,7 +545,13 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   // read from memory, never from GitHub (`fetch` is disarmed here).
   const merged = new Date(NOW).toISOString();
   const delivery = createDeliveryService(
-    { repos: [FIXTURE.repo], reviewers: ["acme-review[bot]"], agentLogins: [], agentCoauthors: [] },
+    {
+      repos: [FIXTURE.repo],
+      reviewers: ["acme-review[bot]"],
+      agentLogins: [],
+      agentCoauthors: [],
+      snapshot: { everyMinutes: 60 },
+    },
     new InMemoryDeliverySource({
       [FIXTURE.repo]: [
         {

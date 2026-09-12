@@ -31,7 +31,11 @@
       // transcript a resumed run continues from (docs/reference/specs/run-history.md item
       // 32). Kept apart from the history object so transcript bytes never queue
       // behind an admission decision; cleared at finish.
-      { "name": "RUN_TRANSCRIPTS", "class_name": "RunTranscriptDO" }
+      { "name": "RUN_TRANSCRIPTS", "class_name": "RunTranscriptDO" },
+      // ONE DeliveryDO (named "delivery"): the delivery page's snapshot per
+      // repository — the merged pull requests' facts over the window, one row
+      // each, and when they were read (docs/reference/specs/delivery.md item 10).
+      { "name": "DELIVERY", "class_name": "DeliveryDO" }
     ]
   },
   // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
@@ -45,6 +49,7 @@
     // The friction ledger is read from run history (RunHistoryDO carries every
     // run's diagnosis); the FrictionDO that once mirrored those diagnoses is
     // retired with its rows — docs/reference/specs/self-improvement.md item 1.
-    { "tag": "v7", "deleted_classes": ["FrictionDO"] }
+    { "tag": "v7", "deleted_classes": ["FrictionDO"] },
+    { "tag": "v8", "new_sqlite_classes": ["DeliveryDO"] }
   ]
 }

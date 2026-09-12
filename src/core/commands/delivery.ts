@@ -3,6 +3,7 @@ import { predicateFor } from "../authz/predicate.js";
 import {
   CommandError,
   commandDefiner,
+  flag,
   type CommandDef,
   type CommandRegistry,
   type JsonValue,
@@ -23,8 +24,9 @@ import type { RunsService } from "../runsService.js";
 // `delivery.report` (docs/reference/specs/delivery.md): the delivery indicators of
 // one repository — issue-to-merge time, first-pass CI, review rounds, the
 // findings and the share resolved with no human edit — per week and per unit,
-// read from GitHub and the caller's own run history, written nowhere. Derived
-// forms: `delivery report [--repo owner/name] [--since YYYY-MM-DD] [--weeks n]`
+// from the repository's snapshot of GitHub's facts (`--fresh` reads GitHub now)
+// and the caller's own run history; nothing written to GitHub. Derived forms:
+// `delivery report [--repo owner/name] [--since YYYY-MM-DD] [--weeks n] [--fresh]`
 // in chat and on the CLI, `/api/delivery.report`, the `delivery_report` MCP tool.
 //
 // Two rules the service does not enforce because they are about the CALLER:
@@ -73,12 +75,13 @@ export const deliveryReport = defineCommand({
       .describe(
         `Monday-start weeks back from this one (default 4, at most ${MAX_WEEKS}); --since, when given, decides instead`,
       ),
+    fresh: flag.optional().describe("read GitHub now instead of the repository's snapshot, and refresh the snapshot"),
   }),
   action: "delivery:read",
   effect: "read",
   enabledWhen: (caps) => caps.github,
   describe:
-    "Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — read from GitHub and the run history; nothing written.",
+    "Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written.",
   render: (output) => renderDeliveryReport(output as unknown as DeliveryReport),
   handler: async ({ options, caller, deps }) => {
     const service = await deps.delivery.service();
@@ -103,7 +106,9 @@ export const deliveryReport = defineCommand({
       return runFactsOf(page.runs, repo);
     };
     try {
-      return asJson(await service.report(repo, { since: options.since, weeks: options.weeks, runs }));
+      return asJson(
+        await service.report(repo, { since: options.since, weeks: options.weeks, fresh: options.fresh, runs }),
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message === DELIVERY_OFF_MESSAGE) throw new CommandError("unavailable", message);

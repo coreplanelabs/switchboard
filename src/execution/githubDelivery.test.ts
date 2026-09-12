@@ -416,8 +416,10 @@ describe("GithubDeliverySource", () => {
   it("assembles one merged pull request's facts from the listing, its timeline, its branch's workflow runs and its linked issue — read-scoped, one page since the listing reached older rows", async () => {
     const gh = fakeGithub(ROUTES);
     const source = new GithubDeliverySource({ fetch: gh.fetch, token: async (scope) => `tok-${scope}` });
-    const { prs, truncated } = await source.fetchPullRequests(REPO, RANGE);
+    const { prs, truncated, completeFrom } = await source.fetchPullRequests(REPO, RANGE);
     expect(truncated).toBe(false);
+    // A complete read is complete from the range's start.
+    expect(completeFrom).toBe(`${RANGE.since}T00:00:00Z`);
     expect(prs).toHaveLength(1);
     const pr = prs[0];
     expect(pr).toMatchObject({
@@ -464,6 +466,9 @@ describe("GithubDeliverySource", () => {
     const cut = await source.fetchPullRequests(REPO, RANGE);
     expect(cut.prs).toHaveLength(200);
     expect(cut.truncated).toBe(true);
+    // A capped read is complete only from the oldest update the listing reached: every pull
+    // request merged after that instant was updated after it, so it is among the rows read.
+    expect(cut.completeFrom).toBe(PULLS_PAGE[0].updated_at);
     // With room for the third page the listing reaches the older row and is complete.
     const whole = new GithubDeliverySource({
       fetch: gh.fetch,
@@ -474,6 +479,7 @@ describe("GithubDeliverySource", () => {
     const all = await whole.fetchPullRequests(REPO, RANGE);
     expect(all.prs).toHaveLength(200);
     expect(all.truncated).toBe(false);
+    expect(all.completeFrom).toBe(`${RANGE.since}T00:00:00Z`);
   });
 
   it("a missing issue, disabled Actions and an empty timeline degrade to absent facts; a failing timeline read throws with the status and a capped body", async () => {

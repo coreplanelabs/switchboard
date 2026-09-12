@@ -19,6 +19,7 @@ export default defineConfig({
       "config.test.ts",
       "runLedger.test.ts",
       "runTranscript.test.ts",
+      "delivery.test.ts",
     ],
   },
 });

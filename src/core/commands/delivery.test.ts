@@ -86,7 +86,15 @@ function bound(
   const service = opts.off
     ? new NullDeliveryService()
     : createDeliveryService(
-        opts.repos ? { repos: opts.repos, reviewers: [], agentLogins: [], agentCoauthors: ["Claude"] } : undefined,
+        opts.repos
+          ? {
+              repos: opts.repos,
+              reviewers: [],
+              agentLogins: [],
+              agentCoauthors: ["Claude"],
+              snapshot: { everyMinutes: 60 },
+            }
+          : undefined,
         source,
         { identities: async () => ({ reviewers: [REVIEWER] }), now: () => new Date(NOW) },
       );
@@ -128,6 +136,17 @@ describe("delivery.report", () => {
     expect(text).toContain("1 merged (0 agent-authored)");
     expect(text).toContain("findings: 1 (1 blocking) · 100% resolved with no human edit");
     expect(text).not.toMatch(/\S {2,}\S/);
+  });
+
+  it("the report says when its facts were read; `--fresh` asks the service for a live read", async () => {
+    const { commands, source } = bound({ repos: ["acme/api"] });
+    const stored = await commands.invoke("delivery.report", {}, operator);
+    if (!stored.ok) throw new Error(stored.message);
+    expect((stored.value as { snapshotAt: string }).snapshotAt).toBe(new Date(NOW).toISOString());
+    expect(renderText(commands.get("delivery.report")!, stored.value)).toMatch(/· as of \S+ \d\d:\d\d UTC, /);
+    const fresh = await commands.invoke("delivery.report", { options: { fresh: true } }, operator);
+    if (!fresh.ok) throw new Error(fresh.message);
+    expect(source.calls.map((c) => c.fresh)).toEqual([undefined, true]);
   });
 
   it("`--repo` names any repository, `--weeks` and `--since` set the range; a caller who may read no runs gets the pull requests alone", async () => {
