@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.205.0](https://github.com/coreplanelabs/switchboard/compare/v1.204.0...v1.205.0) (2026-09-12)
+
+
+### Features
+
+* **agents:** the explore preset runs a two-hour read-only investigation in a cold sandbox, a budget: directive narrows any run's wall clock, and the ship pipeline's wall clock is the ship preset's declared budget ([#971](https://github.com/coreplanelabs/switchboard/issues/971)) ([26ed659](https://github.com/coreplanelabs/switchboard/commit/26ed6594553f80ff131f0a6941bb483603c6d31e))
+* **config:** a scope can cap what any run in it may have — minutes, identity and machine class intersect across the layers, a budget above the cap is clipped and an identity or class above it is refused before any executor exists ([#967](https://github.com/coreplanelabs/switchboard/issues/967)) ([cf536c4](https://github.com/coreplanelabs/switchboard/commit/cf536c40e8bf670fbafa1ac4d2fa1f0b7de28faa))
+* **core:** the delivery page, its JSON twin and delivery report serve a per-repository snapshot of GitHub's facts refreshed on an interval and show its age; ?fresh=1 and --fresh read GitHub now ([#972](https://github.com/coreplanelabs/switchboard/issues/972)) ([d03c0eb](https://github.com/coreplanelabs/switchboard/commit/d03c0eb2b02d69d4240868229437ffa887eb84c8))
+* **web:** the review panel is a Files changed view — a file explorer beside the diff, inline or side by side, the PR's description on its own tab, the Tour gone ([#970](https://github.com/coreplanelabs/switchboard/issues/970)) ([b8ac001](https://github.com/coreplanelabs/switchboard/commit/b8ac001e8f1197dae87eca5a1c4535b0fccdff55))
+
 ## [1.204.0](https://github.com/coreplanelabs/switchboard/compare/v1.203.0...v1.204.0) (2026-09-12)
 
 
