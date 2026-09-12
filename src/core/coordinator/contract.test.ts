@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   COORDINATOR_IDENTITY,
   COORDINATOR_STEP_ACTION,
+  PLAN_MERGE_ACTION,
   coordinatorFields,
   IDEMPOTENCY_KEY_PATTERN,
   idempotencyKeyFor,
@@ -37,9 +38,10 @@ const instance: CoordinatorInstance = {
 };
 
 describe("the coordinator's names", () => {
-  it("the identity is the `coordinator` ingress subject and the action is `coordinator:step`", () => {
+  it("the identity is the `coordinator` ingress subject, the step action is `coordinator:step` and the merge action is `plan:merge`", () => {
     expect(COORDINATOR_IDENTITY).toBe("coordinator");
     expect(COORDINATOR_STEP_ACTION).toBe("coordinator:step");
+    expect(PLAN_MERGE_ACTION).toBe("plan:merge");
   });
 
   it("an instance id is the platform's alphabet, at most 100 characters; a step name may carry `/` and `.`; the key is `<instance>:<step>`", () => {
@@ -106,6 +108,10 @@ describe("isCoordinatorInstance — the parent ship record", () => {
     expect(isCoordinatorInstance({ ...full, caps: { maxRounds: "3", maxMinutes: 45 } })).toBe(false);
     expect(isCoordinatorInstance({ ...full, card: { channel: "C1" } })).toBe(false);
     expect(isCoordinatorInstance({ ...full, runId: 7 })).toBe(false);
+    // A re-issue's attempt is the second or later; the first carries none.
+    expect(isCoordinatorInstance({ ...full, attempt: 2 })).toBe(true);
+    expect(isCoordinatorInstance({ ...full, attempt: 1 })).toBe(false);
+    expect(isCoordinatorInstance({ ...full, attempt: 2.5 })).toBe(false);
   });
 });
 

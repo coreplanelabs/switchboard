@@ -158,11 +158,15 @@ defaults:
 #     actions: [friction:read, friction:write, repo:write]
 #     channels: all                     # the weekly pass analyzes the whole fleet
 #   http:coordinator:                   # the ship coordinator's bearer (its own
-#     actions: [coordinator:step]       # SWITCHBOARD_INGRESS_TOKENS entry, subject
+#     actions: [coordinator:step, plan:merge]  # SWITCHBOARD_INGRESS_TOKENS entry, subject
 #                                       # "coordinator", rotated apart from cron):
-#                                       # the one grant the coordinator's steps need
-#                                       # — the child a spawn starts is authorized as
-#                                       # the requesting user, never as this identity
+#                                       # coordinator:step is the one grant the
+#                                       # coordinator's steps need — the child a spawn
+#                                       # starts is authorized as the requesting user,
+#                                       # never as this identity; plan:merge lets the
+#                                       # plan runner merge a plan branch's pull request
+#                                       # once the review approved at its head and CI is
+#                                       # green — leave it out and every merge is a person's
 #   schedule:self-improvement:          # the weekly cron's own actor (src/core/schedules.ts
 #     actions: [friction:write]         # declares its grants; an entry here REPLACES them)
 #     channels: all                     # analyzes the whole fleet, not one channel

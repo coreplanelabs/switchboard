@@ -44,6 +44,12 @@ function workerDouble() {
       rows.set(inst.id, text);
       return Response.json({ ok: true });
     }
+    if (path === "/runs/coordinator/replace") {
+      const inst = body.instance as CoordinatorInstance;
+      rows.set(inst.id, JSON.stringify(inst));
+      for (const key of [...units.keys()]) if (key.startsWith(`${inst.id}/`)) units.delete(key);
+      return Response.json({ ok: true });
+    }
     if (path === "/runs/coordinator/get") {
       const text = rows.get(body.id as string);
       return Response.json({ instance: text ? JSON.parse(text) : null });
@@ -83,6 +89,22 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
       expect(await store.put({ ...instance, branch: "other" })).toEqual({ ok: false, reason: "exists" });
       expect(await store.get(instance.id)).toEqual(instance);
       expect(await store.get("ship_none")).toBeNull();
+    });
+
+    // A re-issue over the leftover of an attempt whose create failed: the
+    // record is written over whatever the id holds, once the shim said no
+    // instance exists — the one write that is never `exists`.
+    it("replace writes the record over whatever the id holds — a different record, or none — drops the id's unit rows and no other instance's, and get reads the new one back", async () => {
+      const store = make();
+      expect(await store.put(instance)).toEqual({ ok: true });
+      await store.putUnits([unitRow("U12"), unitRow("U13"), { ...unitRow("U12"), instanceId: "ship_other" }]);
+      const again = { ...instance, runId: "run-s2", createdAt: 2_000 };
+      expect(await store.replace(again)).toEqual({ ok: true });
+      expect(await store.get(instance.id)).toEqual(again);
+      expect(await store.listUnits(instance.id)).toEqual([]);
+      expect((await store.listUnits("ship_other")).map((u) => u.unit)).toEqual(["U12"]);
+      expect(await store.replace({ ...again, id: "ship_fresh" })).toEqual({ ok: true });
+      expect(await store.get("ship_fresh")).toEqual({ ...again, id: "ship_fresh" });
     });
 
     // run-history item 50: the unit rows — written at creation, replaced whole
@@ -126,11 +148,17 @@ describe("WorkerCoordinatorInstanceStore — the wire", () => {
     });
     await store.put(instance);
     await store.get(instance.id);
+    await store.replace({ ...instance, runId: "run-s2" });
     expect(w.calls).toEqual([
       { path: "/runs/coordinator/put", body: { storeKey: "runs:default", instance }, auth: "Bearer secret-token" },
       {
         path: "/runs/coordinator/get",
         body: { storeKey: "runs:default", id: instance.id },
+        auth: "Bearer secret-token",
+      },
+      {
+        path: "/runs/coordinator/replace",
+        body: { storeKey: "runs:default", instance: { ...instance, runId: "run-s2" } },
         auth: "Bearer secret-token",
       },
     ]);
@@ -156,6 +184,7 @@ describe("NullCoordinatorInstanceStore and the builder", () => {
     const store = new NullCoordinatorInstanceStore();
     expect(await store.get(instance.id)).toBeNull();
     expect(await store.put(instance)).toEqual({ ok: false, reason: "unavailable" });
+    expect(await store.replace(instance)).toEqual({ ok: false, reason: "unavailable" });
     expect(await store.listUnits(instance.id)).toEqual([]);
     expect(await store.putUnits([unitRow("U12")])).toEqual({ ok: false, reason: "unavailable" });
   });

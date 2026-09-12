@@ -184,6 +184,12 @@ export const POLICY: readonly Rule[] = [
   // spawn starts is authorized as the requesting user the parent record
   // names, not as whoever holds this grant.
   { action: "coordinator:step", resource: "command", actorKinds: ["service"], when: [grant("coordinator:step")] },
+  // The plan runner's merge (docs/decisions/0031-the-coordinator-runs-a-plan-not-a-pull-request.md,
+  // "The merge grant"): its own action, held by the same bearer by name and by
+  // no person — what decides a merge is the branch (a plan branch the runner
+  // itself opened) and the guards, never the requester. Withdrawing the grant
+  // returns every merge to a person.
+  { action: "plan:merge", resource: "command", actorKinds: ["service"], when: [grant("plan:merge")] },
 ];
 
 export const ACTOR_KINDS: readonly ActorKind[] = ["user", "service", "schedule", "agent"];

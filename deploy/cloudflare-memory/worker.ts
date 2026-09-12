@@ -1221,6 +1221,23 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
+  /** The record written over whatever the id holds and the id's unit rows
+   *  dropped, in one transaction — an attempt starting over: the leftover of one
+   *  whose Workflow instance was never created, once the shim said so. */
+  async replaceInstance(instance: CoordinatorInstance): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(
+        `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)
+         ON CONFLICT(instance_id) DO UPDATE SET json = excluded.json, created_at = excluded.created_at`,
+        instance.id,
+        JSON.stringify(instance),
+        instance.createdAt,
+      );
+      this.sql.exec(`DELETE FROM coordinator_units WHERE instance_id = ?`, instance.id);
+    });
+    return { ok: true };
+  }
+
   async getInstance(id: string): Promise<CoordinatorInstance | null> {
     const row = this.sql
       .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, id)
@@ -2442,6 +2459,7 @@ export class RunTranscriptDO extends DurableObject<Env> {
 
 const LEDGER_ROUTES = new Set([
   "/runs/coordinator/put",
+  "/runs/coordinator/replace",
   "/runs/coordinator/get",
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/list",
@@ -2680,6 +2698,13 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const r = await stub.putInstance(b.instance);
     console.log(`[runs/coordinator/put] ${key.value} ${b.instance.id} → ${r.ok ? "stored" : r.reason}`);
     return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/coordinator/replace") {
+    if (!isCoordinatorInstance(b.instance))
+      return json({ error: "instance must be a coordinator instance record" }, 400);
+    const r = await stub.replaceInstance(b.instance);
+    console.log(`[runs/coordinator/replace] ${key.value} ${b.instance.id} → replaced`);
+    return json(r);
   }
   if (pathname === "/runs/coordinator/get") {
     if (typeof b.id !== "string" || !INSTANCE_ID_PATTERN.test(b.id))

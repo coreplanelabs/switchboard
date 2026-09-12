@@ -49,6 +49,7 @@ import { composeChild, TASK_UNIT, type BriefReaders } from "../core/coordinator/
 import {
   COORDINATOR_STEP_ACTION,
   COORDINATOR_STEP_PATH_PREFIX,
+  PLAN_MERGE_ACTION,
   idempotencyKeyFor,
   INSTANCE_ID_PATTERN,
   STEP_NAME_PATTERN,
@@ -60,14 +61,14 @@ import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { childRequestText } from "../core/dispatch/spawn.js";
-import { CHANGES_TOKEN, LGTM_TOKEN } from "../core/reviewVerdict.js";
-import { sameCommit } from "../core/reviewedHead.js";
+import { CHANGES_TOKEN, LGTM_TOKEN, type ReviewVerdictKind } from "../core/reviewVerdict.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent, ShipRoundOutcome } from "../core/runEvents.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, type RunRecord } from "../core/runRecord.js";
 import type { RunsService, RunView } from "../core/runsService.js";
-import type { Brief } from "../core/ship/coordinator.js";
+import { parsePlanBranch, type Brief } from "../core/ship/coordinator.js";
+import { normalizeHead, sameCommit } from "../core/reviewedHead.js";
 import { resolveShipCaps, shipRoundHeader } from "../core/shipPipeline.js";
 import { createCardShell } from "../core/statusCardFrame.js";
 import { systemClock } from "../core/trace/clock.js";
@@ -75,7 +76,13 @@ import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import { authenticateIngressBearer } from "../deploy/restart.js";
 import type { GithubApi } from "../execution/githubApi.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
-import type { OpenPrRef, PullRequestReview } from "../execution/githubPulls.js";
+import type {
+  CommitChecks,
+  MergeResult,
+  OpenPrRef,
+  PullRequestFacts,
+  PullRequestReview,
+} from "../execution/githubPulls.js";
 import type { Secret } from "../secrets.js";
 import { readBody, type IngressResponse } from "./http.js";
 
@@ -114,15 +121,24 @@ export interface AdminCoordinatorDeps {
   ioFor: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
   /** The open pull request heading a branch (githubPulls.findOpenPrByHead). */
   findOpenPrByHead: (repo: string, branch: string) => Promise<OpenPrRef | null>;
-  /** The target repository at the base ref (the plan, the specs, the rules) and
-   *  its issues (a unit's board issue) — the App's GitHub reads. */
-  github: Pick<GithubApi, "readFile" | "listIssues">;
+  /** The target repository at the base ref (the plan, the specs, the rules), its
+   *  issues (a unit's board issue) and the comment a unit's ending leaves there
+   *  — the App's GitHub reads and the one write beside the merge. */
+  github: Pick<GithubApi, "readFile" | "listIssues" | "commentIssue">;
   /** Round 0's branch create (githubPulls.createBranchRef): 422 already-exists is success inside. */
   createBranchRef: (repo: string, branch: string, fromRef: string) => Promise<void>;
   /** The reviews on a pull request (githubPulls.fetchPullRequestReviews) and the
    *  identity this bot posts as: whether the bot's verdict stands at a head. */
   fetchPrReviews: (pr: { repo: string; number: number }) => Promise<PullRequestReview[] | undefined>;
   selfIdentity: () => Promise<GithubIdentity | undefined>;
+  /** The merge step's facts and its one write (githubPulls): the pull request
+   *  as GitHub has it, the checks at a head, the squash at exactly that head. */
+  fetchPrFacts: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
+  fetchCommitChecks: (repo: string, sha: string) => Promise<CommitChecks | undefined>;
+  mergePullRequest: (
+    pr: { repo: string; number: number },
+    opts: { sha: string; title: string },
+  ) => Promise<MergeResult>;
   /** Where the parent's record goes when the instance ends. */
   runHistoryWriter: RunHistoryWriter;
   /** The channel's visibility stamp for that record (dispatch/record.ts `channelVisibilityOf`). */
@@ -598,7 +614,7 @@ function prOpenedOf(
 async function reviewPostedAt(
   deps: AdminCoordinatorDeps,
   pr: { repo: string; number: number },
-  verdict: NonNullable<RunView["verdict"]>,
+  verdict: ReviewVerdictKind,
   head: string,
 ): Promise<boolean | undefined> {
   const [reviews, self] = await Promise.all([
@@ -606,7 +622,7 @@ async function reviewPostedAt(
     deps.selfIdentity().catch(() => undefined),
   ]);
   if (reviews === undefined || self === undefined) return undefined;
-  const token = verdict.verdict === "approve" ? LGTM_TOKEN : CHANGES_TOKEN;
+  const token = verdict === "approve" ? LGTM_TOKEN : CHANGES_TOKEN;
   return reviews.some(
     (r) =>
       r.author?.login === self.login &&
@@ -646,7 +662,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       reviewPosted = await reviewPostedAt(
         deps,
         { repo: instance.repo, number: row.pr.number },
-        record.verdict,
+        record.verdict.verdict,
         record.reviewHead,
       );
   }
@@ -939,6 +955,20 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       );
     }
   }
+  // The unit's ending is its handoff to the board (agent-ship item 14's
+  // destination): when the row names an issue, the report lands there too —
+  // a merge GitHub refused, a cap, a stop — so the board says how the unit
+  // ended without a person copying it over. Best effort, like the thread's.
+  if (row.issue !== undefined) {
+    const comment = `**Plan runner — ${row.unit} ended \`${ending.kind}\`**${updated.pr ? ` · ${updated.pr.url}` : ""}\n\n${ending.report}`;
+    await deps.github
+      .commentIssue(instance.repo, row.issue, comment)
+      .catch((err) =>
+        (deps.log ?? console.warn)(
+          `[coordinator] ${instance.id} ${row.unit}: the board comment could not be posted: ${describe(err)}`,
+        ),
+      );
+  }
   await drawCard(
     deps,
     instance,
@@ -946,6 +976,133 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   ).catch(() => {});
   (deps.log ?? console.log)(`[coordinator] ${instance.id} ${row.unit}: ended ${ending.kind}`);
   return json(200, { ok: true, told, at });
+}
+
+// ---- the merge (docs/reference/specs/http-ingress.md item 9; record 0031's merge grant) ------------
+
+/** The release pull request — release-please's, which deploys — is always a person's merge. */
+function isReleasePullRequest(facts: PullRequestFacts): boolean {
+  return (
+    (facts.headRef?.startsWith("release-please--") ?? false) || /^chore\(main\): release\b/.test(facts.title ?? "")
+  );
+}
+
+/**
+ * `POST /admin/coordinator/merge {parentInstanceId, unit, prNumber, headSha}`:
+ * the runner's squash of a unit's pull request, executed only when every guard
+ * holds — the bearer holds `plan:merge`, the unit's branch is a plan branch of
+ * THIS instance's plan, the pull request is open, heads that branch and stands
+ * at exactly the approved head, the bot's own approving review is pinned to it
+ * and every check at it is green — and refused by reason otherwise, so a person
+ * decides: the release pull request by name, any other branch as "waits for a
+ * person", GitHub's own refusal (a conflict, a branch protection, a moved head)
+ * in GitHub's words. Checks still running answer `pending` for the machine's
+ * poll. GitHub unreachable is a passing condition (502), never a verdict.
+ */
+async function merge(
+  body: Record<string, unknown>,
+  deps: AdminCoordinatorDeps,
+  subject: string,
+): Promise<IngressResponse> {
+  const id = parseInstanceId(body.parentInstanceId);
+  if (!id.ok) return json(400, { ok: false, error: id.error });
+  if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
+    return json(400, { ok: false, error: "unit must be a unit id" });
+  if (typeof body.prNumber !== "number" || !Number.isInteger(body.prNumber) || body.prNumber < 1)
+    return json(400, { ok: false, error: "prNumber must be a pull request number" });
+  const headSha = normalizeHead(body.headSha);
+  if (headSha === undefined) return json(400, { ok: false, error: "headSha must be the approved head (7 to 40 hex)" });
+  const at = (deps.clock ?? systemClock)();
+  const refused = (reason: string) => json(200, { ok: true, outcome: "refused", reason, at });
+  const instance = await deps.instances.get(id.value);
+  if (!instance) return json(404, { ok: false, error: "unknown_instance" });
+  const unit = await unitRowOf(deps, instance, body.unit);
+  if (!unit.ok) return unit.response;
+  const row = unit.row!;
+  const log = deps.log ?? console.log;
+  // The grant: the bearer's actor on `plan:merge`, decided here beside the
+  // door's `coordinator:step`. Withdrawn, every merge is a person's.
+  const actor = resolveActor({ surface: "http", subjectId: subject }, deps.grantsFor);
+  if (!authorize(actor, PLAN_MERGE_ACTION, { type: "command", id: "coordinator.merge" }).allow)
+    return refused(
+      `the runner holds no ${PLAN_MERGE_ACTION} grant (grants["http:${subject}"] in config.yaml) — a person merges`,
+    );
+  // The branch decides, never the requester: a plan branch of this plan and nothing else.
+  const planBranch = parsePlanBranch(row.branch);
+  if (instance.plan === undefined || planBranch === undefined || planBranch.planId !== instance.plan.id)
+    return refused(
+      `\`${row.branch}\` is not a branch of plan \`${instance.plan?.id ?? "(none)"}\` — waits for a person's merge`,
+    );
+  const pr = { repo: instance.repo, number: body.prNumber };
+  const where = `${instance.repo}#${pr.number}`;
+  let facts: PullRequestFacts | undefined;
+  try {
+    facts = await deps.fetchPrFacts(pr);
+  } catch (err) {
+    return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
+  }
+  if (facts === undefined)
+    return json(502, { ok: false, error: "github_unavailable", message: `${where} could not be read`, at });
+  if (isReleasePullRequest(facts))
+    return refused(`${where} is the release pull request — always a person's merge, never the runner's`);
+  if (facts.state !== "open") return refused(`${where} is ${facts.state}`);
+  if (facts.headRef !== row.branch)
+    return refused(`${where} heads \`${facts.headRef ?? "?"}\`, not the unit's branch \`${row.branch}\``);
+  if (facts.headSha === undefined || !sameCommit(facts.headSha, headSha))
+    return refused(
+      `the head of ${where} moved: \`${facts.headSha?.slice(0, 7) ?? "?"}\` is not the approved \`${headSha.slice(0, 7)}\``,
+    );
+  const approved = await reviewPostedAt(deps, pr, "approve", headSha);
+  if (approved === undefined)
+    return json(502, {
+      ok: false,
+      error: "github_unavailable",
+      message: `the reviews of ${where} could not be read`,
+      at,
+    });
+  if (!approved) return refused(`no approving review by the bot stands on ${where} at \`${headSha.slice(0, 7)}\``);
+  const checks = await deps.fetchCommitChecks(instance.repo, headSha).catch(() => undefined);
+  if (checks === undefined)
+    return json(502, {
+      ok: false,
+      error: "github_unavailable",
+      message: `the checks at ${headSha.slice(0, 7)} could not be read`,
+      at,
+    });
+  if (checks.failed.length > 0) return refused(`CI is red at \`${headSha.slice(0, 7)}\`: ${checks.failed.join(", ")}`);
+  if (checks.total === 0)
+    return json(200, {
+      ok: true,
+      outcome: "pending",
+      reason: `no check has reported at \`${headSha.slice(0, 7)}\` yet`,
+      at,
+    });
+  if (checks.pending.length > 0)
+    return json(200, {
+      ok: true,
+      outcome: "pending",
+      reason: `${checks.pending.length} check(s) still running at \`${headSha.slice(0, 7)}\`: ${checks.pending.join(", ")}`,
+      at,
+    });
+  let merged: MergeResult;
+  try {
+    merged = await deps.mergePullRequest(pr, {
+      sha: headSha,
+      title: facts.title ?? `Merge pull request #${pr.number}`,
+    });
+  } catch (err) {
+    return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
+  }
+  if (!merged.ok) {
+    log(
+      `[coordinator] ${instance.id} ${row.unit}: GitHub refused the merge of ${where} (HTTP ${merged.status}): ${merged.reason}`,
+    );
+    return refused(`GitHub refused the merge of ${where} (HTTP ${merged.status}): ${merged.reason}`);
+  }
+  log(
+    `[coordinator] ${instance.id} ${row.unit}: merged ${where} at ${headSha.slice(0, 7)} → ${merged.sha.slice(0, 7)}`,
+  );
+  return json(200, { ok: true, outcome: "merged", sha: merged.sha, at });
 }
 
 const ENDING_ICON: Readonly<Record<string, string>> = { merged: "✅", merge_ready: "✅", done: "✅" };
@@ -1074,6 +1231,7 @@ type Step =
   | "pr-check"
   | "round"
   | "unit-end"
+  | "merge"
   | "finish";
 const STEPS: readonly Step[] = [
   "authorize",
@@ -1085,6 +1243,7 @@ const STEPS: readonly Step[] = [
   "pr-check",
   "round",
   "unit-end",
+  "merge",
   "finish",
 ];
 
@@ -1141,6 +1300,8 @@ export async function answerCoordinatorStep(
       return round(parsed.value, deps);
     case "unit-end":
       return unitEnd(parsed.value, deps);
+    case "merge":
+      return merge(parsed.value, deps, door.subject);
     default:
       return finish(parsed.value, deps);
   }

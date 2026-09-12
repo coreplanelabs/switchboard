@@ -648,6 +648,46 @@ describe("run ledger — the coordinator instance record (item 49)", () => {
     expect((await post("/runs/coordinator/get", { storeKey: key, id: "ship_none" })).data).toEqual({ instance: null });
   });
 
+  it("replace writes the record over whatever the id holds — a different record, or none — drops the id's unit rows and no other instance's; a malformed record is 400", async () => {
+    const key = storeKey();
+    expect(await post("/runs/coordinator/put", { storeKey: key, instance })).toEqual({
+      status: 200,
+      data: { ok: true },
+    });
+    const row = (instanceId: string, unit: string): CoordinatorUnit => ({
+      instanceId,
+      unit,
+      slug: unit.toLowerCase(),
+      branch: `plan/orchestration/${unit.toLowerCase()}`,
+      dependsOn: [],
+      rounds: [],
+    });
+    await post("/runs/coordinator/units/put", {
+      storeKey: key,
+      units: [row(instance.id, "U12"), row(instance.id, "U13"), row("ship_other", "U12")],
+    });
+    const again = { ...instance, runId: "run-s2", createdAt: 2_000 };
+    expect(await post("/runs/coordinator/replace", { storeKey: key, instance: again })).toEqual({
+      status: 200,
+      data: { ok: true },
+    });
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({ instance: again });
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data).toEqual({
+      units: [],
+    });
+    const others = (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: "ship_other" })).data
+      .units as CoordinatorUnit[];
+    expect(others.map((u) => u.unit)).toEqual(["U12"]);
+    const fresh = { ...again, id: "ship_fresh" };
+    expect((await post("/runs/coordinator/replace", { storeKey: key, instance: fresh })).status).toBe(200);
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: "ship_fresh" })).data).toEqual({
+      instance: fresh,
+    });
+    expect(
+      (await post("/runs/coordinator/replace", { storeKey: key, instance: { ...instance, kind: "review" } })).status,
+    ).toBe(400);
+  });
+
   it("validates: a malformed record or id is 400; no bearer is 401", async () => {
     const key = storeKey();
     expect(

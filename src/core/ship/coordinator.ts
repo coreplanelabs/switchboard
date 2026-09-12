@@ -126,8 +126,13 @@ export function parsePlanBranch(branch: string): { planId: string; unitSlug: str
 
 /** The instance id for a plan: it names the plan, so a second runner for the
  *  same plan meets the engine's duplicate-id refusal. */
-export function planInstanceId(planId: string): string {
-  return `plan-${planId}`.slice(0, INSTANCE_ID_MAX);
+export function planInstanceId(planId: string, attempt = 1): string {
+  const base = `plan-${planId}`;
+  if (attempt <= 1) return base.slice(0, INSTANCE_ID_MAX);
+  // A re-issue after an earlier attempt ended: the attempt suffix keeps the
+  // plan's name and never trims into it.
+  const suffix = `-${attempt}`;
+  return `${base.slice(0, INSTANCE_ID_MAX - suffix.length)}${suffix}`;
 }
 
 /** The Dependencies bullet's unit ids — lists, `to` ranges — the unit itself excluded. */

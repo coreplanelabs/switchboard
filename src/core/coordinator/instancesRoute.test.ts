@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   COORDINATOR_AUTHORIZE_PATH,
+  COORDINATOR_INSTANCE_STATUS_PREFIX,
   COORDINATOR_INSTANCES_PATH,
+  instanceStatusResponse,
+  isInstanceNotFound,
+  parseInstanceStatusPath,
+  readInstanceStatusAnswer,
   createInstanceResponse,
   parseCreateInstanceRequest,
   parseSubjectAuthorization,
@@ -124,5 +129,65 @@ describe("readCreateInstanceAnswer — the shim's answer as the bot reads it", (
     });
     expect(readCreateInstanceAnswer(404, "not found")).toEqual({ kind: "unanswered", reason: "HTTP 404 — not found" });
     expect(readCreateInstanceAnswer(201, "<html>")).toEqual({ kind: "unanswered", reason: "HTTP 201 — <html>" });
+  });
+});
+
+describe("the instance status route — the pure halves both ways", () => {
+  it("names the path, reads the id out of it and nothing else", () => {
+    expect(COORDINATOR_INSTANCE_STATUS_PREFIX).toBe("/admin/coordinator/instances/");
+    expect(parseInstanceStatusPath("/admin/coordinator/instances/plan-fixture")).toBe("plan-fixture");
+    expect(parseInstanceStatusPath("/admin/coordinator/instances/plan-fixture-2")).toBe("plan-fixture-2");
+    expect(parseInstanceStatusPath("/admin/coordinator/instances/")).toBeUndefined();
+    expect(parseInstanceStatusPath("/admin/coordinator/instances/has:colon")).toBeUndefined();
+    expect(parseInstanceStatusPath("/admin/coordinator/instances")).toBeUndefined();
+    expect(parseInstanceStatusPath("/admin/coordinator/spawn")).toBeUndefined();
+  });
+
+  it("absence is the engine's own word only — the `instance.not_found` code; a failure whose text merely says not found, does not exist or no such is a failure", () => {
+    expect(isInstanceNotFound("instance.not_found")).toBe(true);
+    expect(isInstanceNotFound("Error: instance.not_found: no instance plan-fixture")).toBe(true);
+    expect(isInstanceNotFound("INSTANCE.NOT_FOUND")).toBe(true);
+    expect(isInstanceNotFound("binding SHIP_COORDINATOR not found")).toBe(false);
+    expect(isInstanceNotFound("the script does not exist")).toBe(false);
+    expect(isInstanceNotFound("no such workflow")).toBe(false);
+    expect(isInstanceNotFound("instance_not_found")).toBe(false);
+    expect(isInstanceNotFound("")).toBe(false);
+  });
+
+  it("the shim answers the platform's status word as 200, no such instance as 404 no_instance, the engine failing as 502 by reason", () => {
+    expect(instanceStatusResponse({ kind: "status", id: "plan-x", status: "running" })).toEqual({
+      status: 200,
+      body: { ok: true, id: "plan-x", status: "running" },
+    });
+    expect(instanceStatusResponse({ kind: "absent", id: "plan-x" })).toEqual({
+      status: 404,
+      body: { ok: false, error: "no_instance", id: "plan-x" },
+    });
+    expect(instanceStatusResponse({ kind: "failed", id: "plan-x", reason: "engine down" })).toEqual({
+      status: 502,
+      body: { ok: false, error: "status_failed", id: "plan-x", message: "engine down" },
+    });
+  });
+
+  it("the bot reads the status word, the absence, and anything else — the door's refusal, a shim without the route — as unanswered by reason", () => {
+    expect(readInstanceStatusAnswer(200, JSON.stringify({ ok: true, id: "plan-x", status: "complete" }))).toEqual({
+      kind: "status",
+      status: "complete",
+    });
+    expect(readInstanceStatusAnswer(404, JSON.stringify({ ok: false, error: "no_instance", id: "plan-x" }))).toEqual({
+      kind: "absent",
+    });
+    expect(readInstanceStatusAnswer(502, JSON.stringify({ ok: false, error: "status_failed", message: "x" }))).toEqual({
+      kind: "unanswered",
+      reason: "HTTP 502 — status_failed",
+    });
+    expect(readInstanceStatusAnswer(403, JSON.stringify({ ok: false, error: "forbidden" }))).toEqual({
+      kind: "unanswered",
+      reason: "HTTP 403 — forbidden",
+    });
+    expect(readInstanceStatusAnswer(404, "not found")).toEqual({ kind: "unanswered", reason: "HTTP 404 — not found" });
+    expect(readInstanceStatusAnswer(200, JSON.stringify({ ok: true, id: "plan-x", status: "" }))).toMatchObject({
+      kind: "unanswered",
+    });
   });
 });
