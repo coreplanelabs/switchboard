@@ -30,7 +30,8 @@ import { markdownOutput } from "../llmOutput/index.js";
 import type { RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
-import type { RunsReadCapability } from "../../tools/runs.js";
+import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
+import type { WaitCapability } from "./awaitChildren.js";
 import type { SpawnCapability } from "./spawn.js";
 import { inFlightToolAfter, quietSuffix } from "../statusCardLabel.js";
 import type { CardShell } from "../statusCardFrame.js";
@@ -108,12 +109,15 @@ export interface RunLoopContext {
   channelVisibility: ChannelVisibility;
   publishText: RegisteredRun["publishText"];
   ending: RunEnding;
-  /** This run's spawn capability and the requester's run reads, for the run
-   *  tools (docs/reference/specs/agent-conductor.md); `dispatch()` always hands
-   *  both. Absent (a loop driven outside it, in a test) → the tools answer
+  /** This run's spawn capability, the requester's run reads, the steer into a
+   *  child and the wait on the children, for the run tools
+   *  (docs/reference/specs/agent-conductor.md); `dispatch()` always hands all
+   *  four. Absent (a loop driven outside it, in a test) → the tools answer
    *  honestly that no run is spawning here. */
   spawn?: SpawnCapability;
   runs?: RunsReadCapability;
+  steer?: SteerCapability;
+  wait?: WaitCapability;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
 }
@@ -160,6 +164,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     ending,
     spawn,
     runs,
+    steer,
+    wait,
     parentRunId,
   } = ctx;
   // The def the runner and the post-run turns read: the preset with the
@@ -407,6 +413,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     agentName: agent.name,
     ...(spawn ? { spawn } : {}),
     ...(runs ? { runs } : {}),
+    ...(steer ? { steer } : {}),
+    ...(wait ? { wait } : {}),
     onVerdict,
     onDigest,
     onPrDescription,

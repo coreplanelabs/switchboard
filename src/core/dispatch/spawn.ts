@@ -23,11 +23,18 @@
 // run tools reach — never pulls the dispatcher in behind it.
 import type { ConfigStore } from "../../config.js";
 import { MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
-import type { RunsReadCapability } from "../../tools/runs.js";
+import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import { resolveChatActor } from "../authz/actor.js";
+import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
+import type { RunRegistry } from "../runRegistry.js";
+import type { RunControl } from "../runRegistry/runControl.js";
 import type { RunStore } from "../runStore.js";
 import { createRunsService, type RunsService } from "../runsService.js";
+import type { FollowUpInbox, ThreadAdmission } from "../threadAdmission.js";
+import type { Clock } from "../trace/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
+import { defaultAdmission, steerRun, type DispatchFollowUp } from "./admission.js";
+import { waitCapabilityFor, type WaitCapability } from "./awaitChildren.js";
 import type { DispatchOutcome } from "./outcome.js";
 
 /** The `spawn` block of `config.yaml` (docs/reference/specs/agent-conductor.md item 5). */
@@ -92,13 +99,18 @@ export interface SpawnRegistry {
   listActive(): ReadonlyArray<{ id: string; finished: boolean; parentRunId?: string }>;
 }
 
-/** The slice of the dispatcher's dependency bag the stage reads: the config
- *  (the fan-out knob, the requester's grants), the run store and service the
- *  reads go through. `CoreDeps` satisfies it; the stage never names `CoreDeps`. */
+/** The slice of the dispatcher's dependency bag the stage and the run tools'
+ *  capabilities read: the config (the fan-out knob, the requester's grants,
+ *  the allowlist a steer passes), the run store and service the reads go
+ *  through, the ledger and admission map a steer pushes into, the clock.
+ *  `CoreDeps` satisfies it; the stage never names `CoreDeps`. */
 export interface SpawnCoreDeps {
-  config: Pick<ConfigStore, "config" | "grantsFor">;
+  config: Pick<ConfigStore, "config" | "grantsFor" | "canRunAgent">;
   runStore: RunStore;
   runs?: RunsService;
+  runLedger: Pick<LedgerWriteThrough, "pushInbox">;
+  admission?: ThreadAdmission<DispatchFollowUp>;
+  clock?: Clock;
 }
 
 /** What the spawn needs: the dependency bag `dispatch()` runs the child with
@@ -335,25 +347,56 @@ export function spawnCapabilityFor<D extends SpawnCoreDeps>(
 
 /**
  * What a run's tools may do to other runs (docs/reference/specs/agent-conductor.md
- * items 3–4), built by `dispatch()` for every run once it is registered: the
- * spawn as THIS run — its id and depth fixed, the remaining wall clock read at
- * every call — and the reads as the REQUESTER, through the one runs service
+ * items 3–4 and 8), built by `dispatch()` for every run once it is registered:
+ * the spawn as THIS run — its id and depth fixed, the remaining wall clock
+ * read at every call; the reads as the REQUESTER, through the one runs service
  * every surface reads (production's, or one over the registry and the store
  * without a ledger's foreign rows) under the actor the chat surface resolves
- * for the same user. Only a toolset that holds the run tools reaches either,
- * so nothing else in the tree starts a run.
+ * for the same user; the steer as the requester from this run (`steerRun`:
+ * the parent's user, channel and thread link as the sender, the run as
+ * `from`); and the wait over this run's own stop control and inbox and the
+ * process's registry. Only a toolset that holds the run tools reaches any of
+ * them, so nothing else in the tree starts, steers or awaits a run.
  */
 export function runToolCapabilities<D extends SpawnCoreDeps>(
-  deps: SpawnDeps<D> & { registry: SpawnRegistry & Parameters<typeof createRunsService>[0]["registry"] },
-  run: Omit<SpawnParent, "remainingMs">,
-): { spawn: SpawnCapability; runs: RunsReadCapability } {
+  deps: SpawnDeps<D> & {
+    registry: SpawnRegistry & Parameters<typeof createRunsService>[0]["registry"] & Pick<RunRegistry, "subscribeIndex">;
+  },
+  run: Omit<SpawnParent, "remainingMs"> & {
+    control: Pick<RunControl, "requested">;
+    inbox: Pick<FollowUpInbox<DispatchFollowUp>, "size">;
+  },
+): { spawn: SpawnCapability; runs: RunsReadCapability; steer: SteerCapability; wait: WaitCapability } {
+  const { core } = deps;
   return {
     spawn: spawnCapabilityFor(deps, run),
     runs: {
-      service: deps.core.runs ?? createRunsService({ registry: deps.registry, store: deps.core.runStore }),
-      actor: resolveChatActor(run.msg, (id) => deps.core.config.grantsFor(id)),
+      service: core.runs ?? createRunsService({ registry: deps.registry, store: core.runStore }),
+      actor: resolveChatActor(run.msg, (id) => core.config.grantsFor(id)),
       runId: run.runId,
     },
+    steer: {
+      steer: (target, text) =>
+        steerRun(
+          {
+            config: core.config,
+            runLedger: core.runLedger,
+            ...(core.clock ? { clock: core.clock } : {}),
+            admission: core.admission ?? defaultAdmission,
+          },
+          {
+            userId: run.msg.userId,
+            ...(run.msg.userName !== undefined ? { userName: run.msg.userName } : {}),
+            channelId: run.msg.channelId,
+            ...(run.msg.channelName !== undefined ? { channelName: run.msg.channelName } : {}),
+            ...(run.msg.sourceUrl !== undefined ? { sourceUrl: run.msg.sourceUrl } : {}),
+            from: { runId: run.runId },
+          },
+          target,
+          text,
+        ),
+    },
+    wait: waitCapabilityFor({ registry: deps.registry, control: run.control, inbox: run.inbox, clock: deps.clock }),
   };
 }
 

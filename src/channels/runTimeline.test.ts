@@ -90,6 +90,17 @@ describe("createRunTimeline — grouping", () => {
   it("passes input / answer / run_note through, and ignores unknown or malformed events", () => {
     const t = createRunTimeline();
     expect(t.push({ type: "input", text: "review #1", at: 1 })).toEqual([{ kind: "input", text: "review #1", at: 1 }]);
+    // An input's origin: the link, the channel, the user — and the run that sent it, when a run did.
+    expect(
+      t.push({
+        type: "input",
+        text: "narrow it",
+        at: 2,
+        source: { user: "alice", run: "run-parent", url: "https://s/1" },
+      }),
+    ).toEqual([
+      { kind: "input", text: "narrow it", at: 2, source: { user: "alice", run: "run-parent", url: "https://s/1" } },
+    ]);
     expect(t.push({ type: "answer", text: "LGTM", at: 9 })).toEqual([{ kind: "answer", text: "LGTM", at: 9 }]);
     // The coding post-step's PR: url + a positive integer number, `created` only when literally true.
     expect(

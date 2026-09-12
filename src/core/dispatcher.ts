@@ -668,11 +668,21 @@ export async function dispatch(
       parentRunId,
     });
     // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
-    // agent-conductor.md): spawn a child as this run, and read the runs its
-    // REQUESTER may. Only a toolset that holds the run tools reaches either.
-    const { spawn, runs } = runToolCapabilities(
+    // agent-conductor.md): spawn a child as this run, read the runs its
+    // REQUESTER may, steer a child through the inbox a thread reply takes, and
+    // wait on its children within its own clock. Only a toolset that holds the
+    // run tools reaches any of them.
+    const { spawn, runs, steer, wait } = runToolCapabilities(
       { core: deps, dispatch, registry, clock },
-      { runId: run.id, depth: opts.parent?.depth ?? 0, agentName: agent.name, msg, io },
+      {
+        runId: run.id,
+        depth: opts.parent?.depth ?? 0,
+        agentName: agent.name,
+        msg,
+        io,
+        control: run.control,
+        inbox: admitted.inbox,
+      },
     );
     // The agent loop (dispatch/runLoop.ts): the model turn, the follow-up inbox,
     // the settle and the post-steps, the finish. A throw propagates to the
@@ -711,6 +721,8 @@ export async function dispatch(
       ending,
       spawn,
       runs,
+      steer,
+      wait,
       parentRunId,
     });
     const {

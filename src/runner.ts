@@ -349,6 +349,7 @@ async function runLoop(
       const source = {
         ...(input.sourceUrl ? { url: input.sourceUrl } : {}),
         ...(input.userName ? { user: input.userName } : {}),
+        ...(input.from ? { run: input.from.runId } : {}),
       };
       emit({ type: "input", text: redactSecrets(input.text), ...(Object.keys(source).length > 0 ? { source } : {}) });
       note("follow_up", `follow-up folded in: ${redactSecrets(followUpSnippet(input))}`);

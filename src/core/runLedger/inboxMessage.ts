@@ -14,12 +14,18 @@ type Attachment = { mediaType: string; data: string; name?: string };
 
 /** The durable copy of a message: the text given (a follow-up's directive-free
  *  text; a request's text verbatim, directives included), sender, link, thread,
- *  arrival time — attachments included when the row stays under
- *  `DURABLE_INBOX_MAX_BYTES`, because a screenshot must survive a restart as
- *  much as its caption. Over the cap the bytes are left with the in-memory
- *  copy and the row says how many attachments it lost, so the message read
- *  back can say so too. */
-export function durableInboxMessage(msg: IncomingMessage, text: string, at: number): Record<string, unknown> {
+ *  arrival time, the run that sent it when a run did (`fromRunId`, a parent's
+ *  steer — agent-conductor item 8) — attachments included when the row stays
+ *  under `DURABLE_INBOX_MAX_BYTES`, because a screenshot must survive a
+ *  restart as much as its caption. Over the cap the bytes are left with the
+ *  in-memory copy and the row says how many attachments it lost, so the
+ *  message read back can say so too. */
+export function durableInboxMessage(
+  msg: IncomingMessage,
+  text: string,
+  at: number,
+  from?: { runId: string },
+): Record<string, unknown> {
   const base: Record<string, unknown> = {
     channelId: msg.channelId,
     userId: msg.userId,
@@ -29,6 +35,7 @@ export function durableInboxMessage(msg: IncomingMessage, text: string, at: numb
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
+    ...(from !== undefined ? { fromRunId: from.runId } : {}),
   };
   const images = msg.images ?? [];
   const documents = msg.documents ?? [];
@@ -53,13 +60,13 @@ const attachmentRow = (a: Attachment) => ({
 
 /** A durable row back as the message it was: text (with the dropped-attachments
  *  note appended when the row says it lost some), sender, link, thread,
- *  attachments as typed parts, and the arrival time (`fallbackAt` when the row
- *  has none). Undefined when the stored shape is not one this build wrote —
- *  the caller skips it, never fatal. */
+ *  attachments as typed parts, the arrival time (`fallbackAt` when the row
+ *  has none), and the run that sent it when one did. Undefined when the
+ *  stored shape is not one this build wrote — the caller skips it, never fatal. */
 export function messageFromInbox(
   stored: Record<string, unknown>,
   fallbackAt: number,
-): { msg: IncomingMessage; at: number } | undefined {
+): { msg: IncomingMessage; at: number; from?: { runId: string } } | undefined {
   const m = stored;
   const str = (k: string): string | undefined => (typeof m[k] === "string" ? (m[k] as string) : undefined);
   const text = str("text");
@@ -71,6 +78,7 @@ export function messageFromInbox(
   const userName = str("userName");
   const sourceUrl = str("sourceUrl");
   const channelName = str("channelName");
+  const fromRunId = str("fromRunId");
   const at = typeof m.at === "number" && Number.isFinite(m.at) ? m.at : fallbackAt;
   const images = attachmentsFromInbox(m.images);
   const documents = attachmentsFromInbox(m.documents);
@@ -86,7 +94,7 @@ export function messageFromInbox(
     ...(images ? { images } : {}),
     ...(documents ? { documents } : {}),
   };
-  return { msg, at };
+  return { msg, at, ...(fromRunId !== undefined ? { from: { runId: fromRunId } } : {}) };
 }
 
 /** A stored attachment list back as typed attachments; an entry that is not

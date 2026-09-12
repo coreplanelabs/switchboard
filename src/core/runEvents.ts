@@ -319,8 +319,10 @@ export type RunEvent =
       text: string;
       /** Where the request came from, for the Request block: the channel and
        *  user display names and a link back to the triggering message —
-       *  whatever the adapter supplied (all optional). */
-      source?: { url?: string; channel?: string; user?: string };
+       *  whatever the adapter supplied (all optional) — and, for a follow-up a
+       *  run sent rather than a person (a parent's `send_to_run`), that run's
+       *  id (docs/reference/specs/agent-conductor.md item 8). */
+      source?: { url?: string; channel?: string; user?: string; run?: string };
       seq?: number;
       at?: number;
     }

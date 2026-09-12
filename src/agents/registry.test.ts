@@ -688,9 +688,18 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
     expect(getAgent("conductor")).toBe(AGENTS.conductor);
   });
 
-  it("conductor's prompt says what a child is — a run the requester could start by hand, in its own thread, visible to the channel, under their permissions — names its tools, the depth and fan-out limits, and forbids doing a child's job or claiming a result it did not read", () => {
+  it("conductor's prompt says what a child is — a run the requester could start by hand, in its own thread, visible to the channel, under their permissions — names its tools, the depth and fan-out limits, says to fan out, await and compile, that an ended child is never restarted, and forbids doing a child's job or claiming a result it did not read", () => {
     const sys = AGENTS.conductor.system;
-    for (const tool of ["spawn_run", "list_runs", "get_run_status", "update_status", "web_fetch", "github_file"])
+    for (const tool of [
+      "spawn_run",
+      "send_to_run",
+      "await_runs",
+      "list_runs",
+      "get_run_status",
+      "update_status",
+      "web_fetch",
+      "github_file",
+    ])
       expect(sys).toContain(tool);
     expect(sys).toMatch(/start by hand/);
     expect(sys).toMatch(/thread of its own/);
@@ -699,6 +708,13 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
     expect(sys).toMatch(/cannot spawn children/);
     expect(sys).toMatch(/spawn\.maxChildren/);
     expect(sys).toMatch(/what is left of yours/);
+    // Fan out, await, compile — and what the wait's early ends mean.
+    expect(sys).toMatch(/await_runs.*(all|every).*child/i);
+    expect(sys).toMatch(/budget/);
+    expect(sys).toMatch(/follow-up/);
+    expect(sys).toMatch(/keeps? running/);
+    expect(sys).toMatch(/never restarted/);
+    expect(sys).toMatch(/compile/i);
     expect(sys).toMatch(/[Nn]ever do a child's job yourself/);
     expect(sys).toMatch(/never claim a child finished/);
     // Every preset a child can run is named, so the model picks from the real list.

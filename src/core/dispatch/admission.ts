@@ -66,9 +66,37 @@ export interface AdmissionDeps {
 }
 
 /** A follow-up as the dispatcher admits it: the runner's `FollowUpInput` plus
- *  the message and channel handle it arrived on — what a fresh turn needs if
- *  the live run ends without consuming it (docs/reference/specs/thread-admission.md item 4). */
-export type DispatchFollowUp = FollowUpInput & { msg: IncomingMessage; io: ChannelIO };
+ *  the message it arrived as and, for a person's, the channel handle it
+ *  arrived on — what a fresh turn needs if the live run ends without consuming
+ *  it (docs/reference/specs/thread-admission.md item 4). A steer a run sent
+ *  (`from` set; item 7) has no handle: a program's message is never run fresh. */
+export type DispatchFollowUp = FollowUpInput & { msg: IncomingMessage; io?: ChannelIO };
+
+/** One follow-up as the slot's inbox holds it: the message's sender, link and
+ *  attachments on the runner's shape, the arrival time, the durable seq when
+ *  the ledger took a copy, the run that sent it when a run did, and the handle
+ *  a fresh turn would reply on when a person did. The one literal every steer
+ *  builds, so a thread reply and a parent's steer fold in as the same thing. */
+function followUpOf(
+  msg: IncomingMessage,
+  text: string,
+  at: number,
+  opts: { io?: ChannelIO; ledgerSeq?: number; from?: { runId: string } },
+): DispatchFollowUp {
+  return {
+    text,
+    userId: msg.userId,
+    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+    ...(msg.images !== undefined ? { images: msg.images } : {}),
+    ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
+    at,
+    ...(opts.ledgerSeq !== undefined ? { ledgerSeq: opts.ledgerSeq } : {}),
+    ...(opts.from !== undefined ? { from: opts.from } : {}),
+    msg,
+    ...(opts.io !== undefined ? { io: opts.io } : {}),
+  };
+}
 
 /** The process-wide admission map (one bot process = one map; the registry's
  *  singleton is the same shape of default). */
@@ -103,24 +131,14 @@ export interface RestartContext {
 export { DURABLE_INBOX_MAX_BYTES, durableInboxMessage } from "../runLedger/inboxMessage.js";
 
 /** A durable inbox item back as a follow-up for the resumed run, on the
- *  resume's channel handle; undefined when the stored shape is not one this
- *  build wrote (skipped, never fatal). */
+ *  resume's channel handle — none for a steer a run sent, which is never run
+ *  fresh; undefined when the stored shape is not one this build wrote
+ *  (skipped, never fatal). */
 export function followUpFromInbox(item: InboxItem, io: ChannelIO, fallbackAt: number): DispatchFollowUp | undefined {
   const restored = messageFromInbox(item.message, fallbackAt);
   if (!restored) return undefined;
-  const { msg, at } = restored;
-  return {
-    text: msg.text,
-    userId: msg.userId,
-    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-    ...(msg.images !== undefined ? { images: msg.images } : {}),
-    ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-    at,
-    ledgerSeq: item.seq,
-    msg,
-    io,
-  };
+  const { msg, at, from } = restored;
+  return followUpOf(msg, msg.text, at, { ledgerSeq: item.seq, ...(from ? { from } : { io }) });
 }
 
 /** Close a restart's row this dispatch will never run (item 42): the thread
@@ -315,18 +333,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       console.log(`[dispatch] ${msg.threadKey} the run finished during the steer — running the follow-up fresh`);
       return { kind: "redispatch" };
     }
-    claim.live.inbox.push({
-      text: directives.text,
-      userId: msg.userId,
-      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-      ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-      ...(msg.images !== undefined ? { images: msg.images } : {}),
-      ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-      at,
-      ...(ledgerSeq !== undefined ? { ledgerSeq } : {}),
-      msg,
-      io,
-    });
+    claim.live.inbox.push(followUpOf(msg, directives.text, at, { io, ledgerSeq }));
     console.log(
       `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
@@ -383,20 +390,8 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       // adopt-time re-read ran before this push landed, or after — either
       // way the inbox folds one seq in once): hand the item to it as well.
       const nowLive = admission.get(msg.threadKey);
-      if (nowLive && nowLive.runId === elsewhere.runId) {
-        nowLive.inbox.push({
-          text: directives.text,
-          userId: msg.userId,
-          ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-          ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-          ...(msg.images !== undefined ? { images: msg.images } : {}),
-          ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
-          at: now,
-          ledgerSeq: seq,
-          msg,
-          io,
-        });
-      }
+      if (nowLive && nowLive.runId === elsewhere.runId)
+        nowLive.inbox.push(followUpOf(msg, directives.text, now, { io, ledgerSeq: seq }));
       console.log(
         `[dispatch] ${msg.threadKey} follow-up steered into run ${elsewhere.runId} live on another generation (durable seq ${seq}${nowLive ? ", now live here" : ""})`,
       );
@@ -414,6 +409,91 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     claim = again;
   }
   return { kind: "proceed", admitted: claim.live };
+}
+
+/** A run a steer is aimed at: its id, the thread it holds, and the agent live
+ *  in it — the allowlist the sender must pass, as for a thread reply. */
+export interface SteerTarget {
+  runId: string;
+  threadKey: string;
+  agent: string;
+}
+
+/** Who sends a steer on a run's behalf: the requesting user, in the channel
+ *  the parent runs in, with the parent's thread as the link — and the run
+ *  itself as `from`. */
+export interface SteerSender {
+  userId: string;
+  userName?: string;
+  channelId: string;
+  channelName?: string;
+  sourceUrl?: string;
+  from: { runId: string };
+}
+
+/** How a steer ended: folded into the run here (its slot's inbox, the durable
+ *  copy's seq riding the item) or on another generation (the durable inbox
+ *  alone); refused because the sender may not run the live agent; or aimed at
+ *  a run that is not live anywhere — no slot here, and a push the ledger
+ *  refused — so nothing landed. */
+export type SteerOutcome =
+  | { kind: "steered"; where: "here" | "elsewhere"; at: number; ledgerSeq?: number }
+  | { kind: "refused"; reason: "live_agent_allowlist" }
+  | { kind: "not_live" };
+
+/**
+ * A steer by a run rather than a thread reply (docs/reference/specs/thread-admission.md
+ * item 7; agent-conductor item 8): `send_to_run`'s path into a live child. The
+ * same gate a thread reply passes — the sender must be allowed to run the live
+ * agent, since being heard by an agent counts as running it — then the same
+ * two pushes in the same order: the durable copy first (item 5, so its seq
+ * rides the in-memory item and the next step record says the run consumed
+ * it), then the slot that holds the target run NOW (matched by run id — a
+ * newer run on the same thread is never handed another run's steer). No
+ * agent-switch gate: a steer names no agent. No ack: nothing was said in the
+ * target's thread to answer. No channel handle on the item: a program's
+ * message is never run fresh (settle). A target with no slot here whose push
+ * the ledger refused is not live, and the caller says so by name.
+ */
+export async function steerRun(
+  deps: {
+    config: Pick<ConfigStore, "canRunAgent">;
+    runLedger: Pick<LedgerWriteThrough, "pushInbox">;
+    clock?: Clock;
+    admission: ThreadAdmission<DispatchFollowUp>;
+  },
+  sender: SteerSender,
+  target: SteerTarget,
+  text: string,
+): Promise<SteerOutcome> {
+  if (!deps.config.canRunAgent(sender.userId, target.agent)) return { kind: "refused", reason: "live_agent_allowlist" };
+  const at = (deps.clock ?? systemClock)();
+  const msg: IncomingMessage = {
+    channelId: sender.channelId,
+    userId: sender.userId,
+    ...(sender.userName !== undefined ? { userName: sender.userName } : {}),
+    ...(sender.channelName !== undefined ? { channelName: sender.channelName } : {}),
+    threadKey: target.threadKey,
+    text,
+    ...(sender.sourceUrl !== undefined ? { sourceUrl: sender.sourceUrl } : {}),
+    receivedAt: at,
+  };
+  const ledgerSeq = await deps.runLedger.pushInbox(target.runId, durableInboxMessage(msg, text, at, sender.from));
+  const live = deps.admission.get(target.threadKey);
+  if (live && live.runId === target.runId) {
+    live.inbox.push(followUpOf(msg, text, at, { ledgerSeq, from: sender.from }));
+    console.log(
+      `[steer] run ${sender.from.runId} → ${target.agent} run ${target.runId} in ${target.threadKey} (${live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
+    );
+    return { kind: "steered", where: "here", at, ...(ledgerSeq !== undefined ? { ledgerSeq } : {}) };
+  }
+  if (ledgerSeq !== undefined) {
+    console.log(
+      `[steer] run ${sender.from.runId} → ${target.agent} run ${target.runId} live on another generation (durable seq ${ledgerSeq})`,
+    );
+    return { kind: "steered", where: "elsewhere", at, ledgerSeq };
+  }
+  return { kind: "not_live" };
 }
 
 /** The ledger handles a resumed or restarted run is taken up with: the adopted

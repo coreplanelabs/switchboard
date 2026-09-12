@@ -64,6 +64,8 @@ export interface TimelineSource {
   url?: string;
   channel?: string;
   user?: string;
+  /** The run that sent the input, when a run did (a parent's steer). */
+  run?: string;
 }
 
 export interface TimelineStep {
@@ -309,6 +311,7 @@ export function createRunTimeline(): RunTimeline {
           if (str(o.url)) source.url = str(o.url);
           if (str(o.channel)) source.channel = str(o.channel);
           if (str(o.user)) source.user = str(o.user);
+          if (str(o.run)) source.run = str(o.run);
           if (Object.keys(source).length > 0) change.source = source;
         }
         return [change];
