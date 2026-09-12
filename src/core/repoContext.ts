@@ -34,9 +34,11 @@ import type { PrSize } from "./digestCoverage.js";
 // a repo that does not exist): (1) a bare token NEVER
 // overrides a repo the thread already established, whatever its strength —
 // the first binding stays until a STRONG signal replaces it; (2) in a thread
-// with no repo yet, a bare token binds only when the injectable resident
-// probe (`isResident`) confirms it names an onboarded resource. No probe
-// (local/dev, tests) → binds as before: there is no registry to consult.
+// with no repo yet, a bare token binds only when the injectable probe
+// (`probe` — the machine class's vet: the resident registry for a
+// `repo-resident` run, GitHub for a `repo-cold` one) confirms it names a
+// repository the run may bind. No probe (local/dev, tests) → binds as before:
+// there is nothing to consult. "The registry" below is that vet.
 //
 // ADDRESSED repos are the third strength (without them, a thread bound to
 // acme/api by an issue link keeps every later `in acme/web` run on the
@@ -335,13 +337,15 @@ interface ThreadSignals {
 type ThreadEvent = { strong: string } | { addressed: Addressed };
 
 /** Sync "is this slug an onboarded resident?" predicate for the history scan
- *  (`repoFromThread`), and its async twin for the resolver. Injected by the
- *  dispatcher from the resident config; absent → weak tokens bind unvetted.
- *  The async probe distinguishes a registry that REFUSED (`false`) from one
+ *  (`repoFromThread`), and the resolver's async probe — "is this slug a
+ *  repository this run may bind?", answered by the machine class's vet: the
+ *  resident registry for `repo-resident`, GitHub with the run's credential for
+ *  `repo-cold` (`src/core/dispatch/resolve.ts`). Absent → weak tokens bind
+ *  unvetted. The probe distinguishes a vet that REFUSED (`false`) from one
  *  that did not ANSWER (`"unreachable"`: transport failure, outage window) —
  *  a throw counts as the latter. */
 export type ResidentPredicate = (slug: string) => boolean;
-export type ResidentProbe = (slug: string) => Promise<boolean | "unreachable">;
+export type RepoProbe = (slug: string) => Promise<boolean | "unreachable">;
 /** The registry listing — every onboarded `owner/name` — for resolving a bare
  *  `in <name>` address. Undefined (or a throw) = no answer: names bind nothing. */
 export type ResidentSlugs = () => Promise<string[] | undefined>;
@@ -390,13 +394,13 @@ function safePredicate(isResident: ResidentPredicate, slug: string): boolean {
   }
 }
 
-/** The probe's answer with a throw folded into "unreachable" (the registry did
- *  not answer — never a refusal, never a bind); no probe → true (no registry
- *  to consult → bind as before). */
-async function safeProbe(isResident: ResidentProbe | undefined, slug: string): Promise<boolean | "unreachable"> {
-  if (!isResident) return true;
+/** The probe's answer with a throw folded into "unreachable" (the vet did not
+ *  answer — never a refusal, never a bind); no probe → true (nothing to
+ *  consult → bind as before). */
+async function safeProbe(probe: RepoProbe | undefined, slug: string): Promise<boolean | "unreachable"> {
+  if (!probe) return true;
   try {
-    const answer = await isResident(slug);
+    const answer = await probe(slug);
     return answer === true || answer === "unreachable" ? answer : false;
   } catch {
     return "unreachable";
@@ -429,7 +433,7 @@ export function repoFromThread(
 export async function resolveRepoContext(
   msg: { text: string },
   history: Array<{ role: string; text: string }> = [],
-  isResident?: ResidentProbe,
+  probe?: RepoProbe,
   residentSlugs?: ResidentSlugs,
 ): Promise<RepoContext> {
   const s = extractSignals(msg.text);
@@ -448,7 +452,7 @@ export async function resolveRepoContext(
   const vet = async (cand: string): Promise<boolean> => {
     let p = vetted.get(cand);
     if (!p) {
-      p = safeProbe(isResident, cand);
+      p = safeProbe(probe, cand);
       vetted.set(cand, p);
     }
     const answer = await p;
@@ -470,7 +474,7 @@ export async function resolveRepoContext(
   const resolveAddressed = async (a: Addressed): Promise<string | undefined> => {
     // Unvetted (no probe), an addressed slug is the weak token it always was —
     // `in try/catch` is ordinary prose, and only the registry can tell.
-    if (a.slug !== undefined) return isResident && (await vet(a.slug)) ? a.slug : undefined;
+    if (a.slug !== undefined) return probe && (await vet(a.slug)) ? a.slug : undefined;
     const matches = ((await listSlugs()) ?? []).filter((slug) => slug.split("/")[1] === a.name);
     return matches.length === 1 ? matches[0] : undefined;
   };

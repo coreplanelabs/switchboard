@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { secretsFrom } from "../secrets.js";
-import { AGENTS } from "../agents/registry.js";
+import { AGENTS, type AgentDef } from "../agents/registry.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { LocalExecutor } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
@@ -27,9 +27,10 @@ vi.mock("./githubApp.js", async (importOriginal) => {
   };
 });
 
-// Feature: docs/reference/specs/execution.md — per-agent executor provisioning: agents
-// declare the resources they need (AgentDef.resources); an agent that declares
-// no repo gets a null executor and no sandbox/workspace is ever provisioned.
+// Feature: docs/reference/specs/execution.md — per-agent executor provisioning: each
+// agent declares the machine class its runs are provisioned on
+// (AgentDef.machine); an agent on `none` gets a null executor and no
+// sandbox/workspace is ever provisioned.
 
 function dirs(): Pick<ExecutorFactoryOptions, "workspaceDir" | "dataDir"> {
   const dir = mkdtempSync(join(tmpdir(), "swb-factory-"));
@@ -58,15 +59,15 @@ describe("makeExecutor per-agent provisioning", () => {
     );
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(backend).toBe("local"); // a null executor runs nothing anywhere: its spans say `local` (docs/reference/specs/tracing.md)
-    // Tools reaching a resource-less agent's executor is a config bug — it
-    // must surface legibly, not crash or provision anything.
-    await expect(ex.exec("echo hi")).rejects.toThrow(/no repo resource/);
+    // Tools reaching a machine-less agent's executor is a config bug — it
+    // must surface legibly, naming the class, not crash or provision anything.
+    await expect(ex.exec("echo hi")).rejects.toThrow(/machine class "none"/);
   });
 
   it("an agent declaring no repo gets a null executor with e2b configured (no API key needed)", async () => {
     vi.stubEnv("E2B_API_KEY", "");
     const { executor: ex } = await makeExecutor({ execution: { type: "e2b" }, ...dirs() }, ctx("general"));
-    await expect(ex.readFile("x")).rejects.toThrow(/no repo resource/);
+    await expect(ex.readFile("x")).rejects.toThrow(/machine class "none"/);
   });
 
   it("an agent declaring no repo creates no workspace directory in local mode", async () => {
@@ -561,6 +562,132 @@ describe("makeExecutor resident selection", () => {
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "");
     stubFetch();
     await expect(makeExecutor(residentOpts(), repoCtx())).rejects.toThrow(/RESIDENT_OPERATOR_TOKEN is not set/);
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 18 — the two machine classes
+// that never touch the resident registry or Worker. `blank` is a per-thread
+// sandbox with an empty workspace: no repository, no credential. `repo-cold`
+// is a per-thread sandbox with the checkout and the run's credential, even
+// when the repository has a serviceable resident. Both are exercised with
+// synthetic agents: no preset declares them yet.
+describe("makeExecutor machine classes", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    resetResidentProbeCache();
+  });
+
+  /** Cloudflare sandbox AND a resident configured: the classes under test must ignore the latter. */
+  const bothBackends = (): ExecutorFactoryOptions => ({
+    execution: {
+      type: "cloudflare",
+      url: "https://sandbox.example",
+      resident: { baseUrl: "https://resident.example" },
+    },
+    ...dirs(),
+  });
+
+  const agentOn = (machine: AgentDef["machine"], base: AgentDef = AGENTS.coding): AgentDef => ({
+    ...base,
+    name: `${base.name}-${machine}`,
+    machine,
+  });
+
+  /** A fetch that records nothing and fails loudly: no class here may call the network at selection. */
+  function poisonFetch() {
+    const fn = vi.fn(() => {
+      throw new Error("unexpected network call");
+    });
+    vi.stubGlobal("fetch", fn);
+    return fn;
+  }
+
+  const optsOf = (ex: unknown) =>
+    (ex as { opts: { repo?: string; ref?: string; resolveEnvs: () => Promise<Record<string, string>> } }).opts;
+
+  it("blank → a per-thread sandbox with NO repository and NO credential, no resident probe, even with a repo in the context", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.mocked(resolveGithubToken).mockClear();
+    const fetchSpy = poisonFetch();
+    const { executor, note, resident, binding, backend } = await makeExecutor(bothBackends(), {
+      threadKey: "slack:CX:1.0",
+      agent: agentOn("blank"),
+      repo: "jshttp/vary",
+      ref: "master",
+    });
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(backend).toBe("sandbox");
+    expect(note).toBeUndefined();
+    expect(resident).toBeFalsy();
+    expect(binding).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // The workspace is empty: the sandbox is told of no repository to clone…
+    expect(optsOf(executor).repo).toBeUndefined();
+    expect(optsOf(executor).ref).toBeUndefined();
+    // …and holds no GitHub credential: nothing says this run acts as anyone.
+    await expect(optsOf(executor).resolveEnvs()).resolves.toEqual({});
+    expect(resolveGithubToken).not.toHaveBeenCalled();
+  });
+
+  it("blank (local) → a per-thread workspace directory, empty", async () => {
+    const d = dirs();
+    const { executor, backend } = await makeExecutor({ ...d }, { threadKey: "slack:CX:1.0", agent: agentOn("blank") });
+    expect(executor).toBeInstanceOf(LocalExecutor);
+    expect(backend).toBe("local");
+    expect(existsSync(join(d.workspaceDir, "slack_CX_1.0"))).toBe(true);
+  });
+
+  it("repo-cold → a per-thread sandbox WITH the checkout and the run's credential; the resident is never probed though one is configured", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.mocked(resolveGithubToken).mockClear();
+    const fetchSpy = poisonFetch();
+    const { executor, note, resident, binding, backend } = await makeExecutor(bothBackends(), {
+      threadKey: "slack:CX:1.0",
+      agent: agentOn("repo-cold"),
+      repo: "jshttp/vary",
+      ref: "master",
+    });
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(backend).toBe("sandbox");
+    expect(note).toBeUndefined(); // nothing fell back: cold is the class, not a fallback
+    expect(resident).toBeFalsy();
+    expect(binding).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(optsOf(executor)).toMatchObject({ repo: "jshttp/vary", ref: "master" });
+    // The credential is the run's, scoped like the sandbox token today: a
+    // `full` toolset writes, a `readonly` one reads.
+    await expect(optsOf(executor).resolveEnvs()).resolves.toEqual({ GH_TOKEN: "ghs_write" });
+    const readonly = await makeExecutor(bothBackends(), {
+      threadKey: "slack:CX:1.0",
+      agent: agentOn("repo-cold", AGENTS.review),
+      repo: "jshttp/vary",
+    });
+    await expect(optsOf(readonly.executor).resolveEnvs()).resolves.toEqual({ GH_TOKEN: "ghs_read" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("repo-cold without a resolved repository → the per-thread sandbox with an empty workspace, no note", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    const fetchSpy = poisonFetch();
+    const { executor, note } = await makeExecutor(bothBackends(), {
+      threadKey: "slack:CX:1.0",
+      agent: agentOn("repo-cold"),
+    });
+    expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect(note).toBeUndefined();
+    expect(optsOf(executor).repo).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("the null executor's tool error names the class and the classes that provision a workspace", async () => {
+    const { executor } = await makeExecutor({ ...dirs() }, ctx("general"));
+    await expect(executor.exec("echo hi")).rejects.toThrow(
+      'Agent "general" runs on machine class "none", so it has no execution workspace. Declare a machine class that provisions one (`repo-resident`, `repo-cold` or `blank`) if its tools need one.',
+    );
   });
 });
 

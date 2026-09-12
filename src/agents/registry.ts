@@ -1,9 +1,32 @@
-// Agent definitions. An agent is a system prompt + toolset + turn budget.
+// Agent definitions. An agent is a system prompt + toolset + machine class + turn budget.
 import type { Effort } from "../effort.js";
 import type { CacheTtl } from "../providers/types.js";
 import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS } from "../core/ship/contract.js";
 // Which model runs it is resolved separately by the config layers, so any
 // agent can run on any configured provider/model.
+
+/** The machine classes a run's tools can execute on — the machine half of a
+ *  profile's reach (docs/decisions/0026-capability-profiles-and-request-routing.md),
+ *  provisioned by the executor factory from the class alone
+ *  (docs/reference/specs/execution.md item 18):
+ *  - `none`: no executor. The agent's tools run in the bot process, or it has none.
+ *  - `blank`: a per-thread sandbox with an empty workspace — no repository is
+ *    resolved and no credential is minted.
+ *  - `repo-cold`: a per-thread sandbox with the checkout and the run's
+ *    credential; bare repository names are vetted against GitHub with that
+ *    credential, and the resident registry and Worker are never consulted.
+ *  - `repo-resident`: the target repository's onboarded resident when it is
+ *    serviceable, else a per-thread sandbox with the checkout and a named note;
+ *    bare repository names are vetted against the resident registry. */
+export const MACHINE_CLASSES = ["none", "blank", "repo-cold", "repo-resident"] as const;
+export type MachineClass = (typeof MACHINE_CLASSES)[number];
+
+/** Whether a class carries a repository checkout — the one fact repository
+ *  resolution and the repository gates read off the class: a run on a class
+ *  without one never resolves or gates a repository. */
+export function machineNeedsRepo(machine: MachineClass): boolean {
+  return machine === "repo-cold" || machine === "repo-resident";
+}
 
 export interface AgentDef {
   name: string;
@@ -26,10 +49,10 @@ export interface AgentDef {
    *  model turn plus its tool run) can exceed 5 minutes, or the cache written
    *  by each call expires before the next call can read it. */
   cacheTtl?: CacheTtl;
-  /** Resources the agent needs (declared per agent, resolved by the
-   *  executor factory). No `repo` declared → no workspace/sandbox is ever
-   *  provisioned for this agent's runs. */
-  resources?: { repo?: "required" | "none" };
+  /** Where the agent's tools execute: the machine class the executor factory
+   *  provisions for its runs (`MACHINE_CLASSES`). `none` provisions nothing —
+   *  no workspace, no sandbox, no credential. */
+  machine: MachineClass;
   /** System prompt variant for resident-repo runs (docs/reference/specs/resident-repos.md):
    *  the workspace is a ready worktree — no cloning, no installs, no repo
    *  discovery, no gh CLI. Selected by the dispatcher AFTER executor
@@ -291,11 +314,12 @@ export const AGENTS: Record<string, AgentDef> = {
       "Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.",
     system: GENERAL_SYSTEM,
     toolset: "assistant",
+    // The GitHub tools are REST in the bot process, so a general ask never
+    // provisions a workspace or sandbox (docs/reference/specs/agent-general.md item 4).
+    machine: "none",
     maxTurns: 8, // a repo read is 2-3 calls (repos → tree → file); an issue action 1-2; still fast
     maxTokens: 16000,
     maxMinutes: 5,
-    // No `resources`: the GitHub tools are REST in the bot process, so a
-    // general ask still never provisions a workspace or sandbox (item 4).
   },
   coding: {
     name: "coding",
@@ -312,7 +336,7 @@ export const AGENTS: Record<string, AgentDef> = {
     cacheTtl: "1h",
     // No built-in effort: the deployment decides (`defaults.efforts.coding`,
     // `config set channel efforts.coding=…`, or `effort:` per request).
-    resources: { repo: "required" },
+    machine: "repo-resident",
   },
   review: {
     name: "review",
@@ -320,7 +344,7 @@ export const AGENTS: Record<string, AgentDef> = {
     system: REVIEW_SYSTEM,
     residentSystem: REVIEW_SYSTEM_RESIDENT,
     toolset: "readonly",
-    resources: { repo: "required" },
+    machine: "repo-resident",
     maxTurns: 30, // backstop only; wall clock is the real budget (12 bound at ~4 min in practice)
     maxTokens: 64000,
     maxMinutes: 25, // safety net, not the mechanism — typical reviews land in ~5
@@ -335,15 +359,15 @@ export const AGENTS: Record<string, AgentDef> = {
     // on the coding/review defs above — runAgent is never called with THIS def.
     system:
       "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
-    // Full toolset so a ship thread provisions a writable workspace class like
-    // coding; placeholder budgets — the pipeline is bounded by the `ship` config
-    // caps and by each child's own budgets clipped to the remaining wall clock,
-    // never by these numbers.
+    // Full toolset and the coding machine class, so repo and PR resolution
+    // gate a ship thread like a coding one; placeholder budgets — the pipeline
+    // is bounded by the `ship` config caps and by each child's own budgets
+    // clipped to the remaining wall clock, never by these numbers.
     toolset: "full",
+    machine: "repo-resident",
     maxTurns: 1,
     maxTokens: 16000,
     maxMinutes: 5,
-    resources: { repo: "required" },
   },
   research: {
     name: "research",
@@ -351,7 +375,7 @@ export const AGENTS: Record<string, AgentDef> = {
       "Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.",
     system: RESEARCH_SYSTEM,
     toolset: "web",
-    resources: { repo: "none" }, // web I/O only; no workspace is provisioned
+    machine: "none", // web I/O only; no workspace is provisioned
     maxTurns: 12,
     maxTokens: 24000,
     maxMinutes: 8,

@@ -1,8 +1,8 @@
 // The authorize stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the gates a resolved request passes before a model turn, each asked against
 // the RESOLVED actor and agent (AGENTS.md invariant 3) — the agent allowlist,
-// the repository gates (not onboarded, unverified, access), the PR head
-// preflight and the attached-head guard. Each is a named refusal the thread
+// the repository gates (not onboarded or not visible, unverified, access), the
+// PR head preflight and the attached-head guard. Each is a named refusal the thread
 // sees, and the dispatch ends on it. The gates run where the pipeline reaches
 // them: the agent gate before the thread is claimed, the repository gates once
 // the target has landed and the ack card is up, the head gates around the
@@ -87,16 +87,58 @@ export async function authorizeAgent(
 
 /**
  * The repository gates, once the target has landed and the ack card is up: a
- * repo-needing agent whose bare slug the resident registry refused (not
- * onboarded) or could not answer for (unverified), and a restricted repository
- * the user holds no grant for (access). Each closes the card with its reason
- * and replies by name — never a silent per-thread fallback.
+ * repo-needing agent whose bare slug its vet refused — the resident registry's
+ * "not onboarded" for a `repo-resident` run, GitHub's 404 ("not visible") for
+ * a `repo-cold` one — or could not answer for (unverified), and a restricted
+ * repository the user holds no grant for (access). Each closes the card with
+ * its reason and replies by name — never a silent per-thread fallback.
  */
 export async function authorizeRepo(
   deps: AuthorizeDeps,
   ctx: GateContext & GateCard & { agent: AgentDef; needsRepo: boolean; repoCtx: RepoContext },
-): Promise<Gate<"repo_not_onboarded" | "repo_unverified" | "repo_access">> {
+): Promise<Gate<"repo_not_onboarded" | "repo_not_visible" | "repo_unverified" | "repo_access">> {
   const { msg, io, refuse, card, shell, closeLines, clock, agent, needsRepo, repoCtx } = ctx;
+  // A `repo-cold` run's vet was GitHub's, not the registry's
+  // (docs/reference/specs/execution.md item 18): a refused slug is a repository
+  // this installation cannot see — a resident fleet, or its absence, has
+  // nothing to do with it — and an unanswered one is GitHub's silence. Both
+  // stop by name before any executor exists; neither ever mentions onboarding.
+  if (agent.machine === "repo-cold" && needsRepo && !repoCtx.repo) {
+    if (repoCtx.rejectedRepo) {
+      const slug = repoCtx.rejectedRepo;
+      console.log(`[dispatch] ${msg.threadKey} not started: repo not visible (${slug}: GitHub answered 404)`);
+      await refuse("repo_not_visible", async () => {
+        await card.done(
+          shell.close({ kind: "not_started", icon: "📦", reason: "repo not visible", ...closeLines(clock(), false) }),
+        );
+        await io.reply(
+          `📦 \`${slug}\` is not a repository this installation can see — GitHub answered 404 — so I did not start ${aRun(agent.name)} for it. ` +
+            `The repository is outside the Switchboard GitHub App installation (\`github_repos\` lists the reachable ones), or the name is wrong.`,
+        );
+      });
+      return { kind: "refused", reason: "repo_not_visible" };
+    }
+    if (repoCtx.unverifiedRepo) {
+      const slug = repoCtx.unverifiedRepo;
+      console.log(
+        `[dispatch] ${msg.threadKey} not started: repo could not be verified (${slug}: GitHub did not answer)`,
+      );
+      await refuse("repo_unverified", async () => {
+        await card.done(
+          shell.close({
+            kind: "not_started",
+            icon: "📦",
+            reason: "repo could not be verified",
+            ...closeLines(clock(), false),
+          }),
+        );
+        await io.reply(
+          `⚠️ I couldn't verify \`${slug}\` against GitHub — it didn't answer — so I did not start ${aRun(agent.name)} rather than guess which repository you meant. Try again in a minute.`,
+        );
+      });
+      return { kind: "refused", reason: "repo_unverified" };
+    }
+  }
   // Not-onboarded gate: the thread has no repo, and the only reason
   // is that its bare `owner/name` slug was refused by the resident registry
   // (item 29's probe). A repo-needing agent would otherwise start with an
@@ -173,6 +215,11 @@ export async function authorizeRepo(
     return { kind: "refused", reason: "repo_access" };
   }
   return { kind: "allowed" };
+}
+
+/** `a *coding* run`, `an *explore* run`: the agent's name with its article. */
+function aRun(agentName: string): string {
+  return `${/^[aeiou]/i.test(agentName) ? "an" : "a"} *${agentName}* run`;
 }
 
 /**

@@ -801,9 +801,9 @@ describe("resident repo dispatch", () => {
   });
 
   // Over-fire fix: repo/ref resolution AND the canUseRepo gate run ONLY when
-  // the resolved agent declares resources.repo === "required". A no-repo agent
-  // (the toolless general default) in a thread that MENTIONS a restricted repo
-  // must not be refused — and must never even resolve or gate a repo.
+  // the resolved agent's machine class carries a checkout. An agent on `none`
+  // (the general default) in a thread that MENTIONS a restricted repo must not
+  // be refused — and must never even resolve or gate a repo.
   it("a no-repo agent (general) in a thread mentioning a restricted repo is NOT refused, and never resolves/gates a repo", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REPO_PERMS_YAML, provider); // acme/api restricted to UADMIN
