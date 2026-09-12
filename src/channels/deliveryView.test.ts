@@ -287,9 +287,18 @@ describe("createDeliveryViewHandler", () => {
     expect(seedOf(asAdmin.body()).report.totals.agentRuns).toEqual({ count: 2, minutes: 10 });
   });
 
-  it("serves the JSON twin for agents with no-store, the snapshot's time in it", async () => {
+  it("serves the JSON twin for agents with no-store, the snapshot's time and completeness in it", async () => {
     const h = createDeliveryViewHandler(
-      { service: fakeService(() => Promise.resolve({ ...report(), snapshotAt: "2026-09-11T13:51:00Z" })) },
+      {
+        service: fakeService(() =>
+          Promise.resolve({
+            ...report(),
+            snapshotAt: "2026-09-11T13:51:00Z",
+            truncated: true,
+            completeFrom: "2026-09-09T02:41:37Z",
+          }),
+        ),
+      },
       shell,
     );
     const io = fakeReqRes("GET", "/delivery/acme/api.json");
@@ -302,6 +311,8 @@ describe("createDeliveryViewHandler", () => {
     expect(parsed.repo).toBe("acme/api");
     expect(parsed.totals.prsMerged).toBe(1);
     expect(parsed.snapshotAt).toBe("2026-09-11T13:51:00Z");
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.completeFrom).toBe("2026-09-09T02:41:37Z");
   });
 
   it("a renderer that throws once the report is in hand is one 502 with the reason — the headers are written once, never a 200 and then a 502", async () => {

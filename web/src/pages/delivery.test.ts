@@ -4,7 +4,7 @@ import { mountApp } from "../testing/mount";
 import type { DeliveryReport, PullRequestFacts } from "@core/core/delivery.js";
 import { buildDeliveryReport } from "@core/core/delivery.js";
 import type { DeliverySeed } from "@core/channels/webSeed.js";
-import { freshHref, hours, monthDay, pct, snapshotTime, tilesOf } from "../lib/delivery";
+import { coverageNote, freshHref, hours, monthDay, pct, snapshotTime, tilesOf } from "../lib/delivery";
 
 // The delivery page against the mounted Vue page: the tiles, the two tables,
 // the switchers, the method, and hostile text kept as text.
@@ -132,14 +132,43 @@ describe("DeliveryPage", () => {
     expect(units[2].find('a[href="https://github.com/acme/api/pull/921"]').exists()).toBe(true);
   });
 
-  it("says a week or a range with nothing merged is empty, without an error, and names a cut-short fetch", () => {
-    const r = report({ prs: [], truncated: true });
+  it("says a week or a range with nothing merged is empty, without an error", () => {
+    const r = report({ prs: [] });
     const w = mountApp(DeliveryPage, { seed: seed(r) });
     expect(w.findAll("table.weeks tbody tr")).toHaveLength(2);
     expect(w.text()).toContain("Nothing merged in range.");
-    expect(w.text()).toContain("newest pull requests only");
     expect(w.text()).toContain("no merges in range");
     expect(tilesOf(r).map((x) => x.value)).toEqual(["0", "—", "—", "—", "—", "0"]);
+  });
+
+  it("a cut-short read is said where it is read: the tiles cover the newest N pull requests, complete from an instant, and the weeks that began before it are muted and marked incomplete; a complete report marks nothing", () => {
+    const cut = { ...report(), truncated: true, completeFrom: "2026-09-03T02:41:37Z" };
+    const w = mountApp(DeliveryPage, { seed: seed(cut) });
+    const tiles = tilesOf(cut);
+    expect(tiles[0]).toEqual({ label: "Merged", value: "3", note: "the newest 3 pull requests · 1 agent-authored" });
+    expect(coverageNote(cut)).toBe(
+      "The tiles cover the newest 3 pull requests only — the read is complete from Sep 3, 02:41 UTC; the weeks before that hold what it reached, not the week.",
+    );
+    expect(w.text()).toContain("The tiles cover the newest 3 pull requests only");
+    const weeks = w.findAll("table.weeks tbody tr");
+    expect(weeks[0].classes()).toContain("text-dimmed");
+    expect(weeks[0].text()).toContain("Aug 31 – Sep 6");
+    expect(weeks[0].text()).toContain("(incomplete)");
+    expect(weeks[1].classes()).not.toContain("text-dimmed");
+    expect(weeks[1].text()).not.toContain("incomplete");
+    expect(w.find("table.weeks").element.parentElement?.parentElement?.textContent).toContain(
+      "Incomplete weeks hold the newest pull requests the read reached",
+    );
+    // A truncated report that names no instant says what the tiles cover and marks no week.
+    const bare = mountApp(DeliveryPage, { seed: seed({ ...report(), truncated: true }) });
+    expect(bare.text()).toContain("The tiles cover the newest 3 pull requests only");
+    expect(bare.text()).not.toContain("incomplete");
+    // Complete: the plain tile note, no coverage line, no marks.
+    const whole = mountApp(DeliveryPage, { seed: seed() });
+    expect(tilesOf(report())[0].note).toBe("1 agent-authored · 2 weeks");
+    expect(coverageNote(report())).toBeUndefined();
+    expect(whole.text()).not.toContain("newest");
+    expect(whole.text()).not.toContain("incomplete");
   });
 
   it("carries the shared site nav with Delivery current", () => {

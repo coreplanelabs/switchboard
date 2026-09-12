@@ -3,6 +3,7 @@ import {
   coauthorsOf,
   type CiRunFact,
   type DeliveryFetch,
+  type DeliveryFetchOptions,
   type DeliveryRange,
   type DeliverySource,
   type LinkedIssueFact,
@@ -21,9 +22,12 @@ import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 //
 //   GET /repos/{repo}/pulls?state=closed&sort=updated&direction=desc   the merged pull
 //       requests in range: pages of 100 newest-touched first, until a page
-//       carries a row last touched before the range began (a row's
-//       `updated_at` is never before its `merged_at`, so nothing merged in
-//       range can follow) or the page cap ends the read (`truncated`);
+//       carries a row last touched before the cutoff — the range's start (a
+//       row's `updated_at` is never before its `merged_at`, so nothing merged
+//       in range can follow), or on an incremental read the instant it goes
+//       back to (`touched.since`) — or the page cap ends the read
+//       (`truncated`). An incremental read also skips a listed row whose
+//       update time the caller holds (`touched.known`): its facts stand;
 //   GET /repos/{repo}/issues/{n}/timeline     one pull request's reviews (each
 //       verdict's author, state, head and body), its commits (with their
 //       `Co-Authored-By:` trailers) and its force-pushes (with their actor);
@@ -42,7 +46,11 @@ import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const PAGE_SIZE = 100;
-const DEFAULT_MAX_PULL_PAGES = 3;
+/** Listing pages read before a fetch is called truncated: the newest 800 closed pull requests. A
+ *  read that reaches the cap costs the pages plus about three calls per merged row — under half of
+ *  an App installation's 5,000 calls an hour — and only a first read or `fresh` reaches it: the
+ *  snapshot's hourly refresh lists the rows touched since the last read and stops there. */
+export const DEFAULT_MAX_PULL_PAGES = 8;
 const MAX_TIMELINE_PAGES = 3;
 const DEFAULT_CONCURRENCY = 6;
 
@@ -51,7 +59,7 @@ export interface GithubDeliverySourceOptions {
   fetch?: typeof fetch;
   /** Credential resolver; defaults to the App installation token (read-scoped), else GH_TOKEN. */
   token?: (scope: GithubTokenScope) => Promise<string | null>;
-  /** Listing pages of 100 read before the fetch is called truncated (default 3: the newest 300 closed pull requests). */
+  /** Listing pages of 100 read before the fetch is called truncated (default `DEFAULT_MAX_PULL_PAGES`). */
   maxPullPages?: number;
   /** Pull requests whose facts are read at once (default 6). */
   concurrency?: number;
@@ -105,20 +113,24 @@ export function parsePullListPage(raw: unknown): PullListItem[] {
 const dayStartMs = (day: string): number => Date.parse(`${day}T00:00:00Z`);
 const DAY_MS = 86_400_000;
 
-/** The rows merged inside the range, and whether a row last touched before the
- *  range began was seen — after which no later page can hold a merge in range. */
+/** The rows merged inside the range and touched at or after the cutoff — the
+ *  range's start, or the instant an incremental read goes back to (`touchedSince`)
+ *  — and whether a row last touched before the cutoff was seen: the listing is
+ *  newest-touched first, so no later page can hold a row this read is after. */
 export function selectMerged(
   items: readonly PullListItem[],
   range: DeliveryRange,
+  touchedSince?: string,
 ): { merged: PullListItem[]; olderSeen: boolean } {
   const since = dayStartMs(range.since);
   const until = dayStartMs(range.until) + DAY_MS;
+  const cutoff = touchedSince === undefined ? since : Date.parse(touchedSince);
   const merged = items.filter((i) => {
     if (i.mergedAt === null) return false;
     const t = Date.parse(i.mergedAt);
-    return t >= since && t < until;
+    return t >= since && t < until && Date.parse(i.updatedAt) >= cutoff;
   });
-  return { merged, olderSeen: items.some((i) => Date.parse(i.updatedAt) < since) };
+  return { merged, olderSeen: items.some((i) => Date.parse(i.updatedAt) < cutoff) };
 }
 
 const REVIEW_STATES: ReadonlySet<ReviewFact["state"]> = new Set([
@@ -276,7 +288,7 @@ export class GithubDeliverySource implements DeliverySource {
     this.concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
   }
 
-  async fetchPullRequests(repo: string, range: DeliveryRange): Promise<DeliveryFetch> {
+  async fetchPullRequests(repo: string, range: DeliveryRange, opts?: DeliveryFetchOptions): Promise<DeliveryFetch> {
     const token = await this.token("read");
     if (!token)
       throw new Error(
@@ -307,10 +319,13 @@ export class GithubDeliverySource implements DeliverySource {
     };
     const json = async (res: Response): Promise<unknown> => (res.status === 404 ? undefined : res.json());
 
-    // 1. The merged pull requests in range, newest-touched first. The oldest
-    //    update the listing reached bounds what a capped read is complete for:
-    //    a pull request merged after that instant was updated after it, so it
-    //    is among the rows read.
+    // 1. The merged pull requests in range, newest-touched first, back to the
+    //    cutoff: the range's start, or the instant an incremental read goes
+    //    back to. The oldest update the listing reached bounds what a capped
+    //    read is complete for: a pull request merged after that instant was
+    //    updated after it, so it is among the rows read.
+    const touched = opts?.touched;
+    const cutoff = touched?.since ?? `${range.since}T00:00:00Z`;
     const merged: PullListItem[] = [];
     let truncated = false;
     let oldestUpdated: PullListItem | undefined;
@@ -323,7 +338,7 @@ export class GithubDeliverySource implements DeliverySource {
       for (const item of items) {
         if (!oldestUpdated || Date.parse(item.updatedAt) < Date.parse(oldestUpdated.updatedAt)) oldestUpdated = item;
       }
-      const selected = selectMerged(items, range);
+      const selected = selectMerged(items, range, touched?.since);
       merged.push(...selected.merged);
       if (selected.olderSeen || items.length < PAGE_SIZE) break;
       if (page >= this.maxPullPages) {
@@ -331,7 +346,9 @@ export class GithubDeliverySource implements DeliverySource {
         break;
       }
     }
-    const completeFrom = truncated && oldestUpdated ? oldestUpdated.updatedAt : `${range.since}T00:00:00Z`;
+    const completeFrom = truncated && oldestUpdated ? oldestUpdated.updatedAt : cutoff;
+    // A listed row whose update time the caller holds has not moved: its facts stand unread.
+    const toRead = touched ? merged.filter((item) => touched.known.get(item.number) !== item.updatedAt) : merged;
 
     // 2. Each pull request's facts, a few at a time; issues read once each.
     const issues = new Map<number, Promise<LinkedIssueFact | undefined>>();
@@ -343,7 +360,7 @@ export class GithubDeliverySource implements DeliverySource {
       }
       return p;
     };
-    const prs = await mapLimit(merged, this.concurrency, async (item): Promise<PullRequestFacts> => {
+    const prs = await mapLimit(toRead, this.concurrency, async (item): Promise<PullRequestFacts> => {
       const timeline: unknown[] = [];
       for (let page = 1; page <= MAX_TIMELINE_PAGES; page++) {
         const res = await get(
@@ -375,6 +392,7 @@ export class GithubDeliverySource implements DeliverySource {
         author: item.author,
         createdAt: item.createdAt,
         mergedAt: item.mergedAt as string,
+        updatedAt: item.updatedAt,
         firstHeadSha: firstHeadOf(ci, reviews, item.headSha),
         ci,
         reviews,

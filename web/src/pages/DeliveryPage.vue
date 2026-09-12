@@ -1,21 +1,37 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { snapshotAgeText } from "@core/core/delivery.js";
+import { snapshotAgeText, weekIncomplete } from "@core/core/delivery.js";
 import AppShell from "../components/AppShell.vue";
 import { useSeed } from "../lib/seed";
-import { ciCell, findingsCell, freshHref, hours, monthDay, pct, ratio, snapshotTime, tilesOf } from "../lib/delivery";
+import {
+  ciCell,
+  coverageNote,
+  findingsCell,
+  freshHref,
+  hours,
+  monthDay,
+  pct,
+  ratio,
+  snapshotTime,
+  tilesOf,
+} from "../lib/delivery";
 import { useWallClock } from "../lib/wallClock";
 
 // The delivery page: how work reaches `main` in one repository, per week and
 // per unit, from the repository's snapshot of GitHub's facts (its age in the
 // footer; `?fresh=1` reads GitHub now) and the run history. The costs page's
 // shape — tiles, a table per grouping, the method one click away — on the same
-// shell and tokens; no chart, the numbers are the picture.
+// shell and tokens; no chart, the numbers are the picture. A read that stopped
+// at its cap says so where the numbers are: over the tiles, and on each week
+// row that holds the newest pull requests only.
 
 const seed = useSeed("delivery");
 const report = computed(() => seed?.report ?? null);
 const repos = computed(() => seed?.repos ?? []);
 const tiles = computed(() => (report.value ? tilesOf(report.value) : []));
+const coverage = computed(() => (report.value ? coverageNote(report.value) : undefined));
+const incomplete = (week: string): boolean => (report.value ? weekIncomplete(report.value, week) : false);
+const anyIncomplete = computed(() => report.value?.weeks.some((w) => incomplete(w.week)) ?? false);
 const ranges = [1, 2, 4, 8, 13];
 /** The snapshot's age ticks by the minute while the page is open. */
 const now = useWallClock(undefined, 60_000);
@@ -57,21 +73,25 @@ const td = "border-b border-muted px-2.5 py-1.5";
       </nav>
       <p class="font-mono text-sm tabular-nums text-muted">
         {{ monthDay(report.range.since) }} → {{ monthDay(report.range.until) }} · {{ report.range.weeks }}w · weeks
-        start Monday, UTC<template v-if="report.truncated"> · newest pull requests only</template>
+        start Monday, UTC
       </p>
     </div>
 
-    <section class="mb-5 grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3">
-      <div
-        v-for="tile in tiles"
-        :key="tile.label"
-        class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5"
-      >
-        <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">{{
-          tile.label
-        }}</span>
-        <span class="font-mono text-2xl font-medium tabular-nums">{{ tile.value }}</span>
-        <span class="text-xs text-muted">{{ tile.note }}</span>
+    <!-- A read that stopped at its cap: say what the tiles cover before the numbers, not in a footnote. -->
+    <section class="mb-5 grid gap-3">
+      <p v-if="coverage" class="text-sm text-muted">{{ coverage }}</p>
+      <div class="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3">
+        <div
+          v-for="tile in tiles"
+          :key="tile.label"
+          class="grid gap-0.5 rounded-lg border border-default bg-elevated px-4 py-3.5"
+        >
+          <span class="font-mono text-[0.6875rem] font-medium uppercase tracking-widest text-dimmed">{{
+            tile.label
+          }}</span>
+          <span class="font-mono text-2xl font-medium tabular-nums">{{ tile.value }}</span>
+          <span class="text-xs text-muted">{{ tile.note }}</span>
+        </div>
       </div>
     </section>
 
@@ -98,8 +118,12 @@ const td = "border-b border-muted px-2.5 py-1.5";
             </tr>
           </thead>
           <tbody>
-            <tr v-for="w in report.weeks" :key="w.week">
-              <td :class="td" :title="`${w.week} → ${w.until}`">{{ monthDay(w.week) }} – {{ monthDay(w.until) }}</td>
+            <!-- A week the read did not cover whole is muted and says so: its numbers are the newest rows, not the week's. -->
+            <tr v-for="w in report.weeks" :key="w.week" :class="incomplete(w.week) ? 'text-dimmed' : ''">
+              <td :class="td" :title="`${w.week} → ${w.until}`">
+                {{ monthDay(w.week) }} – {{ monthDay(w.until) }}
+                <span v-if="incomplete(w.week)" class="ml-1 text-xs">(incomplete)</span>
+              </td>
               <td :class="[td, 'text-right font-medium']">{{ w.prsMerged }}</td>
               <td :class="[td, 'text-right']">{{ w.agentAuthoredPrs }}</td>
               <td :class="[td, 'text-right']">{{ hours(w.leadTimeHours.median) }}</td>
@@ -112,6 +136,10 @@ const td = "border-b border-muted px-2.5 py-1.5";
           </tbody>
         </table>
       </div>
+      <p v-if="anyIncomplete && report.completeFrom" class="text-xs text-muted">
+        Incomplete weeks hold the newest pull requests the read reached — it is complete from
+        {{ snapshotTime(report.completeFrom) }} — so their numbers are a floor on the merges, not the week's.
+      </p>
     </section>
 
     <section class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
