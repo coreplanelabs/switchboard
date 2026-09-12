@@ -2,12 +2,78 @@ import { describe, expect, it } from "vitest";
 import {
   buildReviewPostBody,
   CHANGES_TOKEN,
+  isFindingDispositionsShape,
+  isReviewVerdictShape,
   LGTM_TOKEN,
   NO_VERDICT_LINE,
   parseDispositionsInput,
   parseVerdictInput,
+  redactDispositions,
+  redactVerdict,
   verdictLine,
 } from "./reviewVerdict.js";
+
+// Feature: docs/reference/specs/run-history.md items 2 and 3 — the verdict and
+// the dispositions ride the finished run's record, checked for shape (never
+// bounds) when read back and redacted at every string leaf when written.
+describe("the stored shapes — isReviewVerdictShape, isFindingDispositionsShape, and their redaction", () => {
+  const verdict = parseVerdictInput({
+    verdict: "request_changes",
+    summary: "one nit",
+    head: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    findings: [{ id: "F1", severity: "minor", file: "src/a.ts", line: 3, title: "off by one" }],
+  })!;
+
+  it("accepts a parsed verdict and its JSON round-trip, with or without findings and a head; refuses a non-object, an unknown verdict kind, a non-string summary, non-array findings and a finding missing its id, severity, file or title", () => {
+    expect(isReviewVerdictShape(verdict)).toBe(true);
+    expect(isReviewVerdictShape(JSON.parse(JSON.stringify(verdict)))).toBe(true);
+    expect(isReviewVerdictShape({ verdict: "approve", summary: "" })).toBe(true);
+    expect(isReviewVerdictShape(null)).toBe(false);
+    expect(isReviewVerdictShape({ verdict: "maybe", summary: "x" })).toBe(false);
+    expect(isReviewVerdictShape({ verdict: "approve", summary: 7 })).toBe(false);
+    expect(isReviewVerdictShape({ verdict: "approve", summary: "x", findings: "F1" })).toBe(false);
+    expect(isReviewVerdictShape({ verdict: "approve", summary: "x", head: 7 })).toBe(false);
+    for (const missing of ["id", "severity", "file", "title"]) {
+      const finding: Record<string, unknown> = { id: "F1", severity: "minor", file: "src/a.ts", title: "t" };
+      delete finding[missing];
+      expect(isReviewVerdictShape({ verdict: "approve", summary: "x", findings: [finding] }), missing).toBe(false);
+    }
+    expect(
+      isReviewVerdictShape({
+        verdict: "approve",
+        summary: "x",
+        findings: [{ id: "F1", severity: "huge", file: "a", title: "t" }],
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts a parsed disposition set and its round-trip; refuses a non-array, a non-object entry, an unknown disposition and a non-string note", () => {
+    const set = parseDispositionsInput({ dispositions: [{ findingId: "F1", disposition: "fixed", note: "done" }] })!;
+    expect(isFindingDispositionsShape(set.dispositions)).toBe(true);
+    expect(isFindingDispositionsShape(JSON.parse(JSON.stringify(set.dispositions)))).toBe(true);
+    expect(isFindingDispositionsShape([])).toBe(true);
+    expect(isFindingDispositionsShape({})).toBe(false);
+    expect(isFindingDispositionsShape([7])).toBe(false);
+    expect(isFindingDispositionsShape([{ findingId: "F1", disposition: "maybe", note: "x" }])).toBe(false);
+    expect(isFindingDispositionsShape([{ findingId: "F1", disposition: "fixed", note: 7 }])).toBe(false);
+  });
+
+  it("redaction walks the summary, every finding's title and file, and every disposition's note — the input untouched", () => {
+    const token = `ghp_${"a".repeat(24)}`;
+    const leaky = parseVerdictInput({
+      verdict: "approve",
+      summary: `used ${token}`,
+      findings: [{ id: "F1", severity: "nit", file: `src/${token}.ts`, title: `see ${token}` }],
+    })!;
+    const redacted = redactVerdict(leaky);
+    expect(JSON.stringify(redacted)).not.toContain("ghp_");
+    expect(redacted.summary).toBe("used «redacted-github-token»");
+    expect(redacted.findings?.[0]).toMatchObject({ id: "F1", severity: "nit", title: "see «redacted-github-token»" });
+    expect(leaky.summary).toContain("ghp_");
+    const notes = redactDispositions([{ findingId: "F1", disposition: "declined", note: `because ${token}` }]);
+    expect(notes).toEqual([{ findingId: "F1", disposition: "declined", note: "because «redacted-github-token»" }]);
+  });
+});
 
 // Feature: docs/reference/specs/agent-review.md — deterministic verdict token. The
 // auto-approve workflow keys on `startsWith(body, "LGTM:")`, so the first line

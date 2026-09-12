@@ -1949,6 +1949,56 @@ describe("review post-step", () => {
       expect(replies.some((r) => r.includes("moved during the run"))).toBe(false);
     });
 
+    // docs/reference/specs/run-history.md item 2: the verdict the review
+    // submitted and the head it reviewed ride the run's record — what a
+    // coordinator's `read-record` answers for a review child.
+    it("the review run's record carries the submitted verdict (findings included) and the reviewed head", async () => {
+      let n = 0;
+      const provider: Provider = {
+        name: "fake",
+        async complete(): Promise<CompletionResult> {
+          n++;
+          if (n === 1)
+            return {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "v1",
+                  name: "submit_verdict",
+                  input: {
+                    verdict: "request_changes",
+                    summary: "one nit",
+                    head: PR_HEAD,
+                    findings: [{ id: "F1", severity: "nit", file: "src/a.ts", line: 3, title: "off by one" }],
+                  },
+                },
+              ],
+              stopReason: "tool_use",
+            };
+          return { content: [{ type: "text", text: "Changes requested: one nit." }], stopReason: "end_turn" };
+        },
+      };
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(PR_HEAD);
+      deps.postReviewComment = postSpy().fn;
+      deps.fetchPrHead = async () => PR_HEAD;
+      deps.runRegistry = new RunRegistry({ genId: () => "r-verdict", genToken: () => "t-verdict" });
+      const store = new InMemoryRunStore();
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), fakeIO().io);
+      await deps.runHistoryWriter.settled();
+      const rec = (await store.get("r-verdict"))!;
+      expect(rec.verdict).toEqual({
+        verdict: "request_changes",
+        summary: "one nit",
+        head: PR_HEAD,
+        findings: [{ id: "F1", severity: "nit", file: "src/a.ts", line: 3, title: "off by one" }],
+      });
+      expect(rec.reviewHead).toBe(PR_HEAD);
+      expect("dispositions" in rec).toBe(false);
+    });
+
     it("current head unknown (fetch fails or answers nothing) → no note, never a false alarm", async () => {
       for (const fetchPrHead of [
         async () => undefined,
@@ -3375,6 +3425,75 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     await dispatch(plain, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
     await plain.runHistoryWriter.settled();
     expect("handoff" in (await store2.get("r12"))!).toBe(false);
+  });
+
+  // docs/reference/specs/run-history.md item 2, agent-ship.md item 6 — a coding
+  // run dispatched as a fix round (`DispatchOptions.fixRound` names the review's
+  // finding ids) records `submit_dispositions` on its record; a plain coding run
+  // has no sink, so the tool answers the honest no-op and the record carries none.
+  it("a coding run dispatched as a fix round records its dispositions against the named findings; an unknown id is refused by name; a plain coding run records none", async () => {
+    const dispositionsProvider = (set: unknown[]): Provider => {
+      let n = 0;
+      return {
+        name: "fake",
+        async complete(): Promise<CompletionResult> {
+          n++;
+          if (n === 1)
+            return {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "x1",
+                  name: "submit_dispositions",
+                  input: { dispositions: [{ findingId: "F9", disposition: "fixed", note: "?" }] },
+                },
+              ],
+              stopReason: "tool_use",
+            };
+          if (n === 2)
+            return {
+              content: [{ type: "tool_use", id: "x2", name: "submit_dispositions", input: { dispositions: set } }],
+              stopReason: "tool_use",
+            };
+          if (n === 3)
+            return {
+              content: [{ type: "tool_use", id: "d1", name: "submit_pr_description", input: DESCRIPTION }],
+              stopReason: "tool_use",
+            };
+          return { content: [{ type: "text", text: "Done — branch pushed." }], stopReason: "end_turn" };
+        },
+      };
+    };
+    const set = [{ findingId: "F1", disposition: "declined", note: "the loop is exclusive" }];
+    const deps = codingDeps(dispositionsProvider(set));
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    deps.openPullRequest = openSpy().fn;
+    deps.runRegistry = new RunRegistry({ genId: () => "r-fix", genToken: () => "t-fix" });
+    const store = new InMemoryRunStore();
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io, { fixRound: { findingIds: ["F1"] } });
+    await deps.runHistoryWriter.settled();
+    const rec = (await store.get("r-fix"))!;
+    expect(rec.dispositions).toEqual(set);
+    const dispositionAcks = (events: RunEvent[]) =>
+      events.flatMap((e) => (e.type === "tool_result" && e.tool === "submit_dispositions" ? [e.summary] : []));
+    const acks = dispositionAcks(rec.events);
+    expect(acks[0]).toMatch(/unknown finding id F9/);
+    expect(acks[1]).toMatch(/dispositions recorded: 1/);
+
+    const plain = codingDeps(dispositionsProvider(set));
+    codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
+    plain.openPullRequest = openSpy().fn;
+    plain.runRegistry = new RunRegistry({ genId: () => "r-plain", genToken: () => "t-plain" });
+    const store2 = new InMemoryRunStore();
+    plain.runHistoryWriter = createRunHistoryWriter({ store: store2, warn: () => {}, sleep: async () => {} });
+    await dispatch(plain, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    await plain.runHistoryWriter.settled();
+    const rec2 = (await store2.get("r-plain"))!;
+    expect("dispositions" in rec2).toBe(false);
+    const noSink = dispositionAcks(rec2.events);
+    expect(noSink.length).toBeGreaterThan(0);
+    expect(noSink.every((s) => /not recorded/.test(s))).toBe(true);
   });
 
   it("a thread bound to an existing PR's head branch: the base is the PR's TRUE base ref, so a fix-round repush opens/edits instead of reading as 'nothing pushed'", async () => {

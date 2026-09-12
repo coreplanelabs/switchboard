@@ -125,6 +125,11 @@ export interface DispatchOptions {
    *  run in flight on the thread refuses the request instead of taking it as
    *  a steer (thread-admission item 8). Absent for every other request. */
   coordinator?: CoordinatorTag;
+  /** Set by the coordinator's spawn route for a fix round's child (agent-ship
+   *  item 6): the review's finding ids this coding run answers, so
+   *  `submit_dispositions` records against them and the set rides the record.
+   *  Absent for every other request. */
+  fixRound?: { findingIds: string[] };
 }
 
 /** How a request ended, for whoever started it (dispatch/outcome.ts): the
@@ -744,6 +749,7 @@ export async function dispatch(
       wait,
       parentRunId,
       coordinator,
+      ...(opts.fixRound ? { fixRound: opts.fixRound } : {}),
     });
     const {
       answer,

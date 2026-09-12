@@ -696,3 +696,36 @@ describe("isRunRecord — the coordinator fields (parentInstanceId, idempotencyK
     expect(isRunRecord(record({ idempotencyKey: key }))).toBe(false);
   });
 });
+
+// docs/reference/specs/run-history.md items 2 and 3 — the review child's verdict
+// and reviewed head, and the fix child's dispositions, ride the record so a
+// coordinator's `read-record` answers them; checked for shape, never bounds.
+describe("isRunRecord — the review's verdict and head, the fix round's dispositions", () => {
+  const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+  const verdict = {
+    verdict: "request_changes" as const,
+    summary: "one nit",
+    findings: [{ id: "F1", severity: "minor" as const, file: "src/a.ts", line: 3, title: "off by one" }],
+  };
+  const dispositions = [{ findingId: "F1", disposition: "fixed" as const, note: "counted from zero" }];
+
+  it("accepts a verdict, a 7-to-40-hex reviewed head and a disposition set — also after a JSON round-trip — and a record without them carries no key", () => {
+    const rec = record({ verdict, reviewHead: HEAD, dispositions });
+    expect(isRunRecord(rec)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(rec)))).toBe(true);
+    expect(isRunRecord(record({ reviewHead: HEAD.slice(0, 7) }))).toBe(true);
+    for (const key of ["verdict", "reviewHead", "dispositions"]) expect(key in record()).toBe(false);
+  });
+
+  it("refuses a malformed verdict, a head that is not lowercase hex of 7 to 40, and a malformed disposition set", () => {
+    expect(isRunRecord({ ...record(), verdict: { verdict: "maybe", summary: "x" } })).toBe(false);
+    expect(isRunRecord({ ...record(), verdict: "approve" })).toBe(false);
+    expect(isRunRecord({ ...record(), reviewHead: "MAIN" })).toBe(false);
+    expect(isRunRecord({ ...record(), reviewHead: "abc" })).toBe(false);
+    expect(isRunRecord({ ...record(), reviewHead: `${HEAD}0` })).toBe(false);
+    expect(isRunRecord({ ...record(), dispositions: [{ findingId: "F1", disposition: "later", note: "x" }] })).toBe(
+      false,
+    );
+    expect(isRunRecord({ ...record(), dispositions: "fixed" })).toBe(false);
+  });
+});
