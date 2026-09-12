@@ -80,7 +80,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run web:preview` | Serves the dashboard bundle over fixtures for a visual check. | After a `web/` change. |
 | `npm run screenshots:gen` | Renders the dashboard's screenshots from the fixture preview, both themes, and records their inputs' hashes in `docs/public/screenshots/manifest.json`. | After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`, so it is not part of `fix`. |
 | `npm run screenshots:check` | The dashboard's source and fixtures still hash to what the screenshots were rendered from — no browser. | Part of `check:consistency`. |
-| `npm run load` | Load harness: `-- history\|resident\|sandbox\|e2e\|cards\|provider`. | Capacity receipts (docs/reference/specs/load-harness.md). |
+| `npm run load` | Load harness: `-- history\|resident\|sandbox\|e2e\|cards\|provider\|pi`. | Capacity receipts (docs/reference/specs/load-harness.md). |
 
 <!-- /generated:commands -->
 
