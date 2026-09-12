@@ -55,6 +55,16 @@
     "bindings": [{ "name": "SWITCHBOARD", "class_name": "SwitchboardServer" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SwitchboardServer"] }],
+  // The ship coordinator as a Workflow (coordinator.ts, re-exported by
+  // worker.ts; docs/reference/specs/http-ingress.md item 9): `POST
+  // /admin/coordinator/instances` creates its instances and the state Worker's
+  // finish sends them `run finished:<runId>`. Same-script, so this Worker
+  // deploys on its own. The state Worker's cross-script binding to it comes
+  // once this class is live: the state Worker deploys BEFORE the bot, and a
+  // binding to a class that has never deployed fails that deploy.
+  "workflows": [
+    { "name": "{{script}}-ship-coordinator", "binding": "SHIP_COORDINATOR", "class_name": "ShipCoordinator" }
+  ],
   // Every cron here IS a schedule in src/core/schedules.ts (the registry; a unit
   // test fails when the two sets differ) and worker.ts looks each firing up there.
   // "* * * * *": keep-alive (/healthz) — also what RESTARTS the container after a
