@@ -17,25 +17,42 @@ import { errorSuffix } from "./workerError.js";
 // Node-free on purpose: the state Worker imports `isDeliverySnapshot` by
 // relative path so the bot and the Worker validate ONE shape.
 //
+// A snapshot is written whole once — the first read of a repository — and
+// patched by every refresh after: the rows the refresh re-read, the rows that
+// aged out of the window, the new meta. A busy repository's window is many MB
+// and its hourly change a few rows, so the write follows the change.
+//
 // Route contract (JSON in/out, bearer = the Worker's MEMORY_TOKEN):
-//   POST /delivery/get {repo}      → {snapshot: DeliverySnapshot | null}
-//   POST /delivery/put {snapshot}  → {ok: true, prs}
+//   POST /delivery/get {repo}       → {snapshot: DeliverySnapshot | null}
+//   POST /delivery/put {snapshot}   → {ok: true, prs}          replace the repository's snapshot whole
+//   POST /delivery/merge {patch}    → {ok: true, prs} | 404    apply a refresh; 404 with no snapshot to merge into
 
-/** One repository's facts as a source assembled them, and when. */
-export interface DeliverySnapshot {
+/** What a snapshot says about itself: everything but the rows. */
+export interface DeliverySnapshotMeta {
   /** `owner/name`. */
   repo: string;
   /** ISO 8601 — when the read from GitHub began. */
   snapshotAt: string;
   /** The window the facts were read for: Monday-start weeks ending on the snapshot day. */
   range: DeliveryRange;
-  /** Every pull request merged inside the window that the read reached. */
-  prs: PullRequestFacts[];
-  /** The listing stopped at its page cap before the window's start — the newest pull requests only. */
+  /** The read stopped at its page cap before the window's start — the newest pull requests only. */
   truncated: boolean;
   /** ISO 8601 — every pull request merged at or after this instant is in `prs`: the window's
-   *  start on a complete read, the oldest update the capped listing reached otherwise. */
+   *  start on a complete read, the oldest update a capped listing reached otherwise. */
   completeFrom: string;
+}
+
+/** One repository's facts as a source assembled them, and when. */
+export interface DeliverySnapshot extends DeliverySnapshotMeta {
+  /** Every pull request merged inside the window that the reads reached, in number order. */
+  prs: PullRequestFacts[];
+}
+
+/** What one refresh changes in a stored snapshot: the new meta, the rows the read re-read — they
+ *  replace the stored ones by number — and the numbers of the rows that aged out of the window. */
+export interface DeliverySnapshotPatch extends DeliverySnapshotMeta {
+  upsert: PullRequestFacts[];
+  drop: number[];
 }
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -61,32 +78,59 @@ export function isPullRequestFacts(v: unknown): v is PullRequestFacts {
   );
 }
 
-export function isDeliverySnapshot(v: unknown): v is DeliverySnapshot {
-  if (typeof v !== "object" || v === null) return false;
-  const s = v as Record<string, unknown>;
+/** The fields every snapshot document carries, present and of the right kind. */
+function hasSnapshotMeta(s: Record<string, unknown>): boolean {
   if (typeof s.repo !== "string" || !REPO_SLUG.test(s.repo)) return false;
   if (!isInstant(s.snapshotAt) || !isInstant(s.completeFrom)) return false;
   if (typeof s.truncated !== "boolean") return false;
   const range = s.range as Record<string, unknown> | null | undefined;
-  if (
-    typeof range !== "object" ||
-    range === null ||
-    typeof range.since !== "string" ||
-    !ISO_DAY.test(range.since) ||
-    typeof range.until !== "string" ||
-    !ISO_DAY.test(range.until) ||
-    typeof range.weeks !== "number" ||
-    !Number.isFinite(range.weeks)
-  )
-    return false;
-  return Array.isArray(s.prs) && s.prs.every(isPullRequestFacts);
+  return (
+    typeof range === "object" &&
+    range !== null &&
+    typeof range.since === "string" &&
+    ISO_DAY.test(range.since) &&
+    typeof range.until === "string" &&
+    ISO_DAY.test(range.until) &&
+    typeof range.weeks === "number" &&
+    Number.isFinite(range.weeks)
+  );
+}
+
+export function isDeliverySnapshot(v: unknown): v is DeliverySnapshot {
+  if (typeof v !== "object" || v === null) return false;
+  const s = v as Record<string, unknown>;
+  return hasSnapshotMeta(s) && Array.isArray(s.prs) && s.prs.every(isPullRequestFacts);
+}
+
+export function isDeliverySnapshotPatch(v: unknown): v is DeliverySnapshotPatch {
+  if (typeof v !== "object" || v === null) return false;
+  const { upsert, drop, ...meta } = v as Record<string, unknown>;
+  return (
+    hasSnapshotMeta(meta) &&
+    Array.isArray(upsert) &&
+    upsert.every(isPullRequestFacts) &&
+    Array.isArray(drop) &&
+    drop.every((n) => typeof n === "number" && Number.isFinite(n))
+  );
+}
+
+/** The snapshot a patch leaves behind when applied to `stored`: rows by number, in number order. */
+export function applyPatch(stored: DeliverySnapshot, patch: DeliverySnapshotPatch): DeliverySnapshot {
+  const { upsert, drop, ...meta } = patch;
+  const rows = new Map(stored.prs.map((p) => [p.number, p]));
+  for (const p of upsert) rows.set(p.number, p);
+  for (const n of drop) rows.delete(n);
+  return { ...meta, prs: [...rows.values()].sort((a, b) => a.number - b.number) };
 }
 
 export interface DeliverySnapshotStore {
   /** The repository's stored snapshot, or undefined when none was ever stored. Throws on failure. */
   get(repo: string): Promise<DeliverySnapshot | undefined>;
-  /** Replace the repository's snapshot. Throws on failure; callers warn, never crash. */
+  /** Replace the repository's snapshot whole. Throws on failure; callers warn, never crash. */
   put(snapshot: DeliverySnapshot): Promise<void>;
+  /** Apply a refresh to the repository's stored snapshot. False when nothing is stored to merge
+   *  into — the caller then writes the snapshot whole. Throws on failure. */
+  merge(patch: DeliverySnapshotPatch): Promise<boolean>;
 }
 
 export class InMemoryDeliverySnapshotStore implements DeliverySnapshotStore {
@@ -99,6 +143,13 @@ export class InMemoryDeliverySnapshotStore implements DeliverySnapshotStore {
 
   async put(snapshot: DeliverySnapshot): Promise<void> {
     this.byRepo.set(snapshot.repo, structuredClone(snapshot));
+  }
+
+  async merge(patch: DeliverySnapshotPatch): Promise<boolean> {
+    const stored = this.byRepo.get(patch.repo);
+    if (!stored) return false;
+    this.byRepo.set(patch.repo, applyPatch(stored, structuredClone(patch)));
+    return true;
   }
 }
 
@@ -136,6 +187,14 @@ export class WorkerDeliverySnapshotStore implements DeliverySnapshotStore {
   async put(snapshot: DeliverySnapshot): Promise<void> {
     const res = await this.post("/delivery/put", { snapshot });
     if (!res.ok) throw new Error(`state Worker /delivery/put HTTP ${res.status}${await errorSuffix(res)}`);
+  }
+
+  async merge(patch: DeliverySnapshotPatch): Promise<boolean> {
+    const res = await this.post("/delivery/merge", { patch });
+    // Nothing stored to merge into — or a Worker from before the route: either way the caller writes whole.
+    if (res.status === 404) return false;
+    if (!res.ok) throw new Error(`state Worker /delivery/merge HTTP ${res.status}${await errorSuffix(res)}`);
+    return true;
   }
 
   private post(path: string, body: unknown): Promise<Response> {

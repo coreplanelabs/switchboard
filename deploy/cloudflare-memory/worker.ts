@@ -11,7 +11,12 @@ import {
 import { tokenize } from "../../src/core/memory/scorer.ts";
 import { FIRING_DETAIL_MAX, isScheduleFiring, type ScheduleFiring } from "../../src/core/schedules.ts";
 import { REPO_SLUG } from "../../src/core/delivery.ts";
-import { isDeliverySnapshot, type DeliverySnapshot } from "../../src/core/deliverySnapshotStore.ts";
+import {
+  isDeliverySnapshot,
+  isDeliverySnapshotPatch,
+  type DeliverySnapshot,
+  type DeliverySnapshotPatch,
+} from "../../src/core/deliverySnapshotStore.ts";
 import {
   applyRetention,
   clampRetentionPolicy,
@@ -713,11 +718,14 @@ function parseStored<T>(text: string, guard: (v: unknown) => v is T): T | null {
 
 // The delivery page's snapshot (docs/reference/specs/delivery.md item 10): the
 // merged pull requests' facts over the snapshot window, as GitHub gave them,
-// and when they were read. A busy repository's window is a few MB — the review
+// and when they were read. A busy repository's window is many MB — the review
 // bodies and every workflow run of every branch — so a snapshot is stored as
 // one row per pull request under a meta row, never as one JSON value (the
 // per-row limit is 2 MB). A put replaces the repository's snapshot whole, in
-// one transaction; a get reassembles it in pull request number order.
+// one transaction — the first read; a merge applies a refresh — the rows it
+// re-read replace theirs by number, the rows that aged out go, the meta is
+// replaced — so the hourly write is the change, not the window; a get
+// reassembles the snapshot in pull request number order.
 
 /** One pull request's facts may not exceed a fraction of the row limit; the fence names the pull request. */
 const MAX_PULL_REQUEST_FACTS_BYTES = 1024 * 1024;
@@ -766,6 +774,38 @@ export class DeliveryDO extends DurableObject<Env> {
     return prs.length;
   }
 
+  /** Apply a refresh to the repository's snapshot in one transaction; the rows now stored, or null
+   *  when the repository has no snapshot to merge into (a partial snapshot would claim a
+   *  completeness it lacks — the caller writes whole instead). */
+  async merge(patch: DeliverySnapshotPatch): Promise<number | null> {
+    const { upsert, drop, ...meta } = patch;
+    return this.ctx.storage.transactionSync(() => {
+      const stored = this.sql.exec(`SELECT 1 FROM snapshots WHERE repo = ?`, patch.repo).toArray().length > 0;
+      if (!stored) return null;
+      for (const pr of upsert) {
+        this.sql.exec(
+          `INSERT OR REPLACE INTO pull_requests (repo, number, facts) VALUES (?, ?, ?)`,
+          patch.repo,
+          pr.number,
+          JSON.stringify(pr),
+        );
+      }
+      for (const number of drop) {
+        this.sql.exec(`DELETE FROM pull_requests WHERE repo = ? AND number = ?`, patch.repo, number);
+      }
+      this.sql.exec(
+        `INSERT OR REPLACE INTO snapshots (repo, snapshot_at, meta) VALUES (?, ?, ?)`,
+        patch.repo,
+        patch.snapshotAt,
+        JSON.stringify(meta),
+      );
+      const count = this.sql
+        .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM pull_requests WHERE repo = ?`, patch.repo)
+        .toArray()[0];
+      return count?.n ?? 0;
+    });
+  }
+
   /** The repository's snapshot, pull requests in number order; null when none was stored. */
   async get(repo: string): Promise<DeliverySnapshot | null> {
     const row = this.sql.exec<{ meta: string }>(`SELECT meta FROM snapshots WHERE repo = ?`, repo).toArray()[0];
@@ -778,7 +818,13 @@ export class DeliveryDO extends DurableObject<Env> {
   }
 }
 
-const DELIVERY_ROUTES = new Set(["/delivery/get", "/delivery/put"]);
+const DELIVERY_ROUTES = new Set(["/delivery/get", "/delivery/put", "/delivery/merge"]);
+
+/** The pull request whose facts exceed the row fence, if any — checked before the transaction. */
+function oversizedFacts(prs: readonly DeliverySnapshot["prs"][number][]): number | undefined {
+  const encoder = new TextEncoder();
+  return prs.find((pr) => encoder.encode(JSON.stringify(pr)).byteLength > MAX_PULL_REQUEST_FACTS_BYTES)?.number;
+}
 
 async function handleDelivery(pathname: string, body: unknown, env: Env): Promise<Response> {
   const b = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
@@ -797,17 +843,36 @@ async function handleDelivery(pathname: string, body: unknown, env: Env): Promis
         { error: "snapshot must be a DeliverySnapshot (repo, snapshotAt, range, prs[], truncated, completeFrom)" },
         400,
       );
-    const encoder = new TextEncoder();
-    const oversized = b.snapshot.prs.find(
-      (pr) => encoder.encode(JSON.stringify(pr)).byteLength > MAX_PULL_REQUEST_FACTS_BYTES,
-    );
-    if (oversized)
+    const oversized = oversizedFacts(b.snapshot.prs);
+    if (oversized !== undefined)
       return json(
-        { error: `pull request ${oversized.number}'s facts must be at most ${MAX_PULL_REQUEST_FACTS_BYTES} bytes` },
+        { error: `pull request ${oversized}'s facts must be at most ${MAX_PULL_REQUEST_FACTS_BYTES} bytes` },
         413,
       );
     const prs = await dO.put(b.snapshot);
     console.log(`[delivery/put] ${b.snapshot.repo} <- ${prs} pull requests as of ${b.snapshot.snapshotAt}`);
+    return json({ ok: true, prs });
+  }
+  if (pathname === "/delivery/merge") {
+    if (!isDeliverySnapshotPatch(b.patch))
+      return json(
+        {
+          error:
+            "patch must be a DeliverySnapshotPatch (repo, snapshotAt, range, truncated, completeFrom, upsert[], drop[])",
+        },
+        400,
+      );
+    const oversized = oversizedFacts(b.patch.upsert);
+    if (oversized !== undefined)
+      return json(
+        { error: `pull request ${oversized}'s facts must be at most ${MAX_PULL_REQUEST_FACTS_BYTES} bytes` },
+        413,
+      );
+    const prs = await dO.merge(b.patch);
+    if (prs === null) return json({ error: `no snapshot for ${b.patch.repo} to merge into` }, 404);
+    console.log(
+      `[delivery/merge] ${b.patch.repo} <- ${b.patch.upsert.length} pull requests re-read, ${b.patch.drop.length} dropped, ${prs} stored as of ${b.patch.snapshotAt}`,
+    );
     return json({ ok: true, prs });
   }
   return json({ error: "not found" }, 404);
@@ -2293,14 +2358,15 @@ const LEDGER_ROUTES = new Set([
 
 /** Routes whose bodies may carry a record, a transcript chunk, or an event batch. */
 const WIDE_BODY_ROUTES = new Set(["/runs/put", "/runs/finish", "/runs/append", "/runs/transcript/write"]);
-/** A delivery snapshot: every merged pull request's reviews and its branch's workflow runs over
- *  the window — a busy repository's runs to a few MB (measured: 291 pull requests, 2.1 MB). */
-const MAX_SNAPSHOT_BODY_BYTES = 8 * 1024 * 1024;
+/** A delivery snapshot written whole, or a refresh's patch: every merged pull request's reviews and
+ *  its branch's workflow runs — about 7 KB a pull request (measured: 291 pull requests, 2.1 MB), so
+ *  a first read at the listing cap is under 6 MB and a busy repository's whole window many MB. */
+const MAX_SNAPSHOT_BODY_BYTES = 16 * 1024 * 1024;
 
 /** The request body ceiling per route, decided after routing and before the parse. */
 function bodyFenceFor(pathname: string): number {
   if (WIDE_BODY_ROUTES.has(pathname)) return MAX_RUN_PUT_BODY_BYTES;
-  if (pathname === "/delivery/put") return MAX_SNAPSHOT_BODY_BYTES;
+  if (pathname === "/delivery/put" || pathname === "/delivery/merge") return MAX_SNAPSHOT_BODY_BYTES;
   return MAX_BODY_BYTES;
 }
 

@@ -100,14 +100,52 @@ describe("DeliveryDO routes", () => {
     expect(((await post("/delivery/get", { repo: other })).data.snapshot as { prs: unknown[] }).prs).toEqual([]);
   });
 
+  it("merge: 404 with nothing to merge into; the rows it carries replace theirs by number, the numbers it names go, the meta is replaced, another repository is untouched; a malformed patch is 400, an oversize row 413", async () => {
+    const r = repo();
+    const meta = {
+      repo: r,
+      snapshotAt: "2026-09-12T15:00:00Z",
+      range: { since: "2026-06-22T00:00:00Z".slice(0, 10), until: "2026-09-12T00:00:00Z".slice(0, 10), weeks: 13 },
+      truncated: false,
+      completeFrom: "2026-06-22T00:00:00Z",
+    };
+    const commented = pr(2, "2026-09-11T12:00:00Z", { title: "change 2 (commented on)" });
+    const patch = { ...meta, upsert: [pr(3, "2026-09-12T14:20:00Z"), commented], drop: [1] };
+    const missing = await post("/delivery/merge", { patch });
+    expect(missing.status).toBe(404);
+    expect(missing.data.error).toContain("to merge into");
+    await post("/delivery/put", { snapshot: snapshot(r) });
+    const other = repo();
+    await post("/delivery/put", { snapshot: snapshot(other) });
+    expect((await post("/delivery/merge", { patch })).data).toEqual({ ok: true, prs: 2 });
+    expect((await post("/delivery/get", { repo: r })).data).toEqual({
+      snapshot: { ...meta, prs: [commented, pr(3, "2026-09-12T14:20:00Z")] },
+    });
+    expect(((await post("/delivery/get", { repo: other })).data.snapshot as { prs: unknown[] }).prs).toHaveLength(2);
+    expect((await post("/delivery/merge", { patch: { ...meta } })).status).toBe(400);
+    expect((await post("/delivery/merge", { patch: { ...patch, drop: ["1"] } })).status).toBe(400);
+    const huge = {
+      ...patch,
+      upsert: [
+        pr(9, "2026-09-12T14:20:00Z", {
+          reviews: [
+            { author: "a", state: "commented", submittedAt: "2026-06-01T10:00:00Z", body: "x".repeat(1100 * 1024) },
+          ],
+        }),
+      ],
+    };
+    expect((await post("/delivery/merge", { patch: huge })).status).toBe(413);
+  });
+
   it("validates: a malformed snapshot, a repository that is not owner/name and a bad get are 400; an oversize body is 413; an unknown route 404", async () => {
     expect((await post("/delivery/put", { snapshot: { repo: repo() } })).status).toBe(400);
     expect((await post("/delivery/put", { snapshot: snapshot("../etc") })).status).toBe(400);
     expect((await post("/delivery/put", { snapshot: snapshot(repo(), { prs: [{ number: 1 }] }) })).status).toBe(400);
     expect((await post("/delivery/get", {})).status).toBe(400);
     expect((await post("/delivery/get", { repo: "not a slug" })).status).toBe(400);
+    // Eighty pull requests of 220 KB each: over the 16 MB body fence, no single row over the row fence.
     const huge = snapshot(repo(), {
-      prs: Array.from({ length: 40 }, (_, i) =>
+      prs: Array.from({ length: 80 }, (_, i) =>
         pr(i + 1, "2026-09-11T12:00:00Z", {
           reviews: [
             { author: "a", state: "commented", submittedAt: "2026-06-01T10:00:00Z", body: "x".repeat(220 * 1024) },
