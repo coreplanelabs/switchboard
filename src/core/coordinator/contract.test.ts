@@ -10,7 +10,9 @@ import {
   runFinishedEventType,
   sendRunFinished,
   STEP_NAME_PATTERN,
+  isCoordinatorUnit,
   type CoordinatorInstance,
+  type CoordinatorUnit,
   type WorkflowSender,
 } from "./contract.js";
 
@@ -85,6 +87,72 @@ describe("isCoordinatorInstance — the parent ship record", () => {
     expect(isCoordinatorInstance({ ...instance, createdAt: "yesterday" })).toBe(false);
     expect(isCoordinatorInstance(null)).toBe(false);
     expect(isCoordinatorInstance("x")).toBe(false);
+  });
+
+  // run-history item 49: the instance's own surfaces — the plan it runs, the
+  // clipped caps, the card the bot redraws and the record it writes at the end.
+  it("accepts the plan, the caps, the card, the run id and the label when present, each shaped, and refuses a malformed one", () => {
+    const full: CoordinatorInstance = {
+      ...instance,
+      plan: { id: "feat-program-plan", path: "docs/plans/feat-program-plan.md" },
+      caps: { maxRounds: 3, maxMinutes: 45 },
+      card: { channel: "C1", ts: "1.5" },
+      runId: "run-parent",
+      label: "*ship* · acme/api",
+    };
+    expect(isCoordinatorInstance(full)).toBe(true);
+    expect(isCoordinatorInstance(JSON.parse(JSON.stringify(full)))).toBe(true);
+    expect(isCoordinatorInstance({ ...full, plan: { id: "p" } })).toBe(false);
+    expect(isCoordinatorInstance({ ...full, caps: { maxRounds: "3", maxMinutes: 45 } })).toBe(false);
+    expect(isCoordinatorInstance({ ...full, card: { channel: "C1" } })).toBe(false);
+    expect(isCoordinatorInstance({ ...full, runId: 7 })).toBe(false);
+  });
+});
+
+// run-history item 50: one row per unit of the plan an instance runs.
+describe("isCoordinatorUnit — one unit's row", () => {
+  const unit: CoordinatorUnit = {
+    instanceId: instance.id,
+    unit: "U12",
+    slug: "u12-run-finished",
+    title: "run finished from every terminal record write",
+    branch: "plan/orchestration/u12-run-finished",
+    dependsOn: ["U20", "U21"],
+    threadKey: "slack:C1:2.0",
+    sourceUrl: "https://acme.slack.com/archives/C1/p2",
+    issue: 834,
+    pr: { number: 979, url: "https://github.com/acme/api/pull/979" },
+    rounds: [{ index: 0, agent: "coding", outcome: "started", at: 1_000 }],
+    ending: { kind: "merge_ready", report: "✅ Merge-ready after 1 review round", at: 2_000 },
+    startedAt: 900,
+  };
+
+  it("accepts a full row, its JSON round-trip and a bare one (the branch, the dependencies and no rounds)", () => {
+    expect(isCoordinatorUnit(unit)).toBe(true);
+    expect(isCoordinatorUnit(JSON.parse(JSON.stringify(unit)))).toBe(true);
+    expect(
+      isCoordinatorUnit({
+        instanceId: instance.id,
+        unit: "task",
+        slug: "task",
+        branch: "ship/x-1a2b3c",
+        dependsOn: [],
+        rounds: [],
+      }),
+    ).toBe(true);
+  });
+
+  it("refuses a bad instance id, a missing unit, slug or branch, a non-array dependency list, a malformed pull request, round or ending, and a non-object", () => {
+    expect(isCoordinatorUnit({ ...unit, instanceId: "has:colon" })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, unit: "" })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, slug: 7 })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, branch: "" })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, dependsOn: "U20" })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, pr: { number: "979" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, rounds: [{ index: 0 }] })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, ending: { kind: "merged" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, issue: "834" })).toBe(false);
+    expect(isCoordinatorUnit(null)).toBe(false);
   });
 });
 

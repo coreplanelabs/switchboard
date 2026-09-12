@@ -66,7 +66,10 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
 
 /** The parent ship record: what the bot writes at an instance's creation and
  *  the spawn route reads the requester, channel and thread from — so a step
- *  never takes an actor from its caller. Ids only, never the task text. */
+ *  never takes an actor from its caller. Ids only, never the task text. The
+ *  units the instance runs are rows of their own (`CoordinatorUnit`), so this
+ *  row stays the instance's identity and its two surfaces: the card the bot
+ *  redraws and the run record it writes at the end. */
 export interface CoordinatorInstance {
   id: string;
   kind: "ship";
@@ -75,35 +78,110 @@ export interface CoordinatorInstance {
   userName?: string;
   channelId: string;
   channelName?: string;
-  /** The unit's thread: every child of the instance runs here, one at a time. */
+  /** The requesting thread: where the card lives and where a task-string
+   *  instance's one unit runs; a plan's units each open a thread of their own. */
   threadKey: string;
   sourceUrl?: string;
-  /** `owner/name`, and the head branch the pipeline works on. */
+  /** `owner/name`, and the head branch the pipeline works on (a task string's
+   *  deterministic ship branch; for a plan, the first unit's — each unit row names its own). */
   repo: string;
   branch: string;
   /** The pull request's base branch, when the creator knew it. */
   base?: string;
   /** Epoch ms. */
   createdAt: number;
+  /** The plan the instance runs, when it runs one: its id (the file's name) and its path in the repository. */
+  plan?: { id: string; path: string };
+  /** The pipeline's caps as the profile gate clipped them: the rounds cap and the wall clock per unit. */
+  caps?: { maxRounds: number; maxMinutes: number };
+  /** The status card in the requesting thread, when the channel has one — what
+   *  the bot redraws from the coordinator's round events (`StatusHandle.handle`). */
+  card?: { channel: string; ts: string };
+  /** The run id the bot writes the parent's record under when the instance ends, and the card's label. */
+  runId?: string;
+  label?: string;
+}
+
+/** One unit of the plan an instance runs (a task string is a plan of one unit,
+ *  `task`): its branch, the units it waits on, and — as the runner reaches it —
+ *  its thread, its pull request, the round boundaries the card drew and how it
+ *  ended. One row a person can read for "what happened to this unit". */
+export interface CoordinatorUnit {
+  instanceId: string;
+  /** `U<n>` as the plan spells it, or `task`. */
+  unit: string;
+  slug: string;
+  title?: string;
+  /** `plan/<plan-id>/<unit-slug>`, or the task string's ship branch. */
+  branch: string;
+  dependsOn: string[];
+  /** The unit's thread, once opened; a task's is the requesting thread from the start. */
+  threadKey?: string;
+  sourceUrl?: string;
+  /** The unit's board issue in the repository, when one titled by the unit id exists — the handoff's destination. */
+  issue?: number;
+  pr?: { number: number; url: string };
+  /** The round boundaries the coordinator reported, oldest first (the `ship_round` vocabulary). */
+  rounds: Array<{ index: number; agent: string; outcome: string; at: number }>;
+  /** How the unit ended: the ending's kind and the thread's report, when it has. */
+  ending?: { kind: string; report: string; at: number };
+  startedAt?: number;
 }
 
 const REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const MAX_TEXT = 512;
+/** A unit's report — the loop's words for how it ended, with a cap report's findings — is longer than a name. */
+const MAX_REPORT = 20_000;
+const MAX_ROUNDS = 200;
 
 const isText = (v: unknown, max = MAX_TEXT): v is string => typeof v === "string" && v.length > 0 && v.length <= max;
 const isOptionalText = (v: unknown): boolean => v === undefined || isText(v);
+const isFinite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+const isPr = (v: unknown): boolean => isObject(v) && isFinite(v.number) && isText(v.url, 2048);
 
 /** Structural check on a record from outside the process (a Worker response, an HTTP body). */
 export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
-  if (typeof v !== "object" || v === null) return false;
-  const r = v as Record<string, unknown>;
+  if (!isObject(v)) return false;
+  const r = v;
   if (typeof r.id !== "string" || !INSTANCE_ID_PATTERN.test(r.id)) return false;
   if (r.kind !== "ship") return false;
   if (!isText(r.userId) || !isText(r.channelId) || !isText(r.threadKey)) return false;
   if (!isOptionalText(r.userName) || !isOptionalText(r.channelName) || !isOptionalText(r.sourceUrl)) return false;
   if (typeof r.repo !== "string" || !REPO_SLUG.test(r.repo)) return false;
   if (!isText(r.branch) || !isOptionalText(r.base)) return false;
-  return typeof r.createdAt === "number" && Number.isFinite(r.createdAt);
+  if (!isFinite(r.createdAt)) return false;
+  if (r.plan !== undefined && !(isObject(r.plan) && isText(r.plan.id) && isText(r.plan.path, 1024))) return false;
+  if (r.caps !== undefined && !(isObject(r.caps) && isFinite(r.caps.maxRounds) && isFinite(r.caps.maxMinutes)))
+    return false;
+  if (r.card !== undefined && !(isObject(r.card) && isText(r.card.channel) && isText(r.card.ts))) return false;
+  if (!isOptionalText(r.runId) || !isOptionalText(r.label)) return false;
+  return true;
+}
+
+/** Structural check on a unit row from outside the process. */
+export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
+  if (!isObject(v)) return false;
+  const r = v;
+  if (typeof r.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(r.instanceId)) return false;
+  if (!isText(r.unit, 32) || !isText(r.slug) || !isText(r.branch) || !isOptionalText(r.title)) return false;
+  if (!Array.isArray(r.dependsOn) || !r.dependsOn.every((d) => isText(d, 32))) return false;
+  if (!isOptionalText(r.threadKey) || !isOptionalText(r.sourceUrl)) return false;
+  if (r.issue !== undefined && !isFinite(r.issue)) return false;
+  if (r.pr !== undefined && !isPr(r.pr)) return false;
+  if (
+    !Array.isArray(r.rounds) ||
+    r.rounds.length > MAX_ROUNDS ||
+    !r.rounds.every((x) => isObject(x) && isFinite(x.index) && isText(x.agent) && isText(x.outcome) && isFinite(x.at))
+  )
+    return false;
+  if (
+    r.ending !== undefined &&
+    !(isObject(r.ending) && isText(r.ending.kind) && isText(r.ending.report, MAX_REPORT) && isFinite(r.ending.at))
+  )
+    return false;
+  if (r.startedAt !== undefined && !isFinite(r.startedAt)) return false;
+  return true;
 }
 
 /** The slice of a Workflow binding the send needs (`Workflow.get` →

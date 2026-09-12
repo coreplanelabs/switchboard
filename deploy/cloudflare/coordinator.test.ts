@@ -77,12 +77,18 @@ describe("the coordinator holds no credential", () => {
   });
 });
 
-describe("the state Worker's template carries no coordinator binding yet", () => {
-  it("a cross-script binding to a class that has never deployed would fail the state Worker's own deploy (memory deploys before the bot), so it waits for this class to be live", () => {
+describe("the state Worker's template binds this class across scripts", () => {
+  it("names the same class and the same Workflow name pattern as the shim's own binding, by the bot's script", () => {
     const memory = readFileSync(
       fileURLToPath(new URL("../cloudflare-memory/wrangler.template.jsonc", import.meta.url)),
       "utf8",
     );
-    expect(memory).not.toMatch(/"workflows"/);
+    const block = /"workflows":\s*\[([^\]]*)\]/.exec(memory)?.[1] ?? "";
+    expect(block).toContain('"binding": "SHIP_COORDINATOR"');
+    expect(block).toContain(`"class_name": "${boundClassName()}"`);
+    expect(block).toContain('"script_name": "{{bot.script}}"');
+    expect(block).toContain('"name": "{{bot.script}}-ship-coordinator"');
+    // The shim names its Workflow `{{script}}-ship-coordinator` under its own script — the same name once rendered.
+    expect(read("wrangler.template.jsonc")).toContain('"name": "{{script}}-ship-coordinator"');
   });
 });

@@ -40,7 +40,21 @@ describe("templateView", () => {
         stateWorkerUrl: "https://switchboard-memory.example.test",
       },
       access: undefined,
+      bot: { script: "switchboard" },
     });
+  });
+
+  // run-history item 47: the state Worker binds the bot's `ShipCoordinator` across
+  // scripts, so its template names the bot's script — the one every profile has.
+  it("the committed state Worker template binds the bot's ShipCoordinator Workflow by the bot's script name", () => {
+    const template = readFileSync(new URL(`../../deploy/cloudflare-memory/${TEMPLATE_FILE}`, import.meta.url), "utf8");
+    const rendered = renderTemplate(template, templateView(TEST_PROFILE, "memory", TEST_PUBLISHED_IMAGES)!);
+    expect(rendered.ok ? "" : rendered.problems.join("\n")).toBe("");
+    const text = rendered.ok ? rendered.text : "";
+    expect(text).toContain('"binding": "SHIP_COORDINATOR"');
+    expect(text).toContain('"class_name": "ShipCoordinator"');
+    expect(text).toContain('"script_name": "switchboard"');
+    expect(text).toContain('"name": "switchboard-ship-coordinator"');
   });
 
   it("carries the Access application when the profile has one, and is undefined for a Worker the profile lacks", () => {
