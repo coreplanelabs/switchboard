@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.206.1](https://github.com/coreplanelabs/switchboard/compare/v1.206.0...v1.206.1) (2026-09-12)
+
+
+### Documentation
+
+* **ship:** the runner's first plan — the load harness names rate limiting as a refusal and binds the recovery to its spec ([#986](https://github.com/coreplanelabs/switchboard/issues/986)) ([f3c740d](https://github.com/coreplanelabs/switchboard/commit/f3c740d4b93b900466a60f6073d3308d23d67da3))
+
 ## [1.206.0](https://github.com/coreplanelabs/switchboard/compare/v1.205.0...v1.206.0) (2026-09-12)
 
 
