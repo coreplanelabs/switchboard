@@ -301,7 +301,19 @@ describe("deps-harden: the install's node_modules is made owner-read-only, and a
     expect(lenient).not.toContain("install produced no node_modules");
   });
 
-  it("on a real filesystem: files lose u+w; no node_modules + emptyOk → an empty one exists and the commit succeeds; no node_modules + strict → exit 1 naming the scratch", () => {
+  it("on a real filesystem: files lose u+w; no node_modules + emptyOk → an empty one exists and the commit succeeds; no node_modules + strict → exit 1 naming the scratch", (ctx) => {
+    // `chmod u-w` withholds nothing from uid 0 — `test -w` answers yes for
+    // root whatever the mode bits say — so a root test process (a sandbox
+    // container's, say) cannot observe the hardening this case asserts.
+    // Skipped there, saying why; the assertion itself stays exact rather than
+    // checking mode bits root would pass anyway. The reason goes to stderr as
+    // well as into the skip note: the default reporter prints a skip without
+    // its note and drops a skipped test's console output.
+    const asRoot = process.getuid?.() === 0;
+    const reason =
+      "running as root (uid 0): chmod u-w withholds nothing from root, so `test -w` cannot observe the hardening — run as an unprivileged user";
+    if (asRoot) process.stderr.write(`deps-harden: the real-filesystem case is skipped — ${reason}\n`);
+    ctx.skip(asRoot, reason);
     const root = mkdtempSync(join(tmpdir(), "deps-harden-"));
     const me = `${spawnSync("id", ["-un"], { encoding: "utf8" }).stdout.trim()}:${spawnSync("id", ["-gn"], { encoding: "utf8" }).stdout.trim()}`;
     try {
