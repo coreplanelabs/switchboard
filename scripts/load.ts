@@ -6,6 +6,7 @@
 //   npm run load -- e2e      -- --ingress-url http://127.0.0.1:8080/ingress --text "agent:coding in owner/name: load" --threads 50
 //   npm run load -- cards    -- --cards 50 --hold 600 --channels 5
 //   npm run load -- provider --port 8089 --profile coding --cpu-seconds 60
+//   npm run load -- pi --checkout ../repo --task all --provider anthropic --model <id> --key-env ANTHROPIC_API_KEY
 //
 // Every command writes `load-results/<command>-<runId>.json` (the samples and
 // the summary) and `.md` (the receipt) and exits non-zero when a configured
@@ -13,21 +14,35 @@
 // `--help`; nothing here is hard-coded to one deployment.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   evaluateSlo,
   renderMarkdown,
   summarize,
+  type Sample,
   type SloCheck,
   type SloSpec,
   type Summary,
 } from "../src/load/aggregate.js";
+import { redactSecrets } from "../src/core/redact.js";
+import { processSecrets } from "../src/secrets.js";
 import { simulateCards } from "../src/load/cardsLoad.js";
 import { runE2eLoad } from "../src/load/e2eLoad.js";
 import { durationStats, pageAll, peakConcurrency, realRuns } from "../src/load/history.js";
 import { runResidentLoad, type ResidentThreadClient } from "../src/load/residentLoad.js";
 import { runSandboxLoad } from "../src/load/sandboxLoad.js";
-import { codingProfileScript, reviewProfileScript, startScriptedProvider } from "../src/load/scriptedProvider.js";
+import {
+  codingProfileScript,
+  piCodingProfileScript,
+  reviewProfileScript,
+  startScriptedProvider,
+} from "../src/load/scriptedProvider.js";
+import { drivePiTask, realTimers, redactPiRun, type PiTaskRun } from "../src/load/piRpc.js";
+import { previewToolCall } from "../src/load/piPolicyPreview.js";
+import { PI_TASK_NAMES, PI_TASKS, piTaskByName, taskBranch, taskPrompt } from "../src/load/piTasks.js";
+import { PI_CODING_TOOLS, checkoutBranch, piKeyEnvFor, spawnPi, writeAgentDir } from "../src/load/piProcess.js";
+import { parsePrDescription } from "../src/core/prDescription.js";
 import { CloudflareSandboxExecutor } from "../src/execution/cloudflareSandbox.js";
 import { ResidentExecutor } from "../src/execution/resident.js";
 import { systemClock } from "../src/core/trace/clock.js";
@@ -51,8 +66,14 @@ commands
              env: SWITCHBOARD_LOAD_INGRESS_TOKEN (or --token-env)
   cards      the status-card path in virtual time (no network)
              --cards N  --hold S  --channels N  [--client budgeted|retrying  --budget-per-minute N  --per-app-per-minute N  --per-channel-per-second N]
-  provider   serve the scripted model for a local bot (blocks)
-             --port N  --profile review|coding  --cpu-seconds S  --terminal
+  provider   serve the scripted model for a local bot or for \`pi\` (blocks)
+             --port N  --profile review|coding|pi-coding  --cpu-seconds S  --terminal
+  pi         the five representative coding tasks on pi's harness (pi --mode rpc in a checkout)
+             --checkout DIR  --task all|<name>  --provider NAME  --model ID  --key-env VAR
+             [--pi PATH  --thinking LEVEL  --budget-minutes N  --base-url URL (a custom OpenAI-compatible endpoint)]
+             the model key is read from the environment variable --key-env names (default: the variable pi reads
+             for --provider, e.g. ANTHROPIC_API_KEY); never from a file, never printed
+             --print-prompt --task <name>: print the task's prompt and exit (for the same task on today's coding agent)
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
@@ -85,6 +106,16 @@ function flags(argv: string[]): Flags {
       "per-channel-per-second": { type: "string" },
       client: { type: "string" },
       "budget-per-minute": { type: "string" },
+      checkout: { type: "string" },
+      task: { type: "string" },
+      provider: { type: "string" },
+      model: { type: "string" },
+      "key-env": { type: "string" },
+      pi: { type: "string" },
+      thinking: { type: "string" },
+      "budget-minutes": { type: "string" },
+      "base-url": { type: "string" },
+      "print-prompt": { type: "boolean" },
       help: { type: "boolean" },
     },
   });
@@ -415,7 +446,12 @@ async function cards(f: Flags): Promise<boolean> {
 async function provider(f: Flags): Promise<boolean> {
   const profile = str(f, "profile", "coding");
   const opts = { cpuSeconds: num(f, "cpu-seconds", 60), terminal: f.terminal === true };
-  const script = profile === "review" ? reviewProfileScript(opts) : codingProfileScript(opts);
+  const script =
+    profile === "review"
+      ? reviewProfileScript(opts)
+      : profile === "pi-coding"
+        ? piCodingProfileScript(opts)
+        : codingProfileScript(opts);
   const server = await startScriptedProvider(script, { port: num(f, "port", 8089) });
   process.stdout.write(
     `scripted provider (${profile}, cpu ${opts.cpuSeconds}s${opts.terminal ? ", terminal tool" : ""}) on ${server.url}\n`,
@@ -431,6 +467,200 @@ async function provider(f: Flags): Promise<boolean> {
   return true;
 }
 
+/** pi's `auth.json` is absent or an empty object: nothing was persisted. */
+function authStoreEmpty(path: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    return typeof parsed === "object" && parsed !== null && Object.keys(parsed).length === 0;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/** The pi spike (docs/reference/specs/load-harness.md, the pi driver items):
+ *  each task starts one `pi --mode rpc` in the checkout, on a branch the
+ *  driver creates, with the harness extension and nothing else loaded, and
+ *  records what pi's stream said. The key comes from the environment
+ *  variable `--key-env` names and goes nowhere but the child's environment. */
+async function pi(f: Flags): Promise<boolean> {
+  const id = runId();
+  if (f["print-prompt"] === true) {
+    // The same words for the other arm of the comparison: today's coding
+    // agent gets this prompt through `npm run cli -- ask`. It names a branch
+    // of its own, since no driver creates one for it. No pi, no key.
+    const task = piTaskByName(str(f, "task"));
+    if (!task) throw new Error(`--task must be one of ${PI_TASK_NAMES.join(", ")}`);
+    process.stdout.write(taskPrompt(task, { name: taskBranch(`native-${task.name}`, id), created: false }) + "\n");
+    return true;
+  }
+  const startedAt = new Date(systemClock()).toISOString();
+  const providerName = str(f, "provider", "anthropic");
+  const keyEnv = str(f, "key-env", piKeyEnvFor(providerName));
+  const key = processSecrets.named(keyEnv);
+  if (!key) {
+    process.stderr.write(
+      `load pi: the model key must be in the environment variable ${keyEnv} (name another with --key-env); refusing to start\n`,
+    );
+    return false;
+  }
+  const checkout = resolve(str(f, "checkout"));
+  const model = str(f, "model");
+  const taskFlag = str(f, "task", "all");
+  const tasks = taskFlag === "all" ? [...PI_TASKS] : [piTaskByName(taskFlag)].flatMap((t) => (t ? [t] : []));
+  if (tasks.length === 0) throw new Error(`--task must be all or one of ${PI_TASK_NAMES.join(", ")}`);
+  const budgetMs = num(f, "budget-minutes", 45) * 60_000;
+  const piBin = str(f, "pi", "pi");
+  const thinking = typeof f.thinking === "string" ? f.thinking : undefined;
+  const baseUrl = typeof f["base-url"] === "string" ? f["base-url"] : undefined;
+  const extensionPath = resolve("src/load/piExtension.ts");
+
+  // pi's config directory lives beside the receipt, not in a temp dir: its
+  // session files are the run's own record and stay with the results
+  // (settings.json and models.json hold no secret — the key is interpolated
+  // from the environment at request time).
+  const agentDir = `${RESULTS_DIR}/pi-${id}-agent`;
+  const layout = writeAgentDir(agentDir, { provider: providerName, model, ...(baseUrl ? { baseUrl } : {}) });
+
+  const samples: Sample[] = [];
+  const runs: PiTaskRun[] = [];
+  const stderrs: Record<string, string> = {};
+  for (const task of tasks) {
+    const branch = taskBranch(task.name, id);
+    await checkoutBranch(checkout, branch);
+    const proc = spawnPi({
+      piBin,
+      checkout,
+      extensionPath,
+      provider: providerName,
+      model,
+      ...(thinking ? { thinking } : {}),
+      // pi reads its provider's own variable; the operator's `--key-env`
+      // names where the value comes FROM, never what the child sees.
+      keyEnvName: piKeyEnvFor(providerName),
+      keyValue: key,
+      agentDir,
+      sessionDir: layout.sessionDir,
+      tools: PI_CODING_TOOLS,
+    });
+    const startedTask = systemClock();
+    process.stdout.write(`pi ${task.name}: branch ${branch}, budget ${budgetMs / 60_000} min\n`);
+    const run = await drivePiTask(proc.transport, {
+      task: task.name,
+      prompt: taskPrompt(task, { name: branch, created: true }),
+      budgetMs,
+      now: systemClock,
+      timers: realTimers,
+      preview: (tool, input) => previewToolCall(tool, input, { checkout, branch }),
+      describe: (input) => {
+        try {
+          parsePrDescription(input);
+          return [];
+        } catch (err) {
+          return [err instanceof Error ? err.message.split("\n")[0] : String(err)];
+        }
+      },
+      onEvent: (event) => {
+        if (event.type === "tool_execution_start") process.stdout.write(`  ${String(event.toolName)}\n`);
+      },
+    });
+    // pi shuts down when its stdin closes; give it 5 s, then kill. The timer
+    // is unref'd and cleared so a prompt exit never waits on it.
+    let exitTimer: NodeJS.Timeout | undefined;
+    const exit = await Promise.race([
+      proc.exited,
+      new Promise<{ code: null; signal: null }>((r) => {
+        exitTimer = setTimeout(() => r({ code: null, signal: null }), 5_000);
+        exitTimer.unref();
+      }),
+    ]);
+    if (exitTimer) clearTimeout(exitTimer);
+    if (exit.code === null && exit.signal === null) proc.kill();
+    stderrs[task.name] = redactSecrets(proc.stderr());
+    const ok = run.terminal === "settled" && run.prShaped.reached;
+    samples.push({
+      op: "task",
+      startedAt: startedTask,
+      ms: run.wallMs,
+      ok,
+      status: run.terminal,
+      ...(ok ? {} : { reason: run.terminal === "settled" ? "not-pr-shaped" : run.terminal }),
+    });
+    runs.push(redactPiRun(run));
+    process.stdout.write(
+      `  → ${run.terminal}, ${run.turns} turns, $${run.cost.total.toFixed(4)}, ${run.toolCalls.length} tool calls, PR-shaped: ${run.prShaped.reached}\n`,
+    );
+  }
+
+  const summary = summarize(samples);
+  const refusedCalls = runs.flatMap((r) =>
+    r.toolCalls.filter((c) => c.verdict !== "allowed").map((c) => ({ task: r.task, ...c })),
+  );
+  const unpaired = runs.flatMap((r) => r.toolCalls.filter((c) => !c.hookSeen).map((c) => `${r.task}:${c.callId}`));
+  const unmapped = [...new Set(runs.flatMap((r) => r.unmapped))];
+  const checks: SloCheck[] = [
+    {
+      name: "every task settled",
+      pass: runs.every((r) => r.terminal === "settled"),
+      actual: runs.map((r) => r.terminal).join(", "),
+      limit: "settled",
+    },
+    {
+      name: "every task reached a PR-shaped outcome",
+      pass: runs.every((r) => r.prShaped.reached),
+      actual: `${runs.filter((r) => r.prShaped.reached).length}/${runs.length}`,
+      limit: `${runs.length}`,
+    },
+    {
+      name: "every streamed tool call was also seen by the extension's tool_call hook",
+      pass: unpaired.length === 0,
+      actual: unpaired.length === 0 ? "all paired" : unpaired.join(", "),
+      limit: "0 unpaired",
+    },
+    // pi creates an empty credential store in its config directory; the key
+    // it read from the environment must never land in it, because the
+    // directory stays beside the receipt.
+    {
+      name: "pi persisted no credential into its config directory",
+      pass: authStoreEmpty(`${agentDir}/auth.json`),
+      actual: authStoreEmpty(`${agentDir}/auth.json`) ? "auth.json absent or {}" : "auth.json carries entries",
+      limit: "absent or {}",
+    },
+  ];
+  const notes = [
+    "| task | terminal | wall | turns | retries | tokens in/out | cost (pi catalog) | tool calls | refused | outside profile | PR-shaped |",
+    "|---|---|---|---|---|---|---|---|---|---|---|",
+    ...runs.map(
+      (r) =>
+        `| ${r.task} | ${r.terminal} | ${Math.round(r.wallMs / 1000)} s | ${r.turns} | ${r.retries} | ${r.usage.input}/${r.usage.output} | $${r.cost.total.toFixed(4)} | ${r.toolCalls.length} | ${r.toolCalls.filter((c) => c.verdict === "refused").length} | ${r.toolCalls.filter((c) => c.verdict === "outside-profile").length} | ${r.prShaped.reached ? "yes" : `no (${r.prShaped.problems.join("; ")})`} |`,
+    ),
+    `model: ${runs[0]?.model ? `${runs[0].model.provider}/${runs[0].model.id} thinking ${runs[0].model.thinkingLevel}` : "unknown"}; pi's config and session files under ${agentDir} (kept: the sessions are the run's own record)`,
+    `tool calls the policy preview would refuse or that fall outside the coding profile: ${refusedCalls.length === 0 ? "none" : ""}`,
+    ...refusedCalls.map((c) => `  - ${c.task} ${c.tool} (${c.verdict}): ${c.reason} — \`${c.summary}\``),
+    `pi event kinds with no home on the run stream: ${unmapped.length === 0 ? "none" : unmapped.join(", ")}`,
+    ...runs.flatMap((r) => r.errors.map((e) => `error (${r.task}): ${e}`)),
+  ];
+  return writeResults(
+    "pi",
+    id,
+    startedAt,
+    {
+      checkout,
+      tasks: tasks.map((t) => t.name),
+      provider: providerName,
+      model,
+      thinking,
+      budgetMinutes: budgetMs / 60_000,
+      keyEnv,
+      piBin,
+      baseUrl,
+    },
+    summary,
+    checks,
+    { runs, stderr: stderrs },
+    notes,
+  );
+}
+
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   const f = flags(rest);
@@ -438,7 +668,15 @@ async function main(): Promise<number> {
     process.stdout.write(USAGE);
     return command ? 0 : 2;
   }
-  const commands: Record<string, (f: Flags) => Promise<boolean>> = { history, resident, sandbox, e2e, cards, provider };
+  const commands: Record<string, (f: Flags) => Promise<boolean>> = {
+    history,
+    resident,
+    sandbox,
+    e2e,
+    cards,
+    provider,
+    pi,
+  };
   const run = commands[command];
   if (!run) {
     process.stderr.write(`unknown command ${command}\n${USAGE}`);
