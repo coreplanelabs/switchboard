@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
+import type { CoordinatorInstance } from "../../src/core/coordinator/contract.ts";
+import type { RunHistoryDO } from "./worker.ts";
 
 // Feature: docs/reference/specs/run-history.md items 28–34 — the live-run ledger on the
 // RunHistoryDO: claim (one live run per thread), the fence on every owner
@@ -349,7 +351,8 @@ describe("run ledger — finishing, finish, handoff, reclaim (items 31, 33)", ()
       gen: "g1",
       record: record("r1", "slack:C1:1.0"),
     });
-    expect(fin).toEqual({ status: 200, data: { ok: true, stored: true } });
+    // `event: none` — a record with no coordinator sends nothing (item 47).
+    expect(fin).toEqual({ status: 200, data: { ok: true, stored: true, event: "none" } });
     expect((await post("/runs/live", { storeKey: key })).data.runs).toEqual([]);
     const got = await post("/runs/get", { storeKey: key, id: "r1" });
     expect((got.data.record as RunRecord).status).toBe("completed");
@@ -399,5 +402,253 @@ describe("run ledger — finishing, finish, handoff, reclaim (items 31, 33)", ()
     const live = (await post("/runs/live", { storeKey: key })).data.runs as Array<{ runId: string; ownerGen: string }>;
     expect(live.find((x) => x.runId === "alive")?.ownerGen).toBe("g1");
     expect(live.find((x) => x.runId === "mine")?.ownerGen).toBe("g2"); // untouched by its own generation's reclaim
+  });
+});
+
+// docs/reference/specs/run-history.md items 47–48: the coordinator's event rides
+// the one handler every terminal record commits through, and the row and record
+// carry the instance and the spawn's key.
+describe("run ledger — the coordinator's event and the key (items 47–48)", () => {
+  const TAG = { parentInstanceId: "ship_acme_api_1", idempotencyKey: "ship_acme_api_1:u12/0/coding" };
+  type Sent = { instance: string; type: string; payload: unknown };
+
+  /** The Workflow binding as the object sees it, doubled: what `finish` sent, or
+   *  an engine that refuses because the instance ended. Installed on the live
+   *  object, so the send goes through the handler's own code path. */
+  async function coordinatorDouble(key: string, behaviour: "ok" | "not-running" = "ok"): Promise<Sent[]> {
+    const sent: Sent[] = [];
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const holder = inst as unknown as { env: Record<string, unknown> };
+      holder.env = {
+        ...holder.env,
+        SHIP_COORDINATOR: {
+          get: async (id: string) => ({
+            sendEvent: async (event: { type: string; payload: unknown }) => {
+              if (behaviour === "not-running") throw new Error("instance is not running");
+              sent.push({ instance: id, type: event.type, payload: event.payload });
+            },
+          }),
+        },
+      };
+    });
+    return sent;
+  }
+
+  const childRecord = (id: string, threadKey: string, status: RunRecord["status"] = "completed"): RunRecord => ({
+    ...record(id, threadKey),
+    status,
+    ...TAG,
+  });
+
+  it("a record carrying parentInstanceId committed by the owner's finish sends exactly one `run finished:<runId>` to that instance, after the commit, and the response says so", async () => {
+    const key = storeKey();
+    const sent = await coordinatorDouble(key);
+    await post(
+      "/runs/claim",
+      claimBody(key, "r1", "slack:C1:1.0", "g1", {
+        meta: { ...claimBody(key, "r1", "slack:C1:1.0").run.meta, ...TAG },
+      }),
+    );
+    const fin = await post("/runs/finish", {
+      storeKey: key,
+      runId: "r1",
+      gen: "g1",
+      record: childRecord("r1", "slack:C1:1.0"),
+    });
+    expect(fin).toEqual({ status: 200, data: { ok: true, stored: true, event: "sent" } });
+    expect(sent).toEqual([
+      {
+        instance: "ship_acme_api_1",
+        type: "run finished:r1",
+        payload: expect.objectContaining({ runId: "r1", status: "completed", parentInstanceId: "ship_acme_api_1" }),
+      },
+    ]);
+    // The commit stood: the row is gone and the record lists as finished, its tag on it.
+    expect((await post("/runs/live", { storeKey: key })).data.runs).toEqual([]);
+    const got = (await post("/runs/get", { storeKey: key, id: "r1" })).data.record as RunRecord;
+    expect(got).toMatchObject({ status: "completed", ...TAG });
+  });
+
+  it("the reclaim's close (an expired live row taken by the next generation) and the admission's close (a reserved row it supersedes) each send exactly one event", async () => {
+    const key = storeKey();
+    const sent = await coordinatorDouble(key);
+    const base = claimBody(key, "expired", "slack:C1:1.0").run.meta;
+    await post("/runs/claim", claimBody(key, "expired", "slack:C1:1.0", "g1", { meta: { ...base, ...TAG } }));
+    await post(
+      "/runs/claim",
+      claimBody(key, "reserved", "slack:C1:2.0", "g1", {
+        phase: "attaching",
+        system: "",
+        tools: [],
+        card: null,
+        meta: { ...base, threadKey: "slack:C1:2.0", ...TAG, request: { text: "do the unit" } },
+      }),
+    );
+    const future = Date.now() + LEASE_MS + 1_000;
+    const taken = (await post("/runs/reclaim", { storeKey: key, gen: "g2", now: future, leaseMs: LEASE_MS })).data
+      .runs as Array<{ row: { runId: string } }>;
+    expect(taken.map((t) => t.row.runId).sort()).toEqual(["expired", "reserved"]);
+    expect(
+      await post("/runs/finish", {
+        storeKey: key,
+        runId: "expired",
+        gen: "g2",
+        record: childRecord("expired", "slack:C1:1.0", "interrupted"),
+      }),
+    ).toMatchObject({ status: 200, data: { ok: true, event: "sent" } });
+    expect(
+      await post("/runs/finish", {
+        storeKey: key,
+        runId: "reserved",
+        gen: "g2",
+        record: childRecord("reserved", "slack:C1:2.0", "interrupted"),
+      }),
+    ).toMatchObject({ status: 200, data: { ok: true, event: "sent" } });
+    expect(sent.map((s) => s.type)).toEqual(["run finished:expired", "run finished:reserved"]);
+    expect(sent.map((s) => (s.payload as { status: string }).status)).toEqual(["interrupted", "interrupted"]);
+  });
+
+  it("a record without parentInstanceId sends nothing; a fenced finish sends nothing", async () => {
+    const key = storeKey();
+    const sent = await coordinatorDouble(key);
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"));
+    await post(
+      "/runs/claim",
+      claimBody(key, "r2", "slack:C1:2.0", "g1", {
+        meta: { ...claimBody(key, "r2", "slack:C1:2.0").run.meta, ...TAG },
+      }),
+    );
+    expect(
+      await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", "slack:C1:1.0") }),
+    ).toEqual({ status: 200, data: { ok: true, stored: true, event: "none" } });
+    expect(
+      (await post("/runs/finish", { storeKey: key, runId: "r2", gen: "g9", record: childRecord("r2", "slack:C1:2.0") }))
+        .status,
+    ).toBe(409);
+    expect(sent).toEqual([]);
+  });
+
+  it("a send the engine refuses — the instance ended — is swallowed: the finish still commits and the response names the failure", async () => {
+    const key = storeKey();
+    const sent = await coordinatorDouble(key, "not-running");
+    await post(
+      "/runs/claim",
+      claimBody(key, "r1", "slack:C1:1.0", "g1", {
+        meta: { ...claimBody(key, "r1", "slack:C1:1.0").run.meta, ...TAG },
+      }),
+    );
+    const fin = await post("/runs/finish", {
+      storeKey: key,
+      runId: "r1",
+      gen: "g1",
+      record: childRecord("r1", "slack:C1:1.0"),
+    });
+    expect(fin).toEqual({ status: 200, data: { ok: true, stored: true, event: "failed" } });
+    expect(sent).toEqual([]);
+    expect((await post("/runs/live", { storeKey: key })).data.runs).toEqual([]);
+    expect(((await post("/runs/get", { storeKey: key, id: "r1" })).data.record as RunRecord).status).toBe("completed");
+  });
+
+  it("without a coordinator binding the finish commits as before and the response says no-binding", async () => {
+    const key = storeKey();
+    await post(
+      "/runs/claim",
+      claimBody(key, "r1", "slack:C1:1.0", "g1", {
+        meta: { ...claimBody(key, "r1", "slack:C1:1.0").run.meta, ...TAG },
+      }),
+    );
+    expect(
+      await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: childRecord("r1", "slack:C1:1.0") }),
+    ).toEqual({ status: 200, data: { ok: true, stored: true, event: "no-binding" } });
+  });
+
+  it("the claim stores the key on the row and a second claim on the thread is refused naming it; a malformed key or instance id in the meta is 400", async () => {
+    const key = storeKey();
+    const meta = { ...claimBody(key, "r1", "slack:C1:1.0").run.meta, ...TAG };
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0", "g1", { meta }))).status).toBe(200);
+    const live = (await post("/runs/live", { storeKey: key })).data.runs as Array<{ meta: Record<string, unknown> }>;
+    expect(live[0].meta).toMatchObject(TAG);
+    const busy = await post("/runs/claim", claimBody(key, "r2", "slack:C1:1.0"));
+    expect(busy).toEqual({
+      status: 409,
+      data: {
+        ok: false,
+        reason: "thread-live",
+        live: { runId: "r1", agent: "review", startedAt: 1_000, idempotencyKey: TAG.idempotencyKey },
+      },
+    });
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, "r3", "slack:C1:3.0", "g1", { meta: { ...meta, idempotencyKey: "no-step" } }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, "r3", "slack:C1:3.0", "g1", { meta: { ...meta, parentInstanceId: "has:colon" } }),
+        )
+      ).status,
+    ).toBe(400);
+    // The tag is both fields or neither: one alone is refused before it reaches a row.
+    const { idempotencyKey: _k, ...instanceOnly } = meta;
+    expect((await post("/runs/claim", claimBody(key, "r3", "slack:C1:3.0", "g1", { meta: instanceOnly }))).status).toBe(
+      400,
+    );
+  });
+});
+
+// docs/reference/specs/run-history.md item 49: the parent ship record the
+// coordinator's spawn route reads the requester from lives on the state Worker.
+describe("run ledger — the coordinator instance record (item 49)", () => {
+  const instance: CoordinatorInstance = {
+    id: "ship_acme_api_1",
+    kind: "ship",
+    userId: "slack:UALICE",
+    userName: "alice",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:1.0",
+    repo: "acme/api",
+    branch: "plan/orchestration/u12",
+    base: "main",
+    createdAt: 1_000,
+  };
+
+  it("put stores the record and get reads it back; an identical put is idempotent; a different record under the same id is refused as exists; an unknown id is null", async () => {
+    const key = storeKey();
+    expect(await post("/runs/coordinator/put", { storeKey: key, instance })).toEqual({
+      status: 200,
+      data: { ok: true },
+    });
+    expect(await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).toEqual({
+      status: 200,
+      data: { instance },
+    });
+    expect(await post("/runs/coordinator/put", { storeKey: key, instance })).toEqual({
+      status: 200,
+      data: { ok: true },
+    });
+    expect(await post("/runs/coordinator/put", { storeKey: key, instance: { ...instance, branch: "other" } })).toEqual({
+      status: 409,
+      data: { ok: false, reason: "exists" },
+    });
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({ instance });
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: "ship_none" })).data).toEqual({ instance: null });
+  });
+
+  it("validates: a malformed record or id is 400; no bearer is 401", async () => {
+    const key = storeKey();
+    expect(
+      (await post("/runs/coordinator/put", { storeKey: key, instance: { ...instance, kind: "review" } })).status,
+    ).toBe(400);
+    expect((await post("/runs/coordinator/put", { storeKey: key })).status).toBe(400);
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: "has:colon" })).status).toBe(400);
+    expect(
+      (await post("/runs/coordinator/get", { storeKey: key, id: instance.id }, { "content-type": "application/json" }))
+        .status,
+    ).toBe(401);
   });
 });

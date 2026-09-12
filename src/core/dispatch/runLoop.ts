@@ -9,6 +9,7 @@
 // capabilities are run.ts.
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
+import type { CoordinatorTag } from "../coordinator/contract.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { runAgent } from "../../runner.js";
 import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
@@ -120,6 +121,8 @@ export interface RunLoopContext {
   wait?: WaitCapability;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
+  /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
+  coordinator?: CoordinatorTag;
 }
 
 /**
@@ -167,6 +170,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     steer,
     wait,
     parentRunId,
+    coordinator,
   } = ctx;
   // The def the runner and the post-run turns read: the preset with the
   // EFFECTIVE budget (its deadline, wrap-up warning and budget label read
@@ -731,6 +735,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       ledgerRun,
       ...(handoff !== undefined ? { handoff } : {}),
       ...(parentRunId !== undefined ? { parentRunId } : {}),
+      ...(coordinator !== undefined ? { coordinator } : {}),
     });
     // The diagnosis rides the run record (above): the friction ledger the
     // cross-run proposer reads is run history, so nothing is written twice.

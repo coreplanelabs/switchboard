@@ -9285,6 +9285,52 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(warnings).toEqual([]);
   });
 
+  // docs/reference/specs/run-history.md item 48; docs/reference/specs/thread-admission.md
+  // item 8: a coordinator's child carries its instance and its spawn's key on
+  // every row — the reservation, the claim, the registry summary, the finish
+  // record — and a second spawn onto the unit's thread while the child is live
+  // is refused by name with nothing said in the thread.
+  it("a coordinator's child (DispatchOptions.coordinator) carries parentInstanceId and idempotencyKey on the reserved row, the claimed row, the live summary and the finish record; a second coordinator dispatch onto the live thread is refused coordinator_thread_live and says nothing", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const tag = { parentInstanceId: "ship_acme_api_1", idempotencyKey: "ship_acme_api_1:u12/0/coding" };
+    let rowAtAttach: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    const real = vi.mocked(makeExecutor).getMockImplementation()!;
+    vi.mocked(makeExecutor).mockImplementationOnce(async (...args) => {
+      rowAtAttach = structuredClone(ledger.live.get("run-l"));
+      return real(...args);
+    });
+    let rowAtFirstCall: ReturnType<InMemoryRunLedger["live"]["get"]>;
+    let summaryAtFirstCall: ReturnType<RunRegistry["getById"]> = null;
+    let secondOutcome: DispatchOutcome | undefined;
+    const second = ioWithCard();
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        rowAtFirstCall ??= structuredClone(ledger.live.get("run-l"));
+        summaryAtFirstCall ??= registry.getById("run-l");
+        // A retried spawn lands while the child is live: refused, nothing steered.
+        secondOutcome ??= await dispatch(deps, msg("hello again"), second.io, { coordinator: tag });
+        return { content: [{ type: "text", text: "done" }], stopReason: "end_turn" };
+      },
+    };
+    const { deps, registry, writer, warnings } = wired(provider, { ledger });
+    deps.admission = new ThreadAdmission<DispatchFollowUp>();
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("hello there"), io, { coordinator: tag });
+    await writer.settled();
+    expect(outcome).toEqual({ status: "completed" });
+    expect(rowAtAttach).toMatchObject({ runId: "run-l", phase: "attaching", meta: tag });
+    expect(rowAtFirstCall).toMatchObject({ runId: "run-l", phase: "live", meta: tag });
+    expect(summaryAtFirstCall).toMatchObject({ id: "run-l", ...tag });
+    expect(ledger.finished.get("run-l")).toMatchObject({ id: "run-l", status: "completed", ...tag });
+    expect(isRunRecord(ledger.finished.get("run-l")!)).toBe(true);
+    expect(replies.at(-1)).toBe("done");
+    expect(secondOutcome).toEqual({ status: "refused", refusal: "coordinator_thread_live" });
+    expect(second.replies).toEqual([]);
+    expect(ledger.live.size).toBe(0);
+    expect(warnings).toEqual([]);
+  });
+
   it("a dispatch that ends before its prompt exists — here the attach's ask-once branch refusal — abandons its reservation and discards its registry row (item 42): both go with no record and no warning, the index feed sees the row come and go, so nothing restarts or lists a run that never started", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");

@@ -11,6 +11,7 @@
 // before the next step that can throw and its outer finally releases exactly
 // what the inline code did.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
+import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import { AGENTS, type AgentDef } from "../../agents/registry.js";
 import { clipSourceLabel, type RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
@@ -254,6 +255,8 @@ export interface RegisterRunContext {
   admitted: LiveThread<DispatchFollowUp>;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
+  /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
+  coordinator?: CoordinatorTag;
 }
 
 /**
@@ -283,6 +286,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     shell,
     admitted,
     parentRunId,
+    coordinator,
   } = ctx;
   // The reservation (item 42): the run's row BEFORE the workspace attach —
   // identity, request, card, no prompt — so a kill during a slow attach (a
@@ -337,6 +341,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       ...(parentRunId !== undefined ? { parentRunId } : {}),
+      ...coordinatorFields(coordinator),
     },
     // Under the run's id, at the card's start (the reservation's, or the
     // carried row's) — a resume replays its events, a restart starts them
@@ -460,6 +465,8 @@ export interface ReserveContext {
   root: Span;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
+  /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
+  coordinator?: CoordinatorTag;
 }
 
 /**
@@ -487,6 +494,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     admitted,
     root,
     parentRunId,
+    coordinator,
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
@@ -512,6 +520,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           readonly: profile.identity === "read",
           profile,
           ...(parentRunId !== undefined ? { parentRunId } : {}),
+          ...coordinatorFields(coordinator),
           request: requestRow,
         },
         card: card.handle ?? null,

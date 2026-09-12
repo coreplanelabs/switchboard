@@ -126,6 +126,58 @@ describe("RunsService.getRun", () => {
     );
   });
 
+  // docs/reference/specs/run-history.md item 48: a coordinator's child names its
+  // instance and its spawn's key on every view — live here, live on another
+  // generation's ledger row, and persisted — so the spawn route can tell an
+  // already-spawned step from a busy thread by reading the run.
+  it("carries parentInstanceId and idempotencyKey from a live child's RunMeta, a ledger row's meta and a persisted record; a run without them carries no key", async () => {
+    const { reg, tick } = testRegistry();
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const svc = createRunsService({ registry: reg, store, ledger });
+    const tag = { parentInstanceId: "ship_acme_1", idempotencyKey: "ship_acme_1:u/0/coding" };
+    const child = reg.create("coding · child", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:9",
+      ...tag,
+    });
+    const plain = reg.create("general · plain", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:8",
+    });
+    await ledger.claim({
+      runId: "r-far",
+      threadKey: "slack:C1:7",
+      gen: "gen-OTHER",
+      leaseMs: 30_000,
+      startedAt: NOW - 5_000,
+      meta: { agent: "review", channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:7", ...tag },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    await store.put(record("r-child", NOW - DAY, tag));
+    tick(1);
+    const live = await svc.getRun(child.id);
+    expect(live.ok && live.value).toMatchObject(tag);
+    const far = await svc.getRun("r-far");
+    expect(far.ok && far.value).toMatchObject({ ...tag, ownerGen: "gen-OTHER" });
+    const persisted = await svc.getRun("r-child");
+    expect(persisted.ok && persisted.value).toMatchObject(tag);
+    const none = await svc.getRun(plain.id);
+    expect(none.ok && "parentInstanceId" in none.value).toBe(false);
+    expect(none.ok && "idempotencyKey" in none.value).toBe(false);
+    const active = await svc.listRuns({ status: "active", visibleTo: ALL });
+    expect(
+      active.runs
+        .filter((r) => r.idempotencyKey === tag.idempotencyKey)
+        .map((r) => r.id)
+        .sort(),
+    ).toEqual([child.id, "r-far"].sort());
+  });
+
   it("returns a persisted run in the same shape (finished:true, persisted:true), events only on include", async () => {
     const { svc, store } = setup();
     await store!.put(record("r1", NOW - DAY));

@@ -140,7 +140,12 @@ export class WorkerRunLedger implements RunLedger {
     this.checkIds(req.runId, req.gen);
     const r = await this.post("/runs/claim", { storeKey: this.opts.storeKey, run: req });
     if (r.status === 409) {
-      const live = (r.data.live ?? {}) as { runId?: string; agent?: string; startedAt?: number };
+      const live = (r.data.live ?? {}) as {
+        runId?: string;
+        agent?: string;
+        startedAt?: number;
+        idempotencyKey?: string;
+      };
       return {
         ok: false,
         reason: "thread-live",
@@ -148,6 +153,7 @@ export class WorkerRunLedger implements RunLedger {
           runId: String(live.runId ?? ""),
           ...(live.agent ? { agent: live.agent } : {}),
           startedAt: Number(live.startedAt ?? 0),
+          ...(typeof live.idempotencyKey === "string" ? { idempotencyKey: live.idempotencyKey } : {}),
         },
       };
     }

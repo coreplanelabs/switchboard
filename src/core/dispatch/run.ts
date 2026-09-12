@@ -8,6 +8,7 @@
 // is record.ts).
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
+import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import type { RunProfile } from "../../config/profile.js";
 import { mergeTools } from "../../runner.js";
 import { TOOLSETS } from "../../tools/workspace.js";
@@ -132,6 +133,8 @@ export interface ClaimContext {
   root: Span;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
+  /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
+  coordinator?: CoordinatorTag;
 }
 
 /**
@@ -164,6 +167,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     clock,
     root,
     parentRunId,
+    coordinator,
   } = ctx;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
@@ -204,6 +208,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           readonly: profile.identity === "read",
           profile,
           ...(parentRunId !== undefined ? { parentRunId } : {}),
+          ...coordinatorFields(coordinator),
           selection: resident === true ? "resident" : "sandbox",
           ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
           ...(requestRow !== undefined ? { request: requestRow } : {}),

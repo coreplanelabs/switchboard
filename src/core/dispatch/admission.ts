@@ -10,6 +10,7 @@
 // before the next step that can throw, so its outer `finally` releases
 // exactly what the inline code used to.
 import type { ConfigStore } from "../../config.js";
+import type { CoordinatorTag } from "../coordinator/contract.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { RequestDirectives } from "../../directives.js";
 import type { LedgerRun, LedgerWriteThrough } from "../runLedger/writeThrough.js";
@@ -195,6 +196,11 @@ export interface AdmissionContext {
   restart: RestartContext | undefined;
   /** A resume's or restart's ledger row; undefined for a fresh request. */
   carriedRow: LiveRunRow | undefined;
+  /** Set when a coordinator spawned this request (`DispatchOptions.coordinator`,
+   *  item 8): a run in flight on the thread refuses it by name instead of
+   *  taking its text as a steer — the spawn route answers the coordinator from
+   *  the live run's own key. */
+  coordinator?: CoordinatorTag;
   clock: Clock;
   /** The request's root; the stage's spans are its children. */
   root: Span;
@@ -220,11 +226,17 @@ export type AdmissionOutcome =
   | { kind: "redispatch" }
   /** Folded into the run in flight — here, or on another generation through its durable inbox — and acked. */
   | { kind: "steered"; where: "here" | "elsewhere" }
-  /** Not run, and told why: the sender may not run the live agent, or asked for a different one. */
+  /** Not run, and told why: the sender may not run the live agent, or asked for
+   *  a different one — or a coordinator's spawn met a run in flight on the
+   *  unit's thread (item 8), which it never steers into. */
   | {
       kind: "refused";
       reason:
-        "live_agent_allowlist" | "follow_up_refused" | "elsewhere_agent_allowlist" | "elsewhere_follow_up_refused";
+        | "live_agent_allowlist"
+        | "follow_up_refused"
+        | "elsewhere_agent_allowlist"
+        | "elsewhere_follow_up_refused"
+        | "coordinator_thread_live";
     }
   /** A resume or restart found a newer run on the thread: its row was closed `interrupted`, nothing said. */
   | { kind: "superseded"; of: "resume" | "restart" };
@@ -296,6 +308,19 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     );
     return { kind: "superseded", of: "resume" };
   }
+  if (claim.kind === "live" && ctx.coordinator) {
+    // A coordinator's spawn is the bot's own request, never a person's reply
+    // (item 8): a run in flight on the unit's thread means the step's child is
+    // already running (its row carries the same key) or another step's is
+    // (busy) — either way the spawn route answers from the live run's key, and
+    // this text must never land in anyone's inbox. Nothing is said: the thread
+    // has a person's run or the child itself in it, and a retry is not news.
+    console.log(
+      `[dispatch] ${msg.threadKey} coordinator spawn (${ctx.coordinator.idempotencyKey}) refused: the ${claim.live.agent} run ${claim.live.runId ?? "(unnamed)"} is in flight`,
+    );
+    await refuse("coordinator_thread_live", async () => {});
+    return { kind: "refused", reason: "coordinator_thread_live" };
+  }
   if (claim.kind === "live") {
     // The gate above ran against THIS message's resolved agent; a steered
     // follow-up is read by the LIVE agent, so its sender must be allowed to
@@ -352,6 +377,16 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
   // (A restart's own row is in that map: it is not steered into itself.)
   const elsewhere = resume || restart ? undefined : deps.threadsElsewhere.get(msg.threadKey);
   const farAgent = elsewhere?.agent;
+  if (elsewhere && ctx.coordinator) {
+    // The same refusal for a run live on another generation (item 8): the slot
+    // taken for the check is released, nothing is pushed into the far inbox.
+    admission.release(msg.threadKey, claim.live);
+    console.log(
+      `[dispatch] ${msg.threadKey} coordinator spawn (${ctx.coordinator.idempotencyKey}) refused: run ${elsewhere.runId} is in flight on another generation`,
+    );
+    await refuse("coordinator_thread_live", async () => {});
+    return { kind: "refused", reason: "coordinator_thread_live" };
+  }
   if (elsewhere && farAgent === undefined) {
     // No agent on the row: the no-agent-switch gate cannot be judged, so the
     // message is not steered into it (a claim always records the agent; this

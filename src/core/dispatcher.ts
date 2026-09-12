@@ -54,6 +54,7 @@ import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
 import { shipPresetFor } from "./shipPipeline.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
+import type { CoordinatorTag } from "./coordinator/contract.js";
 import type { DispatchOutcome } from "./dispatch/outcome.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
@@ -118,6 +119,12 @@ export interface DispatchOptions {
    *  profile takes as one more boundary. Absent for every request a person, a
    *  schedule or a resume started. */
   parent?: ParentRun;
+  /** Set by the coordinator's spawn route alone (src/channels/adminCoordinator.ts;
+   *  run-history item 48): this request is a coordinator instance's child —
+   *  the instance and the idempotency key ride every row the run has, and a
+   *  run in flight on the thread refuses the request instead of taking it as
+   *  a steer (thread-admission item 8). Absent for every other request. */
+  coordinator?: CoordinatorTag;
 }
 
 /** How a request ended, for whoever started it (dispatch/outcome.ts): the
@@ -320,6 +327,7 @@ export async function dispatch(
       resume,
       restart,
       carriedRow,
+      ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
       clock,
       root,
       refuse,
@@ -335,9 +343,14 @@ export async function dispatch(
     const outcome = await admit(deps, admissionCtx);
     // A redispatch (the boot-gap steer that found its row gone) is a request
     // of its own — its own root, no resume or restart — but the same message:
-    // a child stays its parent's child, so `parent` rides along, and its
-    // outcome is the one the caller gets.
-    if (outcome.kind === "redispatch") return dispatch(deps, msg, io, opts.parent ? { parent: opts.parent } : {});
+    // a child stays its parent's child and a coordinator's child its
+    // instance's, so `parent` and `coordinator` ride along, and its outcome is
+    // the one the caller gets.
+    if (outcome.kind === "redispatch")
+      return dispatch(deps, msg, io, {
+        ...(opts.parent ? { parent: opts.parent } : {}),
+        ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
+      });
     if (outcome.kind !== "proceed") return ended;
     admitted = outcome.admitted;
     const taken = await adoptCarriedRun(deps, admissionCtx);
@@ -472,8 +485,10 @@ export async function dispatch(
     // workspace attach (dispatch/provision.ts) — the registry row, its label and
     // link, the request and context events — then, for a fresh request, the
     // ledger row. `registered` the moment the row exists: a later throw discards it.
-    // A child names its parent on every row (run-history item 46).
+    // A child names its parent on every row (run-history item 46); a
+    // coordinator's child its instance and key (item 48).
     const parentRunId = opts.parent?.runId;
+    const coordinator = opts.coordinator;
     const registration = await registerRun(deps, {
       msg,
       io,
@@ -493,6 +508,7 @@ export async function dispatch(
       shell,
       admitted,
       parentRunId,
+      coordinator,
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
@@ -513,6 +529,7 @@ export async function dispatch(
       admitted,
       root,
       parentRunId,
+      coordinator,
     });
     if (reservation) {
       reserved = reservation.reserved;
@@ -642,6 +659,7 @@ export async function dispatch(
       registry,
       resume,
       parentRunId,
+      coordinator,
     });
     // The ledger claim (dispatch/run.ts), once the prompt exists: the reserved
     // row promoted, or a resume's adopted row re-subscribed.
@@ -666,6 +684,7 @@ export async function dispatch(
       clock,
       root,
       parentRunId,
+      coordinator,
     });
     // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
     // agent-conductor.md): spawn a child as this run, read the runs its
@@ -724,6 +743,7 @@ export async function dispatch(
       steer,
       wait,
       parentRunId,
+      coordinator,
     });
     const {
       answer,

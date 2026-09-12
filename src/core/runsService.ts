@@ -105,6 +105,11 @@ export interface RunView {
   /** The run that spawned this one (`RunMeta.parentRunId` / `RunRecord.parentRunId`,
    *  run-history item 46); absent on a run a person or a schedule started. */
   parentRunId?: string;
+  /** The coordinator instance a child belongs to and the key its spawn carried
+   *  (`RunMeta` / `LiveRunMeta` / `RunRecord`, run-history item 48) — live here,
+   *  live on another generation, or persisted; absent on every other run. */
+  parentInstanceId?: string;
+  idempotencyKey?: string;
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
   /** The generation driving this run when it is not this process (run-history
@@ -260,6 +265,8 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m.userName !== undefined ? { userName: m.userName } : {}),
     ...(m.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
+    ...(m.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
+    ...(m.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
     ...(row.stop ? { stop: { mode: row.stop, state: "stopping" as const } } : {}),
     schema: SPAN_SCHEMA, // a ledger run is a current runner's: spans carry its timing
     ownerGen: row.ownerGen,
@@ -295,6 +302,8 @@ function liveView(s: RunSummary): RunView {
     ...(s.sourceUrl !== undefined ? { sourceUrl: s.sourceUrl } : {}),
     ...(s.userName !== undefined ? { userName: s.userName } : {}),
     ...(s.parentRunId !== undefined ? { parentRunId: s.parentRunId } : {}),
+    ...(s.parentInstanceId !== undefined ? { parentInstanceId: s.parentInstanceId } : {}),
+    ...(s.idempotencyKey !== undefined ? { idempotencyKey: s.idempotencyKey } : {}),
     ...(s.persisted ? { persisted: true } : {}),
   };
 }

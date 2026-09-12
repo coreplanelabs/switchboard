@@ -65,6 +65,7 @@ export class InMemoryRunLedger implements RunLedger {
             agent: existing.meta.agent,
             startedAt: existing.startedAt,
             ownerGen: existing.ownerGen,
+            idempotencyKey: existing.meta.idempotencyKey,
           }
         : undefined,
       req,

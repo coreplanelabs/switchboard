@@ -4,11 +4,13 @@ import { isRunRecord, type RunRecord } from "../runRecord.js";
 import {
   assembleRunRecord,
   interruptedRunRecord,
+  reclaimedRunRecord,
   registerFinishRecord,
   writeAbandonedRunRecords,
   writeTombstone,
   type RecordDeps,
 } from "./record.js";
+import type { LiveRunRow } from "../runLedger/types.js";
 import type { ResolvedRequest } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
@@ -255,6 +257,72 @@ describe("assembleRunRecord — the handoff on the record", () => {
     });
     const record = interruptedRunRecord(registry.getById(run.id)!, registry.snapshotById(run.id)!, 5000);
     expect(record).toMatchObject({ id: "run-child", status: "interrupted", parentRunId: "run-parent" });
+    expect(isRunRecord(record)).toBe(true);
+  });
+
+  // docs/reference/specs/run-history.md item 48: a coordinator's child names its
+  // instance and its spawn's key on every record the one assembly writes — the
+  // finish, the drain's interrupted record from the registry row, the reclaim's
+  // close from the ledger row — and a run with no coordinator carries neither.
+  it("carries the coordinator tag (parentInstanceId, idempotencyKey) for a coordinator's child, validates, and omits both keys without one", () => {
+    const tag = { parentInstanceId: "ship_acme_1", idempotencyKey: "ship_acme_1:u12/0/coding" };
+    const child = assembleRunRecord({ ...base(), coordinator: tag });
+    expect(child).toMatchObject(tag);
+    expect(isRunRecord(child)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(child)))).toBe(true);
+    const plain = assembleRunRecord(base());
+    expect("parentInstanceId" in plain).toBe(false);
+    expect("idempotencyKey" in plain).toBe(false);
+  });
+
+  it("the drain deadline's interrupted record carries the coordinator tag the registry row names", () => {
+    const registry = new RunRegistry({ genId: () => "run-child", genToken: () => "tok", now: () => 1000 });
+    const run = registry.create("coding · child", {
+      agent: "coding",
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:2.0",
+      parentInstanceId: "ship_acme_1",
+      idempotencyKey: "ship_acme_1:u12/0/coding",
+    });
+    const record = interruptedRunRecord(registry.getById(run.id)!, registry.snapshotById(run.id)!, 5000);
+    expect(record).toMatchObject({
+      status: "interrupted",
+      parentInstanceId: "ship_acme_1",
+      idempotencyKey: "ship_acme_1:u12/0/coding",
+    });
+    expect(isRunRecord(record)).toBe(true);
+  });
+
+  it("the reclaim's close carries the coordinator tag the ledger row's meta names, so the state Worker's finish still sends the parent its event", () => {
+    const row: LiveRunRow = {
+      runId: "run-child",
+      threadKey: "slack:CX:2.0",
+      ownerGen: "gen-NEW",
+      leaseUntil: 9_000,
+      startedAt: 1_000,
+      phase: "live",
+      stop: null,
+      meta: {
+        agent: "coding",
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:2.0",
+        parentInstanceId: "ship_acme_1",
+        idempotencyKey: "ship_acme_1:u12/0/coding",
+      },
+      card: null,
+      system: "sys",
+      tools: [],
+      state: {},
+    };
+    const record = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 5_000 });
+    expect(record).toMatchObject({
+      id: "run-child",
+      status: "interrupted",
+      parentInstanceId: "ship_acme_1",
+      idempotencyKey: "ship_acme_1:u12/0/coding",
+    });
     expect(isRunRecord(record)).toBe(true);
   });
 });
