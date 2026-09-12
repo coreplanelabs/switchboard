@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { parsePrDescription } from "../core/prDescription.js";
 import {
   chatCompletion,
+  chatCompletionChunks,
   codingProfileScript,
   nextStep,
+  piCodingProfileScript,
   reviewProfileScript,
   startScriptedProvider,
   type Script,
@@ -138,7 +141,90 @@ describe("profile scripts", () => {
   });
 });
 
+describe("chatCompletionChunks — the streaming shape pi's OpenAI client consumes", () => {
+  it("a tool step streams the whole call in one delta, then the finish reason, then a usage-only chunk", () => {
+    const chunks = chatCompletionChunks(
+      { model: "scripted", messages: [{ role: "user", content: "go" }], stream: true },
+      script,
+      () => 1_000,
+    );
+    expect(chunks).toHaveLength(3);
+    for (const c of chunks) {
+      expect(c.object).toBe("chat.completion.chunk");
+      expect(c.id).toBe("scripted-0");
+      expect(c.model).toBe("scripted");
+    }
+    expect(chunks[0].choices[0]).toEqual({
+      index: 0,
+      delta: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_0",
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: "README.md" }) },
+          },
+        ],
+      },
+      finish_reason: null,
+    });
+    expect(chunks[1].choices[0]).toEqual({ index: 0, delta: {}, finish_reason: "tool_calls" });
+    expect(chunks[2].choices).toEqual([]);
+    expect(chunks[2].usage).toEqual({
+      prompt_tokens: expect.any(Number),
+      completion_tokens: expect.any(Number),
+      total_tokens: expect.any(Number),
+    });
+  });
+
+  it("a text step streams the content, then finish_reason stop, then usage", () => {
+    const chunks = chatCompletionChunks(
+      { model: "m", messages: [toolMsg("a"), toolMsg("b")], stream: true },
+      script,
+      () => 0,
+    );
+    expect(chunks[0].choices[0].delta).toEqual({ role: "assistant", content: "All done." });
+    expect(chunks[1].choices[0].finish_reason).toBe("stop");
+    expect(chunks[2].usage?.total_tokens).toBeGreaterThan(0);
+  });
+});
+
+describe("the pi coding profile", () => {
+  it("uses pi's tool names, always submits a description that passes Switchboard's schema, and ends with text", () => {
+    const s = piCodingProfileScript({ cpuSeconds: 3 });
+    const names = s.map((step) => (step.kind === "tool" ? step.name : "text"));
+    expect(names).toEqual(["read", "bash", "bash", "write", "submit_pr_description", "text"]);
+    const submit = s[4];
+    expect(submit.kind === "tool" && parsePrDescription(submit.input).title).toBe("Load harness note");
+    const write = s[3];
+    expect(write.kind === "tool" && String(write.input.path)).toMatch(/^\.load-harness\//);
+  });
+});
+
 describe("startScriptedProvider — the server", () => {
+  it("answers a stream: true request as text/event-stream, one data line per chunk, ending in [DONE]", async () => {
+    const server = await startScriptedProvider(script, { port: 0 });
+    try {
+      const res = await fetch(`${server.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "go" }], stream: true }),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toMatch(/^text\/event-stream/);
+      const body = await res.text();
+      const records = body.split("\n\n").filter((r) => r.length > 0);
+      expect(records.at(-1)).toBe("data: [DONE]");
+      const data = records.slice(0, -1).map((r) => JSON.parse(r.replace(/^data: /, "")) as { object: string });
+      expect(data).toHaveLength(3);
+      expect(data.every((d) => d.object === "chat.completion.chunk")).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("serves POST /chat/completions from the script and 404s anything else", async () => {
     const server = await startScriptedProvider(script, { port: 0 });
     try {

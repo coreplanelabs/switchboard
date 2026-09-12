@@ -16,11 +16,39 @@ export type Step =
 
 export type Script = readonly Step[];
 
-/** The subset of the OpenAI Chat Completions request the script reads. */
+/** The subset of the OpenAI Chat Completions request the script reads.
+ *  `stream: true` (pi's client always sets it) selects the chunked answer. */
 export interface ChatRequest {
   model?: string;
   messages: ReadonlyArray<{ role: string; content?: unknown; tool_call_id?: string }>;
   tools?: ReadonlyArray<{ type: string; function: { name: string } }>;
+  stream?: boolean;
+}
+
+/** One server-sent chunk of a streamed completion: the same step as
+ *  `chatCompletion` answers, split the way OpenAI's streaming clients (pi's
+ *  among them) reassemble it — the whole call in one delta, then the finish
+ *  reason, then a usage-only chunk with no choices. */
+export interface ChatChunk {
+  id: string;
+  object: "chat.completion.chunk";
+  created: number;
+  model: string;
+  choices: Array<{
+    index: 0;
+    delta: {
+      role?: "assistant";
+      content?: string | null;
+      tool_calls?: Array<{
+        index: 0;
+        id: string;
+        type: "function";
+        function: { name: string; arguments: string };
+      }>;
+    };
+    finish_reason: "tool_calls" | "stop" | null;
+  }>;
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
 export interface ChatResponse {
@@ -97,6 +125,31 @@ function usage(prompt: number, completionChars: number) {
   return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion };
 }
 
+/** The streamed form of `chatCompletion`: the same step, as the chunks a
+ *  `stream: true` request receives. */
+export function chatCompletionChunks(req: ChatRequest, script: Script, now: () => number = Date.now): ChatChunk[] {
+  const whole = chatCompletion(req, script, now);
+  const base = { id: whole.id, object: "chat.completion.chunk" as const, created: whole.created, model: whole.model };
+  const choice = whole.choices[0];
+  const first: ChatChunk["choices"][number] =
+    choice.finish_reason === "tool_calls"
+      ? {
+          index: 0,
+          delta: {
+            role: "assistant",
+            content: choice.message.content,
+            tool_calls: (choice.message.tool_calls ?? []).map((call) => ({ index: 0 as const, ...call })),
+          },
+          finish_reason: null,
+        }
+      : { index: 0, delta: { role: "assistant", content: choice.message.content ?? "" }, finish_reason: null };
+  return [
+    { ...base, choices: [first] },
+    { ...base, choices: [{ index: 0, delta: {}, finish_reason: choice.finish_reason }] },
+    { ...base, choices: [], usage: whole.usage },
+  ];
+}
+
 export interface ProfileOptions {
   /** How long the CPU-burning step runs. */
   cpuSeconds: number;
@@ -170,6 +223,49 @@ export function reviewProfileScript(opts: ProfileOptions): Script {
   return script;
 }
 
+/** A description that passes `parsePrDescription`, for the pi profile: the
+ *  scripted model's one PR-shaped artifact. */
+export const SCRIPTED_PR_DESCRIPTION = {
+  title: "Load harness note",
+  tldr: "Adds a note file under the harness directory.",
+  whatWhy: "A synthetic change so the harness can prove the PR-shaped path end to end without a model.",
+  tour: [
+    {
+      title: "The note",
+      description: "One line written by the scripted model.",
+      anchor: { path: `${HARNESS_DIR}/note.txt`, from: 1, to: 1 },
+    },
+  ],
+  remaining: [],
+  decisions: [{ title: "Synthetic content", rationale: "The harness measures plumbing, not prose." }],
+  risks: "None: the file lives under the harness directory.",
+  validation: { criteria: [{ criterion: "The note exists", proof: `cat ${HARNESS_DIR}/note.txt` }] },
+};
+
+/** The coding profile in pi's tool vocabulary (`read`, `bash`, `write`
+ *  instead of `read_file`, `bash`, `write_file`), for `load:pi`'s dry run.
+ *  It always ends by submitting the description: with pi the terminal tool
+ *  only reaches the driver, never GitHub, so there is no side effect to opt
+ *  out of. */
+export function piCodingProfileScript(opts: ProfileOptions): Script {
+  return [
+    { kind: "tool", name: "read", input: { path: "README.md" } },
+    { kind: "tool", name: "bash", input: { command: "git status --short | head -20" } },
+    {
+      kind: "tool",
+      name: "bash",
+      input: { command: cpuBurnCommand(opts.cpuSeconds) },
+      text: "Running the test-shaped step.",
+    },
+    { kind: "tool", name: "write", input: { path: `${HARNESS_DIR}/note.txt`, content: "load harness was here\n" } },
+    { kind: "tool", name: "submit_pr_description", input: SCRIPTED_PR_DESCRIPTION },
+    {
+      kind: "text",
+      text: "Load harness run complete: read, inspected, burned CPU, wrote a note, submitted the description.",
+    },
+  ];
+}
+
 export interface ScriptedProviderServer {
   url: string;
   port: number;
@@ -201,6 +297,12 @@ export function startScriptedProvider(
       } catch {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "invalid json" }));
+        return;
+      }
+      if (body.stream === true) {
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+        for (const chunk of chatCompletionChunks(body, script)) res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+        res.end("data: [DONE]\n\n");
         return;
       }
       const answer = chatCompletion(body, script);
