@@ -17,7 +17,7 @@ The header lists only the surfaces this installation has: **Residents** appears 
 | `GET /costs` | Daily spend across every configured group | Priced live from Cloudflare + (optionally) Anthropic billing data, nothing cached |
 | `GET /costs/<group>` | Spend for one group | |
 | `GET /costs/<group>.json` | Same data, machine-readable | For scripting/alerting, not for embedding a live dashboard elsewhere |
-| `GET /delivery` | Delivery indicators for the first configured repository — issue-to-merge time, first-pass CI, review rounds, the findings and the share resolved with no human edit, per week and per unit | From the repository's snapshot of GitHub's facts, refreshed on an interval and dated in the footer, plus the run history you may see; `?weeks=n` or `?since=YYYY-MM-DD`; `?fresh=1` reads GitHub now |
+| `GET /delivery` | Delivery indicators for the first configured repository — issue-to-merge time, first-pass CI, review rounds, the findings and the share resolved with no human edit, per week and per unit | From the repository's snapshot of GitHub's facts, refreshed on an interval and dated in the footer, plus the run history you may see; a read that stopped at its cap says over the tiles that they cover the newest pull requests only and marks the incomplete weeks; `?weeks=n` or `?since=YYYY-MM-DD`; `?fresh=1` reads GitHub now |
 | `GET /delivery/<owner>/<name>` | The same for one configured repository | The command twin, `delivery report --repo`, takes any repository |
 | `GET /delivery/<owner>/<name>.json` | Same data, machine-readable | |
 | `GET /mcp/connect/<nonce>` | The one-time MCP credential-paste form | Bound to whoever mints it or first opens it; single use, expires in 10 minutes |

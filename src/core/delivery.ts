@@ -204,6 +204,22 @@ export interface DeliveryReport {
   /** ISO 8601 — when the pull requests' facts were read from GitHub: the snapshot's time, or
    *  the live read's. The service stamps it; a report built straight from facts has none. */
   snapshotAt?: string;
+  /** ISO 8601 — every pull request merged at or after this instant is in the report; when the
+   *  report is `truncated`, the weeks that began before it hold the newest pull requests only
+   *  (`weekIncomplete`). The service stamps it from the source; a report built straight from
+   *  facts has none. */
+  completeFrom?: string;
+}
+
+/** A week row holds the newest pull requests only — not the week's — when the report is truncated and
+ *  the week began before the instant the report is complete from (the week holding that instant is
+ *  partial, so it counts). A report that names no instant marks no week. */
+export function weekIncomplete(report: Pick<DeliveryReport, "truncated" | "completeFrom">, week: string): boolean {
+  return (
+    report.truncated &&
+    report.completeFrom !== undefined &&
+    Date.parse(`${week}T00:00:00Z`) < Date.parse(report.completeFrom)
+  );
 }
 
 // ---- the arithmetic ---------------------------------------------------------------------
@@ -549,9 +565,18 @@ export function snapshotAgeText(snapshotAt: string, nowMs: number): string {
   return unit(Math.round(hours / 24), "day");
 }
 
+/** `<YYYY-MM-DD> <hh:mm> UTC` — an instant as the text spells one. */
+const clock = (iso: string): string => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+
 /** `as of <YYYY-MM-DD> <hh:mm> UTC, 12 minutes ago` — the snapshot's time and age. */
 function asOf(snapshotAt: string, nowMs: number): string {
-  return `as of ${snapshotAt.slice(0, 10)} ${snapshotAt.slice(11, 16)} UTC, ${snapshotAgeText(snapshotAt, nowMs)}`;
+  return `as of ${clock(snapshotAt)}, ${snapshotAgeText(snapshotAt, nowMs)}`;
+}
+
+/** `the newest 291 pull requests only, complete from <YYYY-MM-DD> <hh:mm> UTC` — what a truncated report covers. */
+function coverage(report: DeliveryReport): string {
+  const from = report.completeFrom === undefined ? "" : `, complete from ${clock(report.completeFrom)}`;
+  return `the newest ${report.totals.prsMerged} pull requests only${from}`;
 }
 
 /** One block per week, then the units — single-spaced lines, so chat carries them as they are. */
@@ -560,19 +585,16 @@ export function renderDeliveryReport(report: DeliveryReport, nowMs: number = sys
     [
       `${report.repo} · ${report.range.since} → ${report.range.until} · ${report.range.weeks} week${report.range.weeks === 1 ? "" : "s"}`,
       ...(report.snapshotAt !== undefined ? [asOf(report.snapshotAt, nowMs)] : []),
+      ...(report.truncated ? [coverage(report)] : []),
     ].join(" · "),
   ];
-  if (report.truncated) lines.push("(the newest pull requests only — the fetch stopped before the range's start)");
   for (const w of report.weeks) {
+    const week = `Week of ${w.week}${weekIncomplete(report, w.week) ? " (incomplete)" : ""}`;
     if (w.prsMerged === 0) {
-      lines.push("", `Week of ${w.week}: nothing merged`);
+      lines.push("", `${week}: nothing merged`);
       continue;
     }
-    lines.push(
-      "",
-      `Week of ${w.week}: ${w.prsMerged} merged (${w.agentAuthoredPrs} agent-authored)`,
-      ...indicatorLines(w),
-    );
+    lines.push("", `${week}: ${w.prsMerged} merged (${w.agentAuthoredPrs} agent-authored)`, ...indicatorLines(w));
   }
   if (report.weeks.length > 1 && report.totals.prsMerged > 0) {
     lines.push(
@@ -738,8 +760,8 @@ export interface DeliveryService {
   /** The configured repositories; the first is the page's default. */
   repos(): string[];
   /** The report for one repository over the resolved range — from the snapshot when one fits the
-   *  range, a live read otherwise or on `fresh`; stamped with when its facts were read. Throws on
-   *  upstream failure. */
+   *  range, a live read otherwise or on `fresh`; stamped with when its facts were read and from
+   *  when they are complete. Throws on upstream failure. */
   report(repo: string, opts: DeliveryReportOptions): Promise<DeliveryReport>;
 }
 
@@ -800,6 +822,7 @@ export function createDeliveryService(
         }),
         // A source behind a snapshot says when it read; a bare one read just now.
         snapshotAt: fetched.fetchedAt ?? at.toISOString(),
+        ...(fetched.completeFrom !== undefined ? { completeFrom: fetched.completeFrom } : {}),
       };
     },
   };

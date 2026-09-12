@@ -865,6 +865,8 @@ const COSTS: CostReport = {
 // fixture cannot drift from the report shape: eight merged pull requests of
 // `acme/api`, five linked to a board issue, one reviewed twice after a
 // blocking finding, one retried in CI, one fixed by a person after review.
+// The read behind it stopped at its cap nine days ago, so the two oldest
+// weeks are the incomplete ones the page marks.
 const daysAgo = (days: number, hours = 0): string =>
   new Date(NOW - days * 86_400_000 + hours * 3_600_000).toISOString();
 const DELIVERY_REVIEWER = "acme-review[bot]";
@@ -1126,8 +1128,14 @@ function page(pathname: string, all: boolean): { title: string; seed: PageSeed; 
       title: "acme/api delivery",
       seed: {
         page: "delivery",
-        // The snapshot the page serves was read twelve minutes before the preview's clock.
-        report: { ...DELIVERY, snapshotAt: new Date(NOW - 12 * 60_000).toISOString() },
+        // The snapshot the page serves was read twelve minutes before the preview's clock, and
+        // the read behind it was capped: complete from nine days and three hours ago.
+        report: {
+          ...DELIVERY,
+          snapshotAt: new Date(NOW - 12 * 60_000).toISOString(),
+          truncated: true,
+          completeFrom: daysAgo(9, -3),
+        },
         repos: ["acme/api", "acme/web"],
       },
     };

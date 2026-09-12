@@ -45,14 +45,31 @@ export interface DeliveryTile {
   note: string;
 }
 
-/** The six tiles over the whole range: the counts and the four leading indicators. */
+/** `the newest 291 pull requests` — what a truncated report's numbers cover. */
+const newest = (report: DeliveryReport): string => `the newest ${report.totals.prsMerged} pull requests`;
+
+/** The line over a truncated report's tiles: what they cover, from when the read is complete, and what
+ *  the weeks before that hold. A complete report has none. */
+export function coverageNote(report: DeliveryReport): string | undefined {
+  if (!report.truncated) return undefined;
+  const from =
+    report.completeFrom === undefined
+      ? "the read stopped at its page cap before the range began"
+      : `the read is complete from ${snapshotTime(report.completeFrom)}; the weeks before that hold what it reached, not the week`;
+  return `The tiles cover ${newest(report)} only — ${from}.`;
+}
+
+/** The six tiles over the whole range: the counts and the four leading indicators. A truncated
+ *  report's Merged tile says it counts the newest pull requests, not the range's. */
 export function tilesOf(report: DeliveryReport): DeliveryTile[] {
   const t = report.totals;
   return [
     {
       label: "Merged",
       value: String(t.prsMerged),
-      note: `${t.agentAuthoredPrs} agent-authored · ${report.range.weeks} week${report.range.weeks === 1 ? "" : "s"}`,
+      note: report.truncated
+        ? `${newest(report)} · ${t.agentAuthoredPrs} agent-authored`
+        : `${t.agentAuthoredPrs} agent-authored · ${report.range.weeks} week${report.range.weeks === 1 ? "" : "s"}`,
     },
     {
       label: "Issue → merge",

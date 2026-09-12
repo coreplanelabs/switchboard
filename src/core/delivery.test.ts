@@ -14,6 +14,7 @@ import {
   runFactsOf,
   SNAPSHOT_EVERY_MINUTES,
   snapshotAgeText,
+  weekIncomplete,
   weekStartOf,
   type DeliveryIdentities,
   type DeliverySource,
@@ -617,18 +618,34 @@ describe("renderDeliveryReport", () => {
     expect(text).toContain("• (no issue) — PRs 919, 921");
     expect(text).not.toMatch(/\S {2,}\S/);
   });
-  it("a week with nothing merged says so, and a cut-short fetch is stated", () => {
-    const text = renderDeliveryReport(
-      buildDeliveryReport({
-        repo: "acme/api",
-        range: { since: dayOf("2026-08-24T00:00:00Z"), until: dayOf("2026-08-30T00:00:00Z"), weeks: 1 },
-        prs: [],
-        identities: IDENTITIES,
-        truncated: true,
-      }),
+  it("a week with nothing merged says so; a cut-short fetch is stated on the first line — the newest N pull requests only, complete from an instant — and the weeks that began before that instant are marked incomplete", () => {
+    const now = Date.parse("2026-09-12T03:16:00Z");
+    const twoWeeks = buildDeliveryReport({
+      repo: "acme/api",
+      range: { since: dayOf("2026-08-31T00:00:00Z"), until: UNTIL, weeks: 2 },
+      prs: TRUNK_PASS,
+      identities: IDENTITIES,
+      truncated: true,
+    });
+    const text = renderDeliveryReport({ ...twoWeeks, completeFrom: "2026-09-03T02:41:37Z" }, now);
+    expect(text.split("\n")[0]).toBe(
+      `acme/api · ${dayOf("2026-08-31T00:00:00Z")} → ${UNTIL} · 2 weeks · the newest 6 pull requests only, complete from ${dayOf("2026-09-03T00:00:00Z")} 02:41 UTC`,
     );
-    expect(text).toContain(`Week of ${dayOf("2026-08-24T00:00:00Z")}: nothing merged`);
-    expect(text).toContain("newest pull requests only");
+    expect(text).toContain(`Week of ${dayOf("2026-08-31T00:00:00Z")} (incomplete): nothing merged`);
+    expect(text).toContain(`Week of ${WEEK}: 6 merged`);
+    expect(text).not.toContain("the fetch stopped");
+    // A truncated report that names no instant (a bare source) still says the newest N pull requests only; no week is marked.
+    const bare = renderDeliveryReport(twoWeeks, now);
+    expect(bare.split("\n")[0]).toMatch(/ · the newest 6 pull requests only$/);
+    expect(bare).not.toContain("(incomplete)");
+    // A complete report says nothing of the kind.
+    expect(renderDeliveryReport(report(), now)).not.toContain("newest");
+    // The week holding the instant is partial, so incomplete; the week after is complete; a complete report marks nothing.
+    const cut = { truncated: true, completeFrom: "2026-09-03T02:41:37Z" };
+    expect(weekIncomplete(cut, dayOf("2026-08-31T00:00:00Z"))).toBe(true);
+    expect(weekIncomplete(cut, WEEK)).toBe(false);
+    expect(weekIncomplete({ ...cut, truncated: false }, dayOf("2026-08-31T00:00:00Z"))).toBe(false);
+    expect(weekIncomplete({ truncated: true }, dayOf("2026-08-31T00:00:00Z"))).toBe(false);
   });
   it("names the snapshot's time and age on the first line when the report carries one, and says nothing about it when it does not", () => {
     const at = "2026-09-11T13:51:00Z";
@@ -712,16 +729,24 @@ describe("createDeliveryService / NullDeliveryService", () => {
     expect(other.totals.prsMerged).toBe(0);
   });
 
-  it("stamps the report with when its facts were read — the source's read time when it names one, else now — and hands `fresh` to the source", async () => {
+  it("stamps the report with when its facts were read — the source's read time when it names one, else now — and from when they are complete, and hands `fresh` to the source", async () => {
     const plain = createDeliveryService(undefined, source, { now });
     const stampedNow = await plain.report("acme/api", { weeks: 1 });
     expect(stampedNow.snapshotAt).toBe(now().toISOString());
+    expect(stampedNow.completeFrom).toBeUndefined();
     const stamped: DeliverySource = {
       fetchPullRequests: () =>
-        Promise.resolve({ prs: TRUNK_PASS, truncated: false, fetchedAt: "2026-09-11T13:00:00Z" }),
+        Promise.resolve({
+          prs: TRUNK_PASS,
+          truncated: true,
+          completeFrom: "2026-09-09T02:41:37Z",
+          fetchedAt: "2026-09-11T13:00:00Z",
+        }),
     };
     const fromSnapshot = await createDeliveryService(undefined, stamped, { now }).report("acme/api", { weeks: 1 });
     expect(fromSnapshot.snapshotAt).toBe("2026-09-11T13:00:00Z");
+    expect(fromSnapshot.truncated).toBe(true);
+    expect(fromSnapshot.completeFrom).toBe("2026-09-09T02:41:37Z");
     expect(fromSnapshot.totals.prsMerged).toBe(6);
     const recording = new InMemoryDeliverySource({ "acme/api": TRUNK_PASS });
     await createDeliveryService(undefined, recording, { now }).report("acme/api", { weeks: 1, fresh: true });
