@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.206.1](https://github.com/coreplanelabs/switchboard/compare/v1.206.0...v1.206.1) (2026-09-13)
+
+
+### Bug fixes
+
+* **ship:** a coordinator child opens its pull request against the plan's base — the tag carries the base, and a branch that is its own base says so instead of staying silent ([#993](https://github.com/coreplanelabs/switchboard/issues/993)) ([7b8fcf0](https://github.com/coreplanelabs/switchboard/commit/7b8fcf0ba1b4281dbdb6cdf7690790279b376bd9))
+* **ship:** the runner hears a child end — the finish event type is in the platform's alphabet and a lost event costs a chunk, not the budget ([#994](https://github.com/coreplanelabs/switchboard/issues/994)) ([340bd60](https://github.com/coreplanelabs/switchboard/commit/340bd6080190a1235dfeddf55d49805f6a602f69))
+
+
+### Documentation
+
+* **agents:** record 0032 — pi is the harness; the native loop retires in a replacement series ([#991](https://github.com/coreplanelabs/switchboard/issues/991)) ([62951bf](https://github.com/coreplanelabs/switchboard/commit/62951bf0972d45e592deddb6fc6fef3370f6efa6))
+* **ship:** the runner's first plan — the load harness names rate limiting as a refusal and binds the recovery to its spec ([#986](https://github.com/coreplanelabs/switchboard/issues/986)) ([f3c740d](https://github.com/coreplanelabs/switchboard/commit/f3c740d4b93b900466a60f6073d3308d23d67da3))
+
 ## [1.206.0](https://github.com/coreplanelabs/switchboard/compare/v1.205.0...v1.206.0) (2026-09-12)
 
 
