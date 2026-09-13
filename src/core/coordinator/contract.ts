@@ -38,8 +38,11 @@ export function idempotencyKeyFor(parentInstanceId: string, step: string): strin
 
 /** The event a child's terminal record sends its parent: the type carries the
  *  run id, so each `waitForEvent` matches its own child and a duplicate is
- *  buffered harmlessly. */
-export const RUN_FINISHED_EVENT_PREFIX = "run finished:";
+ *  buffered harmlessly. An event type is the platform's alphabet — letters,
+ *  digits, `-` and `_` (`^[a-zA-Z0-9_][a-zA-Z0-9-_]*$`); a space, a colon or a
+ *  dot is refused as `workflow.invalid_event_type`, and the parent never hears
+ *  the child end. A run id is a UUID, already inside it. */
+export const RUN_FINISHED_EVENT_PREFIX = "run-finished-";
 export function runFinishedEventType(runId: string): string {
   return `${RUN_FINISHED_EVENT_PREFIX}${runId}`;
 }
@@ -219,7 +222,7 @@ export interface WorkflowSender {
 /** How a send ended. `none`: the record names no instance. `no-binding`: the
  *  Worker has no coordinator binding. `failed`: the engine refused (the
  *  instance ended, or is unknown) — swallowed, never thrown: the commit stands,
- *  and the parent's `waitForEvent` timeout falls back to `read-record`. */
+ *  and the parent's wait falls back to `read-record` at its next chunk. */
 export type RunFinishedSend =
   | { kind: "sent"; instance: string; type: string }
   | { kind: "none" }

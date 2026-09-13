@@ -58,8 +58,13 @@ describe("the coordinator's names", () => {
     expect(IDEMPOTENCY_KEY_PATTERN.test("no-step")).toBe(false);
   });
 
-  it("the event type carries the run id, so each wait matches its own child", () => {
-    expect(runFinishedEventType("run-abc")).toBe("run finished:run-abc");
+  it("the event type is run-finished-<runId>, the run id under a prefix in the platform's alphabet (letters, digits, hyphen, underscore), so each wait matches its own child and the engine accepts the send; the old run finished: shape is outside it", () => {
+    const runId = "8b5a233a-e63d-4da4-b18d-8314f1b08a88";
+    // Cloudflare Workflows' own rule for an event type; anything else is refused as `workflow.invalid_event_type`.
+    const platform = /^[a-zA-Z0-9_][a-zA-Z0-9-_]*$/;
+    expect(runFinishedEventType(runId)).toBe(`run-finished-${runId}`);
+    expect(runFinishedEventType(runId)).toMatch(platform);
+    expect(`run finished:${runId}`).not.toMatch(platform);
   });
 
   it("coordinatorFields spreads a tag into the two record fields and nothing without one", () => {
@@ -184,14 +189,14 @@ describe("sendRunFinished — the event a terminal record sends", () => {
   }
   const finished = { id: "run-1", status: "completed" as const, finishedAt: 5_000, parentInstanceId: "inst_1" };
 
-  it("sends exactly one `run finished:<runId>` to the record's instance, the payload naming the run, its status and the instance", async () => {
+  it("sends exactly one `run-finished-<runId>` to the record's instance, the payload naming the run, its status and the instance", async () => {
     const w = workflow();
     const out = await sendRunFinished(w.sender, finished);
-    expect(out).toEqual({ kind: "sent", instance: "inst_1", type: "run finished:run-1" });
+    expect(out).toEqual({ kind: "sent", instance: "inst_1", type: "run-finished-run-1" });
     expect(w.sent).toEqual([
       {
         instance: "inst_1",
-        type: "run finished:run-1",
+        type: "run-finished-run-1",
         payload: { runId: "run-1", status: "completed", finishedAt: 5_000, parentInstanceId: "inst_1" },
       },
     ]);
@@ -213,7 +218,7 @@ describe("sendRunFinished — the event a terminal record sends", () => {
     expect(await sendRunFinished(w.sender, finished)).toEqual({
       kind: "failed",
       instance: "inst_1",
-      type: "run finished:run-1",
+      type: "run-finished-run-1",
       reason: "instance is not running",
     });
   });

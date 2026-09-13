@@ -13,9 +13,12 @@
 // status and the text of a JSON object the bot stamped with its clock (`at`) —
 // so the mapping onto the machine is pure and runs identically on replay; an
 // answer the runner cannot read fails the instance at once rather than twelve
-// times over. Every wait is a `waitForEvent` typed `run finished:<runId>` for
-// the child's clipped budget plus the margin, and every wait — event or
-// timeout alike — is confirmed by a `read-record` before the machine acts on it.
+// times over. Every wait is a `waitForEvent` typed `run-finished-<runId>` for
+// one chunk of the child's budget (the machine slices the budget plus the
+// margin, `WAIT_CHUNK_MS`, and asks `read-record` between the slices), and
+// every wait — event or timeout alike — is confirmed by a `read-record` before
+// the machine acts on it, so an event the engine never delivered costs a
+// chunk, not the budget.
 //
 // Units run one at a time in the plan's order, each once its in-play
 // dependencies are done. `done` is merged: a plan branch's pull request is the

@@ -64,7 +64,7 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 export interface Env {
   SWITCHBOARD: DurableObjectNamespace<SwitchboardServer>;
   /** The ship coordinator (coordinator.ts): `POST /admin/coordinator/instances`
-   *  creates its instances; the state Worker's finish sends them `run finished`. */
+   *  creates its instances; the state Worker's finish sends them `run-finished-<runId>`. */
   SHIP_COORDINATOR: Workflow<ShipCoordinatorParams>;
   // secrets (wrangler secret put ...)
   SLACK_BOT_TOKEN: string;
