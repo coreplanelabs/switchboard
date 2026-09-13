@@ -104,7 +104,13 @@ export type RunNoteKind =
    *  item 24). The same text the card carries; published by the dispatcher
    *  after the attach, before the first turn, so the run page explains a
    *  sandbox run that shows resident steps. */
-  | "cold_sandbox";
+  | "cold_sandbox"
+  /** A coding run submitted a PR description but the post-step opened no
+   *  pull request because the branch it observed IS the base the pull
+   *  request would target (docs/reference/specs/pr-description.md item 5) —
+   *  the summary names the branch. Published by the post-step, so a unit
+   *  that ends without a pull request says why on the record and the card. */
+  | "pr_not_opened";
 
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
@@ -123,6 +129,7 @@ export const RUN_NOTE_KINDS = [
   "resumed",
   "description_turn",
   "cold_sandbox",
+  "pr_not_opened",
 ] as const satisfies readonly RunNoteKind[];
 type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
 const _everyKindListed: _EveryKindListed = true;

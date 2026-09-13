@@ -280,6 +280,7 @@ describe("RUN_NOTE_KINDS", () => {
       "stop_requested",
       "stopped",
       "spans_dropped",
+      "pr_not_opened",
     ]) {
       expect(RUN_NOTE_KINDS).toContain(kind);
     }

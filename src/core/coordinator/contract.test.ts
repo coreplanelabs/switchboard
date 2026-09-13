@@ -69,6 +69,13 @@ describe("the coordinator's names", () => {
     });
     expect(coordinatorFields(undefined)).toEqual({});
   });
+
+  it("the tag's base is an instruction to the child's post-step, not a record field: coordinatorFields leaves it out, so rows and records keep the shape written before it existed", () => {
+    expect(coordinatorFields({ parentInstanceId: "inst_1", idempotencyKey: "inst_1:s", base: "main" })).toEqual({
+      parentInstanceId: "inst_1",
+      idempotencyKey: "inst_1:s",
+    });
+  });
 });
 
 describe("isCoordinatorInstance — the parent ship record", () => {

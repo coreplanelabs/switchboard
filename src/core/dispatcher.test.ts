@@ -3021,6 +3021,57 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(spy.calls[0].base).toBe("main");
   });
 
+  // The plan runner's coding child (docs/reference/specs/http-ingress.md item 9)
+  // is dispatched AT the unit branch so the resident attaches there — the
+  // binding ref IS the branch the child pushes. Without the plan's base on the
+  // tag, the base resolved to that same branch and the post-step read the push
+  // as "the branch is the base": no PR, no event, a unit ending at round 0
+  // without a pull request. The tag carries the plan's base; the post-step
+  // opens against it.
+  it("a coordinator's child dispatched at the unit branch (the resident binding ref IS the branch) with a tag carrying the plan's base → the PR opens against that base from the unit branch, pr_opened in the record", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "plan/p/u1", bindingRef: "plan/p/u1" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const registry = new RunRegistry({ genId: () => "r-u1", genToken: () => "t-u1" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding in acme/api on branch plan/p/u1: do the unit", "slack:UADMIN"), io, {
+      coordinator: { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding", base: "main" },
+    });
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].headBranch).toBe("plan/p/u1");
+    expect(spy.calls[0].base).toBe("main"); // the plan's base from the tag — not the binding ref, which is the branch itself
+    const events = registry.snapshot("r-u1", "t-u1")?.events ?? [];
+    expect(events.find((e) => e.type === "pr_opened")).toMatchObject({ number: 7, created: true });
+    expect(events.some((e) => e.type === "run_note" && e.kind === "pr_not_opened")).toBe(false);
+    expect(replies.some((r) => /PR opened/.test(r) && r.includes("`plan/p/u1` → `main`"))).toBe(true);
+  });
+
+  it("the same child without a coordinator tag: the binding ref is the branch, so the branch is the base — no PR call, and instead of silence the record carries a `pr_not_opened` note and the reply says the branch is the base", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    codingExecutor({ head: HEAD, branch: "plan/p/u1", bindingRef: "plan/p/u1" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const registry = new RunRegistry({ genId: () => "r-u1", genToken: () => "t-u1" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding in acme/api on branch plan/p/u1: do the unit", "slack:UADMIN"), io);
+    expect(spy.calls).toHaveLength(0);
+    const events = registry.snapshot("r-u1", "t-u1")?.events ?? [];
+    expect(events.find((e) => e.type === "pr_opened")).toBeUndefined();
+    expect(events.find((e) => e.type === "run_note" && e.kind === "pr_not_opened")).toMatchObject({
+      type: "run_note",
+      kind: "pr_not_opened",
+      summary: expect.stringContaining("plan/p/u1"),
+    });
+    const note = replies.find((r) => r.includes("no PR was opened"));
+    expect(note).toBeDefined();
+    expect(note).toContain("`plan/p/u1`");
+    expect(note).toContain("is the base branch");
+    expect(note).not.toContain("/compare/");
+  });
+
   // A bare issue-link coding run resolves no
   // ref and no PR, and the resident attach fails for a reason OTHER than
   // needs-ref (an infra fault, not-onboarded, a probe outage) — so the

@@ -40,11 +40,12 @@
 // record gets `pr_opened` with `created: false`; only a branch with no open
 // PR gets the compare URL and "open manually".
 //
-// Base resolution (CodingPrTarget): a bound PR's true base, else the resident
-// binding ref, else the dispatch's resolved ref, else — the true last resort —
-// the repo's own default branch fetched from GitHub (resolveBaseRefLazy,
-// githubPulls.ts). That fetch closes a real gap: a bare issue-link coding
-// run has no PR/explicit ref, and when the
+// Base resolution (CodingPrTarget): the base the caller already knows — a
+// bound PR's true base, else the base a coordinator's spawn put on its child's
+// tag — else the resident binding ref, else the dispatch's resolved ref, else
+// — the true last resort — the repo's own default branch fetched from GitHub
+// (resolveBaseRefLazy, githubPulls.ts). That fetch closes a real gap: a bare
+// issue-link coding run has no PR/explicit ref, and when the
 // resident attach ALSO fails for a reason other than needs-ref (an infra
 // fault, not-onboarded, a probe outage), the fresh-sandbox fallback carries no
 // binding either — all three fields undefined, no PR openable, though the run
@@ -263,21 +264,26 @@ export function trackPushedBranch(initial?: string): { observe(event: RunEvent):
 
 /** Where the post-step's PR would open: the dispatch's resolved slug and refs.
  *  `repo` may be undefined (an agent-discovered repo — the observation's
- *  origin remote is the repo of last resort); the base is the PR's true base
- *  ref when the thread's context came from a PR, else the thread's resident
- *  binding ref, else the dispatch's resolved ref, else — when a description
- *  was actually submitted — the repo's own default branch fetched from
- *  GitHub (resolveBaseRefLazy, githubPulls.ts; the true base of last resort,
- *  shared with agent:ship's own resolution in shipPipeline.ts). None of these
- *  three fields alone is reliable: a resident attach that fails for a reason
- *  OTHER than needs-ref (an infra fault, not-onboarded, a probe outage) drops
- *  `bindingRef` with no equivalent fallback of its own — which is exactly the
- *  case the GitHub fetch closes. */
+ *  origin remote is the repo of last resort); the base is the one the caller
+ *  already knows (`baseRef`: the PR's true base ref when the thread's context
+ *  came from a PR, else the base a coordinator's spawn put on its child's
+ *  tag), else the thread's resident binding ref, else the dispatch's
+ *  resolved ref, else — when a description was actually submitted — the
+ *  repo's own default branch fetched from GitHub (resolveBaseRefLazy,
+ *  githubPulls.ts; the true base of last resort, shared with agent:ship's own
+ *  resolution in shipPipeline.ts). None of these three fields alone is
+ *  reliable: a resident attach that fails for a reason OTHER than needs-ref
+ *  (an infra fault, not-onboarded, a probe outage) drops `bindingRef` with no
+ *  equivalent fallback of its own — which is exactly the case the GitHub
+ *  fetch closes. */
 export interface CodingPrTarget {
   /** `owner/name` the dispatch resolved, or undefined (agent-discovered repo). */
   repo: string | undefined;
-  /** The bound PR's true base ref (a fix round repushes the PR's OWN head
-   *  branch, so the binding ref equals the branch and is NOT the merge base). */
+  /** The base the caller knows outright: the bound PR's true base ref (a fix
+   *  round repushes the PR's OWN head branch, so the binding ref equals the
+   *  branch and is NOT the merge base), else a coordinator child's plan base
+   *  (the child is dispatched AT its unit branch, so its binding ref is the
+   *  branch itself — `CoordinatorTag.base`). */
   baseRef: string | undefined;
   /** The thread's resident binding ref, when the round ran on a resident. */
   bindingRef: string | undefined;
@@ -360,11 +366,23 @@ export async function runCodingPrPostStep(input: {
     : resolveBaseRef(candidates, undefined);
   const pushedBranch = branch !== undefined && branch !== base && pushed;
   if (prDescription && branch !== undefined && branch === base) {
-    // The workspace sat on the base branch: nothing was pushed to open a PR
-    // from, and a compare-URL note would mislead — the agent's own report
-    // stands.
-    console.log(`[pr-post] ${logKey} skipped: workspace on the base branch ${base} (repo ${repo}) — nothing pushed`);
-    return undefined;
+    // The branch IS the base the pull request would target — a workspace that
+    // never left the default branch, or a run dispatched at a branch the
+    // thread's binding names as its base too — so there is no head to open a
+    // PR from, and a compare URL would mislead. Never silently: the run
+    // submitted a description, and a reader of the card or the record
+    // (a plan runner's `pr-check` among them) must see why no pull request
+    // followed, as a typed note and in the reply.
+    console.log(
+      `[pr-post] ${logKey} skipped: the branch ${branchLog} is the base branch ${base} (repo ${repo}) — no PR opened`,
+    );
+    input.publish({
+      type: "run_note",
+      kind: "pr_not_opened",
+      summary: `no PR opened: the branch ${branch} is the base branch the pull request would target`,
+      at: systemClock(),
+    });
+    return `⚠️ A PR description was submitted but the branch \`${branch}\`${branchNote} is the base branch the pull request would target, so no PR was opened — a pull request needs a head branch other than its base.`;
   }
   if (prDescription && branch !== undefined && headSha !== undefined && !pushed) {
     // A commit sits on a non-base branch, but nothing proves it reached the

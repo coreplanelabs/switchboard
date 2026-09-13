@@ -213,7 +213,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
   // this test proves out. Once fetched, the "sat on the base branch, nothing
   // pushed" guard must win over "PR opened": no PR call, no compare-URL note,
   // same as if a candidate had named "main" as the base from the start.
-  it("GitHub's fetched default branch equals the observed branch → nothing pushed, no PR call (the branch never left the default)", async () => {
+  it("GitHub's fetched default branch equals the observed branch → no PR call (the branch never left the default), and the note says the branch is the base", async () => {
     const spy = openSpy();
     const fetchRepoInfo = vi.fn(async () => ({ defaultBranch: "main" }) as RepoShipInfo);
     const note = await runCodingPrPostStep({
@@ -228,7 +228,60 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     });
     expect(fetchRepoInfo).toHaveBeenCalledTimes(1);
     expect(spy.calls).toHaveLength(0);
+    expect(note).toContain("`main`");
+    expect(note).toContain("is the base branch");
+    expect(note).toContain("no PR was opened");
+  });
+
+  // A coordinator's child before the tag carried the plan's base: dispatched
+  // at the unit branch so the resident attaches there, the binding ref names
+  // that same branch, the base resolves to it, and the post-step had nothing
+  // to open a PR from — and said nothing. Silence here is a bug: the child
+  // pushed real work and submitted a description; the reader of the card and
+  // the record must see why no pull request followed.
+  it("the branch IS the resolved base (a resident binding at the branch) with a description submitted → no PR call, no compare URL, a `pr_not_opened` note in the stream and a reply note naming the branch as the base", async () => {
+    const spy = openSpy();
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "plan/p/u1", checkedOut: "plan/p/u1" }),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: undefined, bindingRef: "plan/p/u1", resolvedRef: "plan/p/u1" },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(spy.calls).toHaveLength(0);
+    expect(published).toEqual([
+      {
+        type: "run_note",
+        kind: "pr_not_opened",
+        summary: expect.stringContaining("plan/p/u1"),
+        at: expect.any(Number),
+      },
+    ]);
+    expect((published[0] as { summary: string }).summary).toContain("is the base");
+    expect(note).toContain("`plan/p/u1`");
+    expect(note).toContain("is the base branch");
+    expect(note).toContain("no PR was opened");
+    expect(note).not.toContain("/compare/");
+  });
+
+  it("the branch is the base but no description was submitted → nothing to report: no note, no event (the agent's own report stands)", async () => {
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ branch: "main" }),
+      description: undefined,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: undefined },
+      openPullRequest: openSpy().fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
     expect(note).toBeUndefined();
+    expect(published).toEqual([]);
   });
 
   it("no explicit base signal AND the GitHub fetch also comes back empty → no PR call, the note names the missing base with the compare URL", async () => {

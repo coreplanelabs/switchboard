@@ -54,14 +54,26 @@ export interface RunFinishedPayload {
 }
 
 /** What a coordinator's spawn stamps on the child's every row: the instance
- *  the child belongs to and the key the spawn carried. */
+ *  the child belongs to and the key the spawn carried — and, for the child's
+ *  own post-step, the base its pull request targets. */
 export interface CoordinatorTag {
   parentInstanceId: string;
   idempotencyKey: string;
+  /** The branch the child's pull request targets: the plan's base
+   *  (`CoordinatorInstance.base`), set by the spawn when the instance knows it.
+   *  A coordinator's child is dispatched AT its unit branch so the resident
+   *  attaches there, which makes the binding ref the branch itself — no base
+   *  the post-step could resolve from the thread — so the spawn says it. An
+   *  instruction to the run like `DispatchOptions.contract`, not a fact about
+   *  it: the fact the record keeps is the `pr_opened` it leads to, and
+   *  `coordinatorFields` leaves it off the rows. */
+  base?: string;
 }
 
 /** The tag as the two flat record fields, or nothing — so a row, a summary
- *  and a record spread the same thing and a run with no coordinator carries no key. */
+ *  and a record spread the same thing and a run with no coordinator carries no
+ *  key. The base never rides here: rows and records keep the shape written
+ *  before it existed. */
 export function coordinatorFields(tag: CoordinatorTag | undefined): {
   parentInstanceId?: string;
   idempotencyKey?: string;

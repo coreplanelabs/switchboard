@@ -69,7 +69,8 @@ const INSTANCE: CoordinatorInstance = {
   createdAt: NOW - 60_000,
 };
 const KEY = "ship_acme_api_1:u12/0/coding";
-const TAG: CoordinatorTag = { parentInstanceId: INSTANCE.id, idempotencyKey: KEY };
+/** The tag the spawn stamps: the instance, the step's key and the plan's base (INSTANCE.base). */
+const TAG: CoordinatorTag = { parentInstanceId: INSTANCE.id, idempotencyKey: KEY, base: "main" };
 
 const answer = (text: string): RunEvent => ({ type: "answer", text });
 
@@ -302,6 +303,19 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       receivedAt: NOW,
     });
     expect(h.dispatched[0].opts).toEqual({ coordinator: TAG });
+  });
+
+  it("the tag carries the instance's base — the branch the child's pull request targets — and no base field at all for an instance that knows none, so the post-step's own resolution runs", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
+    expect(h.dispatched[0].opts.coordinator.base).toBe("main");
+    const { base: _base, ...baseless } = INSTANCE;
+    const noBase = harness();
+    await noBase.instances.put(baseless);
+    await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), noBase.deps);
+    expect(noBase.dispatched[0].opts.coordinator).toEqual({ parentInstanceId: INSTANCE.id, idempotencyKey: KEY });
+    expect("base" in noBase.dispatched[0].opts.coordinator).toBe(false);
   });
 
   it("an unknown parentInstanceId is refused 404 and nothing is dispatched", async () => {
@@ -864,9 +878,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const { msg, opts } = h.dispatched[0];
     expect(msg.threadKey).toBe("slack:C1:2.0");
     expect(msg.text.startsWith("agent:coding in acme/api on branch plan/fixture/u10: Implement unit U10")).toBe(true);
+    // The child runs AT the unit branch; the tag says which branch its pull
+    // request targets — the plan's base — since the thread cannot.
     expect(opts.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,
       idempotencyKey: "plan-fixture:U10/0/coding",
+      base: "main",
     });
     const contract = (opts as { contract?: ChildContract }).contract!;
     expect(contract.unit.id).toBe("U10");
