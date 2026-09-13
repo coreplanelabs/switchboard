@@ -12,6 +12,7 @@ const KNOWN_REASONS = [
   "not-onboarded",
   "needs-ref",
   "not-attached",
+  "rate-limited",
 ] as const;
 
 export type KnownReason = (typeof KNOWN_REASONS)[number] | "timeout" | "unknown";
@@ -21,6 +22,7 @@ export function reasonOf(err: unknown): KnownReason {
   for (const r of KNOWN_REASONS) if (msg.includes(r)) return r;
   if (/sandbox fleet busy/i.test(msg)) return "fleet-busy";
   if (/is not onboarded/i.test(msg)) return "not-onboarded";
+  if (/\b429\b|rate limit/i.test(msg)) return "rate-limited";
   if (/TimeoutError|timed out|timeout/i.test(msg)) return "timeout";
   return "unknown";
 }

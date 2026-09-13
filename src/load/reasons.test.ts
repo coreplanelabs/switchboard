@@ -19,6 +19,17 @@ describe("reasonOf — the machine token inside a client's error", () => {
     expect(reasonOf(new Error("resident attach: repo:x is not onboarded (404)"))).toBe("not-onboarded");
   });
 
+  it("recognizes rate limiting as `rate-limited`, before the timeout rule", () => {
+    expect(reasonOf(new Error("HTTP 429 Too Many Requests"))).toBe("rate-limited");
+    expect(reasonOf(new Error("Rate Limit exceeded, retry later"))).toBe("rate-limited");
+    expect(reasonOf(new Error("rate limit hit: request timed out"))).toBe("rate-limited");
+    expect(reasonOf(new Error("request timed out"))).toBe("timeout");
+    expect(reasonOf(new Error("resident attach failed for repo:x: rate-limited: upstream throttled"))).toBe(
+      "rate-limited",
+    );
+    expect(reasonOf(new Error("request took 14290 ms"))).not.toBe("rate-limited");
+  });
+
   it("a fetch timeout is `timeout`; anything else is `unknown`, never a message fragment", () => {
     const t = new Error("The operation was aborted due to timeout");
     t.name = "TimeoutError";
