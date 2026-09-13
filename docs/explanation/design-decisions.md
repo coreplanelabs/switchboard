@@ -41,6 +41,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0029 | [Durable Objects are the store and never the scheduler, Cloudflare Workflows schedules the multi-step lifecycles, and the agent loop stays in a container](../decisions/0029-durable-objects-store-workflows-schedule.md) | Durable execution for the lifecycles around the loop, never for the loop; one order for four converging tracks | accepted | 2026-09-10 |
 | 0030 | [deploy all copies the images it needs into the account registry itself, over HTTPS, and the operator's whole deploy is one command](../decisions/0030-deploy-all-copies-the-images-it-needs.md) | Artifact promotion, folded into the one deploy command | accepted | 2026-09-10 |
 | 0031 | [The coordinator runs a plan, not a pull request; a child is handed a contract and hands back a deviation; verification cannot be weakened without its spec](../decisions/0031-the-coordinator-runs-a-plan-not-a-pull-request.md) | Planner over workers with one policy table per child; specs as the contract both ways; deterministic guards on the review gate | proposed | 2026-09-11 |
+| 0032 | [pi is the harness for every preset, and the native turn loop retires in a replacement series that never leaves two harnesses in steady state](../decisions/0032-pi-is-the-harness-the-native-loop-retires.md) | Strangler fig over a language-server shape; the loop is a separate process driven over a line protocol, the editor keeps the policy, the record and the UI | proposed | 2026-09-13 |
 
 <!-- /generated:decision-records -->
 
