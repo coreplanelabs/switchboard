@@ -559,13 +559,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       observedRemoteHead = observed.remoteHead;
       observedRemoteRepo = observed.remoteRepo;
     };
-    // Where the post-step's PR would open (CodingPrTarget): the PR's true
-    // base ref when the thread's context came from a PR, else the resident
-    // binding ref, else the dispatch's resolved ref. Shared by the
-    // description turn's decision and the post-step below.
+    // Where the post-step's PR would open (CodingPrTarget), in order: the PR's
+    // true base ref when the thread's context came from a PR (a fix round
+    // repushes the PR's own head branch — the PR, not the thread, knows its
+    // base), else the base a coordinator's spawn put on the tag (its child is
+    // dispatched AT the unit branch so the resident attaches there, which
+    // makes the binding ref the branch itself, and a PR whose base is its own
+    // head cannot open — the plan's base is the only signal that names the
+    // target, and only the tag carries it), else the resident binding ref,
+    // else the dispatch's resolved ref. Shared by the description turn's
+    // decision and the post-step below.
     const prTarget = {
       repo: repoCtx.repo,
-      baseRef: repoCtx.baseRef,
+      baseRef: repoCtx.baseRef ?? coordinator?.base,
       bindingRef: binding?.ref,
       resolvedRef: repoCtx.ref,
     };
@@ -642,13 +648,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     // idempotency lives in githubPulls — HERE, in the bot process, BEFORE
     // the finally below finish()es the stream, so the outcome lands in the
     // run record as a typed `pr_opened` event and not only in a console
-    // line. The base is the PR's true base ref when the thread's context
-    // came from a PR (a fix round repushes the PR's OWN head branch, so the
-    // binding ref equals the branch and is NOT the merge base), else the
-    // thread's resident binding ref, else the dispatch's resolved ref —
-    // binding is only ever set on the resident path (factory.ts), so no
-    // resident check is needed. The note rides on the final reply below. A
-    // hard stop observed nothing above and posts nothing.
+    // line. The base is `prTarget`'s (above): the PR's true base ref, else
+    // the coordinator tag's, else the thread's resident binding ref, else
+    // the dispatch's resolved ref — binding is only ever set on the resident
+    // path (factory.ts), so no resident check is needed. The note rides on
+    // the final reply below. A hard stop observed nothing above and posts
+    // nothing.
     if (isCodingPrRun && run.control.requested !== "hard") {
       prNote = await root.span("run.pr_post_step", () =>
         runCodingPrPostStep({

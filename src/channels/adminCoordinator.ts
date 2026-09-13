@@ -532,7 +532,14 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       lastReply = text;
     },
   });
-  const tag: CoordinatorTag = { parentInstanceId: instance.id, idempotencyKey: key };
+  // The child is dispatched at its unit branch (the resident attaches there),
+  // so the thread cannot tell the post-step which branch the pull request
+  // targets: the tag says it — the plan's base — when the instance knows one.
+  const tag: CoordinatorTag = {
+    parentInstanceId: instance.id,
+    idempotencyKey: key,
+    ...(instance.base !== undefined ? { base: instance.base } : {}),
+  };
   const settled = deps
     .dispatch(msg, child, {
       coordinator: tag,
