@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { CoordinatorUnit } from "./contract.js";
+import { WAIT_CHUNK_MS } from "../ship/coordinator.js";
+import { RUN_FINISHED_EVENT_PREFIX, type CoordinatorUnit } from "./contract.js";
 import {
   SPAWN_STEP_CONFIG,
   STEP_CONFIG,
@@ -125,7 +126,7 @@ function steps(waits: Record<string, "event" | "timeout"> = {}) {
     async waitForEvent(name, options) {
       taken.push({ kind: "wait", name, type: options.type, timeout: options.timeout });
       const answer = waits[name] ?? "timeout";
-      if (answer === "event") return { payload: { runId: options.type.slice("run finished:".length) } };
+      if (answer === "event") return { payload: { runId: options.type.slice(RUN_FINISHED_EVENT_PREFIX.length) } };
       throw new Error(`timeout waiting for ${options.type}`);
     },
   };
@@ -156,7 +157,7 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
 }
 
 describe("the plan runner's driver — the Workflow body over the step runner (item 9)", () => {
-  it("a one-unit plan runs coding, then review to approve, then the runner's merge at the approved head, and ends merged: the steps in order under the machine's names, every spawn typed by its brief and clipped budget, every wait typed `run finished:<runId>` for the budget plus five minutes and followed by a read-record, the round boundaries and the ending told to the bot, the finish completed", async () => {
+  it("a one-unit plan runs coding, then review to approve, then the runner's merge at the approved head, and ends merged: the steps in order under the machine's names, every spawn typed by its brief and clipped budget, every wait typed `run-finished-<runId>` for one chunk and followed by a read-record, the round boundaries and the ending told to the bot, the finish completed", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({
       plan: [planAnswer([row("U10")])],
@@ -208,10 +209,11 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     }
     expect(STEP_RETRIES).toEqual({ limit: 12, delay: 2 * MIN, backoff: "constant" });
     expect(STEP_CONFIG).toEqual({ retries: STEP_RETRIES });
-    // The waits: the child's clipped budget plus the margin, typed by the run the spawn answered.
+    // The waits: one chunk each, typed by the run the spawn answered in the platform's alphabet — the machine
+    // walks the child's budget plus the margin in chunks, a read-record between them.
     expect(s.taken.filter((t) => t.kind === "wait")).toEqual([
-      { kind: "wait", name: "U10/0/coding/wait/1", type: "run finished:run-c0", timeout: 45 * MIN + 5 * MIN },
-      { kind: "wait", name: "U10/1/review/wait/1", type: "run finished:run-r1", timeout: 25 * MIN + 5 * MIN },
+      { kind: "wait", name: "U10/0/coding/wait/1", type: "run-finished-run-c0", timeout: WAIT_CHUNK_MS },
+      { kind: "wait", name: "U10/1/review/wait/1", type: "run-finished-run-r1", timeout: WAIT_CHUNK_MS },
     ]);
     // What the bot was asked, in the machine's words.
     expect(b.of("plan")).toEqual([{ parentInstanceId: INSTANCE }]);
@@ -309,7 +311,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(t.names().filter((n) => n.includes("merge"))).toEqual([]);
   });
 
-  it("a wait that times out is confirmed by read-record like an event: a live child is waited on again under the next step name, a finished one advances; a spawn answered busy naming the run holding the thread waits on that run, one without a run id sleeps the busy retry", async () => {
+  it("a lost event costs one chunk, not the budget: a wait that times out is confirmed by read-record like an event, a live child is waited on again under the next step name, a finished one advances; a spawn answered busy naming the run holding the thread waits on that run, one without a run id sleeps the busy retry", async () => {
     const s = steps({ "U10/0/coding/wait/2": "event", "U10/0/coding/busy/2": "event" });
     const b = bot({
       plan: [planAnswer([row("U10")])],
@@ -361,8 +363,13 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     });
     expect(s.taken.find((t) => t.name === "U10/0/coding/busy/2")).toMatchObject({
       kind: "wait",
-      type: "run finished:run-other",
+      type: "run-finished-run-other",
     });
+    // The wait the engine never answered was one chunk — the read-record after it is what found the child finished.
+    expect(s.taken.filter((t) => t.kind === "wait" && t.name.startsWith("U10/0/coding/wait/"))).toEqual([
+      { kind: "wait", name: "U10/0/coding/wait/1", type: "run-finished-run-c0", timeout: WAIT_CHUNK_MS },
+      { kind: "wait", name: "U10/0/coding/wait/2", type: "run-finished-run-c0", timeout: WAIT_CHUNK_MS },
+    ]);
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("refused");
     expect(end.ending.report).toContain("agent_allowlist");

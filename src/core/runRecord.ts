@@ -129,7 +129,7 @@ export interface RunRecord {
    *  on every run a person or a schedule started. */
   parentRunId?: string;
   /** The coordinator instance this run is a child of (item 48): the state
-   *  Worker's finish sends that instance `run finished:<id>` for a record
+   *  Worker's finish sends that instance `run-finished-<id>` for a record
    *  carrying it, and `read-record` answers only for a matching instance.
    *  Absent on every run no coordinator spawned. */
   parentInstanceId?: string;

@@ -22,6 +22,7 @@ import {
   startUnit,
   unitBranch,
   unitSlug,
+  WAIT_CHUNK_MS,
   WAIT_MARGIN_MS,
   type ChildFacts,
   type CoordinatorAction,
@@ -306,12 +307,12 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
       brief: { kind: "contract", unit: "U10", rebase: { branch: input().unit.branch, onto: "main" } },
     });
     d.answer({ type: "spawn", outcome: "spawned", runId: "run-c0", at: T0 });
-    // The wait is the child's budget plus the margin, under the child's event type.
+    // The wait is one chunk of the child's budget, under the child's run — the durable half walks the rest.
     expect(d.action).toMatchObject({
       type: "wait",
       step: "U10/0/coding/wait/1",
       runId: "run-c0",
-      timeoutMs: CHILD_MINUTES.coding * MIN + WAIT_MARGIN_MS,
+      timeoutMs: WAIT_CHUNK_MS,
     });
     d.answer({ type: "wait", outcome: "event" });
     expect(d.action).toMatchObject({ type: "read-record", step: "U10/0/coding/read/1", runId: "run-c0" });
@@ -465,7 +466,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
     d.answer({ type: "branch", ok: true, at: T0 });
     expect(d.action).toMatchObject({ type: "spawn", budgetMinutes: 30 });
     d.answer({ type: "spawn", outcome: "spawned", runId: "run-c0", at: T0 });
-    expect(d.action).toMatchObject({ type: "wait", timeoutMs: 30 * MIN + WAIT_MARGIN_MS });
+    expect(d.action).toMatchObject({ type: "wait", timeoutMs: WAIT_CHUNK_MS });
     d.answer({ type: "wait", outcome: "event" });
     // The coding child ended with 20 minutes left: the review round is clipped to 20 of its 25.
     d.answer({
@@ -716,6 +717,57 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     d.answer({ type: "read-record", run: { finished: false }, at: T0 + 51 * MIN });
     expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/wait/3" });
     expect(d.rounds()).toEqual(["0 coding started"]);
+  });
+
+  it("the wait is sliced: every wait is a chunk, never the child's whole budget, and a live answer waits the next chunk; the slices before the budget plus the margin sum to exactly that, the last one the remainder; past it an overdue child is asked about every chunk, never in a zero-length wait; a finished record ends the wait exactly as the event would; a busy wait is a chunk too", () => {
+    const until = T0 + CHILD_MINUTES.coding * MIN + WAIT_MARGIN_MS;
+    expect(WAIT_CHUNK_MS).toBeLessThan(CHILD_MINUTES.coding * MIN);
+    const d = atWait();
+    expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/wait/1", timeoutMs: WAIT_CHUNK_MS });
+    // A chunk the engine never answered; the bot says live: the next slice is a chunk again.
+    d.answer({ type: "wait", outcome: "timeout" });
+    d.answer({ type: "read-record", run: { finished: false }, at: T0 + WAIT_CHUNK_MS });
+    expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/wait/2", timeoutMs: WAIT_CHUNK_MS });
+    // Three minutes before the budget plus the margin: the slice is the remainder, never past it.
+    d.answer({ type: "wait", outcome: "timeout" });
+    d.answer({ type: "read-record", run: { finished: false }, at: until - 3 * MIN });
+    expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/wait/3", timeoutMs: 3 * MIN });
+    // At and past it — an overdue child, its own budget's to end — a chunk again, never zero.
+    d.answer({ type: "wait", outcome: "timeout" });
+    d.answer({ type: "read-record", run: { finished: false }, at: until });
+    expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/wait/4", timeoutMs: WAIT_CHUNK_MS });
+    d.answer({ type: "wait", outcome: "timeout" });
+    d.answer({ type: "read-record", run: { finished: false }, at: until + 20 * MIN });
+    expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/wait/5", timeoutMs: WAIT_CHUNK_MS });
+    // The finished record ends the wait as the event would have: the round advances to pr-check.
+    d.answer({ type: "wait", outcome: "timeout" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
+      at: until + 21 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "pr-check" });
+    expect(d.rounds()).toEqual(["0 coding started"]);
+
+    // The slices before the deadline sum to exactly the child's budget plus the margin — what the one wait was.
+    const sum = atWait();
+    let clock = T0;
+    let total = 0;
+    while (clock < until) {
+      const a = sum.action as Extract<CoordinatorAction, { type: "wait" }>;
+      expect(a.type).toBe("wait");
+      total += a.timeoutMs;
+      clock += a.timeoutMs;
+      sum.answer({ type: "wait", outcome: "timeout" });
+      sum.answer({ type: "read-record", run: { finished: false }, at: clock });
+    }
+    expect(total).toBe(CHILD_MINUTES.coding * MIN + WAIT_MARGIN_MS);
+
+    // A busy wait — another run holding the thread — is a chunk too, then the spawn is asked again.
+    const b = new Driver(openUnitPipeline(input(), T0));
+    b.answer({ type: "branch", ok: true, at: T0 });
+    b.answer({ type: "spawn", outcome: "busy", runId: "run-other", at: T0 });
+    expect(b.action).toMatchObject({ type: "wait", step: "U10/0/coding/busy/1", timeoutMs: WAIT_CHUNK_MS });
   });
 
   it("a read-record that says `interrupted` ends the unit with the ship-restart note, naming the pull request when one was opened", () => {

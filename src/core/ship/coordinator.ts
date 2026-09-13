@@ -414,8 +414,9 @@ type Phase =
   | { at: "branch" }
   | { at: "spawn"; round: RoundRef; busy: number }
   | { at: "busy-wait"; round: RoundRef; runId?: string; n: number }
-  | { at: "wait"; round: RoundRef; runId: string; n: number; budgetMinutes: number }
-  | { at: "read"; round: RoundRef; runId: string; n: number; budgetMinutes: number }
+  /** `until`: when the child's budget plus the margin runs out, counted from the spawn's answer — the wait's last slice ends there. */
+  | { at: "wait"; round: RoundRef; runId: string; n: number; until: number }
+  | { at: "read"; round: RoundRef; runId: string; n: number; until: number }
   | { at: "pr-check"; round: RoundRef; runId: string; childHead?: string; finalReply?: string }
   | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number }
   | { at: "merge-sleep"; pr: PrRef; headSha: string; n: number; since: number }
@@ -445,6 +446,14 @@ export interface UnitPipelineState {
 
 /** Past a child's budget, the parent asks the bot instead of waiting on. */
 export const WAIT_MARGIN_MS = 5 * MIN;
+/** One slice of a wait on a child. The child's budget plus the margin is
+ *  walked in chunks with a `read-record` between them, so an event the engine
+ *  never delivered — refused, lost, sent to an instance that had ended — costs
+ *  one chunk of the runner's time, not the child's whole budget. Five minutes
+ *  is the machine's one cadence for asking the bot what it cannot be told (the
+ *  margin and the merge poll are the same number), and it keeps a round to a
+ *  few steps: a coding child's 45 minutes are ten waits and ten reads. */
+export const WAIT_CHUNK_MS = 5 * MIN;
 /** How often the runner asks for the merge while the guards are still pending, and for how long at most. */
 export const MERGE_POLL_MS = 5 * MIN;
 export const MERGE_WAIT_MAX_MS = 60 * MIN;
@@ -477,6 +486,15 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
 
 const deadlineAt = (s: UnitPipelineState) => s.startedAt + s.input.caps.maxMinutes * MIN;
 const remainingMs = (s: UnitPipelineState) => deadlineAt(s) - s.clock;
+
+/** The next slice of a wait: a chunk; the remainder when less is left before
+ *  `until`, so the slices sum to exactly the budget plus the margin; and a
+ *  chunk again once `until` has passed — an overdue child is its own budget's
+ *  to end, and the runner asks about it every chunk, never in a zero-length wait. */
+function waitSliceMs(clock: number, until: number): number {
+  const remaining = until - clock;
+  return remaining > 0 ? Math.min(WAIT_CHUNK_MS, remaining) : WAIT_CHUNK_MS;
+}
 
 /** The child's budget: its preset's own, clipped to the pipeline's remaining
  *  wall clock (the in-process loop's `clip`), never under the two minutes a
@@ -529,14 +547,14 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
     case "busy-wait": {
       const step = `${roundStep(s, p.round)}/busy/${p.n}`;
       if (p.runId === undefined) return { type: "sleep", step, ms: BUSY_RETRY_MS };
-      return { type: "wait", step, runId: p.runId, timeoutMs: Math.max(0, remainingMs(s)) + WAIT_MARGIN_MS };
+      return { type: "wait", step, runId: p.runId, timeoutMs: waitSliceMs(s.clock, deadlineAt(s) + WAIT_MARGIN_MS) };
     }
     case "wait":
       return {
         type: "wait",
         step: `${roundStep(s, p.round)}/wait/${p.n}`,
         runId: p.runId,
-        timeoutMs: p.budgetMinutes * MIN + WAIT_MARGIN_MS,
+        timeoutMs: waitSliceMs(s.clock, p.until),
       };
     case "read":
       return { type: "read-record", step: `${roundStep(s, p.round)}/read/${p.n}`, runId: p.runId };
@@ -813,7 +831,8 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       switch (r.outcome) {
         case "spawned":
         case "alreadySpawned": {
-          const budgetMinutes = budgetMinutesFor(s, presetOf(p.round.kind));
+          // The child's budget runs from the spawn's answer; the wait walks it, plus the margin, in chunks.
+          const until = clocked.clock + budgetMinutesFor(s, presetOf(p.round.kind)) * MIN + WAIT_MARGIN_MS;
           const runs =
             p.round.kind === "review"
               ? { reviewRunByRound: { ...s.reviewRunByRound, [p.round.index]: r.runId } }
@@ -821,7 +840,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
                 ? { fixRunByRound: { ...s.fixRunByRound, [p.round.index]: r.runId }, lastCodingRunId: r.runId }
                 : { lastCodingRunId: r.runId };
           return {
-            state: { ...clocked, ...runs, phase: { at: "wait", round: p.round, runId: r.runId, n: 1, budgetMinutes } },
+            state: { ...clocked, ...runs, phase: { at: "wait", round: p.round, runId: r.runId, n: 1, until } },
             notes: [roundNote(p.round, "started")],
           };
         }
@@ -869,7 +888,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       return { state: { ...s, phase: { at: "spawn", round: p.round, busy: p.n } }, notes: [] };
     case "wait":
       return {
-        state: { ...s, phase: { at: "read", round: p.round, runId: p.runId, n: p.n, budgetMinutes: p.budgetMinutes } },
+        state: { ...s, phase: { at: "read", round: p.round, runId: p.runId, n: p.n, until: p.until } },
         notes: [],
       };
     case "read": {
@@ -878,7 +897,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         return {
           state: {
             ...clocked,
-            phase: { at: "wait", round: p.round, runId: p.runId, n: p.n + 1, budgetMinutes: p.budgetMinutes },
+            phase: { at: "wait", round: p.round, runId: p.runId, n: p.n + 1, until: p.until },
           },
           notes: [],
         };

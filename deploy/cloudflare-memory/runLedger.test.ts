@@ -448,7 +448,7 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
     ...TAG,
   });
 
-  it("a record carrying parentInstanceId committed by the owner's finish sends exactly one `run finished:<runId>` to that instance, after the commit, and the response says so", async () => {
+  it("a record carrying parentInstanceId committed by the owner's finish sends exactly one `run-finished-<runId>` to that instance, after the commit, and the response says so", async () => {
     const key = storeKey();
     const sent = await coordinatorDouble(key);
     await post(
@@ -467,7 +467,7 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
     expect(sent).toEqual([
       {
         instance: "ship_acme_api_1",
-        type: "run finished:r1",
+        type: "run-finished-r1",
         payload: expect.objectContaining({ runId: "r1", status: "completed", parentInstanceId: "ship_acme_api_1" }),
       },
     ]);
@@ -512,7 +512,7 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
         record: childRecord("reserved", "slack:C1:2.0", "interrupted"),
       }),
     ).toMatchObject({ status: 200, data: { ok: true, event: "sent" } });
-    expect(sent.map((s) => s.type)).toEqual(["run finished:expired", "run finished:reserved"]);
+    expect(sent.map((s) => s.type)).toEqual(["run-finished-expired", "run-finished-reserved"]);
     expect(sent.map((s) => (s.payload as { status: string }).status)).toEqual(["interrupted", "interrupted"]);
   });
 

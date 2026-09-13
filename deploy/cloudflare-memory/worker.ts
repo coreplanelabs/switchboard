@@ -147,7 +147,7 @@ export interface Env {
   /** Delivery snapshots (delivery item 10): ONE DeliveryDO (named "delivery"), one snapshot per repository. */
   DELIVERY: DurableObjectNamespace<DeliveryDO>;
   /** The ship coordinator Workflow in the bot's shim Worker (run-history item
-   *  47): where `RunHistoryDO.finish` sends `run finished:<runId>` for a record
+   *  47): where `RunHistoryDO.finish` sends `run-finished-<runId>` for a record
    *  carrying `parentInstanceId`. Optional: this Worker deploys without it (the
    *  binding is a cross-script one, and the class must exist on the bot before
    *  the state Worker may name it), and a finish then commits with no event. */
@@ -1505,7 +1505,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
     const event = await sendRunFinished(this.env.SHIP_COORDINATOR, record);
     if (event.kind === "failed")
-      console.warn(`[runs/finish] ${runId} → run finished not delivered to ${event.instance}: ${event.reason}`);
+      console.warn(`[runs/finish] ${runId} → ${event.type} not delivered to ${event.instance}: ${event.reason}`);
     return { ...out, event: event.kind };
   }
 
