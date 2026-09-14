@@ -91,6 +91,8 @@ commands
   pi         the five representative coding tasks on pi's harness (pi --mode rpc in a checkout)
              --checkout DIR  --task all|<name>  --provider NAME  --model ID  --key-env VAR
              [--pi PATH  --thinking LEVEL  --budget-minutes N  --base-url URL (a custom OpenAI-compatible endpoint)]
+             [--through-proxy URL  (--shape anthropic|openai)]: the bot's model proxy as pi's one provider — URL is the
+             bot's base, the key variable holds a run bearer (SWITCHBOARD_PI_MODEL_KEY unless --key-env names another)
              the model key is read from the environment variable --key-env names (default: the variable pi reads
              for --provider, e.g. ANTHROPIC_API_KEY); never from a file, never printed
              --print-prompt --task <name>: print the task's prompt and exit (for the same task on today's coding agent)
@@ -142,6 +144,8 @@ function flags(argv: string[]): Flags {
       thinking: { type: "string" },
       "budget-minutes": { type: "string" },
       "base-url": { type: "string" },
+      "through-proxy": { type: "string" },
+      shape: { type: "string" },
       "print-prompt": { type: "boolean" },
       since: { type: "string" },
       limit: { type: "string" },
@@ -526,7 +530,14 @@ async function pi(f: Flags): Promise<boolean> {
     return true;
   }
   const startedAt = new Date(systemClock()).toISOString();
-  const providerName = str(f, "provider", "anthropic");
+  // Through the bot's model proxy (docs/reference/specs/harness-pi.md, the
+  // live receipt): pi's one provider is the bot, on the shape the run's
+  // provider speaks, and the "key" is a run bearer an operator minted — the
+  // harness's own variable holds it, never a provider's.
+  const throughProxy = typeof f["through-proxy"] === "string" ? f["through-proxy"].replace(/\/$/, "") : undefined;
+  const shape = str(f, "shape", "anthropic");
+  if (shape !== "anthropic" && shape !== "openai") throw new Error("--shape must be anthropic or openai");
+  const providerName = throughProxy ? "switchboard" : str(f, "provider", "anthropic");
   const keyEnv = str(f, "key-env", piKeyEnvFor(providerName));
   const key = processSecrets.named(keyEnv);
   if (!key) {
@@ -543,7 +554,18 @@ async function pi(f: Flags): Promise<boolean> {
   const budgetMs = num(f, "budget-minutes", 45) * 60_000;
   const piBin = str(f, "pi", "pi");
   const thinking = typeof f.thinking === "string" ? f.thinking : undefined;
-  const baseUrl = typeof f["base-url"] === "string" ? f["base-url"] : undefined;
+  const baseUrl = throughProxy
+    ? shape === "openai"
+      ? `${throughProxy}/v1`
+      : throughProxy
+    : typeof f["base-url"] === "string"
+      ? f["base-url"]
+      : undefined;
+  const api = throughProxy
+    ? shape === "openai"
+      ? ("openai-completions" as const)
+      : ("anthropic-messages" as const)
+    : undefined;
   const extensionPath = resolve("src/load/piExtension.ts");
 
   // pi's config directory lives beside the receipt, not in a temp dir: its
@@ -551,7 +573,12 @@ async function pi(f: Flags): Promise<boolean> {
   // (settings.json and models.json hold no secret — the key is interpolated
   // from the environment at request time).
   const agentDir = `${RESULTS_DIR}/pi-${id}-agent`;
-  const layout = writeAgentDir(agentDir, { provider: providerName, model, ...(baseUrl ? { baseUrl } : {}) });
+  const layout = writeAgentDir(agentDir, {
+    provider: providerName,
+    model,
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(api ? { api } : {}),
+  });
 
   const samples: Sample[] = [];
   const runs: PiTaskRun[] = [];
@@ -685,6 +712,7 @@ async function pi(f: Flags): Promise<boolean> {
       keyEnv,
       piBin,
       baseUrl,
+      throughProxy,
     },
     summary,
     checks,

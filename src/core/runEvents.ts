@@ -118,7 +118,23 @@ export type RunNoteKind =
    *  post-step beside the thread's Slack-only note, so the record says the
    *  verdict is Slack-only and a coordinator reading it never asks GitHub
    *  for a review that was never sent. */
-  | "review_not_posted";
+  | "review_not_posted"
+  /** A pi run's context was compacted (docs/reference/specs/harness-pi.md item
+   *  6): pi summarized its older turns into one entry and the model reads the
+   *  summary from here on; the transcript keeps the originals, so the record
+   *  is a superset of the model's context. The summary names the token counts
+   *  before and after. Published by the pi bridge. */
+  | "compacted"
+  /** The pi harness itself failed in a way the run must show (harness-pi.md
+   *  item 6): the extension threw, pi asked a dialog no one answers (answered
+   *  cancelled), or pi emitted an event kind this build's bridge does not
+   *  know — named, so a pi bump is visible in the first run's record. Published
+   *  by the pi bridge. */
+  | "harness_error"
+  /** The harness's gate refused a tool call the model asked for (harness-pi.md
+   *  item 7): the summary names the tool and the rule; the model read the same
+   *  reason as the tool's result. Published by the bot's authorize route. */
+  | "tool_refused";
 
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
@@ -139,6 +155,9 @@ export const RUN_NOTE_KINDS = [
   "cold_sandbox",
   "pr_not_opened",
   "review_not_posted",
+  "compacted",
+  "harness_error",
+  "tool_refused",
 ] as const satisfies readonly RunNoteKind[];
 type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
 const _everyKindListed: _EveryKindListed = true;

@@ -139,6 +139,27 @@ describe("judgeToolCall — bash", () => {
   });
 });
 
+describe("judgeToolCall — a run that names its own branch", () => {
+  const own = { checkout: "/work/repo", protectedBranches: ["main", "release/1.2"] };
+  it("may push any branch to origin but the protected ones — the base its pull request targets", () => {
+    expect(judgeToolCall("bash", { command: "git push -u origin feat/login" }, own)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("bash", { command: "git push origin HEAD" }, own)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("bash", { command: "git push" }, own)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("bash", { command: "git push origin main" }, own)).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to `main`, the branch this run's pull request targets; push your own branch",
+    });
+    expect(judgeToolCall("bash", { command: "git push origin HEAD:refs/heads/release/1.2" }, own)).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to `release/1.2`, the branch this run's pull request targets; push your own branch",
+    });
+    expect(judgeToolCall("bash", { command: "git push upstream feat/x" }, own)).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to remote `upstream`, not the run's repository (origin)",
+    });
+  });
+});
+
 describe("judgeToolCall — file tools", () => {
   it("allows paths inside the checkout, relative or absolute", () => {
     expect(judgeToolCall("write", { path: "src/x.ts", content: "" }, ctx)).toEqual({ verdict: "allowed" });

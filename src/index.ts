@@ -68,6 +68,8 @@ import {
   OPENAI_CHAT_COMPLETIONS_PATH,
 } from "./channels/modelProxy.js";
 import { RunBearerStore } from "./core/modelProxy/runBearers.js";
+import { HarnessRegistry } from "./core/harness/pi/relay.js";
+import { createHarnessRoutesHandler, isHarnessPath } from "./channels/harnessRoutes.js";
 import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js";
 import { createSpanLog } from "./core/trace/spanLog.js";
 import { handleAdminRestartAuthorize } from "./channels/adminRestartAuthorize.js";
@@ -359,11 +361,19 @@ export async function runBot(): Promise<void> {
   // minted by the provision stage as a run's executor attaches, revoked as the
   // run ends; in-process, so a restart drops them with the runs that held them.
   const runBearers = new RunBearerStore({ clock: systemClock });
+  // The runs driving a pi in their container (docs/reference/specs/harness-pi.md):
+  // the harness routes answer for exactly these; the bot's public URL is where
+  // a container reaches the proxy and the routes.
+  const harnesses = new HarnessRegistry();
   const deps: CoreDeps = {
     config,
     providers,
     spanLog,
     runBearers,
+    harness: {
+      registry: harnesses,
+      ...(process.env.PUBLIC_BASE_URL ? { harnessUrl: process.env.PUBLIC_BASE_URL } : {}),
+    },
     capabilities,
     residentFleet,
     // What this process is, for the About block: the package version and the image's stamp.
@@ -515,6 +525,11 @@ export async function runBot(): Promise<void> {
       secrets: processSecrets,
       clock: systemClock,
     });
+    // The harness routes (docs/reference/specs/harness-pi.md item 7): what a
+    // run's pi extension asks over the run's own bearer — its relayed tool
+    // definitions, the gate's verdict before each tool call, a relayed tool run
+    // here. The shim forwards them blind like the proxy; the bearer is the door.
+    const harnessRoutes = createHarnessRoutesHandler({ bearers: runBearers, harnesses });
     // The bot steps a ship coordinator calls (docs/reference/specs/http-ingress.md
     // item 9): `POST /admin/coordinator/spawn|read-record|pr-check`, and the
     // `authorize` question the shim asks before it creates an instance — for
@@ -712,6 +727,10 @@ export async function runBot(): Promise<void> {
       }
       if (isModelProxyPath(path)) {
         modelProxy(req, res);
+        return;
+      }
+      if (isHarnessPath(path)) {
+        harnessRoutes(req, res);
         return;
       }
       // An operator's bearer for a live run (a `deploy:write` ingress bearer, like

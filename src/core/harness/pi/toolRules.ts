@@ -45,8 +45,13 @@ export type ToolVerdict = { verdict: "allowed" } | { verdict: "refused" | "outsi
 export interface ToolRuleContext {
   /** The checkout pi runs in: the files bundles are this tree and nothing outside it. */
   checkout: string;
-  /** The run's branch — the one push target a coding child may use. */
-  branch: string;
+  /** The run's branch, when the run was given one (a plan unit's, the spike's):
+   *  then the one push target it may use. Absent, the run names its own
+   *  branch and may push any but the protected ones. */
+  branch?: string;
+  /** Branches a run without a branch of its own may never push to: the base
+   *  its pull request would target, the repository's default. */
+  protectedBranches?: readonly string[];
 }
 
 const allowed: ToolVerdict = { verdict: "allowed" };
@@ -106,20 +111,34 @@ function judgeBash(command: unknown, ctx: ToolRuleContext): ToolVerdict {
 }
 
 /** `git push [flags] [remote [refspec]]`: the run's repository is `origin`
- *  and its one branch is the run's; anything else is a `repo:use` the grant
- *  set does not carry. A destination of `HEAD` is the branch the driver
- *  checked out — the run's — so `git push origin HEAD` is the same push as
- *  naming it. */
+ *  and, when the run was given a branch, that is its one target — anything
+ *  else is a `repo:use` the grant set does not carry; a destination of `HEAD`
+ *  is the branch the driver checked out, the run's, so `git push origin HEAD`
+ *  is the same push as naming it. A run naming its own branch may push any but
+ *  the protected ones: the base its pull request targets is never pushed to. */
 function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
   const words = tail.split(/\s+/).filter((w) => w.length > 0 && !w.startsWith("-"));
   const [remote, refspec] = words;
   if (remote !== undefined && remote !== "origin") {
     return refused(`repo:use — push to remote \`${remote}\`, not the run's repository (origin)`);
   }
-  if (refspec !== undefined) {
-    const destination = refspec.replace(/^\+/, "").split(":").pop() ?? refspec;
+  // A push naming no refspec pushes the checked-out branch, which a rule over
+  // the call's text alone cannot know: `git switch main && git push` passes
+  // here. The accepted gap of text-only rules — the policy table's tool-level
+  // rows (the authorization spec's open item) are where a checkout-aware
+  // gate belongs.
+  if (refspec === undefined) return allowed;
+  const destination = refspec.replace(/^\+/, "").split(":").pop() ?? refspec;
+  if (ctx.branch !== undefined) {
     const branch = destination === "HEAD" ? ctx.branch : destination.replace(/^refs\/heads\//, "");
     if (branch !== ctx.branch) return refused(`repo:use — push to \`${branch}\`, not the run's branch ${ctx.branch}`);
+    return allowed;
+  }
+  const branch = destination.replace(/^refs\/heads\//, "");
+  if (branch !== "HEAD" && (ctx.protectedBranches ?? []).includes(branch)) {
+    return refused(
+      `repo:use — push to \`${branch}\`, the branch this run's pull request targets; push your own branch`,
+    );
   }
   return allowed;
 }

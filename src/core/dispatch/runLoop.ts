@@ -11,7 +11,12 @@ import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
-import { runAgent } from "../../runner.js";
+import { mergeTools, runAgent } from "../../runner.js";
+import { parseModelRef } from "../../providers/types.js";
+import { TOOLSETS } from "../../tools/workspace.js";
+import { effectiveHarness } from "../harness/select.js";
+import { ExecPiContainer } from "../harness/pi/container.js";
+import { relayedTools, runPiHarness, type PiHarnessFacts } from "../harness/pi/harness.js";
 import { fetchRepoShipInfo, findOpenPrByHead, openPullRequest } from "../../execution/githubPulls.js";
 import type { ChatMessage, Provider } from "../../providers/types.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
@@ -139,6 +144,10 @@ export interface RunLoopContext {
    *  ids and the set rides the record. Absent on every other run, where the
    *  tool answers that nothing was recorded. */
   fixRound?: { findingIds: string[] };
+  /** The run's model-proxy bearer as minted (docs/reference/specs/model-proxy.md):
+   *  a run on the pi harness hands it to pi as its provider key. Absent without
+   *  a store; a native run never reads it. */
+  bearer?: string;
 }
 
 /**
@@ -459,38 +468,125 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     onHandoff,
     ...(fixRound ? { knownFindingIds: fixRound.findingIds, onDispositions } : {}),
   };
+  // Which loop drives the run (docs/reference/specs/harness-pi.md item 1): the
+  // preset's harness, or the deployment's word for it. Everything before this
+  // point and everything after it is the same for both.
+  const harness = effectiveHarness(agent, deps.config.config.harness);
   try {
-    answer = await runAgent({
-      provider,
-      model,
-      agent,
-      messages,
-      system,
-      effort: resolved.effort,
-      toolContext,
-      ...(mcpForRun && mcpForRun.tools.length > 0 ? { extraTools: mcpForRun.tools } : {}),
-      onProgress,
-      onEvent,
-      span: root, // the loop is `run.agent` under the run's root (docs/reference/specs/tracing.md)
-      ...(round.selection.backend ? { backend: round.selection.backend } : {}),
-      control: run.control, // operator stop from /runs
-      inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
-      // The step record before each step's tools (run-history item 35).
-      ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
-      // A resume re-enters the loop from the plan (run-history item 37).
-      ...(resume
-        ? {
-            resume: {
-              settlements: resume.plan.settlements,
-              stepRecorded: resume.plan.stepRecorded,
-              inboxConsumedSeq: resume.plan.inboxConsumedSeq,
-              turn: resume.plan.turn,
-              iteration: resume.plan.iteration,
-              remainingMs: resume.plan.remainingMs,
-            },
-          }
-        : {}),
-    });
+    if (harness === "pi") {
+      // The pi harness (harness-pi.md): pi in the run's own container, the
+      // bearer as its key, the bridge putting its events on this same stream,
+      // the relayed tools running here under this same tool context.
+      if (!deps.harness)
+        throw new Error(`the ${agent.name} preset is on the pi harness, but this process has no harness deps`);
+      if (!deps.harness.harnessUrl)
+        throw new Error("the pi harness needs PUBLIC_BASE_URL: the run's container reaches the model proxy through it");
+      if (ctx.bearer === undefined)
+        throw new Error("the pi harness needs the run's model-proxy bearer, and this process minted none");
+      const { provider: providerName, model: modelId } = parseModelRef(resolved.modelRef);
+      const providerCfg = deps.config.config.providers[providerName];
+      if (!providerCfg) throw new Error(`the pi harness found no provider named ${providerName} in the config`);
+      // The gate's push rules (harness-pi.md item 7) follow the thread the
+      // way the post-step's PR target does (CodingPrTarget): when the thread
+      // came from a pull request or a coordinator's spawn, the thread is bound
+      // AT the run's own branch — a fix round repushes the PR's head, a unit
+      // child is dispatched at its unit branch — so that branch is the one
+      // push target and the base its pull request targets is protected;
+      // otherwise the binding IS that base, protected, and the run pushes a
+      // branch of its own making.
+      const prBase = repoCtx.baseRef ?? coordinator?.base;
+      const ownBranch = prBase !== undefined ? (binding?.ref ?? repoCtx.ref) : undefined;
+      const protectedBranches = [
+        ...new Set(
+          (prBase !== undefined ? [prBase] : [binding?.ref, repoCtx.ref]).filter(
+            (b): b is string => typeof b === "string",
+          ),
+        ),
+      ];
+      const facts = resume ? harnessFactsOf(resume.row.state.harness) : undefined;
+      answer = await runPiHarness(
+        {
+          container: deps.harness.containerFor?.(executor) ?? new ExecPiContainer(executor),
+          bearer: ctx.bearer,
+          harnessUrl: deps.harness.harnessUrl,
+          registry: deps.harness.registry,
+          ...(deps.runBearers ? { bearers: deps.runBearers } : {}),
+          clock,
+          sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        },
+        {
+          runId: run.id,
+          agent,
+          ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+          model: { id: modelId, provider: providerName, providerType: providerCfg.type },
+          system,
+          messages,
+          tools: relayedTools(mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools)),
+          toolContext,
+          rules: {
+            checkout: binding?.workspace ?? "/workspace",
+            ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
+            protectedBranches,
+          },
+          ...(round.selection.backend ? { backend: round.selection.backend } : {}),
+          span: root,
+          control: run.control,
+          inbox: admitted.inbox,
+          onEvent,
+          onProgress,
+          ...(ledgerRun
+            ? {
+                onStep: ledgerRun.step.bind(ledgerRun),
+                saveFacts: (h: PiHarnessFacts) => ledgerRun.setState({ harness: h }),
+              }
+            : {}),
+          ...(resume
+            ? {
+                resume: {
+                  messages: resume.plan.messages,
+                  settlements: resume.plan.settlements,
+                  remainingMs: resume.plan.remainingMs,
+                  turn: resume.plan.turn,
+                  inboxConsumedSeq: resume.plan.inboxConsumedSeq,
+                  ...(facts ? { facts } : {}),
+                },
+              }
+            : {}),
+        },
+      );
+    } else {
+      answer = await runAgent({
+        provider,
+        model,
+        agent,
+        messages,
+        system,
+        effort: resolved.effort,
+        toolContext,
+        ...(mcpForRun && mcpForRun.tools.length > 0 ? { extraTools: mcpForRun.tools } : {}),
+        onProgress,
+        onEvent,
+        span: root, // the loop is `run.agent` under the run's root (docs/reference/specs/tracing.md)
+        ...(round.selection.backend ? { backend: round.selection.backend } : {}),
+        control: run.control, // operator stop from /runs
+        inbox: admitted.inbox, // thread follow-ups steered into this run (thread-admission item 2)
+        // The step record before each step's tools (run-history item 35).
+        ...(ledgerRun ? { onStep: ledgerRun.step.bind(ledgerRun) } : {}),
+        // A resume re-enters the loop from the plan (run-history item 37).
+        ...(resume
+          ? {
+              resume: {
+                settlements: resume.plan.settlements,
+                stepRecorded: resume.plan.stepRecorded,
+                inboxConsumedSeq: resume.plan.inboxConsumedSeq,
+                turn: resume.plan.turn,
+                iteration: resume.plan.iteration,
+                remainingMs: resume.plan.remainingMs,
+              },
+            }
+          : {}),
+      });
+    }
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
     // settleReviewedHead in reviewRound.ts): for a PR review, read the
     // workspace HEAD NOW — after the model is done, BEFORE the finally
@@ -836,5 +932,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     checklistAsLeft,
     checklistCheckedOff,
     releaseWorkspace,
+  };
+}
+
+/** The harness facts a previous generation wrote on the row (`state.harness`),
+ *  when they have the shape this build writes; anything else is no facts. */
+function harnessFactsOf(value: unknown): PiHarnessFacts | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.pid !== "number" || typeof v.logOffset !== "number") return undefined;
+  return {
+    pid: v.pid,
+    logOffset: v.logOffset,
+    ...(typeof v.sessionFile === "string" ? { sessionFile: v.sessionFile } : {}),
   };
 }

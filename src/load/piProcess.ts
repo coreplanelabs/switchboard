@@ -116,9 +116,12 @@ export function piEnv(o: PiSpawnOptions, base: EnvRecord): Record<string, string
 export interface AgentDirOptions {
   provider: string;
   model: string;
-  /** An OpenAI-compatible endpoint for a provider pi does not ship — the
-   *  scripted provider in the dry run. Written as a `models.json` provider. */
+  /** A custom endpoint for a provider pi does not ship — the scripted provider
+   *  in the dry run, the bot's model proxy in the through-proxy receipt.
+   *  Written as a `models.json` provider. */
   baseUrl?: string;
+  /** The endpoint's wire shape; the OpenAI completions shape unless named. */
+  api?: "openai-completions" | "anthropic-messages";
 }
 
 export interface AgentDirLayout {
@@ -142,7 +145,7 @@ export function writeAgentDir(dir: string, o: AgentDirOptions): AgentDirLayout {
     providers: {
       [o.provider]: {
         baseUrl: o.baseUrl,
-        api: "openai-completions",
+        api: o.api ?? "openai-completions",
         apiKey: `$${HARNESS_KEY_ENV}`,
         models: [{ id: o.model }],
       },

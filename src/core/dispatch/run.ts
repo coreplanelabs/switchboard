@@ -35,6 +35,21 @@ import type { AuthorizeDeps } from "./authorize.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { RecordDeps } from "./record.js";
 import { processSecrets } from "../../secrets.js";
+import type { PiContainer } from "../harness/pi/container.js";
+import type { HarnessRegistry } from "../harness/pi/relay.js";
+import type { Executor } from "../../execution/executor.js";
+
+/** What a run on the pi harness needs from the process (docs/reference/specs/
+ *  harness-pi.md): the registry the harness routes answer from, the bot's URL
+ *  as a container reaches it (the proxy's and the routes' home), and — for a
+ *  test — the container to drive in place of the run's executor. */
+export interface HarnessDeps {
+  registry: HarnessRegistry;
+  /** `PUBLIC_BASE_URL`; without it no run can go on pi and the run says so. */
+  harnessUrl?: string;
+  /** The container over the run's executor; absent → `ExecPiContainer`. */
+  containerFor?: (executor: Executor) => PiContainer;
+}
 
 /** What the run stage reads off the dispatcher's dependencies: the tools'
  *  capabilities (the GitHub API and the per-user write gate), the GitHub seams
@@ -46,8 +61,14 @@ export interface RunDeps
     RecordDeps,
     Pick<AdmissionDeps, "runLedger">,
     Pick<AuthorizeDeps, "fetchPrHead">,
-    Pick<ProvisionDeps, "skills"> {
+    Pick<ProvisionDeps, "skills" | "runBearers"> {
   config: ConfigStore;
+  /**
+   * The pi harness's process-wide pieces (docs/reference/specs/harness-pi.md).
+   * Absent (the CLI, tests) → a preset on pi cannot run here and says so;
+   * every native run is untouched.
+   */
+  harness?: HarnessDeps;
   /**
    * The durable store of finished runs, READ by a review run for the PR
    * description a coding run submitted for the head it reviews

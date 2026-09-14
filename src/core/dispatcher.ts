@@ -632,9 +632,10 @@ export async function dispatch(
     // minted the moment the executor is provisioned, bound to this run, pinned
     // to its preset's model and caps, expiring at its budget plus the margin.
     // Revoked by the ending above when the run finishes, and by the outer
-    // finally for a run that never reached its loop. Nothing consumes it yet
-    // but the proxy's own probe; a harness in the workspace will.
-    mintRunBearer(deps, { runId, agent, profile, resolved, registry, root, clock });
+    // finally for a run that never reached its loop. A run on the pi harness
+    // hands it to pi as its provider key (docs/reference/specs/harness-pi.md);
+    // a native run never reads it.
+    const bearer = mintRunBearer(deps, { runId, agent, profile, resolved, registry, root, clock });
 
     // Attach-head check (dispatch/authorize.ts): for a PR review on the resident
     // path, the attached sha against the resolved PR head, before any model turn.
@@ -818,6 +819,7 @@ export async function dispatch(
       parentRunId,
       coordinator,
       ...(opts.fixRound ? { fixRound: opts.fixRound } : {}),
+      ...(bearer !== undefined ? { bearer } : {}),
     });
     const { answer, prNote, toolCalls, runDiagnosis, checklistAsLeft, checklistCheckedOff, releaseWorkspace } = ran;
 

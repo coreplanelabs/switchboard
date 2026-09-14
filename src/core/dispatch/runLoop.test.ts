@@ -20,8 +20,14 @@ import type { ChannelIO, IncomingMessage, StatusUpdate } from "../types.js";
 import type { DispatchFollowUp } from "./admission.js";
 import { buildMessages } from "./messages.js";
 import { resolveRun } from "./resolve.js";
-import type { RunDeps } from "./run.js";
+import type { HarnessDeps, RunDeps } from "./run.js";
 import { runLoop } from "./runLoop.js";
+import { HarnessRegistry, type LiveHarness } from "../harness/pi/relay.js";
+import { FakePiContainer } from "../harness/pi/testing/fakeContainer.js";
+import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js";
+import type { CoordinatorTag } from "../coordinator/contract.js";
+import type { RepoContext } from "../repoContext.js";
+import type { ResidentBinding } from "../../execution/resident.js";
 
 // Feature: docs/reference/specs/run-loop.md, docs/reference/specs/run-history.md
 // items 20–22, docs/reference/specs/llm-output.md item 5 — the loop's own
@@ -49,10 +55,10 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 `;
 
-function configStore(): ConfigStore {
+function configStore(yaml = YAML): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-runloop-"));
   const path = join(dir, "config.yaml");
-  writeFileSync(path, YAML);
+  writeFileSync(path, yaml);
   return new ConfigStore(path, join(dir, "overrides.json"));
 }
 
@@ -74,9 +80,26 @@ const msg = (text: string): IncomingMessage => ({ channelId: "slack:CX", userId:
  *  `opts.io` adds channel methods, `opts.executor` is the round's workspace. */
 function setup(
   answer: string | Error,
-  opts: { agent?: string; provider?: Provider; io?: Partial<ChannelIO>; executor?: Partial<Executor> } = {},
+  opts: {
+    agent?: string;
+    provider?: Provider;
+    io?: Partial<ChannelIO>;
+    executor?: Partial<Executor>;
+    /** The config to run under; the default names no harness block. */
+    yaml?: string;
+    /** The pi harness's process deps, when the test drives one. */
+    harness?: HarnessDeps;
+    /** The run's model-proxy bearer, as the dispatcher would hand it over. */
+    bearer?: string;
+    /** The thread's resolved repository context; nothing resolved by default. */
+    repoCtx?: RepoContext;
+    /** The coordinator's tag, when a coordinator spawned the run. */
+    coordinator?: CoordinatorTag;
+    /** The resident binding the round attached at, when the round ran on a resident. */
+    binding?: ResidentBinding;
+  } = {},
 ) {
-  const config = configStore();
+  const config = configStore(opts.yaml);
   const agentName = opts.agent ?? "general";
   const store = new InMemoryRunStore();
   const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
@@ -86,6 +109,7 @@ function setup(
     runHistoryWriter: writer,
     runStore: new NullRunStore(),
     githubApi: new InMemoryGithubApi(),
+    ...(opts.harness ? { harness: opts.harness } : {}),
   };
   const message = msg("hello there");
   const { resolved } = resolveRun(
@@ -131,13 +155,17 @@ function setup(
     run,
     registry,
     round: {
-      selection: { executor: (opts.executor ?? {}) as never, backend: "local" as const },
+      selection: {
+        executor: (opts.executor ?? {}) as never,
+        backend: "local" as const,
+        ...(opts.binding ? { binding: opts.binding } : {}),
+      },
       release: async (opts: { hardStopped: boolean }) => void releases.push(opts.hardStopped ? "hard" : "paired"),
     },
     admitted: new ThreadAdmission<DispatchFollowUp>().claim(THREAD, { agent: agentName }).live,
     ledgerRun: undefined,
     resume: undefined,
-    repoCtx: {},
+    repoCtx: opts.repoCtx ?? {},
     isPrReview: false,
     isCodingPrRun: false,
     reviewHead: undefined,
@@ -155,6 +183,8 @@ function setup(
       registry.publish(run.id, { type, text, at: NOW });
     },
     ending,
+    ...(opts.bearer ? { bearer: opts.bearer } : {}),
+    ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
   };
   return { deps, ctx, registry, run, store, writer, replies, frames, closes, releases, published, ending };
 }
@@ -237,5 +267,174 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-l"))!.status).toBe("failed");
+  });
+});
+
+// Feature: docs/reference/specs/harness-pi.md item 2 — the harness seam: when
+// the run's preset is on pi, the loop hands the run to the pi harness in place
+// of `runAgent`, and everything around it — the card, the stream, the answer's
+// publish, the finish — is the same code; without the block, a run is the
+// native loop byte for byte and pi is never started.
+describe("the harness seam — pi in place of the native loop when the preset says so", () => {
+  const PI_YAML = YAML + "harness:\n  coding: pi\n";
+
+  /** A pi that answers the harness's first prompt with one bash turn and a final text. */
+  function scriptedPi(container: FakePiContainer, finalText: string) {
+    container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type !== "prompt") return;
+      const call = {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "npm test" } }],
+        stopReason: "toolUse",
+      };
+      const done = { role: "assistant", content: [{ type: "text", text: finalText }], stopReason: "stop" };
+      c.emit(
+        { id: cmd.id, type: "response", command: "prompt", success: true },
+        { type: "agent_start" },
+        { type: "message_end", message: call },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "npm test" } },
+        {
+          type: "tool_execution_end",
+          toolCallId: "c1",
+          toolName: "bash",
+          result: { content: [{ type: "text", text: "ok" }] },
+          isError: false,
+        },
+        { type: "turn_end", message: call, toolResults: [] },
+        { type: "message_end", message: done },
+        { type: "turn_end", message: done, toolResults: [] },
+        { type: "agent_settled" },
+      );
+    };
+  }
+
+  it("a preset the deployment moved to pi runs on the harness: pi's answer is the run's, its tool events are on the stream, the bearer reaches pi and the provider is never called", async () => {
+    const container = new FakePiContainer();
+    scriptedPi(container, "pi says done");
+    let providerCalls = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete() {
+        providerCalls++;
+        return { content: [{ type: "text", text: "native answer" }], stopReason: "end_turn" };
+      },
+    };
+    const s = setup("", {
+      agent: "coding",
+      provider,
+      yaml: PI_YAML,
+      harness: {
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+      },
+      bearer: "sbr_run-l.s3cret",
+    });
+    const out = await runLoop(s.deps, s.ctx);
+    expect(out.answer).toBe("pi says done");
+    expect(out.toolCalls).toBe(1);
+    expect(providerCalls).toBe(0);
+    expect(container.starts).toHaveLength(1);
+    expect(container.starts[0].env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
+    expect(container.files.get("/tmp/switchboard-pi/run-l/agent/SYSTEM.md")).toContain("the system prompt");
+    expect(container.killed).toEqual([4242]);
+    expect(s.published).toEqual(["answer:pi says done"]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    expect(rec.events.filter((e) => e.type === "tool_call")).toEqual([
+      expect.objectContaining({ tool: "bash", summary: "$ npm test", command: "npm test", callId: "c1" }),
+    ]);
+  });
+
+  it("without a harness block the same preset runs the native loop and pi is never started; a preset declared native is untouched by a block naming another", async () => {
+    const container = new FakePiContainer();
+    const harness: HarnessDeps = {
+      registry: new HarnessRegistry(),
+      harnessUrl: "https://bot.example.com",
+      containerFor: () => container,
+    };
+    const native = setup("native answer", { agent: "coding", harness, bearer: "sbr_run-l.s3cret" });
+    expect((await runLoop(native.deps, native.ctx)).answer).toBe("native answer");
+    const other = setup("native answer", { agent: "general", yaml: PI_YAML, harness, bearer: "sbr_run-l.s3cret" });
+    expect((await runLoop(other.deps, other.ctx)).answer).toBe("native answer");
+    expect(container.starts).toEqual([]);
+  });
+
+  it("the gate's push rules follow the thread: a pull-request thread's or a unit child's bound branch is the run's own — the one push target, its base protected; a plain thread's binding is the protected base", async () => {
+    const seen: ToolRuleContext[] = [];
+    class RecordingRegistry extends HarnessRegistry {
+      override register(harness: LiveHarness): () => void {
+        seen.push(harness.rules);
+        return super.register(harness);
+      }
+    }
+    const rulesOf = async (thread: {
+      repoCtx: RepoContext;
+      coordinator?: CoordinatorTag;
+      binding?: ResidentBinding;
+    }) => {
+      const container = new FakePiContainer();
+      scriptedPi(container, "done");
+      const s = setup("", {
+        agent: "coding",
+        yaml: PI_YAML,
+        harness: {
+          registry: new RecordingRegistry(),
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => container,
+        },
+        bearer: "sbr_run-l.s3cret",
+        ...thread,
+      });
+      await runLoop(s.deps, s.ctx);
+      return seen.pop()!;
+    };
+    const push = (rules: ToolRuleContext, branch: string) =>
+      judgeToolCall("bash", { command: `git push origin ${branch}` }, rules).verdict;
+
+    // A fix round: the thread came from a pull request and the resident is bound at its head branch.
+    const fixRound = await rulesOf({
+      repoCtx: { repo: "o/r", ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" },
+      binding: { ref: "fix/the-pr-head", sha: "abc", workspace: "/srv/wt/the-pr" },
+    });
+    expect(fixRound).toEqual({ checkout: "/srv/wt/the-pr", branch: "fix/the-pr-head", protectedBranches: ["main"] });
+    expect(push(fixRound, "fix/the-pr-head")).toBe("allowed");
+    expect(push(fixRound, "main")).toBe("refused");
+    // A coordinator's unit child: dispatched at its unit branch, the tag naming the base.
+    const child = await rulesOf({
+      repoCtx: { repo: "o/r", ref: "unit/u26" },
+      coordinator: { parentInstanceId: "coord-1", idempotencyKey: "k-1", base: "feat/trunk" },
+    });
+    expect(child).toEqual({ checkout: "/workspace", branch: "unit/u26", protectedBranches: ["feat/trunk"] });
+    expect(push(child, "unit/u26")).toBe("allowed");
+    expect(push(child, "feat/trunk")).toBe("refused");
+    // A plain thread bound at the repository's base: the run pushes a branch of its own making.
+    const plain = await rulesOf({ repoCtx: { repo: "o/r", ref: "main" }, binding: { ref: "main", sha: "def" } });
+    expect(plain).toEqual({ checkout: "/workspace", protectedBranches: ["main"] });
+    expect(push(plain, "feat/anything")).toBe("allowed");
+    expect(push(plain, "main")).toBe("refused");
+  });
+
+  it("a preset on pi in a process without the harness deps, a public URL or a bearer fails the run naming what is missing", async () => {
+    const noDeps = setup("", { agent: "coding", yaml: PI_YAML, bearer: "sbr_x.y" });
+    await expect(runLoop(noDeps.deps, noDeps.ctx)).rejects.toThrow(/no harness deps/);
+    const noUrl = setup("", {
+      agent: "coding",
+      yaml: PI_YAML,
+      harness: { registry: new HarnessRegistry() },
+      bearer: "sbr_x.y",
+    });
+    await expect(runLoop(noUrl.deps, noUrl.ctx)).rejects.toThrow(/PUBLIC_BASE_URL/);
+    const noBearer = setup("", {
+      agent: "coding",
+      yaml: PI_YAML,
+      harness: { registry: new HarnessRegistry(), harnessUrl: "https://b" },
+    });
+    await expect(runLoop(noBearer.deps, noBearer.ctx)).rejects.toThrow(/model-proxy bearer/);
   });
 });
