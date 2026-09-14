@@ -19,11 +19,23 @@ import type { ResidentLifecycleState } from "./residentState.js";
  *  for the runtime-replaced guidance (~120); short enough for a card note. */
 export const RESIDENT_TEXT_CAP = 300;
 
+/** Cap for a resident `error`. A refusal is a whole reply, not a card note: the
+ *  onboard not-in-installation 403 (item 35) carries two causes, the admin's
+ *  path to the fix and GitHub's own 422 body — ~600 chars, and every word past
+ *  the first 300 is the one the admin acts on. Still a bound, so a hostile body
+ *  cannot make a reply unbounded; Slack's 3000-char section stays far away. */
+export const RESIDENT_ERROR_CAP = 1000;
+
 /** Strip terminal control sequences, redact credential shapes, cap. The identity
  *  on the discriminator literals the bot compares (`runtime-replaced`,
  *  `op-refused…`, `disk-pressure:`), pinned by test. */
 export function residentText(text: string): string {
   return redactAndCap(stripAnsi(text), RESIDENT_TEXT_CAP);
+}
+
+/** The same strip and redact, at the reply-sized cap — for `error` only. */
+export function residentErrorText(text: string): string {
+  return redactAndCap(stripAnsi(text), RESIDENT_ERROR_CAP);
 }
 
 const SANITIZED_FIELDS = ["error", "reason", "summary"] as const;
@@ -36,7 +48,8 @@ const SANITIZE_DEPTH = 4;
 /** A parsed resident body with its free-text fields made safe, at every level:
  *  `/residents` nests each resident's `state`/`reason` (or an `error`) under
  *  `residents[].live`, and `repo list` renders those. In each plain object only
- *  `error`, `reason` and `summary` are touched (when strings); `stderr` is
+ *  `error`, `reason` and `summary` are touched (when strings) — `error` at the
+ *  reply-sized cap, the other two at the card-sized one; `stderr` is
  *  rewritten only when it mirrors `error` (the thread routes' failure shape
  *  copies the error into stderr). Every other field — `needs`, `state`,
  *  `stdout`, `status`, bindings, numbers — passes through untouched. Arrays are
@@ -53,7 +66,9 @@ function walk(value: unknown, depth: number): unknown {
   for (const [key, v] of Object.entries(src)) {
     out[key] =
       (SANITIZED_FIELDS as readonly string[]).includes(key) && typeof v === "string"
-        ? residentText(v)
+        ? key === "error"
+          ? residentErrorText(v)
+          : residentText(v)
         : walk(v, depth - 1);
   }
   if (typeof src.stderr === "string" && src.stderr === src.error && typeof out.error === "string") {

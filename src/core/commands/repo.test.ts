@@ -4,6 +4,7 @@ import { callerWith } from "../testing/callers.js";
 import { parseInvocation } from "../commandSurface.js";
 import type { OperationResult, Operations } from "../operations.js";
 import type { ResidentAdminClient, ResidentAdminResponse } from "../residentAdmin.js";
+import { sanitizeResidentBody } from "../../execution/residentText.js";
 import {
   NO_OPS_BACKEND_MESSAGE,
   SETTLE_MAX_MS,
@@ -483,6 +484,25 @@ describe("repo onboard", () => {
       status: 409,
       message: "HTTP 429: resident cap reached (8/8); offboard a resident first",
     });
+  });
+
+  it("the not-in-installation refusal (403) reaches chat whole — the admin action and the 422 detail after it are not clipped (item 35, item 62)", async () => {
+    // The resident's exact 403 body, ~600 chars: two causes, the admin path,
+    // then GitHub's own 422. Passed through the sanitizer the way the admin
+    // client does at the parse, so this test fails when the cap cuts it.
+    const refusal =
+      "not-in-installation: the GitHub App cannot mint a token scoped to repo:acme/polyplane-k8s — " +
+      "the repository is not in the App installation's repository list, or does not exist under that exact name " +
+      "(GitHub's token API answers the same 422 for both). An org admin adds it under the App's installation settings " +
+      "(Settings → GitHub Apps → Configure → Repository access), then retry (github-token-mint-failed: HTTP 422 " +
+      '{"message":"There is at least one repository that does not exist","status":"422"})';
+    const commands = bind({
+      admin: mockClient({ onboard: ok(sanitizeResidentBody({ error: refusal }), 403) }),
+    });
+    const { res, text } = await say(commands, "repo onboard acme/polyplane-k8s", admin);
+    expect(res).toMatchObject({ ok: false, error: "unavailable" });
+    expect(text).toBe(`unavailable: HTTP 403: ${refusal}`);
+    expect(text).not.toContain("…");
   });
 
   it("--evict-coldest opts the onboard into LRU eviction; an evicting onboard says which resident went", async () => {
