@@ -4,10 +4,11 @@ import { InMemoryCoordinatorInstanceStore, NullCoordinatorInstanceStore } from "
 import { handOffToCoordinator, type HandOffDeps, type HandOffInput } from "./handOff.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 
-// Feature: docs/reference/specs/agent-ship.md item 16 — `ship.coordinator: true`
-// hands an `agent:ship` request to the plan runner instead of the in-process
-// round loop: the bot writes the instance record and one unit row per selected
-// unit (a task string is a plan of one unit), asks its shim for the Workflow
+// Feature: docs/reference/specs/agent-ship.md item 16 — every `agent:ship`
+// request the preflight admitted is handed to the plan runner: the bot writes
+// the instance record and one unit row per selected unit (a task string is a
+// plan of one unit; a resume at review is that unit with the pull request on
+// its row), asks its shim for the Workflow
 // instance under the plan's id — or, when an earlier attempt's records are
 // there, asks its status first: a live attempt refuses the request, a leftover
 // is replaced, an ended attempt is resumed as the next under the attempt's id
@@ -202,6 +203,49 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
         rounds: [],
       },
     ]);
+  });
+
+  it("a resume at review (agent-ship item 10) is the one task unit with the pull request on its row, so the runner opens it at the review round; the reply names the pull request and that no coding round runs first", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: {
+          repo: "acme/api",
+          branch: "ship/warm-the-cache-abc123",
+          base: "main",
+          resume: { pr: 7, headSha: "a".repeat(40), url: "https://github.com/acme/api/pull/7" },
+        },
+        requestText: "https://github.com/acme/api/pull/7",
+      }),
+    );
+    expect(out.status).toBe("completed");
+    expect(out.reply).toBe(
+      "🧭 Handed to the plan runner `ship-run-s`: the review loop of https://github.com/acme/api/pull/7 resumes at its next review round on `ship/warm-the-cache-abc123` in this thread under your grants — no new coding round first; this card follows it and the report lands here.",
+    );
+    expect(h.created).toEqual(["ship-run-s"]);
+    expect(await h.instances.listUnits("ship-run-s")).toEqual([
+      {
+        instanceId: "ship-run-s",
+        unit: "task",
+        slug: "task",
+        branch: "ship/warm-the-cache-abc123",
+        dependsOn: [],
+        rounds: [],
+        resume: { pr: 7, headSha: "a".repeat(40), url: "https://github.com/acme/api/pull/7" },
+      },
+    ]);
+    // Without a url the reply builds the pull request's from the number.
+    const bare = harness();
+    const again = await handOffToCoordinator(
+      bare.deps,
+      input({
+        entry: { repo: "acme/api", branch: "ship/warm-the-cache-abc123", base: "main", resume: { pr: 9 } },
+        requestText: "acme/api#9",
+      }),
+    );
+    expect(again.reply).toContain("the review loop of https://github.com/acme/api/pull/9 resumes");
+    expect((await bare.instances.listUnits("ship-run-s"))[0]!.resume).toEqual({ pr: 9 });
   });
 
   it("refusals before anything is written: a plan file the repository does not have at the base, a plan whose name is not a plan id, no base branch, a plan without units; each names the reason and creates nothing", async () => {

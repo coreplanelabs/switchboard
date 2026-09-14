@@ -1822,7 +1822,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect(h.merges).toEqual([]);
   });
 
-  it("unit-end leaves the unit's ending on its board issue as the runner's handoff — the report under a line naming the unit, the ending and the pull request; a unit without an issue leaves none; a failed comment never fails the step", async () => {
+  it("unit-end leaves the unit's ending on its board issue — the report under a line naming the unit, the ending and the pull request, and the last coding child's typed handoff rendered under it when the ending names that run (a run of this instance, none for another's, a missing one or a record without a handoff); a unit without an issue leaves none; a failed comment never fails the step", async () => {
     const h = await mergeHarness({ issues: [] });
     await h.instances.putUnits([row({ issue: 834 })]);
     // The in-memory GitHub needs the issue to exist for the comment.
@@ -1846,6 +1846,53 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect(comments.map((c) => c.body)).toEqual([
       "**Plan runner — U10 ended `merge_refused`** · https://github.com/acme/api/pull/7\n\n⚠️ The review approved acme/api#7 but the runner did not merge it: conflict",
     ]);
+    // The last coding child's typed handoff (agent-ship item 14) rides the
+    // comment under the report when the ending names the child's run: read
+    // from its record, a run of this instance and no other — a run outside the
+    // instance, one the history lacks, or a record without a handoff leaves the
+    // comment as the report alone.
+    const handoff = {
+      deviations: [{ from: "one table", to: "two tables", why: "the row outgrew the record" }],
+      followUps: [],
+      unproven: [{ criterion: "the live receipt", why: "needs staging" }],
+    };
+    await h.store.put(
+      record("run-c0", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        idempotencyKey: `${PLAN_INSTANCE.id}:U10/1/fix`,
+        handoff,
+      }),
+    );
+    await h.store.put(
+      record("run-else", { parentInstanceId: "ship_other_1", idempotencyKey: "ship_other_1:x", handoff }),
+    );
+    await h.store.put(
+      record("run-bare", { parentInstanceId: PLAN_INSTANCE.id, idempotencyKey: `${PLAN_INSTANCE.id}:y` }),
+    );
+    const ended = (codingRunId: unknown) =>
+      call(h, "unit-end", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        ending: { kind: "merged", report: "✅ Merged after 1 review round" },
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        codingRunId,
+      });
+    for (const id of ["run-c0", "run-else", "run-bare", "run-missing", 42]) expect((await ended(id)).status).toBe(200);
+    const bodies = (await h.github.getIssue("acme/api", issue.number)).comments.slice(1).map((c) => c.body);
+    expect(bodies[0]).toBe(
+      "**Plan runner — U10 ended `merged`** · https://github.com/acme/api/pull/7\n\n✅ Merged after 1 review round\n\n" +
+        "**Handoff — U10** · pull request [#7](https://github.com/acme/api/pull/7)\n\n" +
+        "### Deviations\n\n- one table → two tables — the row outgrew the record\n\n" +
+        "### Unproven\n\n- the live receipt — needs staging\n\n" +
+        "### Ledger rows\n\nPaste into the plan's follow-ups ledger while the plan is `proposed`; a person decides each disposition.\n\n" +
+        "```markdown\n| Follow-up | Source | Disposition |\n|---|---|---|\n" +
+        "| Deviation: one table → two tables — the row outgrew the record | U10 handoff ([#7](https://github.com/acme/api/pull/7)) | open |\n" +
+        "| Unproven: the live receipt — needs staging | U10 handoff ([#7](https://github.com/acme/api/pull/7)) | open |\n```",
+    );
+    for (const body of bodies.slice(1))
+      expect(body).toBe(
+        "**Plan runner — U10 ended `merged`** · https://github.com/acme/api/pull/7\n\n✅ Merged after 1 review round",
+      );
     const noIssue = await mergeHarness();
     expect(
       (

@@ -140,6 +140,7 @@ describe("isCoordinatorUnit — one unit's row", () => {
     sourceUrl: "https://acme.slack.com/archives/C1/p2",
     issue: 834,
     pr: { number: 979, url: "https://github.com/acme/api/pull/979" },
+    resume: { pr: 979, headSha: "a".repeat(40), url: "https://github.com/acme/api/pull/979" },
     rounds: [{ index: 0, agent: "coding", outcome: "started", at: 1_000 }],
     ending: { kind: "merge_ready", report: "✅ Merge-ready after 1 review round", at: 2_000 },
     startedAt: 900,
@@ -158,6 +159,16 @@ describe("isCoordinatorUnit — one unit's row", () => {
         rounds: [],
       }),
     ).toBe(true);
+  });
+
+  it("a resume at review is the pull request number with an optional head and url; a resume without the number, or with a malformed head or url, is refused", () => {
+    expect(isCoordinatorUnit({ ...unit, resume: { pr: 7 } })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, resume: { pr: 7, headSha: "b".repeat(40) } })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, resume: { headSha: "b".repeat(40) } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, resume: { pr: "7" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, resume: { pr: 7, headSha: 42 } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, resume: { pr: 7, url: "" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, resume: "7" })).toBe(false);
   });
 
   it("refuses a bad instance id, a missing unit, slug or branch, a non-array dependency list, a malformed pull request, round or ending, and a non-object", () => {

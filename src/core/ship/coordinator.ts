@@ -4,11 +4,10 @@
 // Workflow instance in the bot's shim Worker with no model turn and no
 // credential — decides between the steps it asks the bot for. The Workflow
 // asks `nextAction`, performs it (a bot route, a `waitForEvent`, a sleep) and
-// feeds the answer to `applyReturn`; everything the in-process round loop
-// decides today (`runShipPipeline`: which round is next, what a child's end
-// means, when a cap ends the pipeline, when the pull request is merge-ready)
-// is decided here over the step returns instead, so the same endings hold
-// with the loop's process gone.
+// feeds the answer to `applyReturn`; everything the pipeline decides — which
+// round is next, what a child's end means, when a cap ends the pipeline, when
+// the pull request is merge-ready — is decided here over the step returns, so
+// the endings hold with no process of the pipeline's own to die.
 //
 // Two machines, both pure. The plan cursor walks a plan record's unit graph:
 // which units are ready (their dependencies merged), which one a failure
@@ -379,7 +378,7 @@ export type StepReturn =
   | { type: "merge"; step: string; outcome: "pending" | "refused"; reason: string; at: number }
   | { type: "sleep"; step: string };
 
-/** How one unit's pipeline ended — the truthful vocabulary the in-process loop
+/** How one unit's pipeline ended — the truthful vocabulary the ship pipeline
  *  has, plus the merge's own: `merged` by the runner, or found merged (`by:
  *  other` — a person's merge, or an earlier attempt's that died after it, so
  *  the runner merged nothing), `merge_ready` for a person, `merge_refused` by
@@ -516,7 +515,7 @@ function waitSliceMs(clock: number, until: number): number {
 }
 
 /** The child's budget: its preset's own, clipped to the pipeline's remaining
- *  wall clock (the in-process loop's `clip`), never under the two minutes a
+ *  wall clock (agent-ship item 8's clip), never under the two minutes a
  *  spawn accepts. */
 function budgetMinutesFor(s: UnitPipelineState, preset: ChildPreset): number {
   return Math.max(2, Math.min(s.input.childMinutes[preset], Math.floor(remainingMs(s) / MIN)));
@@ -610,7 +609,7 @@ const roundNote = (round: RoundRef, outcome: ShipRoundOutcome): CoordinatorNote 
   outcome,
 });
 
-/** Start a round if the reservation holds (the in-process loop's check: a
+/** Start a round if the reservation holds (agent-ship item 8's check: a
  *  child clipped under the reserve cannot do useful work). */
 function enterRound(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNote[] = []): Transition {
   const remaining = remainingMs(s);
@@ -1036,7 +1035,7 @@ function splitReport(s: UnitPipelineState): string {
   return lines.join("\n");
 }
 
-/** The thread's report for a unit's ending — the in-process loop's own words
+/** The thread's report for a unit's ending — the ship pipeline's own words
  *  for the endings it has, and the merge's for the ones it gains. */
 export function renderUnitReport(s: UnitPipelineState): string {
   const e = s.ending;

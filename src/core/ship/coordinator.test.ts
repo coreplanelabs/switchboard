@@ -37,7 +37,7 @@ import {
 // has no model turn and holds no credential: it asks the bot for one step at a
 // time and feeds the answer back. Everything it decides — which step is next,
 // what a child's end means, when a round starts and when the pipeline ends —
-// is a pure function over the step returns, so every ending the in-process
+// is a pure function over the step returns, so every ending the ship
 // pipeline has today is reproduced here on a scripted sequence of answers,
 // with no clock read and no I/O.
 
@@ -300,7 +300,7 @@ describe("the plan cursor — ready units in dependency order, a failure blockin
   });
 });
 
-describe("the unit pipeline — every ending the in-process loop has today, on step returns", () => {
+describe("the unit pipeline — every ending the ship pipeline has, on step returns", () => {
   it("merge-ready in one round on a plan branch: branch → coding → pr-check → review → approve → merge, the round boundaries as the card draws them", () => {
     const d = fresh(input());
     expect(d.action).toMatchObject({ type: "branch", step: "U10/branch", branch: input().unit.branch, from: "main" });
@@ -357,7 +357,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
       ending: { kind: "merged", pr: { number: 7, url: PR_URL }, sha: HEAD_B },
     });
     expect(d.rounds()).toEqual(["0 coding started", "0 coding pr_opened", "1 review started", "1 review approve"]);
-    // The card's header for each boundary is the one the in-process pipeline draws.
+    // The card's header for each boundary is the one `shipRoundHeader` draws.
     expect(shipRoundHeader({ index: 0, agent: "coding" })).toBe("Round 0 — coding");
     expect(shipRoundHeader({ index: 1, agent: "review" })).toBe("Round 1 — review");
     expect(d.notes.at(-1)).toMatchObject({ type: "ended", ending: { kind: "merged" } });

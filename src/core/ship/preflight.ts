@@ -1,8 +1,8 @@
 // The ship pipeline's preflight (docs/reference/specs/agent-ship.md items 1, 2,
 // 9, 10): every check that must refuse BEFORE round 0, and the entry it hands
-// the round loop — the pipeline branch, the PR base, and whether the loop
+// the plan runner — the pipeline branch, the PR base, and whether the pipeline
 // resumes at review on an open PR of ship's own. Pure decisions over injected
-// lookups; the orchestrator in shipPipeline.ts runs what this decides.
+// lookups; the hand-off (coordinator/handOff.ts) carries what this decides.
 
 import { createHash } from "node:crypto";
 import { resolveBaseRef, type PullRequestFacts, type RepoShipInfo } from "../../execution/githubPulls.js";

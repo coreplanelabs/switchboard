@@ -5,10 +5,10 @@
 // the run ids whose records carry the prior round's findings and dispositions
 // — and the bot composes the text here, from the repository at the base ref
 // and the run history it already has. One composer for the three kinds so the
-// coordinator's children are told exactly what the in-process pipeline's
-// rounds are told: the unit's contract for round 0, the review turn with the
-// prior round's findings and dispositions for a re-review, the fix turn with
-// the findings for a fix round.
+// coordinator's children are told exactly what a round of the ship pipeline
+// is told: the unit's contract for round 0, the review turn with the prior
+// round's findings and dispositions for a re-review, the fix turn with the
+// findings for a fix round.
 
 import { parseDirectives } from "../../directives.js";
 import type { Finding, FindingDisposition } from "../reviewVerdict.js";

@@ -7,37 +7,36 @@ import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { parseDirectives } from "../../directives.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
-import { NO_CAPABILITIES } from "../capabilities.js";
-import { NullMemoryStore } from "../memory/index.js";
+import type { PullRequestFacts } from "../../execution/githubPulls.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
-import { NO_FLEET } from "../residentFleet.js";
 import { createRunEnding } from "../runEnding.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
 import { NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
 import { InMemoryRunStore, NullRunStore } from "../runStore.js";
-import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
-import { runShipPipeline } from "../shipPipeline.js";
+import { InMemoryCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { ThreadAdmission } from "../threadAdmission.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "../types.js";
 import type { DispatchFollowUp } from "./admission.js";
 import { runShipBranch, type ShipDeps } from "./ship.js";
 
 // Feature: docs/reference/specs/agent-ship.md items 1–2 (the fork's preflight
-// refusal), 5–6 (the one run record and card around the round loop). The ship
-// branch's own contract on how it ends: refused before any run exists, or a
-// pipeline that ran — its report published, replied and recorded — or threw.
-// The round loop itself is `runShipPipeline` (shipPipeline.ts); everything a
-// pipeline does end to end is proven through `dispatch()` in
-// `src/core/dispatcher.test.ts` (`agent:ship (pipeline)`).
-
-vi.mock("../shipPipeline.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../shipPipeline.js")>();
-  return { ...actual, runShipPipeline: vi.fn(actual.runShipPipeline) };
-});
+// refusal), 10 (the resume at review) and 16 (the hand-off): every `agent:ship`
+// request the preflight admits is handed to the plan runner — the one run
+// record and card around the hand-off, the reply saying where the plan runs,
+// or the refusal naming what the deployment lacks. The branch's own contract
+// on how it ends: refused before any run exists; a hand-off that answered —
+// taken, or refused by name — with its answer published, replied and recorded;
+// or threw. The runner's pipeline is proven over its own machine and routes
+// (`src/core/ship/coordinator.test.ts`, `src/core/coordinator/*.test.ts`,
+// `src/channels/adminCoordinator.test.ts`); the entry checks through
+// `dispatch()` in `src/core/dispatcher.test.ts` (`agent:ship`).
 
 const NOW = 10_000;
 const THREAD = "slack:CX:1.0";
+const HEAD_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+const PR_URL = "https://github.com/acme/api/pull/7";
+const SHIP_BOT = { login: "acme-switchboard[bot]", id: 4242 };
 
 const YAML = `
 organization: acme
@@ -67,28 +66,32 @@ function configStore(extra = ""): ConfigStore {
 }
 
 /** Everything `dispatch()` hands the ship branch for one request, with a
- *  recording channel, card and registry, and a real writer over an in-memory store. */
-function setup(userId: string, configExtra = "") {
-  const config = configStore(configExtra);
+ *  recording channel, card and registry, a real writer over an in-memory store,
+ *  and the runner's seams — its records, its shim — as doubles. */
+function setup(userId: string, over: { text?: string; repoCtx?: Record<string, unknown>; configExtra?: string } = {}) {
+  const config = configStore(over.configExtra ?? "");
   const store = new InMemoryRunStore();
   const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+  const instances = new InMemoryCoordinatorInstanceStore();
+  const created: string[] = [];
   const deps: ShipDeps = {
     config,
     runLedger: new NullLedgerWriteThrough("gen-T", new NullRunStore()),
     runHistoryWriter: writer,
     runStore: new NullRunStore(),
     githubApi: new InMemoryGithubApi(),
-    memory: new NullMemoryStore(),
-    providers: { get: () => ({}) as never } as never,
-    residentFleet: NO_FLEET,
-    capabilities: NO_CAPABILITIES,
     clock: () => NOW,
     fetchRepoShipInfo: async () => ({ allowAutoMerge: false, defaultBranch: "main" }),
     fetchPrFacts: async () => undefined,
-    fetchSelfIdentity: async () => ({ login: "acme-switchboard[bot]", id: 4242 }),
-    createBranchRef: async () => {},
+    fetchSelfIdentity: async () => SHIP_BOT,
+    coordinatorInstances: instances,
+    createCoordinatorInstance: async (id) => {
+      created.push(id);
+      return { kind: "created", id };
+    },
+    fetchCoordinatorInstanceStatus: async () => ({ kind: "absent" }),
   };
-  const text = "agent:ship in acme/api: fix the login redirect";
+  const text = over.text ?? "agent:ship in acme/api: fix the login redirect";
   const msg = { channelId: "slack:CX", userId, threadKey: THREAD, text };
   const registry = new RunRegistry({ genId: () => "run-s", genToken: () => "tok" });
   deps.runRegistry = registry;
@@ -112,14 +115,14 @@ function setup(userId: string, configExtra = "") {
     label: "*ship* · acme/api",
     startedAt: NOW,
     card: {
+      handle: { channel: "CX", ts: "1.5" },
       update: (f: StatusUpdate) => void frames.push(f),
       done: async (f: StatusUpdate) => void closes.push(f),
     } as StatusHandle,
     directives: parseDirectives(text),
     sticky: {},
     history: [],
-    repoCtx: { repo: "acme/api" },
-    memoryBlockP: Promise.resolve(undefined),
+    repoCtx: { repo: "acme/api", ...(over.repoCtx ?? {}) },
     live: new ThreadAdmission<DispatchFollowUp>().claim(THREAD, { agent: "ship" }).live,
     ending,
     trace,
@@ -130,17 +133,24 @@ function setup(userId: string, configExtra = "") {
     },
     doneLines: () => ({}),
   };
-  return { deps, msg, io, ctx, registry, store, writer, replies, frames, closes, refusals, ending };
+  return { deps, msg, io, ctx, registry, store, writer, replies, frames, closes, refusals, ending, instances, created };
 }
 
-describe("runShipBranch — the agent:ship fork", () => {
-  beforeEach(() => {
-    vi.stubEnv("PUBLIC_BASE_URL", "");
-    vi.mocked(runShipPipeline).mockReset();
-  });
+const openBotPr = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
+  state: "open",
+  author: { ...SHIP_BOT },
+  headRef: "ship/fix-the-login-redirect-abc123",
+  headSha: HEAD_A,
+  sameRepoHead: true,
+  htmlUrl: PR_URL,
+  ...over,
+});
+
+describe("runShipBranch — the agent:ship fork hands every admitted request to the plan runner", () => {
+  beforeEach(() => vi.stubEnv("PUBLIC_BASE_URL", ""));
   afterEach(() => vi.unstubAllEnvs());
 
-  it("refused at the preflight (ship allowed, coding not): one `dispatch.refuse` outcome, the card closes 🚫 naming the missing grant, the reply names it, no run exists and no pipeline runs", async () => {
+  it("refused at the preflight (ship allowed, coding not): one `dispatch.refuse` outcome, the card closes 🚫 naming the missing grant, the reply names it, no run exists and the runner is never asked", async () => {
     const s = setup("slack:UREV");
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.refusals).toEqual(["ship_preflight"]);
@@ -149,123 +159,14 @@ describe("runShipBranch — the agent:ship fork", () => {
     expect(s.replies).toHaveLength(1);
     expect(s.replies[0]).toContain("`coding`");
     expect(s.registry.getById("run-s")).toBeNull();
-    expect(runShipPipeline).not.toHaveBeenCalled();
+    expect(s.created).toEqual([]);
+    expect(await s.instances.listUnits("ship-run-s")).toEqual([]);
   });
 
-  it("a pipeline that ran: the report is published as the answer, the registry is finished `completed`, the card closes ✅, the reply is the report, and the drain writes the completed record", async () => {
+  it("a task: the request becomes a one-unit instance named by the run — the record carries the requester, thread, card, caps (the profile's minutes, the block's rounds) and run id, the shim is asked, the answer is published and replied, the run ends completed with the ship profile on its record, the card closes ✅", async () => {
     const s = setup("slack:UADMIN");
-    vi.mocked(runShipPipeline).mockResolvedValue({ status: "completed", reply: "shipped: acme/api#7 is merge-ready" });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect(runShipPipeline).toHaveBeenCalledTimes(1);
     expect(s.refusals).toEqual([]);
-    expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed", agent: "ship" });
-    expect(s.registry.snapshot("run-s", "tok")?.events.map((e) => e.type)).toContain("answer");
-    expect(s.closes).toHaveLength(1);
-    expect(JSON.stringify(s.closes[0])).toContain("✅");
-    expect(s.replies).toEqual(["shipped: acme/api#7 is merge-ready"]);
-    s.ending.drain(true);
-    await s.writer.settled();
-    expect(await s.store.get("run-s")).toMatchObject({
-      id: "run-s",
-      status: "completed",
-      agent: "ship",
-      replyOk: true,
-    });
-  });
-
-  // agent-ship.md item 8: the pipeline's wall clock is the parent's EFFECTIVE
-  // profile's minutes — the preset's declared budget as the gate clipped it —
-  // never the `ship` config block read again; the rounds cap still comes from
-  // the block. The record carries the profile like every run's.
-  it("the pipeline runs on the parent's effective budget: `caps.maxMinutes` is the profile's minutes (the channel's 45, not the preset's 120), `maxRounds` the config block's, and the record carries the ship profile with its clip", async () => {
-    const s = setup("slack:UADMIN");
-    vi.mocked(runShipPipeline).mockResolvedValue({ status: "completed", reply: "shipped: acme/api#7 is merge-ready" });
-    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect(vi.mocked(runShipPipeline).mock.calls[0][0].caps).toEqual({ maxRounds: 3, maxMinutes: 45 });
-    s.ending.drain(true);
-    await s.writer.settled();
-    expect((await s.store.get("run-s"))?.profile).toEqual({
-      preset: "ship",
-      machine: "repo-resident",
-      identity: "write",
-      minutes: 45,
-      boundedBy: "channel",
-    });
-  });
-
-  // docs/reference/specs/agent-ship.md item 14 — the ship run's record carries the
-  // handoff its coding round handed back (redacted by the record assembly), and
-  // the pipeline's GitHub seam carries the issue-comment write the parent posts
-  // it through.
-  it("a pipeline whose outcome carries a handoff: the drain's record carries it, redacted; the issue-comment seam handed to the pipeline is the injected one", async () => {
-    const s = setup("slack:UADMIN");
-    const postIssueComment = vi.fn(async () => ({ url: "https://github.com/acme/plan/issues/12#issuecomment-1" }));
-    s.deps.postIssueComment = postIssueComment;
-    const token = `ghp_${"a".repeat(24)}`;
-    vi.mocked(runShipPipeline).mockResolvedValue({
-      status: "completed",
-      reply: "shipped: acme/api#7 is merge-ready",
-      handoff: {
-        deviations: [{ from: "a", to: "b", why: `used ${token}` }],
-        followUps: [{ what: "split the file", where: "src/x.ts" }],
-        unproven: [],
-      },
-    });
-    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect(vi.mocked(runShipPipeline).mock.calls[0][0].github.postIssueComment).toBe(postIssueComment);
-    s.ending.drain(true);
-    await s.writer.settled();
-    expect((await s.store.get("run-s"))?.handoff).toEqual({
-      deviations: [{ from: "a", to: "b", why: "used «redacted-github-token»" }],
-      followUps: [{ what: "split the file", where: "src/x.ts" }],
-      unproven: [],
-    });
-  });
-
-  it("a pipeline that threw: the error propagates, the registry is finished `failed`, the card closes ❌ here, nothing is replied, and the drain writes the failed record", async () => {
-    const s = setup("slack:UADMIN");
-    vi.mocked(runShipPipeline).mockRejectedValue(new Error("resident down"));
-    await expect(runShipBranch(s.deps, s.msg, s.io, s.ctx)).rejects.toThrow("resident down");
-    expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "failed" });
-    expect(s.closes).toHaveLength(1);
-    expect(JSON.stringify(s.closes[0])).toContain("❌");
-    expect(s.replies).toEqual([]);
-    s.ending.drain(undefined);
-    await s.writer.settled();
-    expect((await s.store.get("run-s"))!.status).toBe("failed");
-  });
-});
-
-// docs/reference/specs/agent-ship.md item 16 — `ship.coordinator: true` hands the
-// request to the plan runner: the records are written under the request's own
-// run id, the shim is asked for the instance, the run ends completed with where
-// the plan runs, and no in-process round runs. Off (the default) and on a
-// resume, the branch is the round loop as before.
-describe("runShipBranch — the hand-off to the plan runner (item 16)", () => {
-  beforeEach(() => {
-    vi.stubEnv("PUBLIC_BASE_URL", "");
-    vi.mocked(runShipPipeline).mockReset();
-  });
-  afterEach(() => vi.unstubAllEnvs());
-
-  function coordinated(userId: string) {
-    const s = setup(userId, "ship:\n  coordinator: true\n");
-    const instances = new InMemoryCoordinatorInstanceStore();
-    const created: string[] = [];
-    s.deps.coordinatorInstances = instances;
-    s.deps.createCoordinatorInstance = async (id) => {
-      created.push(id);
-      return { kind: "created", id };
-    };
-    s.deps.fetchCoordinatorInstanceStatus = async () => ({ kind: "absent" });
-    s.ctx.card.handle = { channel: "CX", ts: "1.5" };
-    return { ...s, instances, created };
-  }
-
-  it("on: the task becomes a one-unit instance named by the run — the record carries the requester, thread, card, caps (the profile's minutes) and run id, the shim is asked, the reply says where it runs, the run ends completed and no pipeline round runs", async () => {
-    const s = coordinated("slack:UADMIN");
-    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect(runShipPipeline).not.toHaveBeenCalled();
     expect(s.created).toEqual(["ship-run-s"]);
     expect(await s.instances.get("ship-run-s")).toMatchObject({
       id: "ship-run-s",
@@ -280,22 +181,73 @@ describe("runShipBranch — the hand-off to the plan runner (item 16)", () => {
       runId: "run-s",
       label: "*ship* · acme/api",
     });
-    expect((await s.instances.listUnits("ship-run-s")).map((u) => u.unit)).toEqual(["task"]);
+    const [unit] = await s.instances.listUnits("ship-run-s");
+    expect(unit).toMatchObject({ unit: "task", dependsOn: [], rounds: [] });
+    expect(unit!.branch).toMatch(/^ship\//);
+    expect("resume" in unit!).toBe(false);
     expect(s.replies).toHaveLength(1);
     expect(s.replies[0]).toMatch(/^🧭 Handed to the plan runner `ship-run-s`: the task runs on `ship\//);
     expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed", agent: "ship" });
+    expect(s.registry.snapshot("run-s", "tok")?.events.map((e) => e.type)).toContain("answer");
     expect(s.closes).toHaveLength(1);
     expect(JSON.stringify(s.closes[0])).toContain("✅");
     s.ending.drain(true);
     await s.writer.settled();
-    expect(await s.store.get("run-s")).toMatchObject({ id: "run-s", status: "completed", agent: "ship" });
+    expect(await s.store.get("run-s")).toMatchObject({
+      id: "run-s",
+      status: "completed",
+      agent: "ship",
+      replyOk: true,
+      profile: { preset: "ship", machine: "repo-resident", identity: "write", minutes: 45, boundedBy: "channel" },
+    });
   });
 
-  it("on, the shim refuses: the reply names the reason, the card closes ⚠️, the run still ends completed (the request was answered) and nothing ran", async () => {
-    const s = coordinated("slack:UADMIN");
+  // agent-ship.md item 8: the runner's wall clock is the parent's EFFECTIVE
+  // profile's minutes — the preset's declared budget as the gate clipped it —
+  // never the `ship` config block read again; the rounds cap is the block's.
+  it("the caps handed to the runner: `maxMinutes` is the profile's minutes (the channel's 45, not the block's 60), `maxRounds` the config block's", async () => {
+    const s = setup("slack:UADMIN", { configExtra: "ship:\n  maxRounds: 2\n  maxMinutes: 60\n" });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect((await s.instances.get("ship-run-s"))?.caps).toEqual({ maxRounds: 2, maxMinutes: 45 });
+  });
+
+  // agent-ship.md item 10: a resume at review — the requester named an open pull
+  // request of ship's own with no new task text — is handed to the runner as
+  // the one task unit with the pull request on its row, so the runner opens the
+  // pipeline at its review round. Nothing runs in this process either way.
+  it("a resume at review: the bot-authored open pull request the requester named rides the task row as `resume` with its head, the branch is the pull request's own, and the reply says the review resumes", async () => {
+    const s = setup("slack:UADMIN", {
+      text: `agent:ship ${PR_URL}`,
+      repoCtx: { pr: 7, headSha: HEAD_A, baseRef: "main", ref: "ship/fix-the-login-redirect-abc123" },
+    });
+    s.deps.fetchPrFacts = async () => openBotPr();
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.created).toEqual(["ship-run-s"]);
+    expect(await s.instances.get("ship-run-s")).toMatchObject({
+      branch: "ship/fix-the-login-redirect-abc123",
+      base: "main",
+    });
+    expect(await s.instances.listUnits("ship-run-s")).toEqual([
+      {
+        instanceId: "ship-run-s",
+        unit: "task",
+        slug: "task",
+        branch: "ship/fix-the-login-redirect-abc123",
+        dependsOn: [],
+        rounds: [],
+        resume: { pr: 7, headSha: HEAD_A, url: PR_URL },
+      },
+    ]);
+    expect(s.replies[0]).toContain(`the review loop of ${PR_URL} resumes at its next review round`);
+    expect(s.registry.snapshot("run-s", "tok")?.events).toContainEqual(
+      expect.objectContaining({ type: "run_meta", pr: 7 }),
+    );
+  });
+
+  it("the shim refuses: the reply names the reason, the card closes ⚠️, the run still ends completed (the request was answered) and nothing ran", async () => {
+    const s = setup("slack:UADMIN");
     s.deps.createCoordinatorInstance = async (id) => ({ kind: "failed", id, reason: "engine down" });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect(runShipPipeline).not.toHaveBeenCalled();
     expect(s.replies).toEqual([
       "⚠️ The plan runner could not be started: engine down. Nothing ran; re-issue the request to try again.",
     ]);
@@ -303,24 +255,66 @@ describe("runShipBranch — the hand-off to the plan runner (item 16)", () => {
     expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed" });
   });
 
-  it("on, without an instance store in the process: refused by name before the shim is asked", async () => {
-    const s = coordinated("slack:UADMIN");
+  it("without an instance store in the process (run history not on the state Worker): refused by name before the shim is asked", async () => {
+    const s = setup("slack:UADMIN");
     delete s.deps.coordinatorInstances;
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.created).toEqual([]);
     expect(s.replies[0]).toContain("⚠️ The plan runner needs run history on the state Worker");
   });
 
-  it("off (the default): the round loop runs and the shim is never asked", async () => {
+  // agent-ship.md item 16: a deployment without the runner's prerequisites gets
+  // a refusal naming what is missing — the default shim client answers by
+  // reason when the bot cannot address its own shim or present the bearer —
+  // never a silent fallback to some other ship implementation.
+  it("a deployment without the runner's prerequisites is refused naming the missing one: no `PUBLIC_BASE_URL`, then no `coordinator` entry in the token map; the records are written, nothing runs", async () => {
     const s = setup("slack:UADMIN");
-    const created: string[] = [];
-    s.deps.createCoordinatorInstance = async (id) => {
-      created.push(id);
-      return { kind: "created", id };
-    };
-    vi.mocked(runShipPipeline).mockResolvedValue({ status: "completed", reply: "shipped" });
+    delete s.deps.createCoordinatorInstance;
+    delete s.deps.fetchCoordinatorInstanceStatus;
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect(runShipPipeline).toHaveBeenCalledTimes(1);
-    expect(created).toEqual([]);
+    expect(s.replies).toEqual([
+      "⚠️ The plan runner could not be started: PUBLIC_BASE_URL is not set — the bot cannot address its own shim. Nothing ran; re-issue the request to try again.",
+    ]);
+    expect(JSON.stringify(s.closes[0])).toContain("⚠️");
+
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
+    const t = setup("slack:UADMIN");
+    delete t.deps.createCoordinatorInstance;
+    delete t.deps.fetchCoordinatorInstanceStatus;
+    await runShipBranch(t.deps, t.msg, t.io, t.ctx);
+    expect(t.replies[0]).toBe(
+      "⚠️ The plan runner could not be started: SWITCHBOARD_INGRESS_TOKENS has no single `coordinator` entry — the bot cannot present the coordinator bearer. Nothing ran; re-issue the request to try again.",
+    );
+  });
+
+  it("a hand-off that threw: the error propagates, the registry is finished `failed`, the card closes ❌ here, nothing is replied, and the drain writes the failed record", async () => {
+    const s = setup("slack:UADMIN");
+    const broken: CoordinatorInstanceStore = {
+      ...s.instances,
+      get: async () => null,
+      put: async () => {
+        throw new Error("state Worker down");
+      },
+    } as unknown as CoordinatorInstanceStore;
+    s.deps.coordinatorInstances = broken;
+    await expect(runShipBranch(s.deps, s.msg, s.io, s.ctx)).rejects.toThrow("state Worker down");
+    expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.closes).toHaveLength(1);
+    expect(JSON.stringify(s.closes[0])).toContain("❌");
+    expect(s.replies).toEqual([]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect((await s.store.get("run-s"))!.status).toBe("failed");
+  });
+
+  it("a final reply that throws writes the run record `failed`, never `completed` — the thread never saw where the plan runs", async () => {
+    const s = setup("slack:UADMIN");
+    s.io.reply = async () => {
+      throw new Error("slack outage");
+    };
+    await expect(runShipBranch(s.deps, s.msg, s.io, s.ctx)).rejects.toThrow("slack outage");
+    s.ending.drain(false);
+    await s.writer.settled();
+    expect(await s.store.get("run-s")).toMatchObject({ status: "failed", replyOk: false });
   });
 });

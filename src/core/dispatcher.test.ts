@@ -65,6 +65,7 @@ import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./r
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
+import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
 
@@ -7283,9 +7284,8 @@ describe("reading-diff artifact on review runs", () => {
 // Feature: docs/reference/specs/agent-ship.md — the agent:ship pipeline: one dispatch,
 // one card, one run record; strictly serial coding → review → fix child
 // rounds on clipped budgets; typed artifacts end to end; never a merge.
-describe("agent:ship (pipeline)", () => {
+describe("agent:ship (the hand-off to the plan runner)", () => {
   const HEAD_A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
-  const HEAD_B = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1";
   const PR_URL = "https://github.com/acme/api/pull/7";
   const TASK_MSG = "agent:ship in acme/api: fix the login redirect";
   const SHIP_BRANCH = shipBranchName(shipTaskText("in acme/api: fix the login redirect", "acme/api"), "slack:CX:1.0");
@@ -7312,104 +7312,6 @@ restrict:
 workspaceDir: __WORKDIR__
 `;
 
-  const SHIP_DESCRIPTION = {
-    title: "Fix the login redirect",
-    tldr: "Restores the session cookie on login. Users can sign in again.",
-    whatWhy: "The handler dropped the cookie after the redirect change; this restores it.",
-    tour: [
-      {
-        title: "The fix",
-        description: "The cookie is set on the redirect response again.",
-        anchor: { path: "src/login.ts", from: 10, to: 20 },
-      },
-    ],
-    remaining: [],
-    decisions: [{ title: "Keep the cookie name", rationale: "renaming would log everyone out" }],
-    risks: "none — covered by the auth suite",
-    validation: { criteria: [{ criterion: "auth suite green", proof: "npm test — 24 passing" }] },
-  };
-
-  const F1 = { id: "F1", severity: "blocking", file: "src/login.ts", line: 10, title: "drops the session cookie" };
-  const F2 = { id: "F2", severity: "nit", file: "src/login.ts", title: "rename shadowed variable" };
-  const F3 = { id: "F3", severity: "major", file: "src/auth.ts", title: "missing rate limit" };
-
-  let toolSeq = 0;
-  const toolUse = (name: string, input: Record<string, unknown>): CompletionResult => ({
-    content: [{ type: "tool_use", id: `s${++toolSeq}`, name, input }],
-    stopReason: "tool_use",
-  });
-  const say = (text: string): CompletionResult => ({ content: [{ type: "text", text }], stopReason: "end_turn" });
-
-  /** A provider scripted per CHILD KIND: requests carrying submit_verdict tools
-   *  are review children, everything else (incl. tool-less finales) coding. */
-  function shipProvider(
-    script: { coding?: CompletionResult[]; review?: CompletionResult[] } = {},
-    onCall?: (n: number) => void,
-  ) {
-    const requests: CompletionRequest[] = [];
-    const codingQ = [...(script.coding ?? [])];
-    const reviewQ = [...(script.review ?? [])];
-    let n = 0;
-    const provider: Provider & { requests: CompletionRequest[] } = {
-      name: "fake",
-      requests,
-      async complete(req): Promise<CompletionResult> {
-        onCall?.(n++);
-        requests.push(req);
-        const isReview = req.tools?.some((t) => t.name === "submit_verdict") ?? false;
-        const q = isReview ? reviewQ : codingQ;
-        return q.shift() ?? say(isReview ? "review wrap-up" : "coding wrap-up");
-      },
-    };
-    return provider;
-  }
-
-  /** One round's resident workspace: git probes answer head/branch/remoteHead
-   *  (`ls-remote` and, the tree being a full clone, `@{u}` agree; `null` = the
-   *  remote has no such branch); `onHeadProbe` fires when the round's HEAD is
-   *  observed (the head-flip hook for multi-round scenarios). */
-  function shipWorkspace(opts: {
-    head: string;
-    branch: string;
-    bindingRef?: string;
-    remoteHead?: string | null;
-    onHeadProbe?: () => void;
-    /** Fires on release with the span the pipeline handed it (`ship.round`), or `none`. */
-    onRelease?: (spanName: string) => void;
-  }) {
-    const remoteHead = opts.remoteHead === null ? undefined : (opts.remoteHead ?? opts.head);
-    const executor = {
-      exec: async (cmd: string) => {
-        if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${opts.branch}\n`;
-        if (/rev-parse @\{u\}/.test(cmd))
-          return remoteHead ? `${remoteHead}\n` : "exit 128:\nfatal: no upstream configured\n";
-        if (/ls-remote --exit-code origin/.test(cmd))
-          return remoteHead ? `${remoteHead}\trefs/heads/${opts.branch}\n` : "exit 2:\n";
-        if (/rev-parse HEAD/.test(cmd)) {
-          opts.onHeadProbe?.();
-          return `${opts.head}\n`;
-        }
-        return "";
-      },
-      readFile: async () => "",
-      writeFile: async () => "",
-      release: async (_mode: string, o?: { span?: { name: string } }) => {
-        opts.onRelease?.(o?.span?.name ?? "none");
-        return { released: true };
-      },
-    };
-    return {
-      executor,
-      resident: true as const,
-      binding: { ref: opts.bindingRef ?? opts.branch, sha: opts.head, workspace: "/workspace/threads/t/x" },
-    };
-  }
-
-  function queueWorkspaces(...selections: unknown[]) {
-    for (const s of selections)
-      vi.mocked(makeExecutor).mockResolvedValueOnce(s as Awaited<ReturnType<typeof makeExecutor>>);
-  }
-
   /** The identity the tests' bot acts as (agent-ship.md item 10) — injected, never a name the code knows. */
   const SHIP_BOT: GithubIdentity = { login: "acme-switchboard[bot]", id: 4242 };
   const openBotPr = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
@@ -7422,37 +7324,42 @@ workspaceDir: __WORKDIR__
     ...over,
   });
 
-  function shipDeps(provider: Provider, yaml = SHIP_YAML) {
+  /** The dispatcher's deps for a ship request: a provider that must never be
+   *  asked (the runner's children are runs of their own, none of them here),
+   *  the preflight's GitHub facts, and the runner's seams — its records and its
+   *  shim — as doubles that remember what was written and created. */
+  function shipDeps(yaml = SHIP_YAML) {
+    const provider = capturingProvider("never asked");
     const deps = makeDeps(yaml, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api" });
     deps.statusUpdateMinMs = 0;
     deps.fetchRepoShipInfo = vi.fn(async () => ({ allowAutoMerge: false, defaultBranch: "main" }));
     deps.fetchPrFacts = vi.fn(async () => openBotPr());
     deps.fetchSelfIdentity = vi.fn(async () => SHIP_BOT);
-    deps.fetchPrHead = vi.fn(async () => HEAD_A);
-    deps.fetchPrCommits = vi.fn(async () => undefined);
-    const opened: PullRequestTarget[] = [];
-    deps.openPullRequest = vi.fn(async (t: PullRequestTarget): Promise<OpenedPullRequest> => {
-      opened.push(t);
-      return { number: 7, htmlUrl: PR_URL, created: opened.length === 1 };
+    const instances = new InMemoryCoordinatorInstanceStore();
+    const created: string[] = [];
+    deps.coordinatorInstances = instances;
+    deps.createCoordinatorInstance = vi.fn(async (id: string) => {
+      created.push(id);
+      return { kind: "created" as const, id };
     });
-    const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
-    deps.postReviewComment = vi.fn(
-      async (target: ReviewCommentTarget, body: string) => void posts.push({ target, body }),
-    );
-    // Round 0 creates the pipeline branch through this seam — stubbed
-    // so the fetch guard below proves no direct GitHub call ever fires.
-    deps.createBranchRef = vi.fn(async () => {});
-    return { deps, opened, posts };
+    deps.fetchCoordinatorInstanceStatus = vi.fn(async () => ({ kind: "absent" as const }));
+    return { deps, provider, instances, created };
   }
 
-  // Every scenario runs under a fetch guard: ship's GitHub side effects go
-  // ONLY through the injected typed seams, so any direct network call —
-  // a merge PUT above all — trips the guard and fails the test.
+  /** The one task instance a request became, with its row — what the runner is handed. */
+  async function handed(instances: InMemoryCoordinatorInstanceStore, runId: string) {
+    const instance = await instances.get(`ship-${runId}`);
+    const [unit] = await instances.listUnits(`ship-${runId}`);
+    return { instance, unit };
+  }
+
+  // Every scenario runs under a fetch guard: the branch's GitHub reads go ONLY
+  // through the injected typed seams, so any direct network call trips the
+  // guard and fails the test. Nothing here may attach a workspace or run a
+  // model turn either — the runner's children do that as runs of their own.
   let fetchGuard: ReturnType<typeof vi.fn>;
   beforeEach(() => {
-    // Earlier suites leave recorded calls on the pass-through spies; ship's
-    // call-count assertions need a clean slate.
     vi.mocked(makeExecutor).mockClear();
     vi.mocked(runAgent).mockClear();
     fetchGuard = vi.fn(async (url: unknown) => {
@@ -7464,16 +7371,14 @@ workspaceDir: __WORKDIR__
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
-    // mockReset (not mockClear): a failed scenario must not leak queued
-    // once-workspaces into the next test; vitest restores the pass-through
-    // implementation given to vi.fn.
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(runAgent).not.toHaveBeenCalled();
     vi.mocked(makeExecutor).mockReset();
     vi.mocked(runAgent).mockClear();
   });
 
-  it("channel guard: agent:ship over an HTTP/MCP-originated dispatch is refused with a run-page pointer, no pipeline", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
+  it("channel guard: agent:ship over an HTTP/MCP-originated dispatch is refused with a run-page pointer, nothing handed to the runner", async () => {
+    const { deps, provider, created } = shipDeps();
     // An unrestricted repo (open-when-absent), so the CHANNEL refusal is the
     // one that fires — not the repo allowlist, which has its own test above.
     deps.resolveRepoContext = () => ({ repo: "acme/web" });
@@ -7488,36 +7393,33 @@ workspaceDir: __WORKDIR__
     expect(replies[0]).toContain("Slack or the CLI");
     expect(replies[0]).toContain("/runs");
     expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
   });
 
-  it("permission: user allowed ship but not coding → refused naming coding, no child run", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
+  it("permission: user allowed ship but not coding → refused naming coding, nothing handed to the runner", async () => {
+    const { deps, provider, created } = shipDeps();
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UREV"), io);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("🚫");
     expect(replies[0]).toContain("`coding`");
     expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
   });
 
-  it("allowed all three agents but denied the target repo → the dispatcher's repo gate refuses before the fork, no child run", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
+  it("allowed all three agents but denied the target repo → the dispatcher's repo gate refuses before the fork, nothing handed to the runner", async () => {
+    const { deps, provider, created } = shipDeps();
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UDEV"), io); // UDEV: coding-allowed, NOT on acme/api's repo list
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("🚫");
     expect(replies[0]).toContain("acme/api");
     expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
   });
 
-  it("auto-merge repo → refused before round 0; an unverifiable setting refuses fail-closed too", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
+  it("auto-merge repo → refused before anything is handed over; an unverifiable setting refuses fail-closed too", async () => {
+    const { deps, provider, created } = shipDeps();
     deps.fetchRepoShipInfo = vi.fn(async () => ({ allowAutoMerge: true, defaultBranch: "main" }));
     const first = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), first.io);
@@ -7529,261 +7431,42 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), second.io);
     expect(second.replies[0]).toContain("could not verify");
     expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
   });
 
-  it("LGTM round 1: coding → PR → approve → merge-ready reply with the PR URL, 1 round, and the pending human merge; typed values on the PR-open and review-post seams", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — branch pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("Looks great.")],
-    });
-    const { deps, opened, posts } = shipDeps(provider);
-    const releases: string[] = [];
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, onRelease: (n) => releases.push(n) }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, onRelease: (n) => releases.push(n) }),
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    // Each round's workspace was released under its own `ship.round` span (docs/reference/specs/tracing.md item 17).
-    expect(releases).toEqual(["ship.round", "ship.round"]);
-    // PR opened from typed values: ship-named branch as head, repo default as base.
-    expect(opened).toHaveLength(1);
-    expect(opened[0]).toMatchObject({
-      repo: "acme/api",
-      headBranch: SHIP_BRANCH,
-      base: "main",
-      title: SHIP_DESCRIPTION.title,
-    });
-    // Review posted pinned to the head the round reviewed, LGTM line built by code.
-    expect(posts).toHaveLength(1);
-    expect(posts[0].target).toMatchObject({ repo: "acme/api", number: 7, commitId: HEAD_A });
-    expect(posts[0].body.startsWith("LGTM: clean")).toBe(true);
-    // Merge-ready re-checked the PR is still open (the seam saw the recheck).
-    expect(deps.fetchPrFacts).toHaveBeenCalledTimes(1);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Merge-ready");
-    expect(final).toContain(PR_URL);
-    expect(final).toContain("1 review round");
-    expect(final).toContain("human merge");
-    expect(final).toContain("Declined findings: none");
-  });
-
-  // The description turn inside a ship round (pr-description.md item 5): a
-  // coding child that pushes the pipeline branch and answers without a
-  // description is given the turn while its workspace is still attached; the
-  // turn's description is what the round's post-step then opens the PR from.
-  it("a ship coding round that pushed without a description gets the description turn; the turn's description opens the PR and the round proceeds to review", async () => {
-    const provider = shipProvider({
-      // first loop: answers, no description → the turn: submits, then a line
-      coding: [
-        say("Pushed the change."),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Description resubmitted."),
-      ],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("Looks great.")],
-    });
-    const { deps, opened, posts } = shipDeps(provider);
-    deps.findOpenPrByHead = vi.fn(async () => ({ number: 7, htmlUrl: PR_URL }));
-    const registry = new RunRegistry({ genId: () => "rship", genToken: () => "tship" });
+  it("a task the preflight admits is handed to the runner as a one-unit instance named by the run: the row carries the deterministic ship branch off the default branch and no resume, the reply says where it runs, the card closes ✅, no workspace is attached and no model turn runs here", async () => {
+    const { deps, provider, instances, created } = shipDeps();
+    const registry = new RunRegistry({ genId: () => "run-ship1", genToken: () => "tok" });
     deps.runRegistry = registry;
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", SHIP_BRANCH);
-    // the turn's description reached the round's post-step: one open-or-edit, typed values, at the observed head
-    expect(opened).toHaveLength(1);
-    expect(opened[0]).toMatchObject({
-      repo: "acme/api",
-      headBranch: SHIP_BRANCH,
-      base: "main",
-      title: SHIP_DESCRIPTION.title,
-    });
-    expect(opened[0].body).toContain(`blob/${HEAD_A}/`);
-    const events = registry.snapshot("rship", "tship")?.events ?? [];
-    expect(events.filter((e) => e.type === "run_note" && e.kind === "description_turn")).toHaveLength(1);
-    expect(events.some((e) => e.type === "pr_description")).toBe(true);
-    // the pipeline went on to its review round and finished merge-ready
-    expect(posts).toHaveLength(1);
-    expect(replies[replies.length - 1]).toContain("Merge-ready");
-  });
-
-  it("findings round trip: the fix child gets the findings payload verbatim, an unknown disposition id is rejected by name, dispositions reach the final report", async () => {
-    let currentHead = HEAD_A;
-    const provider = shipProvider({
-      coding: [
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-        toolUse("submit_dispositions", { dispositions: [{ findingId: "F9", disposition: "fixed", note: "?" }] }),
-        toolUse("submit_dispositions", {
-          dispositions: [
-            { findingId: "F1", disposition: "fixed", note: "cookie restored" },
-            { findingId: "F2", disposition: "declined", note: "style-only" },
-          ],
-        }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Addressed the findings."),
-      ],
-      review: [
-        toolUse("submit_verdict", {
-          verdict: "request_changes",
-          summary: "one blocker",
-          head: HEAD_A,
-          findings: [F1, F2],
-        }),
-        say("Round 1 prose: the cookie is dropped on redirect."),
-        toolUse("submit_verdict", { verdict: "approve", summary: "fixed", head: HEAD_B }),
-        say("Round 2 prose: verified."),
-      ],
-    });
-    const { deps, opened, posts } = shipDeps(provider);
-    deps.fetchPrHead = vi.fn(async () => currentHead);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // round 0 (coding)
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // review round 1
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH, onHeadProbe: () => (currentHead = HEAD_B) }), // fix round pushes B
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH }), // review round 2
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    // The fix child's synthesized turn carries the findings payload verbatim + the review prose.
-    const fixTurn = provider.requests
-      .flatMap((r) => r.messages)
-      .map((m) => m.content.map((p) => (p.type === "text" ? p.text : "")).join(""))
-      .find((t) => t.includes("requested changes"));
-    expect(fixTurn).toBeDefined();
-    expect(fixTurn).toContain("[blocking] F1 src/login.ts:10 — drops the session cookie");
-    expect(fixTurn).toContain("[nit] F2 src/login.ts — rename shadowed variable");
-    expect(fixTurn).toContain("Round 1 prose: the cookie is dropped on redirect.");
-    // knownFindingIds: the unknown id came back as a string error naming it.
-    expect(JSON.stringify(provider.requests)).toContain("unknown finding id F9");
-    // Both reviews posted, each pinned to its round's head.
-    expect(posts).toHaveLength(2);
-    expect(posts[0].body.startsWith("Changes requested: one blocker")).toBe(true);
-    expect(posts[0].body).toContain("- [blocking] F1 src/login.ts:10");
-    expect(posts[0].target.commitId).toBe(HEAD_A);
-    expect(posts[1].body.startsWith("LGTM: fixed")).toBe(true);
-    expect(posts[1].target.commitId).toBe(HEAD_B);
-    // The fix round's resubmit re-rendered/edited the PR (second open-or-edit call).
-    expect(opened).toHaveLength(2);
-    // Dispositions in the final report.
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Merge-ready");
-    expect(final).toContain("2 review rounds");
-    expect(final).toContain("F2 — style-only");
-  });
-
-  it("no verdict from review child → abort report naming the terminal; no fix round dispatched", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [say("I ran out of budget before finishing the review.")],
-    });
-    const { deps, posts } = shipDeps(provider);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("without a submitted verdict");
-    expect(final).toContain("no fix round ran");
-    expect(final).toContain("I ran out of budget before finishing the review.");
-    // Machinery unchanged: the no-verdict review still posts fail-closed non-approve.
-    expect(posts[0].body.startsWith("No verdict submitted")).toBe(true);
-    // No fix round: exactly two attaches (coding, review) and no fix turn.
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(2);
-    expect(
-      provider.requests
-        .flatMap((r) => r.messages)
-        .some((m) => m.content.some((p) => p.type === "text" && p.text.includes("requested changes"))),
-    ).toBe(false);
-  });
-
-  it("maxRounds cap → report splits declined (disposition recorded) vs unaddressed (none)", async () => {
-    let currentHead = HEAD_A;
-    const provider = shipProvider({
-      coding: [
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-        toolUse("submit_dispositions", {
-          dispositions: [
-            { findingId: "F1", disposition: "fixed", note: "cookie restored" },
-            { findingId: "F2", disposition: "declined", note: "style-only" },
-          ],
-        }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Addressed what I could."),
-      ],
-      review: [
-        toolUse("submit_verdict", { verdict: "request_changes", summary: "issues", head: HEAD_A, findings: [F1, F2] }),
-        say("Round 1 prose."),
-        toolUse("submit_verdict", {
-          verdict: "request_changes",
-          summary: "still issues",
-          head: HEAD_B,
-          findings: [F2, F3],
-        }),
-        say("Round 2 prose."),
-      ],
-    });
-    const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxRounds: 2\n");
-    deps.fetchPrHead = vi.fn(async () => currentHead);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH, onHeadProbe: () => (currentHead = HEAD_B) }),
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH }),
-    );
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("🧢");
-    expect(final).toContain("2-round cap");
-    expect(final).toMatch(/Declined \(disposition recorded\):[\s\S]*F2[\s\S]*style-only/);
-    expect(final).toMatch(/Unaddressed \(no disposition\):[\s\S]*F3/);
-    // The cap ended the loop: 4 attaches (coding, review, fix, review), never a 3rd review.
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(4);
-    // A capped pipeline closes ⚠️ — never ✅ with a checked-off checklist.
-    expect(statuses[statuses.length - 1].title).toContain("⚠️");
-  });
-
-  it("wall-clock: a child is dispatched with clipped maxMinutes = min(agent ceiling, remaining pipeline time); shared AGENTS defs never mutated", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
+    expect(created).toEqual(["ship-run-ship1"]);
+    const { instance, unit } = await handed(instances, "run-ship1");
+    expect(instance).toMatchObject({
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: "slack:CX:1.0",
+      repo: "acme/api",
+      branch: SHIP_BRANCH,
+      base: "main",
+      caps: { maxRounds: 3, maxMinutes: 120 },
+      runId: "run-ship1",
     });
-    const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxMinutes: 10\n");
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
+    expect(unit).toMatchObject({ unit: "task", branch: SHIP_BRANCH, dependsOn: [], rounds: [] });
+    expect("resume" in unit!).toBe(false);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toBe(
+      `🧭 Handed to the plan runner \`ship-run-ship1\`: the task runs on \`${SHIP_BRANCH}\` in this thread under your grants; this card follows it and the report lands here.`,
     );
-    const { io } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const runs = vi.mocked(runAgent).mock.calls.map((c) => c[0]);
-    expect(runs).toHaveLength(2);
-    expect(runs[0].agent.name).toBe("coding");
-    expect(runs[0].agent.maxMinutes).toBeLessThanOrEqual(10); // min(45, ~10 remaining)
-    expect(runs[0].agent.maxMinutes).toBeGreaterThan(9);
-    expect(runs[1].agent.name).toBe("review");
-    expect(runs[1].agent.maxMinutes).toBeLessThanOrEqual(10); // min(25, remaining)
-    expect(AGENTS.coding.maxMinutes).toBe(45); // clipped COPIES only
-    expect(AGENTS.review.maxMinutes).toBe(25);
+    expect(statuses[statuses.length - 1]!.title).toContain("✅");
+    expect(registry.getById("run-ship1")).toMatchObject({ finished: true, status: "completed", agent: "ship" });
+    expect(provider.requests).toHaveLength(0);
+    expect(fetchGuard).not.toHaveBeenCalled();
   });
 
-  // agent-ship.md item 8 with routing-and-config items 2 and 4: the pipeline's
-  // wall clock IS the ship preset's declared budget, so a boundary or a
-  // `budget:` directive clips it like any preset's — the children then run
-  // under the parent's effective profile, clipped to what remains of it.
-  it("a channel boundary clips the ship pipeline's wall clock: the preset's 120 becomes the channel's 10, every child is clipped to it, the card names the clip and the record carries the ship profile", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider, SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 10\n');
+  it("a channel boundary clips the pipeline's wall clock: the preset's 120 becomes the channel's 10 in the caps handed to the runner, the card names the clip and the record carries the ship profile", async () => {
+    const { deps, instances } = shipDeps(SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 10\n');
     const store = new InMemoryRunStore();
     const registry = new RunRegistry({ genId: () => "run-shipb", genToken: () => "tok" });
     deps.runRegistry = registry;
@@ -7793,17 +7476,11 @@ workspaceDir: __WORKDIR__
       onPersisted: (id) => registry.markPersisted(id),
       sleep: async () => {},
     });
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     await deps.runHistoryWriter.settled();
-    expect(replies[replies.length - 1]).toContain("Merge-ready");
-    const runs = vi.mocked(runAgent).mock.calls.map((c) => c[0]);
-    expect(runs).toHaveLength(2);
-    for (const r of runs) expect(r.agent.maxMinutes, r.agent.name).toBeLessThanOrEqual(10);
+    expect(replies[0]).toContain("Handed to the plan runner");
+    expect((await handed(instances, "run-shipb")).instance?.caps).toEqual({ maxRounds: 3, maxMinutes: 10 });
     expect(
       statuses
         .map((s) => JSON.stringify(s))
@@ -7814,21 +7491,13 @@ workspaceDir: __WORKDIR__
     expect(AGENTS.ship.maxMinutes).toBe(120); // the shared def is never mutated
   });
 
-  it("`agent:ship budget:10` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxMinutes: 60\n");
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
+  it("`agent:ship budget:10` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names; the block's rounds cap rides unclipped", async () => {
+    const { deps, instances } = shipDeps(SHIP_YAML + "ship:\n  maxMinutes: 60\n  maxRounds: 2\n");
+    const registry = new RunRegistry({ genId: () => "run-shipd", genToken: () => "tok" });
+    deps.runRegistry = registry;
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("agent:ship budget:10 in acme/api: fix the login redirect", "slack:UADMIN"), io);
-    const runs = vi.mocked(runAgent).mock.calls.map((c) => c[0]);
-    expect(runs).toHaveLength(2);
-    for (const r of runs) expect(r.agent.maxMinutes, r.agent.name).toBeLessThanOrEqual(10);
+    expect((await handed(instances, "run-shipd")).instance?.caps).toEqual({ maxRounds: 2, maxMinutes: 10 });
     expect(
       statuses
         .map((s) => JSON.stringify(s))
@@ -7836,206 +7505,32 @@ workspaceDir: __WORKDIR__
     ).toBe(true);
   });
 
-  it("a thread reply during a ship run is folded into the live child round, and every child runs on the thread's ONE inbox (ship steers like every agent)", async () => {
-    vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
-    let ids = 0;
-    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
-    const inner = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const second = fakeIO();
-    let calls = 0;
-    // The thread reply lands while the coding child's FIRST model call is in
-    // flight: the second dispatch runs to completion inside that call.
-    const provider: Provider & { requests: CompletionRequest[] } = {
-      name: "fake",
-      requests: inner.requests,
-      async complete(req) {
-        if (calls++ === 0) await dispatch(deps, msg("also add a changelog entry", "slack:UADMIN"), second.io);
-        return inner.complete(req);
-      },
-    };
-    const { deps } = shipDeps(provider);
-    deps.runRegistry = registry;
-    deps.admission = new ThreadAdmission();
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    // No rival run: the reply got the steer ack naming the ship run, not a card.
-    expect(second.statuses).toEqual([]);
-    expect(second.replies).toEqual([expect.stringMatching(/^↪ Folded into the \*ship\* run already in flight/)]);
-    expect(second.replies[0]).toContain(" · https://sb.example/runs/r1?t=t");
-    // The coding child read it on its next turn, after its tool results...
-    const codingSecond = inner.requests[1].messages.at(-1)!;
-    expect(codingSecond.role).toBe("user");
-    expect(JSON.stringify(codingSecond.content)).toContain("also add a changelog entry");
-    // ...and every child round runs on the thread's one inbox, so a reply that
-    // lands between rounds reaches the next child instead of a rival run.
-    const runs = vi.mocked(runAgent).mock.calls.map((c) => c[0]);
-    expect(runs).toHaveLength(2);
-    expect(runs[0].inbox).toBeDefined();
-    expect(runs[1].inbox).toBe(runs[0].inbox);
-    // On the one run record: the follow-up as an `input` under the request.
-    const events = registry.snapshotById("r1")?.events ?? [];
-    expect(events).toContainEqual(expect.objectContaining({ type: "input", text: "also add a changelog entry" }));
-    expect(deps.admission!.size).toBe(0); // released
-  });
-
-  it("reservation check: a round is refused when the remaining budget cannot hold a useful child, before the deadline passes → cap report, no child", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxMinutes: 2\n"); // < the 3-minute reservation
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("cannot hold another round");
-    // No review round ran: the cap report says so plainly instead of an
-    // empty "Open findings from the last review (0)" split.
-    expect(final).toContain("No review round ran before the cap");
-    expect(final).not.toContain("Open findings from the last review (0)");
-    expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
-  });
-
-  it("a repo-shaped repoCtx.ref never becomes the pipeline base — the default branch wins", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
+  it("a repo-shaped repoCtx.ref never becomes the pipeline base — the default branch is the base the runner is handed", async () => {
+    const { deps, instances } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "acme/api" }); // the "on <slug>" misparse shape
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
+    const registry = new RunRegistry({ genId: () => "run-shipr", genToken: () => "tok" });
+    deps.runRegistry = registry;
     const { io } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const createRef = deps.createBranchRef!;
-    expect(createRef).toHaveBeenCalled();
-    expect(vi.mocked(createRef).mock.calls[0][2]).toBe("main"); // fromRef = default branch, never the slug
+    expect((await handed(instances, "run-shipr")).instance?.base).toBe("main"); // never the slug
   });
 
-  it("a coding round that ends on ANOTHER branch aborts before any PR write — work pushed elsewhere is unreachable", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed (on my own branch).")],
-    });
-    const { deps, opened, posts } = shipDeps(provider);
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: "docs/my-own-branch", bindingRef: SHIP_BRANCH }));
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("left the pipeline branch");
-    expect(final).toContain("docs/my-own-branch");
-    expect(final).toContain(SHIP_BRANCH);
-    expect(opened).toHaveLength(0); // no PR opened from the foreign branch
-    expect(posts).toHaveLength(0); // no review round followed
-  });
-
-  it("ship coding rounds carry the branch contract in their system prompt, overriding the coding prompt's create-a-branch step", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const codingSystem = provider.requests[0].system ?? "";
-    expect(codingSystem).toContain("SHIP PIPELINE BRANCH CONTRACT");
-    expect(codingSystem).toContain(SHIP_BRANCH);
-    const reviewSystem = provider.requests[provider.requests.length - 1].system ?? "";
-    expect(reviewSystem).not.toContain("SHIP PIPELINE BRANCH CONTRACT"); // review children are readonly — no branch work
-  });
-
-  it("ship rounds carry no MCP line in the config block: they receive no MCP tools, so advertising `mcp add` there would mislead", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
-    deps.mcp = new StaticMcpToolSource([], { factory: () => new InMemoryMcpClient([]) });
-    deps.capabilities = { ...deps.capabilities, mcp: true };
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(provider.requests.length).toBeGreaterThan(0);
-    for (const r of provider.requests) {
-      expect(r.system ?? "").not.toContain("External MCP servers");
-      expect(r.system ?? "").not.toContain("mcp add");
-    }
-  });
-
-  it("branch binding: every round attaches the ship branch, review/fix rounds at the pinned head", async () => {
-    let currentHead = HEAD_A;
-    const provider = shipProvider({
-      coding: [
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-        toolUse("submit_dispositions", { dispositions: [{ findingId: "F1", disposition: "fixed", note: "done" }] }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Fixed."),
-      ],
-      review: [
-        toolUse("submit_verdict", { verdict: "request_changes", summary: "one blocker", head: HEAD_A, findings: [F1] }),
-        say("Round 1 prose."),
-        toolUse("submit_verdict", { verdict: "approve", summary: "fixed", head: HEAD_B }),
-        say("Round 2 prose."),
-      ],
-    });
-    const { deps } = shipDeps(provider);
-    deps.fetchPrHead = vi.fn(async () => currentHead);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH, onHeadProbe: () => (currentHead = HEAD_B) }),
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH }),
-    );
-    const { io } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const attaches = vi.mocked(makeExecutor).mock.calls.map((c) => c[1]);
-    expect(attaches).toHaveLength(4);
-    for (const a of attaches)
-      expect(a).toMatchObject({ threadKey: "slack:CX:1.0", repo: "acme/api", ref: SHIP_BRANCH });
-    expect(attaches[0].agent.name).toBe("coding");
-    expect(attaches[0].headSha).toBeUndefined(); // round 0 creates the branch
-    expect(attaches[1].agent.name).toBe("review");
-    expect(attaches[1].headSha).toBe(HEAD_A); // pinned before dispatch
-    expect(attaches[2].agent.name).toBe("coding");
-    expect(attaches[2].headSha).toBe(HEAD_A); // fix round starts at the reviewed head
-    expect(attaches[3].agent.name).toBe("review");
-    expect(attaches[3].headSha).toBe(HEAD_B); // re-review pinned to the new head
-  });
-
-  it("thread with user-named, bot-authored open PR and no new task text → resume at review, no PR create", async () => {
-    const provider = shipProvider({
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps, opened } = shipDeps(provider);
+  it("thread with user-named, bot-authored open PR and no new task text → a resume at review: the runner is handed the one task unit with the pull request, its head and url on the row, on the pull request's own head branch", async () => {
+    const { deps, instances, created } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const registry = new RunRegistry({ genId: () => "run-shipres", genToken: () => "tok" });
+    deps.runRegistry = registry;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(makeExecutor).mock.calls[0][1].agent.name).toBe("review"); // round 0 skipped
-    expect(opened).toHaveLength(0); // no create, no edit
-    expect(deps.createBranchRef).not.toHaveBeenCalled(); // the PR's head branch already exists on origin
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Merge-ready");
-    expect(final).toContain("1 review round");
+    expect(created).toEqual(["ship-run-shipres"]);
+    const { instance, unit } = await handed(instances, "run-shipres");
+    expect(instance).toMatchObject({ branch: SHIP_BRANCH, base: "main" });
+    expect(unit?.resume).toEqual({ pr: 7, headSha: HEAD_A, url: PR_URL });
+    expect(replies[replies.length - 1]).toContain(`the review loop of ${PR_URL} resumes at its next review round`);
   });
 
-  it("the bot's own GitHub identity unresolvable → an open PR's authorship cannot be judged → refused fail-closed, no child run", async () => {
-    const provider = shipProvider();
-    const { deps, opened } = shipDeps(provider);
+  it("the bot's own GitHub identity unresolvable → an open PR's authorship cannot be judged → refused fail-closed, nothing handed over", async () => {
+    const { deps, created } = shipDeps();
     deps.fetchSelfIdentity = vi.fn(async () => undefined);
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
     const { io, replies } = fakeIO();
@@ -8044,19 +7539,18 @@ workspaceDir: __WORKDIR__
     expect(replies[0]).toContain("🚫");
     expect(replies[0]).toContain("identity this bot acts as");
     expect(replies[0]).toContain("acme/api#7");
-    expect(opened).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
     // The refusal names the resolved identity when it IS known and the author is someone else.
     deps.fetchSelfIdentity = vi.fn(async () => SHIP_BOT);
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "someone", id: 1 } }));
     const second = fakeIO();
     await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), second.io);
     expect(second.replies[0]).toContain("was not authored by `acme-switchboard[bot]`");
+    expect(created).toEqual([]);
   });
 
-  it("thread PR open + new task text → refusal naming the open PR, no child run", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
+  it("thread PR open + new task text → refusal naming the open PR, nothing handed over", async () => {
+    const { deps, provider, created } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:ship also add rate limiting", "slack:UADMIN"), io);
@@ -8065,35 +7559,31 @@ workspaceDir: __WORKDIR__
     expect(replies[0]).toContain("acme/api#7");
     expect(replies[0]).toContain("still open");
     expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
   });
 
-  it("resume prefers the PR's OWN base ref over the repo default (non-default-base ship PR)", async () => {
-    const provider = shipProvider({
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
+  it("a resume prefers the PR's OWN base ref over the repo default (non-default-base ship PR): the runner is handed that base", async () => {
+    const { deps, instances } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, ref: SHIP_BRANCH }); // thread text names no base
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ baseRef: "release/1.x" }));
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
+    const registry = new RunRegistry({ genId: () => "run-shipbase", genToken: () => "tok" });
+    deps.runRegistry = registry;
     const { io } = fakeIO();
     await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
-    // The review child's system carries the PR's true base, not the default branch.
-    const reviewSystem = provider.requests[provider.requests.length - 1].system ?? "";
-    expect(reviewSystem).toContain("release/1.x");
-    expect(reviewSystem).not.toContain("BASE main");
+    const { instance, unit } = await handed(instances, "run-shipbase");
+    expect(instance?.base).toBe("release/1.x");
+    expect(unit?.resume).toMatchObject({ pr: 7 });
   });
 
-  it("new task text citing a human-authored open PR does NOT bind it — round 0 starts from the default branch, no refusal", async () => {
+  it("new task text citing a human-authored open PR does NOT bind it — the runner is handed a task off the default branch on the task's own ship branch, no resume, no refusal", async () => {
     const TASK = "investigate the review-agent bug seen on acme/api#508";
-    const provider = shipProvider({ coding: [say("Which review run did you mean?")] });
-    const { deps } = shipDeps(provider);
+    const { deps, instances } = shipDeps();
     // resolveRepoContext resolves the cited PR's head and binds it as `ref`
     // (repoContext.ts: `if (head?.ref) ref = head.ref`) — the head branch of
     // the human PR (SHIP_BRANCH here, matching openBotPr's headRef). The mock
     // MUST carry that ref AND the `refFromPr` flag the resolver sets with it, or
-    // it hides the fall-through re-basing round 0 on the stranger's head branch
-    // (F1). `prFromMessage` marks the reference as in-message (not inherited).
+    // it hides the fall-through re-basing the task on the stranger's head branch.
+    // `prFromMessage` marks the reference as in-message (not inherited).
     deps.resolveRepoContext = () => ({
       repo: "acme/api",
       pr: 508,
@@ -8105,27 +7595,27 @@ workspaceDir: __WORKDIR__
     });
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 } }));
     const branch = shipBranchName(shipTaskText(TASK, "acme/api"), "slack:CX:1.0");
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch, remoteHead: null }));
+    const registry = new RunRegistry({ genId: () => "run-shipcite", genToken: () => "tok" });
+    deps.runRegistry = registry;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(`agent:ship ${TASK}`, "slack:UADMIN"), io);
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(makeExecutor).mock.calls[0][1].agent.name).toBe("coding"); // round 0, not a refusal
-    // Round 0 creates the pipeline branch from the repo default branch — NEVER
-    // the cited PR's head branch (SHIP_BRANCH), which would carry the
-    // stranger's commits and dangle when that PR merges.
-    expect(deps.createBranchRef).toHaveBeenCalledWith("acme/api", branch, "main");
+    const { instance, unit } = await handed(instances, "run-shipcite");
+    // The task branches from the repo default branch — NEVER the cited PR's
+    // head branch (SHIP_BRANCH), which would carry the stranger's commits.
+    expect(instance).toMatchObject({ branch, base: "main" });
+    expect(unit).toMatchObject({ branch });
+    expect("resume" in unit!).toBe(false);
     for (const r of replies) expect(r).not.toContain("not ship's to drive");
   });
 
-  it("in-message cited PR + new task text + FAILING prFacts fetch → round 0 starts off the DEFAULT branch, no refusal", async () => {
+  it("in-message cited PR + new task text + FAILING prFacts fetch → the task is handed off the DEFAULT branch, no refusal", async () => {
     const TASK = "investigate the review-agent bug seen on acme/api#508";
-    const provider = shipProvider({ coding: [say("Which review run did you mean?")] });
-    const { deps } = shipDeps(provider);
+    const { deps, instances } = shipDeps();
     // The resolver flagged the cited PR as in-message (prFromMessage) with its
     // head ref bound (refFromPr). Ship's OWN facts fetch then fails transiently
     // — the unlucky case. prFromMessage + task text is the fall-through, so
     // ship must NOT refuse; and because facts.headRef is now UNKNOWN, only
-    // refFromPr keeps round 0 off the stranger's PR head branch.
+    // refFromPr keeps the task off the stranger's PR head branch.
     deps.resolveRepoContext = () => ({
       repo: "acme/api",
       pr: 508,
@@ -8137,21 +7627,19 @@ workspaceDir: __WORKDIR__
     });
     deps.fetchPrFacts = vi.fn(async () => undefined); // transient fetch failure
     const branch = shipBranchName(shipTaskText(TASK, "acme/api"), "slack:CX:1.0");
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch, remoteHead: null }));
+    const registry = new RunRegistry({ genId: () => "run-shipfail", genToken: () => "tok" });
+    deps.runRegistry = registry;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(`agent:ship ${TASK}`, "slack:UADMIN"), io);
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(makeExecutor).mock.calls[0][1].agent.name).toBe("coding"); // round 0, not a refusal
-    // Round 0 branches from the repo default — NEVER the cited PR's head branch
-    // (SHIP_BRANCH), which the failed facts fetch left unverifiable.
-    expect(deps.createBranchRef).toHaveBeenCalledWith("acme/api", branch, "main");
+    const { instance, unit } = await handed(instances, "run-shipfail");
+    expect(instance).toMatchObject({ branch, base: "main" });
+    expect("resume" in unit!).toBe(false);
     for (const r of replies) expect(r).not.toContain("PR unverifiable");
     for (const r of replies) expect(r).not.toContain("refusing fail-closed");
   });
 
   it("inherited unreachable PR (prUnpostable) + new task text → still refused fail-closed (inherited PRs stay closed)", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
+    const { deps, provider, created } = shipDeps();
     // An INHERITED thread PR that could not be fetched — prFromMessage is unset,
     // so the fall-through never applies; the thread's own in-flight PR stays
     // fail-closed even with new task text beside it.
@@ -8163,12 +7651,11 @@ workspaceDir: __WORKDIR__
     expect(replies[0]).toContain("acme/api#42");
     expect(replies[0]).toContain("could not be fetched");
     expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
   });
 
   it("in-message cited PR + NO task text + failing prFacts fetch → still refused (a bare reference is a resume attempt)", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
+    const { deps, provider, created } = shipDeps();
     // In-message, but no task text — a bare URL is a resume request, so the PR
     // MUST be verified before resuming; a failed fetch stays fail-closed.
     deps.resolveRepoContext = () => ({
@@ -8186,12 +7673,11 @@ workspaceDir: __WORKDIR__
     expect(replies[0]).toContain("🚫");
     expect(replies[0]).toContain("Could not fetch acme/api#508");
     expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
   });
 
-  it("thread PR authored by a human → refusal (not ship's to drive), no child run", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
+  it("thread PR authored by a human → refusal (not ship's to drive), nothing handed over", async () => {
+    const { deps, provider, created } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, baseRef: "main", ref: SHIP_BRANCH });
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ author: { login: "alice", id: 42 } }));
     const { io, replies } = fakeIO();
@@ -8199,471 +7685,24 @@ workspaceDir: __WORKDIR__
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("not ship's to drive");
     expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
   });
 
-  it("resident attach fails → plain report, no cold clone, no model call", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
-    queueWorkspaces({
-      executor: {
-        exec: async () => "",
-        readFile: async () => "",
-        writeFile: async () => "",
-        release: async () => ({ released: true }),
-      },
-      note: "resident restoring (rehydrating) — using fresh sandbox",
-    });
-    const { io, replies } = fakeIO();
+  it("a deployment without the runner's prerequisites is refused naming the missing one — here `PUBLIC_BASE_URL` — the card closes ⚠️, and nothing runs some other way", async () => {
+    const { deps, provider } = shipDeps();
+    delete deps.createCoordinatorInstance;
+    delete deps.fetchCoordinatorInstanceStatus;
+    const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("resident worktree");
-    expect(final).toContain("repo onboard acme/api");
-    expect(provider.requests).toHaveLength(0); // never a model call into a cold sandbox
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1); // the one attach that fell back
-  });
-
-  it("operator soft stop between rounds → no new round, stopped report", async () => {
-    const registry = new RunRegistry({ genId: () => "rship", genToken: () => "tship" });
-    const provider = shipProvider(
-      { coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("wrapped up")] },
-      (n) => {
-        if (n === 0) registry.requestStop("rship", "tship", "soft");
-      },
-    );
-    const { deps } = shipDeps(provider);
-    deps.runRegistry = registry;
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }));
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Ship stopped by operator (soft stop)");
-    expect(provider.requests.some((r) => r.tools?.some((t) => t.name === "submit_verdict"))).toBe(false); // no review round started
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
-  });
-
-  it("round 0 without a PR: the child's clarifying question becomes the reply, the terminal is named, no review round", async () => {
-    const provider = shipProvider({ coding: [say("Which login flow did you mean — OAuth or password?")] });
-    const { deps, opened } = shipDeps(provider);
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, remoteHead: null })); // nothing pushed
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Which login flow did you mean — OAuth or password?");
-    expect(final).toContain("round 0");
-    expect(final).toContain("No review round ran");
-    expect(opened).toHaveLength(0);
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
-  });
-
-  it("no merge path: the full LGTM pipeline makes ZERO direct GitHub calls — no PUT …/merge can exist outside the typed seams", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps, opened } = shipDeps(provider);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(replies[replies.length - 1]).toContain("Merge-ready");
-    // The guard throws on ANY fetch; the pipeline finished, so nothing fetched.
-    expect(fetchGuard).not.toHaveBeenCalled();
-    expect(fetchGuard.mock.calls.filter((c) => /\/merge\b/.test(String(c[0])))).toHaveLength(0);
-    // The typed seams carry no merge concept: exactly the open/edit fields.
-    for (const t of opened) expect(Object.keys(t).sort()).toEqual(["base", "body", "headBranch", "repo", "title"]);
-  });
-
-  // Feature: docs/reference/specs/agent-ship.md item 12 — rounds are legible: typed
-  // `ship_round` boundary events on the one stream, and an orchestrator-owned
-  // round header on the card that a child's update_status cannot erase.
-  /** The 2-round script (request_changes → fix → approve) the round-visibility
-   *  tests share; children walk update_status so the card tests see checklists. */
-  function twoRoundProvider() {
-    return shipProvider({
-      coding: [
-        toolUse("update_status", { checklist: "✱ Implementing the redirect fix" }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-        toolUse("update_status", { checklist: "✱ Addressing findings" }),
-        toolUse("submit_dispositions", {
-          dispositions: [{ findingId: "F1", disposition: "fixed", note: "cookie restored" }],
-        }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Fixed."),
-      ],
-      review: [
-        toolUse("update_status", { checklist: "✱ Reading the diff" }),
-        toolUse("submit_verdict", { verdict: "request_changes", summary: "one blocker", head: HEAD_A, findings: [F1] }),
-        say("Round 1 prose."),
-        toolUse("submit_verdict", { verdict: "approve", summary: "fixed", head: HEAD_B }),
-        say("Round 2 prose."),
-      ],
-    });
-  }
-  function twoRoundWorkspaces(onFlip: () => void) {
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // round 0 (coding)
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // review round 1
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH, onHeadProbe: onFlip }), // fix round pushes B
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH }), // review round 2
-    );
-  }
-
-  it("round events: typed ship_round boundaries in order across a 2-round pipeline; every turn event falls inside a started→settle window (per-round cost derivability)", async () => {
-    const registry = new RunRegistry({ genId: () => "rship-ev", genToken: () => "tship-ev" });
-    let currentHead = HEAD_A;
-    const provider = twoRoundProvider();
-    const { deps } = shipDeps(provider);
-    deps.runRegistry = registry;
-    deps.fetchPrHead = vi.fn(async () => currentHead);
-    twoRoundWorkspaces(() => (currentHead = HEAD_B));
-    const { io } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const snap = registry.snapshot("rship-ev", "tship-ev");
-    if (!snap) throw new Error("run not in registry");
-    const rounds = snap.events.filter((e): e is Extract<RunEvent, { type: "ship_round" }> => e.type === "ship_round");
-    expect(rounds.map(({ index, agent, outcome }) => ({ index, agent, outcome }))).toEqual([
-      { index: 0, agent: "coding", outcome: "started" },
-      { index: 0, agent: "coding", outcome: "pr_opened" },
-      { index: 1, agent: "review", outcome: "started" },
-      { index: 1, agent: "review", outcome: "request_changes" },
-      { index: 1, agent: "coding", outcome: "started" },
-      { index: 1, agent: "coding", outcome: "pr_opened" },
-      { index: 2, agent: "review", outcome: "started" },
-      { index: 2, agent: "review", outcome: "approve" },
+    expect(replies).toEqual([
+      "⚠️ The plan runner could not be started: PUBLIC_BASE_URL is not set — the bot cannot address its own shim. Nothing ran; re-issue the request to try again.",
     ]);
-    for (const r of rounds) {
-      expect(typeof r.at).toBe("number"); // stamped for the friction/cost timeline
-      expect(typeof r.seq).toBe("number"); // ordered on the one stream
-    }
-    // Per-round cost derivability (spec item 12): every model turn's span lies
-    // between a round's `started` boundary and its settle, so slicing
-    // `model.turn` spans by ship_round boundaries attributes cost per round.
-    let inRound = false;
-    const turnsPerRound: number[] = [];
-    for (const e of snap.events) {
-      if (e.type === "ship_round") {
-        inRound = e.outcome === "started";
-        if (inRound) turnsPerRound.push(0);
-      } else if (e.type === "span_end" && e.name === "model.turn") {
-        expect(inRound, `model turn (seq ${e.seq}) outside any round window`).toBe(true);
-        turnsPerRound[turnsPerRound.length - 1]++;
-      }
-    }
-    expect(turnsPerRound).toHaveLength(4); // round 0, review 1, fix 1, review 2
-    for (const turns of turnsPerRound) expect(turns).toBeGreaterThan(0);
-  });
-
-  it("round header: the card carries the orchestrator-owned header above the child's checklist during each round (coding, review, fix)", async () => {
-    let currentHead = HEAD_A;
-    const provider = twoRoundProvider();
-    const { deps } = shipDeps(provider);
-    deps.fetchPrHead = vi.fn(async () => currentHead);
-    twoRoundWorkspaces(() => (currentHead = HEAD_B));
-    const { io, statuses } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const details = statuses.map((s) => s.detail ?? "");
-    // Header line first, the child's checklist below it — one frame carries both.
-    expect(details.some((d) => d.startsWith("Round 0 — coding") && d.includes("✱ Implementing the redirect fix"))).toBe(
-      true,
-    );
-    expect(details.some((d) => d.startsWith("Round 1 — review") && d.includes("✱ Reading the diff"))).toBe(true);
-    expect(details.some((d) => d.startsWith("Round 1 — fix") && d.includes("✱ Addressing findings"))).toBe(true);
-  });
-
-  it("round header: a child update_status replaces the checklist outright, but the orchestrator-owned header survives", async () => {
-    const provider = shipProvider({
-      coding: [
-        toolUse("update_status", { checklist: "✱ alpha" }),
-        toolUse("update_status", { checklist: "✱ beta" }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-      ],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io, statuses } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const details = statuses.map((s) => s.detail ?? "");
-    const alpha = details.findIndex((d) => d.startsWith("Round 0 — coding") && d.includes("✱ alpha"));
-    expect(alpha).toBeGreaterThanOrEqual(0);
-    const beta = details.findIndex((d) => d.startsWith("Round 0 — coding") && d.includes("✱ beta"));
-    expect(beta).toBeGreaterThan(alpha);
-    expect(details[beta]).not.toContain("✱ alpha"); // the checklist is REPLACED …
-    expect(details[beta].startsWith("Round 0 — coding")).toBe(true); // … the header is not
-  });
-
-  // ---- pipeline honesty --------------------------------------------------------
-
-  it("fresh pipeline: the bot creates the pipeline branch from base BEFORE the first attach", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(deps.createBranchRef).toHaveBeenCalledTimes(1);
-    expect(deps.createBranchRef).toHaveBeenCalledWith("acme/api", SHIP_BRANCH, "main");
-    // BEFORE any attach: the resident 400s binding a thread to a ref origin
-    // does not have, and the sandbox fallback would misreport "onboard the repo".
-    const createdAt = vi.mocked(deps.createBranchRef!).mock.invocationCallOrder[0];
-    const attachedAt = vi.mocked(makeExecutor).mock.invocationCallOrder[0];
-    expect(createdAt).toBeLessThan(attachedAt);
-  });
-
-  it("branch creation fails → honest abort naming branch and reason; no attach, no model call", async () => {
-    const provider = shipProvider();
-    const { deps } = shipDeps(provider);
-    deps.createBranchRef = vi.fn(async () => {
-      throw new Error("branch create failed: HTTP 403 forbidden");
-    });
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Could not create the pipeline branch");
-    expect(final).toContain(SHIP_BRANCH);
-    expect(final).toContain("HTTP 403");
-    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(statuses[statuses.length - 1]!.title).toContain("⚠️");
     expect(provider.requests).toHaveLength(0);
+    expect(fetchGuard).not.toHaveBeenCalled(); // the shim is never addressed without its URL
   });
 
-  it("a thread already bound to another ref: the coding round refuses naming both refs — no model call, no PR", async () => {
-    const provider = shipProvider();
-    const { deps, opened } = shipDeps(provider);
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: "feature-a" })); // the thread's prior binding wins at the resident
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("`feature-a`");
-    expect(final).toContain(`\`${SHIP_BRANCH}\``);
-    expect(provider.requests).toHaveLength(0); // refused BEFORE any model call
-    expect(opened).toHaveLength(0);
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(1);
-  });
-
-  it("approve whose post FAILED is not merge-ready: the report names the post failure, never claims an approving review", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
-    deps.postReviewComment = vi.fn(async () => {
-      throw new Error("HTTP 502 bad gateway");
-    });
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).not.toContain("Merge-ready");
-    expect(final).toContain("could not be posted");
-    expect(final).toContain("HTTP 502");
-    expect(deps.fetchPrFacts).not.toHaveBeenCalled(); // the merge-ready re-check never ran
-  });
-
-  it("approve whose post was REFUSED by the reviewed-head guard is not merge-ready either", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_B }), say("ok")],
-    });
-    const { deps, posts } = shipDeps(provider);
-    // The review workspace ATTACHED at the pinned head A, but its observed
-    // HEAD after the turn is B (the checkout strayed) — the post gate refuses.
-    const strayed = shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH });
-    strayed.binding.sha = HEAD_A;
-    queueWorkspaces(shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), strayed);
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(posts).toHaveLength(0);
-    const final = replies[replies.length - 1];
-    expect(final).not.toContain("Merge-ready");
-    expect(final).toContain("could not be posted");
-  });
-
-  it("merge-ready re-check that cannot fetch the PR says so honestly — never 'no longer open'", async () => {
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
-    deps.fetchPrFacts = vi.fn(async () => undefined);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Merge-ready");
-    expect(final).toContain("could not be re-verified");
-    expect(final).not.toContain("no longer open");
-  });
-
-  it("a soft stop flagged during an approving round never swallows the posted LGTM: the reply is the merge-ready report", async () => {
-    const registry = new RunRegistry({ genId: () => "rship-s", genToken: () => "tship-s" });
-    const provider = shipProvider(
-      {
-        coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-        review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-      },
-      (n) => {
-        if (n === 2) registry.requestStop("rship-s", "tship-s", "soft"); // during the review child's turn
-      },
-    );
-    const { deps, posts } = shipDeps(provider);
-    deps.runRegistry = registry;
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(posts).toHaveLength(1); // the LGTM WAS posted — a fact the stop cannot un-post
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Merge-ready");
-    expect(final).not.toContain("Ship stopped by operator");
-  });
-
-  it("a soft stop flagged during a changes-requested round: the stopped report names the posted review, no fix round", async () => {
-    const registry = new RunRegistry({ genId: () => "rship-s2", genToken: () => "tship-s2" });
-    const provider = shipProvider(
-      {
-        coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-        review: [
-          toolUse("submit_verdict", {
-            verdict: "request_changes",
-            summary: "one blocker",
-            head: HEAD_A,
-            findings: [F1],
-          }),
-          say("Round 1 prose."),
-        ],
-      },
-      (n) => {
-        if (n === 2) registry.requestStop("rship-s2", "tship-s2", "soft");
-      },
-    );
-    const { deps, posts } = shipDeps(provider);
-    deps.runRegistry = registry;
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(posts).toHaveLength(1);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Ship stopped by operator (soft stop)");
-    expect(final).toContain("changes-requested review was posted this round");
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(2); // the stop was honored: no fix round
-  });
-
-  it("a fix round that repushed nothing (head unchanged) aborts with the post-step's reason — no review round burned on the same diff", async () => {
-    const provider = shipProvider({
-      coding: [
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-        toolUse("submit_dispositions", {
-          dispositions: [{ findingId: "F1", disposition: "fixed", note: "cookie restored" }],
-        }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Fixed (but the push failed)."),
-      ],
-      review: [
-        toolUse("submit_verdict", { verdict: "request_changes", summary: "one blocker", head: HEAD_A, findings: [F1] }),
-        say("Round 1 prose."),
-      ],
-    });
-    const { deps, posts } = shipDeps(provider);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH, remoteHead: null }), // fix round: same head, push not observed
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toContain("no new head");
-    expect(final).toContain("was not found on the remote"); // the post-step's reason rides the report
-    expect(posts).toHaveLength(1); // review round 1 only — never a second review of the same diff
-    expect(vi.mocked(makeExecutor)).toHaveBeenCalledTimes(3);
-  });
-
-  it("a fix round that declines EVERY finding without repushing still earns a re-review — the reviewer can concede and approve the same head", async () => {
-    const provider = shipProvider({
-      coding: [
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-        toolUse("submit_dispositions", {
-          dispositions: [{ findingId: "F1", disposition: "declined", note: "by design — the guard is load-bearing" }],
-        }),
-        say("Declined with the argument; nothing to change."),
-      ],
-      review: [
-        toolUse("submit_verdict", { verdict: "request_changes", summary: "one concern", head: HEAD_A, findings: [F1] }),
-        say("Round 1 prose."),
-        toolUse("submit_verdict", {
-          verdict: "approve",
-          summary: "conceded — the decline argument holds",
-          head: HEAD_A,
-        }),
-        say("Round 2 prose."),
-      ],
-    });
-    const { deps, posts } = shipDeps(provider);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // fix round: same head on purpose (all declined)
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }), // re-review over the same head
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(posts).toHaveLength(2); // the re-review RAN — the all-declined round is the designed exception
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Merge-ready");
-    expect(final).toContain("F1"); // the declined finding is on the merge-ready record
-  });
-
-  it("a fix round that opened a NEW PR hands the pipeline its number: later rounds review it and the report links it", async () => {
-    let currentHead = HEAD_A;
-    const provider = twoRoundProvider();
-    const { deps, posts } = shipDeps(provider);
-    let opens = 0;
-    deps.openPullRequest = vi.fn(async (): Promise<OpenedPullRequest> => {
-      opens += 1;
-      return opens === 1
-        ? { number: 7, htmlUrl: PR_URL, created: true }
-        : { number: 8, htmlUrl: "https://github.com/acme/api/pull/8", created: true }; // PR 7 was closed under the pipeline
-    });
-    deps.fetchPrHead = vi.fn(async () => currentHead);
-    twoRoundWorkspaces(() => (currentHead = HEAD_B));
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    expect(posts).toHaveLength(2);
-    expect(posts[1].target.number).toBe(8); // review round 2 targets the NEW PR
-    const final = replies[replies.length - 1];
-    expect(final).toContain("Merge-ready");
-    expect(final).toContain("https://github.com/acme/api/pull/8");
-    // The fix round's post-step note reached the thread, exactly like round 0's.
-    expect(replies.some((r) => r.includes("PR opened") && r.includes("https://github.com/acme/api/pull/8"))).toBe(true);
-  });
-
-  it("a pipeline is claimed on the run ledger without a seed (item 35) and finishes through it: the live row goes, the record lands in the ledger, the plain store is never the fallback", async () => {
+  it("the ship request is claimed on the run ledger without a seed (item 35) and finishes through it: the live row goes, the record lands in the ledger, the plain store is never the fallback", async () => {
     const registry = new RunRegistry({ genId: () => "rship-l", genToken: () => "tship-l" });
     const store = new InMemoryRunStore();
     const ledger = new InMemoryRunLedger();
@@ -8674,11 +7713,7 @@ workspaceDir: __WORKDIR__
       onPersisted: (id) => registry.markPersisted(id),
       sleep: async () => {},
     });
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
+    const { deps } = shipDeps();
     deps.runRegistry = registry;
     deps.runHistoryWriter = writer;
     deps.runLedger = createLedgerWriteThrough({
@@ -8687,10 +7722,6 @@ workspaceDir: __WORKDIR__
       fallback: { put: async (r) => void fallbackPuts.push(r.id) },
       warn: () => {},
     });
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
     let phaseAtReply: string | undefined;
     let rowSeen: ReturnType<InMemoryRunLedger["live"]["get"]>;
     const io: ChannelIO = {
@@ -8718,7 +7749,7 @@ workspaceDir: __WORKDIR__
     expect((await store.get("rship-l"))?.status).toBe("interrupted"); // only the start tombstone went to the plain store
   });
 
-  it("a final reply that throws writes the run record as `failed`, never `completed` (the thread never saw the report)", async () => {
+  it("a final reply that throws writes the run record as `failed`, never `completed` (the thread never saw where the plan runs)", async () => {
     const registry = new RunRegistry({ genId: () => "rship-w", genToken: () => "tship-w" });
     const store = new InMemoryRunStore();
     const writer = createRunHistoryWriter({
@@ -8727,20 +7758,12 @@ workspaceDir: __WORKDIR__
       onPersisted: (id) => registry.markPersisted(id),
       sleep: async () => {},
     });
-    const provider = shipProvider({
-      coding: [toolUse("submit_pr_description", SHIP_DESCRIPTION), say("Done — pushed.")],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const { deps } = shipDeps(provider);
+    const { deps } = shipDeps();
     deps.runRegistry = registry;
     deps.runHistoryWriter = writer;
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
     const io: ChannelIO = {
       reply: async () => {
-        throw new Error("slack outage"); // mid-pipeline notes are best-effort; the FINAL reply throw must fail the record
+        throw new Error("slack outage");
       },
       status: async () => ({ update: () => {}, done: async () => {} }),
       history: async () => [],
@@ -8752,88 +7775,25 @@ workspaceDir: __WORKDIR__
     expect(registry.getById("rship-w")).toMatchObject({ finished: true, replyOk: false });
   });
 
-  it("card close is truthful: an abort closes ⚠️ over the un-rewritten checklist; merge-ready keeps ✅ with checked-off items", async () => {
-    // Abort: the review child walks a checklist then ends with no verdict.
-    const abortProvider = shipProvider({
-      coding: [
-        toolUse("update_status", { checklist: "✱ Implementing" }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-      ],
-      review: [toolUse("update_status", { checklist: "✱ Reading the diff" }), say("ran out of budget")],
-    });
-    const abortRun = shipDeps(abortProvider);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const abortIO = fakeIO();
-    await dispatch(abortRun.deps, msg(TASK_MSG, "slack:UADMIN"), abortIO.io);
-    const abortClose = abortIO.statuses[abortIO.statuses.length - 1];
-    expect(abortClose.title).toContain("⚠️");
-    expect(abortClose.detail).toContain("✱ Reading the diff"); // un-rewritten: nothing gets checked off
-    expect(abortClose.detail ?? "").not.toContain("✓");
+  it("card close is truthful: the runner took it → ✅; the runner refused it by name → ⚠️ with the reason in the reply, the run still completed", async () => {
+    const taken = shipDeps();
+    const takenIO = fakeIO();
+    await dispatch(taken.deps, msg(TASK_MSG, "slack:UADMIN"), takenIO.io);
+    expect(takenIO.statuses[takenIO.statuses.length - 1]!.title).toContain("✅");
 
-    // Completed: the LGTM pipeline keeps the ✅ + checked-off close.
-    const okProvider = shipProvider({
-      coding: [
-        toolUse("update_status", { checklist: "✱ Implementing" }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-      ],
-      review: [toolUse("submit_verdict", { verdict: "approve", summary: "clean", head: HEAD_A }), say("ok")],
-    });
-    const okRun = shipDeps(okProvider);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-    );
-    const okIO = fakeIO();
-    await dispatch(okRun.deps, msg(TASK_MSG, "slack:UADMIN"), okIO.io);
-    const okClose = okIO.statuses[okIO.statuses.length - 1];
-    expect(okClose.title).toContain("✅");
-    expect(okClose.detail).toContain("✓ Implementing");
-  });
-
-  it("a later round reusing a finding id never inherits the earlier round's disposition: the cap report lists the new finding unaddressed", async () => {
-    let currentHead = HEAD_A;
-    const F1_NIT = { id: "F1", severity: "nit", file: "src/login.ts", title: "rename shadowed variable" };
-    const F1_REUSED = { id: "F1", severity: "blocking", file: "src/auth.ts", title: "missing rate limit" }; // same id, DIFFERENT finding
-    const provider = shipProvider({
-      coding: [
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Done — pushed."),
-        toolUse("submit_dispositions", {
-          dispositions: [{ findingId: "F1", disposition: "declined", note: "style-only" }],
-        }),
-        toolUse("submit_pr_description", SHIP_DESCRIPTION),
-        say("Declined the nit, pushed a cleanup."),
-      ],
-      review: [
-        toolUse("submit_verdict", { verdict: "request_changes", summary: "a nit", head: HEAD_A, findings: [F1_NIT] }),
-        say("Round 1 prose."),
-        toolUse("submit_verdict", {
-          verdict: "request_changes",
-          summary: "new blocker",
-          head: HEAD_B,
-          findings: [F1_REUSED],
-        }),
-        say("Round 2 prose."),
-      ],
-    });
-    const { deps } = shipDeps(provider, SHIP_YAML + "ship:\n  maxRounds: 2\n");
-    deps.fetchPrHead = vi.fn(async () => currentHead);
-    queueWorkspaces(
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_A, branch: SHIP_BRANCH }),
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH, onHeadProbe: () => (currentHead = HEAD_B) }),
-      shipWorkspace({ head: HEAD_B, branch: SHIP_BRANCH }),
-    );
-    const { io, replies } = fakeIO();
-    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
-    const final = replies[replies.length - 1];
-    expect(final).toMatch(/Unaddressed \(no disposition\):[\s\S]*F1 src\/auth\.ts — missing rate limit/);
-    expect(final).toMatch(/Declined \(disposition recorded\):\n {2}- none/);
+    const refusedRun = shipDeps();
+    refusedRun.deps.createCoordinatorInstance = vi.fn(async (id: string) => ({
+      kind: "failed" as const,
+      id,
+      reason: "engine down",
+    }));
+    const registry = new RunRegistry({ genId: () => "run-shipref", genToken: () => "tok" });
+    refusedRun.deps.runRegistry = registry;
+    const refusedIO = fakeIO();
+    await dispatch(refusedRun.deps, msg(TASK_MSG, "slack:UADMIN"), refusedIO.io);
+    expect(refusedIO.statuses[refusedIO.statuses.length - 1]!.title).toContain("⚠️");
+    expect(refusedIO.replies[0]).toContain("The plan runner could not be started: engine down");
+    expect(registry.getById("run-shipref")).toMatchObject({ finished: true, status: "completed" });
   });
 });
 
