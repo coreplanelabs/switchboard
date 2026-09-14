@@ -7,7 +7,7 @@
 //   npm run load -- cards    -- --cards 50 --hold 600 --channels 5
 //   npm run load -- provider --port 8089 --profile coding --cpu-seconds 60
 //   npm run load -- pi --checkout ../repo --task all --provider anthropic --model <id> --key-env ANTHROPIC_API_KEY
-//   npm run load -- route --since <date> --limit 200 --provider anthropic --model <id>   (singles + the compound set)
+//   npm run load -- route --since <date> --limit 200 --provider anthropic --model <id>   (singles + the compound and imperative sets)
 //
 // Every command writes `load-results/<command>-<runId>.json` (the samples and
 // the summary) and `.md` (the receipt) and exits non-zero when a configured
@@ -48,15 +48,19 @@ import {
   compoundScore,
   confusionTable,
   historyCompounds,
+  imperativeScore,
   labelledRequests,
   readToWriteRoutes,
   renderCompound,
   renderConfusion,
+  renderImperative,
   replayCompound,
+  replayImperative,
   replayRoutes,
   routeChecks,
 } from "../src/load/routeReplay.js";
 import { ROUTE_COMPOUND_FIXTURES } from "../src/load/routeCompoundFixtures.js";
+import { ROUTE_IMPERATIVE_FIXTURES } from "../src/load/routeImperativeFixtures.js";
 import { COMPOUND_PRESET } from "../src/agents/registry.js";
 import { providerRouteModel, routablePresets, route, ROUTE_TIMEOUT_MS } from "../src/core/dispatch/route.js";
 import { DEFAULT_MAX_CHILDREN } from "../src/core/dispatch/spawn.js";
@@ -96,8 +100,9 @@ commands
              the model key is read from the environment variable --key-env names (default: the variable pi reads
              for --provider, e.g. ANTHROPIC_API_KEY); never from a file, never printed
              --print-prompt --task <name>: print the task's prompt and exit (for the same task on today's coding agent)
-  route      the request router replayed against finished runs whose requester typed the preset (the label), and its
-             compound form scored on the checked-in set (src/load/routeCompoundFixtures.ts) and the history's conductor runs
+  route      the request router replayed against finished runs whose requester typed the preset (the label), its
+             compound form scored on the checked-in set (src/load/routeCompoundFixtures.ts) and the history's conductor runs,
+             and the terse imperatives scored on theirs (src/load/routeImperativeFixtures.ts)
              --provider NAME  --model ID  [--key-env VAR  --base-url URL  --since DATE  --limit N  --default-agent NAME
              --concurrency N  --max-parts N (the compound cap, default spawn.maxChildren's 3)]
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env); the model key as for pi
@@ -736,7 +741,10 @@ async function pi(f: Flags): Promise<boolean> {
  *  checked-in set (twenty compounds, five decoys) scored on detection, on
  *  decoys kept single and on part presets against the unit's bar, and the
  *  history's `conductor` requests — few — on detection, their count printed.
- *  Live model spend: one small call per request, the key from the environment. */
+ *  Then the imperative half: the checked-in set of terse imperatives (twenty,
+ *  five read-only decoys, five review-shaped) scored on reaching coding and on
+ *  no look-alike reaching a write preset. Live model spend: one small call per
+ *  request, the key from the environment. */
 async function routeReplay(f: Flags): Promise<boolean> {
   const id = runId();
   const startedAt = new Date(systemClock()).toISOString();
@@ -824,6 +832,11 @@ async function routeReplay(f: Flags): Promise<boolean> {
   const fixtures = compoundScore(fixtureResults);
   const historyResults = await replayCompound(fromHistory, decide, { concurrency, now: systemClock });
   const history = compoundScore(historyResults);
+  const imperativeResults = await replayImperative(ROUTE_IMPERATIVE_FIXTURES, decide, {
+    concurrency,
+    now: systemClock,
+  });
+  const imperative = imperativeScore(imperativeResults);
   const samples: Sample[] = [
     ...[...results, ...unstampedResults].map((r): Sample => ({
       op: "route",
@@ -841,6 +854,14 @@ async function routeReplay(f: Flags): Promise<boolean> {
       status: r.detected ? "compound" : (r.routed ?? "none"),
       ...(r.routed === undefined ? { reason: "no-route" } : {}),
     })),
+    ...imperativeResults.map((r): Sample => ({
+      op: "route-imperative",
+      startedAt: systemClock(),
+      ms: r.ms,
+      ok: r.routed !== undefined,
+      status: r.routed ?? "none",
+      ...(r.routed === undefined ? { reason: "no-route" } : {}),
+    })),
   ];
   const summary = summarize(samples);
   const answered = results.filter((r) => r.routed !== undefined).length;
@@ -851,6 +872,8 @@ async function routeReplay(f: Flags): Promise<boolean> {
     readToWrite: readToWrite.length,
     compound: fixtures,
     compoundBar: { detection: 0.9 },
+    imperative,
+    imperativeBar: { hit: 0.9 },
   });
   const bySource: Record<string, number> = {};
   for (const r of requests) bySource[r.labelSource] = (bySource[r.labelSource] ?? 0) + 1;
@@ -872,6 +895,9 @@ async function routeReplay(f: Flags): Promise<boolean> {
       ? "history: no conductor request in the window — the checked-in set is the whole compound score"
       : `history: ${history.compounds} conductor request(s), ${history.detected} detected as compound (parts unknown on the record, so detection alone)`,
     ...(history.compounds === 0 ? [] : renderCompound(history).slice(2)),
+    "",
+    `checked-in imperative set (${imperative.imperatives} imperatives, ${imperative.decoys} read-only decoys, ${imperative.reviews} review-shaped):`,
+    ...renderImperative(imperative),
     "",
     `labels: ${Object.entries(bySource)
       .map(([k, v]) => `${k}=${v}`)
@@ -906,6 +932,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
         fixtures: { ...fixtures, misses: fixtures.misses.map(redacted), results: fixtureResults.map(redacted) },
         history: { ...history, misses: history.misses.map(redacted), results: historyResults.map(redacted) },
       },
+      imperative: { ...imperative, misses: imperative.misses.map(redacted), results: imperativeResults.map(redacted) },
       skipped,
     },
     notes,

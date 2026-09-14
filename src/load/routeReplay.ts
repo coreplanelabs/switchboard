@@ -8,14 +8,18 @@
 // the misroutes listed. The compound half (the same item): the router's
 // compound form scored on the checked-in set — detected where a request has
 // independent parts, kept single on a decoy, each part on its preset — and on
-// the history's conductor requests, detection alone, their count printed. Pure
-// over records and a `RouteDecision` function; the entrypoint
-// (`scripts/load.ts`) pages the run store and picks the model.
+// the history's conductor requests, detection alone, their count printed. The
+// imperative half (the same item): the checked-in set of terse imperatives —
+// an order to change code with no detail to route on — scored on reaching the
+// write preset, its read-only look-alikes on never reaching one. Pure over
+// records and a `RouteDecision` function; the entrypoint (`scripts/load.ts`)
+// pages the run store and picks the model.
 import { AGENTS, COMPOUND_PRESET } from "../agents/registry.js";
 import { stripDirectiveTokens } from "../directives.js";
 import type { RouteDecision } from "../core/dispatch/route.js";
 import type { SloCheck } from "./aggregate.js";
 import type { RouteCompoundFixture } from "./routeCompoundFixtures.js";
+import type { RouteImperativeFixture } from "./routeImperativeFixtures.js";
 import type { RunRecord } from "../core/runRecord.js";
 import type { AgentSource } from "../core/runEvents.js";
 
@@ -134,38 +138,48 @@ export interface ReplayResult extends ReplayRequest {
   ms: number;
 }
 
-/**
- * Ask the router about each request, `concurrency` at a time, in order. The
- * decision function is the same seam the dispatcher's stage calls (`route`
- * bound to a model); the harness never dispatches anything.
- */
+/** The one replay loop every half shares: ask the router about each item's
+ *  text, `concurrency` at a time, results in item order, each decision timed.
+ *  The decision function is the same seam the dispatcher's stage calls
+ *  (`route` bound to a model); the harness never dispatches anything. */
+async function decideEach<T extends { text: string }, R>(
+  items: readonly T[],
+  decide: (text: string) => Promise<RouteDecision>,
+  opts: { concurrency?: number; now: () => number },
+  toResult: (item: T, decision: RouteDecision, ms: number) => R,
+): Promise<R[]> {
+  const concurrency = Math.max(1, opts.concurrency ?? 4);
+  const { now } = opts;
+  const results: R[] = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      const item = items[i];
+      const started = now();
+      const decision = await decide(item.text);
+      results[i] = toResult(item, decision, Math.max(0, now() - started));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
+/** Ask the router about each labelled request: the answer beside the label,
+ *  correct when they agree. */
 export async function replayRoutes(
   requests: readonly ReplayRequest[],
   decide: (text: string) => Promise<RouteDecision>,
   opts: { concurrency?: number; now: () => number },
 ): Promise<ReplayResult[]> {
-  const concurrency = Math.max(1, opts.concurrency ?? 4);
-  const { now } = opts;
-  const results: ReplayResult[] = new Array<ReplayResult>(requests.length);
-  let next = 0;
-  const worker = async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= requests.length) return;
-      const request = requests[i];
-      const started = now();
-      const decision = await decide(request.text);
-      results[i] = {
-        ...request,
-        routed: decision.preset,
-        reason: decision.reason,
-        correct: decision.preset === request.label,
-        ms: Math.max(0, now() - started),
-      };
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(concurrency, requests.length) }, worker));
-  return results;
+  return decideEach(requests, decide, opts, (request, decision, ms) => ({
+    ...request,
+    routed: decision.preset,
+    reason: decision.reason,
+    correct: decision.preset === request.label,
+    ms,
+  }));
 }
 
 /** A typed label's identity as the registry declares it; `write` for a
@@ -333,35 +347,22 @@ export async function replayCompound(
   decide: (text: string) => Promise<RouteDecision>,
   opts: { concurrency?: number; now: () => number },
 ): Promise<CompoundResult[]> {
-  const concurrency = Math.max(1, opts.concurrency ?? 4);
-  const { now } = opts;
-  const results: CompoundResult[] = new Array<CompoundResult>(examples.length);
-  let next = 0;
-  const worker = async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= examples.length) return;
-      const example = examples[i];
-      const started = now();
-      const decision = await decide(example.text);
-      const parts = decision.preset === COMPOUND_PRESET && "parts" in decision ? (decision.parts ?? []) : [];
-      const answered = parts.map((p) => p.preset);
-      const detected = decision.preset === COMPOUND_PRESET && parts.length > 0;
-      const expectedParts = example.kind === "compound" ? example.presets.length : 0;
-      results[i] = {
-        ...example,
-        routed: decision.preset,
-        reason: decision.reason,
-        answered,
-        detected,
-        expectedParts,
-        matchedParts: detected ? multisetOverlap(example.kind === "compound" ? example.presets : [], answered) : 0,
-        ms: Math.max(0, now() - started),
-      };
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(concurrency, examples.length) }, worker));
-  return results;
+  return decideEach(examples, decide, opts, (example, decision, ms) => {
+    const parts = decision.preset === COMPOUND_PRESET && "parts" in decision ? (decision.parts ?? []) : [];
+    const answered = parts.map((p) => p.preset);
+    const detected = decision.preset === COMPOUND_PRESET && parts.length > 0;
+    const expectedParts = example.kind === "compound" ? example.presets.length : 0;
+    return {
+      ...example,
+      routed: decision.preset,
+      reason: decision.reason,
+      answered,
+      detected,
+      expectedParts,
+      matchedParts: detected ? multisetOverlap(example.kind === "compound" ? example.presets : [], answered) : 0,
+      ms,
+    };
+  });
 }
 
 /** The compound score over a set of results: detection on the compounds, the
@@ -429,6 +430,93 @@ export function renderCompound(score: CompoundScore, opts: { textCap?: number } 
   ];
 }
 
+/** One replayed imperative example: the router's answer beside the presets
+ *  that count as right. `hit` — the answer is one of them; `toWrite` — the
+ *  answer is a write preset (what a look-alike must never reach). */
+export interface ImperativeResult extends RouteImperativeFixture {
+  routed: string | undefined;
+  reason: string;
+  hit: boolean;
+  toWrite: boolean;
+  /** Wall time of the router's decision, ms. */
+  ms: number;
+}
+
+/** Ask the router about each example of the imperative set — the same seam
+ *  and the same prompt as the singles and the compounds. */
+export async function replayImperative(
+  examples: readonly RouteImperativeFixture[],
+  decide: (text: string) => Promise<RouteDecision>,
+  opts: { concurrency?: number; now: () => number },
+): Promise<ImperativeResult[]> {
+  return decideEach(examples, decide, opts, (example, decision, ms) => ({
+    ...example,
+    routed: decision.preset,
+    reason: decision.reason,
+    hit: decision.preset !== undefined && example.presets.includes(decision.preset),
+    toWrite: decision.preset !== undefined && identityOf(decision.preset) === "write",
+    ms,
+  }));
+}
+
+/** The imperative score: the imperatives that reached the write preset, the
+ *  look-alikes (decoys and review-shaped asks) that reached one — the row that
+ *  must read 0 — each kind's hits, and every miss in replay order. */
+export interface ImperativeScore {
+  imperatives: number;
+  imperativesHit: number;
+  /** `imperativesHit / imperatives`; NaN with no imperatives. */
+  hitRate: number;
+  /** The decoys and the review-shaped asks together: everything that is not an order to change code. */
+  lookalikes: number;
+  lookalikesToWrite: number;
+  decoys: number;
+  decoysHit: number;
+  reviews: number;
+  reviewsHit: number;
+  /** Every example whose answer is outside its expected presets. */
+  misses: ImperativeResult[];
+}
+
+export function imperativeScore(results: readonly ImperativeResult[]): ImperativeScore {
+  const of = (kind: RouteImperativeFixture["kind"]) => results.filter((r) => r.kind === kind);
+  const imperatives = of("imperative");
+  const decoys = of("decoy");
+  const reviews = of("review");
+  const lookalikes = [...decoys, ...reviews];
+  const hits = (rs: readonly ImperativeResult[]) => rs.filter((r) => r.hit).length;
+  return {
+    imperatives: imperatives.length,
+    imperativesHit: hits(imperatives),
+    hitRate: imperatives.length === 0 ? NaN : hits(imperatives) / imperatives.length,
+    lookalikes: lookalikes.length,
+    lookalikesToWrite: lookalikes.filter((r) => r.toWrite).length,
+    decoys: decoys.length,
+    decoysHit: hits(decoys),
+    reviews: reviews.length,
+    reviewsHit: hits(reviews),
+    misses: results.filter((r) => !r.hit),
+  };
+}
+
+/** The imperative score and its misses as markdown lines, for the receipt's notes. */
+export function renderImperative(score: ImperativeScore, opts: { textCap?: number } = {}): string[] {
+  const cap = opts.textCap ?? 80;
+  const snippet = (text: string) => {
+    const one = text.replace(/\s+/g, " ").trim();
+    return one.length > cap ? `${one.slice(0, cap - 1)}…` : one;
+  };
+  return [
+    `imperatives: ${score.imperativesHit}/${score.imperatives} to coding (${pct(score.hitRate)}); look-alikes to a write preset ${score.lookalikesToWrite}/${score.lookalikes} (decoys ${score.decoysHit}/${score.decoys} read-only as expected, review-shaped ${score.reviewsHit}/${score.reviews} to review)`,
+    "",
+    score.misses.length === 0 ? "misses: none" : `misses (${score.misses.length}):`,
+    ...score.misses.map(
+      (m) =>
+        `- ${m.id}: ${m.kind}, expected ${m.presets.join(" or ")}, routed ${m.routed ?? NO_ROUTE} — ${m.reason} — "${snippet(m.text)}"`,
+    ),
+  ];
+}
+
 /** What the receipt's verdict is made of. */
 export interface RouteCheckInput {
   /** The confusion table over the stamped labels (directive and sticky). */
@@ -440,13 +528,17 @@ export interface RouteCheckInput {
   /** The checked-in compound set's score. */
   compound: CompoundScore;
   compoundBar: { detection: number };
+  /** The checked-in imperative set's score. */
+  imperative: ImperativeScore;
+  imperativeBar: { hit: number };
 }
 
 /** The check rows: the accuracy bar, every request answered, record 0026's
  *  read-only-to-write clause (a row of its own, so the verdict fails on it
- *  without anyone reading the table), and the compound bars. */
+ *  without anyone reading the table), the compound bars and the imperative
+ *  bars. */
 export function routeChecks(input: RouteCheckInput): SloCheck[] {
-  const { table, answered, readToWrite, compound, compoundBar } = input;
+  const { table, answered, readToWrite, compound, compoundBar, imperative, imperativeBar } = input;
   const breaks = readToWriteRoutes(table.misroutes).map((r) => r.id);
   return [
     {
@@ -477,6 +569,18 @@ export function routeChecks(input: RouteCheckInput): SloCheck[] {
       name: "no decoy split — one ask with several steps stays one route",
       pass: compound.decoysSplit === 0,
       actual: `${compound.decoysSplit}/${compound.decoys}`,
+      limit: "0",
+    },
+    {
+      name: `terse imperatives routed to coding on ≥ ${Math.round(imperativeBar.hit * 100)}% of the checked-in imperative asks`,
+      pass: imperative.hitRate >= imperativeBar.hit,
+      actual: `${imperative.imperativesHit}/${imperative.imperatives} (${pct(imperative.hitRate)})`,
+      limit: `≥ ${Math.round(imperativeBar.hit * 100)}%`,
+    },
+    {
+      name: "read-only look-alikes of an imperative routed to a write preset: 0",
+      pass: imperative.lookalikesToWrite === 0,
+      actual: `${imperative.lookalikesToWrite}/${imperative.lookalikes}`,
       limit: "0",
     },
   ];

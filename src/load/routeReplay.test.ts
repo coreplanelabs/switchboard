@@ -4,17 +4,21 @@ import type { RunRecord } from "../core/runRecord.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { routablePresets, route, type RouteDecision, type RouteModel } from "../core/dispatch/route.js";
 import { ROUTE_COMPOUND_FIXTURES } from "./routeCompoundFixtures.js";
+import { ROUTE_IMPERATIVE_FIXTURES } from "./routeImperativeFixtures.js";
 import {
   compoundExamples,
   compoundScore,
   confusionTable,
   historyCompounds,
+  imperativeScore,
   labelledRequests,
   NO_ROUTE,
   readToWriteRoutes,
   renderCompound,
   renderConfusion,
+  renderImperative,
   replayCompound,
+  replayImperative,
   replayRoutes,
   routeChecks,
   type CompoundExample,
@@ -497,9 +501,167 @@ describe("the checked-in set through route() over a scripted model", () => {
   });
 });
 
+describe("the checked-in imperative set (src/load/routeImperativeFixtures.ts)", () => {
+  const table = routablePresets();
+  const names = table.map((p) => p.name);
+  const writers = table.filter((p) => p.identity === "write").map((p) => p.name);
+
+  it("is twenty terse imperatives expecting a write preset, five read-only decoys expecting research or general, five review-shaped asks expecting review; every preset a row of the table, every id unique", () => {
+    const imperatives = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "imperative");
+    const decoys = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "decoy");
+    const reviews = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "review");
+    expect(imperatives).toHaveLength(20);
+    expect(decoys).toHaveLength(5);
+    expect(reviews).toHaveLength(5);
+    for (const f of imperatives) expect(f.presets, f.id).toEqual(writers);
+    for (const f of decoys) expect([...f.presets].sort(), f.id).toEqual(["general", "research"]);
+    for (const f of reviews) expect(f.presets, f.id).toEqual(["review"]);
+    for (const f of ROUTE_IMPERATIVE_FIXTURES) {
+      // Terse: the point of the set is the ask with no detail to route on.
+      expect(f.text.trim().length, f.id).toBeGreaterThan(5);
+      expect(f.text.trim().length, f.id).toBeLessThanOrEqual(80);
+      for (const preset of f.presets) expect(names, `${f.id}: ${preset}`).toContain(preset);
+    }
+    expect(new Set(ROUTE_IMPERATIVE_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_IMPERATIVE_FIXTURES.length);
+    // The one real misroute the replay at the flip found is on the set, verbatim.
+    expect(imperatives.map((f) => f.text)).toContain("looks like the ci failed, fix it");
+  });
+});
+
+describe("the imperative set through route() over a scripted model", () => {
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const byText = new Map(ROUTE_IMPERATIVE_FIXTURES.map((f) => [f.text, f]));
+  const decideWith =
+    (model: RouteModel) =>
+    (text: string): Promise<RouteDecision> =>
+      route({ text, recentDirectives: {}, presets, allowed, fallback: "general", compound: { maxParts: 3 } }, model);
+  const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1];
+
+  it("a router that reads the rule: every imperative to coding, every look-alike read-only, every review-shaped ask to review — both rows pass", async () => {
+    const knowing: RouteModel = async (prompt) =>
+      JSON.stringify({ preset: byText.get(textOf(prompt))!.presets[0], reason: "as the rule says" });
+    const results = await replayImperative(ROUTE_IMPERATIVE_FIXTURES, decideWith(knowing), { now: () => 0 });
+    const score = imperativeScore(results);
+    expect(score).toMatchObject({
+      imperatives: 20,
+      imperativesHit: 20,
+      hitRate: 1,
+      lookalikes: 10,
+      lookalikesToWrite: 0,
+      decoys: 5,
+      decoysHit: 5,
+      reviews: 5,
+      reviewsHit: 5,
+      misses: [],
+    });
+    expect(renderImperative(score)).toEqual([
+      "imperatives: 20/20 to coding (100%); look-alikes to a write preset 0/10 (decoys 5/5 read-only as expected, review-shaped 5/5 to review)",
+      "",
+      "misses: none",
+    ]);
+    const rows = routeChecks({
+      table: confusionTable([], allowed),
+      answered: 0,
+      readToWrite: 0,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+      imperative: score,
+      imperativeBar: { hit: 0.9 },
+    }).filter((c) => /imperative|look-alike/.test(c.name));
+    expect(rows.map((c) => [c.pass, c.actual, c.limit])).toEqual([
+      [true, "20/20 (100%)", "≥ 90%"],
+      [true, "0/10", "0"],
+    ]);
+  });
+
+  it("a keyword router — fix, ci, tests, build mean coding — gets every imperative but sends the decoys to coding too: the look-alike row is what catches it", async () => {
+    const keyword: RouteModel = async (prompt) => {
+      const text = textOf(prompt);
+      const preset = /\b(pr|pull request)\b/i.test(text)
+        ? "review"
+        : /fix|ci\b|tests?|build|add|rename|bump|make|green|red|lint|typecheck|docs|version|retries|delete|update/i.test(
+              text,
+            )
+          ? "coding"
+          : "general";
+      return JSON.stringify({ preset, reason: "keyword" });
+    };
+    const results = await replayImperative(ROUTE_IMPERATIVE_FIXTURES, decideWith(keyword), { now: () => 0 });
+    const score = imperativeScore(results);
+    expect(score.hitRate).toBeGreaterThanOrEqual(0.9);
+    expect(score.lookalikesToWrite).toBeGreaterThan(0);
+    expect(score.misses.every((m) => m.kind !== "imperative")).toBe(true);
+    const rows = routeChecks({
+      table: confusionTable([], allowed),
+      answered: 0,
+      readToWrite: 0,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+      imperative: score,
+      imperativeBar: { hit: 0.9 },
+    }).filter((c) => /imperative|look-alike/.test(c.name));
+    expect(rows.map((c) => c.pass)).toEqual([true, false]);
+    expect(rows[1].actual).toBe(`${score.lookalikesToWrite}/10`);
+    expect(renderImperative(score).slice(2)[0]).toBe(`misses (${score.misses.length}):`);
+  });
+
+  it("the arithmetic: a miss is an answer outside the expected presets; a write answer on a look-alike is counted apart from a plain miss; no route is a miss and never a write; order kept, decisions timed", async () => {
+    const fixtures = [
+      { id: "i1", kind: "imperative" as const, text: "fix it", presets: ["coding"] },
+      { id: "i2", kind: "imperative" as const, text: "make it pass", presets: ["coding"] },
+      { id: "d1", kind: "decoy" as const, text: "why did ci fail?", presets: ["research", "general"] },
+      { id: "d2", kind: "decoy" as const, text: "list the failing tests", presets: ["research", "general"] },
+      { id: "r1", kind: "review" as const, text: "look at PR 42", presets: ["review"] },
+    ];
+    const answers: Record<string, RouteDecision> = {
+      "fix it": { preset: "coding", reason: "order" },
+      "make it pass": { preset: undefined, reason: "router failed: boom" },
+      "why did ci fail?": { preset: "research", reason: "question" },
+      "list the failing tests": { preset: "coding", reason: "keyword" },
+      "look at PR 42": { preset: "explore", reason: "wrong" },
+    };
+    let t = 0;
+    const results = await replayImperative(fixtures, async (text) => answers[text], {
+      concurrency: 1,
+      now: () => (t += 5),
+    });
+    expect(results.map((r) => [r.id, r.routed ?? NO_ROUTE, r.hit, r.toWrite])).toEqual([
+      ["i1", "coding", true, true],
+      ["i2", NO_ROUTE, false, false],
+      ["d1", "research", true, false],
+      ["d2", "coding", false, true],
+      ["r1", "explore", false, false],
+    ]);
+    for (const r of results) expect(r.ms).toBe(5);
+    const score = imperativeScore(results);
+    expect(score).toMatchObject({
+      imperatives: 2,
+      imperativesHit: 1,
+      hitRate: 0.5,
+      lookalikes: 3,
+      lookalikesToWrite: 1,
+      decoys: 2,
+      decoysHit: 1,
+      reviews: 1,
+      reviewsHit: 0,
+    });
+    expect(score.misses.map((m) => m.id)).toEqual(["i2", "d2", "r1"]);
+    expect(renderImperative(score)).toEqual([
+      "imperatives: 1/2 to coding (50%); look-alikes to a write preset 1/3 (decoys 1/2 read-only as expected, review-shaped 0/1 to review)",
+      "",
+      "misses (3):",
+      '- i2: imperative, expected coding, routed (none) — router failed: boom — "make it pass"',
+      '- d2: decoy, expected research or general, routed coding — keyword — "list the failing tests"',
+      '- r1: review, expected review, routed explore — wrong — "look at PR 42"',
+    ]);
+    expect(imperativeScore([]).hitRate).toBeNaN();
+  });
+});
+
 // The checks the receipt's verdict is made of (load-harness item 17): the
 // accuracy bar, every request answered, record 0026's read-only-to-write
-// clause as a row of its own, and the compound bars.
+// clause as a row of its own, the compound bars and the imperative bars.
 describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
   const result = (
     label: string,
@@ -537,6 +699,8 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       readToWrite: readToWriteRoutes(results).length,
       compound: compoundScore([]),
       compoundBar: { detection: 0.9 },
+      imperative: imperativeScore([]),
+      imperativeBar: { hit: 0.9 },
     });
     expect(checks.map((c) => c.name)).toEqual([
       "routing accuracy ≥ 95% against the presets people typed (record 0026's bar)",
@@ -544,11 +708,15 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       "read-only labels routed to a write preset: 0 (record 0026's clause)",
       "compound detected on ≥ 90% of the checked-in compound asks",
       "no decoy split — one ask with several steps stays one route",
+      "terse imperatives routed to coding on ≥ 90% of the checked-in imperative asks",
+      "read-only look-alikes of an imperative routed to a write preset: 0",
     ]);
     expect(checks.map((c) => [c.pass, c.actual, c.limit])).toEqual([
       [true, "100%", "≥ 95%"],
       [true, "3/3", "3"],
       [true, "0", "0"],
+      [false, "0/0 (—)", "≥ 90%"],
+      [true, "0/0", "0"],
       [false, "0/0 (—)", "≥ 90%"],
       [true, "0/0", "0"],
     ]);
@@ -567,6 +735,8 @@ describe("readToWriteRoutes + routeChecks — the verdict's rows", () => {
       readToWrite: readToWriteRoutes(results).length,
       compound: compoundScore([]),
       compoundBar: { detection: 0.9 },
+      imperative: imperativeScore([]),
+      imperativeBar: { hit: 0.9 },
     });
     const row = checks.find((c) => c.name.startsWith("read-only labels routed to a write preset"))!;
     expect(row).toEqual({
