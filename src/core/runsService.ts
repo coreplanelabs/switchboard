@@ -159,6 +159,10 @@ export interface ListRunsOptions {
   agent?: string;
   /** Platform-namespaced channel id (`slack:C0123`) — a filter the caller asked for, ANDed with `visibleTo`. */
   channel?: string;
+  /** One thread's runs, live and finished, newest first — ANDed with `visibleTo`.
+   *  `limit: 1` is the thread's newest run: the read behind a thread's lineage
+   *  and a child's thread-aware rows (agent-conductor item 10). */
+  threadKey?: string;
   /** Only runs finished (or, while live, started) at or after this epoch ms. */
   sinceMs?: number;
   /** Rows after the merge: default `RUN_LIST_DEFAULT_LIMIT`, capped at `RUN_LIST_MAX_LIMIT`. */
@@ -471,6 +475,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         matchesPredicate(opts.visibleTo, r) &&
         (opts.agent === undefined || r.agent === opts.agent) &&
         (opts.channel === undefined || r.channelId === opts.channel) &&
+        (opts.threadKey === undefined || r.threadKey === opts.threadKey) &&
         (opts.sinceMs === undefined || (r.finishedAt ?? r.startedAt) >= opts.sinceMs);
       const paging = opts.before !== undefined;
       const live = paging
@@ -514,6 +519,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             ...(opts.visibleTo.kind !== "all" ? { visibleTo: toVisibilityFilter(opts.visibleTo) } : {}),
             ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
             ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
+            ...(opts.threadKey !== undefined ? { threadKey: opts.threadKey } : {}),
             ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
             ...(opts.before !== undefined ? { before: opts.before } : {}),
             ...(opts.beforeId !== undefined ? { beforeId: opts.beforeId } : {}),

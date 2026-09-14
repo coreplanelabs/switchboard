@@ -66,7 +66,9 @@ import { shipPresetFor } from "./shipPipeline.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
 import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
+import { lineageParent, tellParent, threadLineage, type LineageHeard } from "./dispatch/lineage.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
+import { createRunsService } from "./runsService.js";
 import type { CoordinatorTag } from "./coordinator/contract.js";
 import type { DispatchOutcome } from "./dispatch/outcome.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -127,11 +129,13 @@ export interface DispatchOptions {
   /** A fresh turn's wait behind the run it was parked on (the `queued …
    *  behind the previous run` caption; a `request` attr; never a duration term). */
   queuedBehindMs?: number;
-  /** Set by `spawnChild()` alone (dispatch/spawn.ts; routing-and-config item
-   *  20): this request is a child run — the run that spawned it, its depth,
-   *  and the wall clock the parent had left, which the child's effective
-   *  profile takes as one more boundary. Absent for every request a person, a
-   *  schedule or a resume started. */
+  /** Set by `spawnChild()` (dispatch/spawn.ts; routing-and-config item 20):
+   *  this request is a child run — the run that spawned it, its depth, and the
+   *  wall clock the parent had left, which the child's effective profile takes
+   *  as one more boundary. Absent for every request a person, a schedule or a
+   *  resume started; the dispatcher's lineage stage (dispatch/lineage.ts;
+   *  agent-conductor item 10) then resolves one for a person's reply in a
+   *  thread a run spawned — the same parent, no clock. */
   parent?: ParentRun;
   /** Set by `spawnChild()` beside `parent`: the conversation this child starts
    *  from in place of its thread's history — its parent's text turns at the
@@ -308,6 +312,28 @@ export async function dispatch(
     // through to the agent.
     if (await answerOperation(deps, { msg, io, ending, trace, directives, history })) return ended;
 
+    // The thread's lineage (dispatch/lineage.ts; agent-conductor item 10): a
+    // person's request in a thread a run spawned is a run of that child — the
+    // spawning run's id on its record at the child's depth, no clock inherited
+    // — and the parent, while it lives, hears the reply as a follow-up from
+    // that child. A spawn, a coordinator's child, a resume and a restart know
+    // their parent (or that they have none) already, so nothing is read.
+    const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
+    const lineage =
+      opts.parent || opts.coordinator || resume || restart
+        ? undefined
+        : await threadLineage(runsService, msg.threadKey);
+    const parent: ParentRun | undefined = opts.parent ?? (lineage ? lineageParent(lineage) : undefined);
+    const tellLineage = async (heard: LineageHeard) => {
+      if (!lineage) return;
+      await tellParent(
+        { runs: runsService, config: deps.config, runLedger: deps.runLedger, clock, admission },
+        lineage,
+        msg,
+        heard,
+      );
+    };
+
     // The (agent, model, effort) this request resolves to (dispatch/resolve.ts):
     // a directive, else the thread's sticky one, else the config scopes.
     const settled = resolveRun(deps, { msg, directives, history });
@@ -364,7 +390,7 @@ export async function dispatch(
         resolved,
         resume,
         budget: directives.budget,
-        ...(opts.parent ? { parentRemainingMs: opts.parent.remainingMs } : {}),
+        ...(parent?.remainingMs !== undefined ? { parentRemainingMs: parent.remainingMs } : {}),
       }),
     });
     if (profileGate.kind === "refused") return ended;
@@ -409,6 +435,8 @@ export async function dispatch(
         ...(opts.seed ? { seed: opts.seed } : {}),
         ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
       });
+    // A reply folded into the live child of a spawned thread: its parent hears it now.
+    if (outcome.kind === "steered") await tellLineage({ kind: "steered" });
     if (outcome.kind !== "proceed") return ended;
     admitted = outcome.admitted;
     const taken = await adoptCarriedRun(deps, admissionCtx);
@@ -563,9 +591,10 @@ export async function dispatch(
     // workspace attach (dispatch/provision.ts) — the registry row, its label and
     // link, the request and context events — then, for a fresh request, the
     // ledger row. `registered` the moment the row exists: a later throw discards it.
-    // A child names its parent on every row (run-history item 46); a
-    // coordinator's child its instance and key (item 48).
-    const parentRunId = opts.parent?.runId;
+    // A child names its parent on every row (run-history item 46) — a run in a
+    // spawned thread the same parent; a coordinator's child its instance and
+    // key (item 48).
+    const parentRunId = parent?.runId;
     const coordinator = opts.coordinator;
     const registration = await registerRun(deps, {
       msg,
@@ -594,6 +623,9 @@ export async function dispatch(
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
+    // A new run of a spawned thread's child has its row: its parent hears the
+    // reply now, with the run that answers it named.
+    await tellLineage({ kind: "started", runId });
     // Staged files (record 0033): the copies into the store START here — after
     // admission and the run's row, before the workspace attach they overlap
     // with — for a run whose agent has a workspace to pull them into; the pulls
@@ -832,7 +864,7 @@ export async function dispatch(
       { core: deps, dispatch, registry, clock },
       {
         runId: run.id,
-        depth: opts.parent?.depth ?? 0,
+        depth: parent?.depth ?? 0,
         agentName: agent.name,
         msg,
         io,

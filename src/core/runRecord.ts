@@ -288,6 +288,9 @@ export interface RunListOptions {
   agent?: string;
   /** Platform-namespaced channel id (`slack:C0123`) — a plain filter the caller asked for. */
   channel?: string;
+  /** One thread's runs (`slack:C0123:1712.34`), newest first — the read behind
+   *  a thread's lineage and a child's thread-aware rows (agent-conductor item 10). */
+  threadKey?: string;
   /** What the ACTOR may see (authorization): the store predicate compiled
    *  from the policy, pushed down so no surface loads rows and filters after.
    *  Absent = no visibility constraint — only a caller that has already decided

@@ -526,6 +526,7 @@ function waitFor(
     control: opts.control ?? new RunControl(),
     inbox: opts.inbox ?? new FollowUpInbox(),
     clock: () => at,
+    runId: "run-p",
     sleep: (ms, signal) => {
       slept.push({ ms, signal });
       const hook = hooks.shift();
@@ -787,5 +788,102 @@ describe("await_runs — the children's ends, as data, within the parent's budge
     expect(await awaitRunsTool.run({ ids: [run.id] }, ctxFor(w, alice, { runId: "run-p" }))).toBe(
       "run tools are not available in this context.",
     );
+  });
+});
+
+// docs/reference/specs/agent-conductor.md item 10: a child is its thread. A
+// person's reply in a child's thread after the child ended starts a new run
+// there, and the parent's reads of the child follow the thread's newest run —
+// never the first reply alone.
+describe("a child is its thread — the reads follow the thread's newest run", () => {
+  /** A finished child in the store, and a later run of the same thread live in the registry. */
+  function continuedChild(w: ReturnType<typeof world>) {
+    const threadKey = "slack:CX:child";
+    const first = persisted("r-first", { parentRunId: "run-p", threadKey });
+    const later = w.registry.create("general · child", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UALICE",
+      threadKey,
+      channelVisibility: "public",
+      parentRunId: "run-p",
+    });
+    return { first, later, threadKey };
+  }
+
+  it("get_run_status on a finished child whose thread has a newer live run answers `running` with `continuedBy`; once that run ends it answers its status and final reply — under the child's id", async () => {
+    const w = world();
+    const { first, later } = continuedChild(w);
+    await w.store.put(first);
+    w.registry.publish(later.id, { type: "tool_call", tool: "web_fetch", summary: "GET https://example.com" });
+    const live = JSON.parse(
+      String(await getRunStatusTool.run({ id: "r-first" }, ctxFor(w, alice, { runId: "run-p" }))),
+    );
+    expect(live).toMatchObject({ id: "r-first", agent: "research", status: "running", continuedBy: later.id });
+    expect(String(live.activity)).toContain("example.com");
+    expect("finalReply" in live).toBe(false);
+
+    w.registry.publish(later.id, { type: "answer", text: "Grants live in config.yaml." });
+    w.registry.finish(later.id, "completed");
+    w.registry.seal(later.id, { replyOk: true });
+    const done = JSON.parse(
+      String(await getRunStatusTool.run({ id: "r-first" }, ctxFor(w, alice, { runId: "run-p" }))),
+    );
+    expect(done).toMatchObject({ id: "r-first", status: "completed", continuedBy: later.id });
+    expect(String(done.finalReply)).toContain("Grants live in config.yaml.");
+    expect(String(done.finalReply)).not.toContain("single-instance coordination point"); // the first reply is not the answer
+
+    // The continuation itself reads as its own run, with no `continuedBy`.
+    const own = JSON.parse(String(await getRunStatusTool.run({ id: later.id }, ctxFor(w, alice, { runId: "run-p" }))));
+    expect(own).toMatchObject({ id: later.id, status: "completed" });
+    expect("continuedBy" in own).toBe(false);
+  });
+
+  it("await_runs on a finished child whose thread continued waits for the continuation — its end wakes the wait by the parent's id — and reports the child `completed` with `continuedBy` and the newest run's reply", async () => {
+    const w = world();
+    const { first, later } = continuedChild(w);
+    await w.store.put(first);
+    const finishLater = () => {
+      w.registry.publish(later.id, { type: "answer", text: "Grants live in config.yaml." });
+      w.registry.finish(later.id, "completed");
+      w.registry.seal(later.id, { replyOk: true });
+      return "hold" as const;
+    };
+    const { wait, slept } = waitFor(w, { hooks: [finishLater] });
+    const out = report(
+      await awaitRunsTool.run(
+        { ids: ["r-first"] },
+        ctxFor(w, alice, { runId: "run-p", wait, remainingMs: () => 30 * 60_000 }),
+      ),
+    );
+    expect(out.ended).toBe("all_ended");
+    expect(out.runs[0]).toMatchObject({ id: "r-first", agent: "research", status: "completed", continuedBy: later.id });
+    expect(String(out.runs[0].finalReply)).toContain("Grants live in config.yaml.");
+    expect(slept).toHaveLength(1); // one sleep, held — the continuation's end frame ended it
+  });
+
+  it("a finished child whose thread has no later run reads as before — no `continuedBy` — and a later run in the thread is followed whoever replied: the thread's, not the requester's", async () => {
+    const w = world();
+    await w.store.put(persisted("r-alone", { parentRunId: "run-p", threadKey: "slack:CX:alone" }));
+    const alone = JSON.parse(
+      String(await getRunStatusTool.run({ id: "r-alone" }, ctxFor(w, alice, { runId: "run-p" }))),
+    );
+    expect(alone).toMatchObject({ id: "r-alone", status: "completed" });
+    expect("continuedBy" in alone).toBe(false);
+    expect(String(alone.finalReply)).toContain("single-instance coordination point");
+    // Bob replied in alice's child's thread: the child's row follows his run — one thread, one child.
+    const bobs = w.registry.create("general · child", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UBOB",
+      threadKey: "slack:CX:alone",
+      channelVisibility: "public",
+      parentRunId: "run-p",
+    });
+    const followed = JSON.parse(
+      String(await getRunStatusTool.run({ id: "r-alone" }, ctxFor(w, alice, { runId: "run-p" }))),
+    );
+    expect(followed).toMatchObject({ id: "r-alone", agent: "research", status: "running", continuedBy: bobs.id });
+    expect("finalReply" in followed).toBe(false);
   });
 });

@@ -172,6 +172,53 @@ describe("waitCapabilityFor — what a waiting tool watches", () => {
     stop2();
   });
 
+  // docs/reference/specs/agent-conductor.md item 10: a child is its thread — a
+  // run that continues a child's thread carries the parent's id, so its end
+  // wakes the parent's wait whatever id the wait was asked for.
+  it("wakes when any run this run spawned ends — a child by `parentRunId`, not only a watched id — so a thread's continuation ends the tick; another parent's child, or the continuation's mere activity, never", () => {
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => "tok", now: () => NOW });
+    const cap = waitCapabilityFor({
+      registry,
+      control: new RunControl(),
+      inbox: new FollowUpInbox(),
+      clock: () => NOW,
+      sleep: async () => {},
+      runId: "run-p",
+    });
+    const meta = { channelId: "slack:C", userId: "slack:U" };
+    const continuation = registry.create("general · child", {
+      ...meta,
+      threadKey: "slack:C:child",
+      parentRunId: "run-p",
+    });
+    const othersChild = registry.create("research", { ...meta, threadKey: "slack:C:other", parentRunId: "run-q" });
+    let wakes = 0;
+    const stop = cap.watch(new Set(["run-first"]), () => void wakes++);
+    registry.publish(continuation.id, { type: "tool_call", tool: "web_fetch", summary: "GET x" });
+    expect(wakes).toBe(0); // activity is not an end
+    registry.finish(othersChild.id, "completed");
+    registry.seal(othersChild.id, { replyOk: true });
+    expect(wakes).toBe(0); // another parent's child
+    registry.finish(continuation.id, "completed");
+    expect(wakes).toBe(1); // this run's child ended, though the wait never named its id
+    registry.seal(continuation.id, { replyOk: true });
+    expect(wakes).toBe(2);
+    stop();
+    // The rule reads the live feed alone: a finished child the registry still
+    // holds is replayed at the next subscribe, and must not end that tick at
+    // once — the wait has read it already, and would otherwise spin.
+    let later = 0;
+    const stopLater = cap.watch(new Set(["run-first"]), () => void later++);
+    expect(later).toBe(0);
+    stopLater();
+    // A watched id that already ended still wakes on the replay: nothing waits on an end that has passed.
+    let named = 0;
+    const stopNamed = cap.watch(new Set([continuation.id]), () => void named++);
+    expect(named).toBe(1);
+    stopNamed();
+  });
+
   it("a watched child that already ended wakes the wait at once (the feed replays the active set), so nothing waits on an end that has passed", () => {
     const registry = new RunRegistry({ genId: () => "run-done", genToken: () => "tok", now: () => NOW });
     const child = registry.create("child", { channelId: "slack:C", userId: "slack:U", threadKey: "slack:C:1" });

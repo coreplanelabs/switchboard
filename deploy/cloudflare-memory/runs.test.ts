@@ -645,7 +645,7 @@ describe("run history routes", () => {
     });
   });
 
-  it("list: newest-first, limit 1000 → at most 200 rows plus a cursor; before/sinceMs/agent/channel filters; no events on the wire", async () => {
+  it("list: newest-first, limit 1000 → at most 200 rows plus a cursor; before/sinceMs/agent/channel/threadKey filters; no events on the wire", async () => {
     const key = storeKey();
     const now = Date.now();
     for (let i = 0; i < 230; i++) {
@@ -655,6 +655,7 @@ describe("run history routes", () => {
           events: events(1),
           agent: i % 2 ? "review" : "coding",
           channelId: i % 5 ? "slack:C1" : "slack:C2",
+          threadKey: i % 7 ? "slack:C1:t1" : "slack:C1:t2",
         }),
       );
     }
@@ -685,6 +686,17 @@ describe("run history routes", () => {
       channelId: string;
     }>;
     expect(c2.every((r) => r.channelId === "slack:C2")).toBe(true);
+    // agent-conductor item 10: one thread's runs, newest first — the newest is `limit: 1`.
+    const thread = (await post("/runs/list", { storeKey: key, threadKey: "slack:C1:t2", limit: 5 })).data
+      .items as Array<{ id: string; threadKey: string }>;
+    expect(thread).toHaveLength(5);
+    expect(thread.every((r) => r.threadKey === "slack:C1:t2")).toBe(true);
+    expect(thread[0].id).toBe("r000");
+    const newest = (await post("/runs/list", { storeKey: key, threadKey: "slack:C1:t2", limit: 1 })).data
+      .items as Array<{ id: string }>;
+    expect(newest.map((r) => r.id)).toEqual(["r000"]);
+    expect((await post("/runs/list", { storeKey: key, threadKey: "slack:C1:none" })).data.items).toEqual([]);
+    expect((await post("/runs/list", { storeKey: key, threadKey: 7 })).status).toBe(400);
   }, 60_000);
 
   it("/runs/summary returns the listing row (no events, with bytes) for a kept run and {summary: null} otherwise, reading no event rows", async () => {

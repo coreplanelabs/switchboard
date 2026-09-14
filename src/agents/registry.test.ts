@@ -843,6 +843,20 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
     expect(sys).toMatch(/never claim a child finished/);
   });
 
+  // docs/reference/specs/agent-conductor.md item 10: a child is its thread — a
+  // person's reply there reaches the conductor and the child's rows follow the
+  // thread's newest run, so the prompt says to await again before compiling.
+  it("conductor's prompt says a child is its thread: a person's reply in a child's thread reaches it as a follow-up from that child, steers the child while it runs or starts a new run of it after it ended, the child's rows follow the thread's newest run (`continuedBy`), and it awaits again before compiling", () => {
+    const sys = AGENTS.conductor.system;
+    expect(sys).toMatch(/A CHILD IS ITS THREAD/);
+    expect(sys).toMatch(/reply in a child's thread/i);
+    expect(sys).toMatch(/follow-up from that child/i);
+    expect(sys).toMatch(/new run of (that|the) child/i);
+    expect(sys).toMatch(/continuedBy/);
+    expect(sys).toMatch(/await_runs[^.]*again/);
+    expect(sys).toMatch(/newest run/);
+  });
+
   // docs/reference/specs/agent-conductor.md items 3 and 7: the child list is
   // rendered from the registry the way `help` renders its rows — a preset
   // added or moved across the identity line is offered or withheld the day
