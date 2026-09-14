@@ -8,8 +8,10 @@
 // unit's thread, opened through the requesting thread's channel; its board
 // issue), `branch`, `spawn`, `read-record` (a finished child's typed artifacts:
 // the pull request it opened, the verdict and whether it stands on the pull
-// request at the reviewed head, the dispositions), `pr-check`, `round` (a
-// boundary the card draws), `unit-end` (the report in the unit's thread),
+// request at the reviewed head, the dispositions), `pr-check` (what heads the
+// unit's branch: an open pull request, or — with none open — one already
+// merged, which makes the unit done), `round` (a boundary the card draws),
+// `unit-end` (the report in the unit's thread),
 // `finish` (the parent's run record), plus `authorize`, the question the shim
 // asks before it creates an instance. The shim forwards `/admin/*` to the
 // container untouched and the Access gate does not cover it, so the bearer is
@@ -78,6 +80,7 @@ import type { GithubApi } from "../execution/githubApi.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import type {
   CommitChecks,
+  MergedPrRef,
   MergeResult,
   OpenPrRef,
   PullRequestFacts,
@@ -119,8 +122,11 @@ export interface AdminCoordinatorDeps {
    *  row's parts — the card's ts when the handle must redraw it); undefined for
    *  a platform no thread can be rebuilt on. */
   ioFor: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
-  /** The open pull request heading a branch (githubPulls.findOpenPrByHead). */
+  /** The open pull request heading a branch (githubPulls.findOpenPrByHead), and
+   *  — asked only when there is none — the merged one (githubPulls.findMergedPrByHead):
+   *  a unit whose pull request merged before the runner reached it is done, not aborted. */
   findOpenPrByHead: (repo: string, branch: string) => Promise<OpenPrRef | null>;
+  findMergedPrByHead: (repo: string, branch: string) => Promise<MergedPrRef | null>;
   /** The target repository at the base ref (the plan, the specs, the rules), its
    *  issues (a unit's board issue) and the comment a unit's ending leaves there
    *  — the App's GitHub reads and the one write beside the merge. */
@@ -699,18 +705,38 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const unit = await unitRowOf(deps, instance, body.unit as string | undefined);
   if (!unit.ok) return unit.response;
   const branch = unit.row?.branch ?? instance.branch;
+  // The unit's row remembers its pull request, so a person reads it there.
+  const remember = async (pr: { number: number; url: string }) => {
+    if (unit.row && (unit.row.pr?.number !== pr.number || unit.row.pr.url !== pr.url))
+      await deps.instances.putUnits([{ ...unit.row, pr }]);
+  };
   try {
-    const pr = await deps.findOpenPrByHead(instance.repo, branch);
-    if (!pr) return json(200, { ok: true, state: "none", at });
-    // The unit's row remembers its pull request, so a person reads it there.
-    if (unit.row && (unit.row.pr?.number !== pr.number || unit.row.pr.url !== pr.htmlUrl))
-      await deps.instances.putUnits([{ ...unit.row, pr: { number: pr.number, url: pr.htmlUrl } }]);
+    const open = await deps.findOpenPrByHead(instance.repo, branch);
+    if (open) {
+      await remember({ number: open.number, url: open.htmlUrl });
+      return json(200, {
+        ok: true,
+        state: "open",
+        prNumber: open.number,
+        url: open.htmlUrl,
+        ...(open.headSha !== undefined ? { headSha: open.headSha } : {}),
+        at,
+      });
+    }
+    // No open pull request heads the branch: one already merged — by a person,
+    // or by an earlier attempt that died after its merge — makes the unit done
+    // rather than aborted (record 0031's `merged` ending, reached without the
+    // runner's merge). Asked only now: an open pull request is the round's.
+    const merged = await deps.findMergedPrByHead(instance.repo, branch);
+    if (!merged) return json(200, { ok: true, state: "none", at });
+    await remember({ number: merged.number, url: merged.htmlUrl });
     return json(200, {
       ok: true,
-      state: "open",
-      prNumber: pr.number,
-      url: pr.htmlUrl,
-      ...(pr.headSha !== undefined ? { headSha: pr.headSha } : {}),
+      state: "merged",
+      prNumber: merged.number,
+      url: merged.htmlUrl,
+      sha: merged.sha,
+      mergedAt: merged.mergedAt,
       at,
     });
   } catch (err) {

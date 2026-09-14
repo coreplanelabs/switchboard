@@ -16,6 +16,7 @@ import { isRunRecord, type RunRecord } from "../core/runRecord.js";
 import type { ChannelIO, IncomingMessage, StatusUpdate } from "../core/types.js";
 import type {
   CommitChecks,
+  MergedPrRef,
   MergeResult,
   OpenPrRef,
   PullRequestFacts,
@@ -113,6 +114,8 @@ function harness(
     script?: Script;
     tokens?: Secret | undefined;
     pr?: OpenPrRef | null | Error;
+    /** The merged pull request heading the branch, asked only when no open one does. */
+    mergedPr?: MergedPrRef | null | Error;
     /** The target repository's files at the base ref and its open issues (the in-memory GitHub). */
     files?: Record<string, string>;
     issues?: IssueSummary[];
@@ -141,6 +144,7 @@ function harness(
   };
   const logs: string[] = [];
   const prLookups: Array<[string, string]> = [];
+  const mergedLookups: Array<[string, string]> = [];
   const branches: Array<[string, string, string]> = [];
   const threadsAsked: Array<{ threadKey: string; userId: string; cardTs?: string }> = [];
   const written: RunRecord[] = [];
@@ -163,6 +167,11 @@ function harness(
       prLookups.push([repo, branch]);
       if (over.pr instanceof Error) throw over.pr;
       return over.pr ?? null;
+    },
+    findMergedPrByHead: async (repo, branch) => {
+      mergedLookups.push([repo, branch]);
+      if (over.mergedPr instanceof Error) throw over.mergedPr;
+      return over.mergedPr ?? null;
     },
     github,
     createBranchRef: async (repo, branch, fromRef) => {
@@ -203,6 +212,7 @@ function harness(
     replies,
     logs,
     prLookups,
+    mergedLookups,
     branches,
     threadsAsked,
     written,
@@ -590,6 +600,75 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     });
 
     const down = harness({ pr: new Error("PR lookup failed: HTTP 502") });
+    await down.instances.put(INSTANCE);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id }),
+        down.deps,
+      ),
+    ).toEqual({
+      status: 502,
+      body: { ok: false, error: "github_unavailable", message: "PR lookup failed: HTTP 502", at: NOW },
+    });
+  });
+
+  it("answers state merged — the number, url, merge commit and when GitHub says it merged — for a branch no open pull request heads but a merged one does, asked only after the open lookup came back empty; an open pull request never asks for a merged one; no pull request of either kind is still none; the merged lookup failing is 502 too", async () => {
+    const MERGED_PR: MergedPrRef = {
+      number: 12,
+      htmlUrl: "https://github.com/acme/api/pull/12",
+      sha: "9".repeat(40),
+      mergedAt: "2026-09-13T23:55:59Z",
+    };
+    const merged = harness({ mergedPr: MERGED_PR });
+    await merged.instances.put(INSTANCE);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id }),
+        merged.deps,
+      ),
+    ).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        state: "merged",
+        prNumber: 12,
+        url: "https://github.com/acme/api/pull/12",
+        sha: "9".repeat(40),
+        mergedAt: "2026-09-13T23:55:59Z",
+        at: NOW,
+      },
+    });
+    expect(merged.prLookups).toEqual([["acme/api", "plan/orchestration/u12"]]);
+    expect(merged.mergedLookups).toEqual([["acme/api", "plan/orchestration/u12"]]);
+
+    const open = harness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
+      mergedPr: MERGED_PR,
+    });
+    await open.instances.put(INSTANCE);
+    expect(
+      (
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id }),
+          open.deps,
+        )
+      ).body,
+    ).toMatchObject({ state: "open", prNumber: 12 });
+    expect(open.mergedLookups).toEqual([]);
+
+    const none = harness();
+    await none.instances.put(INSTANCE);
+    expect(
+      (
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id }),
+          none.deps,
+        )
+      ).body,
+    ).toEqual({ ok: true, state: "none", at: NOW });
+    expect(none.mergedLookups).toEqual([["acme/api", "plan/orchestration/u12"]]);
+
+    const down = harness({ mergedPr: new Error("PR lookup failed: HTTP 502") });
     await down.instances.put(INSTANCE);
     expect(
       await handleCoordinatorRequest(
@@ -1205,6 +1284,35 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       url: "https://github.com/acme/api/pull/12",
     });
     expect((await call(h, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U99" })).status).toBe(404);
+  });
+
+  it("pr-check for a unit whose branch only a merged pull request heads answers merged and remembers that pull request on the row, so the row reads like a unit the runner merged", async () => {
+    const h = await planHarness({
+      mergedPr: {
+        number: 12,
+        htmlUrl: "https://github.com/acme/api/pull/12",
+        sha: "9".repeat(40),
+        mergedAt: "2026-09-13T23:55:59Z",
+      },
+    });
+    expect(await call(h, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).toEqual({
+      status: 200,
+      body: {
+        ok: true,
+        state: "merged",
+        prNumber: 12,
+        url: "https://github.com/acme/api/pull/12",
+        sha: "9".repeat(40),
+        mergedAt: "2026-09-13T23:55:59Z",
+        at: NOW,
+      },
+    });
+    expect(h.prLookups).toEqual([["acme/api", "plan/fixture/u10"]]);
+    expect(h.mergedLookups).toEqual([["acme/api", "plan/fixture/u10"]]);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].pr).toEqual({
+      number: 12,
+      url: "https://github.com/acme/api/pull/12",
+    });
   });
 
   it("round appends the boundary to the unit's row and redraws the card from the instance's card handle with one line per unit; a malformed boundary is 400", async () => {

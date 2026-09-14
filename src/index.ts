@@ -77,6 +77,7 @@ import {
   fetchCommitChecks,
   fetchPullRequestFacts,
   fetchPullRequestReviews,
+  findMergedPrByHead,
   findOpenPrByHead,
   mergePullRequest,
 } from "./execution/githubPulls.js";
@@ -494,6 +495,7 @@ export async function runBot(): Promise<void> {
       dispatch: (msg, io, opts) => dispatch(deps, msg, io, opts),
       ioFor: (thread) => threadIoFor(thread),
       findOpenPrByHead,
+      findMergedPrByHead,
       // The App's GitHub reads for the plan, the specs, the rules and a unit's
       // board issue; the branch create; the reviews and the identity the merge
       // gate's "the verdict stands" question is answered from.

@@ -164,6 +164,14 @@ function runChild(d: Driver, runId: string, facts: ChildFacts, at: number): Coor
   return d.answer({ type: "read-record", run: facts, at });
 }
 
+/** A unit at its branch step: the pipeline opened and the pre-check answered `none` — no pull request heads the branch yet. */
+function fresh(inp: UnitPipelineInput, at = T0): Driver {
+  const d = new Driver(openUnitPipeline(inp, at));
+  expect(d.action).toEqual({ type: "pr-check", step: `${inp.unit.id}/pr-check` });
+  d.answer({ type: "pr-check", pr: { state: "none" }, at });
+  return d;
+}
+
 /** Round 0 through its open pull request: the machine is then about to spawn review round 1. */
 function throughRoundZero(d: Driver, at = T0 + 10 * MIN): CoordinatorAction {
   expect(d.action.type).toBe("branch");
@@ -294,7 +302,7 @@ describe("the plan cursor — ready units in dependency order, a failure blockin
 
 describe("the unit pipeline — every ending the in-process loop has today, on step returns", () => {
   it("merge-ready in one round on a plan branch: branch → coding → pr-check → review → approve → merge, the round boundaries as the card draws them", () => {
-    const d = new Driver(openUnitPipeline(input(), T0));
+    const d = fresh(input());
     expect(d.action).toMatchObject({ type: "branch", step: "U10/branch", branch: input().unit.branch, from: "main" });
     d.answer({ type: "branch", ok: true, at: T0 });
     // The spawn carries the key's step, the preset, its clipped budget and the brief (ids only).
@@ -361,9 +369,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
   });
 
   it("merge-ready off a plan branch waits for a person: the machine ends merge_ready and never asks for a merge", () => {
-    const d = new Driver(
-      openUnitPipeline(input({ unit: { id: "task", branch: "ship/fix-abc123" }, merge: "person" }), T0),
-    );
+    const d = fresh(input({ unit: { id: "task", branch: "ship/fix-abc123" }, merge: "person" }));
     throughRoundZero(d);
     runChild(
       d,
@@ -385,7 +391,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
   });
 
   it("findings round trip: request_changes → a fix round with the review's run as its brief → re-review with the prior round's ids → approve; the declined disposition rides the report", () => {
-    const d = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const d = fresh(input({ merge: "person" }));
     throughRoundZero(d);
     runChild(
       d,
@@ -440,7 +446,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
   });
 
   it("the round cap: request_changes at the last allowed round ends the unit with the declined/unaddressed split over the last review's findings", () => {
-    const d = new Driver(openUnitPipeline(input({ caps: { maxRounds: 1, maxMinutes: 120 }, merge: "person" }), T0));
+    const d = fresh(input({ caps: { maxRounds: 1, maxMinutes: 120 }, merge: "person" }));
     throughRoundZero(d);
     runChild(
       d,
@@ -461,7 +467,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
   });
 
   it("the wall-clock cap: a round starts only when the reservation holds, and the child's budget is clipped to what remains", () => {
-    const d = new Driver(openUnitPipeline(input({ caps: { maxRounds: 3, maxMinutes: 30 }, merge: "person" }), T0));
+    const d = fresh(input({ caps: { maxRounds: 3, maxMinutes: 30 }, merge: "person" }));
     // Round 0 spawned with the coding preset's own budget clipped to the 30-minute pipeline.
     d.answer({ type: "branch", ok: true, at: T0 });
     expect(d.action).toMatchObject({ type: "spawn", budgetMinutes: 30 });
@@ -493,14 +499,14 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
   });
 
   it("a stop: a child that ended stopped_soft or stopped_hard ends the unit as an operator stop naming the mode", () => {
-    const soft = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const soft = fresh(input({ merge: "person" }));
     soft.answer({ type: "branch", ok: true, at: T0 });
     runChild(soft, "run-c0", finished({ status: "stopped_soft", finalReply: "stopping" }), T0 + 5 * MIN);
     expect(soft.action).toMatchObject({ type: "end", ending: { kind: "stopped", mode: "soft" } });
     expect(soft.rounds()).toEqual(["0 coding started", "0 coding stopped"]);
     expect(renderUnitReport(soft.state)).toContain("⏹ Ship stopped by operator (soft stop) after 0 review rounds.");
 
-    const hard = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const hard = fresh(input({ merge: "person" }));
     throughRoundZero(hard);
     runChild(hard, "run-r1", finished({ status: "stopped_hard" }), T0 + 20 * MIN);
     expect(hard.action).toMatchObject({ type: "end", ending: { kind: "stopped", mode: "hard" } });
@@ -511,7 +517,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
   });
 
   it("a stop is honored around a posted verdict, never over it: an approve that posted is merge-ready stop or no stop; a changes-requested review that posted is a stopped report naming it", () => {
-    const approved = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const approved = fresh(input({ merge: "person" }));
     throughRoundZero(approved);
     runChild(
       approved,
@@ -526,7 +532,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
     );
     expect(approved.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
 
-    const changes = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const changes = fresh(input({ merge: "person" }));
     throughRoundZero(changes);
     runChild(
       changes,
@@ -546,7 +552,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
   });
 
   it("aborts: a round 0 that opened no pull request, a branch that could not be created, a coding child that failed, a fix round that repushed nothing (unless every finding was declined)", () => {
-    const noPr = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const noPr = fresh(input({ merge: "person" }));
     noPr.answer({ type: "branch", ok: true, at: T0 });
     runChild(noPr, "run-c0", finished({ status: "completed", finalReply: "Which login flow?" }), T0 + 5 * MIN);
     noPr.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 5 * MIN });
@@ -559,19 +565,19 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
     expect(noPrReport).toContain("Which login flow?");
     expect(noPrReport).toContain("⚠️ Ship ended at round 0: the coding round ended without opening a pull request");
 
-    const noBranch = new Driver(openUnitPipeline(input(), T0));
+    const noBranch = fresh(input());
     noBranch.answer({ type: "branch", ok: false, reason: "HTTP 403", at: T0 });
     expect(noBranch.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     expect(renderUnitReport(noBranch.state)).toContain("Could not create the pipeline branch");
     expect(noBranch.rounds()).toEqual([]);
 
-    const failed = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const failed = fresh(input({ merge: "person" }));
     failed.answer({ type: "branch", ok: true, at: T0 });
     runChild(failed, "run-c0", finished({ status: "failed" }), T0 + 5 * MIN);
     expect(failed.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     expect(renderUnitReport(failed.state)).toContain("ended `failed`");
 
-    const stale = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const stale = fresh(input({ merge: "person" }));
     throughRoundZero(stale);
     runChild(
       stale,
@@ -594,7 +600,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
     expect(renderUnitReport(stale.state)).toContain("produced no new head");
     expect(stale.rounds().at(-1)).toBe("1 coding aborted");
 
-    const declinedAll = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const declinedAll = fresh(input({ merge: "person" }));
     throughRoundZero(declinedAll);
     runChild(
       declinedAll,
@@ -617,7 +623,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
   });
 
   it("no verdict: a review child that ended without one aborts the unit naming the terminal, and no fix round starts", () => {
-    const d = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const d = fresh(input({ merge: "person" }));
     throughRoundZero(d);
     runChild(d, "run-r1", finished({ status: "completed", finalReply: "ran out of budget" }), T0 + 20 * MIN);
     expect(d.action).toMatchObject({
@@ -631,7 +637,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
   });
 
   it("an approve whose post did not land is an honest abort, never merge-ready", () => {
-    const d = new Driver(openUnitPipeline(input(), T0));
+    const d = fresh(input());
     throughRoundZero(d);
     runChild(
       d,
@@ -669,7 +675,7 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
 
 describe("the unit pipeline — the event, the timeout and the confirmation (the durable half)", () => {
   function atWait(): Driver {
-    const d = new Driver(openUnitPipeline(input(), T0));
+    const d = fresh(input());
     d.answer({ type: "branch", ok: true, at: T0 });
     d.answer({ type: "spawn", outcome: "spawned", runId: "run-c0", at: T0 });
     expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/wait/1" });
@@ -764,7 +770,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect(total).toBe(CHILD_MINUTES.coding * MIN + WAIT_MARGIN_MS);
 
     // A busy wait — another run holding the thread — is a chunk too, then the spawn is asked again.
-    const b = new Driver(openUnitPipeline(input(), T0));
+    const b = fresh(input());
     b.answer({ type: "branch", ok: true, at: T0 });
     b.answer({ type: "spawn", outcome: "busy", runId: "run-other", at: T0 });
     expect(b.action).toMatchObject({ type: "wait", step: "U10/0/coding/busy/1", timeoutMs: WAIT_CHUNK_MS });
@@ -778,7 +784,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect(renderUnitReport(noPr.state)).toBe(shipInterruptedNote());
     expect(noPr.rounds()).toEqual(["0 coding started", "0 coding aborted"]);
 
-    const withPr = new Driver(openUnitPipeline(input(), T0));
+    const withPr = fresh(input());
     throughRoundZero(withPr);
     runChild(withPr, "run-r1", finished({ status: "interrupted" }), T0 + 20 * MIN);
     expect(withPr.action).toMatchObject({ type: "end", ending: { kind: "interrupted", runId: "run-r1" } });
@@ -786,7 +792,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
   });
 
   it("a spawn answering `alreadySpawned` proceeds to the wait on that run without a second child", () => {
-    const d = new Driver(openUnitPipeline(input(), T0));
+    const d = fresh(input());
     d.answer({ type: "branch", ok: true, at: T0 });
     d.answer({ type: "spawn", outcome: "alreadySpawned", runId: "run-c0", at: T0 });
     expect(d.action).toMatchObject({ type: "wait", runId: "run-c0", step: "U10/0/coding/wait/1" });
@@ -794,7 +800,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
   });
 
   it("a spawn answering `busy` waits for the live run's end, then spawns the same step again; a second `busy` waits again under a new name", () => {
-    const d = new Driver(openUnitPipeline(input(), T0));
+    const d = fresh(input());
     d.answer({ type: "branch", ok: true, at: T0 });
     d.answer({ type: "spawn", outcome: "busy", runId: "run-other", at: T0 });
     expect(d.action).toMatchObject({ type: "wait", step: "U10/0/coding/busy/1", runId: "run-other" });
@@ -810,7 +816,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
   });
 
   it("a spawn the authorize stage refused ends the unit with the gate's own name; a spawn that failed ends it as an abort", () => {
-    const refused = new Driver(openUnitPipeline(input(), T0));
+    const refused = fresh(input());
     refused.answer({ type: "branch", ok: true, at: T0 });
     refused.answer({
       type: "spawn",
@@ -823,7 +829,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect(renderUnitReport(refused.state)).toContain("agent_allowlist");
     expect(renderUnitReport(refused.state)).toContain("not on the allowlist");
 
-    const failed = new Driver(openUnitPipeline(input(), T0));
+    const failed = fresh(input());
     failed.answer({ type: "branch", ok: true, at: T0 });
     failed.answer({ type: "spawn", outcome: "failed", reason: "HTTP 503", at: T0 });
     expect(failed.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
@@ -831,7 +837,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
   });
 
   it("the merge: `pending` polls under a bounded wait, `refused` ends the unit naming the reason, and the poll's budget is its own — never the pipeline's", () => {
-    const d = new Driver(openUnitPipeline(input(), T0));
+    const d = fresh(input());
     throughRoundZero(d);
     runChild(
       d,
@@ -864,7 +870,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     expect((polls - 1) * MERGE_POLL_MS).toBeGreaterThanOrEqual(MERGE_WAIT_MAX_MS);
     expect(renderUnitReport(d.state)).toContain("checks running");
 
-    const refused = new Driver(openUnitPipeline(input(), T0));
+    const refused = fresh(input());
     throughRoundZero(refused);
     runChild(
       refused,
@@ -883,7 +889,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
   });
 
   it("an approve on a plan branch with no known head to merge at is a refused merge, never a person's merge-ready", () => {
-    const d = new Driver(openUnitPipeline(input(), T0));
+    const d = fresh(input());
     d.answer({ type: "branch", ok: true, at: T0 });
     runChild(d, "run-c0", finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }), T0 + MIN);
     // The pull request is open but GitHub reported no head, and the review child settled none either.
@@ -905,7 +911,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
   });
 
   it("a fix round whose pull request was closed out from under it and reopened adopts the open pull request on the branch; one with no open pull request aborts", () => {
-    const adopt = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const adopt = fresh(input({ merge: "person" }));
     throughRoundZero(adopt);
     runChild(
       adopt,
@@ -926,7 +932,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     });
     expect(adopt.action).toMatchObject({ type: "spawn", step: "U10/2/review", brief: { pr: 9, headSha: HEAD_C } });
 
-    const gone = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    const gone = fresh(input({ merge: "person" }));
     throughRoundZero(gone);
     runChild(
       gone,
@@ -949,13 +955,134 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     const d = new Driver(openUnitPipeline(input({ unit: { id: "U12", branch: "plan/p/u12-x" }, merge: "person" }), T0));
     const seen: string[] = [];
     seen.push(d.action.step);
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 });
+    seen.push(d.action.step);
     d.answer({ type: "branch", ok: true, at: T0 });
     seen.push(d.action.step);
     runChild(d, "run-c0", finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }), T0 + MIN);
     seen.push(d.action.step);
     d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + MIN });
     seen.push(d.action.step);
-    expect(seen).toEqual(["U12/branch", "U12/0/coding", "U12/0/coding/pr-check", "U12/1/review"]);
+    expect(seen).toEqual(["U12/pr-check", "U12/branch", "U12/0/coding", "U12/0/coding/pr-check", "U12/1/review"]);
     for (const s of seen) expect(s).toMatch(/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/);
+  });
+});
+
+describe("the unit pipeline — a pull request already merged: a re-issued plan, or a merge that lands during a round", () => {
+  const MERGED_AT = "2026-09-13T23:55:59Z";
+  const graph = parsePlanGraph(PLAN, PLAN_ID);
+  const merged = (sha: string, mergedAt = MERGED_AT) =>
+    ({ state: "merged", prNumber: 7, url: PR_URL, sha, mergedAt }) as const;
+
+  it("a unit whose pull request merged before the attempt — a person's merge, or an earlier attempt's — ends merged at the pre-check under `<unit>/pr-check`: no branch, no child, no round; the report says it was already merged and when, never that the runner merged it; the cursor marks it done and its dependents become ready; the same return applied twice changes nothing", () => {
+    const d = new Driver(openUnitPipeline(input(), T0));
+    expect(d.action).toEqual({ type: "pr-check", step: "U10/pr-check" });
+    d.answer({ type: "pr-check", pr: merged(HEAD_B, MERGED_AT), at: T0 + MIN });
+    expect(d.action).toEqual({
+      type: "end",
+      step: "U10/end",
+      ending: {
+        kind: "merged",
+        by: "other",
+        pr: { number: 7, url: PR_URL },
+        sha: HEAD_B,
+        mergedAt: MERGED_AT,
+        reviewRounds: 0,
+      },
+    });
+    expect(d.rounds()).toEqual([]);
+    expect(d.notes).toEqual([{ type: "ended", ending: d.state.ending }]);
+    expect(d.state.pr).toEqual({ number: 7, url: PR_URL });
+    expect(d.state.clock).toBe(T0 + MIN);
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(
+      `✅ Already merged: ${PR_URL} (merge commit \`${HEAD_B.slice(0, 7)}\`, merged ${MERGED_AT})`,
+    );
+    expect(report).toContain("before this attempt reached it");
+    expect(report).toContain("its dependents start on a base that carries it");
+    expect(report).not.toContain("plan:merge");
+    expect(report).not.toContain("merged by the plan runner");
+    // The same return again: the machine has left the step, and nothing changes.
+    const ended = d.state;
+    const again = applyReturn(ended, { type: "pr-check", step: "U10/pr-check", pr: merged(HEAD_B), at: T0 + 2 * MIN });
+    expect(again.state).toBe(ended);
+    expect(again.notes).toEqual([]);
+    // The cursor: a `merged` ending is `done`, so U11 — which depends on U10 — becomes ready.
+    let cursor = openPlanCursor(graph, ["U10", "U11"]);
+    cursor = startUnit(graph, cursor, "U10");
+    expect(readyUnits(graph, cursor)).toEqual([]);
+    cursor = settleUnit(graph, cursor, "U10", d.state.ending!.kind === "merged" ? "done" : "failed");
+    expect(cursor.status).toEqual({ U10: "done", U11: "pending" });
+    expect(readyUnits(graph, cursor)).toEqual(["U11"]);
+  });
+
+  it("the pre-check answering none or open proceeds to the branch and round 0 as before: an open pull request is round 0's to rebase and re-describe, and is adopted at the round's own pr-check, not here", () => {
+    const none = new Driver(openUnitPipeline(input(), T0));
+    expect(none.action).toEqual({ type: "pr-check", step: "U10/pr-check" });
+    none.answer({ type: "pr-check", pr: { state: "none" }, at: T0 });
+    expect(none.action).toMatchObject({ type: "branch", step: "U10/branch" });
+    expect(none.rounds()).toEqual([]);
+    const open = new Driver(openUnitPipeline(input(), T0));
+    expect(open.action).toEqual({ type: "pr-check", step: "U10/pr-check" });
+    open.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 });
+    expect(open.action).toMatchObject({ type: "branch", step: "U10/branch" });
+    expect(open.state.pr).toBeUndefined();
+    expect(open.state.lastReviewHead).toBeUndefined();
+  });
+
+  it("a merge that lands during a round — the pr-check after the coding child answers merged — ends the unit merged the same way, the round noted completed and no review spawned; after a fix round the same, with the review rounds counted", () => {
+    const d = fresh(input());
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "completed",
+        handoff: true,
+        finalReply: "Unit U10 is already done — nothing to ship this run.",
+      }),
+      T0 + 5 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "pr-check", step: "U10/0/coding/pr-check" });
+    d.answer({ type: "pr-check", pr: merged(HEAD_B), at: T0 + 5 * MIN });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "merged",
+        by: "other",
+        pr: { number: 7, url: PR_URL },
+        sha: HEAD_B,
+        mergedAt: MERGED_AT,
+        reviewRounds: 0,
+      },
+    });
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding completed"]);
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(
+      `✅ Already merged: ${PR_URL} (merge commit \`${HEAD_B.slice(0, 7)}\`, merged ${MERGED_AT})`,
+    );
+    expect(report).not.toContain("plan:merge");
+
+    const fix = fresh(input({ merge: "person" }));
+    throughRoundZero(fix);
+    runChild(
+      fix,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "x", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    runChild(fix, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_B }), T0 + 30 * MIN);
+    expect(fix.action).toMatchObject({ type: "pr-check", step: "U10/1/fix/pr-check" });
+    fix.answer({ type: "pr-check", pr: merged(HEAD_C), at: T0 + 30 * MIN });
+    expect(fix.action).toMatchObject({
+      type: "end",
+      ending: { kind: "merged", by: "other", sha: HEAD_C, reviewRounds: 1 },
+    });
+    expect(fix.rounds().at(-1)).toBe("1 coding completed");
   });
 });

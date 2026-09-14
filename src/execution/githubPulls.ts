@@ -85,6 +85,57 @@ export async function findOpenPrByHead(repo: string, branch: string): Promise<Op
   };
 }
 
+export interface MergedPrRef {
+  number: number;
+  htmlUrl: string;
+  /** The commit the merge put on the base — a squash's one commit, a merge's merge commit. */
+  sha: string;
+  /** When GitHub merged it, ISO 8601 — the fact that makes a closed row a merged one. */
+  mergedAt: string;
+}
+
+/**
+ * The merged PR whose head was `branch`, or null when none merged. The lookup
+ * is `state=closed` + `head=owner:branch`, newest first, read for the rows
+ * with a `merged_at` — a closed-unmerged PR still reports a `merge_commit_sha`
+ * (GitHub's test merge), so the time of the merge is the fact read, never that
+ * field alone — and the latest merge wins when the branch was reused. The plan
+ * runner asks this after `findOpenPrByHead` came back empty: a unit whose pull
+ * request a person, or an earlier attempt of the plan, merged before the runner
+ * reached it is done, not aborted. Throws on missing credential or a non-2xx
+ * response, like the open lookup.
+ */
+export async function findMergedPrByHead(repo: string, branch: string): Promise<MergedPrRef | null> {
+  const token = await requireToken();
+  const owner = repo.split("/")[0];
+  const head = encodeURIComponent(`${owner}:${branch}`);
+  const res = await fetch(
+    `https://api.github.com/repos/${repo}/pulls?state=closed&head=${head}&sort=updated&direction=desc`,
+    { headers: apiHeaders(token), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`PR lookup failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+  }
+  const rows = (await res.json()) as Array<{
+    number: number;
+    html_url: string;
+    merged_at?: string | null;
+    merge_commit_sha?: string | null;
+  }>;
+  if (!Array.isArray(rows)) return null;
+  const merged = rows
+    .flatMap((r) =>
+      typeof r.merged_at === "string" &&
+      typeof r.merge_commit_sha === "string" &&
+      /^[0-9a-f]{40}$/.test(r.merge_commit_sha)
+        ? [{ number: r.number, htmlUrl: r.html_url, sha: r.merge_commit_sha, mergedAt: r.merged_at }]
+        : [],
+    )
+    .sort((a, b) => (a.mergedAt < b.mergedAt ? 1 : a.mergedAt > b.mergedAt ? -1 : 0));
+  return merged[0] ?? null;
+}
+
 /**
  * Open the PR for `target.headBranch`, or edit the one already open —
  * lookup-first, create only when absent, never a second create. The create

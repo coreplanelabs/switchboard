@@ -24,7 +24,10 @@
 // dependencies are done. `done` is merged: a plan branch's pull request is the
 // runner's to squash (the `merge` step, under `plan:merge`) once the review
 // approved at its head and the checks are green, so its dependents start on a
-// base that carries it; a unit that ended any other way — a refused merge, a
+// base that carries it — or was found merged already by the machine's first
+// `pr-check` (a re-issued plan whose unit a person, or an earlier attempt,
+// merged), which ends the unit with no branch and no child; a unit that ended
+// any other way — a refused merge, a
 // cap, a stop — blocks its dependents, each told so as its own ending, and the
 // plan finishes `failed` so the summary says which units are left for the
 // plan's re-issue. A task string's ship branch waits for a person. Node-free:
@@ -252,7 +255,7 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
 }
 
 function prCheckReturn(step: string, a: BotAnswer): StepReturn {
-  const { ok, state, prNumber, url, headSha, at } = a.body;
+  const { ok, state, prNumber, url, headSha, sha, mergedAt, at } = a.body;
   if (ok === true && state === "none") return { type: "pr-check", step, pr: { state: "none" }, at };
   if (ok === true && state === "open" && typeof prNumber === "number" && typeof url === "string")
     return {
@@ -261,6 +264,17 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
       pr: { state: "open", prNumber, url, ...(typeof headSha === "string" ? { headSha } : {}) },
       at,
     };
+  // A merged pull request is read whole or not at all: the merge commit and
+  // the time are what the unit's ending and its report carry.
+  if (
+    ok === true &&
+    state === "merged" &&
+    typeof prNumber === "number" &&
+    typeof url === "string" &&
+    typeof sha === "string" &&
+    typeof mergedAt === "string"
+  )
+    return { type: "pr-check", step, pr: { state: "merged", prNumber, url, sha, mergedAt }, at };
   throw new UnreadableAnswer("pr-check", a, "state");
 }
 
