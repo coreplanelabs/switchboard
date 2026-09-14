@@ -1,4 +1,5 @@
 import { CommandRegistry } from "../commandRegistry.js";
+import { registerArtifactsCommands, type ArtifactsCommandDeps } from "./artifacts.js";
 import { registerConfigCommands, type ConfigCommandDeps } from "./config.js";
 import { registerContractCommands, type ContractCommandDeps } from "./contract.js";
 import { registerDeliveryCommands, type DeliveryCommandDeps } from "./delivery.js";
@@ -37,7 +38,8 @@ export type CoreCommandDeps = HelpCommandDeps &
   SetupCommandDeps &
   StatusCommandDeps &
   ContractCommandDeps &
-  DeliveryCommandDeps;
+  DeliveryCommandDeps &
+  ArtifactsCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
   registerHelpCommands(registry);
@@ -55,6 +57,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerSetupCommands(registry);
   registerContractCommands(registry);
   registerDeliveryCommands(registry);
+  registerArtifactsCommands(registry);
 }
 
 /** The `<group>` of every registered command's action, once each, sorted — the

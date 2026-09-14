@@ -3,6 +3,34 @@
 exports[`command conformance — catalogue fences > catalogue snapshot: id, arguments, options (names + kinds + enum values), surfaces, action, policy target, effect — update deliberately 1`] = `
 [
   {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "read",
+    "id": "artifacts.check",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "write",
+    "id": "artifacts.lifecycle",
+    "options": [
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
     "action": "config:write",
     "args": [
       {

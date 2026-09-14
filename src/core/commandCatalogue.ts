@@ -17,6 +17,7 @@ import {
   runDeployPlan,
 } from "../deploy/run.js";
 import { imagesHostIO } from "../deploy/imagesHost.js";
+import { artifactsBucketHost } from "../deploy/artifactsBucket.js";
 import { hostSecretsIO } from "../deploy/secretsHost.js";
 import { hostSetupIO } from "../setup/host.js";
 import { LocalOperations } from "../execution/executor.js";
@@ -294,6 +295,11 @@ export function buildCoreCommands(
       pushConfig: pushConfigOnHost,
       images: imagesHostIO({ log: (l) => console.log(l), now: wiring.now ?? systemClock }),
       cliVersion: cliVersionOnHost,
+    },
+    // `artifacts lifecycle` / `artifacts check`: the config's section and the operator's Cloudflare calls.
+    artifacts: {
+      config: async () => (await cfg()).config.artifacts,
+      bucket: artifactsBucketHost(),
     },
     env: { bootstrap: bootstrapOnHost },
     status: { snapshot: () => (wiring.status ?? unstampedStatus)() },
