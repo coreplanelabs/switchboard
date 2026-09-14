@@ -58,8 +58,18 @@ export interface PiRunPaths {
 
 /** Every path is derived from the run id, so two runs never share a file and
  *  a run's files are removable as one tree. Outside the checkout, so nothing
- *  pi writes lands in the repository or its snapshots. */
-export function piRunPaths(runId: string, root = "/tmp/switchboard-pi"): PiRunPaths {
+ *  pi writes lands in the repository or its snapshots.
+ *
+ *  The root is the OS user's own when the run knows the user its commands run
+ *  as (`/tmp/switchboard-pi-<user>`: the resident runs each thread's commands
+ *  as that thread's pool user), the shared `/tmp/switchboard-pi` when it does
+ *  not (the local host, the sandbox: one user). `mkdir -p` gives a parent it
+ *  creates to its caller at 755, so one root shared by every run would belong
+ *  to whichever user ran first and refuse every other user's run at its own
+ *  mkdir; the users' roots are siblings directly under `/tmp` (mode 1777),
+ *  with nothing between them for one user to own. */
+export function piRunPaths(runId: string, user?: string): PiRunPaths {
+  const root = user ? `/tmp/switchboard-pi-${user}` : "/tmp/switchboard-pi";
   const dir = `${root}/${runId}`;
   return {
     dir,

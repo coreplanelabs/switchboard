@@ -93,6 +93,11 @@ export interface PiHarnessRun {
    *  (`agent.identity`) and is folded in here, so the allowlist pi starts
    *  with and the reach the gate judges by read one word (harness-pi item 10). */
   rules: Omit<ToolRuleContext, "identity">;
+  /** The OS user the run's executor runs its commands as: the resident's pool
+   *  user for the thread (`ResidentBinding.user`). The run's files live under
+   *  a root of that user's own (`piRunPaths`); absent on an executor with one
+   *  user, and the files go under the shared root. */
+  user?: string;
   backend?: Backend;
   span?: Span;
   control?: RunControl;
@@ -120,8 +125,6 @@ export interface PiHarnessDeps {
   tickMs?: number;
   /** How long a write-up may take before pi is aborted (the native finale's bound). */
   finaleTimeoutMs?: number;
-  /** pi's root for the run's files in the container. */
-  root?: string;
 }
 
 /** The workspace tools pi has of its own; the native names are not relayed. */
@@ -218,7 +221,7 @@ export async function runPiHarness(deps: PiHarnessDeps, run: PiHarnessRun): Prom
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
   };
   const bridge = new PiBridge({ emit, onProgress: run.onProgress, agentSpan, clock });
-  const paths = piRunPaths(run.runId, deps.root);
+  const paths = piRunPaths(run.runId, run.user);
   const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * 60_000;
   const deadline = now() + remainingMs;
   const warnAt = deadline - Math.min(3 * 60_000, run.agent.maxMinutes * 15_000);
