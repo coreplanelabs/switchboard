@@ -4,13 +4,17 @@
 // pi the model key under the name pi reads and nothing else from the
 // operator's shell, and the config directory pi is pointed at (so the
 // operator's own `~/.pi/agent` — its auth.json, settings, extensions — is
-// never read); the LF-only line reader is the protocol module's. This is the
-// driver's one host-touching module beside the entrypoint: it runs on the
-// operator's machine, like every load command.
+// never read). pi runs in the checkout, not where the operator typed the
+// command, and looks a relative path up there: every path it is handed —
+// config directory, session directory, extension — is made absolute here,
+// whatever the caller knew it as. The LF-only line reader is the protocol
+// module's. This is the driver's one host-touching module beside the
+// entrypoint: it runs on the operator's machine, like every load command.
 
 import { execFile, spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { redactSecrets } from "../core/redact.js";
 import { publicEnv, type EnvRecord, type Secret } from "../secrets.js";
 import { jsonlLines, type PiTransport } from "../core/harness/pi/protocol.js";
 
@@ -55,6 +59,8 @@ export const PI_CODING_TOOLS: readonly string[] = [
 export interface PiSpawnOptions {
   piBin: string;
   checkout: string;
+  /** The harness extension, as the caller knows it — relative to the
+   *  caller's cwd if it likes; pi gets it absolute. */
   extensionPath: string;
   provider: string;
   model: string;
@@ -64,6 +70,8 @@ export interface PiSpawnOptions {
    *  into the child's environment and nowhere else. */
   keyEnvName: string;
   keyValue: Secret;
+  /** pi's config directory and its session directory, as the caller knows
+   *  them — relative to the caller's cwd if it likes; pi gets them absolute. */
   agentDir: string;
   sessionDir: string;
   tools: readonly string[];
@@ -74,8 +82,10 @@ export interface PiSpawnOptions {
  *  without a saved decision; the settings file says `never` anyway), no
  *  skills, prompt templates or themes; the harness extension by explicit
  *  path; the tools allowlist; the model; a session directory so the session
- *  file exists for the receipt. Never `--api-key`: the key is in the
- *  environment, not on a command line `ps` shows. */
+ *  file exists for the receipt. Every path absolute: pi's cwd is the
+ *  checkout, and a relative path would be looked up there. Never
+ *  `--api-key`: the key is in the environment, not on a command line `ps`
+ *  shows. */
 export function piArgs(o: PiSpawnOptions): string[] {
   return [
     "--mode",
@@ -85,7 +95,7 @@ export function piArgs(o: PiSpawnOptions): string[] {
     "--no-prompt-templates",
     "--no-themes",
     "-e",
-    o.extensionPath,
+    resolve(o.extensionPath),
     "--tools",
     o.tools.join(","),
     "--provider",
@@ -93,25 +103,47 @@ export function piArgs(o: PiSpawnOptions): string[] {
     "--model",
     o.thinking ? `${o.model}:${o.thinking}` : o.model,
     "--session-dir",
-    o.sessionDir,
+    resolve(o.sessionDir),
   ];
 }
 
 /** The child's whole environment: PATH and HOME (pi and git need them), the
- *  key under pi's name, pi's config directory, and the switches that keep pi
- *  off the network for anything but the model (no update check, no
+ *  key under pi's name, pi's config directory — absolute, since pi resolves
+ *  the variable against its own cwd, the checkout, where a relative one
+ *  finds no models.json and so no custom provider — and the switches that
+ *  keep pi off the network for anything but the model (no update check, no
  *  telemetry, no catalog refresh). Nothing else from the operator's shell. */
 export function piEnv(o: PiSpawnOptions, base: EnvRecord): Record<string, string> {
   const env: Record<string, string> = {};
   if (base.PATH) env.PATH = base.PATH;
   if (base.HOME) env.HOME = base.HOME;
   env[o.keyEnvName] = o.keyValue.reveal();
-  env.PI_CODING_AGENT_DIR = o.agentDir;
+  env.PI_CODING_AGENT_DIR = resolve(o.agentDir);
   env.PI_SKIP_VERSION_CHECK = "1";
   env.PI_OFFLINE = "1";
   env.PI_TELEMETRY = "0";
   return env;
 }
+
+/** What a models.json entry tells pi about a model beyond its id — pi's own
+ *  fields. A bare entry is a model pi knows nothing about: no reasoning
+ *  (thinking forced off), a 128k window, a 16k output ceiling. */
+export interface ModelEntryFields {
+  reasoning?: boolean;
+  contextWindow?: number;
+  maxTokens?: number;
+}
+
+/** The entry for the model the bot's proxy fronts: pi's own catalog entry
+ *  for the Claude family, so the through-proxy arm thinks at the same level
+ *  and compacts at the same point as the direct arm — the window is the
+ *  family's, the output ceiling its floor, so no model refuses a request
+ *  for asking too much. */
+export const PROXIED_MODEL_ENTRY: Readonly<Required<ModelEntryFields>> = {
+  reasoning: true,
+  contextWindow: 1_000_000,
+  maxTokens: 64_000,
+};
 
 export interface AgentDirOptions {
   provider: string;
@@ -122,6 +154,8 @@ export interface AgentDirOptions {
   baseUrl?: string;
   /** The endpoint's wire shape; the OpenAI completions shape unless named. */
   api?: "openai-completions" | "anthropic-messages";
+  /** What the entry says about the model beyond its id; a bare entry unless given. */
+  modelEntry?: ModelEntryFields;
 }
 
 export interface AgentDirLayout {
@@ -147,12 +181,32 @@ export function writeAgentDir(dir: string, o: AgentDirOptions): AgentDirLayout {
         baseUrl: o.baseUrl,
         api: o.api ?? "openai-completions",
         apiKey: `$${HARNESS_KEY_ENV}`,
-        models: [{ id: o.model }],
+        models: [{ id: o.model, ...o.modelEntry }],
       },
     },
   };
   writeFileSync(modelsPath, JSON.stringify(models, null, 2) + "\n");
   return { settingsPath, modelsPath, sessionDir };
+}
+
+/** How much of pi's stderr an early-exit note shows. */
+const EARLY_EXIT_STDERR_CHARS = 300;
+
+/** A task pi left before its first turn (`exited`, no turn) has no stream
+ *  to explain it; the receipt's note carries pi's own stderr for it —
+ *  redacted, folded onto one line (the note is a list item), its first 300
+ *  characters — so the operator reads the reason on the receipt and not
+ *  only in the JSON. Nothing for a task that reached a turn or ended any
+ *  other way: those the stream explains. */
+export function earlyExitNote(
+  task: string,
+  run: { terminal: string; turns: number },
+  stderr: string,
+): string | undefined {
+  if (run.terminal !== "exited" || run.turns > 0) return undefined;
+  const text = redactSecrets(stderr).replace(/\s+/g, " ").trim();
+  const shown = text.length > EARLY_EXIT_STDERR_CHARS ? `${text.slice(0, EARLY_EXIT_STDERR_CHARS)}…` : text;
+  return `${task}: pi exited before its first turn — its stderr: ${shown || "(empty)"}`;
 }
 
 export interface PiProcess {
