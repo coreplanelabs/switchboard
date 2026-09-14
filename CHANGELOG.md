@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.207.1](https://github.com/coreplanelabs/switchboard/compare/v1.207.0...v1.207.1) (2026-09-14)
+
+
+### Bug fixes
+
+* **ship:** the runner recognizes a unit whose pull request already merged — pr-check answers merged, the unit ends done and its dependents run ([#1001](https://github.com/coreplanelabs/switchboard/issues/1001)) ([9a85bcb](https://github.com/coreplanelabs/switchboard/commit/9a85bcb0a0713b73ebd6790b742d71b14ff87cd8))
+
+
+### Documentation
+
+* **ship:** the runner's second plan — the child contract and the coding prompt name the title gate from one constant ([#999](https://github.com/coreplanelabs/switchboard/issues/999)) ([ee42ac8](https://github.com/coreplanelabs/switchboard/commit/ee42ac82e37baeebaa8138446c7367b1746ea0e5))
+
 ## [1.207.0](https://github.com/coreplanelabs/switchboard/compare/v1.206.1...v1.207.0) (2026-09-14)
 
 
