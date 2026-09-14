@@ -162,4 +162,19 @@ describe("the profile's image mode", () => {
     const example = parseProfile(read(PROFILE_EXAMPLE_PATH));
     expect(example.ok && example.profile.images).toBe("registry");
   });
+
+  // docs/reference/specs/execution.md item 20 — the artifacts bucket is optional and strict:
+  // R2's bucket-name rules, refused by field; the committed example names none (opt-in).
+  it("`artifacts.bucket` is optional, kept when valid, and refused by field when it is not an R2 bucket name", () => {
+    const without = parseProfile(TEST_PROFILE);
+    expect(without.ok && without.profile.artifacts).toBeUndefined();
+    const named = parseProfile({ ...TEST_PROFILE, artifacts: { bucket: "switchboard-artifacts" } });
+    expect(named.ok && named.profile.artifacts).toEqual({ bucket: "switchboard-artifacts" });
+    for (const bucket of ["Upper", "a", "has_underscore", "-leading", "trailing-"]) {
+      const bad = parseProfile({ ...TEST_PROFILE, artifacts: { bucket } });
+      expect(bad.ok ? [] : bad.problems, bucket).toEqual([expect.stringMatching(/^artifacts\.bucket: /)]);
+    }
+    const example = parseProfile(read(PROFILE_EXAMPLE_PATH));
+    expect(example.ok && example.profile.artifacts).toBeUndefined();
+  });
 });

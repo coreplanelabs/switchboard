@@ -46,6 +46,7 @@ import {
 import { systemClock } from "../../src/core/trace/clock.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
 import { shimRoute, stripTraceContext, withTraceContext, workerLogSink } from "../../src/core/trace/workerTrace.ts";
+import { COPY_PATH, handleArtifactsCopy } from "./artifactsCopy.ts";
 import type { ShipCoordinatorParams } from "./coordinator";
 import { INSTANCE, INTERNAL } from "./shared";
 
@@ -93,6 +94,12 @@ export interface Env {
   ARTIFACTS_R2_ACCESS_KEY_ID?: string; // artifact store: the bucket-scoped S3 token the bot signs presigned URLs with
   ARTIFACTS_R2_SECRET_ACCESS_KEY?: string; // artifact store: the secret half of that token
   ARTIFACTS_COPY_TOKEN?: string; // artifact store: the bearer the bot presents to this Worker's /artifacts/copy route
+  /** The artifacts bucket (artifactsCopy.ts), bound only when the deployment profile names one
+   *  (`artifacts.bucket` → the template's `r2_buckets` block); `ARTIFACTS_BUCKET_NAME` is the same
+   *  name as a var, what `GET /artifacts/copy` reports so `artifacts check` can hold it against the
+   *  bot's config. Worker-side only: neither reaches the container. */
+  ARTIFACTS?: R2Bucket;
+  ARTIFACTS_BUCKET_NAME?: string;
 }
 
 /** Every secret/var the Worker forwards into the container. Optional entries
@@ -429,7 +436,18 @@ export default {
             ? await handleCoordinatorInstances(forwarded, env)
             : statusId !== undefined
               ? await handleCoordinatorInstanceStatus(forwarded, env, statusId)
-              : await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded);
+              : pathname === COPY_PATH
+                ? // The artifact copy (artifactsCopy.ts): the R2 binding and the Slack
+                  // token are this Worker's; the bot only asks, with its copy bearer.
+                  await handleArtifactsCopy(inbound, {
+                    bucket: env.ARTIFACTS,
+                    bucketName: env.ARTIFACTS_BUCKET_NAME,
+                    copyToken: env.ARTIFACTS_COPY_TOKEN,
+                    slackToken: env.SLACK_BOT_TOKEN,
+                    fetch: (input, init) => fetch(input, init),
+                    lengthPipe: (size) => new FixedLengthStream(size),
+                  })
+                : await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded);
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {

@@ -88,6 +88,14 @@ export const SANDBOX_CONTAINER_CLASS = "SwitchboardSandbox";
 /** The bearer every route on the sandbox Worker needs, `/healthz` included (execution.md item 13). */
 export const SANDBOX_BEARER_ENV = "SANDBOX_TOKEN";
 
+/** R2 on the credential: the resident's `BACKUP_BUCKET` binding wrangler validates on deploy, and
+ *  the bot's artifacts bucket its `npm run deploy` creates first (deploy/cloudflare/ensure-bucket.mjs)
+ *  when the profile names one. */
+const R2_CAPABILITY: CapabilityCheck = {
+  command: ["wrangler", "r2", "bucket", "list"],
+  needs: "Workers R2 Storage: Edit",
+};
+
 /** The Containers application `wrangler deploy` creates for a Worker's container class —
  *  `<script>-<class_name lowercased>` (the bot's is `switchboard-switchboardserver`,
  *  deploy/cloudflare/preflight.mjs `APP_NAME`). The script name is the profile's. */
@@ -244,10 +252,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
     // A container image like the bot's — checked here too, since an --affected
     // release can select the resident without the bot — plus the BACKUP_BUCKET
     // R2 binding wrangler validates on deploy.
-    capabilities: [
-      CONTAINERS_CAPABILITY,
-      { command: ["wrangler", "r2", "bucket", "list"], needs: "Workers R2 Storage: Edit" },
-    ],
+    capabilities: [CONTAINERS_CAPABILITY, R2_CAPABILITY],
     waitMaxMs: RESIDENT_WAIT_MAX_MS,
     why: "per-repo DOs — preflight refuses while a resident has a run in flight or is provisioning (a refresh or restore mid-cycle only warns: it resumes after the swap)",
   },
@@ -476,7 +481,11 @@ export function planDeploy(
       : {},
     ...(opts.force && w.preflight ? { forcedBy: w.preflight.forceEnv } : {}),
     requiredEnv: w.requiredEnv ?? [],
-    capabilities: w.capabilities ?? [],
+    // The bot's `npm run deploy` creates the artifacts bucket before the upload
+    // (deploy/cloudflare/ensure-bucket.mjs) when the profile names one — that
+    // needs R2 on the credential, checked up front like every capability; an
+    // installation without artifacts asks nothing extra of its token.
+    capabilities: [...(w.capabilities ?? []), ...(w.name === "bot" && profile.artifacts ? [R2_CAPABILITY] : [])],
     retryOnPreflightRefusal: !!w.preflight && !opts.force,
     ...(w.waitMaxMs !== undefined ? { waitMaxMs: w.waitMaxMs } : {}),
     ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),

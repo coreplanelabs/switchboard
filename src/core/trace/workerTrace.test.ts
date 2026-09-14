@@ -65,6 +65,7 @@ describe("shimRoute", () => {
     expect(shimRoute("/healthz")).toBe("healthz");
     expect(shimRoute("/ingress")).toBe("ingress");
     expect(shimRoute("/mcp")).toBe("mcp");
+    expect(shimRoute("/artifacts/copy")).toBe("artifacts"); // the Worker's own copy route (execution.md item 20)
     expect(shimRoute("/mcp/connect/abc")).toBe("mcp");
     expect(shimRoute("/runs")).toBe("runs");
     expect(shimRoute("/runs/abc")).toBe("runs"); // never the id, never `?t=SECRET` (a pathname has no query)

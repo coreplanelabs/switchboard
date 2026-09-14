@@ -66,6 +66,12 @@ describe("templateView", () => {
       teamDomain: "acme.cloudflareaccess.com",
       aud: "a".repeat(64),
     });
+    // The artifacts bucket rides the same way (execution.md item 20): named when the profile names it.
+    expect(templateView(TEST_PROFILE, "bot", TEST_PUBLISHED_IMAGES)?.artifacts).toBeUndefined();
+    expect(
+      templateView({ ...TEST_PROFILE, artifacts: { bucket: "switchboard-artifacts" } }, "bot", TEST_PUBLISHED_IMAGES)
+        ?.artifacts,
+    ).toEqual({ bucket: "switchboard-artifacts" });
     const { sandbox: _sandbox, ...withoutSandbox } = TEST_PROFILE.workers;
     expect(
       templateView({ ...TEST_PROFILE, workers: withoutSandbox }, "sandbox", TEST_PUBLISHED_IMAGES),
@@ -242,6 +248,31 @@ describe("templateView / renderTemplate for a bot-only profile", () => {
     expect(without.ok && without.text).toContain('"PUBLIC_BASE_URL": "https://switchboard.example.test"');
     const withState = renderTemplate(template, templateView(TEST_PROFILE, "bot", TEST_PUBLISHED_IMAGES)!);
     expect(withState.ok && withState.text).toContain('"STATE_WORKER_URL": "https://switchboard-memory.example.test"');
+  });
+
+  // docs/reference/specs/execution.md item 20 — the artifacts bucket binding and its name var are
+  // rendered together, only when the profile names a bucket; a profile without one binds nothing.
+  it("the committed bot template binds the artifacts bucket (r2_buckets + ARTIFACTS_BUCKET_NAME) exactly when the profile names one", () => {
+    const template = readFileSync(new URL(`../../deploy/cloudflare/${TEMPLATE_FILE}`, import.meta.url), "utf8");
+    const without = renderTemplate(template, templateView(botOnly, "bot", TEST_PUBLISHED_IMAGES)!);
+    // The keys are absent (the template's comments still name them).
+    expect(without.ok && without.text).not.toContain('"r2_buckets":');
+    expect(without.ok && without.text).not.toContain('"ARTIFACTS_BUCKET_NAME":');
+    const named = { ...TEST_PROFILE, artifacts: { bucket: "switchboard-artifacts" } };
+    const withBucket = renderTemplate(template, templateView(named, "bot", TEST_PUBLISHED_IMAGES)!);
+    expect(withBucket.ok ? "" : withBucket.problems.join("\n")).toBe("");
+    expect(withBucket.ok && withBucket.text).toContain(
+      '"r2_buckets": [{ "binding": "ARTIFACTS", "bucket_name": "switchboard-artifacts" }],',
+    );
+    expect(withBucket.ok && withBucket.text).toContain('"ARTIFACTS_BUCKET_NAME": "switchboard-artifacts"');
+    // A bot-only profile WITH a bucket renders too: the vars block closes cleanly.
+    const botOnlyBucket = renderTemplate(
+      template,
+      templateView({ ...botOnly, artifacts: { bucket: "switchboard-artifacts" } }, "bot", TEST_PUBLISHED_IMAGES)!,
+    );
+    expect(botOnlyBucket.ok ? "" : botOnlyBucket.problems.join("\n")).toBe("");
+    expect(botOnlyBucket.ok && botOnlyBucket.text).not.toContain("STATE_WORKER_URL");
+    expect(botOnlyBucket.ok && botOnlyBucket.text).toContain('"ARTIFACTS_BUCKET_NAME": "switchboard-artifacts"');
   });
 });
 

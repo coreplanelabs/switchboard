@@ -89,6 +89,17 @@ export const profileSchema = z.object({
   /** The Cloudflare Access application in front of the bot's dashboards, when
    *  there is one: the team domain the JWT is issued by and the app's AUD. */
   access: z.object({ teamDomain: hostname, aud: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
+  /** The artifact store's bucket (docs/reference/specs/execution.md item 20), when the installation
+   *  has one: the bot Worker's template binds it as `ARTIFACTS` and `deploy` creates it before the
+   *  upload. The bot's runtime config (`artifacts.r2.bucket`) must name the same bucket — the two
+   *  are held equal by `artifacts check`, not by the profile. R2's own bucket-name rules. */
+  artifacts: z
+    .object({
+      bucket: z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/, "an R2 bucket name: 3–63 lowercase letters, digits and hyphens"),
+    })
+    .optional(),
 });
 
 export type DeploymentProfile = z.infer<typeof profileSchema>;
