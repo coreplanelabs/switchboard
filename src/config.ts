@@ -26,7 +26,7 @@ import { ConfigDocumentClient, parseConfigLocation, stateWorkerFrom } from "./co
 import type { EnvRecord, Secrets } from "./secrets.js";
 import type { Grants } from "./core/authz/types.js";
 import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
-import { AGENTS } from "./agents/registry.js";
+import { AGENTS, type Harness } from "./agents/registry.js";
 import type { McpServerEntry } from "./mcp/registry.js";
 import {
   validateBoundaries,
@@ -243,6 +243,13 @@ export interface AppConfig {
    * `defaults.agent`, exactly as before the router.
    */
   routing?: RoutingConfig;
+  /**
+   * Which loop drives each preset's runs (docs/reference/specs/harness-pi.md
+   * item 1): `<preset>: native | pi`, a deployment decision over the preset's
+   * own declaration (`AgentDef.harness`). Absent → every preset runs the
+   * harness it declares — the native loop today — and nothing changes.
+   */
+  harness?: Record<string, Harness>;
   /** Slack adapter behavior that is not pure transport. */
   slack?: SlackConfig;
   /**

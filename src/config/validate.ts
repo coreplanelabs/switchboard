@@ -12,7 +12,14 @@ import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
 import { validateArtifacts } from "../artifacts/config.js";
 import { parseGrantsConfig, parseRestrictConfig, type Restriction } from "../core/authz/grants.js";
 import type { Grants } from "../core/authz/types.js";
-import { AGENTS, IDENTITIES, MACHINE_CLASSES, type Identity, type MachineClass } from "../agents/registry.js";
+import {
+  AGENTS,
+  HARNESSES,
+  IDENTITIES,
+  MACHINE_CLASSES,
+  type Identity,
+  type MachineClass,
+} from "../agents/registry.js";
 import type { Boundary } from "./profile.js";
 import { assertUrlAllowed } from "../tools/web.js";
 import {
@@ -52,6 +59,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   ship: true,
   spawn: true,
   routing: true,
+  harness: true,
   slack: true,
   runHistory: true,
   runtimeOverrides: true,
@@ -286,7 +294,23 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.spawn !== undefined) validateSpawn(cfg.spawn);
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
   if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
+  if (cfg.harness !== undefined) validateHarness(cfg.harness);
   validateDashboardConfig(cfg.dashboard);
+}
+
+/** `harness` (docs/reference/specs/harness-pi.md item 1): a mapping of preset
+ *  name to `native` or `pi`, every key a registered preset. A misspelt preset
+ *  or a value that is neither harness fails the load by name — a setting that
+ *  read as "nothing changes" while the operator believed a preset had moved
+ *  would be the worst kind of silent. */
+function validateHarness(harness: unknown): void {
+  if (typeof harness !== "object" || harness === null || Array.isArray(harness))
+    throw new Error("config.yaml: harness must be a mapping of preset to harness (native | pi)");
+  for (const [preset, value] of Object.entries(harness)) {
+    if (!Object.hasOwn(AGENTS, preset)) throw new Error(`config.yaml: harness.${preset} is not a known agent`);
+    if (typeof value !== "string" || !(HARNESSES as readonly string[]).includes(value))
+      throw new Error(`config.yaml: harness.${preset} must be one of ${HARNESSES.join(", ")}`);
+  }
 }
 
 /** The `routing` block's keys, held equal to `RoutingConfig` the way the top-level keys are. */

@@ -314,6 +314,18 @@ workspaceDir: ./workspaces
 #   maxRounds: 3      # review rounds per unit
 #   maxMinutes: 120   # the ship preset's wall-clock budget in minutes (the registry's default)
 
+# Which loop drives each preset's runs (docs/reference/specs/harness-pi.md):
+# `native`, the in-process turn loop, or `pi`, the pi coding agent started
+# inside the run's own execution container and driven over its RPC protocol —
+# with the run's model-proxy bearer as its only key, every event bridged onto
+# the run's own record, our tools and tool rules as its extension. Every
+# preset declares `native` until the pi series moves it; a deployment moves a
+# preset early here. Only a preset with a workspace (coding, review, explore)
+# can run on pi. A preset the registry does not know, or a value that is
+# neither harness, fails the load by name.
+# harness:
+#   coding: pi
+
 # The fan-out cap a spawning run meets (docs/reference/specs/agent-conductor.md).
 # `agent:conductor` starts child runs as the person who asked — each an
 # ordinary run in a thread of its own, under that person's permissions — and

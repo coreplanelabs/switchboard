@@ -42,6 +42,15 @@ export function machineNeedsRepo(machine: MachineClass): boolean {
 export const IDENTITIES = ["none", "read", "write"] as const;
 export type Identity = (typeof IDENTITIES)[number];
 
+/** The loops a preset's runs can be driven by (docs/reference/specs/harness-pi.md
+ *  item 1): `native`, the in-process turn loop (`src/runner.ts`), or `pi`, the
+ *  pi coding agent in the run's own execution container, driven over its RPC
+ *  protocol and bridged onto the run's events. A deployment's `harness:` block
+ *  overrides a preset's own declaration (`effectiveHarness`,
+ *  src/core/harness/select.ts). */
+export const HARNESSES = ["native", "pi"] as const;
+export type Harness = (typeof HARNESSES)[number];
+
 /** The pace that marks a run as looping rather than working: a model turn
  *  every ten seconds, sustained for the whole wall clock. A busy run takes
  *  20–40 s a turn (a model think plus a tool call), so a run that averages six
@@ -110,6 +119,11 @@ export interface AgentDef {
    *  discovery, no gh CLI. Selected by the dispatcher AFTER executor
    *  resolution via RunOptions.system; the shared AgentDef is never mutated. */
   residentSystem?: string;
+  /** Which loop drives the preset's runs (`HARNESSES`): the native loop
+   *  unless declared, and whatever a deployment's `harness.<preset>` says
+   *  over that. Only a preset with a workspace can run on pi — pi is a process
+   *  in the run's execution container. */
+  harness?: Harness;
 }
 
 // Every PR the coding agent ships carries a rich description by default —
@@ -486,6 +500,9 @@ export const AGENTS: Record<string, AgentDef> = {
     // `config set channel efforts.coding=…`, or `effort:` per request).
     machine: "repo-resident",
     identity: "write", // pushes branches and opens pull requests
+    // The native loop until the pi series moves this preset; a deployment
+    // flips it early with `harness: { coding: pi }` (docs/reference/specs/harness-pi.md).
+    harness: "native",
   },
   review: {
     name: "review",
