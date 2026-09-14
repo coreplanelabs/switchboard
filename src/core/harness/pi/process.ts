@@ -123,12 +123,36 @@ export function piLaunchEnv(spec: PiLaunchSpec, bearer: string): Record<string, 
   };
 }
 
+/** Whether a Claude model takes adaptive thinking (`thinking.type: "adaptive"`
+ *  plus `output_config.effort`) or the legacy budget (`thinking.type:
+ *  "enabled"` plus `budget_tokens`). Anthropic drew the line at the 4.6
+ *  generation: Opus 4.6 and Sonnet 4.6 take both; everything after them —
+ *  Opus 4.7 and 4.8, Sonnet 5, Opus 5, the Fable family — refuses the budget
+ *  with a 400 (`"thinking.type.enabled" is not supported for this model`);
+ *  everything before — Haiku 4.5, Sonnet 4.5, Opus 4.5 and older — refuses
+ *  adaptive. pi sends the budget unless the model's entry says
+ *  `compat.forceAdaptiveThinking`, which its built-in Anthropic catalog sets
+ *  per model along the same line; a model behind the proxy is not in that
+ *  catalog, so the harness says it here. The generation is the id's first
+ *  version number — `claude-fable-5` is 5, `claude-opus-4-6` 4.6,
+ *  `claude-sonnet-4-5-20250929` 4.5 (a minor is one or two digits, so a
+ *  date is never read as one) — and an id with none is taken for the current
+ *  generation, since every model Anthropic ships now is adaptive. */
+export function takesAdaptiveThinking(modelId: string): boolean {
+  const version = /(?:^|-)(\d{1,2})(?:-(\d{1,2}))?(?=-|$)/.exec(modelId);
+  if (!version) return true;
+  const major = Number(version[1]);
+  const minor = version[2] === undefined ? 0 : Number(version[2]);
+  return major > 4 || (major === 4 && minor >= 6);
+}
+
 /** pi's `models.json`: one provider, the bot's proxy, on the wire shape the
  *  run's provider speaks — `anthropic-messages` posts `/v1/messages` under the
  *  base, `openai-completions` posts `/chat/completions` under `<base>/v1` —
- *  with the key read from the bearer's variable at request time and a zero
- *  rate card, because pi's `usage.cost` is never what a page shows: the proxy
- *  meters. */
+ *  with the key read from the bearer's variable at request time, the thinking
+ *  payload the model takes on the Anthropic shape (`takesAdaptiveThinking`;
+ *  the completions shape has no such switch), and a zero rate card, because
+ *  pi's `usage.cost` is never what a page shows: the proxy meters. */
 export function piModelsJson(spec: PiLaunchSpec): string {
   const anthropic = spec.model.providerType === "anthropic";
   const base = spec.harnessUrl.replace(/\/$/, "");
@@ -145,6 +169,7 @@ export function piModelsJson(spec: PiLaunchSpec): string {
                 id: spec.model.id,
                 name: spec.model.id,
                 reasoning: true,
+                ...(anthropic ? { compat: { forceAdaptiveThinking: takesAdaptiveThinking(spec.model.id) } } : {}),
                 input: ["text", "image"],
                 contextWindow: 200_000,
                 maxTokens: spec.model.maxTokens,
