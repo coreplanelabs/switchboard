@@ -7,6 +7,7 @@
 //   npm run load -- cards    -- --cards 50 --hold 600 --channels 5
 //   npm run load -- provider --port 8089 --profile coding --cpu-seconds 60
 //   npm run load -- pi --checkout ../repo --task all --provider anthropic --model <id> --key-env ANTHROPIC_API_KEY
+//   npm run load -- pi --suite review --checkout ../repo --task all --provider anthropic --model <id>   (merged PRs reviewed, verdicts recorded)
 //   npm run load -- route --since <date> --limit 200 --provider anthropic --model <id>   (singles + the compound and imperative sets)
 //
 // Every command writes `load-results/<command>-<runId>.json` (the samples and
@@ -27,7 +28,7 @@ import {
   type Summary,
 } from "../src/load/aggregate.js";
 import { redactSecrets } from "../src/core/redact.js";
-import { processSecrets } from "../src/secrets.js";
+import { processSecrets, type Secret } from "../src/secrets.js";
 import { simulateCards } from "../src/load/cardsLoad.js";
 import { runE2eLoad } from "../src/load/e2eLoad.js";
 import { durationStats, pageAll, peakConcurrency, realRuns } from "../src/load/history.js";
@@ -36,20 +37,36 @@ import { runSandboxLoad } from "../src/load/sandboxLoad.js";
 import {
   codingProfileScript,
   piCodingProfileScript,
+  piReviewProfileScript,
   reviewProfileScript,
   startScriptedProvider,
 } from "../src/load/scriptedProvider.js";
 import { drivePiTask, realTimers, redactPiRun, type PiTaskRun } from "../src/load/piRpc.js";
 import { judgeToolCall } from "../src/core/harness/pi/toolRules.js";
 import { PI_TASK_NAMES, PI_TASKS, piTaskByName, taskBranch, taskPrompt } from "../src/load/piTasks.js";
+import { PI_REVIEW_TASKS, PI_REVIEW_TASK_NAMES, piReviewTaskByName, reviewTaskUrl } from "../src/load/piReviewTasks.js";
+import {
+  reviewChecks,
+  reviewFailureReason,
+  reviewOutcome,
+  reviewPrompt,
+  reviewSystemPrompt,
+  type ReviewRow,
+} from "../src/load/piReview.js";
 import {
   PI_CODING_TOOLS,
+  PI_REVIEW_TOOLS,
   PROXIED_MODEL_ENTRY,
   checkoutBranch,
+  checkoutPrHead,
+  checkoutState,
   earlyExitNote,
+  originSlug,
   piKeyEnvFor,
   spawnPi,
   writeAgentDir,
+  writeSystemPrompt,
+  type AgentDirLayout,
 } from "../src/load/piProcess.js";
 import {
   compoundExamples,
@@ -99,9 +116,11 @@ commands
   cards      the status-card path in virtual time (no network)
              --cards N  --hold S  --channels N  [--client budgeted|retrying  --budget-per-minute N  --per-app-per-minute N  --per-channel-per-second N]
   provider   serve the scripted model for a local bot or for \`pi\` (blocks)
-             --port N  --profile review|coding|pi-coding  --cpu-seconds S  --terminal
-  pi         the five representative coding tasks on pi's harness (pi --mode rpc in a checkout)
-             --checkout DIR  --task all|<name>  --provider NAME  --model ID  --key-env VAR
+             --port N  --profile review|coding|pi-coding|pi-review  --cpu-seconds S  --terminal
+  pi         the five representative coding tasks on pi's harness (pi --mode rpc in a checkout), or with
+             --suite review the review tasks: merged public pull requests reviewed at their pinned head under the read
+             identity's allowlist, the verdict recorded in the receipt and posted nowhere
+             --checkout DIR  --task all|<name>  --provider NAME  --model ID  --key-env VAR  [--suite coding|review]
              [--pi PATH  --thinking LEVEL  --budget-minutes N  --base-url URL (a custom OpenAI-compatible endpoint)]
              [--through-proxy URL  (--shape anthropic|openai)]: the bot's model proxy as pi's one provider — URL is the
              bot's base, the key variable holds a run bearer (SWITCHBOARD_PI_MODEL_KEY unless --key-env names another)
@@ -158,6 +177,7 @@ function flags(argv: string[]): Flags {
       "budget-minutes": { type: "string" },
       "base-url": { type: "string" },
       "through-proxy": { type: "string" },
+      suite: { type: "string" },
       shape: { type: "string" },
       "print-prompt": { type: "boolean" },
       since: { type: "string" },
@@ -500,7 +520,9 @@ async function provider(f: Flags): Promise<boolean> {
       ? reviewProfileScript(opts)
       : profile === "pi-coding"
         ? piCodingProfileScript(opts)
-        : codingProfileScript(opts);
+        : profile === "pi-review"
+          ? piReviewProfileScript(opts)
+          : codingProfileScript(opts);
   const server = await startScriptedProvider(script, { port: num(f, "port", 8089) });
   process.stdout.write(
     `scripted provider (${profile}, cpu ${opts.cpuSeconds}s${opts.terminal ? ", terminal tool" : ""}) on ${server.url}\n`,
@@ -526,22 +548,32 @@ function authStoreEmpty(path: string): boolean {
   }
 }
 
-/** The pi spike (docs/reference/specs/load-harness.md, the pi driver items):
- *  each task starts one `pi --mode rpc` in the checkout, on a branch the
- *  driver creates, with the harness extension and nothing else loaded, and
- *  records what pi's stream said. The key comes from the environment
- *  variable `--key-env` names and goes nowhere but the child's environment. */
-async function pi(f: Flags): Promise<boolean> {
-  const id = runId();
-  if (f["print-prompt"] === true) {
-    // The same words for the other arm of the comparison: today's coding
-    // agent gets this prompt through `npm run cli -- ask`. It names a branch
-    // of its own, since no driver creates one for it. No pi, no key.
-    const task = piTaskByName(str(f, "task"));
-    if (!task) throw new Error(`--task must be one of ${PI_TASK_NAMES.join(", ")}`);
-    process.stdout.write(taskPrompt(task, { name: taskBranch(`native-${task.name}`, id), created: false }) + "\n");
-    return true;
-  }
+/** What both suites of `load:pi` share (docs/reference/specs/load-harness.md,
+ *  the pi driver items): the provider — a built-in one with its own key, or
+ *  the bot's model proxy with a run bearer — the checkout, the model, pi's
+ *  binary and thinking level, the budget, and pi's config directory beside the
+ *  receipt. The key comes from the environment variable `--key-env` names and
+ *  goes nowhere but the child's environment. */
+interface PiSetup {
+  startedAt: string;
+  providerName: string;
+  keyEnv: string;
+  key: Secret;
+  checkout: string;
+  model: string;
+  budgetMs: number;
+  piBin: string;
+  thinking: string | undefined;
+  baseUrl: string | undefined;
+  throughProxy: string | undefined;
+  extensionPath: string;
+  agentDir: string;
+  layout: AgentDirLayout;
+}
+
+/** Undefined when the key is not in the environment — the reason is printed
+ *  and the command refuses to start. */
+function piSetup(f: Flags, id: string, defaultBudgetMinutes: number): PiSetup | undefined {
   const startedAt = new Date(systemClock()).toISOString();
   // Through the bot's model proxy (docs/reference/specs/harness-pi.md, the
   // live receipt): pi's one provider is the bot, on the shape the run's
@@ -557,14 +589,11 @@ async function pi(f: Flags): Promise<boolean> {
     process.stderr.write(
       `load pi: the model key must be in the environment variable ${keyEnv} (name another with --key-env); refusing to start\n`,
     );
-    return false;
+    return undefined;
   }
   const checkout = resolve(str(f, "checkout"));
   const model = str(f, "model");
-  const taskFlag = str(f, "task", "all");
-  const tasks = taskFlag === "all" ? [...PI_TASKS] : [piTaskByName(taskFlag)].flatMap((t) => (t ? [t] : []));
-  if (tasks.length === 0) throw new Error(`--task must be all or one of ${PI_TASK_NAMES.join(", ")}`);
-  const budgetMs = num(f, "budget-minutes", 45) * 60_000;
+  const budgetMs = num(f, "budget-minutes", defaultBudgetMinutes) * 60_000;
   const piBin = str(f, "pi", "pi");
   const thinking = typeof f.thinking === "string" ? f.thinking : undefined;
   const baseUrl = throughProxy
@@ -596,6 +625,64 @@ async function pi(f: Flags): Promise<boolean> {
     ...(api ? { api } : {}),
     ...(throughProxy ? { modelEntry: PROXIED_MODEL_ENTRY } : {}),
   });
+  return {
+    startedAt,
+    providerName,
+    keyEnv,
+    key,
+    checkout,
+    model,
+    budgetMs,
+    piBin,
+    thinking,
+    baseUrl,
+    throughProxy,
+    extensionPath,
+    agentDir,
+    layout,
+  };
+}
+
+/** The pi spike (docs/reference/specs/load-harness.md, the pi driver items):
+ *  each task starts one `pi --mode rpc` in the checkout, on a branch the
+ *  driver creates, with the harness extension and nothing else loaded, and
+ *  records what pi's stream said. `--suite review` runs the review tasks
+ *  instead (`piReviewSuite`). */
+async function pi(f: Flags): Promise<boolean> {
+  const suite = str(f, "suite", "coding");
+  if (suite !== "coding" && suite !== "review") throw new Error("--suite must be coding or review");
+  if (suite === "review") return piReviewSuite(f);
+  const id = runId();
+  if (f["print-prompt"] === true) {
+    // The same words for the other arm of the comparison: today's coding
+    // agent gets this prompt through `npm run cli -- ask`. It names a branch
+    // of its own, since no driver creates one for it. No pi, no key.
+    const task = piTaskByName(str(f, "task"));
+    if (!task) throw new Error(`--task must be one of ${PI_TASK_NAMES.join(", ")}`);
+    process.stdout.write(taskPrompt(task, { name: taskBranch(`native-${task.name}`, id), created: false }) + "\n");
+    return true;
+  }
+  const taskFlag = str(f, "task", "all");
+  const tasks = taskFlag === "all" ? [...PI_TASKS] : [piTaskByName(taskFlag)].flatMap((t) => (t ? [t] : []));
+  if (tasks.length === 0) throw new Error(`--task must be all or one of ${PI_TASK_NAMES.join(", ")}`);
+  const setup = piSetup(f, id, 45);
+  if (!setup) return false;
+  const {
+    startedAt,
+    providerName,
+    keyEnv,
+    key,
+    checkout,
+    model,
+    budgetMs,
+    piBin,
+    thinking,
+    baseUrl,
+    throughProxy,
+    extensionPath,
+    agentDir,
+    layout,
+  } = setup;
 
   const samples: Sample[] = [];
   const runs: PiTaskRun[] = [];
@@ -626,7 +713,7 @@ async function pi(f: Flags): Promise<boolean> {
       budgetMs,
       now: systemClock,
       timers: realTimers,
-      preview: (tool, input) => judgeToolCall(tool, input, { checkout, branch }),
+      preview: (tool, input) => judgeToolCall(tool, input, { identity: "write", checkout, branch }),
       describe: (input) => {
         try {
           parsePrDescription(input);
@@ -755,6 +842,180 @@ async function pi(f: Flags): Promise<boolean> {
     summary,
     checks,
     { runs, stderr: stderrs },
+    notes,
+  );
+}
+
+/** The review suite (docs/reference/specs/load-harness.md, the review suite
+ *  item): each task is a merged public pull request reviewed at its pinned
+ *  head — the checkout fetched and detached there, pi started under the read
+ *  identity's allowlist (no `edit`, no `write`) with the registry's review
+ *  framing as its system prompt and the verdict tool as its one relay — and
+ *  scored as the post-step would score it: a verdict in the house shape
+ *  naming the reviewed head, every call vetted, no write tool run, the
+ *  checkout untouched. The verdict is recorded in the receipt and posted
+ *  nowhere: the driver's `submit_verdict` reaches the driver, never GitHub. */
+async function piReviewSuite(f: Flags): Promise<boolean> {
+  const id = runId();
+  const taskFlag = str(f, "task", "all");
+  const tasks =
+    taskFlag === "all" ? [...PI_REVIEW_TASKS] : [piReviewTaskByName(taskFlag)].flatMap((t) => (t ? [t] : []));
+  if (tasks.length === 0) throw new Error(`--task must be all or one of ${PI_REVIEW_TASK_NAMES.join(", ")}`);
+  const setup = piSetup(f, id, 25);
+  if (!setup) return false;
+  const {
+    startedAt,
+    providerName,
+    keyEnv,
+    key,
+    checkout,
+    model,
+    budgetMs,
+    piBin,
+    thinking,
+    baseUrl,
+    throughProxy,
+    extensionPath,
+    agentDir,
+    layout,
+  } = setup;
+
+  // The repository the tasks belong to is the checkout's, read once: the
+  // fixtures pin heads, never a name.
+  const repo = await originSlug(checkout);
+  const samples: Sample[] = [];
+  const rows: ReviewRow[] = [];
+  const stderrs: Record<string, string> = {};
+  for (const task of tasks) {
+    await checkoutPrHead(checkout, task);
+    // The framing a resident review run composes, rewritten per task: pi
+    // reads SYSTEM.md from its config directory, as the production harness
+    // writes it.
+    writeSystemPrompt(agentDir, reviewSystemPrompt(task, { repo, checkout }));
+    const proc = spawnPi({
+      piBin,
+      checkout,
+      extensionPath,
+      provider: providerName,
+      model,
+      ...(thinking ? { thinking } : {}),
+      keyEnvName: piKeyEnvFor(providerName),
+      keyValue: key,
+      agentDir,
+      sessionDir: layout.sessionDir,
+      tools: PI_REVIEW_TOOLS,
+    });
+    const startedTask = systemClock();
+    process.stdout.write(
+      `pi review ${task.name}: ${reviewTaskUrl(repo, task)} at ${task.head.slice(0, 7)}, budget ${budgetMs / 60_000} min\n`,
+    );
+    const run = await drivePiTask(proc.transport, {
+      task: task.name,
+      prompt: reviewPrompt(task, repo),
+      budgetMs,
+      now: systemClock,
+      timers: realTimers,
+      // The gate's rules for a read identity: no branch of the run's own, no
+      // push at all, no write tool in reach.
+      preview: (tool, input) => judgeToolCall(tool, input, { identity: "read", checkout }),
+      describe: () => [],
+      onEvent: (event) => {
+        if (event.type === "tool_execution_start") process.stdout.write(`  ${String(event.toolName)}\n`);
+      },
+    });
+    let exitTimer: NodeJS.Timeout | undefined;
+    const exit = await Promise.race([
+      proc.exited,
+      new Promise<{ code: null; signal: null }>((r) => {
+        exitTimer = setTimeout(() => r({ code: null, signal: null }), 5_000);
+        exitTimer.unref();
+      }),
+    ]);
+    if (exitTimer) clearTimeout(exitTimer);
+    if (exit.code === null && exit.signal === null) proc.kill();
+    stderrs[task.name] = redactSecrets(proc.stderr());
+    const state = await checkoutState(checkout);
+    const outcome = reviewOutcome(run, task);
+    const reason = reviewFailureReason(run, outcome);
+    samples.push({
+      op: "task",
+      startedAt: startedTask,
+      ms: run.wallMs,
+      ok: reason === undefined,
+      status: run.terminal,
+      ...(reason === undefined ? {} : { reason }),
+    });
+    rows.push({ task, run: redactPiRun(run), checkout: state });
+    process.stdout.write(
+      `  → ${run.terminal}, ${run.turns} turns, $${run.cost.total.toFixed(4)}, ${run.toolCalls.length} tool calls, verdict: ${outcome.verdict?.verdict ?? "none"}${outcome.headMatches ? "" : " (head not the reviewed one)"}, checkout ${state.clean && state.head === task.head ? "untouched" : "touched"}\n`,
+    );
+  }
+
+  const summary = summarize(samples);
+  const outcomes = rows.map((r) => ({ ...r, outcome: reviewOutcome(r.run, r.task) }));
+  const refusedCalls = rows.flatMap((r) =>
+    r.run.toolCalls.filter((c) => c.verdict !== "allowed").map((c) => ({ task: r.task.name, ...c })),
+  );
+  const rejectedByPi = rows.flatMap((r) =>
+    r.run.toolCalls.filter((c) => c.gate === "rejected-by-pi").map((c) => ({ task: r.task.name, ...c })),
+  );
+  const unmapped = [...new Set(rows.flatMap((r) => r.run.unmapped))];
+  const checks: SloCheck[] = [
+    ...reviewChecks(rows),
+    {
+      name: "pi persisted no credential into its config directory",
+      pass: authStoreEmpty(`${agentDir}/auth.json`),
+      actual: authStoreEmpty(`${agentDir}/auth.json`) ? "auth.json absent or {}" : "auth.json carries entries",
+      limit: "absent or {}",
+    },
+  ];
+  const notes = [
+    "| task | pull request | terminal | wall | turns | tokens in/out | cost (pi catalog) | tool calls | write calls | verdict | head | checkout |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ...outcomes.map(
+      (r) =>
+        `| ${r.task.name} | [#${r.task.number}](${reviewTaskUrl(repo, r.task)}) | ${r.run.terminal} | ${Math.round(r.run.wallMs / 1000)} s | ${r.run.turns} | ${r.run.usage.input}/${r.run.usage.output} | $${r.run.cost.total.toFixed(4)} | ${r.run.toolCalls.length} | ${r.outcome.writeCalls.length === 0 ? "none" : r.outcome.writeCalls.join(", ")} | ${r.outcome.verdict ? `${r.outcome.verdict.verdict}, ${r.outcome.verdict.findings?.length ?? 0} finding(s)` : `none (${r.outcome.problems.join("; ")})`} | ${r.outcome.headMatches ? "reviewed" : "not the reviewed head"} | ${r.checkout.clean && r.checkout.head === r.task.head ? "untouched" : `${r.checkout.clean ? "" : "dirty "}${r.checkout.head === r.task.head ? "" : `at ${r.checkout.head.slice(0, 7)}`}`.trim()} |`,
+    ),
+    // The verdict the post-step would have posted, first line only: the
+    // receipt says what landed nowhere.
+    ...outcomes.flatMap((r) =>
+      r.outcome.body
+        ? [`${r.task.name} — the body the post-step would post begins: \`${r.outcome.body.split("\n")[0]}\``]
+        : [],
+    ),
+    ...rows.flatMap((r) => {
+      const note = earlyExitNote(r.task.name, r.run, stderrs[r.task.name] ?? "");
+      return note ? [note] : [];
+    }),
+    `model: ${rows[0]?.run.model ? `${rows[0].run.model.provider}/${rows[0].run.model.id} thinking ${rows[0].run.model.thinkingLevel}` : "unknown"}; pi's config and session files under ${agentDir} (kept: the sessions are the run's own record); verdicts recorded here and posted nowhere`,
+    `tool calls the read identity's rules would refuse or that fall outside its reach: ${refusedCalls.length === 0 ? "none" : ""}`,
+    ...refusedCalls.map((c) => `  - ${c.task} ${c.tool} (${c.verdict}): ${c.reason} — \`${c.summary}\``),
+    `tool calls pi answered by itself before the hook — nothing ran, so the gate had nothing to vet: ${rejectedByPi.length === 0 ? "none" : ""}`,
+    ...rejectedByPi.map((c) => `  - ${c.task} ${c.tool} ${c.callId}: ${c.piRejection} — \`${c.summary}\``),
+    `pi event kinds with no home on the run stream: ${unmapped.length === 0 ? "none" : unmapped.join(", ")}`,
+    ...rows.flatMap((r) => r.run.errors.map((e) => `error (${r.task.name}): ${e}`)),
+  ];
+  return writeResults(
+    "pi-review",
+    id,
+    startedAt,
+    {
+      checkout,
+      repo,
+      suite: "review",
+      tasks: tasks.map((t) => ({ name: t.name, url: reviewTaskUrl(repo, t), head: t.head })),
+      provider: providerName,
+      model,
+      thinking,
+      budgetMinutes: budgetMs / 60_000,
+      keyEnv,
+      piBin,
+      baseUrl,
+      throughProxy,
+    },
+    summary,
+    checks,
+    { runs: outcomes.map((r) => ({ ...r.run, checkout: r.checkout, review: r.outcome })), stderr: stderrs },
     notes,
   );
 }

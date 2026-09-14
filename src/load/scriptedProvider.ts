@@ -74,9 +74,27 @@ const DEFAULT_FINAL: Step = { kind: "text", text: "Done." };
  *  Past the script's end the answer is its trailing text step, or `Done.`. */
 export function nextStep(script: Script, messages: ChatRequest["messages"]): Step {
   const done = messages.filter((m) => m.role === "tool").length;
-  if (done < script.length) return script[done];
+  if (done < script.length) return resolveStep(script[done], messages);
   const last = script[script.length - 1];
   return last && last.kind === "text" ? last : DEFAULT_FINAL;
+}
+
+/** The one value a script cannot know when it is written: the head a review
+ *  must name. The pi review profile's verdict carries this in `head`, and the
+ *  step is resolved against the request — the way a model reads the head off
+ *  the REVIEW TARGET block. A request without the block leaves the token,
+ *  which the verdict parser drops as a malformed head. */
+export const REVIEW_HEAD_PLACEHOLDER = "<the head commit named in the REVIEW TARGET block>";
+const REVIEW_TARGET_HEAD = /Head commit: ([0-9a-f]{40})\b/;
+
+function resolveStep(step: Step, messages: ChatRequest["messages"]): Step {
+  if (step.kind !== "tool" || step.input.head !== REVIEW_HEAD_PLACEHOLDER) return step;
+  for (const m of messages) {
+    if (typeof m.content !== "string") continue;
+    const head = REVIEW_TARGET_HEAD.exec(m.content)?.[1];
+    if (head) return { ...step, input: { ...step.input, head } };
+  }
+  return step;
 }
 
 export function chatCompletion(req: ChatRequest, script: Script, now: () => number = Date.now): ChatResponse {
@@ -263,6 +281,35 @@ export function piCodingProfileScript(opts: ProfileOptions): Script {
       kind: "text",
       text: "Load harness run complete: read, inspected, burned CPU, wrote a note, submitted the description.",
     },
+  ];
+}
+
+/** The review profile in pi's tool vocabulary, for `load:pi --suite review`'s
+ *  dry run: the head and the diff read with pi's `bash`, then a verdict in
+ *  the house shape — `approve`, a summary, one nit, and the reviewed head
+ *  resolved from the request (`REVIEW_HEAD_PLACEHOLDER`) — then text. No
+ *  `read`, `edit` or `write`: a review reads with git, and a read run holds
+ *  no write tool. */
+export function piReviewProfileScript(opts: ProfileOptions): Script {
+  return [
+    { kind: "tool", name: "bash", input: { command: "git rev-parse HEAD && git diff --stat origin/main...HEAD" } },
+    {
+      kind: "tool",
+      name: "bash",
+      input: { command: cpuBurnCommand(opts.cpuSeconds) },
+      text: "Reading the change.",
+    },
+    {
+      kind: "tool",
+      name: "submit_verdict",
+      input: {
+        verdict: "approve",
+        summary: "Load harness review — synthetic approval of the pinned head.",
+        head: REVIEW_HEAD_PLACEHOLDER,
+        findings: [{ id: "F1", severity: "nit", file: "README.md", title: "A synthetic nit from the scripted model" }],
+      },
+    },
+    { kind: "text", text: "Load harness review complete: read the head and the diff, submitted the verdict." },
   ];
 }
 

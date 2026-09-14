@@ -1,14 +1,19 @@
-// The coding preset's tool rules under pi (docs/reference/specs/harness-pi.md):
-// what a coding run may ask of pi's built-in tools and of the harness's own,
+// A preset's tool rules under pi (docs/reference/specs/harness-pi.md items 7
+// and 10): what a run may ask of pi's built-in tools and of the harness's own,
 // judged per call from the call alone — the push target (the run's repository
 // and branch), a merge or an approval, the executor's credential store, an
-// environment dump, a path outside the checkout, a tool outside the preset's
-// reach. Pure: it executes nothing and reads nothing. The load harness previews
-// every call against it for the spike's receipt; the pi harness's gate refuses
-// with it. Each rule cites the rule it stands in for; the policy table's
-// tool-level rows (the authorization spec's open gap) are the follow-up.
+// environment dump, a path outside the checkout, a tool outside the reach the
+// run's identity gives it. A write run's reach is the coding preset's; a read
+// run's holds no write bundle, and its shell never pushes and never writes to
+// GitHub — the read-only rule the resident enforces with a read-only worktree
+// and no write token, said once more in pi's terms. Pure: it executes nothing
+// and reads nothing. The load harness previews every call against it for the
+// spike's receipt; the pi harness's gate refuses with it. Each rule cites the
+// rule it stands in for; the policy table's tool-level rows (the authorization
+// spec's open gap) are the follow-up.
 
 import { isAbsolute, relative, resolve } from "node:path";
+import type { Identity } from "../../../agents/registry.js";
 
 /** pi's built-in tools (packages/coding-agent/src/core/tools) and the harness
  *  extension's, each on the capability-profile bundle it exercises (the
@@ -38,11 +43,26 @@ export const CODING_REACH: ReadonlySet<string> = new Set([
   "pr",
 ]);
 
+/** A read-identity preset's reach — the `readonly` and `explore` toolsets'
+ *  bundles: a shell and the files to read the change with, the web, the
+ *  GitHub reads and the verdict; never `write-files`, `github-write` or `pr`. */
+export const READ_REACH: ReadonlySet<string> = new Set(["shell", "files", "web", "search", "github-read", "verdict"]);
+
+/** The reach a run's identity gives its pi: a write run reaches what the
+ *  coding preset does; a read run (and a preset without an identity, which
+ *  never has a workspace to run pi in) reaches nothing that writes. */
+export function reachFor(identity: Identity): ReadonlySet<string> {
+  return identity === "write" ? CODING_REACH : READ_REACH;
+}
+
 /** One call's verdict: allowed; refused by a rule the reason names; or a tool
- *  outside the coding preset's reach altogether (`outside-profile`). */
+ *  outside the run's identity's reach altogether (`outside-profile`). */
 export type ToolVerdict = { verdict: "allowed" } | { verdict: "refused" | "outside-profile"; reason: string };
 
 export interface ToolRuleContext {
+  /** The run's identity — the preset's (`AgentDef.identity`): it decides the
+   *  reach, and under `read` the shell never pushes or writes to GitHub. */
+  identity: Identity;
   /** The checkout pi runs in: the files bundles are this tree and nothing outside it. */
   checkout: string;
   /** The run's branch, when the run was given one (a plan unit's, the spike's):
@@ -80,14 +100,34 @@ const CREDENTIAL_VAR =
  *  the ship pipeline's rule for every coding child, and the review agent's
  *  read-only rule. */
 const MERGE_OR_APPROVE = /\bgh\s+pr\s+(merge|review)\b|\/pulls\/\d+\/(merge|reviews)\b/;
+/** `git push`, with git's own options between the two words allowed for —
+ *  `-C <dir>`, `--git-dir=`, `--work-tree=`, `-c key=value`, `--no-pager` —
+ *  so a push aimed from another directory is the same push. */
+const GIT_THEN_PUSH = String.raw`\bgit(?:\s+(?:-C\s+\S+|--git-dir=\S+|--work-tree=\S+|-c\s+\S+|--no-pager))*\s+push\b`;
 /** Each `git push` and what follows it up to the next shell operator. */
-const GIT_PUSH = /\bgit\s+push\b([^;&|]*)/g;
+const GIT_PUSH = new RegExp(`${GIT_THEN_PUSH}([^;&|]*)`, "g");
+/** Any `git push` at all — a read run's one answer to every one of them. */
+const ANY_PUSH = new RegExp(GIT_THEN_PUSH);
+/** A GitHub write from the shell, for a run whose identity holds no write:
+ *  the CLI's comment, edit, state and review verbs on a pull request or an
+ *  issue; `gh api` with a write method, or with a field (`-f`/`-F`, an input
+ *  file) — fields make `gh api` POST; curl at the REST API with a write
+ *  method or a body. A read of either by the same tools is not matched. */
+const GH_WRITE_VERB =
+  /\bgh\s+(pr|issue)\s+(comment|create|edit|close|reopen|ready|lock|unlock|review|merge|delete|transfer|pin|unpin)\b/;
+const WRITE_METHOD = "(POST|post|PATCH|patch|PUT|put|DELETE|delete)";
+const GH_API_WRITE = new RegExp(
+  `\\bgh\\s+api\\b(?=[^;&|]*(?:\\s(?:-X|--method)[\\s=]*${WRITE_METHOD}\\b|\\s(?:-f|-F|--field|--raw-field|--input)[\\s=]))`,
+);
+const CURL_GITHUB_WRITE = new RegExp(
+  `\\bcurl\\b(?=[^;&|]*api\\.github\\.com)(?=[^;&|]*(?:\\s(?:-X|--request)[\\s=]*${WRITE_METHOD}\\b|\\s(?:-d|--data(?:-\\w+)?|--json|-T|--upload-file)[\\s=]))`,
+);
 
 export function judgeToolCall(tool: string, input: unknown, ctx: ToolRuleContext): ToolVerdict {
   const bundle = PI_TOOL_BUNDLES[tool];
-  if (bundle === undefined) return outside(`${tool} is not in any bundle the coding preset reaches`);
-  if (!CODING_REACH.has(bundle)) {
-    return outside(`${tool} is the \`${bundle}\` bundle; the coding preset's reach does not include it`);
+  if (bundle === undefined) return outside(`${tool} is not in any bundle the ${ctx.identity} identity reaches`);
+  if (!reachFor(ctx.identity).has(bundle)) {
+    return outside(`${tool} is the \`${bundle}\` bundle, outside the ${ctx.identity} identity's reach`);
   }
   const args = isRecord(input) ? input : {};
   if (tool === "bash") return judgeBash(args.command, ctx);
@@ -102,6 +142,18 @@ function judgeBash(command: unknown, ctx: ToolRuleContext): ToolVerdict {
   if (CREDENTIAL_VAR.test(command)) return refused("credential — expands a credential variable");
   if (MERGE_OR_APPROVE.test(command)) {
     return refused("merge/approve — a coding run never merges or approves a pull request");
+  }
+  if (ctx.identity !== "write") {
+    // The read-only rule (harness-pi item 10): the worktree the resident
+    // attached for this run holds no write token and its origin is the
+    // read-only mirror, so a push could not land — the rule says so before
+    // the model learns it from a failure, and covers a GitHub write the
+    // prompt already forbids (the bot posts the review, never the agent).
+    if (ANY_PUSH.test(command)) return refused("read-only — a read-identity run never pushes");
+    if (GH_WRITE_VERB.test(command) || GH_API_WRITE.test(command) || CURL_GITHUB_WRITE.test(command)) {
+      return refused("read-only — a read-identity run never writes to GitHub");
+    }
+    return allowed;
   }
   for (const match of command.matchAll(GIT_PUSH)) {
     const verdict = judgePush(match[1], ctx);

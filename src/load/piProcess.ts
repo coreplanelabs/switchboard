@@ -16,7 +16,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { redactSecrets } from "../core/redact.js";
 import { publicEnv, type EnvRecord, type Secret } from "../secrets.js";
-import { takesAdaptiveThinking } from "../core/harness/pi/process.js";
+import { piBuiltinToolsFor, takesAdaptiveThinking } from "../core/harness/pi/process.js";
 import { jsonlLines, type PiTransport } from "../core/harness/pi/protocol.js";
 
 /** The variable the harness hands a custom provider's key under: the name
@@ -56,6 +56,12 @@ export const PI_CODING_TOOLS: readonly string[] = [
   "submit_pr_description",
   "submit_verdict",
 ];
+
+/** The tools a pi review child may call: the read identity's built-ins —
+ *  pi's tools less `edit` and `write`, as the production harness allowlists
+ *  them (`piBuiltinToolsFor("read")`) — and the extension's verdict tool. No
+ *  `submit_pr_description`: a review has no PR-shaped outcome to measure. */
+export const PI_REVIEW_TOOLS: readonly string[] = [...piBuiltinToolsFor("read"), "submit_verdict"];
 
 export interface PiSpawnOptions {
   piBin: string;
@@ -266,14 +272,83 @@ export function spawnPi(o: PiSpawnOptions, spawn: SpawnFn = nodeSpawn): PiProces
   return { transport, exited, stderr: () => stderr, kill: () => void child.kill("SIGKILL") };
 }
 
+/** One git command in the checkout; its stdout, or a named failure. */
+function git(checkout: string, args: readonly string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("git", [...args], { cwd: checkout }, (err, stdout, stderr) => {
+      if (err) reject(new Error(`git ${args.join(" ")} failed: ${stderr.trim() || err.message}`));
+      else resolve(stdout);
+    });
+  });
+}
+
 /** Put the checkout on the task's branch before pi starts — the ship
  *  pipeline owns its children's branch the same way. `-B` resets a branch a
  *  previous run left behind. */
-export function checkoutBranch(checkout: string, branch: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile("git", ["checkout", "-q", "-B", branch], { cwd: checkout }, (err, _stdout, stderr) => {
-      if (err) reject(new Error(`git checkout -B ${branch} failed: ${stderr.trim() || err.message}`));
-      else resolve();
-    });
-  });
+export async function checkoutBranch(checkout: string, branch: string): Promise<void> {
+  await git(checkout, ["checkout", "-q", "-B", branch]);
+}
+
+/** The fetch that brings a pull request's head into the checkout beside the
+ *  base branch: GitHub keeps `refs/pull/<n>/head` after the merge, so a merged
+ *  review task is fetchable for as long as the repository is; the base branch
+ *  comes along so `origin/<base>...HEAD` is the change. Into a ref of the
+ *  driver's own, never a local branch. */
+export function prHeadFetchArgs(pr: { number: number; baseRef: string }): string[] {
+  return ["fetch", "-q", "origin", pr.baseRef, `+refs/pull/${pr.number}/head:refs/remotes/load-pi/pr-${pr.number}`];
+}
+
+/** Detach at the fetched head — a review reads a commit, never a branch. */
+export function prHeadCheckoutArgs(pr: { number: number }): string[] {
+  return ["checkout", "-q", "--detach", `refs/remotes/load-pi/pr-${pr.number}`];
+}
+
+/** Put the checkout at the review task's pinned head before pi starts, the
+ *  way the resident attaches a review's worktree at the PR head: fetch, detach,
+ *  and refuse to start on any other commit — a review of the wrong head is
+ *  the one thing the post-step never posts. */
+export async function checkoutPrHead(
+  checkout: string,
+  pr: { number: number; baseRef: string; head: string },
+): Promise<void> {
+  await git(checkout, prHeadFetchArgs(pr));
+  await git(checkout, prHeadCheckoutArgs(pr));
+  const at = (await git(checkout, ["rev-parse", "HEAD"])).trim();
+  if (at !== pr.head) {
+    throw new Error(`refs/pull/${pr.number}/head is ${at.slice(0, 7)}, not the pinned head ${pr.head.slice(0, 7)}`);
+  }
+}
+
+/** `owner/name` from a GitHub remote URL — `https://github.com/o/r`, with or
+ *  without `.git`, or `git@github.com:o/r.git`; undefined for anything else. */
+export function parseGithubSlug(url: string): string | undefined {
+  const m = /^(?:https?:\/\/github\.com\/|git@github\.com:)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(url.trim());
+  return m?.[1];
+}
+
+/** The repository the checkout clones, as GitHub names it: the review suite's
+ *  pull requests are this repository's, and the REVIEW TARGET block, the
+ *  prompt and the receipt name it from here — never from the tree. */
+export async function originSlug(checkout: string): Promise<string> {
+  const url = (await git(checkout, ["remote", "get-url", "origin"])).trim();
+  const slug = parseGithubSlug(url);
+  if (!slug) throw new Error(`the checkout's origin (${url}) is not a GitHub repository URL`);
+  return slug;
+}
+
+/** What the checkout looks like after a task: the tree's status (empty when
+ *  clean) and its HEAD — the read-only facts a review run must leave behind. */
+export async function checkoutState(checkout: string): Promise<{ clean: boolean; head: string }> {
+  const status = await git(checkout, ["status", "--porcelain"]);
+  const head = (await git(checkout, ["rev-parse", "HEAD"])).trim();
+  return { clean: status.trim() === "", head };
+}
+
+/** The system prompt pi reads from its config directory (`SYSTEM.md`) — the
+ *  production harness writes the same file. Rewritten before each task, since
+ *  a review's framing names its pull request. */
+export function writeSystemPrompt(agentDir: string, system: string): string {
+  const path = join(agentDir, "SYSTEM.md");
+  writeFileSync(path, system.endsWith("\n") ? system : `${system}\n`);
+  return path;
 }
