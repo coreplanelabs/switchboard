@@ -233,7 +233,9 @@ describe("sandbox Worker wiring (static)", () => {
   it("the executor sends the env in the body alone — no x-env-* header", () => {
     const executor = readFileSync(resolve(ROOT, "src/execution/cloudflareSandbox.ts"), "utf8");
     expect(executor).toMatch(/const envs\s*=\s*await this\.opts\.resolveEnvs\(\)/);
-    expect(executor).toMatch(/env:\s*envs\b/);
+    // The resolved credential is the body's env — a caller's own variables
+    // (harness-pi item 4) join it there, under the credential.
+    expect(executor).toMatch(/env:\s*\{ \.\.\.callerEnv, \.\.\.envs \}/);
     expect(executor).not.toMatch(/x-env-/i);
   });
 

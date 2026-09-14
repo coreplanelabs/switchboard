@@ -134,7 +134,8 @@ export class CloudflareSandboxExecutor implements Executor {
     // heuristic only — a per-variable header whose name does not look
     // sensitive is logged in clear — while bodies are not recorded. So no
     // credential ever rides in a header.
-    const sent: Record<string, unknown> = { ...body, env: envs };
+    const callerEnv = isPlainEnv(body.env) ? body.env : {};
+    const sent: Record<string, unknown> = { ...body, env: { ...callerEnv, ...envs } };
 
     const budget = Math.min(budgetMs, FLEET_BUSY_WAIT_MAX_MS);
     let waited = 0;
@@ -263,6 +264,10 @@ export class CloudflareSandboxExecutor implements Executor {
     // server-side with the same [1s, 20 min] bounds — never this number alone.
     const body: Record<string, unknown> = { command };
     if (opts?.timeoutMs !== undefined) body.timeoutMs = clampBashTimeout(opts.timeoutMs);
+    // A caller's extra environment (docs/reference/specs/harness-pi.md item 4)
+    // joins the sandbox's own credential in the body's one env map (`call`
+    // merges them, the credential winning a clash).
+    if (opts?.env !== undefined) body.env = opts.env;
     // The fleet wait may spend up to the command's own budget (item 14) — a
     // command the run gave 60 s should not wait five minutes for a slot.
     const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs), opts?.span);
@@ -289,4 +294,14 @@ export class CloudflareSandboxExecutor implements Executor {
     await this.call("/write", { path, content }, undefined, undefined, opts?.span);
     return `Wrote ${path}`;
   }
+}
+
+/** A caller's `env` on an exec body: a plain object of string values, else nothing. */
+function isPlainEnv(v: unknown): v is Record<string, string> {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    !Array.isArray(v) &&
+    Object.values(v as Record<string, unknown>).every((x) => typeof x === "string")
+  );
 }

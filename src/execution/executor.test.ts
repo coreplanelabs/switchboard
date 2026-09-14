@@ -224,6 +224,41 @@ describe("LocalExecutor exec abort", () => {
   });
 });
 
+// Feature: docs/reference/specs/harness-pi.md item 4 — a caller's extra
+// environment for one command (`ExecOptions.env`): the pi harness hands the run
+// bearer to the pi process this way, never on a command line. Locally the
+// child gets the PUBLIC environment plus the caller's variables — a command
+// that carries an env of its own never inherits the host's secrets.
+describe("LocalExecutor exec env", () => {
+  it("the child sees the caller's variables beside the public environment, and never a secret of the host", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-local-env-"));
+    const ex = new LocalExecutor(dir);
+    process.env.SWB_TEST_SECRET_PROBE = "must-not-leak";
+    process.env.ANTHROPIC_API_KEY = "sk-must-not-leak";
+    try {
+      const out = await ex.exec(
+        'echo "probe=$SWB_PROBE path=${PATH:+set} key=${ANTHROPIC_API_KEY:-unset} plain=$SWB_TEST_SECRET_PROBE"',
+        {
+          env: { SWB_PROBE: "hi" },
+        },
+      );
+      expect(out.trim()).toBe("probe=hi path=set key=unset plain=must-not-leak");
+    } finally {
+      delete process.env.SWB_TEST_SECRET_PROBE;
+      delete process.env.ANTHROPIC_API_KEY;
+    }
+  });
+  it("without an env the command inherits the process environment exactly as before", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-local-env-"));
+    process.env.SWB_TEST_INHERIT_PROBE = "inherited";
+    try {
+      expect((await new LocalExecutor(dir).exec("echo $SWB_TEST_INHERIT_PROBE")).trim()).toBe("inherited");
+    } finally {
+      delete process.env.SWB_TEST_INHERIT_PROBE;
+    }
+  });
+});
+
 // Feature: docs/reference/specs/execution.md item 11 — per-call bash timeout. The local
 // executor honors ExecOptions.timeoutMs (execFile's `timeout`, maxBuffer kept)
 // and a deadline kill renders as exit 124 NAMING the limit that fired and the

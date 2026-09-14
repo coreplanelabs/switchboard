@@ -86,6 +86,17 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
     expect(sentEnv(calls[1]).GH_TOKEN).toBe("ghs_second");
   });
 
+  // docs/reference/specs/harness-pi.md item 4: a caller's extra environment
+  // joins the resolved credential in the body's one env map; on a name clash
+  // the sandbox's own credential wins — a caller never renames the token.
+  it("a caller's env rides beside the resolved credential in the body, the credential winning a clash", async () => {
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const resolveEnvs = vi.fn(async () => ({ GH_TOKEN: "ghs_real" }));
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs });
+    await ex.exec("pi --version", { env: { SWITCHBOARD_RUN_BEARER: "sbr_x.y", GH_TOKEN: "ghs_forged" } });
+    expect(sentEnv(calls[0])).toEqual({ GH_TOKEN: "ghs_real", SWITCHBOARD_RUN_BEARER: "sbr_x.y" });
+  });
+
   it("resolves nothing at construction — building the executor mints no credential", () => {
     const resolveEnvs = vi.fn(async () => ({ GH_TOKEN: "ghs_x" }));
     new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs });

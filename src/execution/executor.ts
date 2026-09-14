@@ -6,6 +6,7 @@ import { BASH_TIMEOUT_MS, bashTimeoutNote, clampBashTimeout } from "./bashTimeou
 import { MAX_READ_BYTES, tooLargeMessage } from "./binaryRead.js";
 import type { Span } from "../core/trace/types.js";
 import { systemClock } from "../core/trace/clock.js";
+import { publicEnv } from "../secrets.js";
 
 // The timeout policy (default/floor/ceiling + clamp) lives in bashTimeout.ts
 // so the deploy Workers can bundle it; re-exported here for the many callers
@@ -56,6 +57,13 @@ export interface Executor {
 export interface ExecOptions extends ExecTraceOptions {
   /** Aborted when the run is hard-stopped; cancel the command if you can. */
   signal?: AbortSignal;
+  /** Extra environment for this one command, handed to the process by the
+   *  executor's own env channel — the remote Workers' per-exec `env` option,
+   *  the local child's environment — and never onto the command text
+   *  (docs/reference/specs/harness-pi.md item 4: the pi harness hands the run
+   *  bearer this way). Locally the child then gets the PUBLIC environment plus
+   *  these, never the host's secrets; absent → the command runs as it always did. */
+  env?: Record<string, string>;
   /** Per-call command budget in ms (the bash tool's `timeoutMs`), already
    *  clamped to [1s, BASH_TIMEOUT_MAX_MS] by the tool layer; implementations
    *  re-clamp defensively (`clampBashTimeout`). Absent → BASH_TIMEOUT_MS, the
@@ -196,7 +204,7 @@ export class LocalExecutor implements Executor {
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
-    const r = await runBash(command, this.workspaceDir, opts?.signal, timeoutMs);
+    const r = await runBash(command, this.workspaceDir, opts?.signal, timeoutMs, opts?.env);
     const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
     if (r.timedOut) {
       // Name the limit that fired (not a generic abort) so the model can
@@ -339,6 +347,7 @@ function runBash(
   cwd: string,
   signal?: AbortSignal,
   timeoutMs: number = BASH_TIMEOUT_MS,
+  env?: Record<string, string>,
 ): Promise<{
   stdout: string;
   stderr: string;
@@ -350,7 +359,16 @@ function runBash(
     execFile(
       "bash",
       ["-c", command],
-      { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, ...(signal ? { signal } : {}) },
+      {
+        cwd,
+        timeout: timeoutMs,
+        maxBuffer: 10 * 1024 * 1024,
+        ...(signal ? { signal } : {}),
+        // A caller's env replaces the inherited one: the public variables plus
+        // the caller's, so a command that asked for an environment of its own
+        // never sees the host's secrets. Without one, inherited as always.
+        ...(env ? { env: { ...publicEnv(), ...env } } : {}),
+      },
       (err, stdout, stderr) => {
         const e = err as (NodeJS.ErrnoException & { code?: number | string; signal?: string | null }) | null;
         res({

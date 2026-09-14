@@ -114,6 +114,7 @@ import {
   recoverCapturedOutput,
 } from "../../src/execution/residentExecWrap.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
+import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import {
   CREDENTIAL_EXPIRY_MARGIN_MS,
   shouldRefreshThreadCredentials,
@@ -3942,8 +3943,13 @@ export class ResidentDO extends Sandbox<Env> {
     timeoutMs: number,
     capBytes?: number,
     capFiles?: { out: string; err: string },
+    env?: Record<string, string>,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean }> {
-    const injected = { GIT_TERMINAL_PROMPT: "0" };
+    // The caller's variables (an /exec body's `env`, docs/reference/specs/
+    // harness-pi.md item 4) under the Worker's own: a caller never overrides
+    // what the Worker injects. `su` without `-` keeps this environment for the
+    // thread user's shell.
+    const injected = { ...(env ?? {}), GIT_TERMINAL_PROMPT: "0" };
     validateEnvNames(injected);
     const body = capBytes
       ? capWrappedCommand(worktreePath, command, capBytes, capFiles)
@@ -3965,10 +3971,11 @@ export class ResidentDO extends Sandbox<Env> {
     command: string,
     timeoutMs: number,
     charCap: number,
+    env?: Record<string, string>,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean }> {
     const capBytes = capBytesFor(charCap);
     const files = execCapFiles();
-    const r = await this.threadRun(user, worktreePath, command, timeoutMs, capBytes, files);
+    const r = await this.threadRun(user, worktreePath, command, timeoutMs, capBytes, files, env);
     if (!r.timedOut) return r;
     try {
       const rec = await this.threadRun(
@@ -5130,12 +5137,13 @@ export class ResidentDO extends Sandbox<Env> {
     command: string,
     timeoutMs: number,
     traceparent?: string,
+    env?: Record<string, string>,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
     const queuedAt = systemClock();
     let startedAt = queuedAt;
     const res = await this.withThreadBusy(threadKey, () => {
       startedAt = systemClock();
-      return this.execThreadImpl(threadKey, command, timeoutMs);
+      return this.execThreadImpl(threadKey, command, timeoutMs, env);
     });
     // The command as the resident's own `resident.exec` root (docs/reference/specs/tracing.md
     // item 22): started when the command did, the wait for the thread's turn an attr.
@@ -5150,6 +5158,7 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     command: string,
     timeoutMs: number,
+    env?: Record<string, string>,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
@@ -5167,7 +5176,7 @@ export class ResidentDO extends Sandbox<Env> {
 
     let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
     try {
-      r = await this.threadRunCapped(binding.user, binding.worktreePath, command, timeoutMs, EXEC_OUTPUT_CAP);
+      r = await this.threadRunCapped(binding.user, binding.worktreePath, command, timeoutMs, EXEC_OUTPUT_CAP, env);
     } catch (err) {
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
       throw err;
@@ -7183,7 +7192,12 @@ async function handleExec(env: Env, body: Record<string, unknown>, traceparent?:
   // a string) runs at the 5-minute default. A clamp, not a 400: an out-of-range
   // ask still runs, at the nearest bound.
   const timeoutMs = clampBashTimeout(body.timeoutMs);
-  return streamThreadExec(ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent));
+  // A caller's extra environment for this one command (docs/reference/specs/
+  // harness-pi.md item 4) — the run bearer the pi harness hands its process —
+  // read from the body alone through the one validated reader the sandbox
+  // Worker uses, and handed to the exec's env option, never onto the command.
+  const execEnv = envFromRequest({ body });
+  return streamThreadExec(ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent, execEnv));
 }
 
 /** Stream one pending result with the thread-sandbox Worker's heartbeat
