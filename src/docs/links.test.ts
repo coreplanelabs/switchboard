@@ -1,5 +1,5 @@
 import { existsSync, globSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { SHOTS, shotSrc } from "../../docs/.vitepress/theme/screenshots.mjs";
@@ -167,6 +167,28 @@ describe("absolute URLs in docs/", () => {
           const ups = (target.match(/\.\.\//g) ?? []).length;
           if (ups <= climbs) continue; // stays inside docs/: the site checks it
           if (!existsSync(resolve(DOCS, dirname(rel), target))) wrong.push(`${rel}:${i + 1} ${target}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it("a relative link in a plan that resolves inside docs/ names a file that exists — plans are excluded from the site build, so its dead-link check never sees them", () => {
+    const wrong: string[] = [];
+    // Plans are frozen records, but the decisions and specs they cite live in
+    // this tree: a link from a plan to `../decisions/...` that no longer
+    // resolves is a defect in the tree (a record was renamed without a
+    // redirect), not in the plan. Links that climb out of docs/ point at code,
+    // which does move after a plan freezes, and stay exempt (see above).
+    for (const rel of pages.filter((p) => p.startsWith("plans/"))) {
+      const text = withoutCode(readFileSync(`${DOCS}/${rel}`, "utf8"));
+      for (const [line, i] of text.split("\n").map((l, i) => [l, i] as const)) {
+        for (const m of line.matchAll(/\]\(([^)#\s]+)(?:#[^)]*)?\)/g)) {
+          const target = m[1];
+          if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("/")) continue; // absolute: linted above
+          const abs = resolve(DOCS, dirname(rel), target);
+          if (relative(DOCS, abs).startsWith("..")) continue; // leaves docs/: frozen record, exempt
+          if (!existsSync(abs)) wrong.push(`${rel}:${i + 1} ${target}`);
         }
       }
     }
