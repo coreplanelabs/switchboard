@@ -1,4 +1,4 @@
-// Agent definitions. An agent is a system prompt + toolset + machine class + turn budget.
+// Agent definitions. An agent is a system prompt + toolset + machine class + wall-clock budget.
 import type { Effort } from "../effort.js";
 import type { CacheTtl } from "../providers/types.js";
 import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
@@ -42,13 +42,37 @@ export function machineNeedsRepo(machine: MachineClass): boolean {
 export const IDENTITIES = ["none", "read", "write"] as const;
 export type Identity = (typeof IDENTITIES)[number];
 
+/** The pace that marks a run as looping rather than working: a model turn
+ *  every ten seconds, sustained for the whole wall clock. A busy run takes
+ *  20–40 s a turn (a model think plus a tool call), so a run that averages six
+ *  a minute from start to end is re-issuing calls, not making progress — and
+ *  its turn cap ends it before the wall clock would, with a write-up that
+ *  says so (docs/reference/specs/run-loop.md item 1). */
+export const RUNAWAY_TURNS_PER_MINUTE = 6;
+
+/** The turn cap a wall clock implies: `maxMinutes × RUNAWAY_TURNS_PER_MINUTE`.
+ *  Every preset that runs the loop derives its `maxTurns` from this, so the
+ *  cap is never a number a good run reaches — the minutes are the budget. */
+export function runawayTurnCap(maxMinutes: number): number {
+  return maxMinutes * RUNAWAY_TURNS_PER_MINUTE;
+}
+
+/** A loop-running preset's budget as one fact: the wall clock, and the runaway
+ *  guard derived from it. */
+function loopBudget(maxMinutes: number): Pick<AgentDef, "maxMinutes" | "maxTurns"> {
+  return { maxMinutes, maxTurns: runawayTurnCap(maxMinutes) };
+}
+
 export interface AgentDef {
   name: string;
   description: string;
   system: string;
   /** key into TOOLSETS: "full" | "readonly" | "web" | "assistant" | "explore" | "conductor" | "none" */
   toolset: "full" | "readonly" | "web" | "assistant" | "explore" | "conductor" | "none";
-  /** backstop only — the wall clock below is the real budget */
+  /** The runaway guard, not a budget: `runawayTurnCap(maxMinutes)` for every
+   *  preset that runs the loop (`loopBudget`). The wall clock below is the
+   *  budget; a run that reaches this cap first was pacing like a loop, and its
+   *  write-up says so. The proxy refuses model calls past it too. */
   maxTurns: number;
   maxTokens: number;
   /** hard wall-clock budget for the tool loop; at the deadline the agent is
@@ -401,9 +425,8 @@ export const AGENTS: Record<string, AgentDef> = {
     // and mints no credential of its own.
     machine: "none",
     identity: "none",
-    maxTurns: 8, // a repo read is 2-3 calls (repos → tree → file); an issue action 1-2; still fast
     maxTokens: 16000,
-    maxMinutes: 5,
+    ...loopBudget(5),
   },
   coding: {
     name: "coding",
@@ -411,9 +434,8 @@ export const AGENTS: Record<string, AgentDef> = {
     system: CODING_SYSTEM,
     residentSystem: CODING_SYSTEM_RESIDENT,
     toolset: "full",
-    maxTurns: 60, // scoping is capped at ~5 calls by the prompt; this is implementation room
     maxTokens: 64000,
-    maxMinutes: 45,
+    ...loopBudget(45),
     // Coding steps run long: a single model turn can take 5-6 minutes and
     // installs/tests add more — a 5m cache entry would expire between
     // requests, so the 2× write buys reads for the whole run.
@@ -431,9 +453,8 @@ export const AGENTS: Record<string, AgentDef> = {
     toolset: "readonly",
     machine: "repo-resident",
     identity: "read", // a read-scoped token and a read-only worktree: it cannot post or push from inside
-    maxTurns: 30, // backstop only; wall clock is the real budget (12 bound at ~4 min in practice)
     maxTokens: 64000,
-    maxMinutes: 25, // safety net, not the mechanism — typical reviews land in ~5
+    ...loopBudget(25), // a safety net — typical reviews land in ~5 minutes
     effort: "medium", // fast turns; one big-context pass does the deep work
   },
   ship: {
@@ -468,9 +489,8 @@ export const AGENTS: Record<string, AgentDef> = {
     toolset: "web",
     machine: "none", // web I/O only; no workspace is provisioned
     identity: "none",
-    maxTurns: 12,
     maxTokens: 24000,
-    maxMinutes: 8,
+    ...loopBudget(8),
     effort: "medium",
   },
   explore: {
@@ -483,9 +503,8 @@ export const AGENTS: Record<string, AgentDef> = {
     // review depends on: a two-hour job shares no container with anyone.
     machine: "repo-cold",
     identity: "read", // a read-scoped token: it can clone and read, never push — whatever the caller holds
-    maxTurns: 150, // a backstop for a two-hour loop of batched checks; the wall clock is the budget
     maxTokens: 64000,
-    maxMinutes: 120,
+    ...loopBudget(120),
     // A detached job polled across calls makes long steps: a 5m cache entry
     // would expire between them, so the 2× write buys reads for the whole run.
     cacheTtl: "1h",
@@ -501,9 +520,8 @@ export const AGENTS: Record<string, AgentDef> = {
     // dispatcher, the GitHub reads are REST in the bot process.
     machine: "none",
     identity: "none",
-    maxTurns: 40, // a spawn, then a poll per child every few minutes; the wall clock is the budget
     maxTokens: 32000,
-    maxMinutes: 120, // long enough to outlast a coding child; every child is capped by what remains of it
+    ...loopBudget(120), // long enough to outlast a coding child; every child is capped by what remains of it
     // No built-in effort: the deployment decides, as for coding.
   },
 };

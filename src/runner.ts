@@ -30,8 +30,8 @@ import type { Span } from "./core/trace/types.js";
 import { formatDuration } from "./core/time/formatDuration.js";
 
 // The runner is the provider-neutral agent loop: send messages, execute any
-// requested tools, feed results back, repeat until the model stops or the
-// turn budget runs out.
+// requested tools, feed results back, repeat until the model stops, the wall
+// clock runs out, or the turn guard catches a run pacing like a loop.
 
 // A sandbox that becomes unrecoverable (e.g. a heavy `pnpm install` OOMs
 // or fills the disk and wedges the exec worker) surfaces every command — even a
@@ -313,7 +313,8 @@ async function runLoop(
     return agentSpan ? agentSpan.span("model.turn", call) : call(undefined);
   };
 
-  // The wall clock is the real budget; turns are a backstop. At the deadline
+  // The wall clock is the budget; the turn cap is a runaway guard derived from
+  // it (`runawayTurnCap`, six turns a minute over the minutes). At the deadline
   // the loop ends and the agent is forced to write up findings so far. Tools
   // get the deadline too, so the bash tool can clip a command that would
   // otherwise outlive the run (docs/reference/specs/execution.md item 12).
@@ -325,7 +326,7 @@ async function runLoop(
   // and the finale reports a dead sandbox instead of the ordinary budget notice.
   let sandboxDead = false;
 
-  // update_status-only turns don't consume the turn budget (bookkeeping,
+  // update_status-only turns don't count against the turn guard (bookkeeping,
   // not work); the absolute iteration cap still bounds the loop.
   let turn = 0;
   // The loop condition below, as a predicate over a prospective (turn,
@@ -735,24 +736,47 @@ async function runLoop(
     return await finishSandboxDead(complete, opts, messages, system, diagnosis);
   }
 
-  // Budget exhausted (time or turns): one final tool-less call so the work
-  // so far is written up instead of discarded.
+  // The wall clock ran out, or the turn guard caught a run pacing like a loop:
+  // one final tool-less call so the work so far is written up instead of
+  // discarded. The guard's write-up says why it stopped — the turns and the
+  // minutes — never "budget": a budget is a number a good run may reach, and
+  // this cap is not one.
   const wasTimeout = now() >= deadline;
+  const elapsedMs = opts.agent.maxMinutes * 60_000 - (deadline - now());
+  const pace = `${turn} model turn${turn === 1 ? "" : "s"} in ${elapsedMinutes(elapsedMs)}`;
   note(
     wasTimeout ? "time_budget_exhausted" : "turn_budget_exhausted",
-    `${wasTimeout ? "time" : "turn"} budget exhausted — writing up findings so far`,
+    wasTimeout
+      ? "time budget exhausted — writing up findings so far"
+      : `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`,
   );
+  const writeUp =
+    "Write your final answer now from what you have learned so far: report your findings/results to date, then state plainly which parts of the task you did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.";
   const text = await runFinale(
     complete,
     opts,
     messages,
     system,
-    "You have reached the turn budget and can make no more tool calls. Write your final answer now from what you have learned so far: report your findings/results to date, then state plainly which parts of the task you did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.",
+    wasTimeout
+      ? `You have reached the time budget and can make no more tool calls. ${writeUp}`
+      : `You have hit the run's turn guard — ${pace}, a pace that looks like a loop — and can make no more tool calls. ${writeUp}`,
   );
-  const budgetLabel = wasTimeout ? `${opts.agent.maxMinutes}-minute` : `${opts.agent.maxTurns}-turn`;
+  if (wasTimeout) {
+    return text
+      ? `⚠️ _Hit the ${opts.agent.maxMinutes}-minute budget before finishing — findings so far:_\n\n${text}`
+      : `Stopped at the ${opts.agent.maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
+  }
   return text
-    ? `⚠️ _Hit the ${budgetLabel} budget before finishing — findings so far:_\n\n${text}`
-    : `Stopped at the ${budgetLabel} budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
+    ? `⚠️ _Stopped after ${pace} — that pace looks like a loop; findings so far:_\n\n${text}`
+    : `Stopped after ${pace} — that pace looks like a loop — without finishing. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`;
+}
+
+/** The run's elapsed time as the write-up says it: whole minutes, or "under a
+ *  minute" — the guard's label is about pace, not a stopwatch reading. */
+function elapsedMinutes(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return "under a minute";
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
 /** A provider call already wrapped with the run's hard-stop race + signal; an

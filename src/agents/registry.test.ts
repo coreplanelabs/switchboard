@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS, PR_TITLE_GUARD } from "../core/ship/contract.js";
-import { AGENTS, getAgent, IDENTITIES } from "./registry.js";
+import { AGENTS, getAgent, IDENTITIES, RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap } from "./registry.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
 // docs/reference/specs/agent-coding.md — budgets, toolsets, and prompt guarantees are
@@ -8,21 +8,18 @@ import { AGENTS, getAgent, IDENTITIES } from "./registry.js";
 // change forces a feature-file update (and vice versa).
 
 describe("agent registry matches the feature specs", () => {
-  it("general: the assistant toolset (GitHub reads + issue writes + web_fetch, no shell), 8 turns, 5 min", () => {
+  it("general: the assistant toolset (GitHub reads + issue writes + web_fetch, no shell), 5 min", () => {
     expect(AGENTS.general.toolset).toBe("assistant");
-    expect(AGENTS.general.maxTurns).toBe(8);
     expect(AGENTS.general.maxMinutes).toBe(5);
   });
 
-  it("review: readonly toolset, 30-turn backstop, 25 min", () => {
+  it("review: readonly toolset, 25 min", () => {
     expect(AGENTS.review.toolset).toBe("readonly");
-    expect(AGENTS.review.maxTurns).toBe(30);
     expect(AGENTS.review.maxMinutes).toBe(25);
   });
 
-  it("coding: full toolset, 60 turns, 45 min, no built-in effort (config layers decide)", () => {
+  it("coding: full toolset, 45 min, no built-in effort (config layers decide)", () => {
     expect(AGENTS.coding.toolset).toBe("full");
-    expect(AGENTS.coding.maxTurns).toBe(60);
     expect(AGENTS.coding.maxMinutes).toBe(45);
     expect(AGENTS.coding.effort).toBeUndefined();
   });
@@ -91,10 +88,43 @@ describe("agent registry matches the feature specs", () => {
   });
 });
 
+// Feature: docs/reference/specs/run-loop.md item 1 — the wall clock is the
+// budget; the turn cap is a runaway guard derived from it, never a number a
+// working run reaches. A turn every ten seconds for the whole budget is a loop,
+// not work: six a minute, times the minutes. Ship is the one exception — its
+// def never runs the loop, so its 1 is structural.
+describe("the turn cap is a runaway guard derived from the wall clock (docs/reference/specs/run-loop.md item 1)", () => {
+  it("the rule: six turns a minute over the wall clock", () => {
+    expect(RUNAWAY_TURNS_PER_MINUTE).toBe(6);
+    expect(runawayTurnCap(45)).toBe(270);
+    expect(runawayTurnCap(25)).toBe(150);
+    expect(runawayTurnCap(5)).toBe(30);
+  });
+
+  it("every loop-running preset's maxTurns is runawayTurnCap(maxMinutes); ship keeps its structural 1", () => {
+    for (const [name, def] of Object.entries(AGENTS)) {
+      if (name === "ship") continue;
+      expect(def.maxTurns, name).toBe(runawayTurnCap(def.maxMinutes));
+      expect(def.maxTurns, name).toBe(def.maxMinutes * RUNAWAY_TURNS_PER_MINUTE);
+    }
+    expect(AGENTS.ship.maxTurns).toBe(1);
+  });
+
+  it("the derived caps: coding 270 in 45, review 150 in 25, research 48 in 8, general 30 in 5, explore and conductor 720 in 120", () => {
+    expect(AGENTS.coding.maxTurns).toBe(270);
+    expect(AGENTS.review.maxTurns).toBe(150);
+    expect(AGENTS.research.maxTurns).toBe(48);
+    expect(AGENTS.general.maxTurns).toBe(30);
+    expect(AGENTS.explore.maxTurns).toBe(720);
+    expect(AGENTS.conductor.maxTurns).toBe(720);
+  });
+});
+
 // Feature: docs/reference/specs/resident-repos.md — resident-path prompt variants:
 // the workspace is a ready worktree (no cloning, no installs, no repo
 // discovery, no gh CLI); selected by the dispatcher AFTER executor resolution,
 // never by mutating the shared AgentDef.
+
 describe("resident prompt variants", () => {
   it("coding and review carry a resident variant; general does not", () => {
     expect(AGENTS.coding.residentSystem).toBeTruthy();

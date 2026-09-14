@@ -35,8 +35,8 @@ import type { Backend } from "./trace/attrs.js";
 import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
 
-/** The turn's budget, below the coding agent's own (60 turns / 45 min): one
- *  read of the PR, one look at the diff, one submit, one line back. */
+/** The turn's budget, well under the coding agent's own wall clock and turn
+ *  guard: one read of the PR, one look at the diff, one submit, one line back. */
 export const DESCRIPTION_TURN_MAX_TURNS = 8;
 export const DESCRIPTION_TURN_MAX_MINUTES = 5;
 

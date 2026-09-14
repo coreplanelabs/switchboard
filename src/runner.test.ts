@@ -232,20 +232,51 @@ describe("runAgent budgets", () => {
     expect(result?.content).toContain("[tool result truncated:");
   });
 
-  it("forces a write-up labeled with the turn budget when turns run out", async () => {
+  it("forces a write-up that says the turn guard fired — the turns, the minutes, and that the pace looks like a loop — when turns run out", async () => {
     // Always asks for tools; maxTurns=2 → 2 tool turns, then a final tool-less call.
+    // The clock advances 40 s per tool call, so the label counts real minutes.
+    let t = 0;
+    const advancing: Executor = {
+      ...fakeExecutor,
+      exec: async () => {
+        t += 40_000;
+        return "ok";
+      },
+    };
     const provider = scripted([bashUse("t1"), bashUse("t2"), text("partial findings")]);
     const answer = await runAgent({
       provider,
       model: "m",
-      agent: agent({ maxTurns: 2 }),
+      agent: agent({ maxTurns: 2, maxMinutes: 10 }),
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      toolContext: { executor: advancing },
+      now: () => t,
+    });
+    expect(answer).toContain(
+      "⚠️ _Stopped after 2 model turns in 1 minute — that pace looks like a loop; findings so far:_",
+    );
+    expect(answer).not.toContain("budget");
+    expect(answer).toContain("partial findings");
+    // The model is told why it was stopped, not that it ran out of budget.
+    const finale = provider.requests[provider.requests.length - 1];
+    const instruction = finale.messages[finale.messages.length - 1];
+    expect(JSON.stringify(instruction.content)).toMatch(/turn guard.*2 model turns/);
+    // The forced final call must not offer tools.
+    expect(finale.tools).toBeUndefined();
+  });
+
+  it("the turn guard's empty write-up still says why the run stopped", async () => {
+    const provider = scripted([bashUse("t1"), text("")]);
+    const answer = await runAgent({
+      provider,
+      model: "m",
+      agent: agent({ maxTurns: 1, maxMinutes: 10 }),
       messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
       toolContext: { executor: fakeExecutor },
+      now: () => 0,
     });
-    expect(answer).toContain("2-turn budget");
-    expect(answer).toContain("partial findings");
-    // The forced final call must not offer tools.
-    expect(provider.requests[provider.requests.length - 1].tools).toBeUndefined();
+    expect(answer).toMatch(/^Stopped after 1 model turn in under a minute — that pace looks like a loop/);
+    expect(answer).toContain("Partial work may exist in the workspace");
   });
 
   it("labels the write-up with the minute budget when the wall clock ran out", async () => {

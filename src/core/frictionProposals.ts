@@ -5,6 +5,7 @@ import {
   type FrictionFinding,
   type FrictionSeverity,
 } from "./runFriction.js";
+import { RUNAWAY_TURNS_PER_MINUTE } from "../agents/registry.js";
 import { formatDuration } from "./time/formatDuration.js";
 
 // Friction proposer (docs/reference/specs/self-improvement.md): the PURE half of turning
@@ -621,7 +622,7 @@ function suggestedFix(p: FrictionPattern): string {
       return `Runs keep reaching the wrap-up warning (${p.runIds.length} runs; ${formatDuration(p.durationMs, "report")} spent winding down). Either the affected agent's \`maxMinutes\` (\`src/agents/registry.ts\`) is too tight for this shape of work, or the prompt should push batching (fewer, larger tool calls) — the evidence rows say which agent and how close to the deadline each run got.`;
     case "budget_hit":
       return p.signature === "turns"
-        ? `Runs exhaust the TURN budget. Raise \`maxTurns\` for the affected agent (\`src/agents/registry.ts\`) or have its prompt batch tool calls (several commands per \`bash\` call) so the same work takes fewer turns.`
+        ? `Runs outpace the runaway guard: the turn cap is \`RUNAWAY_TURNS_PER_MINUTE\` (${RUNAWAY_TURNS_PER_MINUTE} turns a minute) over the affected agent's wall clock, a pace a working run does not sustain — so a run that reaches it is looping, not working. Read the evidence rows for a retry loop (the same call re-issued turn after turn) and fix its cause where the agent reads before acting (the target repo's AGENTS.md, the resident command table), or have the prompt batch tool calls (several commands per \`bash\` call). The cap is derived from \`maxMinutes\` (\`src/agents/registry.ts\`), not a knob to turn.`
         : `Runs exhaust the TIME budget and are cut off mid-work. Raise \`maxMinutes\` for the affected agent (\`src/agents/registry.ts\`), or split the task shape that triggers it — a run that is forced to write up findings is a run whose work was wasted.`;
     case "infra_failure":
       if (p.signature === "sandbox_dead") {

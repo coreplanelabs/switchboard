@@ -4,7 +4,8 @@
 // of the provider, presenting the run's bearer as its API key. The proxy
 // authenticates the bearer (this run, unexpired, unrevoked), pins the request
 // to the preset's model and `max_tokens` whatever the body named, refuses a
-// call past the preset's `maxTurns` as a typed run event, forwards everything
+// call past the run's turn guard (the preset's `maxTurns`, derived from its
+// wall clock) as a typed run event, forwards everything
 // else byte-for-byte to the real provider with the real key from this
 // process's secrets, streams the answer back, and closes one `model.turn` span
 // per call carrying the token attrs the native runner sets — so the run page,
@@ -517,7 +518,7 @@ export async function handleAdmitted(
     grant.publish({
       type: "run_note",
       kind: "turn_budget_exhausted",
-      summary: `model proxy refused a call past the ${turn.maxTurns}-turn budget (${used})`,
+      summary: `model proxy refused a call past the run's ${turn.maxTurns}-turn guard (${used})`,
       at: deps.clock(),
     });
     log(`[model-proxy] 403 turn_budget_exhausted run=${grant.runId} turns=${turn.turns}/${turn.maxTurns}`);
@@ -525,7 +526,7 @@ export async function handleAdmitted(
       shape,
       403,
       "turn_budget_exhausted",
-      `the run's ${turn.maxTurns}-turn budget is spent (${used})`,
+      `the run is past its ${turn.maxTurns}-turn guard (${used})`,
     );
   }
   const payload = JSON.stringify(pinRequest(shape, body, grant));
