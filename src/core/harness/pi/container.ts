@@ -1,6 +1,7 @@
 // The container as the pi harness needs it (docs/reference/specs/harness-pi.md
-// item 4): a seam of six operations — write a file, start pi detached, feed
-// its stdin, read its log from an offset, ask whether it lives, end it — with
+// item 4): a seam of seven operations — write a file, start pi detached, feed
+// its stdin, read its log from an offset, ask whether it lives, end it, remove
+// the run's directory — with
 // two implementations: `ExecPiContainer`, which turns each into one command
 // over the run's own `Executor` (the resident's `/exec` as the thread's user,
 // the sandbox's, the local host's), and the in-memory fake the tests drive.
@@ -35,6 +36,8 @@ export interface PiContainer {
   kill(pid: number): Promise<void>;
   /** The last `bytes` of a file — pi's stderr for a diagnostic. */
   tail(path: string, bytes: number): Promise<string>;
+  /** Take the run's directory down as one tree, once pi has ended; idempotent. */
+  remove(paths: PiRunPaths): Promise<void>;
 }
 
 /** Thrown when a container command failed as a command (a nonzero exit, an
@@ -60,7 +63,10 @@ export const LOG_READ_BYTES = 48 * 1024;
 const LOG_FILTER = `grep --line-buffered -v ${shellQuote('"type":"message_update"')}`;
 
 /** `content` in chunks a shell argument can carry, each `printf '%s'`-ed, the
- *  first creating the file: exact bytes, no newline added, whatever the content. */
+ *  first creating the file and its directories: exact bytes, no newline added,
+ *  whatever the content. The umask comes before the mkdir, so every directory
+ *  it creates — the run's root under `/tmp` among them — is the caller's alone
+ *  at 700 (the `mkdtemp` shape), and the file is 600. */
 export function writeFileScripts(path: string, content: string): string[] {
   const chunks: string[] = [];
   for (let i = 0; i < Math.max(1, content.length); i += WRITE_CHUNK_CHARS)
@@ -68,16 +74,18 @@ export function writeFileScripts(path: string, content: string): string[] {
   const dir = path.slice(0, path.lastIndexOf("/")) || ".";
   return chunks.map((chunk, i) =>
     i === 0
-      ? `mkdir -p ${shellQuote(dir)} && umask 077 && printf '%s' ${shellQuote(chunk)} > ${shellQuote(path)}`
+      ? `umask 077 && mkdir -p ${shellQuote(dir)} && printf '%s' ${shellQuote(chunk)} > ${shellQuote(path)}`
       : `printf '%s' ${shellQuote(chunk)} >> ${shellQuote(path)}`,
   );
 }
 
-/** The wrapper that starts pi detached: the FIFO opened read-write on a spare
- *  descriptor so it never runs out of writers, the wrapper's own pid recorded
- *  (it leads the group pi and the filter run in), pi's stdin the FIFO, its
- *  stdout through the filter into the log, its stderr into its own file. The
- *  arguments are quoted one by one; the bearer is in none of them. */
+/** The wrapper that starts pi detached: the run's directories made at 700 in
+ *  a subshell (the umask stays out of pi's own environment), the FIFO opened
+ *  read-write on a spare descriptor so it never runs out of writers, the
+ *  wrapper's own pid recorded (it leads the group pi and the filter run in),
+ *  pi's stdin the FIFO, its stdout through the filter into the log, its
+ *  stderr into its own file. The arguments are quoted one by one; the bearer
+ *  is in none of them. */
 export function startScript(start: PiStart): string {
   const { paths, args } = start;
   const inner = [
@@ -86,7 +94,7 @@ export function startScript(start: PiStart): string {
     `pi ${args.map(shellQuote).join(" ")} <&3 2>>${shellQuote(paths.errLog)} | ${LOG_FILTER} >> ${shellQuote(paths.log)}`,
   ].join("; ");
   return [
-    `mkdir -p ${shellQuote(paths.dir)} ${shellQuote(paths.sessionDir)} ${shellQuote(paths.commandDir)}`,
+    `(umask 077 && mkdir -p ${shellQuote(paths.dir)} ${shellQuote(paths.sessionDir)} ${shellQuote(paths.commandDir)})`,
     `rm -f ${shellQuote(paths.fifo)}`,
     `mkfifo -m 600 ${shellQuote(paths.fifo)}`,
     `: > ${shellQuote(paths.log)}`,
@@ -123,6 +131,11 @@ export function killScript(pid: number): string {
 
 export function tailScript(path: string, bytes: number): string {
   return `tail -c ${bytes} ${shellQuote(path)} 2>/dev/null || true`;
+}
+
+/** The run's directory as one tree; a directory already gone is not a failure. */
+export function removeScript(dir: string): string {
+  return `rm -rf ${shellQuote(dir)}`;
 }
 
 const STDERR_MARK = "\n--- stderr ---\n";
@@ -186,6 +199,10 @@ export class ExecPiContainer implements PiContainer {
     } catch {
       return "";
     }
+  }
+
+  async remove(paths: PiRunPaths): Promise<void> {
+    stdoutOf("remove", await this.exec(removeScript(paths.dir)));
   }
 
   private exec(script: string, env?: Record<string, string>): Promise<string> {

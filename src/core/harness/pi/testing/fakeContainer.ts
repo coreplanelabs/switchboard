@@ -12,6 +12,8 @@ export class FakePiContainer implements PiContainer {
   readonly stdin: string[] = [];
   readonly starts: PiStart[] = [];
   readonly killed: number[] = [];
+  /** The run directories the harness removed; `files` keeps its record of what was written. */
+  readonly removed: string[] = [];
   private log = Buffer.alloc(0);
   private live = false;
   /** The pid every start answers; changed by a test that wants two processes told apart. */
@@ -74,6 +76,11 @@ export class FakePiContainer implements PiContainer {
   async kill(pid: number): Promise<void> {
     this.killed.push(pid);
     this.live = false;
+  }
+
+  async remove(paths: PiRunPaths): Promise<void> {
+    this.maybeFail("remove");
+    this.removed.push(paths.dir);
   }
 
   async tail(path: string, bytes: number): Promise<string> {

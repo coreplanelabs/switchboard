@@ -60,17 +60,19 @@ export interface PiRunPaths {
  *  a run's files are removable as one tree. Outside the checkout, so nothing
  *  pi writes lands in the repository or its snapshots.
  *
- *  The root is the OS user's own when the run knows the user its commands run
- *  as (`/tmp/switchboard-pi-<user>`: the resident runs each thread's commands
- *  as that thread's pool user), the shared `/tmp/switchboard-pi` when it does
- *  not (the local host, the sandbox: one user). `mkdir -p` gives a parent it
- *  creates to its caller at 755, so one root shared by every run would belong
- *  to whichever user ran first and refuse every other user's run at its own
- *  mkdir; the users' roots are siblings directly under `/tmp` (mode 1777),
- *  with nothing between them for one user to own. */
-export function piRunPaths(runId: string, user?: string): PiRunPaths {
-  const root = user ? `/tmp/switchboard-pi-${user}` : "/tmp/switchboard-pi";
-  const dir = `${root}/${runId}`;
+ *  The directory is the run's own, directly under `/tmp`, which is sticky
+ *  (mode 1777): whichever OS user runs the run's commands can create a
+ *  sibling there, and only that user can remove it. That is the `mkdtemp`
+ *  shape, the mechanism the OS has for exactly this, and it asks nothing of
+ *  the harness about who runs the commands. There is no parent between `/tmp`
+ *  and the root, shared or per user: the resident runs each thread's commands
+ *  as that thread's pool user, and `mkdir -p` gives a parent it creates to
+ *  its caller, so a parent shared by every run would belong to whichever user
+ *  ran first and refuse every other user's run at its own mkdir, and a parent
+ *  per user would only move that ownership to the runs that know their user.
+ *  The run id is unique, so the name needs no suffix. */
+export function piRunPaths(runId: string): PiRunPaths {
+  const dir = `/tmp/switchboard-pi-${runId}`;
   return {
     dir,
     agentDir: `${dir}/agent`,
