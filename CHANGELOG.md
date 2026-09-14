@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.216.1](https://github.com/coreplanelabs/switchboard/compare/v1.216.0...v1.216.1) (2026-09-14)
+
+
+### Bug fixes
+
+* **slack:** a routed card closed by another process carries the override footer - the boot reclaim reads the route off the run's events, the reconnect sweep off the card's own label ([#1102](https://github.com/coreplanelabs/switchboard/issues/1102)) ([2f15fd7](https://github.com/coreplanelabs/switchboard/commit/2f15fd72f3578c1524ad1886dbd6b55690fe7523))
+* **workers:** the artifacts copy route reads the request that still has its body ([#1104](https://github.com/coreplanelabs/switchboard/issues/1104)) ([5bbf172](https://github.com/coreplanelabs/switchboard/commit/5bbf17204a05a08392c6585a73af1e51cd9073ce))
+
+
+### Documentation
+
+* **docs:** the plan and record 0034 take in the thread lineage stage, the thread-key filter and continuedBy from the run tools ([#1100](https://github.com/coreplanelabs/switchboard/issues/1100)) ([ca20fc4](https://github.com/coreplanelabs/switchboard/commit/ca20fc426b33e460149d958b46ad8f9da87b49cb))
+* **docs:** U34b gates its one thread read on a reply in an existing thread, and record 0034's store row binds to the thread-key tests by title ([#1103](https://github.com/coreplanelabs/switchboard/issues/1103)) ([261d2f6](https://github.com/coreplanelabs/switchboard/commit/261d2f69586c4e06496b99ae0f679d4aba51085c))
+
 ## [1.216.0](https://github.com/coreplanelabs/switchboard/compare/v1.215.2...v1.216.0) (2026-09-14)
 
 
