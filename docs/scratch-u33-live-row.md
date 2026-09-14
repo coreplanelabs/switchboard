@@ -1,11 +1,11 @@
 # Scratch note for the U33 live row
 
-This file exists only so a routed request has something to fix. It carries three deliberate mistakes:
+This file exists only so a routed request has something to fix. It carried three deliberate mistakes, now corrected:
 
-- The word recieve is misspelled here and again below: recieve.
-- This sentence says the router shiped in 1.999.0, which is not a real release.
-- The list item numbering below skips a step.
+- The word receive is spelled correctly here and again below: receive.
+- This sentence says the router shipped in 1.215.0, which is a real release.
+- The list item numbering below is sequential.
 
 1. Post a plain message.
-3. Read the card.
-4. Delete this file.
+2. Read the card.
+3. Delete this file.
