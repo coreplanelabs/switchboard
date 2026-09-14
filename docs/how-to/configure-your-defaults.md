@@ -1,6 +1,6 @@
 # Configure your defaults
 
-Set the agent, model and effort once, at the scope that owns them, instead of repeating directives on every message.
+A plain message picks its own agent; the model and effort it runs on come from these layers. Set them once, at the scope that owns them, instead of on every message. Set an agent for a scope too, and every message there runs it, no picking.
 
 **You need:**
 
@@ -26,7 +26,7 @@ The reply names the effective agent, model and effort for you, where each came f
 
 | Flag | Sets |
 |---|---|
-| `--agent <name>` | the agent that runs when a message names none |
+| `--agent <name>` | the agent every plain message of yours runs, instead of one picked per message |
 | `--model <provider/model>` | one model for every agent |
 | `--models.<agent> <provider/model>` | the model for one agent |
 | `--effort <low\|medium\|high\|xhigh\|max>` | how hard the model thinks per turn; lower is much faster |

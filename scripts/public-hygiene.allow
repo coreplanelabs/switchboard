@@ -154,7 +154,7 @@ docs/reference/specs/public-hygiene.md	4. **A legitimate line is allowed by name
 CONTRIBUTING.md	published CLI package in `packages/switchboard/` (what `npx @coreplane/switchboard`
 README.md	npx @coreplane/switchboard ask "what can you do?"
 README.md	npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key <your key>
-README.md	Off means absent from `help`, the dashboard and the plan ([Turn features on and off](docs/how-to/turn-features-on-and-off.md)). The bot is `npx @coreplane/switchboard start` on any machine with Node, or the published image `ghcr.io/coreplanelabs/switchboard`.
+README.md	Off means the bot never offers it and the dashboard and the plan never show it ([Turn features on and off](docs/how-to/turn-features-on-and-off.md)). The bot is `npx @coreplane/switchboard start` on any machine with Node, or the published image `ghcr.io/coreplanelabs/switchboard`.
 docs/public/install.sh	# and can be run by hand: `npx @coreplane/switchboard init --help`.
 docs/public/install.sh	# runs the published installer — `npx @coreplane/switchboard init` — with every
 docs/public/install.sh	PACKAGE="@coreplane/switchboard"

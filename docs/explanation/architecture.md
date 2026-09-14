@@ -15,7 +15,7 @@ flowchart LR
         C2["CLI"]
         C3["HTTP · MCP"]
     end
-    D{"Dispatcher<br/>directives · config layers · authorization"}
+    D{"Dispatcher<br/>routing · config layers · authorization"}
     subgraph agent ["Agent — what runs"]
         AG["general · coding · review · ship · research · explore · conductor"]
     end
@@ -46,9 +46,9 @@ sequenceDiagram
     participant D as Dispatcher
     participant P as Provider
     participant E as Executor
-    U->>C: "agent:coding in acme/api: add a retry to the webhook sender"
+    U->>C: "in acme/api, add a retry to the webhook sender and open a PR"
     C->>D: message
-    D->>D: directives → agent · config layers → model, effort · authorize · history
+    D->>D: route → agent (a directive wins) · config layers → model, effort · authorize · history
     loop until the model stops or the budget runs out
         D->>P: complete(messages, tools)
         P-->>D: text, or a tool call

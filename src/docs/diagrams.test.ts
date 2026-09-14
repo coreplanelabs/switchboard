@@ -51,7 +51,7 @@ describe("renderFourSeams", () => {
     for (const way of channel.implementations) expect(out).toContain(`["${way}"]`);
     expect(out).toContain('AG["general · coding · review · ship · research · explore · conductor"]');
     expect(out).toContain('E["local · sandbox · resident"]');
-    expect(out).toContain('D{"Dispatcher<br/>directives · config layers · authorization"}');
+    expect(out).toContain('D{"Dispatcher<br/>routing · config layers · authorization"}');
     expect(out).toContain('C1 & C2 & C3 -->|"message"| D');
     expect(out).toContain('AG <-->|"complete"| P');
   });

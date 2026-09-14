@@ -4,7 +4,7 @@ description: Install Switchboard, get an answer in your terminal, then put it in
 
 # Get started
 
-Switchboard is an open-source agent gateway. You mention it in Slack, or call it from a terminal, and an AI agent answers the question, reviews the pull request, or ships the fix — on the model you choose, with its tools running where you decide. You install it; you do not fork it.
+Switchboard is an open-source agent gateway. You say what you want, in Slack or from a terminal, and it picks the agent: one answers the question, one reviews the pull request, one ships the fix, on the model you choose and with its tools running where you decide. You install it; you do not fork it.
 
 In ten minutes it will be answering you in your terminal and in a Slack channel, from one process on your machine. Production comes after, as a how-to.
 
@@ -15,7 +15,7 @@ In ten minutes it will be answering you in your terminal and in a Slack channel,
 | | |
 |---|---|
 | **One process** | The bot. It talks to your terminal, and to Slack over Socket Mode: no public URL, no Docker, no hosted service in between. |
-| **Three agents** | `general` answers and reads links. `review` reviews a pull request. `coding` makes a change and opens the PR. A plain message picks its own agent and the card says why; say `agent:review` or `agent:coding` to force one, and reply `agent:<name>` in the thread to run it another way. To turn the picking off, `routing: { auto: false }` ([Turn features on and off](../how-to/turn-features-on-and-off.md)); every plain message then runs `general`. |
+| **Three agents** | `general` answers and reads links. `review` reviews a pull request. `coding` makes a change and opens the PR. You never name one: the bot reads your message, picks the agent, and its status card says which and why. |
 | **Your keys, at home** | Keys live in `~/.switchboard/.env`, readable only by you. Every later command finds them from any directory. |
 
 ## Part 1: an answer in your terminal
@@ -51,7 +51,7 @@ Status lines appear (`preparing workspace…`, `preparing the prompt…`), then 
 npx @coreplane/switchboard ask "read https://github.com/coreplanelabs/switchboard and say what it does in two sentences"
 ```
 
-The `general` agent fetched the page and answered. That was the whole pipeline — the same one Slack will use.
+The agent fetched the page and answered. That was the whole pipeline, the same one Slack will use.
 
 ## Part 2: an answer in Slack
 
@@ -89,15 +89,15 @@ In Slack, `/invite @<your app>` into a channel, then:
 @<your app> what can you do?
 ```
 
-You should see a 👀 reaction (the receipt), a status card that updates in place, and the answer in a thread. Reply in the thread without the mention: it answers again, and the thread keeps its context. No 👀 means the bot is not in the channel.
+You should see a 👀 reaction (the receipt), a status card that updates in place, and the answer in a thread. The card's first line names the agent it picked and why. Reply in the thread without the mention: it answers again, and the thread keeps its context. No 👀 means the bot is not in the channel.
 
 ## What you have
 
-One process, answering on two channels, with your keys in a file only you can read. Nothing runs anywhere else yet.
+One process, answering on two channels and picking the agent for each message, with your keys in a file only you can read. Nothing runs anywhere else yet. To turn the picking off, `routing: { auto: false }` in `config/config.yaml` ([Turn features on and off](../how-to/turn-features-on-and-off.md)); every plain message then runs `general`.
 
 ## Next
 
-- [Your first request in Slack](first-request-in-slack.md): follow-ups, `agent:` and `model:` directives, handing a task to the coding agent.
+- [Your first request in Slack](first-request-in-slack.md): follow-ups, handing it a real task in plain words, watching the run.
 - [Set up accounts](../how-to/set-up-accounts.md): the GitHub App, so agents can read your repositories and open pull requests.
 - [Deploy](../how-to/deploy.md): run it on Cloudflare so it no longer depends on your laptop.
 - [Architecture](../explanation/architecture.md): what you just ran.

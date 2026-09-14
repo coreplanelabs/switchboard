@@ -10,7 +10,7 @@
 Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.
 
 <p align="center">
-  <img alt="A review in a Slack thread: the mention, the status card ticking through the run's steps, then the verdict with its findings." src="docs/public/slack/run.gif" width="395">
+  <img alt="A review in a Slack thread: a plain request to look at a pull request, the card naming the agent it picked and why, then the verdict with its findings." src="docs/public/slack/run.gif" width="395">
 </p>
 
 <picture>
@@ -33,7 +33,7 @@ Next: [Get started](docs/tutorials/get-started.md).
 
 ## How it is put together
 
-Four seams: Channel, Provider, Executor, Agent. Each is an interface with more than one implementation. The dispatcher sits between them: directives, config layers, routing, authorization, the agent loop ([How a request flows](docs/explanation/how-a-request-flows.md)).
+Four seams: Channel, Provider, Executor, Agent. Each is an interface with more than one implementation. The dispatcher sits between them: it reads what you asked for and picks the agent, resolves the model through the config layers, checks authorization and runs the agent loop ([How a request flows](docs/explanation/how-a-request-flows.md)).
 
 <!-- generated:four-seams · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
 
@@ -44,7 +44,7 @@ flowchart LR
         C2["CLI"]
         C3["HTTP · MCP"]
     end
-    D{"Dispatcher<br/>directives · config layers · authorization"}
+    D{"Dispatcher<br/>routing · config layers · authorization"}
     subgraph agent ["Agent — what runs"]
         AG["general · coding · review · ship · research · explore · conductor"]
     end
@@ -73,8 +73,10 @@ flowchart LR
 | Optional | An E2B account | Per-thread micro-VMs without Cloudflare |
 | Optional | A Brave Search key (`BRAVE_SEARCH_API_KEY`) | Web search for the research agent |
 
-Off means absent from `help`, the dashboard and the plan ([Turn features on and off](docs/how-to/turn-features-on-and-off.md)). The bot is `npx @coreplane/switchboard start` on any machine with Node, or the published image `ghcr.io/coreplanelabs/switchboard`.
+Off means the bot never offers it and the dashboard and the plan never show it ([Turn features on and off](docs/how-to/turn-features-on-and-off.md)). The bot is `npx @coreplane/switchboard start` on any machine with Node, or the published image `ghcr.io/coreplanelabs/switchboard`.
 
 ## Learn more
 
 Docs: <https://openswitchboard.dev> ([`docs/`](docs/README.md)) · [CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md) · [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
+
+Going deeper: commands and directives exist for whoever wants to type them ([Slack commands](docs/reference/slack-commands.md)); a plain sentence needs none.

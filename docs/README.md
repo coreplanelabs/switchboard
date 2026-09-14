@@ -1,6 +1,6 @@
 # Switchboard docs
 
-Switchboard is an agent gateway: a message arrives over Slack, the CLI, HTTP or MCP, and an agent answers it, reviews a pull request, or ships code. Read this tree here or at [openswitchboard.dev](https://openswitchboard.dev).
+Switchboard is an agent gateway: you say what you want over Slack, the CLI, HTTP or MCP, and the agent it picks answers the question, reviews the pull request, or ships the code. Read this tree here or at [openswitchboard.dev](https://openswitchboard.dev).
 
 ## Pick your surface
 
@@ -13,6 +13,8 @@ New here? [Get started](tutorials/get-started.md) first.
 | watching runs or spend | [Watch a run](how-to/watch-a-run.md) | [Check spend](how-to/check-spend.md) |
 | locking it down | [Restrict who can do what](how-to/restrict-who-can-do-what.md) | [Security model](explanation/security-model.md) |
 | changing the code | [Run it locally](tutorials/run-it-locally.md) | [How a request flows](explanation/how-a-request-flows.md) |
+
+A plain sentence is the whole interface. Commands and directives are there for whoever wants to type them: [Slack commands](reference/slack-commands.md).
 
 ## Four kinds of page
 
