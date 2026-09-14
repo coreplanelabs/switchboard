@@ -1,11 +1,13 @@
 ---
 title: Run artifacts move by reference through one private R2 bucket — containers and the bot's Worker move the bytes over URLs the bot signs, in both directions, and the run record keeps the key
-status: proposed
+status: accepted
 date: 2026-09-14
 pattern: Presigned-URL upload (a browser writing to S3 while the app server only signs), applied to both directions of a run, with the run record as catalogue and access list
 ---
 
 # Run artifacts move by reference through one private R2 bucket — containers and the bot's Worker move the bytes over URLs the bot signs, in both directions, and the run record keeps the key
+
+*Accepted with three mechanisms superseded by the execution plan's review and the live receipts: privacy is not probed at runtime (R2's S3 endpoint refuses every unsigned request whatever the bucket's public setting, so the probe would always say private) but read from the bucket's domain settings with the operator's Cloudflare token; the lifecycle rules are applied with that same operator token, not the bot's object-scoped S3 token; and the container streams the file to Slack's one-shot URL with `curl --upload-file … -X POST`, not `--data-binary`, which reads the whole file into memory and died at 1 GiB live. The five criteria's receipts are on the receipts ledger for the execution spec.*
 
 **The ask.** Decide (the owner, before the next attachment work starts): adopt an **artifact store** on Cloudflare R2 as the transport for every file a run receives or produces, in place of base64 inside the Workers' JSON, keeping the inline path only for deployments with no bucket. Written for an engineer who knows the channel and executor seams and has not read the `attach_file` pull requests. The frame is the owner's words: "we should be able to attach large files like 1 GB", "for upload and return", "we use Cloudflare".
 
