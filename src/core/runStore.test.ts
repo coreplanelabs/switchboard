@@ -102,6 +102,20 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect(await store.list({})).toEqual([]);
     });
 
+    // docs/reference/specs/agent-conductor.md item 10: a thread's runs are one
+    // read — the lineage lookup and the thread-aware child reads need the
+    // newest run of a thread, so the store filters by thread key.
+    it("list filters by `threadKey` — one thread's runs, newest first, under the same cap — and an unknown thread is empty", async () => {
+      const { store } = make();
+      await store.put(record("t1", NOW - 3000, { threadKey: "slack:C1:th" }));
+      await store.put(record("t2", NOW - 1000, { threadKey: "slack:C1:th" }));
+      await store.put(record("o1", NOW - 2000, { threadKey: "slack:C1:other" }));
+      expect((await store.list({ threadKey: "slack:C1:th" })).map((r) => r.id)).toEqual(["t2", "t1"]);
+      expect((await store.list({ threadKey: "slack:C1:th", limit: 1 })).map((r) => r.id)).toEqual(["t2"]);
+      expect((await store.list({ threadKey: "slack:C1:th", agent: "explore" })).map((r) => r.id)).toEqual([]);
+      expect(await store.list({ threadKey: "slack:C1:none" })).toEqual([]);
+    });
+
     // 30 s timeout, not the 5 s default: the FileRunStore variant's 205 puts
     // each re-read the index, stat every kept record (compact's intact check),
     // and rewrite the index — O(n) I/O per put by design (self-healing index).

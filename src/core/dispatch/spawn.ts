@@ -79,11 +79,14 @@ export interface SpawnRequest {
 /** What `dispatch()` is told about a child's parent (`DispatchOptions.parent`):
  *  the run that spawned it, the child's own depth, and the wall clock the
  *  parent had left at the spawn — the child's effective profile takes it as one
- *  more boundary (`boundedBy: "parent"`). */
+ *  more boundary (`boundedBy: "parent"`). A run that continues a spawned
+ *  thread (a person's reply there; dispatch/lineage.ts) names the same parent
+ *  at the same depth and inherits no clock: the wait that bounded the spawned
+ *  child is not what a later reply spends. */
 export interface ParentRun {
   runId: string;
   depth: number;
-  remainingMs: number;
+  remainingMs?: number;
 }
 
 /** The parent as the spawn sees it: the run's identity and clock, the preset
@@ -94,6 +97,8 @@ export interface ParentRun {
  *  keeps none in this process (a unit context, a harness that holds the
  *  transcript elsewhere): the child then starts from its own thread. */
 export interface SpawnParent extends ParentRun {
+  /** The wall clock the parent has left: a spawned child is always bounded by it. */
+  remainingMs: number;
   agentName: string;
   msg: IncomingMessage;
   io: ChannelIO;
@@ -447,7 +452,13 @@ export function runToolCapabilities<D extends SpawnCoreDeps>(
           text,
         ),
     },
-    wait: waitCapabilityFor({ registry: deps.registry, control: run.control, inbox: run.inbox, clock: deps.clock }),
+    wait: waitCapabilityFor({
+      registry: deps.registry,
+      control: run.control,
+      inbox: run.inbox,
+      clock: deps.clock,
+      runId: run.runId,
+    }),
   };
 }
 

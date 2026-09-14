@@ -366,6 +366,29 @@ describe("RunsService.listRuns — read merge", () => {
     expect(after.runs[0].stop).toBeUndefined(); // stop state lived only on the registry row
   });
 
+  // docs/reference/specs/agent-conductor.md item 10: a thread's newest run is
+  // one read — the filter narrows both sides of the merge.
+  it("`threadKey` narrows the listing to one thread's runs — a live registry row first, then the store's, newest first — so a thread's newest run is one read with `limit: 1`", async () => {
+    const { reg, svc, store } = setup();
+    await store!.put(record("t-old", NOW - 5000, { threadKey: "slack:C1:th" }));
+    await store!.put(record("t-mid", NOW - 1000, { threadKey: "slack:C1:th" }));
+    await store!.put(record("x-other", NOW - 500, { threadKey: "slack:C1:other" }));
+    const { id } = reg.create("general · follow-up", {
+      agent: "general",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:th",
+    });
+    const all = await svc.listRuns({ visibleTo: ALL, status: "all", threadKey: "slack:C1:th" });
+    expect(all.runs.map((r) => r.id)).toEqual([id, "t-mid", "t-old"]);
+    const newest = await svc.listRuns({ visibleTo: ALL, status: "all", threadKey: "slack:C1:th", limit: 1 });
+    expect(newest.runs.map((r) => r.id)).toEqual([id]);
+    const finished = await svc.listRuns({ visibleTo: ALL, status: "finished", threadKey: "slack:C1:th" });
+    expect(finished.runs.map((r) => r.id)).toEqual(["t-mid", "t-old"]);
+    const none = await svc.listRuns({ visibleTo: ALL, status: "all", threadKey: "slack:C1:none" });
+    expect(none.runs).toEqual([]);
+  });
+
   it("a live run's provisional interrupted tombstone never surfaces: the run lists as live under `all`, is absent from `finished`, and getRun serves the live row", async () => {
     const { reg, svc, store } = setup();
     const { id } = reg.create("coding · acme/x", {

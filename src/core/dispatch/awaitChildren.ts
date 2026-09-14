@@ -31,13 +31,23 @@ export const AWAIT_POLL_MS = 5_000;
  *  outcome's own word (`refused`, `failed`, `stopped`). */
 export type ChildEndStatus = RunStatus | "refused" | "stopped";
 
-/** What the wait knows of one child at a moment. */
+/** What the wait knows of one child at a moment. A child is its thread
+ *  (agent-conductor item 10): when a person's reply in the child's thread
+ *  started a later run there, the state is that run's — `continuedBy` names
+ *  it — so a child's row never stands on its first reply alone. */
 export type ChildState =
   /** Live — in this process, or under another generation (`elsewhere`). */
-  | { kind: "running"; activity?: string; elsewhere?: boolean }
+  | { kind: "running"; activity?: string; elsewhere?: boolean; continuedBy?: string }
   /** Ended: its terminal status, its last activity line, its final reply when
    *  it wrote one, and the gate's name when a gate refused it. */
-  | { kind: "ended"; status: ChildEndStatus; activity?: string; finalReply?: string; refusal?: string }
+  | {
+      kind: "ended";
+      status: ChildEndStatus;
+      activity?: string;
+      finalReply?: string;
+      refusal?: string;
+      continuedBy?: string;
+    }
   /** Unknown, or a run the requester may not read — byte-identical on purpose. */
   | { kind: "not_found" };
 
@@ -143,8 +153,9 @@ export interface WaitCapability {
   /** How many follow-ups wait in this run's own inbox. */
   followUpsPending(): number;
   /** Call `onChange` whenever one of `ids` finishes, is sealed, discarded or
-   *  evicted in this process's registry — a child that already ended is
-   *  reported at once. Returns the unsubscribe. */
+   *  evicted in this process's registry — or any run this run spawned ends
+   *  (a child by `parentRunId`: a thread's continuation, whatever its id) — a
+   *  child that already ended is reported at once. Returns the unsubscribe. */
   watch(ids: ReadonlySet<string>, onChange: () => void): () => void;
   now(): number;
   /** Resolves after `ms`, or at once when `signal` aborts (a hard stop). Never rejects. */
@@ -168,21 +179,42 @@ export function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<vo
 /** The capability over a run's own control and inbox and the process's
  *  registry. The feed's `upsert` of a watched child is an end only once it is
  *  finished (the finish, then the seal); its `removed` is a discard or an
- *  eviction. A child's mere activity never wakes the wait. */
+ *  eviction. A run that ends LIVE with this run (`runId`) as its `parentRunId`
+ *  wakes the wait too, whatever its id: a person's reply in a child's thread
+ *  after the child ended starts a run of that child the wait was never asked
+ *  for by name (agent-conductor item 10). That rule reads the live feed alone,
+ *  never the subscribe-time replay: a finished child the registry still holds
+ *  is one the wait has already read (or re-reads through the child it
+ *  continues, which stays pending while it runs), and a replay that woke on it
+ *  would end every tick at once. A watched id's replayed end still wakes: a
+ *  child that already ended is reported at once. A child's mere activity never
+ *  wakes it. */
 export function waitCapabilityFor(deps: {
   registry: Pick<RunRegistry, "subscribeIndex">;
   control: Pick<RunControl, "requested">;
   inbox: Pick<FollowUpInbox<FollowUpInput>, "size">;
   clock: Clock;
   sleep?: WaitCapability["sleep"];
+  /** The waiting run's own id: its children by `parentRunId` wake it as they end. */
+  runId?: string;
 }): WaitCapability {
   return {
     stopRequested: () => deps.control.requested,
     followUpsPending: () => deps.inbox.size,
-    watch: (ids, onChange) =>
-      deps.registry.subscribeIndex((event) => {
-        if (event.type === "removed" ? ids.has(event.id) : ids.has(event.run.id) && event.run.finished) onChange();
-      }),
+    watch: (ids, onChange) => {
+      let replaying = true; // `subscribeIndex` replays the active set synchronously before it returns
+      const unsubscribe = deps.registry.subscribeIndex((event) => {
+        if (event.type === "removed") {
+          if (ids.has(event.id)) onChange();
+          return;
+        }
+        if (!event.run.finished) return;
+        if (ids.has(event.run.id)) onChange();
+        else if (!replaying && deps.runId !== undefined && event.run.parentRunId === deps.runId) onChange();
+      });
+      replaying = false;
+      return unsubscribe;
+    },
     now: deps.clock,
     sleep: deps.sleep ?? sleepUnlessAborted,
   };

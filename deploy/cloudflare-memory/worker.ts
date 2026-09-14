@@ -136,7 +136,7 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 // keeps the 512 KB one.
 //   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?} → {ok, retained, stored, rewritten}
 //   POST /runs/get    {storeKey, id} → {record: RunRecord | null}      (unknown/expired: null, 200)
-//   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?}
+//   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?, threadKey?}
 //                       → {items: RunListItem[], nextBefore?: {finishedAt, id}}   (cursor = the last row's list key)
 //   POST /runs/events {storeKey, id, afterSeq?, limit?} → {events: (RunEvent & {seq})[] | null, nextAfterSeq?}
 //                       (`events: null` when the run is unknown or hidden by retention; `seq` is the registry's stamp)
@@ -1124,6 +1124,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         summary_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS runs_finished ON runs(finished_at);
+      CREATE INDEX IF NOT EXISTS runs_thread_key ON runs(thread_key, finished_at);
       CREATE TABLE IF NOT EXISTS run_events (
         run_id TEXT NOT NULL,
         seq INTEGER NOT NULL,
@@ -2095,6 +2096,10 @@ export class RunHistoryDO extends DurableObject<Env> {
       where.push(`channel_id = ?`);
       params.push(q.channel);
     }
+    if (q.threadKey !== undefined) {
+      where.push(`thread_key = ?`);
+      params.push(q.threadKey);
+    }
     if (q.visibleTo !== undefined && q.visibleTo.kind !== "all") where.push(visibilitySql(q.visibleTo, params));
     const select = `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE ${where.join(" AND ")} ORDER BY finished_at DESC, run_id DESC`;
     // `LIMIT` holds on the over-bound path too: the kept set is the newest
@@ -2276,7 +2281,7 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
     if (!id.ok) return invalid("beforeId must match ^[A-Za-z0-9_-]{1,64}$");
     query.beforeId = id.value;
   }
-  for (const field of ["agent", "channel"] as const) {
+  for (const field of ["agent", "channel", "threadKey"] as const) {
     const v = b[field];
     if (v === undefined) continue;
     if (typeof v !== "string" || v.length > MAX_KEY_CHARS)
@@ -2295,8 +2300,8 @@ function parseRunList(body: unknown): Validated<{ storeKey: string; query: RunLi
 }
 
 /** Parameters the page query binds before any filter: the cursor pair (3) and the age floor (1),
- *  plus `agent`, `channel`, and the LIMIT at most — the headroom `visibleTo` must fit under. */
-const RUN_LIST_BASE_PARAMETERS = 7;
+ *  plus `agent`, `channel`, `threadKey`, and the LIMIT at most — the headroom `visibleTo` must fit under. */
+const RUN_LIST_BASE_PARAMETERS = 8;
 
 /** How many `?` a filter binds (one per id, one per user). */
 function boundParameters(f: RunVisibilityFilter): number {

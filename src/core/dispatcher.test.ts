@@ -10296,8 +10296,8 @@ workspaceDir: __WORKDIR__
     return { parent, child, leads };
   }
   /** The deps of a tree: ids minted in order (the parent, then the child), a recording store, the process admission map. */
-  function treeDeps(provider: Provider) {
-    const ids = ["run-parent", "run-child", "run-third"];
+  function treeDeps(provider: Provider, minted: readonly string[] = ["run-parent", "run-child", "run-third"]) {
+    const ids = [...minted];
     const registry = new RunRegistry({ genId: () => ids.shift() ?? "run-more", genToken: () => "tok" });
     const store = new InMemoryRunStore();
     const writer = createRunHistoryWriter({
@@ -10698,6 +10698,224 @@ workspaceDir: __WORKDIR__
     expect(t.registry.getById("run-cut")).toBeNull();
     expect((await t.store.get("run-cut"))!.status).toBe("interrupted");
   });
+
+  // docs/reference/specs/agent-conductor.md item 10: a child is its thread. A
+  // person's reply in a spawned thread is a run of the same child — the
+  // parent's id on its record, depth 1, seeded from the thread — and the
+  // parent, while it lives, hears the reply as a follow-up from that child.
+  /** A person's reply in a child's thread, on the child's own channel handle. */
+  const replyIn = (threadKey: string, text: string, url: string) => ({
+    channelId: "slack:CX",
+    userId: "slack:UADMIN",
+    userName: "alice",
+    threadKey,
+    text,
+    sourceUrl: url,
+  });
+
+  it("a person's reply in a spawned thread after the child ended is a run of the same child: its record carries the parent's id and `seed: channel`, its budget is its own (no parent clock to inherit), and a parent that already ended is told nothing", async () => {
+    const { provider } = treeProvider(
+      [{ preset: "research", prompt: "what is a Durable Object?" }],
+      "A Durable Object is a single-instance coordination point.",
+    );
+    const t = treeDeps(provider);
+    const { parent, child } = treeIO();
+    await dispatch(t.deps, inChannel("CX", "agent:conductor look into durable objects"), parent.io);
+    await vi.waitFor(() => expect(t.registry.getById("run-child")?.finished).toBe(true));
+    await t.writer.settled();
+    // Both runs have ended; the person replies in the child's thread.
+    await dispatch(
+      t.deps,
+      replyIn(CHILD_THREAD, "actually, I meant Workflows", "https://acme.slack.com/archives/CX/p91"),
+      child.io,
+    );
+    await t.writer.settled();
+    const third = (await t.store.get("run-third"))!;
+    expect(third).toMatchObject({
+      agent: "general", // the thread's default: the child's directive lives in no user turn (the stickiness gap row)
+      threadKey: CHILD_THREAD,
+      userId: "slack:UADMIN",
+      parentRunId: "run-parent",
+      seed: "channel",
+      status: "completed",
+    });
+    expect(third.profile).toMatchObject({ preset: "general", minutes: AGENTS.general.maxMinutes });
+    expect(third.profile!.boundedBy).not.toBe("parent");
+    expect(t.registry.getById("run-third")).toMatchObject({ parentRunId: "run-parent", agent: "general" });
+    expect(child.replies).toHaveLength(2); // the child's answer, then the continuation's, both in the child's thread
+    expect(agentsProvisioned()).toEqual(["conductor", "research", "general"]);
+    // The parent had ended: one input on its record, nothing more in its thread.
+    const parentRecord = (await t.store.get("run-parent"))!;
+    expect(parentRecord.events.filter((e) => e.type === "input")).toHaveLength(1);
+    expect(parent.replies).toHaveLength(1);
+  });
+
+  /** A parent channel whose `openThread` hands out one recording child channel per thread named, in order. */
+  function forestIO(threads: ReadonlyArray<{ key: string; url: string }>) {
+    const parent = fakeIO();
+    const children = threads.map((th) => ({ ...th, ...fakeIO() }));
+    let n = 0;
+    parent.io.openThread = async () => {
+      const c = children[n++]!;
+      return { thread: { threadKey: c.key, sourceUrl: c.url }, io: c.io };
+    };
+    return { parent, children };
+  }
+  /** Every user text part of a request, in order. */
+  const userTexts = (req: CompletionRequest): string =>
+    req.messages
+      .filter((m) => m.role === "user")
+      .flatMap((m) =>
+        typeof m.content === "string"
+          ? [m.content]
+          : (m.content as Array<{ type: string; text?: string }>)
+              .filter((p) => p.type === "text")
+              .map((p) => p.text ?? ""),
+      )
+      .join("\n");
+  /**
+   * The scenario that motivated item 10: a conductor spawns two children, one slow ([A],
+   * held until the test releases it) and one quick ([B]); the requester
+   * corrects [B] in its thread while the conductor awaits. The conductor awaits
+   * again whenever a wait ended on a follow-up, and answers with the last
+   * report. A run in [B]'s thread that carries the correction answers it.
+   */
+  function continuedThreadProvider(releaseA: Promise<void>) {
+    const requests: CompletionRequest[] = [];
+    let ids: string[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        // The runner hands its provider the live conversation array; a snapshot keeps each request's own last turn.
+        requests.push({ ...req, messages: [...req.messages] });
+        const conducts = req.tools?.some((t) => t.name === "spawn_run") ?? false;
+        if (conducts) {
+          const results = toolResultTexts(req);
+          if (results.length === 0)
+            return {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "t1",
+                  name: "spawn_run",
+                  input: { preset: "research", prompt: "[A] what is a Durable Object?" },
+                },
+                {
+                  type: "tool_use",
+                  id: "t2",
+                  name: "spawn_run",
+                  input: { preset: "research", prompt: "[B] what is a Workflow?" },
+                },
+              ],
+              stopReason: "tool_use",
+            };
+          const spawned = results.filter((r) => r.startsWith("spawned a research run: "));
+          if (spawned.length === 2) ids = spawned.map((s) => /run: (\S+) in thread/.exec(s)![1]);
+          const report = results.find((r) => r.startsWith("{"));
+          const cutByFollowUp = report !== undefined && (JSON.parse(report) as { ended: string }).ended === "follow_up";
+          if (spawned.length === 2 || cutByFollowUp)
+            return {
+              content: [{ type: "tool_use", id: `w${requests.length}`, name: "await_runs", input: { ids } }],
+              stopReason: "tool_use",
+            };
+          return { content: [{ type: "text", text: results.join("\n---\n") }], stopReason: "end_turn" };
+        }
+        const asked = userTexts(req);
+        if (asked.includes("[A]")) {
+          await releaseA;
+          return {
+            content: [{ type: "text", text: "A: a Durable Object is a coordination point." }],
+            stopReason: "end_turn",
+          };
+        }
+        if (asked.includes("actually"))
+          return { content: [{ type: "text", text: "B: the grants live in config.yaml." }], stopReason: "end_turn" };
+        return { content: [{ type: "text", text: "B: a Workflow is a durable execution." }], stopReason: "end_turn" };
+      },
+    };
+    return { provider, requests };
+  }
+
+  it(
+    "a person's reply in a child's thread while the parent awaits: the reply reaches the parent as a follow-up from that child (the wait ends `follow_up`), the new run of the child carries the parent's id, and the parent's next await reports the child under its id with `continuedBy` and the thread's newest reply — never the first answer alone",
+    { timeout: 20_000 },
+    async () => {
+      let releaseA!: () => void;
+      const held = new Promise<void>((resolve) => {
+        releaseA = resolve;
+      });
+      const admission = new ThreadAdmission<DispatchFollowUp>();
+      const { provider, requests } = continuedThreadProvider(held);
+      const t = treeDeps(provider, ["run-parent", "run-A", "run-B", "run-B2"]);
+      t.deps.admission = admission;
+      const THREAD_A = "slack:CX:9.0";
+      const THREAD_B = "slack:CX:9.1";
+      const { parent, children } = forestIO([
+        { key: THREAD_A, url: "https://acme.slack.com/archives/CX/p90" },
+        { key: THREAD_B, url: "https://acme.slack.com/archives/CX/p91" },
+      ]);
+      const [ioA, ioB] = children;
+      const parentDone = dispatch(t.deps, inChannel("CX", "agent:conductor look into DOs and Workflows"), parent.io);
+      // [B] answers at once; [A] is held, so the parent sits in await_runs by the time B has
+      // replied (its spawn results came back at registration, long before). B's record is
+      // flushed to the store so the reply below finds B however the registry has aged it.
+      await vi.waitFor(() => expect(ioB.replies).toEqual(["B: a Workflow is a durable execution."]));
+      await t.writer.settled();
+      // The requester corrects [B] in its thread. The child ended, so this is a new run of it.
+      await dispatch(
+        t.deps,
+        replyIn(THREAD_B, "actually, I meant Switchboard admins", "https://acme.slack.com/archives/CX/p911"),
+        ioB.io,
+      );
+      expect(ioB.replies).toEqual(["B: a Workflow is a durable execution.", "B: the grants live in config.yaml."]);
+      releaseA();
+      await parentDone;
+      await t.writer.settled();
+
+      // The continuation is a run of the same child: the parent's id on its record, seeded from its thread.
+      const b2 = (await t.store.get("run-B2"))!;
+      expect(b2).toMatchObject({
+        agent: "general",
+        threadKey: THREAD_B,
+        parentRunId: "run-parent",
+        seed: "channel",
+        status: "completed",
+      });
+      expect(b2.profile!.boundedBy).not.toBe("parent");
+      // The parent heard the reply as a follow-up from the child, linked to the reply, naming the new run.
+      const parentRecord = (await t.store.get("run-parent"))!;
+      const inputs = parentRecord.events.filter((e) => e.type === "input");
+      expect(inputs).toHaveLength(2);
+      expect(inputs[1]).toMatchObject({
+        type: "input",
+        source: { user: "alice", run: "run-B", url: "https://acme.slack.com/archives/CX/p911" },
+      });
+      expect(String((inputs[1] as { text: string }).text)).toContain("actually, I meant Switchboard admins");
+      expect(String((inputs[1] as { text: string }).text)).toContain("run-B2");
+      expect(String((inputs[1] as { text: string }).text)).toMatch(/thread of your research child/);
+      // Its wait ended on the follow-up, and it awaited again before compiling.
+      const cut = requests.find((r) => toolResultTexts(r).some((x) => /ended\W+follow_up/.test(x)));
+      expect(cut).toBeDefined();
+      expect(lastUserTexts(cut!).some((x) => /Follow-up from the thread/.test(x))).toBe(true);
+      // The compiled answer reports [B] under its own id, continued by the new run, with the thread's newest reply.
+      expect(parent.replies).toHaveLength(1);
+      const report = JSON.parse(parent.replies[0]) as { ended: string; runs: Array<Record<string, unknown>> };
+      expect(report.ended).toBe("all_ended");
+      expect(report.runs.map((r) => [r.id, r.status])).toEqual([
+        ["run-A", "completed"],
+        ["run-B", "completed"],
+      ]);
+      expect(report.runs[1]).toMatchObject({ continuedBy: "run-B2", agent: "research", parentRunId: "run-parent" });
+      expect(String(report.runs[1].finalReply)).toContain("B: the grants live in config.yaml.");
+      expect(String(report.runs[1].finalReply)).not.toContain("durable execution");
+      expect("continuedBy" in report.runs[0]).toBe(false);
+      expect(String(report.runs[0].finalReply)).toContain("coordination point");
+      expect(ioA.replies).toEqual(["A: a Durable Object is a coordination point."]);
+      expect(agentsProvisioned()).toEqual(["conductor", "research", "research", "general"]);
+      expect(admission.get(PARENT_THREAD)).toBeUndefined();
+      expect(admission.get(THREAD_B)).toBeUndefined();
+    },
+  );
 });
 
 // Feature: docs/reference/specs/model-proxy.md — the run-scoped bearer's life
