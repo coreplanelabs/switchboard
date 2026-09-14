@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS, PR_TITLE_GUARD } from "../core/ship/contract.js";
 import { COMPOUND_BRIEF_HEADING } from "../core/dispatch/route.js";
-import { AGENTS, getAgent, IDENTITIES, RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap } from "./registry.js";
+import {
+  AGENTS,
+  COMPOUND_PRESET,
+  getAgent,
+  IDENTITIES,
+  presetDoor,
+  RUNAWAY_TURNS_PER_MINUTE,
+  runawayTurnCap,
+} from "./registry.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
 // docs/reference/specs/agent-coding.md — budgets, toolsets, and prompt guarantees are
@@ -81,6 +89,18 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.general.identity).toBe("none");
     expect(AGENTS.research.identity).toBe("none");
     expect(AGENTS.conductor.identity).toBe("none");
+  });
+
+  it("door declarations: how a plain message reaches each preset — the table for the five routable ones, the compound form alone for the conductor, a directive alone for ship", () => {
+    // `presetDoor` reads `routable` off the def and names the compound preset
+    // (docs/reference/specs/routing-and-config.md item 21); `help` renders its
+    // lines from it, so a preset's door is declared once, here.
+    for (const name of ["general", "coding", "review", "research", "explore"])
+      expect(presetDoor(AGENTS[name]), name).toBe("routed");
+    expect(COMPOUND_PRESET).toBe("conductor");
+    expect(presetDoor(AGENTS.conductor)).toBe("compound");
+    expect(presetDoor(AGENTS.ship)).toBe("directive");
+    expect(AGENTS[COMPOUND_PRESET].routable).toBe(false);
   });
 
   it("getAgent throws on unknown agents, naming the available ones", () => {

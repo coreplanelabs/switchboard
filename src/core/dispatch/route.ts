@@ -18,7 +18,7 @@
 // way only — the compound form: a request with two or more independent parts
 // answers as `conductor` with the parts, each on a preset from the same table,
 // and runs as one conductor whose brief lists the parts for it to spawn.
-import { AGENTS, type Identity, type MachineClass } from "../../agents/registry.js";
+import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
@@ -42,9 +42,6 @@ export const ROUTE_TIMEOUT_MS = 8_000;
 export const ROUTE_PART_TEXT_CAP = 1000;
 /** The most of a part's text the card's line shows. */
 export const ROUTE_PART_LINE_CAP = 100;
-/** The compound answer's preset: the one preset absent from the table that the
- *  router may still name — with parts. */
-export const COMPOUND_PRESET = "conductor";
 /** The line that opens the parts block of a routed conductor's brief; the
  *  conductor's prompt (`CONDUCTOR_SYSTEM`) names the same words. */
 export const COMPOUND_BRIEF_HEADING = "Routed as a compound request";
