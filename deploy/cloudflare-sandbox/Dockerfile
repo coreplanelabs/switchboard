@@ -136,3 +136,21 @@ RUN apt-get update \
   && playwright --version | grep -qx 'Version 1.63.0' \
   && playwright screenshot --viewport-size=640,480 'data:text/html,<h1>ok</h1>' /tmp/ok.png && test -s /tmp/ok.png \
   && rm -f /tmp/proof.mp4 /tmp/proof_*.png /tmp/ok.png
+
+# pi — the coding harness the bot can start INSIDE this container in place of
+# its native turn loop (docs/reference/specs/harness-pi.md): `pi --mode rpc`,
+# one process per run in the thread's worktree, driven by the bot over its
+# JSONL protocol, with the run's model-proxy bearer as its only key (never a
+# model key: the bearer buys calls through the bot, docs/reference/specs/
+# model-proxy.md). Installed globally with this image's Node — pi needs
+# >= 22.19.0 and the image ships 24 — so every user finds it on PATH, at an
+# EXACT pin held by src/deploy/imagePiHarness.test.ts (the pnpm lesson: a
+# floating tag would move the harness's protocol with the build date, and a
+# pi minor changes RPC events and extension hooks). Proven by the layer, so
+# the BUILD fails, not a run: the pi on PATH answers the pin, and its own help
+# names the RPC mode the harness drives. Dark until a deployment sets
+# `harness: { coding: pi }`: nothing here starts pi on its own.
+RUN npm install -g @earendil-works/pi-coding-agent@0.85.1 \
+  && npm cache clean --force \
+  && pi --version | grep -qx '0.85.1' \
+  && pi --help | grep -q -- '--mode <mode>'

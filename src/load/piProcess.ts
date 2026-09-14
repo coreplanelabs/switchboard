@@ -2,18 +2,17 @@
 // driver items): the argument list that pins RPC mode and turns every
 // discovery off but the one extension, the environment allowlist that hands
 // pi the model key under the name pi reads and nothing else from the
-// operator's shell, the config directory pi is pointed at (so the operator's
-// own `~/.pi/agent` — its auth.json, settings, extensions — is never read),
-// and the LF-only line reader over pi's stdout. This is the harness's one
-// host-touching module beside the entrypoint: it runs on the operator's
-// machine, like every load command.
+// operator's shell, and the config directory pi is pointed at (so the
+// operator's own `~/.pi/agent` — its auth.json, settings, extensions — is
+// never read); the LF-only line reader is the protocol module's. This is the
+// driver's one host-touching module beside the entrypoint: it runs on the
+// operator's machine, like every load command.
 
 import { execFile, spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Readable } from "node:stream";
 import { publicEnv, type EnvRecord, type Secret } from "../secrets.js";
-import { splitJsonl, type PiTransport } from "./piRpc.js";
+import { jsonlLines, type PiTransport } from "../core/harness/pi/protocol.js";
 
 /** The variable the harness hands a custom provider's key under: the name
  *  the generated models.json interpolates (`"apiKey": "$SWITCHBOARD_PI_MODEL_KEY"`). */
@@ -151,20 +150,6 @@ export function writeAgentDir(dir: string, o: AgentDirOptions): AgentDirLayout {
   };
   writeFileSync(modelsPath, JSON.stringify(models, null, 2) + "\n");
   return { settingsPath, modelsPath, sessionDir };
-}
-
-/** pi's stdout as records: LF-only framing (`splitJsonl`), the unterminated
- *  tail delivered when the stream ends. */
-export async function* jsonlLines(stream: Readable): AsyncIterable<string> {
-  let buffer = "";
-  for await (const chunk of stream) {
-    buffer += typeof chunk === "string" ? chunk : (chunk as Buffer).toString("utf8");
-    const { lines, rest } = splitJsonl(buffer);
-    buffer = rest;
-    for (const line of lines) yield line;
-  }
-  const tail = buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer;
-  if (tail.length > 0) yield tail;
 }
 
 export interface PiProcess {

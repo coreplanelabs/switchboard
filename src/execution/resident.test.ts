@@ -181,6 +181,22 @@ describe("ResidentExecutor.exec", () => {
     await expect(ex.exec("false")).resolves.toMatch(/^exit 2:\nboom/);
   });
 
+  // docs/reference/specs/harness-pi.md item 4: a caller's extra environment
+  // rides in the /exec body as `env` — the channel the pi harness hands the
+  // run bearer through — and only when the caller gave one, so an older
+  // resident sees the body it always did.
+  it("sends a caller's env in the /exec body, and no env key at all without one", async () => {
+    const { calls } = stubFetch(
+      { body: { stdout: "ok", stderr: "", exitCode: 0, truncated: false } },
+      { body: { stdout: "ok", stderr: "", exitCode: 0, truncated: false } },
+    );
+    const ex = new ResidentExecutor(OPTS);
+    await ex.exec("pi --version", { env: { SWITCHBOARD_RUN_BEARER: "sbr_x.y", PI_CODING_AGENT_DIR: "/tmp/pi" } });
+    expect(sentBody(calls[0]).env).toEqual({ SWITCHBOARD_RUN_BEARER: "sbr_x.y", PI_CODING_AGENT_DIR: "/tmp/pi" });
+    await ex.exec("pi --version");
+    expect("env" in sentBody(calls[1])).toBe(false);
+  });
+
   it('needs:"attach" (evicted/recycled worktree) re-attaches once and retries the command', async () => {
     const { fn, calls } = stubFetch(
       {

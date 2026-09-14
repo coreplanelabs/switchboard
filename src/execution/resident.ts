@@ -471,6 +471,11 @@ export class ResidentExecutor implements Executor {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
     const body: Record<string, unknown> = { command };
     if (opts?.timeoutMs !== undefined) body.timeoutMs = timeoutMs;
+    // A caller's extra environment (docs/reference/specs/harness-pi.md item 4)
+    // rides in the body as `env`, the same convention as timeoutMs: only when
+    // given, so an older resident sees the body it always did; the Worker reads
+    // it through the one validated reader and hands it to the exec's env option.
+    if (opts?.env !== undefined) body.env = opts.env;
     const { status, data } = await this.opWithReattach(
       "/exec",
       body,

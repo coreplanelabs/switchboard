@@ -1,16 +1,15 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { Secret } from "../secrets.js";
-import { PI_CODING_TOOLS, jsonlLines, piArgs, piEnv, piKeyEnvFor, writeAgentDir } from "./piProcess.js";
+import { PI_CODING_TOOLS, piArgs, piEnv, piKeyEnvFor, writeAgentDir } from "./piProcess.js";
 
 // How `load:pi` starts pi (docs/reference/specs/load-harness.md, the pi
 // driver items): the argument list that pins RPC mode and turns every
 // discovery off but the one extension, the environment allowlist that hands
 // pi the model key under the name pi reads and nothing else, the config
-// directory pi is pointed at, and the LF-only line reader over its stdout.
+// directory pi is pointed at.
 
 const base = {
   piBin: "/opt/pi/bin/pi",
@@ -102,14 +101,5 @@ describe("writeAgentDir", () => {
     expect(models.providers.scripted.api).toBe("openai-completions");
     expect(models.providers.scripted.apiKey).toBe("$SWITCHBOARD_PI_MODEL_KEY");
     expect(models.providers.scripted.models).toEqual([{ id: "any" }]);
-  });
-});
-
-describe("jsonlLines", () => {
-  it("yields one record per LF however the chunks fall, and the unterminated tail at the end", async () => {
-    const chunks = ['{"a":1}\n{"b":', '2}\r\n{"c":3}', '\n{"d":4}'];
-    const out: string[] = [];
-    for await (const line of jsonlLines(Readable.from(chunks))) out.push(line);
-    expect(out).toEqual(['{"a":1}', '{"b":2}', '{"c":3}', '{"d":4}']);
   });
 });

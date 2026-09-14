@@ -161,8 +161,55 @@ class HardStopError extends Error {
 
 /** The one-line outcome of a hard stop: no finale was run, so this IS the
  *  answer the thread gets. */
-const HARD_STOP_MESSAGE =
+export const HARD_STOP_MESSAGE =
   "⛔ Run aborted by an operator (hard stop). No summary was written; partial work may exist in the workspace.";
+
+// The wind-down wording, named once so every loop that ends a run says the
+// same thing to the model and to the thread (docs/reference/specs/run-loop.md
+// items 2, 3 and 8).
+
+/** The wrap-up warning's card and note text, at `minutesLeft`. */
+export const wrapUpNote = (minutesLeft: number): string => `~${minutesLeft} min left — signaling wrap-up`;
+/** The wrap-up warning as the model reads it, appended to a step's results. */
+export const wrapUpInstruction = (minutesLeft: number): string =>
+  `⏱ Time budget: about ${minutesLeft} minute(s) of tool time remain before cutoff. Finish your current check and start consolidating your answer; prefer writing up over starting new exploration.`;
+
+/** What every forced write-up asks for, after the reason. */
+export const WRITE_UP_REQUEST =
+  "Write your final answer now from what you have learned so far: report your findings/results to date, then state plainly which parts of the task you did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.";
+export const timeBudgetInstruction = (): string =>
+  `You have reached the time budget and can make no more tool calls. ${WRITE_UP_REQUEST}`;
+export const turnGuardInstruction = (pace: string): string =>
+  `You have hit the run's turn guard — ${pace}, a pace that looks like a loop — and can make no more tool calls. ${WRITE_UP_REQUEST}`;
+export const SOFT_STOP_INSTRUCTION =
+  "An operator has asked this run to stop. You can make no more tool calls. Write your final answer now from what " +
+  "you have learned so far: report your findings/results to date, then state plainly which parts of the task you " +
+  "did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.";
+
+/** The turn guard's pace, as its note and its answer say it: `<N> model turn(s) in <M>`. */
+export const turnGuardPace = (turns: number, elapsedMs: number): string =>
+  `${turns} model turn${turns === 1 ? "" : "s"} in ${elapsedMinutes(elapsedMs)}`;
+export const timeBudgetNote = (): string => "time budget exhausted — writing up findings so far";
+export const turnGuardNote = (pace: string): string =>
+  `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`;
+export const softStopNote = (): string => "soft stop — no further steps, writing up findings so far";
+export const hardStopNote = (): string => "hard stop — run aborted, no summary written";
+
+/** The thread's answer when the wall clock ran out: the write-up under its label, or the reason alone. */
+export const timeBudgetAnswer = (text: string, maxMinutes: number): string =>
+  text
+    ? `⚠️ _Hit the ${maxMinutes}-minute budget before finishing — findings so far:_\n\n${text}`
+    : `Stopped at the ${maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
+/** The thread's answer when the turn guard fired. */
+export const turnGuardAnswer = (text: string, pace: string): string =>
+  text
+    ? `⚠️ _Stopped after ${pace} — that pace looks like a loop; findings so far:_\n\n${text}`
+    : `Stopped after ${pace} — that pace looks like a loop — without finishing. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`;
+/** The thread's answer after a soft stop. */
+export const softStopAnswer = (text: string): string =>
+  text
+    ? `⏹ _Stopped early by an operator (soft stop) — findings so far:_\n\n${text}`
+    : "⏹ Stopped early by an operator (soft stop) before any findings were written. Partial work may exist in the workspace.";
 
 export async function runAgent(opts: RunOptions): Promise<string> {
   const control = opts.control;
@@ -188,7 +235,7 @@ export async function runAgent(opts: RunOptions): Promise<string> {
     // provider stream, a tool, even the soft-stop finale) was abandoned. Any
     // other throw is a real failure and keeps propagating to the dispatcher.
     if (control?.requested === "hard") {
-      note("stopped", "hard stop — run aborted, no summary written", "hard");
+      note("stopped", hardStopNote(), "hard");
       return HARD_STOP_MESSAGE;
     }
     throw err;
@@ -696,11 +743,8 @@ async function runLoop(
     if (!warned && now() >= warnAt) {
       warned = true;
       const minutesLeft = Math.max(1, Math.round((deadline - now()) / 60_000));
-      note("wrap_up", `~${minutesLeft} min left — signaling wrap-up`);
-      results.push({
-        type: "text",
-        text: `⏱ Time budget: about ${minutesLeft} minute(s) of tool time remain before cutoff. Finish your current check and start consolidating your answer; prefer writing up over starting new exploration.`,
-      });
+      note("wrap_up", wrapUpNote(minutesLeft));
+      results.push({ type: "text", text: wrapUpInstruction(minutesLeft) });
     }
     // Pending follow-ups ride on this turn — after the results, before the
     // step that reads them — but only if that step will happen: a loop about to
@@ -726,7 +770,7 @@ async function runLoop(
   // bookkeeping-turn answer is narration now: the finale writes the answer.
   narrateHeld();
   if (control?.requested === "soft") {
-    note("stopped", "soft stop — no further steps, writing up findings so far", "soft");
+    note("stopped", softStopNote(), "soft");
     return await finishSoftStop(complete, opts, messages, system);
   }
 
@@ -743,32 +787,19 @@ async function runLoop(
   // this cap is not one.
   const wasTimeout = now() >= deadline;
   const elapsedMs = opts.agent.maxMinutes * 60_000 - (deadline - now());
-  const pace = `${turn} model turn${turn === 1 ? "" : "s"} in ${elapsedMinutes(elapsedMs)}`;
+  const pace = turnGuardPace(turn, elapsedMs);
   note(
     wasTimeout ? "time_budget_exhausted" : "turn_budget_exhausted",
-    wasTimeout
-      ? "time budget exhausted — writing up findings so far"
-      : `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`,
+    wasTimeout ? timeBudgetNote() : turnGuardNote(pace),
   );
-  const writeUp =
-    "Write your final answer now from what you have learned so far: report your findings/results to date, then state plainly which parts of the task you did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.";
   const text = await runFinale(
     complete,
     opts,
     messages,
     system,
-    wasTimeout
-      ? `You have reached the time budget and can make no more tool calls. ${writeUp}`
-      : `You have hit the run's turn guard — ${pace}, a pace that looks like a loop — and can make no more tool calls. ${writeUp}`,
+    wasTimeout ? timeBudgetInstruction() : turnGuardInstruction(pace),
   );
-  if (wasTimeout) {
-    return text
-      ? `⚠️ _Hit the ${opts.agent.maxMinutes}-minute budget before finishing — findings so far:_\n\n${text}`
-      : `Stopped at the ${opts.agent.maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`;
-  }
-  return text
-    ? `⚠️ _Stopped after ${pace} — that pace looks like a loop; findings so far:_\n\n${text}`
-    : `Stopped after ${pace} — that pace looks like a loop — without finishing. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`;
+  return wasTimeout ? timeBudgetAnswer(text, opts.agent.maxMinutes) : turnGuardAnswer(text, pace);
 }
 
 /** The run's elapsed time as the write-up says it: whole minutes, or "under a
@@ -845,18 +876,8 @@ async function finishSoftStop(
   messages: ChatMessage[],
   system: string,
 ): Promise<string> {
-  const text = await runFinale(
-    complete,
-    opts,
-    messages,
-    system,
-    "An operator has asked this run to stop. You can make no more tool calls. Write your final answer now from what " +
-      "you have learned so far: report your findings/results to date, then state plainly which parts of the task you " +
-      "did not get to and what a follow-up (in this thread, to reuse this workspace) should focus on.",
-  );
-  return text
-    ? `⏹ _Stopped early by an operator (soft stop) — findings so far:_\n\n${text}`
-    : "⏹ Stopped early by an operator (soft stop) before any findings were written. Partial work may exist in the workspace.";
+  const text = await runFinale(complete, opts, messages, system, SOFT_STOP_INSTRUCTION);
+  return softStopAnswer(text);
 }
 
 /** The one-line diagnostic surfaced when the run aborts into an unrecoverable

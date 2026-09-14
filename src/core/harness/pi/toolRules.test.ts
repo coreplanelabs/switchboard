@@ -1,39 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { CODING_REACH, PI_TOOL_BUNDLES, previewToolCall } from "./piPolicyPreview.js";
+import { CODING_REACH, PI_TOOL_BUNDLES, judgeToolCall } from "./toolRules.js";
 
-// `load:pi` previews every tool pi's model asked for against the tool-level
-// gate the authorization spec still lists as a gap: which calls the policy
-// table would refuse once agent actors are gated per tool, and which name a
-// reach the coding preset does not have at all (docs/reference/specs/
-// load-harness.md, the pi driver items). Each rule cites the rule it stands in
-// for; the classifier never executes anything.
+// The coding preset's tool rules under pi (docs/reference/specs/harness-pi.md):
+// which calls are refused by name, and which name a reach the coding preset
+// does not have at all. The load harness previews the spike's calls against
+// them; the pi harness's gate refuses with them. The judge never executes
+// anything.
 
 const ctx = { checkout: "/work/repo", branch: "load-pi/test-gap-1" };
-const bash = (command: string) => previewToolCall("bash", { command }, ctx);
+const bash = (command: string) => judgeToolCall("bash", { command }, ctx);
 
-describe("previewToolCall — bundles", () => {
+describe("judgeToolCall — bundles", () => {
   it("maps pi's built-in tools onto the coding preset's reach and allows them", () => {
     for (const tool of ["read", "grep", "find", "ls"]) expect(PI_TOOL_BUNDLES[tool]).toBe("files");
     for (const tool of ["write", "edit"]) expect(PI_TOOL_BUNDLES[tool]).toBe("write-files");
     expect(PI_TOOL_BUNDLES.bash).toBe("shell");
-    expect(previewToolCall("read", { path: "README.md" }, ctx)).toEqual({ verdict: "allowed" });
-    expect(previewToolCall("ls", {}, ctx)).toEqual({ verdict: "allowed" });
-    expect(previewToolCall("submit_pr_description", { title: "x" }, ctx)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("read", { path: "README.md" }, ctx)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("ls", {}, ctx)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("submit_pr_description", { title: "x" }, ctx)).toEqual({ verdict: "allowed" });
   });
   it("a tool whose bundle the coding preset lacks, or an unknown tool, is outside the profile", () => {
     expect(CODING_REACH.has("verdict")).toBe(false);
-    expect(previewToolCall("submit_verdict", { verdict: "approve" }, ctx)).toEqual({
+    expect(judgeToolCall("submit_verdict", { verdict: "approve" }, ctx)).toEqual({
       verdict: "outside-profile",
       reason: "submit_verdict is the `verdict` bundle; the coding preset's reach does not include it",
     });
-    expect(previewToolCall("powershell", { command: "dir" }, ctx)).toEqual({
+    expect(judgeToolCall("powershell", { command: "dir" }, ctx)).toEqual({
       verdict: "outside-profile",
       reason: "powershell is not in any bundle the coding preset reaches",
     });
   });
 });
 
-describe("previewToolCall — bash", () => {
+describe("judgeToolCall — bash", () => {
   it("allows ordinary commands and a push of the run's own branch to origin", () => {
     expect(bash("npx vitest run src/load/reasons.test.ts")).toEqual({ verdict: "allowed" });
     expect(bash("git push -u origin load-pi/test-gap-1")).toEqual({ verdict: "allowed" });
@@ -133,41 +132,41 @@ describe("previewToolCall — bash", () => {
     expect(bash("echo $HOME $PATH")).toEqual({ verdict: "allowed" });
   });
   it("a non-string command is refused as malformed rather than allowed by accident", () => {
-    expect(previewToolCall("bash", { command: 42 }, ctx)).toEqual({
+    expect(judgeToolCall("bash", { command: 42 }, ctx)).toEqual({
       verdict: "refused",
       reason: "malformed — bash without a string command",
     });
   });
 });
 
-describe("previewToolCall — file tools", () => {
+describe("judgeToolCall — file tools", () => {
   it("allows paths inside the checkout, relative or absolute", () => {
-    expect(previewToolCall("write", { path: "src/x.ts", content: "" }, ctx)).toEqual({ verdict: "allowed" });
-    expect(previewToolCall("edit", { path: "/work/repo/src/x.ts" }, ctx)).toEqual({ verdict: "allowed" });
-    expect(previewToolCall("read", { path: "./docs/../README.md" }, ctx)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("write", { path: "src/x.ts", content: "" }, ctx)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("edit", { path: "/work/repo/src/x.ts" }, ctx)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("read", { path: "./docs/../README.md" }, ctx)).toEqual({ verdict: "allowed" });
   });
   it("refuses a path that leaves the checkout — the files bundles are the worktree", () => {
-    expect(previewToolCall("write", { path: "../other/x.ts", content: "" }, ctx)).toEqual({
+    expect(judgeToolCall("write", { path: "../other/x.ts", content: "" }, ctx)).toEqual({
       verdict: "refused",
       reason: "path — `../other/x.ts` resolves outside the checkout",
     });
-    expect(previewToolCall("read", { path: "/etc/passwd" }, ctx)).toEqual({
+    expect(judgeToolCall("read", { path: "/etc/passwd" }, ctx)).toEqual({
       verdict: "refused",
       reason: "path — `/etc/passwd` resolves outside the checkout",
     });
-    expect(previewToolCall("read", { path: "/work/repo-2/x" }, ctx)).toEqual({
+    expect(judgeToolCall("read", { path: "/work/repo-2/x" }, ctx)).toEqual({
       verdict: "refused",
       reason: "path — `/work/repo-2/x` resolves outside the checkout",
     });
   });
   it("refuses the credential file even inside the checkout", () => {
-    expect(previewToolCall("read", { path: ".git/github-credentials" }, ctx)).toEqual({
+    expect(judgeToolCall("read", { path: ".git/github-credentials" }, ctx)).toEqual({
       verdict: "refused",
       reason: "credential — reads the executor's credential store",
     });
   });
   it("a search tool without a path searches the checkout and is allowed", () => {
-    expect(previewToolCall("grep", { pattern: "reasonOf" }, ctx)).toEqual({ verdict: "allowed" });
-    expect(previewToolCall("find", { pattern: "*.ts", path: "src" }, ctx)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("grep", { pattern: "reasonOf" }, ctx)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("find", { pattern: "*.ts", path: "src" }, ctx)).toEqual({ verdict: "allowed" });
   });
 });

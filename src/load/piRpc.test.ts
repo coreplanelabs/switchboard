@@ -1,14 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  PI_EVENT_HOME,
-  PiTaskAccumulator,
-  drivePiTask,
-  hookNotice,
-  parsePiLine,
-  splitJsonl,
-  type PiEvent,
-  type PiTransport,
-} from "./piRpc.js";
+import { PI_EVENT_HOME, PiTaskAccumulator, drivePiTask, hookNotice } from "./piRpc.js";
+import type { PiEvent, PiTransport } from "../core/harness/pi/protocol.js";
 import { HOOK_PREFIX } from "./piExtension.js";
 
 // `load:pi` drives a real `pi --mode rpc` process over JSONL (docs/reference/
@@ -148,23 +140,7 @@ function recordedStream(): PiEvent[] {
 const allowAll = () => ({ verdict: "allowed" as const });
 const noProblems = () => [] as string[];
 
-describe("splitJsonl — pi's framing: LF is the only delimiter", () => {
-  it("splits on LF, strips a trailing CR, keeps U+2028 inside a record, and returns the partial tail", () => {
-    const { lines, rest } = splitJsonl('{"a":1}\r\n{"b":"x y"}\n{"c"');
-    expect(lines).toEqual(['{"a":1}', '{"b":"x y"}']);
-    expect(rest).toBe('{"c"');
-  });
-  it("skips empty records", () => {
-    expect(splitJsonl("\n\n{}\n").lines).toEqual(["{}"]);
-  });
-});
-
-describe("parsePiLine / hookNotice — the stream's records and the extension's notices", () => {
-  it("parses a record with a type and refuses anything else", () => {
-    expect(parsePiLine('{"type":"agent_start"}')).toEqual({ type: "agent_start" });
-    expect(parsePiLine("not json")).toBeUndefined();
-    expect(parsePiLine('{"noType":true}')).toBeUndefined();
-  });
+describe("hookNotice — the extension's notices on the stream", () => {
   it("reads a notice only from a `notify` request carrying the prefix", () => {
     expect(hookNotice(notice({ kind: "tool_call", toolCallId: "c", toolName: "bash", input: {} }))).toEqual({
       kind: "tool_call",

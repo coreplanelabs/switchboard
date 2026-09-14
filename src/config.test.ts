@@ -720,6 +720,38 @@ describe("routing block (routing.auto, routing.model)", () => {
   });
 });
 
+// Feature: docs/reference/specs/harness-pi.md item 1 — the `harness` block:
+// which loop drives each preset's runs, a deployment decision validated at
+// load so a misspelt preset or a value that is neither harness can never read
+// as a working setting.
+describe("harness block (harness.<preset>: native | pi)", () => {
+  it("parses a preset's harness; an absent block leaves the field unset (every preset on its own harness)", () => {
+    expect(store(YAML_FIXTURE + "harness:\n  coding: pi\n").config.harness).toEqual({ coding: "pi" });
+    expect(store(YAML_FIXTURE + "harness:\n  coding: native\n  review: native\n").config.harness).toEqual({
+      coding: "native",
+      review: "native",
+    });
+    expect(store().config.harness).toBeUndefined();
+  });
+
+  it("refuses a preset the registry does not know, naming it", () => {
+    expect(() => store(YAML_FIXTURE + "harness:\n  codng: pi\n")).toThrow(/harness\.codng is not a known agent/);
+  });
+
+  it("refuses a value that is neither harness, naming the two", () => {
+    expect(() => store(YAML_FIXTURE + "harness:\n  coding: claude\n")).toThrow(
+      /harness\.coding must be one of native, pi/,
+    );
+    expect(() => store(YAML_FIXTURE + "harness:\n  coding: true\n")).toThrow(
+      /harness\.coding must be one of native, pi/,
+    );
+  });
+
+  it("refuses a non-mapping at load", () => {
+    expect(() => store(YAML_FIXTURE + "harness: pi\n")).toThrow(/harness must be a mapping of preset to harness/);
+  });
+});
+
 // Feature: docs/reference/specs/agent-ship.md item 8 — the `ship` caps block: pipeline
 // wall clock + review-round cap, deployment-level like the sibling `review`
 // block, validated at load so a typo cannot silently become "no cap".

@@ -33,6 +33,14 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.coding.effort).toBeUndefined();
   });
 
+  // docs/reference/specs/harness-pi.md item 1: the harness is a preset property
+  // a deployment may override; until the coding preset's flip, every preset
+  // declares the native loop, so a deployment that sets nothing is unchanged.
+  it("every preset declares the native harness; coding names it explicitly, the one the pi series moves first", () => {
+    for (const agent of Object.values(AGENTS)) expect(agent.harness ?? "native", agent.name).toBe("native");
+    expect(AGENTS.coding.harness).toBe("native");
+  });
+
   it("general's prompt names its GitHub tools and redirects code/PR/web-research asks to the other agents", () => {
     // The general agent points at the agents that can act — it never invents a
     // repo URL or tells the user to run git themselves. It holds the issue tools
