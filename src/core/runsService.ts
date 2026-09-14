@@ -112,7 +112,9 @@ export interface RunView {
   idempotencyKey?: string;
   /** The typed artifacts a finished run's record carries (run-history item 2) —
    *  the review's verdict and reviewed head, the fix round's dispositions, the
-   *  coding child's handoff. Persisted rows only: a live view has none yet. */
+   *  coding child's handoff. A live view has none yet; a finished row the
+   *  registry still holds carries them from the store the moment the store
+   *  holds its record (`getRun`, item 21); a persisted row carries its own. */
   verdict?: RunRecord["verdict"];
   reviewHead?: string;
   dispositions?: RunRecord["dispositions"];
@@ -430,6 +432,33 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     if (!store || !RUN_ID_PATTERN.test(id)) return null;
     return store.getSummary(id);
   };
+  /** The typed artifacts of a finished run's record (run-history item 2) as the
+   *  store's summary row carries them, for a FINISHED row the registry still
+   *  holds: the finish record lands in the store before the finish event that
+   *  wakes a reader is sent, so the reader that follows sees the verdict the
+   *  record landed with, never the row's silence. A store without the record
+   *  yet — or holding only the start tombstone, which carries none — lends
+   *  nothing; a store that throws is one warning and nothing. */
+  const storedArtifacts = async (
+    id: string,
+  ): Promise<Pick<RunView, "verdict" | "reviewHead" | "dispositions" | "handoff">> => {
+    let row: RunListItem | null;
+    try {
+      row = await storeSummary(id);
+    } catch (err) {
+      warn(
+        `[runs] history store read failed for ${id} — serving the registry row without its record: ${describe(err)}`,
+      );
+      return {};
+    }
+    if (!row) return {};
+    return {
+      ...(row.verdict !== undefined ? { verdict: row.verdict } : {}),
+      ...(row.reviewHead !== undefined ? { reviewHead: row.reviewHead } : {}),
+      ...(row.dispositions !== undefined ? { dispositions: row.dispositions } : {}),
+      ...(row.handoff !== undefined ? { handoff: row.handoff } : {}),
+    };
+  };
 
   return {
     async listRuns(opts) {
@@ -543,6 +572,10 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       if (summary && snap) {
         const view: RunRecordView = liveView(summary);
         if (opts.include === "messages") view.events = snap.events;
+        // A finished row inside the registry's window: its identity, stop state,
+        // finish fields and events are the registry's; the record's typed
+        // artifacts are the store's to supply (item 21). A live row never asks.
+        if (summary.finished) Object.assign(view, await storedArtifacts(id));
         return { ok: true, value: view };
       }
       // Live on the ledger, not here (item 41): the row and the events it holds.
