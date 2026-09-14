@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.215.2](https://github.com/coreplanelabs/switchboard/compare/v1.215.1...v1.215.2) (2026-09-14)
+
+
+### Bug fixes
+
+* **tools:** attach_file streams the Slack upload from disk instead of buffering it ([#1093](https://github.com/coreplanelabs/switchboard/issues/1093)) ([7cbf1ac](https://github.com/coreplanelabs/switchboard/commit/7cbf1ac478a0ba92c09ccb972553b4cf59d4cbe3))
+
 ## [1.215.1](https://github.com/coreplanelabs/switchboard/compare/v1.215.0...v1.215.1) (2026-09-14)
 
 
