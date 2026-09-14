@@ -421,8 +421,11 @@ function validateRunHistory(rh: RunHistoryConfig): void {
     if (v !== undefined && (!Number.isInteger(v) || (v as number) < 1))
       throw new Error(`config.yaml: runHistory.${key} must be an integer >= 1`);
   }
-  if (rh.maxBytes !== undefined && (!Number.isInteger(rh.maxBytes) || rh.maxBytes < 1))
-    throw new Error("config.yaml: runHistory.maxBytes must be an integer >= 1");
+  for (const key of ["maxBytes", "sessionLogMaxBytes"] as const) {
+    const v = rh[key];
+    if (v !== undefined && (!Number.isInteger(v) || (v as number) < 1))
+      throw new Error(`config.yaml: runHistory.${key} must be an integer >= 1`);
+  }
   if (rh.store !== undefined && rh.store !== "worker" && rh.store !== "file")
     throw new Error('config.yaml: runHistory.store must be "worker" or "file"');
   if (rh.worker !== undefined) {

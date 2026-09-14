@@ -147,10 +147,12 @@ describe("open — claim and seed", () => {
       meta: { agent: "review", model: "p/m" },
     });
     expect(row.tools.map((t) => t.name)).toEqual(["bash"]);
-    expect(await ledger.readTranscript("r1")).toEqual({
+    // The seed lands in the thread-and-agent session log, never in a per-run object.
+    expect(await ledger.readSession("slack:C1:1.0:review", 0)).toEqual({
       complete: true,
       turns: 3,
       messages: [user("earlier"), assistant("sure"), user("go")],
+      compactions: [],
     });
     expect(warnings).toEqual([]);
   });
@@ -237,7 +239,7 @@ describe("open — claim and seed", () => {
     const run = (await wt.open(openReq()))!;
     expect(run.tracked()).toBe(false);
     expect(warnings[0]).toMatch(/detached: seed record refused \(fenced\)/);
-    expect((await inner.readTranscript("r1")).turns).toBe(3);
+    expect((await inner.readSession("slack:C1:1.0:review", 0)).turns).toBe(3);
     expect(inner.steps.get("r1")).toBeUndefined();
   });
 
@@ -306,7 +308,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
       state: { checklist: [] },
       startedAt: 9_000,
     });
-    expect((await ledger.readTranscript("r1")).turns).toBe(3);
+    expect((await ledger.readSession("slack:C1:1.0:review", 0)).turns).toBe(3);
     expect(wt.liveRuns()).toEqual([run]);
     expect(warnings).toEqual([]);
   });
@@ -497,7 +499,7 @@ describe("step — turns first, then the record", () => {
         iteration: 1,
       },
     ]);
-    const transcript = await ledger.readTranscript("r1");
+    const transcript = await ledger.readSession("slack:C1:1.0:review", 0);
     expect(transcript.complete).toBe(true);
     expect(transcript.turns).toBe(6);
     expect(transcript.messages[3]).toEqual(assistant("looking"));
@@ -651,7 +653,10 @@ describe("finishing and finish", () => {
     expect(ledger.live.get("r1")!.phase).toBe("finishing");
     await run.sink.put(record("r1"));
     expect(ledger.live.has("r1")).toBe(false);
-    expect(ledger.finished.get("r1")).toEqual(record("r1"));
+    expect(ledger.finished.get("r1")).toEqual({
+      ...record("r1"),
+      session: { key: "slack:C1:1.0:review", seedFrom: 0, request: 2, range: { from: 0, to: 2 } },
+    });
     expect(ledger.events.get("r1")).toHaveLength(1); // flushed before the finish, not dropped
     expect(fallbackPuts).toEqual([]);
     expect(t.heartbeats()).toBe(0);
@@ -810,6 +815,164 @@ describe("finishing and finish", () => {
 // Feature: docs/reference/specs/routing-and-config.md item 16 — the Null Object a process
 // without a ledger is wired with: the dispatcher claims, steers and hands off
 // unconditionally and every answer is the one an untracked run gets.
+// docs/reference/specs/session-log.md items 2–3: a run is a range of its session's
+// log — the seed appended at the tail, the request its last user turn, every
+// step at its log index, the range closed at finish and nothing cleared.
+describe("the session log — a run is a range of it", () => {
+  const KEY = "slack:C1:1.0:review";
+
+  it("a thread's first run of an agent starts the log at 0: the seed is rows 0..n-1, the row's session names the key, seedFrom 0, the request's index and range.from 0; the finish closes the range and clears nothing", async () => {
+    const { ledger, wt } = harness();
+    const run = (await wt.open(openReq()))!;
+    expect(ledger.live.get("r1")!.meta.session).toEqual({
+      key: KEY,
+      seedFrom: 0,
+      request: 2,
+      range: { from: 0 },
+    });
+    expect(ledger.sessions.get(KEY)?.owner).toEqual({ runId: "r1", gen: "gen-A" });
+    const seeded = await ledger.readSession(KEY, 0);
+    expect(seeded.complete).toBe(true);
+    expect(seeded.messages).toEqual([user("earlier"), assistant("sure"), user("go")]);
+    // The run's own transcript object is never written.
+    expect((await ledger.readTranscript("r1")).turns).toBe(0);
+
+    await run.step(step());
+    await run.step(
+      step({
+        turns: [
+          { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: "ok" }] },
+          assistant("done"),
+        ],
+        firstIdx: 4,
+        inFlight: [],
+      }),
+    );
+    expect((await ledger.readSession(KEY, 0)).messages).toHaveLength(6);
+    await run.sink.put(record("r1"));
+    expect(ledger.finished.get("r1")!.session).toEqual({
+      key: KEY,
+      seedFrom: 0,
+      request: 2,
+      range: { from: 0, to: 5 },
+    });
+    // Nothing cleared: the rows stay for the next run; the owner is released.
+    expect((await ledger.readSession(KEY, 0)).messages).toHaveLength(6);
+    expect(ledger.sessions.get(KEY)?.owner).toBeUndefined();
+  });
+
+  it("the next run of the same agent in the thread appends after the last row: seedFrom, request and range.from at the tail, its steps at seedFrom + their local index, its record's range closed there", async () => {
+    const { ledger, wt } = harness();
+    const first = (await wt.open(openReq()))!;
+    await first.sink.put(record("r1"));
+    const second = (await wt.open(
+      openReq({ runId: "r2", seed: { messages: [user("history"), user("follow up")], budgetMs: 600_000 } }),
+    ))!;
+    expect(ledger.live.get("r2")!.meta.session).toEqual({ key: KEY, seedFrom: 3, request: 4, range: { from: 3 } });
+    expect(ledger.steps.get("r2")![0]).toMatchObject({ step: 0, turnIndex: 2 });
+    await second.step(step({ turns: [assistant("on it")], firstIdx: 2 }));
+    const own = await ledger.readSession(KEY, 3);
+    expect(own.messages).toEqual([user("history"), user("follow up"), assistant("on it")]);
+    expect((await ledger.readSession(KEY, 0)).messages).toHaveLength(6);
+    await second.sink.put(record("r2"));
+    expect(ledger.finished.get("r2")!.session).toEqual({
+      key: KEY,
+      seedFrom: 3,
+      request: 4,
+      range: { from: 3, to: 5 },
+    });
+  });
+
+  it("two agents in one thread keep two logs; a run without a conversation of its own (a ship pipeline) has no session", async () => {
+    const { ledger, wt } = harness();
+    await wt.open(openReq());
+    await wt.open(
+      openReq({
+        runId: "r2",
+        threadKey: "slack:C1:2.0",
+        meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:2.0", agent: "coding" },
+      }),
+    );
+    expect(ledger.live.get("r2")!.meta.session?.key).toBe("slack:C1:2.0:coding");
+    expect((await ledger.readSession("slack:C1:2.0:coding", 0)).messages).toHaveLength(3);
+    expect((await ledger.readSession(KEY, 0)).messages).toHaveLength(3);
+    const ship = (await wt.open(openReq({ runId: "r3", threadKey: "slack:C1:3.0", seed: undefined })))!;
+    expect(ledger.live.get("r3")!.meta.session).toBeUndefined();
+    await ship.sink.put(record("r3"));
+    expect("session" in ledger.finished.get("r3")!).toBe(false);
+  });
+
+  it("a detach marks the range broken on the finished record — the log ends short of what the model saw — and the live row keeps its open range", async () => {
+    const { ledger, wt } = harness({
+      ledger: overriding(new InMemoryRunLedger(() => 10_000), {
+        step: async () => {
+          throw new PermanentStoreError("boom");
+        },
+      }),
+    });
+    const run = (await wt.open(openReq()))!;
+    // The seed's own record write goes through `step` too: it is the detach here.
+    expect(run.tracked()).toBe(false);
+    expect(ledger.live.get("r1")!.meta.session).toEqual({ key: KEY, seedFrom: 0, request: 2, range: { from: 0 } });
+    await run.sink.put(record("r1"));
+    expect(ledger.finished.get("r1")!.session).toEqual({ key: KEY, seedFrom: 0, request: 2, range: "broken" });
+  });
+
+  it("an adopted run continues its session: steps land at seedFrom + their local index and the record closes the range there; an adopted row without a session writes its own transcript object as before", async () => {
+    const { ledger, wt } = harness();
+    const session = { key: KEY, seedFrom: 3, request: 4, range: { from: 3 } };
+    // The rows a reclaim leaves this generation: the live row is ours, the session's owner too.
+    const liveRow = (runId: string, threadKey: string, meta: Record<string, unknown>) =>
+      ledger.live.set(runId, {
+        runId,
+        threadKey,
+        ownerGen: "gen-A",
+        leaseUntil: 20_000,
+        startedAt: 1_000,
+        phase: "live",
+        stop: null,
+        meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey, ...meta },
+        card: null,
+        system: "",
+        tools: [],
+        state: {},
+      });
+    liveRow("r9", "slack:C1:1.0", { session });
+    ledger.sessions.set(KEY, {
+      owner: { runId: "r9", gen: "gen-A" },
+      rows: [],
+      attachments: [],
+      maxBytes: 200 * 1024 * 1024,
+      trimmed: new Set(),
+    });
+    const adopted = wt.adopt({ runId: "r9", threadKey: "slack:C1:1.0", state: {}, lastStep: 1, lastSeq: 0, session });
+    await adopted.step(step({ turns: [assistant("back")], firstIdx: 2, inFlight: [] }));
+    expect((await ledger.readSession(KEY, 5)).messages).toEqual([assistant("back")]);
+    await adopted.sink.put(record("r9"));
+    expect(ledger.finished.get("r9")!.session).toEqual({ ...session, range: { from: 3, to: 5 } });
+
+    liveRow("r8", "slack:C1:8.0", {});
+    ledger.transcripts.set("r8", { ownerGen: "gen-A", rows: [], attachments: [] });
+    const old = wt.adopt({ runId: "r8", threadKey: "slack:C1:8.0", state: {}, lastStep: 1, lastSeq: 0 });
+    await old.step(step({ turns: [assistant("old")], firstIdx: 0, inFlight: [] }));
+    expect((await ledger.readTranscript("r8")).messages).toEqual([assistant("old")]);
+    await old.sink.put(record("r8"));
+    expect("session" in ledger.finished.get("r8")!).toBe(false);
+  });
+
+  it("a step carrying pi's compaction entry writes it as the row after its turns; the step record counts it", async () => {
+    const { ledger, wt } = harness();
+    const run = (await wt.open(openReq()))!;
+    const compaction = { summary: "so far: the tests fail on X", tokensBefore: 150_000, firstKeptEntryId: "abc123" };
+    await run.step(step({ turns: [user("results")], firstIdx: 3, inFlight: [], compaction }));
+    expect(ledger.steps.get("r1")![1]).toMatchObject({ step: 1, turnIndex: 5, inFlight: [] });
+    const log = await ledger.readSession(KEY, 0);
+    expect(log.turns).toBe(5);
+    expect(log.messages).toHaveLength(4);
+    expect(log.compactions).toEqual([{ before: 4, entry: compaction }]);
+  });
+});
+
 describe("NullLedgerWriteThrough — the write-through of a process without a ledger", () => {
   it("open claims nothing (undefined — the untracked answer), nothing is live, the inbox holds nothing, the handoff marks nothing, and the generation is the process's", async () => {
     const puts: RunRecord[] = [];

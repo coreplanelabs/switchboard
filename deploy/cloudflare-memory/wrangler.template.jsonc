@@ -35,7 +35,15 @@
       // ONE DeliveryDO (named "delivery"): the delivery page's snapshot per
       // repository — the merged pull requests' facts over the window, one row
       // each, and when they were read (docs/reference/specs/delivery.md item 10).
-      { "name": "DELIVERY", "class_name": "DeliveryDO" }
+      { "name": "DELIVERY", "class_name": "DeliveryDO" },
+      // One SessionLogDO per session — a thread and an agent (the DO name is
+      // `<threadKey>:<agent>`): the transcript rows of every run of the
+      // session, a full-text index over them, and the notepad
+      // (docs/reference/specs/session-log.md). Kept after a run finishes; the
+      // retention sweep drops it once its last kept run is gone and no run is
+      // live on the thread. Runs claimed before it existed still finish on
+      // RunTranscriptDO, which stays bound until no such row is live.
+      { "name": "SESSION_LOGS", "class_name": "SessionLogDO" }
     ]
   },
   // The bot shim's ship coordinator Workflow, bound across scripts by the bot's
@@ -65,6 +73,7 @@
     // run's diagnosis); the FrictionDO that once mirrored those diagnoses is
     // retired with its rows — docs/reference/specs/self-improvement.md item 1.
     { "tag": "v7", "deleted_classes": ["FrictionDO"] },
-    { "tag": "v8", "new_sqlite_classes": ["DeliveryDO"] }
+    { "tag": "v8", "new_sqlite_classes": ["DeliveryDO"] },
+    { "tag": "v9", "new_sqlite_classes": ["SessionLogDO"] }
   ]
 }

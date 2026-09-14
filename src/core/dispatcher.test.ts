@@ -8305,7 +8305,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       async complete(req): Promise<CompletionResult> {
         if (n++ === 0) {
           seen.rowAtFirstCall = structuredClone(ledger.live.get("run-l"));
-          seen.transcriptAtFirstCall = (await ledger.readTranscript("run-l")).turns;
+          seen.transcriptAtFirstCall = (await ledger.readSession("slack:CX:1.0:general", 0)).turns;
           seen.firstRequestTurns = req.messages.length;
           return {
             content: [
@@ -8316,7 +8316,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           };
         }
         seen.stepsAtSecondCall = structuredClone(ledger.steps.get("run-l"));
-        seen.transcriptAtSecondCall = await ledger.readTranscript("run-l");
+        seen.transcriptAtSecondCall = await ledger.readSession("slack:CX:1.0:general", 0);
         seen.stateAtSecondCall = structuredClone(ledger.live.get("run-l")?.state);
         return { content: [{ type: "text", text: "all done" }], stopReason: "end_turn" };
       },
@@ -8343,6 +8343,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         threadKey: "slack:CX:1.0",
         readonly: false,
         selection: "sandbox",
+        // The run's place in its session log (session-log item 2): a thread's
+        // first run of the agent starts the log at 0 and appends from there.
+        session: { key: "slack:CX:1.0:general", seedFrom: 0, range: { from: 0 } },
       },
     });
     expect(row.system.length).toBeGreaterThan(0);
@@ -8378,6 +8381,16 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.has("run-l")).toBe(false);
     expect(ledger.steps.has("run-l")).toBe(false);
     expect(ledger.finished.get("run-l")).toMatchObject({ id: "run-l", status: "completed" });
+    // The record's range: the seed rows, then the first assistant turn — the
+    // final answer has no tools, so no step report carries it or its results
+    // (the record's events do) — closed at finish, the rows kept in the log.
+    expect(ledger.finished.get("run-l")!.session).toEqual({
+      key: "slack:CX:1.0:general",
+      seedFrom: 0,
+      request: seedTurns - 1,
+      range: { from: 0, to: seedTurns },
+    });
+    expect((await ledger.readSession("slack:CX:1.0:general", 0)).turns).toBe(seedTurns + 1);
     const appended = ledger.events.get("run-l")!;
     expect(appended.map((e) => e.type)).toEqual(
       expect.arrayContaining(["input", "run_meta", "context", "tool_call", "tool_result", "answer"]),
@@ -8816,7 +8829,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     };
     const { deps, registry, writer, fallbackPuts, warnings } = wired(provider, { ledger });
     const plan = planResume({
-      transcript: { complete: true, turns: 2, messages: transcript },
+      transcript: { complete: true, turns: 2, messages: transcript, compactions: [] },
       lastStep: reclaimed.lastStep!,
       tools: knownToolsFor(getAgent("general")),
     });
@@ -8908,6 +8921,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const plan = planResume({
       transcript: {
         complete: true,
+        compactions: [],
         turns: 1,
         messages: reclaimed.row ? [{ role: "user", content: [{ type: "text", text: "hello there" }] }] : [],
       },
@@ -8970,6 +8984,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const plan = planResume({
       transcript: {
         complete: true,
+        compactions: [],
         turns: 1,
         messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
       },
@@ -9219,7 +9234,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const { deps, writer } = wired(provider, { ledger });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const plan = planResume({
-      transcript: { complete: true, turns: 1, messages: transcript },
+      transcript: { complete: true, turns: 1, messages: transcript, compactions: [] },
       lastStep: reclaimed.lastStep!,
       tools: knownToolsFor(getAgent("general")),
     });
@@ -9411,7 +9426,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             // deliver the item — and only if the slot already names the run.
             slotAtResumeClaim = admission.get("slack:CX:1.0") ? "taken" : "free";
             const plan = planResume({
-              transcript: { complete: true, turns: 1, messages: transcript },
+              transcript: { complete: true, turns: 1, messages: transcript, compactions: [] },
               lastStep: reclaimed.lastStep!,
               tools: knownToolsFor(getAgent("general")),
             });

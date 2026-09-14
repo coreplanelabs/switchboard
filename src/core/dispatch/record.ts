@@ -14,6 +14,7 @@ import {
   type RunProfileRecord,
   type RunRecord,
   type RunSeed,
+  type RunSession,
   type RunStatus,
 } from "../runRecord.js";
 import type { RunProfile } from "../../config/profile.js";
@@ -196,6 +197,9 @@ export function reclaimedRunRecord(input: {
     ...(row.meta.profile && row.meta.agent ? { profile: { preset: row.meta.agent, ...row.meta.profile } } : {}),
     ...(row.meta.parentRunId !== undefined ? { parentRunId: row.meta.parentRunId } : {}),
     ...(row.meta.seed !== undefined ? { seed: row.meta.seed } : {}),
+    // The row's place in its session log (item 53): the range stays open on a
+    // record closed here, since the closer has no turn count to end it with.
+    ...(row.meta.session !== undefined ? { session: row.meta.session } : {}),
     // A coordinator's child keeps its instance and key on the close (item 48),
     // so the state Worker's finish still sends the parent its event.
     ...(row.meta.parentInstanceId !== undefined && row.meta.idempotencyKey !== undefined
@@ -300,6 +304,10 @@ export function assembleRunRecord(input: {
   /** Where the run's conversation started (item 52). Omitted when the caller
    *  has no row that says (a hand-built context). */
   seed?: RunSeed;
+  /** The run's place in its session log (item 53), as the row carried it.
+   *  Omitted for a run without one; the ledger's finish closes the range on
+   *  the record it writes, so a caller here passes the row's open range. */
+  session?: RunSession;
 }): RunRecord {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
@@ -343,6 +351,7 @@ export function assembleRunRecord(input: {
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
     ...coordinatorFields(input.coordinator),
     ...(input.seed !== undefined ? { seed: input.seed } : {}),
+    ...(input.session !== undefined ? { session: input.session } : {}),
   });
   return fitted.eventCount !== fitted.storedEventCount ? { ...fitted, truncated: true } : fitted;
 }

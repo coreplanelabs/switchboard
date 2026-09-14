@@ -16,10 +16,11 @@ import { randomUUID } from "node:crypto";
 import type { StepReport } from "../../runner.js";
 import type { ChatMessage, ToolDef } from "../../providers/types.js";
 import type { RunEvent } from "../runEvents.js";
-import type { RunRecord } from "../runRecord.js";
+import type { RunRecord, RunSession } from "../runRecord.js";
 import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { RunLedger } from "./ledger.js";
+import { requestIndex, sessionKey } from "./sessionLog.js";
 import {
   APPEND_FLUSH_EVENTS,
   APPEND_FLUSH_MS,
@@ -173,6 +174,10 @@ export interface AdoptRunRequest {
   lastStep: number;
   /** The highest event `seq` on the ledger; the next append continues past it. */
   lastSeq: number;
+  /** The row's place in its session log (session-log item 2): the adopted run
+   *  appends at its indices and its record closes the range. Absent for a row
+   *  claimed before the log existed, which keeps writing its own object. */
+  session?: RunSession;
   onStop?: (mode: StopMode) => void;
   onFenced?: () => void;
 }
@@ -307,42 +312,57 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     );
   };
 
+  type Claimed = { outcome: "ok"; session?: RunSession } | { outcome: "untracked" | "fenced" };
+
   /** `fenced`: the thread's row is THIS run under another generation — the
    *  reservation's lease lapsed and a reclaim took it (item 42); this process
-   *  must not drive it. */
+   *  must not drive it. With a `seed`, the run is a range of its thread-and-
+   *  agent session log (session-log item 2): the log's tail is read first,
+   *  the row's meta names the range the seed will occupy, and the log's owner
+   *  is taken AFTER the history claim — so a refused claim never steals a live
+   *  run's log. The three requests are one claim: any failure retries them all. */
   async function claim(
     req: Omit<OpenRunRequest, "seed" | "reservation">,
-    phase?: "attaching",
-  ): Promise<"ok" | "untracked" | "fenced"> {
+    opts: { phase?: "attaching"; seed?: readonly ChatMessage[] } = {},
+  ): Promise<Claimed> {
     for (let attempt = 1; ; attempt++) {
       try {
+        let session: RunSession | undefined;
+        if (opts.seed) {
+          const key = sessionKey(req.threadKey, req.meta.agent);
+          const next = await ledger.sessionTail(key);
+          session = { key, seedFrom: next, request: next + requestIndex(opts.seed), range: { from: next } };
+        }
         const result = await ledger.claim({
           runId: req.runId,
           threadKey: req.threadKey,
           gen,
           leaseMs,
           startedAt: req.startedAt,
-          meta: req.meta,
+          meta: session ? { ...req.meta, session } : req.meta,
           card: req.card ?? null,
           system: req.system,
           tools: req.tools,
           ...(req.state !== undefined ? { state: req.state } : {}),
-          ...(phase ? { phase } : {}),
+          ...(opts.phase ? { phase: opts.phase } : {}),
         });
-        if (result.ok) return "ok";
-        if (result.live.runId === req.runId) return "fenced";
+        if (result.ok) {
+          if (session) await ledger.claimSession(session.key, req.runId, gen);
+          return session ? { outcome: "ok", session } : { outcome: "ok" };
+        }
+        if (result.live.runId === req.runId) return { outcome: "fenced" };
         warn(
           `[ledger] ${req.threadKey} not tracked: the thread's live row belongs to run ${result.live.runId} (started ${new Date(result.live.startedAt).toISOString()}) — reclaim is the resume phase's`,
         );
-        return "untracked";
+        return { outcome: "untracked" };
       } catch (err) {
         if (err instanceof RouteMissingError) {
           routeMissing();
-          return "untracked";
+          return { outcome: "untracked" };
         }
         if (err instanceof PermanentStoreError || attempt >= claimAttempts) {
           warn(`[ledger] ${req.threadKey} not tracked: claim failed after ${attempt} attempt(s): ${describe(err)}`);
-          return "untracked";
+          return { outcome: "untracked" };
         }
         await sleep(RETRY_MS[Math.min(attempt, RETRY_MS.length) - 1]);
       }
@@ -364,6 +384,15 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private seeded = false;
     private adopted = false;
     handedOff = false;
+    /** The run's place in its session log (session-log item 2); undefined for
+     *  a run without a conversation of its own and for an adopted row claimed
+     *  before the log existed. */
+    private session: RunSession | undefined;
+    /** Turns of the run's conversation on the ledger, counted from its seed —
+     *  the last step record's `turnIndex` — so the finish can close the range. */
+    private turnsWritten: number | undefined;
+    /** A detach left the log short of what the model saw: the record says `broken`. */
+    private broken = false;
     private stepNo: number;
     private lastSeq: number;
     private state: RunState;
@@ -387,7 +416,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     constructor(
       req: Pick<OpenRunRequest, "runId" | "threadKey" | "state" | "onStop" | "onFenced">,
-      from: { stepNo: number; lastSeq: number; resumable?: boolean } = { stepNo: 0, lastSeq: 0 },
+      from: { stepNo: number; lastSeq: number; resumable?: boolean; session?: RunSession } = {
+        stepNo: 0,
+        lastSeq: 0,
+      },
     ) {
       this.runId = req.runId;
       this.threadKey = req.threadKey;
@@ -397,6 +429,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.stepNo = from.stepNo;
       this.lastSeq = from.lastSeq;
       this.adopted = from.resumable === true;
+      this.session = from.session;
+    }
+
+    /** A reservation learns its session when the prompt's claim promotes it. */
+    bindSession(session: RunSession): void {
+      this.session = session;
     }
 
     get resumable(): boolean {
@@ -407,11 +445,28 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.handedOff = true;
     }
 
+    /** The run's range as the finished record carries it (session-log item 2):
+     *  closed at the last turn written, or `broken` after a detach — the log
+     *  ends short of what the model saw, and the next run in the session must
+     *  know. A run that wrote no turn leaves the range open. */
+    private sessionOnRecord(): RunSession | undefined {
+      if (!this.session) return undefined;
+      if (this.broken) return { ...this.session, range: "broken" };
+      const from = this.session.range === "broken" ? this.session.seedFrom : this.session.range.from;
+      const to =
+        this.turnsWritten !== undefined && this.turnsWritten > 0
+          ? this.session.seedFrom + this.turnsWritten - 1
+          : undefined;
+      return { ...this.session, range: to !== undefined && to >= from ? { from, to } : { from } };
+    }
+
     readonly sink: RecordSink = {
-      put: async (record) => {
+      put: async (plain) => {
         this.finished = true; // no event or state write after this point
         live.delete(this);
         await this.close();
+        const session = this.sessionOnRecord();
+        const record = session ? { ...plain, session } : plain;
         let result: Awaited<ReturnType<RunLedger["finish"]>>;
         try {
           result = await ledger.finish(this.runId, gen, record);
@@ -434,6 +489,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     detach(reason: string): void {
       if (this.detached) return;
       this.detached = true;
+      this.broken = true; // the log ends short of what the model saw from here on
       warn(`[ledger] ${this.threadKey} run ${this.runId} detached: ${reason} — this run is not resumable`);
       this.stopHeartbeat();
       live.delete(this);
@@ -455,13 +511,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
      *  no record at all was killed before its conversation was stored and
      *  closes `interrupted`. */
     async seed(messages: ChatMessage[], budgetMs: number): Promise<void> {
-      const turns: TranscriptTurn[] = messages.map((message, idx) => ({ idx, message }));
+      // The seed's rows land at the session log's tail (session-log item 2), the
+      // first at `seedFrom`; a run without a session writes its own object from 0.
+      const base = this.session?.seedFrom ?? 0;
+      const turns: TranscriptTurn[] = messages.map((message, i) => ({ idx: base + i, message }));
       try {
-        const seeded = await ledger.seed(this.runId, gen, turns);
+        const seeded = await ledger.seed(this.runId, gen, turns, this.session?.key);
         if (!seeded.ok) {
           this.detach(`seed refused (${seeded.reason})`);
           return;
         }
+        this.turnsWritten = messages.length;
         const recorded = await ledger.step(
           this.runId,
           gen,
@@ -486,11 +546,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async step(report: StepReport): Promise<void> {
       if (this.detached) return;
-      const turns: TranscriptTurn[] = report.turns.map((message, i) => ({ idx: report.firstIdx + i, message }));
+      // Every row at its log index: the run's local index plus where its seed
+      // began. A compaction entry rides as the row after the step's turns and
+      // counts as a turn, so the completeness rule sees one index per row.
+      const base = this.session?.seedFrom ?? 0;
+      const turns: TranscriptTurn[] = report.turns.map((message, i) => ({ idx: base + report.firstIdx + i, message }));
+      if (report.compaction)
+        turns.push({ idx: base + report.firstIdx + report.turns.length, compaction: report.compaction });
       const record: StepRecord = {
         step: ++this.stepNo,
         seq: this.lastSeq,
-        turnIndex: report.firstIdx + report.turns.length,
+        turnIndex: report.firstIdx + turns.length,
         inFlight: report.inFlight,
         inboxConsumedSeq: report.inboxConsumedSeq,
         remainingMs: report.remainingMs,
@@ -499,8 +565,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       };
       for (let attempt = 1; ; attempt++) {
         try {
-          const result = await ledger.step(this.runId, gen, record, turns);
+          const result = await ledger.step(this.runId, gen, record, turns, this.session?.key);
           if (!result.ok) this.detach(`step ${record.step} refused (${result.reason})`);
+          else this.turnsWritten = record.turnIndex;
           return;
         } catch (err) {
           if (err instanceof RouteMissingError || err instanceof PermanentStoreError || attempt >= 2) {
@@ -627,8 +694,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   return {
     gen,
     async reserve(req) {
-      const claimed = await claim({ ...req, system: "", tools: [], state: {} }, "attaching");
-      if (claimed !== "ok") return undefined;
+      const claimed = await claim({ ...req, system: "", tools: [], state: {} }, { phase: "attaching" });
+      if (claimed.outcome !== "ok") return undefined;
       const run = new TrackedRun(req);
       run.startHeartbeat();
       live.add(run);
@@ -636,6 +703,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     },
     async open(req) {
       const reserved = req.reservation;
+      const seed = req.seed?.messages;
       if (reserved instanceof TrackedRun) {
         // The promotion (item 42): the claim the dispatcher always made, now
         // landing on the row reserved at admission — same tracked run, its
@@ -644,33 +712,43 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // the thread's row is someone else's (a stale reservation) — the run
         // goes on untracked, as an open without a reservation would.
         if (!reserved.tracked()) return undefined;
-        const claimed = await claim(req);
-        if (claimed === "fenced") {
+        const claimed = await claim(req, seed ? { seed } : {});
+        if (claimed.outcome === "fenced") {
           reserved.detach("promotion refused (fenced)");
           return undefined;
         }
-        if (claimed !== "ok") {
+        if (claimed.outcome !== "ok") {
           await reserved.close();
           live.delete(reserved);
           return undefined;
         }
+        if (claimed.session) reserved.bindSession(claimed.session);
         if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs);
         return reserved;
       }
-      const claimed = await claim(req);
-      if (claimed === "fenced") {
+      const claimed = await claim(req, seed ? { seed } : {});
+      if (claimed.outcome === "fenced") {
         warn(`[ledger] ${req.threadKey} not tracked: run ${req.runId} is live under another generation`);
         return undefined;
       }
-      if (claimed !== "ok") return undefined;
-      const run = new TrackedRun(req);
+      if (claimed.outcome !== "ok") return undefined;
+      const run = new TrackedRun(req, {
+        stepNo: 0,
+        lastSeq: 0,
+        ...(claimed.session ? { session: claimed.session } : {}),
+      });
       if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs);
       run.startHeartbeat();
       live.add(run);
       return run;
     },
     adopt(req) {
-      const run = new TrackedRun(req, { stepNo: req.lastStep, lastSeq: req.lastSeq, resumable: true });
+      const run = new TrackedRun(req, {
+        stepNo: req.lastStep,
+        lastSeq: req.lastSeq,
+        resumable: true,
+        ...(req.session ? { session: req.session } : {}),
+      });
       run.startHeartbeat();
       live.add(run);
       return run;

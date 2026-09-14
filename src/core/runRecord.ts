@@ -151,11 +151,47 @@ export interface RunRecord {
    *  turns at the spawn (`DispatchOptions.seed`). Absent on records written
    *  before it existed. */
   seed?: RunSeed;
+  /** The run as a range of its session's log (item 53; docs/reference/specs/session-log.md):
+   *  the object's key, the log index its seed began at, its request row and
+   *  the rows it appended — closed at finish, or `broken` when a refused or
+   *  failed write detached the run and its later turns never landed. Absent
+   *  on records written before the session log existed and on runs without
+   *  a conversation of their own. */
+  session?: RunSession;
 }
 
 /** The two places a run's conversation can start (item 52). */
 export const RUN_SEEDS = ["channel", "parent"] as const;
 export type RunSeed = (typeof RUN_SEEDS)[number];
+
+/** A session log's name: `<threadKey>:<agent>` (docs/reference/specs/session-log.md item 1). */
+export const SESSION_KEY_PATTERN = /^[A-Za-z0-9_.:@+/-]{1,512}$/;
+
+/** Where a run sits in its session's log (session-log item 2): `seedFrom` is
+ *  the first log index its seed included, `request` the index of its request
+ *  row, `range.from` the first row it appended and `range.to` the last, set
+ *  at finish; `broken` says the run detached from the ledger and the log
+ *  ends short of what the model saw. */
+export interface RunSession {
+  key: string;
+  seedFrom: number;
+  request: number;
+  range: { from: number; to?: number } | "broken";
+}
+
+const isIndex = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
+
+export function isRunSession(v: unknown): v is RunSession {
+  if (typeof v !== "object" || v === null) return false;
+  const s = v as Record<string, unknown>;
+  if (typeof s.key !== "string" || !SESSION_KEY_PATTERN.test(s.key)) return false;
+  if (!isIndex(s.seedFrom) || !isIndex(s.request) || s.request < s.seedFrom) return false;
+  if (s.range === "broken") return true;
+  if (typeof s.range !== "object" || s.range === null) return false;
+  const range = s.range as Record<string, unknown>;
+  if (!isIndex(range.from) || range.from < s.seedFrom) return false;
+  return range.to === undefined || (isIndex(range.to) && range.to >= range.from);
+}
 
 /** The profile as the record stores it: the run's effective profile plus the preset it came from. */
 export type RunProfileRecord = RunProfile & { preset: string };
@@ -393,6 +429,10 @@ export interface RetentionPolicy {
   retentionDays: number;
   maxRuns: number;
   maxBytes: number;
+  /** The most bytes one session log holds (docs/reference/specs/session-log.md item 5):
+   *  past it the object replaces its oldest tool results with a marker;
+   *  `maxBytes` bounds the run records alone. */
+  sessionLogMaxBytes: number;
 }
 
 const KIB = 1024;
@@ -403,6 +443,7 @@ export const DEFAULT_RETENTION_POLICY: Readonly<RetentionPolicy> = {
   retentionDays: 30,
   maxRuns: 5000,
   maxBytes: 2 * GIB,
+  sessionLogMaxBytes: 200 * MIB,
 };
 
 /** Inclusive `[min, max]` per policy field. */
@@ -410,6 +451,7 @@ export const RETENTION_BOUNDS: Readonly<Record<keyof RetentionPolicy, readonly [
   retentionDays: [1, 365],
   maxRuns: [1, 20_000],
   maxBytes: [16 * MIB, 8 * GIB],
+  sessionLogMaxBytes: [16 * MIB, 2 * GIB],
 };
 
 /** Fill a partial policy from the defaults and clamp every field into its
@@ -421,7 +463,12 @@ export function clampRetentionPolicy(partial: Partial<RetentionPolicy>): Retenti
     const [lo, hi] = RETENTION_BOUNDS[k];
     return Math.min(hi, Math.max(lo, n));
   };
-  return { retentionDays: field("retentionDays"), maxRuns: field("maxRuns"), maxBytes: field("maxBytes") };
+  return {
+    retentionDays: field("retentionDays"),
+    maxRuns: field("maxRuns"),
+    maxBytes: field("maxBytes"),
+    sessionLogMaxBytes: field("sessionLogMaxBytes"),
+  };
 }
 
 // ---- validation -------------------------------------------------------------
@@ -527,6 +574,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
     return false;
   // Where the conversation started (item 52): one of the two words, or absent.
   if (r.seed !== undefined && !RUN_SEEDS.includes(r.seed as RunSeed)) return false;
+  // The run's place in its session's log (item 53), or absent.
+  if (r.session !== undefined && !isRunSession(r.session)) return false;
   // A coordinator's child (item 48): the instance id in the platform's alphabet
   // and the key `<instance>:<step>` — both or neither; one alone is no tag.
   if ((r.parentInstanceId === undefined) !== (r.idempotencyKey === undefined)) return false;

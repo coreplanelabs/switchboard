@@ -359,11 +359,23 @@ describe("the notes — compaction, harness errors, dialogs, the unknown", () =>
     const { bridge, events } = harness();
     bridge.observe({ type: "summarization_retry_scheduled", attempt: 1 });
     bridge.observe({ type: "compaction_start", reason: "threshold" });
-    bridge.observe({
+    const compacted = bridge.observe({
       type: "compaction_end",
       reason: "threshold",
-      result: { tokensBefore: 150000, estimatedTokensAfter: 32000 },
+      result: {
+        summary: "So far: the user asked for the tests; two fail.",
+        firstKeptEntryId: "abc123",
+        tokensBefore: 150000,
+        estimatedTokensAfter: 32000,
+      },
       aborted: false,
+    });
+    // The entry itself rides the observation for the mirror (session-log item 6):
+    // the summary, what it replaced, and pi's id for the first entry it kept.
+    expect(compacted.compaction).toEqual({
+      summary: "So far: the user asked for the tests; two fail.",
+      tokensBefore: 150000,
+      firstKeptEntryId: "abc123",
     });
     expect(events).toEqual([
       {

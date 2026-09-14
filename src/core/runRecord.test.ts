@@ -263,7 +263,12 @@ describe("applyRetention", () => {
 describe("clampRetentionPolicy", () => {
   it("fills defaults for an empty partial", () => {
     expect(clampRetentionPolicy({})).toEqual(DEFAULT_RETENTION_POLICY);
-    expect(DEFAULT_RETENTION_POLICY).toEqual({ retentionDays: 30, maxRuns: 5000, maxBytes: 2 * 1024 ** 3 });
+    expect(DEFAULT_RETENTION_POLICY).toEqual({
+      retentionDays: 30,
+      maxRuns: 5000,
+      maxBytes: 2 * 1024 ** 3,
+      sessionLogMaxBytes: 200 * 1024 ** 2,
+    });
   });
 
   it("clamps out-of-range values to the bounds", () => {
@@ -271,11 +276,13 @@ describe("clampRetentionPolicy", () => {
       retentionDays: 1,
       maxRuns: 20_000,
       maxBytes: 16 * 1024 ** 2,
+      sessionLogMaxBytes: 200 * 1024 ** 2,
     });
     expect(clampRetentionPolicy({ retentionDays: 1000, maxRuns: 0, maxBytes: 1e12 })).toEqual({
       retentionDays: 365,
       maxRuns: 1,
       maxBytes: 8 * 1024 ** 3,
+      sessionLogMaxBytes: 200 * 1024 ** 2,
     });
   });
 
@@ -286,6 +293,7 @@ describe("clampRetentionPolicy", () => {
       retentionDays: 30,
       maxRuns: 2,
       maxBytes: DEFAULT_RETENTION_POLICY.maxBytes,
+      sessionLogMaxBytes: 200 * 1024 ** 2,
     });
   });
 });
@@ -759,5 +767,38 @@ describe("isRunRecord — the review's verdict and head, the fix round's disposi
     expect(isRunRecord({ ...record(), reviewPost: { posted: true, head: HEAD } })).toBe(false);
     expect(isRunRecord({ ...record(), reviewPost: { posted: false } })).toBe(false);
     expect(isRunRecord({ ...record(), reviewPost: "posted" })).toBe(false);
+  });
+});
+
+// docs/reference/specs/run-history.md item 53: a run is a range of its session's log;
+// the record names the log, where its seed began, its request row and its rows.
+describe("isRunRecord — the session field", () => {
+  const session = { key: "slack:C1:1.0:coding", seedFrom: 0, request: 2, range: { from: 0, to: 41 } };
+  it("accepts a closed range, an open one and `broken` — also after a JSON round-trip — and a record without one carries no key", () => {
+    expect(isRunRecord(record({ session }))).toBe(true);
+    expect(isRunRecord(record({ session: { ...session, range: { from: 0 } } }))).toBe(true);
+    expect(isRunRecord(record({ session: { ...session, range: "broken" } }))).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record({ session }))))).toBe(true);
+    expect("session" in record()).toBe(false);
+    expect(isRunRecord(record())).toBe(true);
+  });
+
+  it("refuses a session with a bad key, a negative index, an end before its start, or another word for the range", () => {
+    expect(isRunRecord({ ...record(), session: { ...session, key: "" } })).toBe(false);
+    expect(isRunRecord({ ...record(), session: { ...session, seedFrom: -1 } })).toBe(false);
+    expect(isRunRecord({ ...record(), session: { ...session, range: { from: 5, to: 4 } } })).toBe(false);
+    expect(isRunRecord({ ...record(), session: { ...session, range: "gone" } })).toBe(false);
+    expect(isRunRecord({ ...record(), session: "slack:C1:1.0:coding" })).toBe(false);
+  });
+});
+
+describe("clampRetentionPolicy — the session log's byte policy", () => {
+  it("defaults to 200 MiB, clamps into [16 MiB, 2 GiB], and rides the policy beside the run fields", () => {
+    expect(DEFAULT_RETENTION_POLICY.sessionLogMaxBytes).toBe(200 * 1024 ** 2);
+    expect(RETENTION_BOUNDS.sessionLogMaxBytes).toEqual([16 * 1024 ** 2, 2 * 1024 ** 3]);
+    expect(clampRetentionPolicy({ sessionLogMaxBytes: 1 }).sessionLogMaxBytes).toBe(16 * 1024 ** 2);
+    expect(clampRetentionPolicy({ sessionLogMaxBytes: 1e12 }).sessionLogMaxBytes).toBe(2 * 1024 ** 3);
+    expect(clampRetentionPolicy({ sessionLogMaxBytes: 64 * 1024 ** 2 }).sessionLogMaxBytes).toBe(64 * 1024 ** 2);
+    expect(clampRetentionPolicy({}).sessionLogMaxBytes).toBe(200 * 1024 ** 2);
   });
 });

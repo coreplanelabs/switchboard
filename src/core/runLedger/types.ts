@@ -7,7 +7,7 @@ import type { ChatMessage, ToolDef } from "../../providers/types.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RunEvent } from "../runEvents.js";
-import type { RunSeed } from "../runRecord.js";
+import type { RunSeed, RunSession } from "../runRecord.js";
 
 /** How long a generation's claim on a run lasts without a heartbeat. */
 export const LEASE_MS = 30_000;
@@ -73,6 +73,12 @@ export interface LiveRunMeta {
   /** Where the run's conversation started (item 52), so a reclaimed run's
    *  record still says so: `parent` for a spawned child, `channel` otherwise. */
   seed?: RunSeed;
+  /** The run's place in its session's log (docs/reference/specs/session-log.md item
+   *  2): set at the claim, so a resume reads the rows from `seedFrom` and
+   *  continues appending at its indices. Absent on rows claimed before the
+   *  session log existed — those resume from their own transcript object —
+   *  and on runs without a conversation of their own. */
+  session?: RunSession;
   /** Which executor the run attached: what `makeExecutor` chose. */
   selection?: "resident" | "sandbox" | "local" | "none";
   /** The worktree path the system prompt names. */
@@ -194,10 +200,21 @@ export interface TranscriptAttachment {
   data: string;
 }
 
-/** The turns a step write carries: the previous step's results and this step's assistant turn. */
-export interface TranscriptTurn {
-  idx: number;
-  message: ChatMessage;
+/** pi's compaction entry as the log stores it (docs/reference/specs/session-log.md item
+ *  6): the summary pi wrote of everything before the row, the size it replaced,
+ *  pi's own id for the first entry it kept (forensics: it names nothing in a
+ *  rebuilt file) and, when the mirror can say, `keptFrom` — the log index of
+ *  that entry — so a rebuilt session keeps what pi kept. */
+export interface CompactionEntry {
+  summary: string;
+  tokensBefore?: number;
+  firstKeptEntryId?: string;
+  keptFrom?: number;
 }
+
+/** The rows a step write carries, each at its log index: the previous step's
+ *  results and this step's assistant turn as messages, and pi's compaction
+ *  entry as a row of its own between them. */
+export type TranscriptTurn = { idx: number; message: ChatMessage } | { idx: number; compaction: CompactionEntry };
 
 export type AppendableEvent = RunEvent & { seq: number };

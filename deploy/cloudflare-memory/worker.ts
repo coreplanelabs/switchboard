@@ -21,14 +21,17 @@ import {
   applyRetention,
   clampRetentionPolicy,
   isRunRecord,
+  isRunSession,
   isRunVisibilityFilter,
   normalizeStored,
+  RETENTION_BOUNDS,
   RUN_EVENTS_DEFAULT_PAGE,
   RUN_EVENTS_MAX_PAGE,
   RUN_ID_PATTERN,
   clampListLimit,
   RUN_LIST_MAX_LIMIT,
   sameStoredVersion,
+  SESSION_KEY_PATTERN,
   storedEventSeqs,
   utf8ByteLength,
   MAX_EVENT_BYTES,
@@ -39,6 +42,16 @@ import {
   type RunVisibilityFilter,
   type StoredRunEvent,
 } from "../../src/core/runRecord.ts";
+import {
+  attachmentRefsOf,
+  DEFAULT_SESSION_LOG_MAX_BYTES,
+  droppedToolResultRow,
+  planSessionTrim,
+  rowKind,
+  sessionsToDrop,
+  tailCut,
+  textOfStoredRow,
+} from "../../src/core/runLedger/sessionLog.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
 import {
   checkFence,
@@ -142,8 +155,12 @@ export interface Env {
   RUNS: DurableObjectNamespace<RunHistoryDO>;
   /** Runtime config documents (routing-and-config item 12): ONE ConfigDO (named "config"). */
   CONFIG: DurableObjectNamespace<ConfigDO>;
-  /** Live-run transcripts (run-history item 32): one RunTranscriptDO per live run, named by run id. */
+  /** Live-run transcripts of runs claimed before the session log existed (run-history
+   *  item 32): one RunTranscriptDO per such run, named by run id. New runs never write here. */
   RUN_TRANSCRIPTS: DurableObjectNamespace<RunTranscriptDO>;
+  /** Session logs (docs/reference/specs/session-log.md): one SessionLogDO per thread and
+   *  agent, named `<threadKey>:<agent>` — every run of the session appends its rows. */
+  SESSION_LOGS: DurableObjectNamespace<SessionLogDO>;
   /** Delivery snapshots (delivery item 10): ONE DeliveryDO (named "delivery"), one snapshot per repository. */
   DELIVERY: DurableObjectNamespace<DeliveryDO>;
   /** The ship coordinator Workflow in the bot's shim Worker (run-history item
@@ -1131,10 +1148,27 @@ export class RunHistoryDO extends DurableObject<Env> {
     );
     if (!columns.has("channel_visibility"))
       this.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
+    // The session a run was a range of (session-log item 7), so the sweep can
+    // tell which sessions still have a kept run; null for a record without one.
+    if (!columns.has("session_key")) this.sql.exec(`ALTER TABLE runs ADD COLUMN session_key TEXT`);
     this.sql.exec(`
       CREATE INDEX IF NOT EXISTS runs_channel_finished ON runs(channel_id, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_visibility_finished ON runs(channel_visibility, finished_at DESC, run_id DESC);
       CREATE INDEX IF NOT EXISTS runs_user_finished ON runs(user_id, finished_at DESC, run_id DESC);
+      CREATE INDEX IF NOT EXISTS runs_session ON runs(session_key);
+    `);
+    // The sessions registry (session-log item 7): every session log a run of
+    // this store claimed, with its thread — the sweep cannot enumerate the
+    // SESSION_LOGS namespace, so this is how it knows which objects exist and
+    // which thread's live row would block a drop.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        key TEXT PRIMARY KEY,
+        thread_key TEXT NOT NULL,
+        agent TEXT,
+        last_finished_at INTEGER NOT NULL DEFAULT 0,
+        bytes INTEGER NOT NULL DEFAULT 0
+      );
     `);
     // The live-run ledger (run-history items 28–34): live runs never enter
     // `runs` — that table's finished_at drives retention and listing — they
@@ -1285,6 +1319,21 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** One live run per thread (item 29): the UNIQUE on thread_key is the
    *  store-level guarantee; the decision names the live run for the steer. */
+  /** A claim naming a session log registers it (session-log item 7), so the
+   *  sweep knows the object exists and which thread it belongs to. Inside the
+   *  claim's transaction. */
+  private registerSession(req: ClaimRequest): void {
+    const session = req.meta.session;
+    if (!session) return;
+    this.sql.exec(
+      `INSERT INTO sessions (key, thread_key, agent) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET thread_key = excluded.thread_key, agent = excluded.agent`,
+      session.key,
+      req.threadKey,
+      req.meta.agent ?? null,
+    );
+  }
+
   async claim(req: ClaimRequest, now: number): Promise<ClaimResult> {
     let out: ClaimResult = { ok: true };
     this.ctx.storage.transactionSync(() => {
@@ -1322,10 +1371,12 @@ export class RunHistoryDO extends DurableObject<Env> {
             JSON.stringify(req.state ?? {}),
             req.runId,
           );
+          this.registerSession(req);
           return;
         case "insert":
           break;
       }
+      this.registerSession(req);
       this.sql.exec(
         `INSERT INTO live_runs (run_id, thread_key, owner_gen, lease_until, started_at, phase, stop, meta_json, card_json, system_text, tools_json, state_json)
          VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
@@ -1503,6 +1554,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!out.ok) return out;
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
+    await this.refreshSessionBytes(record.session?.key);
     const event = await sendRunFinished(this.env.SHIP_COORDINATOR, record);
     if (event.kind === "failed")
       console.warn(`[runs/finish] ${runId} → ${event.type} not delivered to ${event.instance}: ${event.reason}`);
@@ -1759,15 +1811,16 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       this.sql.exec(
         `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status,
-                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            label = excluded.label, agent = excluded.agent, model = excluded.model, channel_id = excluded.channel_id,
            user_id = excluded.user_id, thread_key = excluded.thread_key, channel_visibility = excluded.channel_visibility,
            repo = excluded.repo, started_at = excluded.started_at,
            finished_at = excluded.finished_at, stored_at = excluded.stored_at, status = excluded.status,
            event_count = excluded.event_count, stored_event_count = excluded.stored_event_count, truncated = excluded.truncated,
-           bytes = excluded.bytes, diagnosis_json = excluded.diagnosis_json, summary_json = excluded.summary_json`,
+           bytes = excluded.bytes, diagnosis_json = excluded.diagnosis_json, summary_json = excluded.summary_json,
+           session_key = excluded.session_key`,
         stored.id,
         stored.label ?? null,
         stored.agent ?? null,
@@ -1787,7 +1840,21 @@ export class RunHistoryDO extends DurableObject<Env> {
         bytes,
         JSON.stringify(stored.diagnosis),
         JSON.stringify(summary),
+        stored.session?.key ?? null,
       );
+      // The session's registry row learns its newest finish (session-log item
+      // 7); a record that reaches the store without a claim (the plain put
+      // of a detached run) still registers the session it names.
+      if (stored.session) {
+        this.sql.exec(
+          `INSERT INTO sessions (key, thread_key, agent, last_finished_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET last_finished_at = MAX(sessions.last_finished_at, excluded.last_finished_at)`,
+          stored.session.key,
+          stored.threadKey,
+          stored.agent ?? null,
+          finishedAt,
+        );
+      }
       if (!unchanged) {
         this.sql.exec(`DELETE FROM run_events WHERE run_id = ?`, record.id);
         const seqs = storedEventSeqs(events); // the registry's stamps (see runRecord.ts)
@@ -1833,19 +1900,78 @@ export class RunHistoryDO extends DurableObject<Env> {
       const now = systemClock();
       const { policy } = this.policyState();
       let deleted = 0;
+      let candidates: { key: string; threadKey: string }[] = [];
       this.ctx.storage.transactionSync(() => {
         deleted = this.trim(policy, now, undefined).deleted;
         // Orphan sweep: events whose run is gone (defensive — `deleteRuns` pairs
         // the two deletes, so this is a periodic check, not a per-put cost).
         this.sql.exec(`DELETE FROM run_events WHERE run_id NOT IN (SELECT run_id FROM runs)`);
+        // The sessions no kept run names any more (session-log item 7): decided
+        // here, on the rows this transaction leaves; dropped after it.
+        candidates = this.sql
+          .exec<{ key: string; thread_key: string }>(
+            `SELECT key, thread_key FROM sessions
+              WHERE key NOT IN (SELECT session_key FROM runs WHERE session_key IS NOT NULL)`,
+          )
+          .toArray()
+          .map((r) => ({ key: r.key, threadKey: r.thread_key }));
       });
-      console.log(`[runs/alarm] swept ${deleted} rows outside policy`);
+      const dropped = await this.sweepSessions(candidates);
+      console.log(`[runs/alarm] swept ${deleted} rows outside policy, dropped ${dropped} session log(s)`);
       await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
       root.end("ok", { swept: deleted });
     } catch (err) {
       root.fail(err);
       root.end("error");
       throw err;
+    }
+  }
+
+  /** Drop the session logs among `candidates` that still have no kept run and
+   *  no live run on their thread (session-log item 7), each object's owner row
+   *  first so a late write is refused, then its rows; the registry row goes
+   *  once the object is empty. Outside the sweep's transaction — a Durable
+   *  Object call cannot run inside one — so each drop awaits, and a claim or a
+   *  finish can land between two of them: the decision is therefore taken per
+   *  key on what the object reads right before that key's drop, never on the
+   *  list the transaction produced. A candidate a live run or a fresh record
+   *  has overtaken is skipped and keeps its registry row. Returns how many dropped. */
+  async sweepSessions(candidates: readonly { key: string; threadKey: string }[]): Promise<number> {
+    let dropped = 0;
+    for (const { key, threadKey } of candidates) {
+      const [{ decision }] = sessionsToDrop([
+        {
+          key,
+          hasKeptRun: this.sql.exec(`SELECT 1 FROM runs WHERE session_key = ? LIMIT 1`, key).toArray().length > 0,
+          threadLive:
+            this.sql.exec(`SELECT 1 FROM live_runs WHERE thread_key = ? LIMIT 1`, threadKey).toArray().length > 0,
+        },
+      ]);
+      if (decision !== "drop") continue;
+      try {
+        await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).drop();
+        this.sql.exec(`DELETE FROM sessions WHERE key = ?`, key);
+        dropped++;
+      } catch (err) {
+        console.warn(
+          `[runs/alarm] session log ${key} not dropped: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return dropped;
+  }
+
+  /** The registry row's `bytes` is the object's own count, read after a finish
+   *  (the one moment a session's size changes and the store is told). Best
+   *  effort: a registry row without a fresh count is a stale number, never a
+   *  wrong decision — the sweep decides on run rows and live rows alone. */
+  private async refreshSessionBytes(key: string | undefined): Promise<void> {
+    if (key === undefined) return;
+    try {
+      const bytes = await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).bytes();
+      this.sql.exec(`UPDATE sessions SET bytes = ? WHERE key = ?`, bytes, key);
+    } catch (err) {
+      console.warn(`[runs/finish] session ${key} bytes not read: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -2457,6 +2583,355 @@ export class RunTranscriptDO extends DurableObject<Env> {
   }
 }
 
+/** A tool-result marker's size, for the byte policy's first estimate of how
+ *  many rows to replace; the pass repeats on the measured total, so the
+ *  estimate only decides how many rows one pass tries. */
+const TRIM_MARKER_BYTES_ESTIMATE = 260;
+
+type SessionTurnRow = { id: number; idx: number; part: number; json: string; text: string };
+
+/**
+ * One session log (docs/reference/specs/session-log.md): the transcript rows of every
+ * run of a thread-and-agent session, each at its log index, under the same
+ * `(idx, part)` upsert and owner fence as a run's transcript object — plus a
+ * full-text index over the rows' text, kept in step by hand because an
+ * external-content FTS5 table learns of a replaced row only when told, the
+ * attachments the rows reference, the byte policy that replaces the oldest
+ * tool results with a marker once the log is over its budget, and the
+ * notepad row a later release writes. Nothing here is cleared when a run
+ * finishes; the sweep on `RunHistoryDO` drops the whole object.
+ */
+export class SessionLogDO extends DurableObject<Env> {
+  private readonly sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS owner (k INTEGER PRIMARY KEY CHECK (k = 1), run_id TEXT NOT NULL, gen TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS turns (
+        id INTEGER PRIMARY KEY,
+        idx INTEGER NOT NULL,
+        part INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        bytes INTEGER NOT NULL,
+        trimmed INTEGER NOT NULL DEFAULT 0,
+        json TEXT NOT NULL,
+        text TEXT NOT NULL,
+        UNIQUE (idx, part)
+      );
+      CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(text, content='turns', content_rowid='id');
+      CREATE TABLE IF NOT EXISTS attachments (
+        ref TEXT PRIMARY KEY,
+        media_type TEXT NOT NULL,
+        data TEXT NOT NULL,
+        bytes INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS notepad (k INTEGER PRIMARY KEY CHECK (k = 1), text TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    `);
+  }
+
+  /** The index the next row lands at: one past the newest turn, 0 for an empty
+   *  log. (Not named `tail`: the runtime reserves that as a handler name on an
+   *  entrypoint and refuses it over RPC.) */
+  async nextIndex(): Promise<{ next: number }> {
+    return { next: this.next() };
+  }
+
+  private next(): number {
+    return this.sql.exec<{ next: number }>(`SELECT COALESCE(MAX(idx) + 1, 0) AS next FROM turns`).one().next;
+  }
+
+  /** The live writer: the run and the generation whose writes land. Replaced
+   *  by every claim and reclaim, as the transcript object's owner is. The byte
+   *  budget rides along so the object enforces the store's policy on write. */
+  async setOwner(runId: string, gen: string, maxBytes: number = DEFAULT_SESSION_LOG_MAX_BYTES): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(
+        `INSERT INTO owner (k, run_id, gen) VALUES (1, ?, ?) ON CONFLICT(k) DO UPDATE SET run_id = excluded.run_id, gen = excluded.gen`,
+        runId,
+        gen,
+      );
+      this.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('max_bytes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        String(maxBytes),
+      );
+    });
+    return { ok: true };
+  }
+
+  async maxBytes(): Promise<number> {
+    const row = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'max_bytes'`).toArray()[0];
+    const n = row ? Number(row.value) : Number.NaN;
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_SESSION_LOG_MAX_BYTES;
+  }
+
+  private owner(): { runId: string; gen: string } | undefined {
+    const row = this.sql
+      .exec<{ run_id: string; gen: string }>(`SELECT run_id, gen FROM owner WHERE k = 1`)
+      .toArray()[0];
+    return row ? { runId: row.run_id, gen: row.gen } : undefined;
+  }
+
+  /** The owner releases the log at its finish so a zombie of a finished run is
+   *  refused rather than appending to a session it no longer drives; only the
+   *  owner may. The rows stay. */
+  async clearOwner(runId: string, gen: string): Promise<FenceResult> {
+    let out: FenceResult = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const owner = this.owner();
+      if (!owner) {
+        out = { ok: false, reason: "unknown-run" };
+        return;
+      }
+      if (owner.runId !== runId || owner.gen !== gen) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      this.sql.exec(`DELETE FROM owner`);
+    });
+    return out;
+  }
+
+  /** One row into the table and the index. A row already at `(idx, part)` — a
+   *  zombie's late write the new generation overwrites — has its index entry
+   *  deleted first, then goes; the new row is inserted with its own id and
+   *  indexed. */
+  private putRow(row: TranscriptRow, json: string, trimmed: boolean): void {
+    const existing = this.sql
+      .exec<{ id: number; text: string }>(`SELECT id, text FROM turns WHERE idx = ? AND part = ?`, row.idx, row.part)
+      .toArray()[0];
+    if (existing) {
+      this.sql.exec(
+        `INSERT INTO turns_fts (turns_fts, rowid, text) VALUES ('delete', ?, ?)`,
+        existing.id,
+        existing.text,
+      );
+      this.sql.exec(`DELETE FROM turns WHERE id = ?`, existing.id);
+    }
+    const text = textOfStoredRow(json);
+    this.sql.exec(
+      `INSERT INTO turns (idx, part, kind, bytes, trimmed, json, text) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      row.idx,
+      row.part,
+      rowKind(json),
+      utf8ByteLength(json),
+      trimmed ? 1 : 0,
+      json,
+      text,
+    );
+    const id = this.sql.exec<{ id: number }>(`SELECT last_insert_rowid() AS id`).one().id;
+    this.sql.exec(`INSERT INTO turns_fts (rowid, text) VALUES (?, ?)`, id, text);
+  }
+
+  async write(
+    gen: string,
+    rows: TranscriptRow[],
+    attachments: TranscriptAttachment[],
+  ): Promise<FenceResult & { bytes?: number }> {
+    let out: FenceResult & { bytes?: number } = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const owner = this.owner();
+      if (owner === undefined) {
+        out = { ok: false, reason: "unknown-run" };
+        return;
+      }
+      if (owner.gen !== gen) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      for (const a of attachments) {
+        this.sql.exec(
+          `INSERT OR REPLACE INTO attachments (ref, media_type, data, bytes) VALUES (?, ?, ?, ?)`,
+          a.ref,
+          a.mediaType,
+          a.data,
+          utf8ByteLength(a.data),
+        );
+      }
+      for (const r of rows) this.putRow(r, r.json, false);
+      out = { ok: true, bytes: this.enforceBytePolicy() };
+    });
+    return out;
+  }
+
+  private totalBytes(): number {
+    return (
+      this.sql.exec<{ b: number }>(`SELECT COALESCE(SUM(bytes), 0) AS b FROM turns`).one().b +
+      this.sql.exec<{ b: number }>(`SELECT COALESCE(SUM(bytes), 0) AS b FROM attachments`).one().b
+    );
+  }
+
+  /** Whether any row other than `exceptId` references the attachment `ref`.
+   *  Rows carry references inside their JSON, so the check is a substring
+   *  match on the quoted field; refs are `t<idx>p<part>`, and the closing quote
+   *  keeps `t1p0` from matching `t1p01`. */
+  private referencedElsewhere(ref: string, exceptId: number): boolean {
+    return (
+      this.sql
+        .exec(`SELECT 1 FROM turns WHERE id != ? AND INSTR(json, ?) > 0 LIMIT 1`, exceptId, `"dataRef":"${ref}"`)
+        .toArray().length > 0
+    );
+  }
+
+  /** The bytes a trimmed row would free beyond its own: the attachments only
+   *  it references (session-log item 5). */
+  private soleAttachmentBytes(row: { id: number; json: string }): number {
+    let bytes = 0;
+    for (const ref of attachmentRefsOf(row.json)) {
+      if (this.referencedElsewhere(ref, row.id)) continue;
+      bytes +=
+        this.sql.exec<{ bytes: number }>(`SELECT bytes FROM attachments WHERE ref = ?`, ref).toArray()[0]?.bytes ?? 0;
+    }
+    return bytes;
+  }
+
+  /** The byte policy (session-log item 5): over the budget, the oldest tool
+   *  results are replaced by a marker, oldest first, each taking with it the
+   *  attachments no remaining row references, until the log fits or none is
+   *  left; user and assistant text is never dropped, nor an attachment a kept
+   *  row still shows. Each pass plans on an estimate of the marker's size and
+   *  re-measures, so a pass is never short by more than the estimate's error
+   *  and the loop ends when the candidates do. Returns the total after. */
+  private enforceBytePolicy(): number {
+    const max = Number(
+      this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'max_bytes'`).toArray()[0]?.value ??
+        DEFAULT_SESSION_LOG_MAX_BYTES,
+    );
+    let total = this.totalBytes();
+    while (total > max) {
+      const candidates = this.sql
+        .exec<{ id: number; bytes: number; json: string }>(
+          `SELECT id, bytes, json FROM turns WHERE kind = 'tool_result' AND trimmed = 0 ORDER BY idx ASC, part ASC`,
+        )
+        .toArray()
+        .map((c) => ({ id: c.id, bytes: c.bytes + this.soleAttachmentBytes(c) }));
+      const ids = planSessionTrim(candidates, total - max, TRIM_MARKER_BYTES_ESTIMATE);
+      if (ids.length === 0) break;
+      for (const id of ids) {
+        const row = this.sql
+          .exec<SessionTurnRow>(`SELECT id, idx, part, json, text FROM turns WHERE id = ?`, id)
+          .toArray()[0];
+        if (!row) continue;
+        const marker = droppedToolResultRow(row.json);
+        if (marker === undefined) {
+          // Not replaceable after all: mark it so the loop never picks it again.
+          this.sql.exec(`UPDATE turns SET trimmed = 1 WHERE id = ?`, id);
+          continue;
+        }
+        const refs = attachmentRefsOf(row.json);
+        this.putRow({ idx: row.idx, part: row.part, json: marker }, marker, true);
+        // The marker references nothing, so an attachment only this row showed is now orphaned.
+        for (const ref of refs) {
+          if (!this.referencedElsewhere(ref, -1)) this.sql.exec(`DELETE FROM attachments WHERE ref = ?`, ref);
+        }
+      }
+      total = this.totalBytes();
+    }
+    return total;
+  }
+
+  /** Every attachment the log holds, by reference. */
+  async attachmentRefs(): Promise<string[]> {
+    return this.sql
+      .exec<{ ref: string }>(`SELECT ref FROM attachments ORDER BY ref`)
+      .toArray()
+      .map((r) => r.ref);
+  }
+
+  /** The rows from `from` to `to` (inclusive; the tail when `to` is absent), in
+   *  (idx, part) order, with the attachments those rows reference. */
+  async read(from: number, to?: number): Promise<{ rows: TranscriptRow[]; attachments: TranscriptAttachment[] }> {
+    const rows = this.sql
+      .exec<{ idx: number; part: number; json: string }>(
+        `SELECT idx, part, json FROM turns WHERE idx >= ? AND idx <= ? ORDER BY idx, part`,
+        from,
+        to ?? Number.MAX_SAFE_INTEGER,
+      )
+      .toArray();
+    return { rows, attachments: this.attachmentsOf(rows) };
+  }
+
+  private attachmentsOf(rows: readonly TranscriptRow[]): TranscriptAttachment[] {
+    const refs = [...new Set(rows.flatMap((r) => attachmentRefsOf(r.json)))];
+    if (refs.length === 0) return [];
+    const out: TranscriptAttachment[] = [];
+    for (let i = 0; i < refs.length; i += DO_MAX_BOUND_PARAMETERS) {
+      const batch = refs.slice(i, i + DO_MAX_BOUND_PARAMETERS);
+      out.push(
+        ...this.sql
+          .exec<{ ref: string; media_type: string; data: string }>(
+            `SELECT ref, media_type, data FROM attachments WHERE ref IN (${batch.map(() => "?").join(",")}) ORDER BY ref`,
+            ...batch,
+          )
+          .toArray()
+          .map((a) => ({ ref: a.ref, mediaType: a.media_type, data: a.data })),
+      );
+    }
+    return out;
+  }
+
+  /** The tail a follow-up seeds from (session-log item 4): the newest whole
+   *  turns within `maxBytes`, answered oldest first with the first index they
+   *  start at; when even the newest turn is over the budget, no rows and the
+   *  tail index. */
+  async readTail(
+    maxBytes: number,
+  ): Promise<{ rows: TranscriptRow[]; attachments: TranscriptAttachment[]; from: number }> {
+    const newestFirst = this.sql
+      .exec<{ idx: number; bytes: number }>(`SELECT idx, bytes FROM turns ORDER BY idx DESC, part DESC`)
+      .toArray();
+    const from = tailCut(newestFirst, maxBytes);
+    if (from === undefined) return { rows: [], attachments: [], from: this.next() };
+    return { ...(await this.read(from)), from };
+  }
+
+  /** The rows whose text matches `query`, newest first. */
+  async search(query: string, limit: number): Promise<Array<{ idx: number; part: number; text: string }>> {
+    const match = ftsMatchExpr(query);
+    if (match === null) return [];
+    return this.sql
+      .exec<{ idx: number; part: number; text: string }>(
+        `SELECT t.idx, t.part, t.text FROM turns_fts f JOIN turns t ON t.id = f.rowid
+          WHERE turns_fts MATCH ? ORDER BY t.idx DESC, t.part DESC LIMIT ?`,
+        match,
+        limit,
+      )
+      .toArray();
+  }
+
+  async bytes(): Promise<number> {
+    return this.totalBytes();
+  }
+
+  async rowCount(): Promise<number> {
+    return this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM turns`).one().n;
+  }
+
+  async notepad(): Promise<{ text: string; updatedAt: number } | null> {
+    const row = this.sql
+      .exec<{ text: string; updated_at: number }>(`SELECT text, updated_at FROM notepad WHERE k = 1`)
+      .toArray()[0];
+    return row ? { text: row.text, updatedAt: row.updated_at } : null;
+  }
+
+  /** The sweep's drop (session-log item 7): the owner first, so a write that
+   *  races the drop is refused rather than landing on a log about to go, then
+   *  every row, index entry, attachment, the notepad and the budget. */
+  async drop(): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`DELETE FROM owner`);
+      this.sql.exec(`INSERT INTO turns_fts (turns_fts) VALUES ('delete-all')`);
+      this.sql.exec(`DELETE FROM turns`);
+      this.sql.exec(`DELETE FROM attachments`);
+      this.sql.exec(`DELETE FROM notepad`);
+      this.sql.exec(`DELETE FROM meta`);
+    });
+    return { ok: true };
+  }
+}
+
 const LEDGER_ROUTES = new Set([
   "/runs/coordinator/put",
   "/runs/coordinator/replace",
@@ -2482,10 +2957,22 @@ const LEDGER_ROUTES = new Set([
   "/runs/transcript/write",
   "/runs/transcript/read",
   "/runs/transcript/clear",
+  "/runs/session/tail",
+  "/runs/session/owner",
+  "/runs/session/write",
+  "/runs/session/read",
+  "/runs/session/read-tail",
+  "/runs/session/clear-owner",
 ]);
 
 /** Routes whose bodies may carry a record, a transcript chunk, or an event batch. */
-const WIDE_BODY_ROUTES = new Set(["/runs/put", "/runs/finish", "/runs/append", "/runs/transcript/write"]);
+const WIDE_BODY_ROUTES = new Set([
+  "/runs/put",
+  "/runs/finish",
+  "/runs/append",
+  "/runs/transcript/write",
+  "/runs/session/write",
+]);
 /** A delivery snapshot written whole, or a refresh's patch: every merged pull request's reviews and
  *  its branch's workflow runs — about 7 KB a pull request (measured: 291 pull requests, 2.1 MB), so
  *  a first read at the listing cap is under 6 MB and a busy repository's whole window many MB. */
@@ -2530,6 +3017,8 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
   // by the finish's send and the refusal a second claim meets: shaped or
   // refused, and both fields or neither — one alone is no tag.
   const meta = r.meta as Record<string, unknown>;
+  if (meta.session !== undefined && !isRunSession(meta.session))
+    return invalid("run.meta.session must name a session log and the run's range in it");
   if ((meta.parentInstanceId === undefined) !== (meta.idempotencyKey === undefined))
     return invalid("run.meta.parentInstanceId and run.meta.idempotencyKey come together or not at all");
   if (meta.parentInstanceId !== undefined) {
@@ -2604,6 +3093,25 @@ function parseTranscriptRows(v: unknown): Validated<TranscriptRow[]> {
   return { ok: true, value: v as TranscriptRow[] };
 }
 
+function parseSessionKey(v: unknown): Validated<string> {
+  if (typeof v !== "string" || !SESSION_KEY_PATTERN.test(v)) return invalid("key must be a session key");
+  return { ok: true, value: v };
+}
+
+function parseLogIndex(v: unknown, name: string): Validated<number> {
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return invalid(`${name} must be an integer >= 0`);
+  return { ok: true, value: v };
+}
+
+/** The session log's byte budget on the owner claim: the store's policy field,
+ *  clamped into its bounds like every policy field; absent, the default. */
+function parseSessionMaxBytes(v: unknown): Validated<number> {
+  if (v === undefined) return { ok: true, value: DEFAULT_SESSION_LOG_MAX_BYTES };
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1) return invalid("maxBytes must be an integer >= 1");
+  const [lo, hi] = RETENTION_BOUNDS.sessionLogMaxBytes;
+  return { ok: true, value: Math.min(hi, Math.max(lo, v)) };
+}
+
 function parseAttachments(v: unknown): Validated<TranscriptAttachment[]> {
   if (!Array.isArray(v)) return invalid("attachments must be an array");
   for (const a of v) {
@@ -2622,6 +3130,60 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
   const b = body as Record<string, unknown>;
   const fenced = (r: FenceResult) => (r.ok ? json(r) : json(r, 409));
+
+  if (pathname.startsWith("/runs/session/")) {
+    const key = parseSessionKey(b.key);
+    if (!key.ok) return json({ error: key.error }, 400);
+    const stub = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(key.value));
+    if (pathname === "/runs/session/tail") return json(await stub.nextIndex());
+    if (pathname === "/runs/session/owner") {
+      const runId = parseRunId(b.runId);
+      if (!runId.ok) return json({ error: runId.error }, 400);
+      const g = gen(b.gen);
+      if (!g.ok) return json({ error: g.error }, 400);
+      const max = parseSessionMaxBytes(b.maxBytes);
+      if (!max.ok) return json({ error: max.error }, 400);
+      return json(await stub.setOwner(runId.value, g.value, max.value));
+    }
+    if (pathname === "/runs/session/write") {
+      const g = gen(b.gen);
+      if (!g.ok) return json({ error: g.error }, 400);
+      const rows = parseTranscriptRows(b.rows);
+      if (!rows.ok) return json({ error: rows.error }, 400);
+      const attachments = parseAttachments(b.attachments);
+      if (!attachments.ok) return json({ error: attachments.error }, 400);
+      const r = await stub.write(g.value, rows.value, attachments.value);
+      console.log(
+        `[runs/session/write] ${key.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
+      );
+      return fenced(r);
+    }
+    if (pathname === "/runs/session/read") {
+      const from = parseLogIndex(b.from, "from");
+      if (!from.ok) return json({ error: from.error }, 400);
+      if (b.to !== undefined) {
+        const to = parseLogIndex(b.to, "to");
+        if (!to.ok) return json({ error: to.error }, 400);
+        if (to.value < from.value) return json({ error: "to must be at least from" }, 400);
+        return json(await stub.read(from.value, to.value));
+      }
+      return json(await stub.read(from.value));
+    }
+    if (pathname === "/runs/session/read-tail") {
+      const max = b.maxBytes;
+      if (typeof max !== "number" || !Number.isInteger(max) || max < 1)
+        return json({ error: "maxBytes must be an integer >= 1" }, 400);
+      return json(await stub.readTail(max));
+    }
+    if (pathname === "/runs/session/clear-owner") {
+      const runId = parseRunId(b.runId);
+      if (!runId.ok) return json({ error: runId.error }, 400);
+      const g = gen(b.gen);
+      if (!g.ok) return json({ error: g.error }, 400);
+      return fenced(await stub.clearOwner(runId.value, g.value));
+    }
+    return json({ error: "not found" }, 404);
+  }
 
   if (pathname.startsWith("/runs/transcript/")) {
     const runId = parseRunId(b.runId);

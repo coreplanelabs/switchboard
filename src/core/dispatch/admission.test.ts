@@ -220,6 +220,7 @@ async function resumeOf(
     plan: {
       kind: "resume",
       messages: [],
+      compactions: [],
       settlements: [],
       stepRecorded: true,
       inboxConsumedSeq: over.inboxConsumedSeq ?? 0,

@@ -15,11 +15,12 @@
 // generation still holds a current lease on are handed back so the sweep leaves
 // THEIR cards alone (`liveElsewhere`).
 
-import type { ChatMessage } from "../providers/types.js";
 import type { RunRecord, RunStatus } from "./runRecord.js";
 import { RouteMissingError } from "./runStoreWorker.js";
 import type { RunLedger } from "./runLedger/ledger.js";
 import { transcriptCompleteness } from "./runLedger/decisions.js";
+import { transcriptSource } from "./runLedger/resume.js";
+import type { AssembledTranscript } from "./runLedger/transcript.js";
 import {
   LEASE_MS,
   type AppendableEvent,
@@ -85,7 +86,7 @@ export interface ResumeRun {
   row: LiveRunRow;
   reclaimedFrom: LivePhase;
   lastStep: StepRecord;
-  transcript: { complete: true; turns: number; messages: ChatMessage[] };
+  transcript: Extract<AssembledTranscript, { complete: true }>;
   events: AppendableEvent[];
   /** Follow-ups steered into the run after its last step record (item 40):
    *  the resume folds them in at its first boundary. */
@@ -186,7 +187,7 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         // Resumable (item 38) when the transcript is whole and the completeness
         // rule accepts it against the last step record; the launcher plans the
         // settlement once the socket is up. Otherwise closed here.
-        const verdict = await completenessVerdict(ledger, row.runId, run.lastStep);
+        const verdict = await completenessVerdict(ledger, row, run.lastStep);
         if (verdict.resumable && run.lastStep) {
           const events = await ledger.readEvents(row.runId);
           outcome.resumable.push({
@@ -314,20 +315,27 @@ export async function closeReclaimed(
 }
 
 type Verdict =
-  | { resumable: true; transcript: { complete: true; turns: number; messages: ChatMessage[] }; why: string }
+  | { resumable: true; transcript: Extract<AssembledTranscript, { complete: true }>; why: string }
   | { resumable: false; why: string };
 
 /** The transcript-completeness rule (item 31) against the last step record:
- *  what a resume finds, with the reason in words for the log and the record. */
+ *  what a resume finds, with the reason in words for the log and the record.
+ *  The rows come from the run's session log from where its seed began, or
+ *  from its own transcript object for a row claimed before the log existed
+ *  (docs/reference/specs/session-log.md item 3). */
 async function completenessVerdict(
   ledger: RunLedger,
-  runId: string,
+  row: LiveRunRow,
   lastStep: { turnIndex: number } | null,
 ): Promise<Verdict> {
   if (!lastStep) return { resumable: false, why: "no step record: killed before its conversation was stored" };
   let transcript;
   try {
-    transcript = await ledger.readTranscript(runId);
+    const source = transcriptSource(row.meta);
+    transcript =
+      source.kind === "session"
+        ? await ledger.readSession(source.key, source.from)
+        : await ledger.readTranscript(row.runId);
   } catch (err) {
     return { resumable: false, why: `transcript unreadable (${describe(err)})` };
   }

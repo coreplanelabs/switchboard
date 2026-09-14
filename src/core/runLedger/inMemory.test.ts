@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../providers/types.js";
 import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "./inMemory.js";
-import { LEASE_MS, type ClaimRequest, type StepRecord } from "./types.js";
+import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./sessionLog.js";
+import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest, type StepRecord } from "./types.js";
 
 // The reference ledger (docs/reference/specs/run-history.md items 28–31, 33): the whole
 // protocol over one object, in the shape the Durable Object mirrors.
@@ -79,7 +80,7 @@ describe("InMemoryRunLedger", () => {
     expect(await ledger.finish("r1", "g1", record("r1"))).toEqual({ ok: true, stored: true });
     expect(await ledger.listLive()).toEqual([]);
     expect(ledger.finished.has("r1")).toBe(true);
-    expect(await ledger.readTranscript("r1")).toEqual({ complete: true, turns: 0, messages: [] });
+    expect(await ledger.readTranscript("r1")).toEqual({ complete: true, turns: 0, messages: [], compactions: [] });
   });
 
   it("a second claim on the same thread is refused with the live run; a different thread is fine; the same run by its owner is idempotent", async () => {
@@ -272,5 +273,144 @@ describe("InMemoryRunLedger", () => {
       ["a", "live"],
       ["b", "live"],
     ]);
+  });
+
+  // docs/reference/specs/session-log.md items 1–4: the session log in the plainest
+  // form — the same owner fence and (idx, part) upsert as the transcript, kept
+  // across finishes, read by range and by tail.
+  it("session log: the tail of an empty log is 0; a write before the owner is unknown-run; the owner appends at log indices and another generation is fenced; a range read re-bases; the tail read cuts at a turn boundary; finish releases the owner and clears nothing", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const key = "slack:C1:1.0:review";
+    expect(await ledger.sessionTail(key)).toBe(0);
+    expect(await ledger.seed("r1", "g1", [{ idx: 0, message: seedTurns[0] }], key)).toEqual({
+      ok: false,
+      reason: "unknown-run",
+    });
+    await ledger.claim({
+      ...claimReq("r1", "slack:C1:1.0"),
+      meta: { ...claimReq("r1", "slack:C1:1.0").meta, session: { key, seedFrom: 0, request: 0, range: { from: 0 } } },
+    });
+    await ledger.claimSession(key, "r1", "g1");
+    expect(
+      await ledger.seed(
+        "r1",
+        "g1",
+        seedTurns.map((message, idx) => ({ idx, message })),
+        key,
+      ),
+    ).toEqual({ ok: true });
+    expect(await ledger.step("r1", "g2", stepRecord(1, 3), [{ idx: 2, message: seedTurns[1] }], key)).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await ledger.step("r1", "g1", stepRecord(1, 3), [{ idx: 2, message: seedTurns[1] }], key)).toEqual({
+      ok: true,
+    });
+    expect(await ledger.sessionTail(key)).toBe(3);
+    expect((await ledger.readSession(key, 1)).messages).toEqual([seedTurns[1], seedTurns[1]]);
+    expect((await ledger.readSession(key, 0, 0)).messages).toEqual([seedTurns[0]]);
+    const tail = await ledger.readSessionTail(key, 10_000);
+    expect(tail.from).toBe(0);
+    expect(tail.transcript.messages).toHaveLength(3);
+    const one = await ledger.readSessionTail(key, 80);
+    expect(one.from).toBe(2);
+    expect(one.transcript.messages).toEqual([seedTurns[1]]);
+    expect(await ledger.readSessionTail(key, 1)).toMatchObject({ from: 3, transcript: { turns: 0 } });
+    // The run's own object was never written.
+    expect((await ledger.readTranscript("r1")).turns).toBe(0);
+    await ledger.finish("r1", "g1", {
+      ...record("r1"),
+      session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 2 } },
+    });
+    expect(ledger.sessions.get(key)?.owner).toBeUndefined();
+    expect((await ledger.readSession(key, 0)).messages).toHaveLength(3);
+    expect(await ledger.seed("r1", "g1", [{ idx: 3, message: seedTurns[0] }], key)).toEqual({
+      ok: false,
+      reason: "unknown-run",
+    });
+    // A reclaim re-owns the session of a row that names one.
+    await ledger.claim({
+      ...claimReq("r2", "slack:C1:1.0"),
+      meta: { ...claimReq("r2", "slack:C1:1.0").meta, session: { key, seedFrom: 3, request: 3, range: { from: 3 } } },
+    });
+    await ledger.claimSession(key, "r2", "g1");
+    await ledger.reclaim("g3", 100_000, LEASE_MS);
+    expect(ledger.sessions.get(key)?.owner).toEqual({ runId: "r2", gen: "g3" });
+    expect(await ledger.releaseSession(key, "r2", "g1")).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.releaseSession(key, "r2", "g3")).toEqual({ ok: true });
+  });
+
+  // docs/reference/specs/session-log.md item 5: the reference ledger enforces the
+  // byte policy the object enforces, so the two implementations agree.
+  it("session log byte policy: over the budget carried on the claim, the oldest tool results are replaced by the marker first and their sole attachments reclaimed; user and assistant text is never dropped", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const key = "slack:C1:1.0:coding";
+    const text = (role: "user" | "assistant", t: string): ChatMessage => ({
+      role,
+      content: [{ type: "text", text: t }],
+    });
+    const result = (callId: string, t: string): ChatMessage => ({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: callId, content: t }],
+    });
+    await ledger.claimSession(key, "r1", "g1", 2000);
+    await ledger.seed(
+      "r1",
+      "g1",
+      [
+        text("user", "please run the tests"),
+        text("assistant", "running"),
+        result("c1", "A".repeat(1200)),
+        text("assistant", "again"),
+        result("c2", "B".repeat(1200)),
+      ].map((message, idx) => ({ idx, message })),
+      key,
+    );
+    const { messages } = await ledger.readSession(key, 0);
+    expect(messages[0]).toEqual(text("user", "please run the tests"));
+    expect(messages[1]).toEqual(text("assistant", "running"));
+    expect(messages[2].content[0]).toMatchObject({ type: "tool_result", toolUseId: "c1" });
+    expect(String((messages[2].content[0] as { content: unknown }).content)).toMatch(/dropped/);
+    expect(messages[3]).toEqual(text("assistant", "again"));
+    expect(messages[4]).toEqual(result("c2", "B".repeat(1200)));
+    expect(ledger.sessionBytes(key)).toBeLessThanOrEqual(2000);
+
+    // Text alone over the budget: nothing more is dropped.
+    const textOnly = "slack:C1:2.0:coding";
+    await ledger.claimSession(textOnly, "r2", "g1", 200);
+    await ledger.seed(
+      "r2",
+      "g1",
+      [text("user", "u".repeat(300)), text("assistant", "a".repeat(300))].map((message, idx) => ({ idx, message })),
+      textOnly,
+    );
+    expect(
+      (await ledger.readSession(textOnly, 0)).messages.map((m) => (m.content[0] as { text: string }).text.length),
+    ).toEqual([300, 300]);
+
+    // An externalized image on a user turn is never a candidate: it and its attachment stay.
+    const withImage = "slack:C1:3.0:coding";
+    await ledger.claimSession(withImage, "r3", "g1", 2500);
+    const big = "A".repeat(ATTACHMENT_REF_BYTES + 1);
+    await ledger.seed(
+      "r3",
+      "g1",
+      [
+        text("user", "look"),
+        { role: "user", content: [{ type: "image", mediaType: "image/png", data: big }] } as ChatMessage,
+        text("assistant", "seen"),
+      ].map((message, idx) => ({ idx, message })),
+      withImage,
+    );
+    // The user's own image is never dropped, so the log rests over budget with the attachment kept.
+    expect(ledger.sessions.get(withImage)!.attachments.map((a) => a.ref)).toEqual(["t1p0"]);
+    expect((await ledger.readSession(withImage, 1, 1)).messages[0].content[0]).toMatchObject({
+      type: "image",
+      data: big,
+    });
+
+    // The budget defaults when the claim carries none.
+    await ledger.claimSession("slack:C1:4.0:coding", "r4", "g1");
+    expect(ledger.sessions.get("slack:C1:4.0:coding")!.maxBytes).toBe(DEFAULT_SESSION_LOG_MAX_BYTES);
   });
 });

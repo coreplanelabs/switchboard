@@ -19,13 +19,19 @@
 //   POST /runs/reclaim          {storeKey, gen, now, leaseMs}            → {runs: ReclaimedRun[]}
 //   POST /runs/live             {storeKey}                               → {runs: LiveRunRow[]}
 //   POST /runs/live-events      {storeKey, runId}                        → {events: AppendableEvent[]}
-//   POST /runs/transcript/owner {runId, gen}                             → {ok}
+//   POST /runs/transcript/owner {runId, gen}                             → {ok}        (rows claimed before the session log)
 //   POST /runs/transcript/write {runId, gen, rows, attachments}          → {ok} | 409 fenced
 //   POST /runs/transcript/read  {runId}                                  → {rows, attachments}
 //   POST /runs/transcript/clear {runId}                                  → {ok}
+//   POST /runs/session/tail        {key}                                 → {next}
+//   POST /runs/session/owner       {key, runId, gen, maxBytes}           → {ok}
+//   POST /runs/session/write       {key, gen, rows, attachments}         → {ok, bytes} | 409 fenced
+//   POST /runs/session/read        {key, from, to?}                      → {rows, attachments}
+//   POST /runs/session/read-tail   {key, maxBytes}                       → {rows, attachments, from}
+//   POST /runs/session/clear-owner {key, runId, gen}                     → {ok} | 409 fenced
 
-import { RUN_ID_PATTERN, type RunRecord } from "./runRecord.js";
-import type { RunHistoryConfig } from "./runStore.js";
+import { RUN_ID_PATTERN, SESSION_KEY_PATTERN, type RunRecord } from "./runRecord.js";
+import { retentionPolicyOf, type RunHistoryConfig } from "./runStore.js";
 import {
   DEFAULT_RUN_STORE_TOKEN_ENV,
   PermanentStoreError,
@@ -35,6 +41,7 @@ import {
   TransientStoreError,
 } from "./runStoreWorker.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./runLedger/ledger.js";
+import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
 import { assembleTranscript, chunkRows, turnRows, type AssembledTranscript } from "./runLedger/transcript.js";
 import {
   GEN_PATTERN,
@@ -60,6 +67,8 @@ export interface WorkerRunLedgerOptions {
   token: string;
   /** The history store this ledger's live rows belong to (`runs:default`). */
   storeKey: string;
+  /** The session log byte budget every owner claim carries (`RetentionPolicy.sessionLogMaxBytes`). */
+  sessionLogMaxBytes?: number;
   fetch?: typeof fetch;
 }
 
@@ -81,6 +90,9 @@ export function buildRunLedger(
     baseUrl: worker.baseUrl,
     token: token.reveal(),
     storeKey: RUN_STORE_KEY,
+    // The same clamped policy the run store proposes, so the session logs and
+    // the run records are bounded by one configuration.
+    sessionLogMaxBytes: retentionPolicyOf(cfg).sessionLogMaxBytes,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
   });
 }
@@ -157,50 +169,121 @@ export class WorkerRunLedger implements RunLedger {
         },
       };
     }
-    // The transcript object learns its owner at claim. Two requests, not one
-    // transaction: a failure here leaves a claimed run whose transcript answers
-    // `unknown-run` until the caller retries the whole claim (idempotent for
-    // the owner) or a reclaim resets the owner. Callers never proceed past a
-    // claim that threw.
-    await this.post("/runs/transcript/owner", { runId: req.runId, gen: req.gen });
+    // The run's rows go to its session log, owned by `claimSession` once the
+    // caller knows the log's tail; a run's own transcript object is never
+    // owned any more (rows claimed before the log existed keep theirs).
     return { ok: true };
   }
 
-  private async writeTurns(runId: string, gen: string, turns: TranscriptTurn[]): Promise<FenceResult> {
+  /** The write route and its body for a run's rows: the session log when the
+   *  run has one, the run's own transcript object otherwise. */
+  private target(runId: string, gen: string, session: string | undefined) {
+    if (session === undefined) return { path: "/runs/transcript/write", body: { runId, gen } };
+    this.checkSessionKey(session);
+    return { path: "/runs/session/write", body: { key: session, gen } };
+  }
+
+  private async writeTurns(
+    runId: string,
+    gen: string,
+    turns: TranscriptTurn[],
+    session?: string,
+  ): Promise<FenceResult> {
     const rows: TranscriptRow[] = [];
     const attachments: TranscriptAttachment[] = [];
     for (const t of turns) {
-      const out = turnRows(t.idx, t.message);
+      const out = turnRows(t.idx, "message" in t ? t.message : { compaction: t.compaction });
       rows.push(...out.rows);
       attachments.push(...out.attachments);
     }
+    const { path, body } = this.target(runId, gen, session);
     // Attachments travel one per request (each is under the fence by the ref
     // threshold); rows are chunked under the fence.
     for (const a of attachments) {
-      const r = await this.post("/runs/transcript/write", { runId, gen, rows: [], attachments: [a] });
+      const r = await this.post(path, { ...body, rows: [], attachments: [a] });
       const f = this.fenceResult(r);
       if (!f.ok) return f;
     }
     const chunks = chunkRows(rows, TRANSCRIPT_REQUEST_BYTES - 4_096);
     for (const chunk of chunks.length ? chunks : [[]]) {
       if (chunk.length === 0 && attachments.length > 0) continue;
-      const r = await this.post("/runs/transcript/write", { runId, gen, rows: chunk, attachments: [] });
+      const r = await this.post(path, { ...body, rows: chunk, attachments: [] });
       const f = this.fenceResult(r);
       if (!f.ok) return f;
     }
     return { ok: true };
   }
 
-  async seed(runId: string, gen: string, turns: TranscriptTurn[]): Promise<FenceResult> {
+  async seed(runId: string, gen: string, turns: TranscriptTurn[], session?: string): Promise<FenceResult> {
     this.checkIds(runId, gen);
-    return this.writeTurns(runId, gen, turns);
+    return this.writeTurns(runId, gen, turns, session);
   }
 
-  async step(runId: string, gen: string, record: StepRecord, turns: TranscriptTurn[]): Promise<FenceResult> {
+  async step(
+    runId: string,
+    gen: string,
+    record: StepRecord,
+    turns: TranscriptTurn[],
+    session?: string,
+  ): Promise<FenceResult> {
     this.checkIds(runId, gen);
-    const written = await this.writeTurns(runId, gen, turns);
+    const written = await this.writeTurns(runId, gen, turns, session);
     if (!written.ok) return written;
     return this.fenceResult(await this.post("/runs/step", { storeKey: this.opts.storeKey, runId, gen, record }));
+  }
+
+  private checkSessionKey(key: string): void {
+    if (!SESSION_KEY_PATTERN.test(key))
+      throw new PermanentStoreError(`run ledger: malformed session key ${JSON.stringify(key)}`);
+  }
+
+  async sessionTail(key: string): Promise<number> {
+    this.checkSessionKey(key);
+    const r = await this.post("/runs/session/tail", { key });
+    return typeof r.data.next === "number" ? r.data.next : 0;
+  }
+
+  async claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void> {
+    this.checkSessionKey(key);
+    this.checkIds(runId, gen);
+    // Every claim carries the budget, so the object never keeps a stale one
+    // from an earlier configuration.
+    await this.post("/runs/session/owner", {
+      key,
+      runId,
+      gen,
+      maxBytes: maxBytes ?? this.opts.sessionLogMaxBytes ?? DEFAULT_SESSION_LOG_MAX_BYTES,
+    });
+  }
+
+  async releaseSession(key: string, runId: string, gen: string): Promise<FenceResult> {
+    this.checkSessionKey(key);
+    this.checkIds(runId, gen);
+    return this.fenceResult(await this.post("/runs/session/clear-owner", { key, runId, gen }));
+  }
+
+  async readSession(key: string, from: number, to?: number): Promise<AssembledTranscript> {
+    this.checkSessionKey(key);
+    const r = await this.post("/runs/session/read", { key, from, ...(to !== undefined ? { to } : {}) });
+    return assembleTranscript(
+      Array.isArray(r.data.rows) ? (r.data.rows as TranscriptRow[]) : [],
+      Array.isArray(r.data.attachments) ? (r.data.attachments as TranscriptAttachment[]) : [],
+      from,
+    );
+  }
+
+  async readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }> {
+    this.checkSessionKey(key);
+    const r = await this.post("/runs/session/read-tail", { key, maxBytes });
+    const from = typeof r.data.from === "number" ? r.data.from : 0;
+    return {
+      from,
+      transcript: assembleTranscript(
+        Array.isArray(r.data.rows) ? (r.data.rows as TranscriptRow[]) : [],
+        Array.isArray(r.data.attachments) ? (r.data.attachments as TranscriptAttachment[]) : [],
+        from,
+      ),
+    };
   }
 
   async heartbeat(runId: string, gen: string, leaseMs: number): Promise<HeartbeatResult> {
@@ -262,25 +345,31 @@ export class WorkerRunLedger implements RunLedger {
     const r = await this.post("/runs/finish", { storeKey: this.opts.storeKey, runId, gen, record });
     const f = this.fenceResult(r);
     if (!f.ok) return f;
-    // Best-effort: an orphaned transcript is harmless and swept.
-    await this.post("/runs/transcript/clear", { runId }).catch(() => {});
+    // The session log is kept whole for the thread's next run; only the owner
+    // is released, best-effort — a stale owner is replaced by the next claim,
+    // and a run's own transcript object, when it has one, is swept with it.
+    if (record.session)
+      await this.post("/runs/session/clear-owner", { key: record.session.key, runId, gen }).catch(() => {});
     return { ok: true, stored: r.data.stored === true };
   }
 
   async abandon(runId: string, gen: string): Promise<FenceResult> {
     this.checkIds(runId, gen);
-    const f = this.fenceResult(await this.post("/runs/abandon", { storeKey: this.opts.storeKey, runId, gen }));
-    if (!f.ok) return f;
-    // Best-effort, as after a finish: an orphaned transcript is harmless and swept.
-    await this.post("/runs/transcript/clear", { runId }).catch(() => {});
-    return f;
+    // An abandoned run never had a prompt, so it owns no session log and wrote no row.
+    return this.fenceResult(await this.post("/runs/abandon", { storeKey: this.opts.storeKey, runId, gen }));
   }
 
   async reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]> {
     const r = await this.post("/runs/reclaim", { storeKey: this.opts.storeKey, gen, now, leaseMs });
     const runs = Array.isArray(r.data.runs) ? (r.data.runs as ReclaimedRun[]) : [];
-    // The transcript objects change hands before the caller may resume anything.
-    for (const run of runs) await this.post("/runs/transcript/owner", { runId: run.row.runId, gen });
+    // The rows' logs change hands before the caller may resume anything: a
+    // row's session log, or — for one claimed before the log existed — its own
+    // transcript object.
+    for (const run of runs) {
+      const session = run.row.meta?.session;
+      if (session) await this.claimSession(session.key, run.row.runId, gen);
+      else await this.post("/runs/transcript/owner", { runId: run.row.runId, gen });
+    }
     return runs;
   }
 

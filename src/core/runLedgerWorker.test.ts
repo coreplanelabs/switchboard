@@ -47,13 +47,12 @@ const claimReq: ClaimRequest = {
 };
 
 describe("WorkerRunLedger", () => {
-  it("claim posts the run under the store key with the bearer, then sets the transcript owner; a 409 thread-live is a result", async () => {
+  it("claim posts the run under the store key with the bearer and nothing else — a run's transcript object is never owned; a 409 thread-live is a result", async () => {
     const w = stubWorker();
     expect(await w.ledger.claim(claimReq)).toEqual({ ok: true });
-    expect(w.calls.map((c) => c.path)).toEqual(["/runs/claim", "/runs/transcript/owner"]);
+    expect(w.calls.map((c) => c.path)).toEqual(["/runs/claim"]);
     expect(w.calls[0].auth).toBe("Bearer tok");
     expect(w.calls[0].body).toEqual({ storeKey: "runs:default", run: claimReq });
-    expect(w.calls[1].body).toEqual({ runId: "r1", gen: "g1" });
 
     const busy = stubWorker(() => ({
       status: 409,
@@ -115,28 +114,96 @@ describe("WorkerRunLedger", () => {
     expect(await unknown.ledger.heartbeat("r1", "g1", LEASE_MS)).toEqual({ ok: false, reason: "unknown-run" });
   });
 
-  it("append with no events posts nothing; finish clears the transcript best-effort; reclaim re-owns each transcript before returning", async () => {
+  it("append with no events posts nothing; finish clears nothing and releases the session's owner best-effort when the record names one; reclaim re-owns a session log for a row with a session and the transcript object for one without", async () => {
+    const session = { key: "slack:C1:1.0:review", seedFrom: 0, request: 0, range: { from: 0 } };
     const w = stubWorker((path) =>
       path === "/runs/reclaim"
-        ? { status: 200, data: { runs: [{ row: { runId: "a" } }, { row: { runId: "b" } }] } }
+        ? {
+            status: 200,
+            data: { runs: [{ row: { runId: "a", meta: { session } } }, { row: { runId: "b", meta: {} } }] },
+          }
         : path === "/runs/finish"
           ? { status: 200, data: { ok: true, stored: true } }
-          : path === "/runs/transcript/clear"
+          : path === "/runs/session/clear-owner"
             ? { status: 500 }
             : { status: 200, data: { ok: true } },
     );
     expect(await w.ledger.append("r1", "g1", [])).toEqual({ ok: true });
     expect(w.calls).toHaveLength(0);
-    const record = { id: "r1" } as never;
-    expect(await w.ledger.finish("r1", "g1", record)).toEqual({ ok: true, stored: true });
-    expect(w.calls.map((c) => c.path)).toEqual(["/runs/finish", "/runs/transcript/clear"]);
+    const plain = { id: "r1" } as never;
+    expect(await w.ledger.finish("r1", "g1", plain)).toEqual({ ok: true, stored: true });
+    expect(w.calls.map((c) => c.path)).toEqual(["/runs/finish"]);
+    const withSession = { id: "r1", session: { ...session, range: { from: 0, to: 4 } } } as never;
+    expect(await w.ledger.finish("r1", "g1", withSession)).toEqual({ ok: true, stored: true });
+    expect(w.calls.slice(1).map((c) => [c.path, c.body.key ?? c.body.runId])).toEqual([
+      ["/runs/finish", "r1"],
+      ["/runs/session/clear-owner", "slack:C1:1.0:review"],
+    ]);
+    expect(w.calls[2].body).toEqual({ key: "slack:C1:1.0:review", runId: "r1", gen: "g1" });
     const taken = await w.ledger.reclaim("g2", 10, LEASE_MS);
     expect(taken.map((r) => r.row.runId)).toEqual(["a", "b"]);
-    expect(w.calls.slice(2).map((c) => [c.path, c.body.runId])).toEqual([
+    expect(w.calls.slice(3).map((c) => [c.path, c.body.key ?? c.body.runId])).toEqual([
       ["/runs/reclaim", undefined],
-      ["/runs/transcript/owner", "a"],
+      ["/runs/session/owner", "slack:C1:1.0:review"],
       ["/runs/transcript/owner", "b"],
     ]);
+    expect(w.calls[4].body).toMatchObject({ key: "slack:C1:1.0:review", runId: "a", gen: "g2" });
+  });
+
+  it("the session routes: tail, owner with the configured byte budget, seed and step writes into the log at their indices, a range read re-based to the range, the tail read, release", async () => {
+    const rows = [
+      { idx: 3, part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "go" } }) },
+      { idx: 4, part: 0, json: JSON.stringify({ role: "assistant", part: { type: "text", text: "ok" } }) },
+    ];
+    const w = stubWorker((path) =>
+      path === "/runs/session/tail"
+        ? { status: 200, data: { next: 3 } }
+        : path === "/runs/session/read"
+          ? { status: 200, data: { rows, attachments: [] } }
+          : path === "/runs/session/read-tail"
+            ? { status: 200, data: { rows, attachments: [], from: 3 } }
+            : path === "/runs/session/write"
+              ? { status: 200, data: { ok: true, bytes: 120 } }
+              : { status: 200, data: { ok: true } },
+    );
+    const key = "slack:C1:1.0:review";
+    expect(await w.ledger.sessionTail(key)).toBe(3);
+    expect(w.calls[0]).toMatchObject({ path: "/runs/session/tail", body: { key } });
+    await w.ledger.claimSession(key, "r1", "g1");
+    expect(w.calls[1]).toMatchObject({
+      path: "/runs/session/owner",
+      body: { key, runId: "r1", gen: "g1", maxBytes: 200 * 1024 * 1024 },
+    });
+    const go: ChatMessage = { role: "user", content: [{ type: "text", text: "go" }] };
+    expect(await w.ledger.seed("r1", "g1", [{ idx: 3, message: go }], key)).toEqual({ ok: true });
+    expect(w.calls[2]).toMatchObject({ path: "/runs/session/write", body: { key, gen: "g1", rows: [rows[0]] } });
+    expect(
+      await w.ledger.step(
+        "r1",
+        "g1",
+        { step: 1, seq: 0, turnIndex: 2, inFlight: [], inboxConsumedSeq: 0, remainingMs: 1, turn: 1, iteration: 0 },
+        [{ idx: 4, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } }],
+        key,
+      ),
+    ).toEqual({ ok: true });
+    expect(w.calls.slice(3).map((c) => c.path)).toEqual(["/runs/session/write", "/runs/step"]);
+    const read = await w.ledger.readSession(key, 3, 4);
+    expect(w.calls[5]).toMatchObject({ path: "/runs/session/read", body: { key, from: 3, to: 4 } });
+    expect(read).toEqual({
+      complete: true,
+      turns: 2,
+      messages: [go, { role: "assistant", content: [{ type: "text", text: "ok" }] }],
+      compactions: [],
+    });
+    const tail = await w.ledger.readSessionTail(key, 240_000);
+    expect(w.calls[6]).toMatchObject({ path: "/runs/session/read-tail", body: { key, maxBytes: 240_000 } });
+    expect(tail.from).toBe(3);
+    expect(tail.transcript.messages).toHaveLength(2);
+    expect(await w.ledger.releaseSession(key, "r1", "g1")).toEqual({ ok: true });
+    expect(w.calls[7]).toMatchObject({ path: "/runs/session/clear-owner", body: { key, runId: "r1", gen: "g1" } });
+    // Without a session the seed still goes to the run's own transcript object (an adopted older row).
+    await w.ledger.seed("r1", "g1", [{ idx: 0, message: go }]);
+    expect(w.calls[8].path).toBe("/runs/transcript/write");
   });
 
   it("errors: 404 is RouteMissingError, 5xx/429 TransientStoreError, other 4xx PermanentStoreError, a malformed run id never leaves the process", async () => {
@@ -169,6 +236,7 @@ describe("WorkerRunLedger", () => {
       complete: true,
       turns: 1,
       messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      compactions: [],
     });
   });
 });
@@ -200,5 +268,27 @@ describe("buildRunLedger — the client for the configured history (run-history 
     );
     await byName!.listLive();
     expect(calls.at(-1)).toEqual({ url: "https://memory.example.com/runs/live", auth: "Bearer tok-b" });
+  });
+
+  it("carries the configured session log byte budget onto every session owner claim, clamped like the rest of the policy", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    const configured = buildRunLedger(
+      { worker, sessionLogMaxBytes: 64 * 1024 * 1024 },
+      secretsFrom({ MEMORY_TOKEN: "t" }),
+      {
+        fetch: fetchImpl,
+      },
+    );
+    await configured!.claimSession("slack:C1:1.0:review", "r1", "g1");
+    expect(bodies.at(-1)).toEqual({ key: "slack:C1:1.0:review", runId: "r1", gen: "g1", maxBytes: 64 * 1024 * 1024 });
+    const clamped = buildRunLedger({ worker, sessionLogMaxBytes: 1 }, secretsFrom({ MEMORY_TOKEN: "t" }), {
+      fetch: fetchImpl,
+    });
+    await clamped!.claimSession("slack:C1:1.0:review", "r1", "g1");
+    expect(bodies.at(-1)).toMatchObject({ maxBytes: 16 * 1024 * 1024 });
   });
 });

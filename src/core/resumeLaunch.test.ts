@@ -60,7 +60,7 @@ const resumable = (over: Partial<ResumeRun> = {}): ResumeRun => ({
   row: row(),
   reclaimedFrom: "live",
   lastStep: step(),
-  transcript: { complete: true, turns: 2, messages: [user("go"), calling("c1", "read_file")] },
+  transcript: { complete: true, turns: 2, messages: [user("go"), calling("c1", "read_file")], compactions: [] },
   events: [
     { type: "input", text: "please review", at: 1, seq: 1 },
     { type: "tool_call", tool: "read_file", summary: "x", at: 2, seq: 2 },
@@ -151,7 +151,12 @@ describe("launchResumes", () => {
 
   it("closes instead of dispatching when the plan says interrupted, the agent is unknown, or the channel cannot be resumed on — each with its reason", async () => {
     const partial = resumable({
-      transcript: { complete: true, turns: 3, messages: [user("go"), calling("c1", "read_file"), user("odd")] },
+      transcript: {
+        complete: true,
+        turns: 3,
+        messages: [user("go"), calling("c1", "read_file"), user("odd")],
+        compactions: [],
+      },
     });
     const a = harness();
     expect(await a.run([partial])).toEqual({
