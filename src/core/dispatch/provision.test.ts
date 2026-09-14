@@ -34,12 +34,14 @@ import {
   attachWorkspace,
   budgetClipLabel,
   composePrompt,
+  mintRunBearer,
   openAckCard,
   registerRun,
   reserveRun,
   startMemoryRead,
   type ProvisionDeps,
 } from "./provision.js";
+import { BEARER_MARGIN_MS, RunBearerStore } from "../modelProxy/runBearers.js";
 
 // The attach itself is the executor factory's (src/execution/factory.ts); the
 // one refusal the stage decides — ask-once, when the resident has no ref
@@ -608,5 +610,62 @@ describe("composePrompt — the system prompt for the first turn", () => {
     });
     expect(out.system).toBe("the prompt the run started with");
     expect(out.reviewHead).toBeUndefined();
+  });
+});
+
+// Feature: docs/reference/specs/model-proxy.md — the run's bearer, minted as its executor is provisioned.
+describe("mintRunBearer — the run's model-proxy bearer", () => {
+  it("mints a bearer bound to the run, pinned to the resolved provider and model and the preset's caps, expiring at the profile's minutes plus the margin, whose turns hang under the request root and whose refusals land on the run's stream", () => {
+    const d = deps();
+    const store = new RunBearerStore({ clock: () => NOW });
+    d.runBearers = store;
+    const { resolved, agent, profile, root } = request(d, "hello there", "coding");
+    const registry = new RunRegistry();
+    const run = registry.create("label", {
+      agent: "coding",
+      model: resolved.modelRef,
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: THREAD,
+      channelVisibility: "unknown",
+    });
+    const token = mintRunBearer(d, {
+      runId: run.id,
+      agent,
+      profile: { ...profile, minutes: 30 },
+      resolved,
+      registry,
+      root,
+      clock: () => NOW,
+    });
+    expect(token?.startsWith(`sbr_${run.id}.`)).toBe(true);
+    const verdict = store.verify(token!);
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) throw new Error("expected ok");
+    expect(verdict.grant).toMatchObject({
+      runId: run.id,
+      modelRef: "anthropic/coding-model",
+      providerName: "anthropic",
+      providerType: "anthropic",
+      model: "coding-model",
+      maxTokens: agent.maxTokens,
+      maxTurns: agent.maxTurns,
+      expiresAt: NOW + 30 * 60_000 + BEARER_MARGIN_MS,
+    });
+    expect(verdict.grant.span).toBe(root);
+    verdict.grant.publish({ type: "run_note", kind: "turn_budget_exhausted", summary: "refused", at: NOW });
+    expect(registry.snapshot(run.id, run.token)?.events.map((e) => e.type)).toEqual(["run_note"]);
+  });
+
+  it("mints nothing without a store, and nothing for a provider the config does not name", () => {
+    const d = deps();
+    const { resolved, agent, profile, root } = request(d, "hello there");
+    const registry = new RunRegistry();
+    const ctx = { runId: "run-1", agent, profile, resolved, registry, root, clock: () => NOW };
+    expect(mintRunBearer(d, ctx)).toBeUndefined();
+    const store = new RunBearerStore({ clock: () => NOW });
+    d.runBearers = store;
+    expect(mintRunBearer(d, { ...ctx, resolved: { ...resolved, modelRef: "vanished/model" } })).toBeUndefined();
+    expect(store.size()).toBe(0);
   });
 });

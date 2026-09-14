@@ -20,6 +20,8 @@ import type { ResidentStep } from "../../execution/residentStepTrace.js";
 import { graftResidentSteps, residentTraceOf } from "../../execution/residentTrace.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { memoryContextBlock, type MemoryStore } from "../memory/index.js";
+import { BEARER_MARGIN_MS, type RunBearerStore } from "../modelProxy/runBearers.js";
+import { parseModelRef } from "../../providers/types.js";
 import { skillGuidanceBlock, type SkillStore } from "../../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource, type McpToolsForRun } from "../../mcp/source.js";
 import { configAwarenessBlock } from "../configAwareness.js";
@@ -101,6 +103,13 @@ export interface ProvisionDeps
   /** Floor between two status-card edits (default `STATUS_UPDATE_MIN_MS`).
    *  Tests that assert on an individual intermediate frame set 0. */
   statusUpdateMinMs?: number;
+  /**
+   * The run-scoped bearers the model proxy honours (docs/reference/specs/model-proxy.md):
+   * one is minted here the moment a run's executor is provisioned, and the
+   * dispatch revokes it when the run ends. Absent (the CLI, tests) → no bearer
+   * is minted and the run is byte-identical to before the proxy existed.
+   */
+  runBearers?: RunBearerStore;
 }
 
 /**
@@ -629,6 +638,49 @@ export async function attachWorkspace(
     throw err;
   }
   return { kind: "attached", round };
+}
+
+/** What `mintRunBearer` reads off the dispatch. */
+export interface MintBearerContext {
+  runId: string;
+  agent: AgentDef;
+  /** The run's effective profile: its minutes are the bearer's life, plus the margin. */
+  profile: RunProfile;
+  resolved: ResolvedRequest;
+  registry: RunRegistry;
+  /** The request root: the span the proxied `model.turn` spans hang under. */
+  root: Span;
+  clock: Clock;
+}
+
+/**
+ * The run's model-proxy bearer (docs/reference/specs/model-proxy.md), minted the
+ * moment its executor is provisioned: bound to the run id, pinned to the
+ * preset's model and caps, expiring at the run's budget plus `BEARER_MARGIN_MS`,
+ * its turns hung under the request root and its refusals published on the
+ * run's stream. The token is returned to the caller alone — never logged, never
+ * on the record. Nothing is minted without a store (the CLI, tests) or for a
+ * provider the config does not name (the resolve stage refused that earlier).
+ */
+export function mintRunBearer(deps: ProvisionDeps, ctx: MintBearerContext): string | undefined {
+  const store = deps.runBearers;
+  if (!store) return undefined;
+  const { runId, agent, profile, resolved, registry, root, clock } = ctx;
+  const { provider: providerName, model } = parseModelRef(resolved.modelRef);
+  const providerCfg = deps.config.config.providers[providerName];
+  if (!providerCfg) return undefined;
+  return store.mint({
+    runId,
+    modelRef: resolved.modelRef,
+    providerName,
+    providerType: providerCfg.type,
+    model,
+    maxTokens: agent.maxTokens,
+    maxTurns: agent.maxTurns,
+    expiresAt: clock() + profile.minutes * 60_000 + BEARER_MARGIN_MS,
+    span: root,
+    publish: (event) => registry.publish(runId, event),
+  });
 }
 
 /** The prompt as composed for the first turn: the MCP tools discovered for this
