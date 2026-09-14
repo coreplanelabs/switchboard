@@ -7,7 +7,7 @@
 //   npm run load -- cards    -- --cards 50 --hold 600 --channels 5
 //   npm run load -- provider --port 8089 --profile coding --cpu-seconds 60
 //   npm run load -- pi --checkout ../repo --task all --provider anthropic --model <id> --key-env ANTHROPIC_API_KEY
-//   npm run load -- route --since <date> --limit 200 --provider anthropic --model <id>
+//   npm run load -- route --since <date> --limit 200 --provider anthropic --model <id>   (singles + the compound set)
 //
 // Every command writes `load-results/<command>-<runId>.json` (the samples and
 // the summary) and `.md` (the receipt) and exits non-zero when a configured
@@ -43,8 +43,28 @@ import { drivePiTask, realTimers, redactPiRun, type PiTaskRun } from "../src/loa
 import { previewToolCall } from "../src/load/piPolicyPreview.js";
 import { PI_TASK_NAMES, PI_TASKS, piTaskByName, taskBranch, taskPrompt } from "../src/load/piTasks.js";
 import { PI_CODING_TOOLS, checkoutBranch, piKeyEnvFor, spawnPi, writeAgentDir } from "../src/load/piProcess.js";
-import { confusionTable, labelledRequests, renderConfusion, replayRoutes } from "../src/load/routeReplay.js";
-import { providerRouteModel, routablePresets, route, ROUTE_TIMEOUT_MS } from "../src/core/dispatch/route.js";
+import {
+  compoundExamples,
+  compoundScore,
+  confusionTable,
+  historyCompounds,
+  labelledRequests,
+  readToWriteRoutes,
+  renderCompound,
+  renderConfusion,
+  replayCompound,
+  replayRoutes,
+  routeChecks,
+} from "../src/load/routeReplay.js";
+import { ROUTE_COMPOUND_FIXTURES } from "../src/load/routeCompoundFixtures.js";
+import {
+  COMPOUND_PRESET,
+  providerRouteModel,
+  routablePresets,
+  route,
+  ROUTE_TIMEOUT_MS,
+} from "../src/core/dispatch/route.js";
+import { DEFAULT_MAX_CHILDREN } from "../src/core/dispatch/spawn.js";
 import { WorkerRunStore } from "../src/core/runStoreWorker.js";
 import { ProviderRegistry } from "../src/providers/registry.js";
 import { parsePrDescription } from "../src/core/prDescription.js";
@@ -79,13 +99,16 @@ commands
              the model key is read from the environment variable --key-env names (default: the variable pi reads
              for --provider, e.g. ANTHROPIC_API_KEY); never from a file, never printed
              --print-prompt --task <name>: print the task's prompt and exit (for the same task on today's coding agent)
-  route      the request router replayed against finished runs whose requester typed the preset (the label)
+  route      the request router replayed against finished runs whose requester typed the preset (the label), and its
+             compound form scored on the checked-in set (src/load/routeCompoundFixtures.ts) and the history's conductor runs
              --provider NAME  --model ID  [--key-env VAR  --base-url URL  --since DATE  --limit N  --default-agent NAME
-             --concurrency N]
+             --concurrency N  --max-parts N (the compound cap, default spawn.maxChildren's 3)]
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env); the model key as for pi
 `;
 
 type Flags = Record<string, string | boolean | undefined>;
+
+const pct = (n: number) => (Number.isFinite(n) ? `${Math.round(n * 1000) / 10}%` : "—");
 
 function flags(argv: string[]): Flags {
   const { values } = parseArgs({
@@ -129,6 +152,7 @@ function flags(argv: string[]): Flags {
       limit: { type: "string" },
       "default-agent": { type: "string" },
       concurrency: { type: "string" },
+      "max-parts": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -679,10 +703,17 @@ async function pi(f: Flags): Promise<boolean> {
  *  read newest-first from the run store; a run whose requester chose its
  *  preset (`labelledRequests`) is one labelled example, the directive hidden
  *  from its text; the router — the dispatcher's own `route` over the same
- *  `RouteModel` seam, bound to the provider `--provider`/`--model` name — is
- *  asked what it would have picked; the receipt is the per-preset confusion
- *  table, the accuracy against record 0026's bar, and the misroutes. Live
- *  model spend: one small call per request, the key from the environment. */
+ *  `RouteModel` seam, bound to the provider `--provider`/`--model` name, the
+ *  compound form offered as production offers it — is asked what it would
+ *  have picked; the receipt is the per-preset confusion table over the stamped
+ *  labels, the accuracy against record 0026's bar, its read-only-to-write
+ *  clause as a row of its own, the misroutes, and the unstamped labels (a
+ *  pre-stamp record cannot tell a typed preset from a scope's) replayed and
+ *  reported apart. Then the compound half: the
+ *  checked-in set (twenty compounds, five decoys) scored on detection, on
+ *  decoys kept single and on part presets against the unit's bar, and the
+ *  history's `conductor` requests — few — on detection, their count printed.
+ *  Live model spend: one small call per request, the key from the environment. */
 async function routeReplay(f: Flags): Promise<boolean> {
   const id = runId();
   const startedAt = new Date(systemClock()).toISOString();
@@ -716,6 +747,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
   const limit = num(f, "limit", 200);
   const defaultPreset = str(f, "default-agent", "general");
   const concurrency = num(f, "concurrency", 4);
+  const maxParts = num(f, "max-parts", DEFAULT_MAX_CHILDREN);
 
   // Newest first, one record at a time, until `limit` labelled requests or
   // the store runs out: a record is a few KB, and most rows are labelled.
@@ -736,72 +768,121 @@ async function routeReplay(f: Flags): Promise<boolean> {
     for (const [reason, n] of Object.entries(labelled.skipped)) if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n;
     requests.push(...labelled.requests);
   }
+  // The singles: every labelled request but a `conductor` one — those are the
+  // history's compound examples below, since the conductor is never a single
+  // route. The stamped labels (directive, sticky) make the table and the bar;
+  // an unstamped one — a pre-stamp record, whose preset may be a scope's —
+  // is replayed and reported apart, so it never inflates the accuracy.
+  const singles = requests.filter((r) => r.label !== COMPOUND_PRESET);
+  const stamped = singles.filter((r) => r.labelSource !== "unstamped");
+  const unstamped = singles.filter((r) => r.labelSource === "unstamped");
+  const fromHistory = historyCompounds(requests);
   process.stdout.write(
-    `route: ${requests.length} labelled request(s) from ${scanned} record(s) scanned; model ${modelRef}\n`,
+    `route: ${stamped.length} stamped + ${unstamped.length} unstamped labelled request(s) and ${fromHistory.length} conductor request(s) from ${scanned} record(s) scanned; model ${modelRef}\n`,
   );
 
+  // One decision function for both halves: the production prompt, the compound
+  // form offered under the cap — so a single that the router splits is a
+  // misroute in the table, and a decoy split is counted where it belongs.
   const presets = routablePresets();
   const allowed = presets.map((p) => p.name);
-  const results = await replayRoutes(
-    requests,
-    (text) =>
-      route({ text, recentDirectives: {}, presets, allowed, fallback: defaultPreset }, model, {
-        timeoutMs: ROUTE_TIMEOUT_MS,
-      }),
-    { concurrency, now: systemClock },
-  );
+  const decide = (text: string) =>
+    route({ text, recentDirectives: {}, presets, allowed, fallback: defaultPreset, compound: { maxParts } }, model, {
+      timeoutMs: ROUTE_TIMEOUT_MS,
+    });
+  const results = await replayRoutes(stamped, decide, { concurrency, now: systemClock });
   const table = confusionTable(results, allowed);
-  const samples: Sample[] = results.map((r) => ({
-    op: "route",
-    startedAt: systemClock(),
-    ms: r.ms,
-    ok: r.routed !== undefined,
-    status: r.routed ?? "none",
-    ...(r.routed === undefined ? { reason: "no-route" } : {}),
-  }));
+  const unstampedResults = await replayRoutes(unstamped, decide, { concurrency, now: systemClock });
+  const unstampedAgreed = unstampedResults.filter((r) => r.correct).length;
+  const fixtureResults = await replayCompound(compoundExamples(ROUTE_COMPOUND_FIXTURES), decide, {
+    concurrency,
+    now: systemClock,
+  });
+  const fixtures = compoundScore(fixtureResults);
+  const historyResults = await replayCompound(fromHistory, decide, { concurrency, now: systemClock });
+  const history = compoundScore(historyResults);
+  const samples: Sample[] = [
+    ...[...results, ...unstampedResults].map((r): Sample => ({
+      op: "route",
+      startedAt: systemClock(),
+      ms: r.ms,
+      ok: r.routed !== undefined,
+      status: r.routed ?? "none",
+      ...(r.routed === undefined ? { reason: "no-route" } : {}),
+    })),
+    ...[...fixtureResults, ...historyResults].map((r): Sample => ({
+      op: "route-compound",
+      startedAt: systemClock(),
+      ms: r.ms,
+      ok: r.routed !== undefined,
+      status: r.detected ? "compound" : (r.routed ?? "none"),
+      ...(r.routed === undefined ? { reason: "no-route" } : {}),
+    })),
+  ];
   const summary = summarize(samples);
   const answered = results.filter((r) => r.routed !== undefined).length;
-  const checks: SloCheck[] = [
-    {
-      name: "routing accuracy ≥ 95% against the presets people typed (record 0026's bar)",
-      pass: table.accuracy >= 0.95,
-      actual: Number.isFinite(table.accuracy) ? `${Math.round(table.accuracy * 1000) / 10}%` : "no labelled requests",
-      limit: "≥ 95%",
-    },
-    {
-      name: "every request answered with a preset",
-      pass: results.length > 0 && answered === results.length,
-      actual: `${answered}/${results.length}`,
-      limit: `${results.length}`,
-    },
-  ];
+  const readToWrite = readToWriteRoutes(results);
+  const checks: SloCheck[] = routeChecks({
+    table,
+    answered,
+    readToWrite: readToWrite.length,
+    compound: fixtures,
+    compoundBar: { detection: 0.9 },
+  });
   const bySource: Record<string, number> = {};
   for (const r of requests) bySource[r.labelSource] = (bySource[r.labelSource] ?? 0) + 1;
   const notes = [
     ...renderConfusion(table),
     "",
+    readToWrite.length === 0
+      ? "read-only labels routed to a write preset: none"
+      : `read-only labels routed to a write preset (${readToWrite.length}): ${readToWrite.map((r) => `${r.id} (${r.label} → ${r.routed})`).join(", ")}`,
+    "",
+    unstamped.length === 0
+      ? `unstamped labels: none (every labelled record carries run_meta.agentSource)`
+      : `unstamped labels (a record from before the agentSource stamp, on a preset other than ${defaultPreset} — typed, sticky or a channel/user scope's agent; the record cannot say): ${unstamped.length}, router agreed ${unstampedAgreed} (${pct(unstampedAgreed / unstamped.length)}) — excluded from the table and the bar`,
+    "",
+    `checked-in compound set (${fixtures.compounds} compounds, ${fixtures.decoys} decoys; cap ${maxParts} parts):`,
+    ...renderCompound(fixtures),
+    "",
+    history.compounds === 0
+      ? "history: no conductor request in the window — the checked-in set is the whole compound score"
+      : `history: ${history.compounds} conductor request(s), ${history.detected} detected as compound (parts unknown on the record, so detection alone)`,
+    ...(history.compounds === 0 ? [] : renderCompound(history).slice(2)),
+    "",
     `labels: ${Object.entries(bySource)
       .map(([k, v]) => `${k}=${v}`)
       .join(
         " ",
-      )} (directive/sticky: the record's run_meta.agentSource; heuristic: a record from before the stamp, on a preset other than ${defaultPreset})`,
+      )} (directive/sticky: the record's run_meta.agentSource — the table and the bar; unstamped: a record from before the stamp — reported above, apart)`,
     `records skipped: ${
       Object.entries(skipped)
         .map(([k, v]) => `${k}=${v}`)
         .join(" ") || "none"
     }`,
-    "the thread's earlier directives are not on a record, so every request replays with none; the allowlist is every routable preset",
+    "the thread's earlier directives are not on a record, so every request replays with none; the allowlist is every routable preset and the compound form is offered, as production offers it to a requester who may run the conductor",
   ];
+  const redacted = <T extends { text: string; reason: string }>(r: T): T => ({
+    ...r,
+    text: redactSecrets(r.text),
+    reason: redactSecrets(r.reason),
+  });
   return writeResults(
     "route",
     id,
     startedAt,
-    { stateUrl: base, model: modelRef, since: f.since, limit, defaultPreset, concurrency, keyEnv },
+    { stateUrl: base, model: modelRef, since: f.since, limit, defaultPreset, concurrency, maxParts, keyEnv },
     summary,
     checks,
     {
       table,
-      results: results.map((r) => ({ ...r, text: redactSecrets(r.text), reason: redactSecrets(r.reason) })),
+      results: results.map(redacted),
+      readToWrite: readToWrite.map(redacted),
+      unstamped: { count: unstamped.length, agreed: unstampedAgreed, results: unstampedResults.map(redacted) },
+      compound: {
+        fixtures: { ...fixtures, misses: fixtures.misses.map(redacted), results: fixtureResults.map(redacted) },
+        history: { ...history, misses: history.misses.map(redacted), results: historyResults.map(redacted) },
+      },
       skipped,
     },
     notes,

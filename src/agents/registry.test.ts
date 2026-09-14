@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS, PR_TITLE_GUARD } from "../core/ship/contract.js";
+import { COMPOUND_BRIEF_HEADING } from "../core/dispatch/route.js";
 import { AGENTS, getAgent, IDENTITIES, RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap } from "./registry.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
@@ -811,6 +812,19 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
     expect(sys).toMatch(/never claim a child finished/);
     // Every preset a child can run is named, so the model picks from the real list.
     for (const preset of ["research", "coding", "review", "explore", "general"]) expect(sys).toContain(`\`${preset}\``);
+  });
+
+  it("conductor's prompt knows a routed compound: the brief's heading, the numbered `<preset>`: <text> lines, spawn exactly those and never merge, drop or add one", () => {
+    const sys = AGENTS.conductor.system;
+    expect(sys).toContain(COMPOUND_BRIEF_HEADING);
+    expect(sys).toMatch(/numbered/);
+    expect(sys).toMatch(/exactly th(ose|e listed)/i);
+    expect(sys).toMatch(/never merge, drop or add/i);
+    expect(sys).toMatch(/one `spawn_run` per line/);
+  });
+
+  it("conductor stays out of the single-route table: routable is false, and the def says the compound form is its one door", () => {
+    expect(AGENTS.conductor.routable).toBe(false);
   });
 });
 

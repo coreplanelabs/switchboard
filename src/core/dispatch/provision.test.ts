@@ -252,6 +252,50 @@ describe("startMemoryRead — the memory read, started", () => {
 });
 
 describe("openAckCard — the ack card the thread sees while setup runs", () => {
+  it("a routed run's label carries the routed line; a compound's card leads every frame with one line per part", async () => {
+    const d = deps();
+    const { agent, resolved, root, trace } = request(d, "review #7 and also look into the outage");
+    const { io, statuses } = fakeIO();
+    const parts = [
+      { preset: "review", text: "review https://github.com/acme/api/pull/7" },
+      { preset: "research", text: "why did the staging resident go down last night" },
+    ];
+    const ack = await openAckCard(d, {
+      io,
+      agent,
+      resolved,
+      startedAt: NOW,
+      clock: () => NOW,
+      root,
+      trace,
+      route: { preset: "conductor", reason: "two independent asks", model: "anthropic/fast", parts },
+    });
+    clearInterval(ack.heartbeat);
+    expect(statuses[0].title).toContain("· routed: two independent asks");
+    expect(statuses[0].detail).toBe(
+      "review: review https://github.com/acme/api/pull/7\nresearch: why did the staging resident go down last night",
+    );
+    ack.card.update(ack.shell.live({ detail: ["○ review child"] }));
+    expect(statuses[1].detail).toBe(
+      "review: review https://github.com/acme/api/pull/7\nresearch: why did the staging resident go down last night\n○ review child",
+    );
+    // A single route: the routed line, no lead.
+    const single = fakeIO();
+    const one = await openAckCard(d, {
+      io: single.io,
+      agent,
+      resolved,
+      startedAt: NOW,
+      clock: () => NOW,
+      root,
+      trace,
+      route: { preset: "review", reason: "a PR URL", model: "anthropic/fast" },
+    });
+    clearInterval(one.heartbeat);
+    expect(single.statuses[0].title).toContain("· routed: a PR URL");
+    expect(single.statuses[0].detail).toBeUndefined();
+  });
+
   it("posts the ack frame once, hands back the shell, the coalesced card and a heartbeat the caller owns", async () => {
     const d = deps();
     const { agent, resolved, root, trace } = request(d, "hello there");

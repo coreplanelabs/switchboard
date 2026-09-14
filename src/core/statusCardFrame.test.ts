@@ -36,6 +36,32 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(shell.live().title.startsWith("◐ ")).toBe(true); // wraps
   });
 
+  it("lead lines (a routed conductor's parts) open the ack's and every live frame's detail, ahead of the run's own lines; a close carries none", () => {
+    let now = 1_000_000;
+    const shell = createCardShell({
+      label: LABEL,
+      startedAt: now,
+      now: () => now,
+      lead: ["review: look at PR 7", "research: why the resident went down"],
+    });
+    expect(shell.ack()).toEqual({
+      title: `👀 ${LABEL} · preparing workspace…`,
+      detail: "review: look at PR 7\nresearch: why the resident went down",
+    });
+    now += 5_000;
+    expect(shell.live().detail).toBe("review: look at PR 7\nresearch: why the resident went down");
+    expect(shell.live({ detail: ["○ review child", undefined, "$ spawn_run"] }).detail).toBe(
+      "review: look at PR 7\nresearch: why the resident went down\n○ review child\n$ spawn_run",
+    );
+    expect(shell.close({ kind: "done", icon: "✅", detail: "✓ review child" })).toEqual({
+      title: `✅ ${LABEL} · 5s`,
+      detail: "✓ review child",
+      link: undefined,
+    });
+    // No lead: the ack is title-only, exactly as before.
+    expect(shellAt(0).ack()).toEqual({ title: `👀 ${LABEL} · preparing workspace…` });
+  });
+
   it("the elapsed time floors in clock style like every other duration surface (docs/reference/specs/tracing.md), never a second ahead of the run page", () => {
     expect(shellAt(1_499).live().title).toBe(`◐ ${LABEL} · 1s`);
     expect(shellAt(1_999).live().title).toBe(`◐ ${LABEL} · 1s`);

@@ -26,7 +26,7 @@ import {
 } from "./dispatch/admission.js";
 import { answerChatCommand, answerOperation, type FastPathDeps } from "./dispatch/fastPath.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
-import { routeRequest, type RouteDecided, type RouteDeps } from "./dispatch/route.js";
+import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps } from "./dispatch/route.js";
 import {
   authorizeAgent,
   authorizeAttachedHead,
@@ -308,7 +308,11 @@ export async function dispatch(
     // through the fast model when `routing.auto` is on. Whatever it picks
     // meets the gates below like a typed directive; a router that is off,
     // fails or answers outside the requester's allowlist leaves the request
-    // on `defaults.agent` exactly as before.
+    // on `defaults.agent` exactly as before. A compound (the conductor with
+    // its parts) is a route like any other here; a compound the parse refused
+    // leaves the request on the default and rides the record as its `route`
+    // event with the rejection — `routeEvent` is what the record gets,
+    // `route` what the card and the run read.
     let route: RouteDecided | undefined;
     const threadLive =
       admission.get(msg.threadKey) !== undefined ||
@@ -319,6 +323,7 @@ export async function dispatch(
       route = routing.route;
       agentSource = "route";
     }
+    const routeEvent = routing.kind === "routed" ? routing.route : routing.rejected;
 
     // The agent gate (dispatch/authorize.ts), against the RESOLVED agent and
     // before the thread is claimed.
@@ -503,11 +508,15 @@ export async function dispatch(
     // the thread history was folded into it when the run started. A plan
     // unit's contract (agent-ship item 13) rides a coding child's first user
     // turn as its own text part after the request's text — the review child
-    // gets the same block in its system prompt (composePrompt below).
+    // gets the same block in its system prompt (composePrompt below). A routed
+    // compound's first turn is its brief (dispatch/route.ts): the message as
+    // typed, then the parts for the conductor to spawn — the record's `input`
+    // stays the message, its `route` event carries the parts.
     const contractBlock = opts.contract
       ? renderContract(opts.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
       : undefined;
-    const built = buildMessages(history, directives.text, msg.images, msg.documents);
+    const requestText = route?.parts ? compoundBrief(directives.text, route.parts) : directives.text;
+    const built = buildMessages(history, requestText, msg.images, msg.documents);
     const messages = resume
       ? resume.plan.messages
       : contractBlock !== undefined && agent.name !== "review"
@@ -563,7 +572,7 @@ export async function dispatch(
       parentRunId,
       coordinator,
       agentSource,
-      ...(route ? { route } : {}),
+      ...(routeEvent ? { route: routeEvent } : {}),
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
