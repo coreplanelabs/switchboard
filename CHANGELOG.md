@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.213.0](https://github.com/coreplanelabs/switchboard/compare/v1.212.0...v1.213.0) (2026-09-14)
+
+
+### Features
+
+* **agents:** pi 0.85.1 in both execution images, a preset's harness field with its config knob, and an exec's caller environment — the ground the pi harness lands on ([#1042](https://github.com/coreplanelabs/switchboard/issues/1042)) ([8179e7a](https://github.com/coreplanelabs/switchboard/commit/8179e7a2220af785e07f182e2edcef3d4aff50d7))
+* **dispatcher:** the router is on by default — a fresh installation routes a plain message from its first day, help says "describe what you want", and the card says how to override a route ([#1038](https://github.com/coreplanelabs/switchboard/issues/1038)) ([41a734a](https://github.com/coreplanelabs/switchboard/commit/41a734a13dc1d7df10583f0f7ba6d2f044e69ce2))
+* **harness:** the coding preset can run on pi — pi in the container with the run's bearer as its only key, every RPC event bridged into the run's own events and spans, our tools and tool rules as its extension, dark behind harness: pi ([#1043](https://github.com/coreplanelabs/switchboard/issues/1043)) ([8c95dd5](https://github.com/coreplanelabs/switchboard/commit/8c95dd525ca6b8cd9d23e783e66cd598aad709ad))
+* **runs:** a run's files move by reference — the artifact event names the store key, the run page serves each file through its own authorized route, and the Files block lists them with images inline ([#1045](https://github.com/coreplanelabs/switchboard/issues/1045)) ([0146e37](https://github.com/coreplanelabs/switchboard/commit/0146e37de1818a558e537ac047a7a4015d38d07b))
+* **tools:** the artifact store seam — a run's files can move by reference through one private R2 bucket the bot signs URLs for, with the config section, three bot secrets and the /healthz fact; absent the section, nothing changes ([#1040](https://github.com/coreplanelabs/switchboard/issues/1040)) ([d35050e](https://github.com/coreplanelabs/switchboard/commit/d35050e002cf6177cfceb2edbb3ddcee538415ac))
+
+
+### Bug fixes
+
+* **dispatcher:** the router reads a terse "fix it" as a coding ask — imperative fixtures join the replay, and the compound rule meets its bar at the live model ([#1051](https://github.com/coreplanelabs/switchboard/issues/1051)) ([f99535d](https://github.com/coreplanelabs/switchboard/commit/f99535d3e9e7586562cc6b7229556ccdbc06b021))
+* **harness:** a fresh pi run is prompted with the request, not the thread's oldest turn — the earlier turns become the session pi starts from, and a single-turn thread is unchanged ([#1048](https://github.com/coreplanelabs/switchboard/issues/1048)) ([ea57f04](https://github.com/coreplanelabs/switchboard/commit/ea57f048ea2cb586b4014ac2ad07d835dfd4a3ab))
+* keep error-code diagnoses out of the secret redactor and make the onboard not-in-installation refusal actionable ([#1041](https://github.com/coreplanelabs/switchboard/issues/1041)) ([33d4e2b](https://github.com/coreplanelabs/switchboard/commit/33d4e2ba9ce5504d3c11f005afbecea6b7c24e55))
+* **resident:** a container whose runtime never answers heals itself — the unreachable probe is named, counted and escalated (short re-arm, stop, destroy and restore from snapshot, then down), with an admin recreate-container op ([#1046](https://github.com/coreplanelabs/switchboard/issues/1046)) ([78f5409](https://github.com/coreplanelabs/switchboard/commit/78f5409e429c7f671c1027c63a2e884e1a13599e))
+
+
+### Documentation
+
+* **docs:** record 0033 proposes the artifact store — run files move by reference through one private R2 bucket in both directions, and the run record keeps the key ([#1033](https://github.com/coreplanelabs/switchboard/issues/1033)) ([80e3664](https://github.com/coreplanelabs/switchboard/commit/80e3664583f4764100db5fae9440027ffcf4edcd))
+* **docs:** the execution ledger for record 0033 — eight units that move run artifacts through R2 in both directions, outbound first, each inert until the store is configured ([#1036](https://github.com/coreplanelabs/switchboard/issues/1036)) ([3192767](https://github.com/coreplanelabs/switchboard/commit/3192767dda3f3fb1a5ddedcb8aa47e3aeb638e1c))
+* the front door is the first thing a newcomer meets — every intro says describe what you want, commands wait for whoever digs, and the pictures show a routed run ([#1037](https://github.com/coreplanelabs/switchboard/issues/1037)) ([0318334](https://github.com/coreplanelabs/switchboard/commit/03183348760c8c4a1e1bd1d91a2add7c4deb1ebb))
+* the front door, the runner and the budgets read as built — every page says a plain message routes itself, no pause exists, turns are a guard, and the plan's graph matches its text ([#1031](https://github.com/coreplanelabs/switchboard/issues/1031)) ([bdf2504](https://github.com/coreplanelabs/switchboard/commit/bdf2504d9de2ecf8591f0f204995eef4a048479a))
+
 ## [1.212.0](https://github.com/coreplanelabs/switchboard/compare/v1.211.0...v1.212.0) (2026-09-14)
 
 
