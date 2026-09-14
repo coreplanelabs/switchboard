@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.215.1](https://github.com/coreplanelabs/switchboard/compare/v1.215.0...v1.215.1) (2026-09-14)
+
+
+### Bug fixes
+
+* **dispatcher:** the router reads parts without a preset as the compound form - the forced tool call skips the required field, and the parse names the conductor instead of refusing the answer ([#1090](https://github.com/coreplanelabs/switchboard/issues/1090)) ([4e60046](https://github.com/coreplanelabs/switchboard/commit/4e6004694bb6977f401cea9a9f70322e2ccc2381))
+
+
+### Documentation
+
+* state the session log object's name is stable for the life of the thread ([#1092](https://github.com/coreplanelabs/switchboard/issues/1092)) ([ce998a2](https://github.com/coreplanelabs/switchboard/commit/ce998a283b8af99eb706d3ef98d1a208d774d625))
+
 ## [1.215.0](https://github.com/coreplanelabs/switchboard/compare/v1.214.0...v1.215.0) (2026-09-14)
 
 
