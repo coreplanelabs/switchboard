@@ -470,7 +470,10 @@ export function presetDoor(def: AgentDef): PresetDoor {
   return def.name === COMPOUND_PRESET ? "compound" : "directive";
 }
 
-export const AGENTS: Record<string, AgentDef> = {
+/** Every preset that does the work, listed apart from the conductor that
+ *  coordinates them: the registry below is the two joined, so each list can
+ *  be read on its own. */
+const WORK_PRESETS = {
   general: {
     name: "general",
     description:
@@ -574,6 +577,10 @@ export const AGENTS: Record<string, AgentDef> = {
     cacheTtl: "1h",
     // No built-in effort: the deployment decides, as for coding.
   },
+} satisfies Record<string, AgentDef>;
+
+export const AGENTS: Record<string, AgentDef> = {
+  ...WORK_PRESETS,
   conductor: {
     name: "conductor",
     description:
