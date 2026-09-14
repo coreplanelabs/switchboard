@@ -353,18 +353,25 @@ export function parseRouteAnswer(raw: string, allowed: readonly string[], compou
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
     return { preset: undefined, reason: `not a single JSON object: ${tidyReason(trimmed)}` };
-  const { preset, reason, parts } = parsed as Record<string, unknown>;
-  // The field named AND what came back: a forced tool call once answered
-  // without its required `preset`, and a record that says only "missing" hides
-  // what the model did — the same courtesy the not-JSON case pays.
-  if (typeof preset !== "string")
+  const { preset: named, reason, parts } = parsed as Record<string, unknown>;
+  // Parts without a preset IS the compound form: under the forced tool call
+  // the model fills `parts` and skips the required `preset` (Anthropic does not
+  // enforce `required`; three such answers in two live replays), and `parts`
+  // exists for no other shape. The inference names the conductor and nothing
+  // more — `parseCompound` still holds it to the offer, the cap and the table.
+  const preset = typeof named === "string" ? named : Array.isArray(parts) ? COMPOUND_PRESET : undefined;
+  const inferred = typeof named !== "string" && preset === COMPOUND_PRESET;
+  // The field named AND what came back: a record that says only "missing"
+  // hides what the model did — the same courtesy the not-JSON case pays.
+  if (preset === undefined)
     return { preset: undefined, reason: `missing preset in the router's answer: ${tidyReason(trimmed)}` };
-  if (typeof reason !== "string")
+  if (typeof reason !== "string" && !inferred)
     return { preset: undefined, reason: `missing reason in the router's answer: ${tidyReason(trimmed)}` };
-  if (preset === COMPOUND_PRESET) return parseCompound(parts, tidyReason(reason), allowed, compound);
+  const tidy = typeof reason === "string" ? tidyReason(reason) : "compound inferred from parts";
+  if (preset === COMPOUND_PRESET) return parseCompound(parts, tidy, allowed, compound);
   if (!allowed.includes(preset))
     return { preset: undefined, reason: `router said "${tidyReason(preset)}", not a preset the requester may run` };
-  return { preset, reason: tidyReason(reason) };
+  return { preset, reason: tidy };
 }
 
 /** The compound answer, held to its rule: offered at all; two or more parts,
