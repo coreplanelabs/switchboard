@@ -283,22 +283,26 @@ export function cursorFinished(cursor: PlanCursor): boolean {
 
 // ---- the unit pipeline: shapes --------------------------------------------------------------------
 
-export type RoundKind = "coding" | "review" | "fix";
+/** `findings` is the step after a verdict that requests changes: the review's
+ *  findings dispatched into the unit thread as `agent:coding`, so the coding
+ *  session there continues with them (record 0034). Never a `fix` child briefed
+ *  from the review. */
+export type RoundKind = "coding" | "review" | "findings";
 export interface RoundRef {
-  /** Round 0 is the coding round; review round n and its fix round share n. */
+  /** Round 0 is the coding round; review round n and its findings step share n. */
   index: number;
   kind: RoundKind;
 }
 export type ChildPreset = "coding" | "review";
 
-/** The preset a round's child runs as: a fix round is a coding child. */
+/** The preset a round's child runs as: the findings step's run is a coding run. */
 export function presetOf(kind: RoundKind): ChildPreset {
   return kind === "review" ? "review" : "coding";
 }
 
 /** How a spawn's child is briefed — ids only, never text. The bot composes the
  *  turn: the unit's contract, or the review turn from the pull request and the
- *  prior rounds' records, or the fix turn from the review run's verdict. */
+ *  prior rounds' records, or the findings message from the review run's verdict. */
 export type Brief =
   | { kind: "contract"; unit: string; rebase: { branch: string; onto: string } }
   | {
@@ -307,10 +311,10 @@ export type Brief =
       pr: number;
       headSha?: string;
       round: number;
-      /** The previous review round's run and the fix round that answered it, for a re-review. */
-      prior?: { reviewRunId: string; fixRunId?: string };
+      /** The previous review round's run and the coding run that answered its findings, for a re-review. */
+      prior?: { reviewRunId: string; codingRunId?: string };
     }
-  | { kind: "fix"; unit: string; pr: number; reviewRunId: string };
+  | { kind: "findings"; unit: string; pr: number; reviewRunId: string };
 
 export interface PrRef {
   number: number;
@@ -351,7 +355,7 @@ export type ChildFacts =
       /** Why the child recorded no post, when it recorded one it chose or failed. */
       reviewPostReason?: string;
       reviewHead?: string;
-      /** A fix child's dispositions. */
+      /** The dispositions a coding run recorded, as it submitted them: the machine matches them to the round's findings. */
       dispositions?: FindingDisposition[];
       handoff?: boolean;
     };
@@ -451,13 +455,16 @@ export interface UnitPipelineState {
   readonly pr?: PrRef;
   readonly lastReviewHead?: string;
   readonly lastVerdictSummary?: string;
-  /** Findings per review round and dispositions per fix round, keyed by the
-   *  review round they belong to — finding ids are unique within one round only. */
+  /** Findings per review round and the dispositions the round's findings step
+   *  recorded against them, keyed by the review round they belong to — finding
+   *  ids are unique within one round only. A disposition naming an id the review
+   *  never issued is dropped at the match (`matchDispositions`). */
   readonly findingsByRound: Readonly<Record<number, Finding[]>>;
   readonly dispositionsByRound: Readonly<Record<number, FindingDisposition[]>>;
   readonly reviewRunByRound: Readonly<Record<number, string>>;
-  readonly fixRunByRound: Readonly<Record<number, string>>;
-  /** The last coding child (round 0 or a fix round): its record carries the unit's handoff. */
+  /** The coding run each round's findings step dispatched. */
+  readonly findingsRunByRound: Readonly<Record<number, string>>;
+  /** The last coding run (round 0's child or a findings step's): its record carries the unit's handoff. */
   readonly lastCodingRunId?: string;
   readonly ending?: UnitEnding;
 }
@@ -490,7 +497,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
     findingsByRound: {},
     dispositionsByRound: {},
     reviewRunByRound: {},
-    fixRunByRound: {},
+    findingsRunByRound: {},
   };
   if (!input.resume) return base;
   const url = input.resume.url ?? `https://github.com/${input.repo}/pull/${input.resume.pr}`;
@@ -528,9 +535,9 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
   if (round.kind === "coding")
     return { kind: "contract", unit, rebase: { branch: s.input.unit.branch, onto: s.input.base } };
   const pr = s.pr!.number;
-  if (round.kind === "fix") return { kind: "fix", unit, pr, reviewRunId: s.reviewRunByRound[round.index]! };
+  if (round.kind === "findings") return { kind: "findings", unit, pr, reviewRunId: s.reviewRunByRound[round.index]! };
   const priorReview = s.reviewRunByRound[round.index - 1];
-  const priorFix = s.fixRunByRound[round.index - 1];
+  const priorCoding = s.findingsRunByRound[round.index - 1];
   return {
     kind: "review",
     unit,
@@ -538,9 +545,25 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
     ...(s.lastReviewHead !== undefined ? { headSha: s.lastReviewHead } : {}),
     round: round.index,
     ...(priorReview !== undefined
-      ? { prior: { reviewRunId: priorReview, ...(priorFix !== undefined ? { fixRunId: priorFix } : {}) } }
+      ? { prior: { reviewRunId: priorReview, ...(priorCoding !== undefined ? { codingRunId: priorCoding } : {}) } }
       : {}),
   };
+}
+
+/** The dispositions a coding run recorded that answer `findings`, and the ids
+ *  it named that the review never issued (agent-ship item 6). The tool records
+ *  whatever the run submits, so the match is the runner's: `matched` is what the
+ *  state, the report and the re-review carry, `dropped` what the re-review's
+ *  note names. Pure and node-free, so the spawn route composing the re-review
+ *  turn and this machine agree by construction. */
+export function matchDispositions(
+  findings: readonly Finding[],
+  dispositions: readonly FindingDisposition[],
+): { matched: FindingDisposition[]; dropped: string[] } {
+  const issued = new Set(findings.map((f) => f.id));
+  const matched = dispositions.filter((d) => issued.has(d.findingId));
+  const dropped = [...new Set(dispositions.filter((d) => !issued.has(d.findingId)).map((d) => d.findingId))];
+  return { matched, dropped };
 }
 
 /** The step the machine is at. Pure over the state: asked before every step
@@ -629,7 +652,7 @@ function nextReview(s: UnitPipelineState, notes: CoordinatorNote[] = []): Transi
 const stopMode = (status: RunStatus): "soft" | "hard" | undefined =>
   status === "stopped_soft" ? "soft" : status === "stopped_hard" ? "hard" : undefined;
 
-/** A coding or fix child's confirmed end. */
+/** A coding run's confirmed end: round 0's child, or the run a findings step dispatched. */
 function settleCoding(
   s: UnitPipelineState,
   round: RoundRef,
@@ -637,12 +660,19 @@ function settleCoding(
   facts: Extract<ChildFacts, { finished: true }>,
 ): Transition {
   // Recorded before the checks below: a pull request is a fact a stop must
-  // still report, and submitted dispositions are a fact no ending erases.
+  // still report, and submitted dispositions are a fact no ending erases. The
+  // run records whatever it submitted; only the dispositions that answer this
+  // round's findings enter the state (agent-ship item 6).
   let next: UnitPipelineState = {
     ...s,
     ...(facts.pr !== undefined ? { pr: { number: facts.pr.number, url: facts.pr.url } } : {}),
-    ...(round.kind === "fix" && facts.dispositions !== undefined
-      ? { dispositionsByRound: { ...s.dispositionsByRound, [round.index]: facts.dispositions } }
+    ...(round.kind === "findings" && facts.dispositions !== undefined
+      ? {
+          dispositionsByRound: {
+            ...s.dispositionsByRound,
+            [round.index]: matchDispositions(s.findingsByRound[round.index] ?? [], facts.dispositions).matched,
+          },
+        }
       : {}),
   };
   const mode = stopMode(facts.status);
@@ -752,7 +782,7 @@ function settleReview(
     return { state: { ...next, phase: { at: "merge", pr, headSha, n: 1, since: next.clock } }, notes };
   }
   // request_changes: the verdict settled (and posted) — now a stop
-  // short-circuits the fix round, naming the review standing on the pull request.
+  // short-circuits the findings step, naming the review standing on the pull request.
   if (mode !== undefined)
     return end(
       next,
@@ -772,7 +802,11 @@ function settleReview(
       { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
       notes,
     );
-  return enterRound(next, { index: round.index, kind: "fix" }, notes);
+  // The findings step (agent-ship item 7): the review's findings dispatched into
+  // the unit thread as a coding run, under the review round's index. A run live
+  // there is a person's (this machine awaited its own child's end), so the
+  // spawn answers busy and the step waits under the unit's clock like any round.
+  return enterRound(next, { index: round.index, kind: "findings" }, notes);
 }
 
 /** The unit's ending when its pull request is found merged — by a person, or
@@ -792,7 +826,7 @@ function foundMerged(
   );
 }
 
-/** The pull request heading the branch after a coding or fix round. */
+/** The pull request heading the branch after round 0 or a findings step. */
 function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-check" }>, pr: PrCheck): Transition {
   const { round } = phase;
   // The merge landed during the round: the child found nothing left to ship
@@ -803,7 +837,7 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
     const reason =
       round.index === 0
         ? `⚠️ Ship ended at round 0: the coding round ended without opening a pull request (a clarifying question, a budget write-up, an unproven push or a description-less push ends the pipeline here). No review round ran.`
-        : `⚠️ Fix round ${round.index} left no open pull request heading \`${s.input.unit.branch}\` — the pull request was closed out from under the pipeline and none was reopened, so there is nothing to re-review.`;
+        : `⚠️ Round ${round.index}'s findings step left no open pull request heading \`${s.input.unit.branch}\` — the pull request was closed out from under the pipeline and none was reopened, so there is nothing to re-review.`;
     return end(
       s,
       {
@@ -818,13 +852,13 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
   }
   const head = pr.headSha ?? phase.childHead;
   const next: UnitPipelineState = { ...s, pr: { number: pr.prNumber, url: pr.url } };
-  if (round.kind === "fix") {
+  if (round.kind === "findings") {
     // Nothing repushed → nothing to re-review, unless every finding of the
     // last review was declined on the record: that re-review verifies the
     // arguments and may concede.
-    const fixHead = normalizeHead(head);
+    const codingHead = normalizeHead(head);
     const reviewedAt = normalizeHead(s.lastReviewHead);
-    if (fixHead !== undefined && reviewedAt !== undefined && sameCommit(fixHead, reviewedAt)) {
+    if (codingHead !== undefined && reviewedAt !== undefined && sameCommit(codingHead, reviewedAt)) {
       const findings = s.findingsByRound[round.index] ?? [];
       const dispositions = s.dispositionsByRound[round.index] ?? [];
       const allDeclined =
@@ -835,7 +869,7 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
           next,
           {
             kind: "aborted",
-            reason: `⚠️ Fix round ${round.index} produced no new head — the branch still sits at \`${fixHead.slice(0, 7)}\`, the commit the review already read, and not every finding was declined on the record, so there is nothing new to re-review.`,
+            reason: `⚠️ Round ${round.index}'s findings step produced no new head — the branch still sits at \`${codingHead.slice(0, 7)}\`, the commit the review already read, and not every finding was declined on the record, so there is nothing new to re-review.`,
             round,
             reviewRounds: next.reviewRounds,
           },
@@ -889,8 +923,11 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           const runs =
             p.round.kind === "review"
               ? { reviewRunByRound: { ...s.reviewRunByRound, [p.round.index]: r.runId } }
-              : p.round.kind === "fix"
-                ? { fixRunByRound: { ...s.fixRunByRound, [p.round.index]: r.runId }, lastCodingRunId: r.runId }
+              : p.round.kind === "findings"
+                ? {
+                    findingsRunByRound: { ...s.findingsRunByRound, [p.round.index]: r.runId },
+                    lastCodingRunId: r.runId,
+                  }
                 : { lastCodingRunId: r.runId };
           return {
             state: { ...clocked, ...runs, phase: { at: "wait", round: p.round, runId: r.runId, n: 1, until } },
@@ -999,8 +1036,8 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
 const sameFinding = (a: Finding, b: Finding) => a.severity === b.severity && a.file === b.file && a.title === b.title;
 
 /** The disposition that answers `finding` as review round `round` listed it:
- *  that round's own fix round's, else one carried forward unchanged from an
- *  earlier round — never across a reused id, which inherits nothing. */
+ *  the one that round's findings step recorded, else one carried forward
+ *  unchanged from an earlier round — never across a reused id, which inherits nothing. */
 function dispositionFor(s: UnitPipelineState, finding: Finding, round: number): FindingDisposition | undefined {
   let cur = finding;
   for (let r = round; r >= 1; r--) {
@@ -1097,7 +1134,7 @@ export function renderUnitReport(s: UnitPipelineState): string {
       return join([e.finalReply, e.reason, `⚠️ Ship aborted after ${rounds}.`, reissue]);
     case "no_verdict":
       return join([
-        `⚠️ Review round ${e.round.index} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no fix round ran.`,
+        `⚠️ Review round ${e.round.index} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no findings step ran.`,
         e.finalReply ? `Review round's final message:\n\n${e.finalReply}` : undefined,
         `⚠️ Ship aborted after ${rounds}.`,
         reissue,

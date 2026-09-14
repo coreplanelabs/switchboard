@@ -146,11 +146,6 @@ export interface DispatchOptions {
    *  run in flight on the thread refuses the request instead of taking it as
    *  a steer (thread-admission item 8). Absent for every other request. */
   coordinator?: CoordinatorTag;
-  /** Set by the coordinator's spawn route for a fix round's child (agent-ship
-   *  item 6): the review's finding ids this coding run answers, so
-   *  `submit_dispositions` records against them and the set rides the record.
-   *  Absent for every other request. */
-  fixRound?: { findingIds: string[] };
   /** Set by the coordinator's spawn route for a plan unit's child (agent-ship
    *  item 13): the unit's contract, rendered once here — into a coding child's
    *  first user turn as its own text part, into a review child's system prompt
@@ -889,7 +884,6 @@ export async function dispatch(
       parentRunId,
       coordinator,
       seed,
-      ...(opts.fixRound ? { fixRound: opts.fixRound } : {}),
       ...(bearer !== undefined ? { bearer } : {}),
     });
     const { answer, prNote, toolCalls, runDiagnosis, checklistAsLeft, checklistCheckedOff, releaseWorkspace } = ran;

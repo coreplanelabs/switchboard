@@ -114,11 +114,11 @@ export interface AdminCoordinatorDeps {
   /** The one runs service every surface reads: the live and finished runs of the instance's thread. */
   runs: RunsService;
   /** `dispatch()` bound over the process's deps: the child as the requesting
-   *  user, tagged — with the unit's contract and, for a fix round, the finding ids. */
+   *  user, tagged, with the unit's contract for a round-0 child. */
   dispatch: (
     msg: IncomingMessage,
     io: ChannelIO,
-    opts: Pick<DispatchOptions, "coordinator" | "contract" | "fixRound"> & { coordinator: CoordinatorTag },
+    opts: Pick<DispatchOptions, "coordinator" | "contract"> & { coordinator: CoordinatorTag },
   ) => Promise<DispatchOutcome>;
   /** The channel handle for a thread (the resume's `resumeSlackIO` from the
    *  row's parts — the card's ts when the handle must redraw it); undefined for
@@ -183,7 +183,7 @@ const UNIT_ID = /^[A-Za-z0-9_-]{1,32}$/;
 const PRESETS_OF_KIND: Readonly<Record<Brief["kind"], string>> = {
   contract: "coding",
   review: "review",
-  fix: "coding",
+  findings: "coding",
 };
 
 /** A brief as the coordinator sends it (`Brief`, ship/coordinator.ts): ids only, each shaped. */
@@ -222,9 +222,12 @@ function parseBrief(v: unknown): Parsed<Brief> {
           !RUN_ID_PATTERN.test(p.reviewRunId)
         )
           return invalid("brief.prior.reviewRunId must be a run id");
-        if (p.fixRunId !== undefined && (typeof p.fixRunId !== "string" || !RUN_ID_PATTERN.test(p.fixRunId)))
-          return invalid("brief.prior.fixRunId must be a run id");
-        prior = { reviewRunId: p.reviewRunId, ...(p.fixRunId !== undefined ? { fixRunId: p.fixRunId as string } : {}) };
+        if (p.codingRunId !== undefined && (typeof p.codingRunId !== "string" || !RUN_ID_PATTERN.test(p.codingRunId)))
+          return invalid("brief.prior.codingRunId must be a run id");
+        prior = {
+          reviewRunId: p.reviewRunId,
+          ...(p.codingRunId !== undefined ? { codingRunId: p.codingRunId as string } : {}),
+        };
       }
       return {
         ok: true,
@@ -238,15 +241,15 @@ function parseBrief(v: unknown): Parsed<Brief> {
         },
       };
     }
-    case "fix": {
+    case "findings": {
       const n = pr();
       if (!n.ok) return n;
       const review = runId("reviewRunId");
       if (!review.ok) return review;
-      return { ok: true, value: { kind: "fix", unit: b.unit, pr: n.value, reviewRunId: review.value } };
+      return { ok: true, value: { kind: "findings", unit: b.unit, pr: n.value, reviewRunId: review.value } };
     }
     default:
-      return invalid("brief.kind must be contract, review or fix");
+      return invalid("brief.kind must be contract, review or findings");
   }
 }
 
@@ -347,12 +350,60 @@ async function unitRowOf(
   return { ok: true, row };
 }
 
-/** The thread a unit's children run in: the unit's own once opened, the
- *  requesting thread for a task-string unit. */
+/** The thread a unit's coding children run in, and where its findings are
+ *  dispatched: the unit's own once opened, the requesting thread for a
+ *  task-string unit. The review child's thread is `ensureReviewThread`. */
 function unitThread(instance: CoordinatorInstance, row: CoordinatorUnit | undefined) {
   const threadKey = row?.threadKey ?? (row === undefined || row.unit === TASK_UNIT ? instance.threadKey : undefined);
   const sourceUrl = row?.sourceUrl ?? (threadKey === instance.threadKey ? instance.sourceUrl : undefined);
   return { threadKey, sourceUrl };
+}
+
+type OpenedThreadRef = { threadKey: string; sourceUrl?: string };
+
+/** A thread opened top-level in the requesting thread's channel with `lead`
+ *  (`ChannelIO.openThread`): `503 no_channel` without a channel that can,
+ *  `502 thread_failed` on a failed open, both passing conditions the runner
+ *  asks again on. */
+async function openThreadFromRequester(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  lead: string,
+  at: number,
+): Promise<{ ok: true; thread: OpenedThreadRef } | { ok: false; response: IngressResponse }> {
+  const parent = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
+  if (!parent?.openThread) return { ok: false, response: json(503, { ok: false, error: "no_channel", at }) };
+  try {
+    const opened = await parent.openThread(lead);
+    return {
+      ok: true,
+      thread: {
+        threadKey: opened.thread.threadKey,
+        ...(opened.thread.sourceUrl !== undefined ? { sourceUrl: opened.thread.sourceUrl } : {}),
+      },
+    };
+  } catch (err) {
+    return { ok: false, response: json(502, { ok: false, error: "thread_failed", message: describe(err), at }) };
+  }
+}
+
+/** The unit's review thread (run-history item 50's `reviewThread`), opened once
+ *  beside the unit's thread and written on the row: by `unit-start`, or by the
+ *  first review spawn of a row written before the field existed. Every review
+ *  round runs there, so the review child's worktree is its own and readonly
+ *  and no round wipes the coding thread's (record 0034). */
+async function ensureReviewThread(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  at: number,
+): Promise<{ ok: true; row: CoordinatorUnit; thread: OpenedThreadRef } | { ok: false; response: IngressResponse }> {
+  if (row.reviewThread !== undefined) return { ok: true, row, thread: row.reviewThread };
+  const opened = await openThreadFromRequester(deps, instance, reviewLead(instance, row), at);
+  if (!opened.ok) return opened;
+  const updated: CoordinatorUnit = { ...row, reviewThread: opened.thread };
+  await deps.instances.putUnits([updated]);
+  return { ok: true, row: updated, thread: opened.thread };
 }
 
 /** The whole door: WHO (the bearer in the token map — 401/503) and WHETHER (the
@@ -474,11 +525,26 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const at = (deps.clock ?? systemClock)();
   const unit = await unitRowOf(deps, instance, req.unit);
   if (!unit.ok) return unit.response;
-  const thread = unitThread(instance, unit.row);
+  const own = unitThread(instance, unit.row);
   // A plan unit's thread is opened by `unit-start`; a spawn before it has no
   // thread to run in — a passing condition (the runner asks again), stamped
   // like every answer.
-  if (thread.threadKey === undefined) return json(409, { ok: false, error: "unit_not_started", unit: req.unit, at });
+  if (own.threadKey === undefined) return json(409, { ok: false, error: "unit_not_started", unit: req.unit, at });
+  // The thread the child runs in: a review child's is the unit's review thread,
+  // opened here for a row written before the field existed; a coding child and
+  // the findings step's run share the unit's own thread, whose coding session
+  // the findings continue.
+  let row = unit.row;
+  let thread: OpenedThreadRef = {
+    threadKey: own.threadKey,
+    ...(own.sourceUrl !== undefined ? { sourceUrl: own.sourceUrl } : {}),
+  };
+  if (req.preset === "review" && row !== undefined) {
+    const review = await ensureReviewThread(deps, instance, row, at);
+    if (!review.ok) return review.response;
+    row = review.row;
+    thread = review.thread;
+  }
   const threadKey = thread.threadKey;
   const key = idempotencyKeyFor(instance.id, req.step);
   // Retry-safe before anything starts: the step's child, live or finished, or
@@ -491,17 +557,11 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (!io) return json(503, { ok: false, error: "no_channel", at });
   // The child's turn: the caller's prompt, or the brief composed from what the
   // bot holds — the plan at the base ref, the prior rounds' records.
-  let turn: {
-    prompt: string;
-    ref?: string;
-    contract?: DispatchOptions["contract"];
-    fixRound?: DispatchOptions["fixRound"];
-  };
+  let turn: { prompt: string; ref?: string; contract?: DispatchOptions["contract"] };
   if (req.brief !== undefined) {
-    if (unit.row === undefined) return json(400, { ok: false, error: "a brief needs the unit it runs for" });
+    if (row === undefined) return json(400, { ok: false, error: "a brief needs the unit it runs for" });
     try {
-      const composed = await composeChild(req.brief, instance, unit.row, briefReaders(deps, instance, io));
-      turn = composed;
+      turn = await composeChild(req.brief, instance, row, briefReaders(deps, instance, io));
     } catch (err) {
       // A brief the bot cannot compose — the plan missing at the base, a run
       // the history lacks — is a failed spawn: the machine ends the unit as an
@@ -514,7 +574,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     turn = { prompt: req.prompt! };
   }
   // The child's message is the one the requester would have typed, in the
-  // unit's thread, as the requester the parent record names.
+  // child's thread, as the requester the parent record names. The directive is
+  // the message's own (`childRequestText`), so the findings step's `agent:coding`
+  // resolves the coding preset whatever a person's detour in the thread or a
+  // lost store would have made sticky.
   const msg: IncomingMessage = {
     channelId: instance.channelId,
     userId: instance.userId,
@@ -558,7 +621,6 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     .dispatch(msg, child, {
       coordinator: tag,
       ...(turn.contract !== undefined ? { contract: turn.contract } : {}),
-      ...(turn.fixRound !== undefined ? { fixRound: turn.fixRound } : {}),
     })
     .then(
       (outcome) => ({ kind: "ended" as const, outcome }),
@@ -722,7 +784,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   if (!view.finished) return json(200, { ok: true, run: coordinatorRunView(view, id.value, undefined), at });
   // Finished: the final reply and the typed artifacts the record carries — the
   // coding child's pull request, the review child's verdict and whether it
-  // stands on the pull request, the fix child's dispositions.
+  // stands on the pull request, the coding run's dispositions.
   const full = await deps.runs.getRun(body.runId, { include: "messages" });
   const record = full.ok ? full.value : view;
   const finalReply = finalReplyOf(record.events);
@@ -848,8 +910,10 @@ async function unitIssueOf(deps: AdminCoordinatorDeps, repo: string, unit: strin
 }
 
 /** A unit starts: its thread is opened by the requesting thread's channel (a
- *  task's is the requesting thread itself), its board issue looked up, and the
- *  row says so. Idempotent: a unit with a thread answers it again. */
+ *  task's is the requesting thread itself), its review thread beside it, its
+ *  board issue looked up, and the row says so. Idempotent: a unit with its
+ *  threads answers them again. A review thread whose open fails leaves the
+ *  unit thread on the row, so the retry opens the review thread alone. */
 async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -869,19 +933,19 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
         ...(instance.sourceUrl !== undefined ? { sourceUrl: instance.sourceUrl } : {}),
       };
     } else {
-      const parent = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
-      if (!parent?.openThread) return json(503, { ok: false, error: "no_channel", at });
-      try {
-        const opened = await parent.openThread(unitLead(instance, row));
-        row = {
-          ...row,
-          threadKey: opened.thread.threadKey,
-          ...(opened.thread.sourceUrl !== undefined ? { sourceUrl: opened.thread.sourceUrl } : {}),
-        };
-      } catch (err) {
-        return json(502, { ok: false, error: "thread_failed", message: describe(err), at });
-      }
+      const opened = await openThreadFromRequester(deps, instance, unitLead(instance, row), at);
+      if (!opened.ok) return opened.response;
+      row = { ...row, ...opened.thread };
     }
+  }
+  if (row.reviewThread === undefined) {
+    const review = await ensureReviewThread(deps, instance, row, at);
+    if (!review.ok) {
+      // The unit thread stands: written, so the retry does not open a second one.
+      if (row !== unit.row) await deps.instances.putUnits([row]);
+      return review.response;
+    }
+    row = review.row;
   }
   if (row.issue === undefined && row.unit !== TASK_UNIT) {
     const issue = await unitIssueOf(deps, instance.repo, row.unit);
@@ -889,10 +953,13 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   }
   row = { ...row, startedAt: row.startedAt ?? at };
   await deps.instances.putUnits([row]);
-  (deps.log ?? console.log)(`[coordinator] ${instance.id} ${row.unit}: started in ${row.threadKey}`);
+  (deps.log ?? console.log)(
+    `[coordinator] ${instance.id} ${row.unit}: started in ${row.threadKey}, review in ${row.reviewThread?.threadKey}`,
+  );
   return json(200, {
     ok: true,
     threadKey: row.threadKey,
+    reviewThreadKey: row.reviewThread?.threadKey,
     branch: row.branch,
     base: instance.base ?? "main",
     ...(row.issue !== undefined ? { issue: row.issue } : {}),
@@ -905,6 +972,14 @@ function unitLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
   const who = instance.userName ?? instance.userId;
   const from = instance.sourceUrl !== undefined ? `[the *ship* run](${instance.sourceUrl})` : "the *ship* run";
   return `↳ *ship* unit ${row.unit}${row.title ? ` — ${row.title}` : ""} for ${who}, from ${from}: \`${row.branch}\` in ${instance.repo}`;
+}
+
+/** The lead of a unit's review thread: the same reader, told this thread holds the unit's review rounds. */
+function reviewLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
+  const who = instance.userName ?? instance.userId;
+  const from = instance.sourceUrl !== undefined ? `[the *ship* run](${instance.sourceUrl})` : "the *ship* run";
+  const what = row.unit === TASK_UNIT ? "the task" : `unit ${row.unit}${row.title ? ` — ${row.title}` : ""}`;
+  return `↳ *ship* review of ${what} for ${who}, from ${from}: \`${row.branch}\` in ${instance.repo}`;
 }
 
 /** Round 0's pipeline branch: `refs/heads/<branch>` at the base's tip, on

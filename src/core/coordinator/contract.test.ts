@@ -138,6 +138,7 @@ describe("isCoordinatorUnit — one unit's row", () => {
     dependsOn: ["U20", "U21"],
     threadKey: "slack:C1:2.0",
     sourceUrl: "https://acme.slack.com/archives/C1/p2",
+    reviewThread: { threadKey: "slack:C1:3.0", sourceUrl: "https://acme.slack.com/archives/C1/p3" },
     issue: 834,
     pr: { number: 979, url: "https://github.com/acme/api/pull/979" },
     resume: { pr: 979, headSha: "a".repeat(40), url: "https://github.com/acme/api/pull/979" },
@@ -169,6 +170,16 @@ describe("isCoordinatorUnit — one unit's row", () => {
     expect(isCoordinatorUnit({ ...unit, resume: { pr: 7, headSha: 42 } })).toBe(false);
     expect(isCoordinatorUnit({ ...unit, resume: { pr: 7, url: "" } })).toBe(false);
     expect(isCoordinatorUnit({ ...unit, resume: "7" })).toBe(false);
+  });
+
+  it("the review thread is a thread key with an optional link, beside the unit's own thread; a review thread without its key, with a malformed link, or as a bare string is refused", () => {
+    expect(isCoordinatorUnit({ ...unit, reviewThread: { threadKey: "slack:C1:3.0" } })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, reviewThread: undefined })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, reviewThread: { sourceUrl: "https://acme.slack.com/x" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, reviewThread: { threadKey: "" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, reviewThread: { threadKey: 7 } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, reviewThread: { threadKey: "slack:C1:3.0", sourceUrl: "" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, reviewThread: "slack:C1:3.0" })).toBe(false);
   });
 
   it("refuses a bad instance id, a missing unit, slug or branch, a non-array dependency list, a malformed pull request, round or ending, and a non-object", () => {

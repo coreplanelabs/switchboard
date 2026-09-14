@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -60,11 +60,11 @@ describe("the ship modules after the round loop's retirement — a source scan",
     expect(src).not.toMatch(/from "\.\/ship\/(codingChild|reviewChild|childRound)\.js"/);
   });
 
-  it("the child modules export only the prompt blocks the spawn route composes a child's turn from", () => {
+  it("the child modules export only the prompt blocks the spawn route composes a child's turn from: the coding module keeps the contract's place in the first turn and nothing of a fix turn", () => {
     expect(existsSync(join(core, "ship/childRound.ts"))).toBe(false);
     const coding = read("ship/codingChild.ts");
     const review = read("ship/reviewChild.ts");
-    expect(exportsOf(coding)).toEqual(["buildShipFixTurn", "withContractInFirstUserTurn"]);
+    expect(exportsOf(coding)).toEqual(["withContractInFirstUserTurn"]);
     expect(exportsOf(review)).toEqual(["buildShipReviewTurn"]);
     for (const src of [coding, review]) {
       expect(src).not.toMatch(/runner\.js"/);
@@ -73,6 +73,32 @@ describe("the ship modules after the round loop's retirement — a source scan",
       expect(src).not.toContain("runShipCodingChild");
       expect(src).not.toContain("runShipReviewChild");
     }
+  });
+
+  it("the fix child is gone from the tree: no `fixRound` option, no `buildShipFixTurn`, no `knownFindingIds` check, no `fix` brief kind and no no-sink answer from `submit_dispositions` anywhere under src/", () => {
+    const src = join(core, "..");
+    const self = fileURLToPath(import.meta.url);
+    /** Every `.ts` file under `src/` but this scan, with its source; tests included. */
+    const files: Array<{ path: string; source: string; test: boolean }> = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (entry.isFile() && path.endsWith(".ts") && path !== self)
+          files.push({ path, source: readFileSync(path, "utf8"), test: /\.test\.ts$/.test(path) });
+      }
+    };
+    walk(src);
+    expect(files.length).toBeGreaterThan(100);
+    const offenders = (pattern: RegExp, includeTests: boolean) =>
+      files.filter((f) => (includeTests || !f.test) && pattern.test(f.source)).map((f) => relative(src, f.path));
+    // The symbols, everywhere: a test that still names them would be testing code that is not there.
+    expect(offenders(/\bbuildShipFixTurn\b/, true)).toEqual([]);
+    expect(offenders(/\bknownFindingIds\b/, true)).toEqual([]);
+    // The shapes, in the shipped code: the option, the brief kind and the tool's no-sink answer.
+    expect(offenders(/\bfixRound\b/, false)).toEqual([]);
+    expect(offenders(/kind: "fix"/, false)).toEqual([]);
+    expect(offenders(/no ship fix round/, false)).toEqual([]);
   });
 
   it("the ship branch hands every request to the runner: it imports the hand-off and no loop, and reads no switch", () => {

@@ -137,19 +137,12 @@ export interface ToolContext {
    *  run record carries it; a ship round posts it to the unit's board issue.
    *  Absent → the tool says nothing is recording it. */
   onHandoff?: (handoff: Handoff) => void;
-  /** Receives a fix round's per-finding dispositions from
-   *  `submit_dispositions` (docs/reference/specs/agent-ship.md item 6). Injected by the
-   *  ship orchestrator for fix rounds; the last valid call wins. Absent → the
-   *  tool still accepts the call. */
+  /** Receives a coding run's per-finding dispositions from
+   *  `submit_dispositions` (docs/reference/specs/agent-ship.md item 6). Injected by
+   *  the run loop for every run; the last valid call wins and the set rides the
+   *  run record, where the plan runner matches it to its round's findings.
+   *  Absent → the tool still accepts the call. */
   onDispositions?: (dispositions: FindingDisposition[]) => void;
-  /** The finding ids from the round's review verdict, for
-   *  `submit_dispositions`' known-id check: a disposition naming an id
-   *  outside this list is a string error naming it. The tool cannot know the
-   *  findings on its own, so validation runs against this list — optional:
-   *  when absent (plain coding runs, unit contexts) the id-existence check is
-   *  skipped; the ship orchestrator supplies it from the parsed
-   *  verdict's findings. */
-  knownFindingIds?: string[];
 }
 
 export interface RunnableTool extends ToolDef {
@@ -413,23 +406,23 @@ export const submitVerdictTool: RunnableTool = {
   },
 };
 
-// The fix round's answer to the review's findings (docs/reference/specs/agent-ship.md
-// item 6): one typed disposition per finding, so the ship orchestrator can
+// A coding run's answer to a review's findings (docs/reference/specs/agent-ship.md
+// item 6): one typed disposition per finding, recorded on the run's record as
+// submitted, so the plan runner can match them to its round's findings and
 // split a cap report into declined (disposition recorded) vs unaddressed
 // (none). Validation mirrors submit_verdict's fail-closed style — the parse
-// lives beside the findings in src/core/reviewVerdict.ts. The tool cannot
-// know the round's findings on its own: the known-id check runs against
-// `ToolContext.knownFindingIds` when the orchestrator supplies it, and is
-// skipped when absent.
+// lives beside the findings in src/core/reviewVerdict.ts. The tool holds no
+// list of a review's ids: an id the review never issued is recorded like any
+// other and the runner drops it, with a note to the re-review.
 export const submitDispositionsTool: RunnableTool = {
   name: "submit_dispositions",
   description:
     "Record one disposition per review finding after addressing them: `fixed` (the finding is addressed in your " +
     "pushed code) or `declined` (deliberately not doing it — the note says why). `findingId` is the finding's " +
-    "stable id from the review (F1, F2, …) — use exactly those ids; an unknown id is rejected by name. Every " +
-    "finding gets exactly one entry, every severity included (nits too). Call it once with the complete set after " +
-    "your last push; a later call replaces the earlier one. Dispositions are recorded only inside a ship " +
-    "pipeline's fix round; anywhere else the call is an honest no-op that says nothing was recorded.",
+    "stable id from the review (F1, F2, …) — use exactly those ids; an id the review never issued answers nothing " +
+    "and is dropped when the plan runner reads your record. Every finding gets exactly one entry, every severity " +
+    "included (nits too). Call it once with the complete set after your last push; a later call replaces the " +
+    "earlier one. The set rides this run's record, where the plan runner reads it for the re-review.",
   inputSchema: {
     type: "object",
     properties: {
@@ -452,18 +445,9 @@ export const submitDispositionsTool: RunnableTool = {
   async run(input, ctx) {
     const parsed = parseDispositionsInput(input);
     if (!parsed) return "error: dispositions must be an array of { findingId, disposition: fixed|declined, note }";
-    if (ctx.knownFindingIds) {
-      const known = new Set(ctx.knownFindingIds);
-      const unknown = [...new Set(parsed.dispositions.map((d) => d.findingId).filter((id) => !known.has(id)))];
-      if (unknown.length) {
-        return `error: unknown finding id${unknown.length === 1 ? "" : "s"} ${unknown.join(", ")} — use exactly the ids from the review's findings list`;
-      }
-    }
-    // No sink means no ship fix round is listening (docs/reference/specs/agent-ship.md
-    // item 6): a "recorded" ack here would be a false success the model
-    // relays to the user — say the truth instead.
-    if (!ctx.onDispositions)
-      return "no ship fix round is active here — dispositions were not recorded (they apply only when addressing a ship review's findings)";
+    // The run loop hands every run the sink; a context without one (a unit
+    // test's, a CLI's) records nothing and the ack says so, never "recorded".
+    if (!ctx.onDispositions) return "no run is recording dispositions here";
     ctx.onDispositions(parsed.dispositions);
     const drops = parsed.dropped.length ? ` (dropped: ${parsed.dropped.join("; ")})` : "";
     return `dispositions recorded: ${parsed.dispositions.length}${drops}; a later call replaces this one`;

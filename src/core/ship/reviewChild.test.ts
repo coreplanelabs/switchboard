@@ -36,7 +36,7 @@ describe("buildShipReviewTurn — the review round's one user turn (item 5)", ()
     );
   });
 
-  it("a re-review carries the PREVIOUS round's findings and the fix round's dispositions as given, loads the re-review-delta skill for the reading, keeps the verdict over the full diff, and carries unresolved findings forward under their ids", () => {
+  it("a re-review carries the PREVIOUS round's findings and the coding run's dispositions as given, loads the re-review-delta skill for the reading, keeps the verdict over the full diff, and carries unresolved findings forward under their ids", () => {
     const turn = buildShipReviewTurn({
       where: "acme/api#7",
       round: 2,
@@ -60,5 +60,23 @@ describe("buildShipReviewTurn — the review round's one user turn (item 5)", ()
     expect(turn).toContain("Previous round's findings:\n(none recorded)");
     expect(turn).toContain("Fix round's dispositions:\n(none recorded)");
     expect(turn).not.toContain("at head");
+    expect(turn).not.toContain("dropped");
+  });
+
+  it("a re-review names the ids the coding run recorded a disposition for that the previous round never issued, so the reviewer knows they answer nothing", () => {
+    const turn = buildShipReviewTurn({
+      where: "acme/api#7",
+      round: 2,
+      headSha: HEAD,
+      prior: { findings: [F1], dispositions: [D1], dropped: ["F9", "F10"] },
+    });
+    expect(turn).toContain("Fix round's dispositions:\nF1: fixed — cookie set on the redirect");
+    expect(turn).toContain("Dispositions naming no finding of the previous round (dropped): F9, F10");
+    const none = buildShipReviewTurn({
+      where: "acme/api#7",
+      round: 2,
+      prior: { findings: [F1], dispositions: [D1], dropped: [] },
+    });
+    expect(none).not.toContain("dropped");
   });
 });

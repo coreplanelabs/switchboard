@@ -3566,11 +3566,12 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect("handoff" in (await store2.get("r12"))!).toBe(false);
   });
 
-  // docs/reference/specs/run-history.md item 2, agent-ship.md item 6 — a coding
-  // run dispatched as a fix round (`DispatchOptions.fixRound` names the review's
-  // finding ids) records `submit_dispositions` on its record; a plain coding run
-  // has no sink, so the tool answers the honest no-op and the record carries none.
-  it("a coding run dispatched as a fix round records its dispositions against the named findings; an unknown id is refused by name; a plain coding run records none", async () => {
+  // docs/reference/specs/run-history.md item 2, agent-ship.md item 6 — every
+  // coding run records what it submits through `submit_dispositions` on its
+  // record, whatever ids it names: the plan runner matches the set to the
+  // round's findings when it reads the record. A run that submitted none
+  // carries no key.
+  it("a coding run records the dispositions it submits, the ids the review issued or not, and the last set wins; a coding run that submitted none carries no dispositions key", async () => {
     const dispositionsProvider = (set: unknown[]): Provider => {
       let n = 0;
       return {
@@ -3607,20 +3608,23 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const deps = codingDeps(dispositionsProvider(set));
     codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
     deps.openPullRequest = openSpy().fn;
-    deps.runRegistry = new RunRegistry({ genId: () => "r-fix", genToken: () => "t-fix" });
+    deps.runRegistry = new RunRegistry({ genId: () => "r-findings", genToken: () => "t-findings" });
     const store = new InMemoryRunStore();
     deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
-    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io, { fixRound: { findingIds: ["F1"] } });
+    // No option names the review's ids: the run is a plain `agent:coding` dispatch, as the findings step's is.
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
     await deps.runHistoryWriter.settled();
-    const rec = (await store.get("r-fix"))!;
+    const rec = (await store.get("r-findings"))!;
     expect(rec.dispositions).toEqual(set);
     const dispositionAcks = (events: RunEvent[]) =>
       events.flatMap((e) => (e.type === "tool_result" && e.tool === "submit_dispositions" ? [e.summary] : []));
     const acks = dispositionAcks(rec.events);
-    expect(acks[0]).toMatch(/unknown finding id F9/);
+    expect(acks).toHaveLength(2);
+    expect(acks[0]).toMatch(/dispositions recorded: 1/); // F9, an id no review issued, is recorded as submitted
     expect(acks[1]).toMatch(/dispositions recorded: 1/);
+    expect(acks.some((a) => /not recorded|unknown finding id/.test(a ?? ""))).toBe(false);
 
-    const plain = codingDeps(dispositionsProvider(set));
+    const plain = codingDeps(describeThenAnswer(DESCRIPTION));
     codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
     plain.openPullRequest = openSpy().fn;
     plain.runRegistry = new RunRegistry({ genId: () => "r-plain", genToken: () => "t-plain" });
@@ -3630,9 +3634,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     await plain.runHistoryWriter.settled();
     const rec2 = (await store2.get("r-plain"))!;
     expect("dispositions" in rec2).toBe(false);
-    const noSink = dispositionAcks(rec2.events);
-    expect(noSink.length).toBeGreaterThan(0);
-    expect(noSink.every((s) => /not recorded/.test(s))).toBe(true);
+    expect(dispositionAcks(rec2.events)).toEqual([]);
   });
 
   // docs/reference/specs/agent-ship.md item 13 — a coordinator's coding child is

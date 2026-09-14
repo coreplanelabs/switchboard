@@ -1,26 +1,12 @@
-// The coding child's prompt blocks (docs/reference/specs/agent-ship.md items 7
-// and 13): what a coding round of the ship pipeline is told beyond a plain
-// coding run. The child itself is an ordinary `dispatch()` run the plan
-// runner's spawn route starts as the requesting user (coordinator/briefs.ts
-// composes the turn from these); the fix turn carries the review's findings
-// and the loop contract, and the unit's contract enters the first user turn.
+// The coding child's prompt block (docs/reference/specs/agent-ship.md item 13):
+// where a unit's contract enters a coding round of the ship pipeline. The child
+// itself is an ordinary `dispatch()` run the plan runner's spawn route starts as
+// the requesting user (coordinator/briefs.ts composes the turn). A review's
+// findings are no block of this module: the runner dispatches them into the
+// unit thread as a message of their own (item 7), so the coding session there
+// continues with them.
 
 import type { ChatMessage } from "../../providers/types.js";
-import { formatFinding, type Finding } from "../reviewVerdict.js";
-
-/** The fix round's one user turn: the findings payload verbatim (ids, severity,
- *  file:line, title) plus the review prose, and the loop contract — every
- *  severity gets a disposition, description resubmitted, branch repushed. */
-export function buildShipFixTurn(input: { where: string; findings: Finding[]; review: string }): string {
-  const findings =
-    input.findings.map(formatFinding).join("\n") || "(the review listed no structured findings — address its prose)";
-  return (
-    `The review of ${input.where} requested changes. Load the \`address-review-findings\` skill and address EVERY finding below, nits included: ` +
-    `record one disposition per finding with submit_dispositions (fixed|declined, with a note), squash to coherent commits, ` +
-    `resubmit the PR description with submit_pr_description, and push the branch. Never merge and never approve.\n\n` +
-    `Findings:\n${findings}\n\nReview:\n${input.review}`
-  );
-}
 
 /** The unit contract enters the child's FIRST user turn (docs/reference/specs/agent-ship.md
  *  item 13): appended as its own text part after the request's text, so the

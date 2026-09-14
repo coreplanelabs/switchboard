@@ -22,7 +22,7 @@ A run that starts other runs. `agent:conductor` — or the router's compound for
 ## Roadmap (gaps)
 
 - `[gap]` Thread stickiness in a spawned thread: the child's directive lives in no user turn of its thread, so a follow-up there after the child finished resolves to the channel's default agent; the routed preset's sticky card label ([record 0026](../../decisions/0026-capability-profiles-and-request-routing.md), slice two) would cover it.
-- `[gap]` The board: `parentRunId` is on the record and the live summary; the `/runs` index does not yet draw the tree.
+- `[gap]` The board: `parentRunId` is on the record and the live summary, and a ship unit's row names its coding thread and its review thread; the `/runs` index does not yet draw the tree, and a unit's runs are not yet one page ([record 0034](../../decisions/0034-one-agent-per-unit-a-run-continues-a-transcript.md), the unit as the reading unit).
 
 ## Validation criteria
 
