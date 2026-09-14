@@ -4,10 +4,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   base64ByteLength,
+  base64LengthOf,
+  chunkPlan,
   MAX_READ_BASE64_CHARS,
   MAX_READ_BYTES,
+  parseByteSize,
+  READ_CHUNK_BYTES,
+  readChunkCommandFor,
   readCommandFor,
   readEncodingOf,
+  statCommandFor,
   tooLargeMessage,
 } from "./binaryRead.js";
 import { decodeBase64Read, ExecHealthTracker, ExecInfraError, LocalExecutor, type Executor } from "./executor.js";
@@ -27,9 +33,8 @@ describe("the /read encoding contract (item 19)", () => {
     expect(readEncodingOf({ encoding: 7 })).toMatchObject({ error: expect.stringContaining("got 7") });
   });
 
-  it("the resident reads text with cat and bytes with an unwrapped base64 — one line for the char cap to slice", () => {
-    expect(readCommandFor("utf8", "/w/t/a.ts")).toBe("cat -- /w/t/a.ts");
-    expect(readCommandFor("base64", "/w/t/a.png")).toBe("base64 -w0 -- /w/t/a.png");
+  it("the resident reads text with cat; bytes never ride one command (see the chunked read)", () => {
+    expect(readCommandFor("/w/t/a.ts")).toBe("cat -- /w/t/a.ts");
   });
 
   it("the base64 cap is exactly what a MAX_READ_BYTES file encodes to, so the largest allowed file is never called truncated — and the decoded byte count, not the char count, tells a file one byte over apart", () => {
@@ -50,13 +55,68 @@ describe("the /read encoding contract (item 19)", () => {
   });
 });
 
+describe("the resident's chunked byte read (item 19)", () => {
+  it("measures the file first with stat, and reads only a number", () => {
+    expect(statCommandFor("/w/t/a.png")).toBe("stat -c %s -- /w/t/a.png");
+    expect(parseByteSize("12000000\n")).toBe(12_000_000);
+    expect(parseByteSize("0")).toBe(0);
+    expect(parseByteSize("stat: cannot statx 'a.png': No such file or directory")).toBeNull();
+    expect(parseByteSize("")).toBeNull();
+  });
+
+  it("the chunk is a multiple of 3 and well under the SDK's observed stream cut, so pieces have no padding and concatenate into the whole", () => {
+    expect(READ_CHUNK_BYTES % 3).toBe(0);
+    expect(READ_CHUNK_BYTES).toBeLessThan(1_764_096); // the bytes that survived the cut, live
+    expect(base64LengthOf(READ_CHUNK_BYTES) % 4).toBe(0);
+    const file = Buffer.alloc(READ_CHUNK_BYTES * 2 + 17, 3);
+    const pieces = chunkPlan(file.byteLength).map((c) =>
+      file.subarray(c.offset, c.offset + c.length).toString("base64"),
+    );
+    expect(pieces.join("")).toBe(file.toString("base64"));
+  });
+
+  it("the plan covers the size exactly, in order, with a short last chunk; an empty file has no chunks", () => {
+    expect(chunkPlan(0)).toEqual([]);
+    expect(chunkPlan(5, 3)).toEqual([
+      { offset: 0, length: 3 },
+      { offset: 3, length: 2 },
+    ]);
+    expect(chunkPlan(6, 3)).toEqual([
+      { offset: 0, length: 3 },
+      { offset: 3, length: 3 },
+    ]);
+    expect(chunkPlan(MAX_READ_BYTES)).toHaveLength(Math.ceil(MAX_READ_BYTES / READ_CHUNK_BYTES));
+  });
+
+  it("each chunk command seeks with tail, bounds with head and encodes unwrapped, and its expected base64 length is known before it runs", () => {
+    expect(readChunkCommandFor("/w/t/a.png", { offset: 0, length: 3 })).toBe(
+      "tail -c +1 -- /w/t/a.png | head -c 3 | base64 -w0",
+    );
+    expect(readChunkCommandFor("/w/t/a.png", { offset: 1_048_575, length: 17 })).toBe(
+      "tail -c +1048576 -- /w/t/a.png | head -c 17 | base64 -w0",
+    );
+    for (const n of [1, 2, 3, 17, READ_CHUNK_BYTES])
+      expect(base64LengthOf(n)).toBe(Buffer.alloc(n).toString("base64").length);
+  });
+});
+
 describe("decodeBase64Read — the bot side of a Worker's answer (item 19)", () => {
-  it("decodes a base64 answer to the bytes", () => {
+  it("decodes a base64 answer to the bytes when they are exactly the size the Worker measured", () => {
     const bytes = decodeBase64Read(
-      { encoding: "base64", content: Buffer.from([137, 80, 78, 71]).toString("base64") },
+      { encoding: "base64", content: Buffer.from([137, 80, 78, 71]).toString("base64"), size: 4 },
       { where: "sandbox worker /read", path: "shot.png" },
     );
     expect(Array.from(bytes)).toEqual([137, 80, 78, 71]);
+  });
+
+  it("bytes that are not the named size are read-inconsistent and nothing is handed on; an answer without a size predates the verified read", () => {
+    const content = Buffer.from([137, 80, 78]).toString("base64");
+    expect(() =>
+      decodeBase64Read({ encoding: "base64", content, size: 4 }, { where: "resident /read", path: "a.png" }),
+    ).toThrow("resident /read: read-inconsistent — a.png is 4 bytes but 3 arrived; nothing was handed on");
+    expect(() => decodeBase64Read({ encoding: "base64", content }, { where: "resident /read", path: "a.png" })).toThrow(
+      /answered without the file's size — it predates the verified read; redeploy it/,
+    );
   });
 
   it("a Worker that predates binary reads answers text — named as a rollout gap, never decoded as base64, never infra", () => {

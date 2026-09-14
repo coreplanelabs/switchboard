@@ -239,10 +239,14 @@ export class LocalExecutor implements Executor {
  *  `encoding: "base64"` is a Worker that predates binary reads — it ignored
  *  the request and sent the file as text — named as such (the fix is a
  *  redeploy), never decoded as if it were base64; a `tooLarge` answer is the
- *  cap's one message. Both are plain errors: the model's file or the fleet's
- *  rollout, never a sick Worker. */
+ *  cap's one message. The bytes must be exactly `size`, the Worker's own
+ *  measurement of the file before the read: a stream cut in transit (the
+ *  sandbox SDK truncates a command's output past a limit its typings do not
+ *  name) is refused as `read-inconsistent`, never handed on as the file, and an
+ *  answer without a size predates the verified read. All plain errors: the
+ *  model's file or the fleet's rollout, never a sick Worker. */
 export function decodeBase64Read(
-  answer: { content?: unknown; encoding?: unknown; tooLarge?: unknown },
+  answer: { content?: unknown; encoding?: unknown; tooLarge?: unknown; size?: unknown },
   at: { where: string; path: string },
 ): Uint8Array {
   if (answer.encoding !== "base64") {
@@ -251,7 +255,18 @@ export function decodeBase64Read(
     );
   }
   if (answer.tooLarge === true) throw new Error(tooLargeMessage(at.path));
-  return new Uint8Array(Buffer.from(typeof answer.content === "string" ? answer.content : "", "base64"));
+  if (typeof answer.size !== "number") {
+    throw new Error(
+      `${at.where}: the Worker answered without the file's size — it predates the verified read; redeploy it`,
+    );
+  }
+  const bytes = new Uint8Array(Buffer.from(typeof answer.content === "string" ? answer.content : "", "base64"));
+  if (bytes.byteLength !== answer.size) {
+    throw new Error(
+      `${at.where}: read-inconsistent — ${at.path} is ${answer.size} bytes but ${bytes.byteLength} arrived; nothing was handed on`,
+    );
+  }
+  return bytes;
 }
 
 /** Dev-only deterministic ops against the thread's LOCAL workspace directory
