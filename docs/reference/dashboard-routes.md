@@ -31,7 +31,8 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 
 | Route | Methods | Action | What it does |
 |---|---|---|---|
-| `/api/help.show` | `GET`, `POST` | `help:read` | What Switchboard can do: agents, per-request directives, and every chat command. |
+| `/api/help.show` | `GET`, `POST` | `help:read` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. |
+| `/api/help.commands` | `GET`, `POST` | `help:read` | Every chat command by group, the grammar, and the per-request directives. |
 | `/api/status.show` | `GET`, `POST` | `status:read` | Which build this process runs: version, commit, when it was built and started, runs in flight, draining. |
 | `/api/config.show` | `GET`, `POST` | `config:read` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted. |
 | `/api/config.set` | `POST` | `config:write` | Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.&lt;agent&gt; / --efforts.&lt;agent&gt;, the boundary's axes --boundary.&lt;axis&gt; (a boundary caps every run in the scope and never grants). |

@@ -14,7 +14,7 @@ flowchart TB
 
 Commands: [Configure your defaults](../how-to/configure-your-defaults.md). Record: [decision 0005](../decisions/0005-layered-config-effort-first-class.md).
 
-When no layer above the installation defaults names the agent and `routing.auto` is on, the request router picks the preset before the defaults do; a directive, the sticky preset, a user `agent` or a channel `agent` each skip it ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
+When no layer above the installation defaults names the agent, the request router picks the preset before the defaults do — on unless the deployment sets `routing: { auto: false }`; a directive, the sticky preset, a user `agent` or a channel `agent` each skip it ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
 
 ## The thread layer has no storage
 

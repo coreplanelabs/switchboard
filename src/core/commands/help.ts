@@ -1,3 +1,4 @@
+import type { PresetDoor } from "../../agents/registry.js";
 import {
   commandDefiner,
   type CommandDef,
@@ -6,16 +7,24 @@ import {
   type JsonValue,
 } from "../commandRegistry.js";
 import { catalogueText, chatCatalogueText, chatForm, cliWords, type CommandShape } from "../commandSurface.js";
+import { PROJECT_DOCS_URL } from "../docsLink.js";
 
-// `help.show` (phase 4b): the one help text, DERIVED — the agents from the
-// agent registry, the per-request directive syntax, and the chat catalogue
-// from the command registry itself (every chat-exposed command, in registration
-// order). Nothing about a command is hand-written here: adding a registration
-// adds its help line. In chat the bare word `help` is this command.
+// The two help commands. `help.show` — the bare word `help` in chat — is the
+// plain-language guide a person meets first (docs/reference/specs/routing-and-config.md
+// item 21): how to ask (describe what you want; the router picks the preset and
+// the card says why), how to force a preset (`agent:<preset>`, the presets a
+// plain message can mean listed off the registry, and that `ship` runs only
+// when named), how to change a route (a reply with `agent:<preset>` once the
+// card closes), then one pointer to the command reference. It prints no
+// command grammar: commands are a first-class surface for the operator who
+// digs in, not the way a person asks. `help.commands` is that surface — the
+// per-request directives and every chat-exposed command by group, DERIVED from
+// the registry this process bound, so adding a registration adds its line.
 
 export interface HelpCommandDeps {
   help: {
-    agents(): Array<{ name: string; description: string }>;
+    /** Every preset off the registry, with how a plain message reaches it (`presetDoor`). */
+    agents(): Array<{ name: string; description: string; door: PresetDoor }>;
     /** The catalogue this process bound — the very list the adapters expose. */
     commands(): ReadonlyArray<CommandShape & { surfaces?: { chat?: false } }>;
   };
@@ -23,22 +32,57 @@ export interface HelpCommandDeps {
 
 const defineCommand = commandDefiner<HelpCommandDeps>();
 
+/** Where the command grammar's reference lives: the one line `help` ends with. */
+export const COMMANDS_REFERENCE_URL = `${PROJECT_DOCS_URL}/reference/slack-commands`;
+
 export const DIRECTIVES_HELP =
   "`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42` (effort: low | medium | high — lower = faster turns; budget: whole minutes, at least 2 — narrows this run's wall clock, never widens it)";
 
-/** The help text around the command list — shared by both renderings. */
-function helpFrame(output: JsonValue, commandList: (commands: CommandShape[]) => string[]): string {
+interface HelpAgent {
+  name: string;
+  description: string;
+  door: PresetDoor;
+}
+
+function agentsOf(output: JsonValue): HelpAgent[] {
   const o = output as JsonObject;
-  const agents = (Array.isArray(o.agents) ? o.agents : [])
+  return (Array.isArray(o.agents) ? o.agents : [])
     .map((a) => a as JsonObject)
-    .map((a) => `• \`${String(a.name)}\` — ${String(a.description)}`);
+    .map((a) => ({ name: String(a.name), description: String(a.description), door: String(a.door) as PresetDoor }));
+}
+
+/** The guide, the same on every surface: how to ask, how to force a preset,
+ *  how to change a route, where the commands are. Every preset line is read
+ *  off the registry through the deps — the routable presets as the list a
+ *  plain message picks from, the compound preset with its door, the presets
+ *  reached only by name with theirs. */
+function plainHelp(output: JsonValue): string {
+  const agents = agentsOf(output);
+  const bullet = (a: HelpAgent) => `• \`${a.name}\` — ${a.description}`;
+  return [
+    "*Switchboard* — just describe what you want. I pick the agent for it and say why on the card (`routed: <reason>`).",
+    ...agents
+      .filter((a) => a.door === "compound")
+      .map((a) => `Several independent asks in one message run as \`${a.name}\`, one child per ask: ${a.description}`),
+    "*Want a particular agent?* Start your message with `agent:<preset>`:",
+    ...agents.filter((a) => a.door === "routed").map(bullet),
+    ...agents
+      .filter((a) => a.door === "directive")
+      .map((a) => `\`${a.name}\` is never picked for you — name it: \`agent:${a.name}\` — ${a.description}`),
+    "*Wrong pick?* Once the card closes, reply `agent:<preset>` in the thread and the request runs there instead.",
+    `Commands (config, runs, repos and more): \`help commands\` lists them; the reference is ${COMMANDS_REFERENCE_URL}`,
+  ].join("\n");
+}
+
+/** The command reference: the per-request directives, then the command list
+ *  under the grammar line — shared by both renderings, which differ only in
+ *  the list's shape. */
+function commandsFrame(output: JsonValue, commandList: (commands: CommandShape[]) => string[]): string {
+  const o = output as JsonObject;
   const commands = (Array.isArray(o.commands) ? o.commands : [])
     .map((c) => c as JsonObject)
     .map((c) => ({ id: String(c.id), describe: String(c.describe) }));
   return [
-    "*Switchboard* — send me a request. Agents:",
-    ...agents,
-    "",
     "*Per-request directives* (anywhere in the message):",
     DIRECTIVES_HELP,
     "",
@@ -63,11 +107,22 @@ export const helpShow = defineCommand({
   id: "help.show",
   action: "help:read",
   effect: "read",
-  describe: "What Switchboard can do: agents, per-request directives, and every chat command.",
-  render: (output) => helpFrame(output, (commands) => [catalogueText(commands)]),
-  renderChat: (output) => helpFrame(output, chatCommandList),
+  describe: "How to ask in plain words: describe what you want, force an agent, change a route in the thread.",
+  render: plainHelp,
   handler: async ({ deps }) => ({
     agents: deps.help.agents() as unknown as JsonValue,
+    commandsReference: COMMANDS_REFERENCE_URL,
+  }),
+});
+
+export const helpCommandsList = defineCommand({
+  id: "help.commands",
+  action: "help:read",
+  effect: "read",
+  describe: "Every chat command by group, the grammar, and the per-request directives.",
+  render: (output) => commandsFrame(output, (commands) => [catalogueText(commands)]),
+  renderChat: (output) => commandsFrame(output, chatCommandList),
+  handler: async ({ deps }) => ({
     directives: DIRECTIVES_HELP,
     commands: deps.help
       .commands()
@@ -78,6 +133,7 @@ export const helpShow = defineCommand({
 
 export const helpCommands: readonly CommandDef<HelpCommandDeps>[] = [
   helpShow,
+  helpCommandsList,
 ] as unknown as CommandDef<HelpCommandDeps>[];
 
 export function registerHelpCommands<D extends HelpCommandDeps>(registry: CommandRegistry<D>): void {

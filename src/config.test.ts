@@ -11,6 +11,7 @@ import {
   openConfigStore,
   OverridesConflictError,
   overridesBackingFor,
+  routingOn,
   WorkerOverridesBacking,
   type AppConfig,
   type ConfigStoreOptions,
@@ -683,11 +684,18 @@ describe("selfImprovement", () => {
 // block: the router's switch and its model, validated at load so a value that
 // is not a boolean can never read as on or as off.
 describe("routing block (routing.auto, routing.model)", () => {
-  it("parses auto and model; an absent block leaves the field unset (the router off)", () => {
+  it("parses auto and model; an absent block leaves the field unset", () => {
     const s = store(YAML_FIXTURE + "routing:\n  auto: true\n  model: anthropic/fast-model\n");
     expect(s.config.routing).toEqual({ auto: true, model: "anthropic/fast-model" });
     expect(store(YAML_FIXTURE + "routing:\n  auto: false\n").config.routing).toEqual({ auto: false });
     expect(store().config.routing).toBeUndefined();
+  });
+
+  it("the router is on by default: no block, or a block naming only the model, routes; `auto: false` is the one way off", () => {
+    expect(routingOn(store().config)).toBe(true);
+    expect(routingOn(store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\n").config)).toBe(true);
+    expect(routingOn(store(YAML_FIXTURE + "routing:\n  auto: true\n").config)).toBe(true);
+    expect(routingOn(store(YAML_FIXTURE + "routing:\n  auto: false\n").config)).toBe(false);
   });
 
   it("refuses a non-boolean auto by name, whatever it spells", () => {

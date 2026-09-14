@@ -435,6 +435,26 @@ Maintain the user-facing status card with the update_status tool: one item per c
 
 Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack: lead with the outcome, then one line per child — its preset, its thread, its status and its result in a sentence — and what is still running, if anything.`;
 
+/** The compound answer's preset — the one preset absent from the router's
+ *  table that a plain message still reaches: a message with two or more
+ *  independent asks routes to it with the parts named
+ *  (docs/reference/specs/routing-and-config.md item 21). Its def below opts
+ *  out of the table (`routable: false`); the router names it only in the
+ *  compound form. */
+export const COMPOUND_PRESET = "conductor";
+
+/** How a plain message reaches a preset (docs/reference/specs/routing-and-config.md
+ *  item 21), read off its def: `routed` — a row of the router's table, picked
+ *  for a single ask; `compound` — the compound form alone, a message with
+ *  several independent asks; `directive` — never picked, only `agent:<name>`.
+ *  `help` renders its lines from this, so its words follow the registry. */
+export type PresetDoor = "routed" | "compound" | "directive";
+
+export function presetDoor(def: AgentDef): PresetDoor {
+  if (def.routable !== false) return "routed";
+  return def.name === COMPOUND_PRESET ? "compound" : "directive";
+}
+
 export const AGENTS: Record<string, AgentDef> = {
   general: {
     name: "general",

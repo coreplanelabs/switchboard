@@ -73,7 +73,7 @@ sequenceDiagram
 
 The same sequence runs from the CLI, or on a local backend.
 
-The directive in the example forces `coding`. Without one (no `agent:`, no sticky preset, no channel or user `agent`) and with `routing.auto` on, the dispatcher first asks the fast model which preset the message means and says so on the card (`routed: <reason>`); the gates then judge the routed preset exactly as they judge a typed one, `ship` is never routed, and a message with several independent parts runs as a `conductor` with one child per part ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
+The directive in the example forces `coding`. Without one (no `agent:`, no sticky preset, no channel or user `agent`) — and unless the deployment set `routing: { auto: false }` — the dispatcher first asks the fast model which preset the message means and says so on the card (`routed: <reason>`); the gates then judge the routed preset exactly as they judge a typed one, `ship` is never routed, and a message with several independent parts runs as a `conductor` with one child per part ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
 
 ## Every step is measured
 

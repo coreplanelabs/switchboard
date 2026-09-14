@@ -3,7 +3,8 @@
 // message picks its own preset. A filter after `resolveRun` and before the
 // agent gate and repository resolution, run only when the agent would
 // otherwise be `defaults.agent` — a directive, the thread's sticky preset, a
-// user or channel `agent` each skip it — and only when `routing.auto` is on.
+// user or channel `agent` each skip it — and unless the deployment turned it
+// off (`routing: { auto: false }`; on by default, `routingOn`).
 // It asks the deployment's fast model for one JSON object over the preset
 // table (rendered from the registry, never copied), the thread's last
 // directives and the request text quoted as untrusted data; anything but a
@@ -18,8 +19,8 @@
 // way only — the compound form: a request with two or more independent parts
 // answers as `conductor` with the parts, each on a preset from the same table,
 // and runs as one conductor whose brief lists the parts for it to spawn.
-import { AGENTS, type Identity, type MachineClass } from "../../agents/registry.js";
-import type { ConfigStore, ResolvedRequest } from "../../config.js";
+import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
+import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { ProviderRegistry } from "../../providers/registry.js";
 import { parseModelRef, type Provider } from "../../providers/types.js";
@@ -42,9 +43,6 @@ export const ROUTE_TIMEOUT_MS = 8_000;
 export const ROUTE_PART_TEXT_CAP = 1000;
 /** The most of a part's text the card's line shows. */
 export const ROUTE_PART_LINE_CAP = 100;
-/** The compound answer's preset: the one preset absent from the table that the
- *  router may still name — with parts. */
-export const COMPOUND_PRESET = "conductor";
 /** The line that opens the parts block of a routed conductor's brief; the
  *  conductor's prompt (`CONDUCTOR_SYSTEM`) names the same words. */
 export const COMPOUND_BRIEF_HEADING = "Routed as a compound request";
@@ -355,10 +353,13 @@ export type RouteStage =
   { kind: "unrouted"; rejected?: RouteDecided } | { kind: "routed"; resolved: ResolvedRequest; route: RouteDecided };
 
 /**
- * The stage. Off, or an agent any layer chose, or a thread with a run in
- * flight, or a router that fails or answers outside the requester's
- * allowlist: `unrouted`, and `dispatch()` proceeds exactly as before this
- * stage existed. A route re-resolves the (agent, model, effort) triple through
+ * The stage. Turned off (`routing: { auto: false }`), or an agent any layer
+ * chose, or a thread with a run in flight, or a router that fails or answers
+ * outside the requester's allowlist: `unrouted`, and `dispatch()` proceeds
+ * exactly as before this stage existed. On by default, on every channel the
+ * dispatcher serves — the CLI's `ask` included, where a router that cannot
+ * run (no fast model configured, a provider error) falls through the same way.
+ * A route re-resolves the (agent, model, effort) triple through
  * the config layers with the routed preset as the request's agent — so the run
  * gets that preset's own model — and hands back the decision for the card and
  * the record. A compound (the conductor with its parts) is offered only to a
@@ -369,8 +370,8 @@ export type RouteStage =
 export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Promise<RouteStage> {
   const { msg, directives, sticky, agentSource, threadLive, root } = ctx;
   const cfg = deps.config.config;
-  if (cfg.routing?.auto !== true || agentSource !== "default" || threadLive) return { kind: "unrouted" };
-  const modelRef = cfg.routing.model ?? cfg.defaults.models["general"];
+  if (!routingOn(cfg) || agentSource !== "default" || threadLive) return { kind: "unrouted" };
+  const modelRef = cfg.routing?.model ?? cfg.defaults.models["general"];
   if (!modelRef) {
     console.log(`[route] ${msg.threadKey} not routed: no routing.model and no defaults.models.general`);
     return { kind: "unrouted" };
@@ -437,6 +438,15 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
 export function routedLabel(reason: string): string {
   return `routed: ${reason}`;
 }
+
+/** The routed card's last line, on every close: how to run the request on
+ *  another preset. A reply into the finished thread with a directive runs on
+ *  the named preset with the thread's history, the original request in it
+ *  (routing-and-config item 2) — no new path, only the pointer. A close and
+ *  never a live frame: while the run is live the same reply is refused as a
+ *  rival (thread-admission item 1). Plain text, no backticks: the Slack card's
+ *  body is literal rich text. */
+export const ROUTED_CARD_FOOTER = "reply agent:<preset> to run it another way";
 
 /** The card's part lines under a routed conductor's label: one per part,
  *  `<preset>: <text>`, the text on one line and cut at `ROUTE_PART_LINE_CAP`. */

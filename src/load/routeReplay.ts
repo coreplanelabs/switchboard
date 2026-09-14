@@ -11,9 +11,9 @@
 // the history's conductor requests, detection alone, their count printed. Pure
 // over records and a `RouteDecision` function; the entrypoint
 // (`scripts/load.ts`) pages the run store and picks the model.
-import { AGENTS } from "../agents/registry.js";
+import { AGENTS, COMPOUND_PRESET } from "../agents/registry.js";
 import { stripDirectiveTokens } from "../directives.js";
-import { COMPOUND_PRESET, type RouteDecision } from "../core/dispatch/route.js";
+import type { RouteDecision } from "../core/dispatch/route.js";
 import type { SloCheck } from "./aggregate.js";
 import type { RouteCompoundFixture } from "./routeCompoundFixtures.js";
 import type { RunRecord } from "../core/runRecord.js";

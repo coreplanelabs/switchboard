@@ -57,13 +57,8 @@ import {
   routeChecks,
 } from "../src/load/routeReplay.js";
 import { ROUTE_COMPOUND_FIXTURES } from "../src/load/routeCompoundFixtures.js";
-import {
-  COMPOUND_PRESET,
-  providerRouteModel,
-  routablePresets,
-  route,
-  ROUTE_TIMEOUT_MS,
-} from "../src/core/dispatch/route.js";
+import { COMPOUND_PRESET } from "../src/agents/registry.js";
+import { providerRouteModel, routablePresets, route, ROUTE_TIMEOUT_MS } from "../src/core/dispatch/route.js";
 import { DEFAULT_MAX_CHILDREN } from "../src/core/dispatch/spawn.js";
 import { WorkerRunStore } from "../src/core/runStoreWorker.js";
 import { ProviderRegistry } from "../src/providers/registry.js";

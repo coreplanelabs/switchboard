@@ -79,6 +79,13 @@ export interface CardShellOptions {
    *  so the thread reads what was asked from the first paint. A close carries
    *  none: its detail is the run's checklist as left. */
   lead?: readonly string[];
+  /** The line every close ends its detail with, after the shape, the queued
+   *  line and the run's own lines — the routed card's override hint
+   *  (routing-and-config item 21). A close only, never the ack or a live
+   *  frame: while the run is live a reply naming another preset is refused as
+   *  a rival (docs/reference/specs/thread-admission.md item 1); once the card
+   *  closes, the same reply runs the request on that preset. */
+  footer?: string;
 }
 
 export function createCardShell(opts: CardShellOptions): CardShell {
@@ -93,9 +100,9 @@ export function createCardShell(opts: CardShellOptions): CardShell {
   // the run page and the index for the same window.
   const elapsed = () => formatDuration((finishedAt ?? opts.now()) - opts.startedAt, "clock");
   const headline = (icon: string) => `${icon} ${label} · ${elapsed()}`;
-  // Detail order on a close: shape, queued, then the caller's own lines.
+  // Detail order on a close: shape, queued, the caller's own lines, the footer.
   const closeDetail = (close: CardClose, own?: string) =>
-    [close.shape, close.queued, own].filter(Boolean).join("\n") || undefined;
+    [close.shape, close.queued, own, opts.footer].filter(Boolean).join("\n") || undefined;
   return {
     get label() {
       return label;

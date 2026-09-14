@@ -20,7 +20,7 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BootstrapResult } from "../../agentEnv/bootstrap.js";
-import { AGENTS } from "../../agents/registry.js";
+import { AGENTS, presetDoor } from "../../agents/registry.js";
 import { CLI_CALLER, parseCliArgv, runCli } from "../../cli.js";
 import { ConfigStore } from "../../config.js";
 import { createCommandHttpHandler } from "../../channels/commandHttp.js";
@@ -596,7 +596,8 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   return {
     delivery: { service: async () => delivery },
     help: {
-      agents: () => Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description })),
+      agents: () =>
+        Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description, door: presetDoor(a) })),
       commands: () => s.commands(),
     },
     status: {

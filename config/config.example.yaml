@@ -302,6 +302,17 @@ workspaceDir: ./workspaces
 # spawn:
 #   maxChildren: 3
 
+# The request router (docs/reference/specs/routing-and-config.md item 21). ON BY
+# DEFAULT: a plain message — no `agent:` directive, no sticky preset, no channel
+# or user `agent` — asks the fast model which preset it means and runs as that
+# preset, the card saying why (`routed: <reason>`) and how to run it another way.
+# `ship` is never routed. The one way off, so every plain message runs
+# `defaults.agent` as before the router: `auto: false`. `model` is the router's
+# model; default `defaults.models.general`.
+# routing:
+#   auto: false
+#   model: anthropic/claude-haiku-4-5
+
 # Spend reporting: GET /costs (Access-gated). Optional. See docs/reference/specs/costs.md.
 # costs:
 #   cloudflareAccountId: <32-hex account id>
