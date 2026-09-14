@@ -1998,6 +1998,65 @@ describe("review post-step", () => {
       });
       expect(rec.reviewHead).toBe(PR_HEAD);
       expect("dispositions" in rec).toBe(false);
+      // docs/reference/specs/agent-review.md item 18 — the post is a fact of the
+      // record, so a reader woken by the finish never asks GitHub for it: the
+      // record says the review landed, on which pull request, at which head.
+      expect(rec.reviewPost).toEqual({
+        posted: true,
+        target: { repo: "acme/api", number: 42 },
+        head: PR_HEAD,
+        verdict: "request_changes",
+      });
+      expect(rec.events.filter((e) => e.type === "review_posted")).toEqual([
+        expect.objectContaining({ type: "review_posted", repo: "acme/api", number: 42, head: PR_HEAD }),
+      ]);
+    });
+
+    it("the record is written AFTER the post: the review_posted event and the reviewPost fact are on the record the store receives, and the record lands after the GitHub post was made (item 18)", async () => {
+      const order: string[] = [];
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok"));
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(PR_HEAD);
+      deps.postReviewComment = async () => void order.push("post");
+      deps.fetchPrHead = async () => PR_HEAD;
+      deps.runRegistry = new RunRegistry({ genId: () => "r-order", genToken: () => "t-order" });
+      const inner = new InMemoryRunStore();
+      const store: RunStore = {
+        put: async (r) => {
+          order.push(`record:${r.status}`);
+          return inner.put(r);
+        },
+        get: (id) => inner.get(id),
+        getSummary: (id) => inner.getSummary(id),
+        list: (o) => inner.list(o),
+        events: (id, o) => inner.events(id, o),
+        delete: (id) => inner.delete(id),
+      };
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), fakeIO().io);
+      await deps.runHistoryWriter.settled();
+      // The start tombstone (run-history item 27) lands at create; the finish
+      // record — the one the runner reads — lands after the post.
+      expect(order).toEqual(["record:interrupted", "post", "record:completed"]);
+      const rec = (await inner.get("r-order"))!;
+      expect(rec.reviewPost).toMatchObject({ posted: true, head: PR_HEAD, verdict: "approve" });
+    });
+
+    it("a post the reviewed-head guard refused is recorded as a skip with its reason, beside a review_not_posted note — the record says the verdict is Slack-only, not that GitHub is slow (item 18)", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "looks great"));
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(OTHER_HEAD);
+      deps.postReviewComment = postSpy().fn;
+      deps.runRegistry = new RunRegistry({ genId: () => "r-skip", genToken: () => "t-skip" });
+      const store = new InMemoryRunStore();
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), fakeIO().io);
+      await deps.runHistoryWriter.settled();
+      const rec = (await store.get("r-skip"))!;
+      expect(rec.reviewPost).toEqual({ posted: false, reason: expect.stringContaining("is not the PR head") });
+      expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "review_not_posted")).toHaveLength(1);
+      vi.restoreAllMocks();
     });
 
     // docs/reference/specs/agent-ship.md item 13 — a coordinator's review child is

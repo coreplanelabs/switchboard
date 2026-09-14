@@ -110,7 +110,15 @@ export type RunNoteKind =
    *  request would target (docs/reference/specs/pr-description.md item 5) —
    *  the summary names the branch. Published by the post-step, so a unit
    *  that ends without a pull request says why on the record and the card. */
-  | "pr_not_opened";
+  | "pr_not_opened"
+  /** A review run's post-step posted nothing to the pull request — a guard's
+   *  refusal, an opt-out, no pull request resolved, GitHub's own error — and
+   *  the summary names the pull request (when one was resolved) and the
+   *  reason (docs/reference/specs/agent-review.md item 18). Published by the
+   *  post-step beside the thread's Slack-only note, so the record says the
+   *  verdict is Slack-only and a coordinator reading it never asks GitHub
+   *  for a review that was never sent. */
+  | "review_not_posted";
 
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
@@ -130,6 +138,7 @@ export const RUN_NOTE_KINDS = [
   "description_turn",
   "cold_sandbox",
   "pr_not_opened",
+  "review_not_posted",
 ] as const satisfies readonly RunNoteKind[];
 type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
 const _everyKindListed: _EveryKindListed = true;
@@ -438,6 +447,25 @@ export type RunEvent =
    *  run record carries the PR URL as a fact of the run rather than only the
    *  channel reply's projection of it. Additive: unknown → ignored. */
   | { type: "pr_opened"; url: string; number: number; created: boolean; seq?: number; at?: number }
+  /** The review post-step's outcome when the verdict landed
+   *  (docs/reference/specs/agent-review.md item 18): the pull request it was
+   *  posted to, the head it was pinned to (the carried head after a rebase,
+   *  item 12) and the verdict kind when one was submitted. Published by the
+   *  post-step straight to the registry BEFORE the stream finishes — the
+   *  post-step runs inside the run loop, like the coding one — so the record
+   *  carries the post as a fact of the run and a coordinator woken by the
+   *  finish reads it there instead of asking GitHub, whose review list can
+   *  lag the post it just accepted. A post that did not land is a
+   *  `review_not_posted` note. Additive: unknown → ignored. */
+  | {
+      type: "review_posted";
+      repo: string;
+      number: number;
+      head: string;
+      verdict?: "approve" | "request_changes";
+      seq?: number;
+      at?: number;
+    }
   /** One `agent:ship` round boundary (docs/reference/specs/agent-ship.md item 12): the
    *  pipeline publishes a `started` event when a round's child is dispatched
    *  and one settle event when its outcome is known (`ShipRoundOutcome`), so

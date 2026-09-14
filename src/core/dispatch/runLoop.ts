@@ -25,7 +25,14 @@ import {
   type ReviewVerdict,
 } from "../reviewVerdict.js";
 import { parseDigestReport, type DigestReport } from "../diffDigest.js";
-import { settleReviewedHead, type makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
+import {
+  runReviewPostStep,
+  settleReviewedHead,
+  type makeSystemComposer,
+  type ReviewPostOutcome,
+  type RoundWorkspace,
+} from "../reviewRound.js";
+import { postReviewComment } from "../../execution/githubComments.js";
 import { observeCodingWorkspace, runCodingPrPostStep, trackPushedBranch } from "../codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
 import { startReviewReadingDiff } from "../readingDiff.js";
@@ -54,18 +61,14 @@ import { activityLine } from "./reply.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
 /** What the loop hands back once the run has finished: the answer as
- *  canonicalized for every projection, the review facts the post-step and the
- *  head settle key on, the coding post-step's note, the finish-site diagnosis
- *  the done card carries, the checklist views for the closed card, and the
- *  workspace release the reply stage calls after the answer landed. */
+ *  canonicalized for every projection, the head the review settled on, the
+ *  coding post-step's note, the finish-site diagnosis the done card carries,
+ *  the checklist views for the closed card, and the workspace release the
+ *  reply stage calls after the answer landed. The review post-step runs
+ *  inside the loop (agent-review.md item 18), so its inputs stay here. */
 export interface RunOutcome {
   answer: string;
-  verdict: ReviewVerdict | undefined;
-  /** The review's last diff digest, for the post-step's coverage guard. */
-  digest: DigestReport | undefined;
   reviewHead: string | undefined;
-  observedHead: string | undefined;
-  carried: { reviewed: string; current: string; commits: number } | undefined;
   prNote: string | undefined;
   /** "Did real work" — the memory reflection gate. */
   toolCalls: number;
@@ -102,6 +105,9 @@ export interface RunLoopContext {
   isCodingPrRun: boolean;
   /** The head this run reviews at the start; the settle may advance it. */
   reviewHead: string | undefined;
+  /** The request's text with its directives stripped — what the review
+   *  post-step reads the opt-out from (agent-review.md item 18). */
+  requestText: string;
   card: StatusHandle;
   shell: CardShell;
   /** The done card's shape and queued lines, from the finish-site diagnosis (the dispatch's `doneLines`). */
@@ -405,6 +411,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   // runs BEFORE the stream finishes, so its outcome is a fact of the run —
   // and appended to the channel reply at the end.
   let prNote: string | undefined;
+  // How the review post-step ended (agent-review.md item 18) — the record's fact.
+  let reviewPost: ReviewPostOutcome | undefined;
   // Set when the head moved during the run by a rebase of the same commits
   // (item 12): the post is pinned to `current` with a footer, and the thread
   // is told the review was carried forward.
@@ -697,6 +705,41 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
     const rawAnswer = acceptedAnswer.ok && acceptedAnswer.changed ? answer : undefined;
     if (acceptedAnswer.ok) answer = acceptedAnswer.value;
     publishText("answer", answer, undefined, rawAnswer);
+    // Deterministic review post-step (runReviewPostStep in reviewRound.ts;
+    // agent-review.md items 8, 10, 12, 15 and 18): a `review` run against a
+    // resolved PR posts its findings back to that PR by default — no need to
+    // ask — behind the reviewed-head guard (fail-closed) and pinned to the
+    // verified head (or the carried one). HERE, in the run loop BEFORE the
+    // finally below finish()es the stream — like the coding post-step above —
+    // so the outcome is a fact of the record (`reviewPost`, the
+    // `review_posted` event or the `review_not_posted` note) and a
+    // coordinator woken by the finish reads whether the verdict landed
+    // without asking GitHub, whose review list can lag a post it accepted a
+    // second ago. Best-effort: a post failure is recorded and said in the
+    // thread but never fails the run (the review lands in Slack regardless).
+    // A HARD-stopped review has no findings — only the abort line — so
+    // nothing is posted and nothing is recorded. The step reads the canonical
+    // answer above: the GitHub body and the `answer` event are one dialect.
+    // Only a review run reaches it: every other run's stream is as before.
+    if (agent.name === "review" && run.control.requested !== "hard")
+      reviewPost = await root.span("run.review_post_step", () =>
+        runReviewPostStep({
+          agent,
+          requestText: ctx.requestText,
+          repoCtx,
+          heads: { reviewHead, observedHead },
+          verdict,
+          digest,
+          answer,
+          carried,
+          hardStopped: false,
+          post: deps.postReviewComment ?? postReviewComment,
+          fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+          reply: (text) => io.reply(text),
+          publish: (e) => registry.publish(run.id, e),
+          logKey: msg.threadKey,
+        }),
+      );
   } catch (err) {
     runFailed = true;
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
@@ -765,6 +808,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
       ...(verdict !== undefined ? { verdict } : {}),
       ...(reviewHead !== undefined ? { reviewHead } : {}),
       ...(dispositions !== undefined ? { dispositions } : {}),
+      ...(reviewPost !== undefined ? { reviewPost } : {}),
       ...(parentRunId !== undefined ? { parentRunId } : {}),
       ...(coordinator !== undefined ? { coordinator } : {}),
     });
@@ -781,11 +825,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunOu
   }
   return {
     answer,
-    verdict,
-    digest,
     reviewHead,
-    observedHead,
-    carried,
     prNote,
     toolCalls,
     runDiagnosis,

@@ -36,7 +36,7 @@ import {
   type PrCommitList,
 } from "./headMoved.js";
 import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
-import { buildReviewPostBody, type ReviewVerdict } from "./reviewVerdict.js";
+import { buildReviewPostBody, type ReviewPost, type ReviewVerdict } from "./reviewVerdict.js";
 import { checkReviewedHead, normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { checkDigestCoverage, type PrSize } from "./digestCoverage.js";
@@ -532,13 +532,16 @@ async function classifyMove(
 
 // ---- reviewed-head post gate + review post (agent-review.md item 8) ---------
 
-/** How the post step ended: `posted: true` only when the GitHub post call
- *  succeeded; every skip, guard refusal, and failure is `posted: false` with
- *  the reason (already said in the thread where the contract wants it said).
- *  The plain dispatch path may ignore the value — its behavior is unchanged —
- *  while ship's merge-ready gate consumes it: an approve whose LGTM never
- *  landed on the PR must not be reported merge-ready. */
-export type ReviewPostOutcome = { posted: true } | { posted: false; reason: string };
+/** How the post step ended — the `ReviewPost` the run's record carries
+ *  (agent-review.md item 18): `posted: true` only when the GitHub post call
+ *  succeeded, with the pull request, the pinned head and the verdict kind;
+ *  every skip, guard refusal, and failure is `posted: false` with the reason
+ *  (already said in the thread where the contract wants it said). The run loop
+ *  writes it onto the record, and a coordinator's `read-record` answers
+ *  `reviewPosted` from it: an approve whose LGTM never landed on the PR must
+ *  not be reported merge-ready, and one that landed a second ago must not
+ *  read as unposted because GitHub's review list lags. */
+export type ReviewPostOutcome = ReviewPost;
 
 /**
  * The deterministic review post-step: a round on the review agent against a
@@ -571,10 +574,45 @@ export async function runReviewPostStep(input: {
   post: (target: ReviewCommentTarget, body: string) => Promise<void>;
   fetchPrHead: FetchPrHead;
   reply: (text: string) => Promise<void>;
+  /** The run's stream (`registry.publish` bound to the run): the outcome is
+   *  published as a `review_posted` event or a `review_not_posted` note for a
+   *  review round that was asked to post (item 18). Absent → the outcome is
+   *  only returned (a caller outside a run). */
+  publish?: (event: RunEvent) => void;
   logKey: string;
 }): Promise<ReviewPostOutcome> {
   const { agent, repoCtx, verdict, carried, logKey } = input;
   const { reviewHead, observedHead } = input.heads;
+  // The record's fact (item 18): what a review round leaves behind about its
+  // post. A non-review round posts nothing and records nothing; a hard-stopped
+  // round records nothing either — the abort is the record's story.
+  const record = (outcome: ReviewPostOutcome): ReviewPostOutcome => {
+    if (input.publish && agent.name === "review" && !input.hardStopped) {
+      const where = outcome.posted
+        ? undefined
+        : repoCtx.repo && repoCtx.pr
+          ? `${repoCtx.repo}#${repoCtx.pr}`
+          : undefined;
+      input.publish(
+        outcome.posted
+          ? {
+              type: "review_posted",
+              repo: outcome.target.repo,
+              number: outcome.target.number,
+              head: outcome.head,
+              ...(outcome.verdict !== undefined ? { verdict: outcome.verdict } : {}),
+              at: systemClock(),
+            }
+          : {
+              type: "run_note",
+              kind: "review_not_posted",
+              summary: `review not posted${where ? ` to ${where}` : ""}: ${outcome.reason}`,
+              at: systemClock(),
+            },
+      );
+    }
+    return outcome;
+  };
   let postTarget: ReviewPostTarget | null = null;
   // Why nothing was posted, carried into the typed outcome — every path that
   // leaves `postTarget` null fills it (the hard-stop skip is the default).
@@ -670,7 +708,7 @@ export async function runReviewPostStep(input: {
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`[review-post] ${logKey} failed for ${where}: ${reason}`);
       await input.reply(`ℹ️ Review not posted to ${where}: ${reason} — this verdict is Slack-only.`).catch(() => {});
-      return { posted: false, reason };
+      return record({ posted: false, reason });
     }
     console.log(
       `[review-post] ${logKey} → ${where} (${verdict?.verdict ?? "no verdict"})${carried ? ` carried ${carried.reviewed.slice(0, 7)} → ${pinned.slice(0, 7)}` : ""}`,
@@ -694,7 +732,12 @@ export async function runReviewPostStep(input: {
       );
       await input.reply(moved).catch(() => {});
     }
-    return { posted: true };
+    return record({
+      posted: true,
+      target: { repo: postTarget.repo, number: postTarget.number },
+      head: pinned,
+      ...(verdict !== undefined ? { verdict: verdict.verdict } : {}),
+    });
   }
-  return { posted: false, reason: skipReason };
+  return record({ posted: false, reason: skipReason });
 }

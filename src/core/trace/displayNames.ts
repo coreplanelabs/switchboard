@@ -32,6 +32,7 @@ export const DISPLAY_NAMES = {
   "run.description_turn": "asking for the PR description",
   "run.observe_workspace": "checking the workspace",
   "run.pr_post_step": "posting the PR",
+  "run.review_post_step": "posting the review",
   "run.reading_diff_join": "waiting for the diff",
   "run.pr_description_join": "waiting for the PR description",
   "model.turn": "a model turn",

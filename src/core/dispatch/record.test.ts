@@ -248,6 +248,27 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
   });
 
+  it("carries the review post — posted at the pinned head, or skipped with its reason redacted — and omits the key when the run has none", () => {
+    const token = `ghp_${"a".repeat(24)}`;
+    const head = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const posted = assembleRunRecord({
+      ...base(),
+      reviewPost: { posted: true, target: { repo: "acme/api", number: 42 }, head, verdict: "approve" },
+    });
+    expect(posted.reviewPost).toEqual({
+      posted: true,
+      target: { repo: "acme/api", number: 42 },
+      head,
+      verdict: "approve",
+    });
+    expect(isRunRecord(JSON.parse(JSON.stringify(posted)))).toBe(true);
+    const skipped = assembleRunRecord({ ...base(), reviewPost: { posted: false, reason: `HTTP 401 for ${token}` } });
+    expect(skipped.reviewPost).toEqual({ posted: false, reason: "HTTP 401 for «redacted-github-token»" });
+    expect(JSON.stringify(skipped)).not.toContain("ghp_");
+    expect(isRunRecord(skipped)).toBe(true);
+    expect("reviewPost" in assembleRunRecord(base())).toBe(false);
+  });
+
   // docs/reference/specs/run-history.md: the effective profile the run was
   // admitted with rides the record — the preset named, so a reader can tell a
   // clipped budget from a declared one.

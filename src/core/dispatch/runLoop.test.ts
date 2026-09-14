@@ -133,6 +133,7 @@ function setup(answer: string | Error) {
     isPrReview: false,
     isCodingPrRun: false,
     reviewHead: undefined,
+    requestText: "",
     card: { update: (f: StatusUpdate) => void frames.push(f), done: async (f: StatusUpdate) => void closes.push(f) },
     shell,
     doneLines: () => ({}),

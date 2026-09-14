@@ -8,7 +8,8 @@
 // unit's thread, opened through the requesting thread's channel; its board
 // issue), `branch`, `spawn`, `read-record` (a finished child's typed artifacts:
 // the pull request it opened, the verdict and whether it stands on the pull
-// request at the reviewed head, the dispositions), `pr-check` (what heads the
+// request at the reviewed head — from the child's own record of its post, and
+// from GitHub only when that record is silent — the dispositions), `pr-check` (what heads the
 // unit's branch: an open pull request, or — with none open — one already
 // merged, which makes the unit done), `round` (a boundary the card draws),
 // `unit-end` (the report in the unit's thread),
@@ -137,6 +138,10 @@ export interface AdminCoordinatorDeps {
    *  identity this bot posts as: whether the bot's verdict stands at a head. */
   fetchPrReviews: (pr: { repo: string; number: number }) => Promise<PullRequestReview[] | undefined>;
   selfIdentity: () => Promise<GithubIdentity | undefined>;
+  /** The pause between `read-record`'s looks at GitHub's review list when the
+   *  child's record carries no post of its own (`REVIEW_POSTED_RECHECK_MS`
+   *  apart); tests pass one that records instead of waiting. */
+  sleep?: (ms: number) => Promise<void>;
   /** The merge step's facts and its one write (githubPulls): the pull request
    *  as GitHub has it, the checks at a head, the squash at exactly that head. */
   fetchPrFacts: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
@@ -620,6 +625,16 @@ function prOpenedOf(
   return last && last.type === "pr_opened" ? { number: last.number, url: last.url, created: last.created } : undefined;
 }
 
+/** How many times `read-record` looks at GitHub's review list for a review
+ *  child whose record carries no post of its own, and the pause between looks:
+ *  the list can lag a post it accepted a second ago, and the finish event that
+ *  wakes the runner arrives within that second. Three looks over a few
+ *  seconds cover the lag seen live; the merge step re-verifies the approval at
+ *  the head regardless, so this pre-check can afford patience and the guard
+ *  stays strict. */
+export const REVIEW_POSTED_CHECKS = 3;
+export const REVIEW_POSTED_RECHECK_MS = 2_000;
+
 /** Whether the bot's own verdict stands on the pull request at the head the
  *  child reviewed: a review by this bot's identity, pinned to that head, whose
  *  body starts with the verdict's token. Unknown (no identity, GitHub silent)
@@ -646,6 +661,48 @@ async function reviewPostedAt(
   );
 }
 
+/** `reviewPostedAt`, asked up to `REVIEW_POSTED_CHECKS` times a pause apart
+ *  until it answers true: a review posted a second ago may not be in GitHub's
+ *  list yet, and a silent GitHub may answer on the next look. The last look's
+ *  answer stands — false when every look found nothing, undefined when every
+ *  look was silent. */
+async function reviewPostedAtPatiently(
+  deps: AdminCoordinatorDeps,
+  pr: { repo: string; number: number },
+  verdict: ReviewVerdictKind,
+  head: string,
+): Promise<boolean | undefined> {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let answer: boolean | undefined;
+  for (let look = 1; look <= REVIEW_POSTED_CHECKS; look++) {
+    answer = await reviewPostedAt(deps, pr, verdict, head);
+    if (answer === true || look === REVIEW_POSTED_CHECKS) break;
+    await sleep(REVIEW_POSTED_RECHECK_MS);
+  }
+  return answer;
+}
+
+/** What the child's own record says about its post (agent-review.md item 18),
+ *  for the unit's pull request: `true` when it posted this verdict at the
+ *  reviewed head to that pull request, `false` with the reason when it recorded
+ *  a skip or a failure, and nothing when the record is silent (a child from
+ *  before the fact existed) or names another head, verdict or pull request —
+ *  then GitHub decides. */
+function reviewPostedByRecord(
+  record: Pick<RunView, "reviewPost" | "reviewHead" | "verdict">,
+  pr: { repo: string; number: number },
+): { reviewPosted: boolean; reviewPostReason?: string } | undefined {
+  const post = record.reviewPost;
+  if (post === undefined || record.reviewHead === undefined || record.verdict === undefined) return undefined;
+  if (!post.posted) return { reviewPosted: false, reviewPostReason: post.reason };
+  const same =
+    post.target.repo === pr.repo &&
+    post.target.number === pr.number &&
+    sameCommit(post.head.toLowerCase(), record.reviewHead) &&
+    post.verdict === record.verdict.verdict;
+  return same ? { reviewPosted: true } : undefined;
+}
+
 async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -667,17 +724,24 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const record = full.ok ? full.value : view;
   const finalReply = finalReplyOf(record.events);
   const pr = prOpenedOf(record.events);
-  let reviewPosted: boolean | undefined;
+  // Whether the verdict stands on the unit's pull request: the child's own
+  // record of its post first (item 18) — it posted, or it recorded why not —
+  // and GitHub only when the record is silent, looked at patiently: the
+  // finish event wakes the runner within a second of the post, and GitHub's
+  // review list can lag it. The merge step re-verifies the approval at the
+  // head regardless, so the pre-check may be patient while the guard stays strict.
+  let posted: { reviewPosted: boolean; reviewPostReason?: string } | undefined;
   if (record.verdict !== undefined && record.reviewHead !== undefined && typeof body.unit === "string") {
     const instance = await deps.instances.get(id.value);
     const row = instance ? (await deps.instances.listUnits(instance.id)).find((u) => u.unit === body.unit) : undefined;
-    if (instance && row?.pr !== undefined)
-      reviewPosted = await reviewPostedAt(
-        deps,
-        { repo: instance.repo, number: row.pr.number },
-        record.verdict.verdict,
-        record.reviewHead,
-      );
+    if (instance && row?.pr !== undefined) {
+      const unitPr = { repo: instance.repo, number: row.pr.number };
+      posted = reviewPostedByRecord(record, unitPr);
+      if (posted === undefined) {
+        const seen = await reviewPostedAtPatiently(deps, unitPr, record.verdict.verdict, record.reviewHead);
+        if (seen !== undefined) posted = { reviewPosted: seen };
+      }
+    }
   }
   return json(200, {
     ok: true,
@@ -686,7 +750,8 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       ...(pr !== undefined ? { pr } : {}),
       ...(record.verdict !== undefined ? { verdict: record.verdict } : {}),
       ...(record.reviewHead !== undefined ? { reviewHead: record.reviewHead } : {}),
-      ...(reviewPosted !== undefined ? { reviewPosted } : {}),
+      ...(posted !== undefined ? { reviewPosted: posted.reviewPosted } : {}),
+      ...(posted?.reviewPostReason !== undefined ? { reviewPostReason: posted.reviewPostReason } : {}),
       ...(record.dispositions !== undefined ? { dispositions: record.dispositions } : {}),
       ...(record.handoff !== undefined ? { handoff: true } : {}),
     },

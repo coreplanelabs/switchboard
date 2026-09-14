@@ -4,9 +4,11 @@ import type { RunEvent } from "./runEvents.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
 import {
-  isFindingDispositionsShape,
-  isReviewVerdictShape,
   type FindingDisposition,
+  isFindingDispositionsShape,
+  isReviewPostShape,
+  isReviewVerdictShape,
+  type ReviewPost,
   type ReviewVerdict,
 } from "./reviewVerdict.js";
 import { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "./coordinator/contract.js";
@@ -114,6 +116,12 @@ export interface RunRecord {
   /** The head a review run reviewed and posted against (7 to 40 lowercase hex),
    *  after the settle; present only on a review run that pinned one. */
   reviewHead?: string;
+  /** How the review run's post-step ended (docs/reference/specs/agent-review.md
+   *  item 18): the verdict posted to a named pull request at a pinned head, or
+   *  not posted with the reason — what a coordinator's `read-record` answers
+   *  `reviewPosted` from before it asks GitHub. Present only on a review run
+   *  that reached its post-step; absent on records written before it existed. */
+  reviewPost?: ReviewPost;
   /** The dispositions a fix round submitted through `submit_dispositions`
    *  (docs/reference/specs/agent-ship.md item 6), the last call's set, redacted;
    *  present only on a coding run dispatched as a fix round that submitted one. */
@@ -502,6 +510,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.reviewHead !== undefined && (typeof r.reviewHead !== "string" || !REVIEW_HEAD_PATTERN.test(r.reviewHead)))
     return false;
   if (r.dispositions !== undefined && !isFindingDispositionsShape(r.dispositions)) return false;
+  if (r.reviewPost !== undefined && !isReviewPostShape(r.reviewPost)) return false;
   if (r.profile !== undefined && !isRunProfileRecord(r.profile)) return false;
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))

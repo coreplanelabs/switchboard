@@ -233,7 +233,18 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   // The typed artifacts as the bot's record carries them — shape-checked where
   // they were written (the run record's validator), read here as they are.
   const facts = run as unknown as Omit<Extract<ChildFacts, { finished: true }>, "finished" | "status">;
-  const { finalReply, pr, headSha, description, verdict, reviewPosted, reviewHead, dispositions, handoff } = facts;
+  const {
+    finalReply,
+    pr,
+    headSha,
+    description,
+    verdict,
+    reviewPosted,
+    reviewPostReason,
+    reviewHead,
+    dispositions,
+    handoff,
+  } = facts;
   return {
     type: "read-record",
     step,
@@ -246,6 +257,7 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
       ...(description !== undefined ? { description } : {}),
       ...(verdict !== undefined ? { verdict } : {}),
       ...(reviewPosted !== undefined ? { reviewPosted } : {}),
+      ...(reviewPostReason !== undefined ? { reviewPostReason } : {}),
       ...(reviewHead !== undefined ? { reviewHead } : {}),
       ...(dispositions !== undefined ? { dispositions } : {}),
       ...(handoff !== undefined ? { handoff } : {}),

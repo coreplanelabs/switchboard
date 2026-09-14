@@ -753,6 +753,7 @@ export async function dispatch(
       isPrReview,
       isCodingPrRun,
       reviewHead,
+      requestText: directives.text,
       card,
       shell,
       doneLines,
@@ -771,19 +772,7 @@ export async function dispatch(
       coordinator,
       ...(opts.fixRound ? { fixRound: opts.fixRound } : {}),
     });
-    const {
-      answer,
-      verdict,
-      digest,
-      observedHead,
-      carried,
-      prNote,
-      toolCalls,
-      runDiagnosis,
-      checklistAsLeft,
-      checklistCheckedOff,
-      releaseWorkspace,
-    } = ran;
+    const { answer, prNote, toolCalls, runDiagnosis, checklistAsLeft, checklistCheckedOff, releaseWorkspace } = ran;
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
     // (a summary was written), ⛔ hard (aborted, no summary).
@@ -815,12 +804,10 @@ export async function dispatch(
     });
     if (delivery.kind === "fenced") return ended;
 
-    // After the reply (dispatch/reply.ts): the memory reflection pass and the
-    // deterministic review post-step.
-    await afterReply(deps, {
+    // After the reply (dispatch/reply.ts): the memory reflection pass. The
+    // review post-step ran inside the run loop, before the stream finished.
+    afterReply(deps, {
       msg,
-      io,
-      agent,
       resolved,
       directives,
       history,
@@ -830,12 +817,6 @@ export async function dispatch(
       stopped,
       answer,
       toolCalls,
-      reviewHead: ran.reviewHead,
-      observedHead,
-      verdict,
-      digest,
-      carried,
-      root,
     });
     return ended;
   } catch (err) {

@@ -636,8 +636,31 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
     expect(report).toContain("ran out of budget");
   });
 
-  it("an approve whose post did not land is an honest abort, never merge-ready", () => {
+  it("an approve whose post did not land is an honest abort, never merge-ready — the report carries the child's recorded reason and says how to continue in the runner's words", () => {
     const d = fresh(input());
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "x", findings: [] },
+        reviewPosted: false,
+        reviewPostReason: "digest covered 3 of 5 files",
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("the approval could not be posted");
+    expect(report).toContain("digest covered 3 of 5 files");
+    expect(report).toContain("the unit runs again when the plan is re-issued");
+    expect(report).not.toMatch(/Re-run ship/);
+  });
+
+  it("an approve GitHub shows no post for — with no recorded reason — aborts naming the pull request's silence, and a task unit is told to re-issue ship with the PR URL", () => {
+    const d = fresh(input({ unit: { id: "task", branch: "ship/fix-abc123" }, merge: "person" }));
     throughRoundZero(d);
     runChild(
       d,
@@ -651,7 +674,9 @@ describe("the unit pipeline — every ending the in-process loop has today, on s
       T0 + 20 * MIN,
     );
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
-    expect(renderUnitReport(d.state)).toContain("the approval could not be posted");
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("the pull request carries no approving review");
+    expect(report).toContain("re-issue `agent:ship` in this thread and include the PR URL");
   });
 
   it("a resume at review (an open pull request of ship's own named by the requester) skips the branch and round 0", () => {

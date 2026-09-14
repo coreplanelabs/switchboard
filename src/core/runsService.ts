@@ -111,12 +111,13 @@ export interface RunView {
   parentInstanceId?: string;
   idempotencyKey?: string;
   /** The typed artifacts a finished run's record carries (run-history item 2) —
-   *  the review's verdict and reviewed head, the fix round's dispositions, the
-   *  coding child's handoff. A live view has none yet; a finished row the
+   *  the review's verdict, reviewed head and post, the fix round's dispositions,
+   *  the coding child's handoff. A live view has none yet; a finished row the
    *  registry still holds carries them from the store the moment the store
    *  holds its record (`getRun`, item 21); a persisted row carries its own. */
   verdict?: RunRecord["verdict"];
   reviewHead?: string;
+  reviewPost?: RunRecord["reviewPost"];
   dispositions?: RunRecord["dispositions"];
   handoff?: RunRecord["handoff"];
   /** True once the durable store holds this run (registry flag or store row). */
@@ -441,7 +442,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
    *  nothing; a store that throws is one warning and nothing. */
   const storedArtifacts = async (
     id: string,
-  ): Promise<Pick<RunView, "verdict" | "reviewHead" | "dispositions" | "handoff">> => {
+  ): Promise<Pick<RunView, "verdict" | "reviewHead" | "reviewPost" | "dispositions" | "handoff">> => {
     let row: RunListItem | null;
     try {
       row = await storeSummary(id);
@@ -455,6 +456,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     return {
       ...(row.verdict !== undefined ? { verdict: row.verdict } : {}),
       ...(row.reviewHead !== undefined ? { reviewHead: row.reviewHead } : {}),
+      ...(row.reviewPost !== undefined ? { reviewPost: row.reviewPost } : {}),
       ...(row.dispositions !== undefined ? { dispositions: row.dispositions } : {}),
       ...(row.handoff !== undefined ? { handoff: row.handoff } : {}),
     };
