@@ -728,4 +728,18 @@ describe("isRunRecord — the review's verdict and head, the fix round's disposi
     );
     expect(isRunRecord({ ...record(), dispositions: "fixed" })).toBe(false);
   });
+
+  it("accepts the review post the record carries — posted at a pinned head, or skipped with its reason — also after a JSON round-trip; a record without one carries no key; refuses a malformed one", () => {
+    const posted = { posted: true, target: { repo: "acme/api", number: 42 }, head: HEAD, verdict: "approve" };
+    const skipped = { posted: false, reason: "digest covered 3 of 5 files" };
+    for (const reviewPost of [posted, skipped]) {
+      const rec = record({ verdict, reviewHead: HEAD, reviewPost } as Partial<RunRecord>);
+      expect(isRunRecord(rec)).toBe(true);
+      expect(isRunRecord(JSON.parse(JSON.stringify(rec)))).toBe(true);
+    }
+    expect("reviewPost" in record()).toBe(false);
+    expect(isRunRecord({ ...record(), reviewPost: { posted: true, head: HEAD } })).toBe(false);
+    expect(isRunRecord({ ...record(), reviewPost: { posted: false } })).toBe(false);
+    expect(isRunRecord({ ...record(), reviewPost: "posted" })).toBe(false);
+  });
 });

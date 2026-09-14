@@ -340,8 +340,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
   });
 });
 
-describe("afterReply — the reflection pass and the review post-step", () => {
-  const NOW = 10_000;
+describe("afterReply — the reflection pass", () => {
   const msg = {
     channelId: "slack:CX",
     userId: "slack:UX",
@@ -357,13 +356,10 @@ describe("afterReply — the reflection pass and the review post-step", () => {
       "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n    review: anthropic/review-model\n",
     );
     const config = new ConfigStore(path, join(dir, "overrides.json"));
-    const posts: Array<{ target: unknown; body: string }> = [];
     const deps: ReplyDeps = {
       config,
       memory: new NullMemoryStore(),
       providers: { get: () => ({}) as never } as never,
-      postReviewComment: async (target, body) => void posts.push({ target, body }),
-      fetchPrHead: async () => "a".repeat(40),
     };
     const registry = new RunRegistry({ genId: () => "run-a", genToken: () => "tok" });
     const run = registry.create(agentName, {
@@ -372,17 +368,8 @@ describe("afterReply — the reflection pass and the review post-step", () => {
       userId: "slack:UX",
       threadKey: "slack:CX:1.0",
     });
-    const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf("slack:CX"), receivedAt: NOW });
-    const replies: string[] = [];
-    const io: ChannelIO = {
-      reply: async (t) => void replies.push(t),
-      status: async () => ({ update: () => {}, done: async () => {} }),
-      history: async () => [],
-    };
     const ctx = {
       msg,
-      io,
-      agent: getAgent(agentName),
       resolved: { agentName, modelRef: `anthropic/${agentName}-model` } as ResolvedRequest,
       directives: { text: msg.text },
       history: [],
@@ -392,30 +379,22 @@ describe("afterReply — the reflection pass and the review post-step", () => {
       stopped,
       answer: "the findings",
       toolCalls: 0,
-      reviewHead: "a".repeat(40),
-      observedHead: "a".repeat(40),
-      verdict: undefined,
-      digest: undefined,
-      carried: undefined,
-      root: trace.root,
     };
-    return { deps, ctx, posts, replies };
+    return { deps, ctx };
   }
 
-  it("a review of a resolved PR posts its findings back, pinned to the reviewed head, with the fail-closed verdict line; memory off reflects nothing", async () => {
+  // The review post-step no longer runs here: it runs inside the run loop,
+  // before the stream finishes, so the record carries its outcome
+  // (agent-review.md item 18; proven end-to-end in dispatcher.test.ts).
+  it("memory off reflects nothing", () => {
     const s = setup("review", undefined);
-    await afterReply(s.deps, s.ctx);
-    expect(s.posts).toHaveLength(1);
-    expect(s.posts[0].target).toMatchObject({ repo: "acme/api", number: 41 });
-    expect(s.posts[0].body).toMatch(/^No verdict submitted — not approving\./);
-    expect(s.posts[0].body).toContain("the findings");
+    afterReply(s.deps, s.ctx);
     expect(pendingReflectionCount()).toBe(0);
   });
 
-  it("a hard-stopped review posts nothing and reflects nothing", async () => {
+  it("a hard-stopped run reflects nothing", () => {
     const s = setup("review", "hard");
-    await afterReply(s.deps, s.ctx);
-    expect(s.posts).toEqual([]);
+    afterReply(s.deps, s.ctx);
     expect(pendingReflectionCount()).toBe(0);
   });
 });

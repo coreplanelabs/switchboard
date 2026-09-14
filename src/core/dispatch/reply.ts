@@ -15,11 +15,7 @@ import { cardShapeLine } from "../runShape.js";
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { RequestDirectives } from "../../directives.js";
-import { postReviewComment, type ReviewCommentTarget } from "../../execution/githubComments.js";
-import { currentPrHeadSha, type RepoContext } from "../repoContext.js";
-import { runReviewPostStep } from "../reviewRound.js";
-import type { ReviewVerdict } from "../reviewVerdict.js";
-import type { DigestReport } from "../diffDigest.js";
+import type { RepoContext } from "../repoContext.js";
 import { scheduleReflection } from "../memory/index.js";
 import { resolveChatActor } from "../authz/actor.js";
 import type { ChannelVisibility } from "../authz/types.js";
@@ -31,7 +27,6 @@ import type { RunEnding } from "../runEnding.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Span } from "../trace/types.js";
 import type { HistoryItem, IncomingMessage, StatusHandle } from "../types.js";
-import type { AuthorizeDeps } from "./authorize.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { ResolveDeps } from "./resolve.js";
 
@@ -250,6 +245,8 @@ export function activityLine(e: RunEvent): string {
       return "PR description recorded"; // published straight to the registry — never arrives here
     case "pr_opened":
       return "PR opened"; // published straight to the registry — never arrives here
+    case "review_posted":
+      return "review posted"; // published straight to the registry — never arrives here
     case "ship_round":
       return `round ${e.index} (${e.agent}): ${e.outcome}`; // published straight to the registry — never arrives here
     case "span_start":
@@ -340,21 +337,11 @@ export async function replyCommandOutput(io: ChannelIO, parsed: ParsedChatComman
   });
 }
 
-/** What the reply stage's post-run steps read off the dispatcher's
- *  dependencies: the memory store and providers for the reflection pass, the
- *  review post and the PR head lookup for the review post-step. `CoreDeps`
- *  extends this; a caller's shape is unchanged. */
-export interface ReplyDeps
-  extends Pick<ProvisionDeps, "memory">, Pick<ResolveDeps, "providers">, Pick<AuthorizeDeps, "fetchPrHead"> {
+/** What the reply stage's post-run step reads off the dispatcher's
+ *  dependencies: the memory store and providers for the reflection pass.
+ *  `CoreDeps` extends this; a caller's shape is unchanged. */
+export interface ReplyDeps extends Pick<ProvisionDeps, "memory">, Pick<ResolveDeps, "providers"> {
   config: ConfigStore;
-  /**
-   * Posts a review comment back to a PR. Called after a `review`
-   * run against a resolved PR, unless the request opted out. Default: the real
-   * GitHub REST post with the App installation token (App `pull_requests:write`;
-   * no `gh` shell-out — AGENTS.md invariant 5). Injectable so tests assert the
-   * decision without a network call.
-   */
-  postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
 }
 
 /** How the answer's delivery ended: delivered (the card closed, the reply
@@ -479,8 +466,6 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
 /** What `afterReply` reads off the dispatch. */
 export interface AfterReplyContext {
   msg: IncomingMessage;
-  io: ChannelIO;
-  agent: AgentDef;
   resolved: ResolvedRequest;
   directives: RequestDirectives;
   history: HistoryItem[];
@@ -490,44 +475,17 @@ export interface AfterReplyContext {
   stopped: StopMode | undefined;
   answer: string;
   toolCalls: number;
-  reviewHead: string | undefined;
-  observedHead: string | undefined;
-  verdict: ReviewVerdict | undefined;
-  /** The review's last diff digest (`diff_digest` → `onDigest`), for the
-   *  digest-coverage guard; undefined when the tool was never called. */
-  digest: DigestReport | undefined;
-  carried: { reviewed: string; current: string; commits: number } | undefined;
-  root: Span;
 }
 
 /**
  * After the reply has landed: the memory reflection pass (fire-and-forget,
- * gated on memory being on and the run having done real work) and the
- * deterministic review post-step (a review of a resolved PR posts its findings
- * back, behind the reviewed-head guard). Deliberately after the workspace
- * release and the registry finish, as before.
+ * gated on memory being on and the run having done real work). The review
+ * post-step used to run here too, after the seal that writes the record; it
+ * now runs inside the run loop, before the stream finishes, so the record
+ * carries its outcome (agent-review.md item 18).
  */
-export async function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): Promise<void> {
-  const {
-    msg,
-    io,
-    agent,
-    resolved,
-    directives,
-    history,
-    repoCtx,
-    run,
-    channelVisibility,
-    stopped,
-    answer,
-    toolCalls,
-    reviewHead,
-    observedHead,
-    verdict,
-    digest,
-    carried,
-    root,
-  } = ctx;
+export function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): void {
+  const { msg, resolved, directives, history, repoCtx, run, channelVisibility, stopped, answer, toolCalls } = ctx;
   // Cross-session memory — WRITE path. AFTER the reply has
   // landed, distill this run into memory records: fire-and-forget (tracked
   // only for the shutdown drain), so its latency/failures never reach the
@@ -560,32 +518,4 @@ export async function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): Promi
       request: directives.text,
       answer,
     });
-
-  // Deterministic review post-step (runReviewPostStep in
-  // reviewRound.ts): a `review` run against a resolved PR posts its findings
-  // back to that PR by default — no need to ask — behind the reviewed-head
-  // guard (item 8, fail-closed) and pinned to the verified head (or the
-  // carried one, item 12). Best-effort: a post failure is logged and said in
-  // the thread but never fails the dispatch (the review already landed in
-  // Slack). A HARD-stopped review has no findings — only the abort line — so
-  // nothing is posted; a soft stop's "findings so far" finale posts as
-  // usual. Deliberately AFTER the workspace release and registry finish
-  // above — the plain path's lifecycle position is unchanged.
-  await root.span("post.review_post", () =>
-    runReviewPostStep({
-      agent,
-      requestText: directives.text,
-      repoCtx,
-      heads: { reviewHead, observedHead },
-      verdict,
-      digest,
-      answer,
-      carried,
-      hardStopped: stopped === "hard",
-      post: deps.postReviewComment ?? postReviewComment,
-      fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-      reply: (text) => io.reply(text),
-      logKey: msg.threadKey,
-    }),
-  );
 }

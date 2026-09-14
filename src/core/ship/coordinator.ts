@@ -345,8 +345,12 @@ export type ChildFacts =
       description?: boolean;
       /** A review child's verdict. */
       verdict?: { verdict: ReviewVerdictKind; summary?: string; findings: Finding[] };
-      /** Whether the review child's verdict landed on the pull request. */
+      /** Whether the review child's verdict landed on the pull request — the
+       *  child's own record of its post, or GitHub's review list when the
+       *  record is silent (http-ingress.md item 9). */
       reviewPosted?: boolean;
+      /** Why the child recorded no post, when it recorded one it chose or failed. */
+      reviewPostReason?: string;
       reviewHead?: string;
       /** A fix child's dispositions. */
       dispositions?: FindingDisposition[];
@@ -720,13 +724,15 @@ function settleReview(
   const notes = [roundNote(round, verdict.verdict)];
   if (verdict.verdict === "approve") {
     // Merge-ready stands on the POSTED approval: an approve whose post did
-    // not land left no approving review on the pull request.
+    // not land left no approving review on the pull request. The reason is
+    // the child's own when it recorded one; how to continue is the report's
+    // re-issue line, in the runner's words (`renderUnitReport`).
     if (facts.reviewPosted === false)
       return end(
         next,
         {
           kind: "aborted",
-          reason: `⚠️ The review approved, but the approval could not be posted — the pull request carries no approving review. Re-run ship with the pull request URL to retry the approval.`,
+          reason: `⚠️ The review approved, but the approval could not be posted${facts.reviewPostReason !== undefined ? ` (${facts.reviewPostReason})` : ""} — the pull request carries no approving review.`,
           round,
           reviewRounds: next.reviewRounds,
         },

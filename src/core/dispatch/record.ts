@@ -12,7 +12,14 @@ import { isSpanRecord } from "../runEvents.js";
 import { fitRecordToBudget, type RunProfileRecord, type RunRecord, type RunStatus } from "../runRecord.js";
 import type { RunProfile } from "../../config/profile.js";
 import { redactHandoff, type Handoff } from "../ship/handoff.js";
-import { redactDispositions, redactVerdict, type FindingDisposition, type ReviewVerdict } from "../reviewVerdict.js";
+import {
+  redactDispositions,
+  redactReviewPost,
+  redactVerdict,
+  type FindingDisposition,
+  type ReviewPost,
+  type ReviewVerdict,
+} from "../reviewVerdict.js";
 import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import { activityOfEvents } from "../runRegistry/activity.js";
@@ -268,6 +275,10 @@ export function assembleRunRecord(input: {
   verdict?: ReviewVerdict;
   reviewHead?: string;
   dispositions?: FindingDisposition[];
+  /** How the review run's post-step ended (agent-review.md item 18) — the
+   *  skip's reason redacted HERE like every other free string. Omitted when
+   *  the run has none. */
+  reviewPost?: ReviewPost;
   /** The effective profile the run was admitted with, with its preset. Omitted
    *  when the caller has none (the drain's tombstone of a run whose registry
    *  row predates profiles). */
@@ -316,6 +327,7 @@ export function assembleRunRecord(input: {
     ...(input.verdict !== undefined ? { verdict: redactVerdict(input.verdict) } : {}),
     ...(input.reviewHead !== undefined ? { reviewHead: input.reviewHead } : {}),
     ...(input.dispositions !== undefined ? { dispositions: redactDispositions(input.dispositions) } : {}),
+    ...(input.reviewPost !== undefined ? { reviewPost: redactReviewPost(input.reviewPost) } : {}),
     ...(input.profile !== undefined ? { profile: input.profile } : {}),
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
     ...coordinatorFields(input.coordinator),
@@ -428,6 +440,8 @@ export interface FinishRecordContext {
   verdict?: ReviewVerdict;
   reviewHead?: string;
   dispositions?: FindingDisposition[];
+  /** How the review run's post-step ended (agent-review.md item 18), when it ran one. */
+  reviewPost?: ReviewPost;
   /** The run that spawned this one (item 46), when it is a child. */
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
@@ -462,6 +476,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     verdict,
     reviewHead,
     dispositions,
+    reviewPost,
     parentRunId,
     coordinator,
   } = ctx;
@@ -489,6 +504,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           ...(verdict !== undefined ? { verdict } : {}),
           ...(reviewHead !== undefined ? { reviewHead } : {}),
           ...(dispositions !== undefined ? { dispositions } : {}),
+          ...(reviewPost !== undefined ? { reviewPost } : {}),
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...(coordinator !== undefined ? { coordinator } : {}),
         }),

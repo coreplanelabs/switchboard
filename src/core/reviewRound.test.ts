@@ -6,6 +6,7 @@ import { AGENTS } from "../agents/registry.js";
 import { declaredProfile } from "../config/profile.js";
 import { resetResidentProbeCache } from "../execution/factory.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
+import type { RunEvent } from "./runEvents.js";
 import {
   attachRoundWorkspace,
   checkPrHeadPreflight,
@@ -385,7 +386,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     expect(h.posts).toHaveLength(1);
     expect(h.posts[0].target).toMatchObject({ repo: "acme/api", number: 42, commitId: HEAD });
     expect(h.posts[0].body.startsWith("LGTM:")).toBe(true);
-    expect(out).toEqual({ posted: true });
+    expect(out).toEqual({ posted: true, target: { repo: "acme/api", number: 42 }, head: HEAD, verdict: "approve" });
   });
 
   it("a non-review AgentDef never posts, even with a resolved PR and a verdict", async () => {
@@ -533,7 +534,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       expect(h.posts).toHaveLength(1);
       expect(h.posts[0].target).toMatchObject({ commitId: HEAD });
       expect(h.replies).toHaveLength(0);
-      expect(out).toEqual({ posted: true });
+      expect(out).toMatchObject({ posted: true, head: HEAD });
     });
 
     it("no digest, or no PR size to compare against → nothing to hold the review to; it posts", async () => {
@@ -559,6 +560,118 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       expect(h.replies).toHaveLength(1);
       expect(h.replies[0]).toContain("is not the PR head");
       expect(h.replies[0]).not.toContain("digest covered");
+    });
+  });
+
+  // docs/reference/specs/agent-review.md item 18 — the post is a recorded fact of
+  // the run: the step knows the outcome in-process and publishes it onto the
+  // run's stream, so the record a coordinator reads the second the run
+  // finishes says whether the verdict landed on the pull request — without
+  // asking GitHub, whose review list can lag the post it just accepted.
+  describe("the post as a recorded fact (item 18)", () => {
+    const base = (h: ReturnType<typeof harness>, events: RunEvent[]) => ({
+      agent: AGENTS.review,
+      requestText: "review acme/api#42",
+      repoCtx: { repo: "acme/api", pr: 42 },
+      heads: { reviewHead: HEAD, observedHead: HEAD },
+      verdict,
+      digest: undefined,
+      answer,
+      carried: undefined,
+      hardStopped: false,
+      post: h.post,
+      fetchPrHead: async () => HEAD,
+      reply: h.reply,
+      publish: (e: RunEvent) => void events.push(e),
+      logKey: "t",
+    });
+
+    it("a successful post publishes `review_posted` with the pull request, the pinned head and the verdict — the same facts the outcome carries", async () => {
+      const h = harness();
+      const events: RunEvent[] = [];
+      const out = await runReviewPostStep(base(h, events));
+      expect(out).toEqual({ posted: true, target: { repo: "acme/api", number: 42 }, head: HEAD, verdict: "approve" });
+      expect(events).toEqual([
+        { type: "review_posted", repo: "acme/api", number: 42, head: HEAD, verdict: "approve", at: expect.any(Number) },
+      ]);
+    });
+
+    it("a review carried across a rebase records the head it was pinned to — the current one — not the one it read", async () => {
+      const h = harness();
+      const events: RunEvent[] = [];
+      const out = await runReviewPostStep({
+        ...base(h, events),
+        carried: { reviewed: HEAD, current: OTHER, commits: 2 },
+        fetchPrHead: async () => OTHER,
+      });
+      expect(out).toMatchObject({ posted: true, head: OTHER });
+      expect(events[0]).toMatchObject({ type: "review_posted", head: OTHER });
+    });
+
+    it("a skipped post (the reviewed-head guard) publishes a `review_not_posted` note carrying the reason the outcome carries — a recorded skip, distinguishable from a post GitHub has not surfaced yet", async () => {
+      const h = harness();
+      const events: RunEvent[] = [];
+      const out = await runReviewPostStep({ ...base(h, events), heads: { reviewHead: HEAD, observedHead: OTHER } });
+      expect(out).toEqual({ posted: false, reason: expect.stringContaining("is not the PR head") });
+      expect(events).toEqual([
+        {
+          type: "run_note",
+          kind: "review_not_posted",
+          summary: `review not posted to acme/api#42: ${(out as { reason: string }).reason}`,
+          at: expect.any(Number),
+        },
+      ]);
+    });
+
+    it("a post GitHub refused publishes the same note with GitHub's reason", async () => {
+      const h = harness();
+      const events: RunEvent[] = [];
+      const out = await runReviewPostStep({
+        ...base(h, events),
+        post: async () => {
+          throw new Error("HTTP 502 bad gateway");
+        },
+      });
+      expect(out).toEqual({ posted: false, reason: "HTTP 502 bad gateway" });
+      expect(events).toEqual([
+        {
+          type: "run_note",
+          kind: "review_not_posted",
+          summary: "review not posted to acme/api#42: HTTP 502 bad gateway",
+          at: expect.any(Number),
+        },
+      ]);
+    });
+
+    it("a review with no pull request to post to records the skip without a target; a non-review round and a hard-stopped round publish nothing", async () => {
+      const noPr = harness();
+      const noPrEvents: RunEvent[] = [];
+      const out = await runReviewPostStep({ ...base(noPr, noPrEvents), repoCtx: { repo: "acme/api" } });
+      expect(out).toEqual({ posted: false, reason: "no PR resolved" });
+      expect(noPrEvents).toEqual([
+        {
+          type: "run_note",
+          kind: "review_not_posted",
+          summary: "review not posted: no PR resolved",
+          at: expect.any(Number),
+        },
+      ]);
+
+      const coding = harness();
+      const codingEvents: RunEvent[] = [];
+      await runReviewPostStep({ ...base(coding, codingEvents), agent: AGENTS.coding, requestText: "fix acme/api#42" });
+      expect(codingEvents).toEqual([]);
+
+      const stopped = harness();
+      const stoppedEvents: RunEvent[] = [];
+      await runReviewPostStep({ ...base(stopped, stoppedEvents), hardStopped: true });
+      expect(stoppedEvents).toEqual([]);
+    });
+
+    it("without a `publish` seam the step still answers the same outcome — the plain caller's shape is unchanged", async () => {
+      const h = harness();
+      const { publish: _publish, ...input } = base(h, []);
+      expect(await runReviewPostStep(input)).toMatchObject({ posted: true, head: HEAD });
     });
   });
 });

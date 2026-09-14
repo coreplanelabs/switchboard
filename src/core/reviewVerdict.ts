@@ -259,6 +259,46 @@ export function isReviewVerdictShape(v: unknown): v is ReviewVerdict {
   return true;
 }
 
+/** How a review run's post-step ended, as the run's record carries it
+ *  (docs/reference/specs/agent-review.md item 18; run-history item 2): the verdict
+ *  landed on a named pull request pinned to `head` (the verdict kind rides when
+ *  one was submitted — a review that posted without a verdict posts the
+ *  no-verdict line), or nothing landed and `reason` says why — a guard's
+ *  refusal, an opt-out, no pull request, GitHub's own error. A coordinator's
+ *  `read-record` answers `reviewPosted` from this before it asks GitHub, whose
+ *  review list can lag a post it accepted a second ago. */
+export type ReviewPost =
+  | { posted: true; target: { repo: string; number: number }; head: string; verdict?: ReviewVerdictKind }
+  | { posted: false; reason: string };
+
+const REVIEW_POST_HEAD = /^[0-9a-f]{7,40}$/;
+
+/** Structural check on a review post read back from a stored record: a posted
+ *  outcome names its pull request and a 7-to-40-hex head, its verdict (when
+ *  present) a known kind; a skipped one carries a string reason. */
+export function isReviewPostShape(v: unknown): v is ReviewPost {
+  if (!isRecordLike(v)) return false;
+  if (v.posted === false) return typeof v.reason === "string";
+  if (v.posted !== true) return false;
+  const target = v.target;
+  if (
+    !isRecordLike(target) ||
+    typeof target.repo !== "string" ||
+    typeof target.number !== "number" ||
+    !Number.isInteger(target.number) ||
+    target.number <= 0
+  )
+    return false;
+  if (typeof v.head !== "string" || !REVIEW_POST_HEAD.test(v.head)) return false;
+  return v.verdict === undefined || VERDICT_KINDS.includes(v.verdict as string);
+}
+
+/** The skip's reason through the redaction seam (it may carry GitHub's own
+ *  words); a posted outcome has no free text and is returned as it is. */
+export function redactReviewPost(post: ReviewPost, redact: (s: string) => string = redactSecrets): ReviewPost {
+  return post.posted ? post : { posted: false, reason: redact(post.reason) };
+}
+
 /** Structural check on a disposition set read back from a stored record. */
 export function isFindingDispositionsShape(v: unknown): v is FindingDisposition[] {
   return (

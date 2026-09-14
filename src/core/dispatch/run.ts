@@ -16,6 +16,7 @@ import { makeWebCapability } from "../../tools/web.js";
 import { RestGithubApi, type GithubApi } from "../../execution/githubApi.js";
 import type { GithubCapability } from "../../tools/github.js";
 import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../../execution/githubPulls.js";
+import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
 import type { ChatMessage } from "../../providers/types.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
@@ -104,6 +105,15 @@ export interface RunDeps
    * Injectable so tests assert the refusal without a network call.
    */
   fetchRepoShipInfo?: (repo: string) => Promise<RepoShipInfo | undefined>;
+  /**
+   * Posts a review back to a PR (docs/reference/specs/agent-review.md item 8): the
+   * review post-step, run inside the run loop for a `review` run against a
+   * resolved PR unless the request opted out. Default: the real GitHub REST
+   * post with the App installation token (App `pull_requests:write`; no `gh`
+   * shell-out — AGENTS.md invariant 5). Injectable so tests assert the
+   * decision without a network call.
+   */
+  postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
 }
 
 /** What `claimRun` reads off the dispatch. */

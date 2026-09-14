@@ -3,12 +3,14 @@ import {
   buildReviewPostBody,
   CHANGES_TOKEN,
   isFindingDispositionsShape,
+  isReviewPostShape,
   isReviewVerdictShape,
   LGTM_TOKEN,
   NO_VERDICT_LINE,
   parseDispositionsInput,
   parseVerdictInput,
   redactDispositions,
+  redactReviewPost,
   redactVerdict,
   verdictLine,
 } from "./reviewVerdict.js";
@@ -312,5 +314,53 @@ describe("review verdict → post body", () => {
       verdict: "approve",
       summary: "ok",
     });
+  });
+});
+
+// docs/reference/specs/run-history.md item 2, agent-review.md item 18 — the review
+// post as the record carries it: posted to a named pull request at a pinned
+// head, or not posted with the reason; shape-checked when read back, the
+// reason redacted when written (it may carry GitHub's own words).
+describe("the stored review post — isReviewPostShape and its redaction", () => {
+  const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+  const posted = {
+    posted: true as const,
+    target: { repo: "acme/api", number: 42 },
+    head: HEAD,
+    verdict: "approve" as const,
+  };
+  const skipped = { posted: false as const, reason: "digest covered 3 of 5 files" };
+
+  it("accepts a posted outcome (with or without a verdict) and a skipped one, also after a JSON round-trip", () => {
+    expect(isReviewPostShape(posted)).toBe(true);
+    expect(isReviewPostShape(JSON.parse(JSON.stringify(posted)))).toBe(true);
+    const { verdict: _verdict, ...noVerdict } = posted;
+    expect(isReviewPostShape(noVerdict)).toBe(true);
+    expect(isReviewPostShape({ ...posted, head: HEAD.slice(0, 7) })).toBe(true);
+    expect(isReviewPostShape(skipped)).toBe(true);
+  });
+
+  it("refuses a non-object, a posted outcome without its target, head or with a head outside the pattern or an unknown verdict, and a skip without a string reason", () => {
+    expect(isReviewPostShape(null)).toBe(false);
+    expect(isReviewPostShape("posted")).toBe(false);
+    expect(isReviewPostShape({ posted: "yes" })).toBe(false);
+    expect(isReviewPostShape({ posted: true, head: HEAD })).toBe(false);
+    expect(isReviewPostShape({ posted: true, target: { repo: "acme/api" }, head: HEAD })).toBe(false);
+    expect(isReviewPostShape({ posted: true, target: { repo: "acme/api", number: 0 }, head: HEAD })).toBe(false);
+    expect(isReviewPostShape({ posted: true, target: { repo: "acme/api", number: 42 } })).toBe(false);
+    expect(isReviewPostShape({ ...posted, head: "MAIN" })).toBe(false);
+    expect(isReviewPostShape({ ...posted, head: "abc" })).toBe(false);
+    expect(isReviewPostShape({ ...posted, verdict: "maybe" })).toBe(false);
+    expect(isReviewPostShape({ posted: false })).toBe(false);
+    expect(isReviewPostShape({ posted: false, reason: 7 })).toBe(false);
+  });
+
+  it("redaction walks the skip's reason and leaves a posted outcome as it is", () => {
+    const token = `ghp_${"a".repeat(24)}`;
+    expect(redactReviewPost({ posted: false, reason: `HTTP 401 for ${token}` })).toEqual({
+      posted: false,
+      reason: "HTTP 401 for «redacted-github-token»",
+    });
+    expect(redactReviewPost(posted)).toEqual(posted);
   });
 });

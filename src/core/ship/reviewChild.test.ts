@@ -179,7 +179,7 @@ describe("runShipReviewChild — one review round as a stage", () => {
     expect(posts[0].body.startsWith("LGTM: clean")).toBe(true);
     expect(out.verdict).toMatchObject({ verdict: "approve", summary: "clean" });
     expect(out.reviewHead).toBe(HEAD);
-    expect(out.reviewPost).toEqual({ posted: true });
+    expect(out.reviewPost).toMatchObject({ posted: true });
     expect(out.answer).toBe("Looks great.");
     expect(out.refusal).toBeUndefined();
     expect(releases).toEqual(["always"]);
@@ -243,7 +243,7 @@ describe("runShipReviewChild — one review round as a stage", () => {
     expect(out.verdict).toBeUndefined();
     expect(out.answer).toBe("I could not finish the review.");
     expect(out.refusal).toBeUndefined();
-    expect(out.reviewPost).toEqual({ posted: true });
+    expect(out.reviewPost).toMatchObject({ posted: true });
     expect(posts).toHaveLength(1);
     expect(posts[0].target).toMatchObject({ repo: "acme/api", number: 7, commitId: HEAD });
     expect(posts[0].body).toContain("I could not finish the review.");

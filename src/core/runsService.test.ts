@@ -200,7 +200,7 @@ describe("RunsService.getRun", () => {
     expect(withMessages.ok && withMessages.value.events?.length).toBe(4);
   });
 
-  it("a finished run still in the registry carries verdict, reviewHead, dispositions and handoff from the store the moment the store holds its record — identity, status and events stay the registry's, and only the summary row is read", async () => {
+  it("a finished run still in the registry carries verdict, reviewHead, reviewPost, dispositions and handoff from the store the moment the store holds its record — identity, status and events stay the registry's, and only the summary row is read", async () => {
     const inner = new InMemoryRunStore({ now: () => NOW });
     const store: RunStore = {
       put: (r) => inner.put(r),
@@ -226,10 +226,16 @@ describe("RunsService.getRun", () => {
     const verdict = { verdict: "approve" as const, summary: "clean", findings: [] };
     const dispositions = [{ findingId: "F1", disposition: "fixed" as const, note: "done" }];
     const handoff = { deviations: [], followUps: [], unproven: [] };
+    const reviewPost = {
+      posted: true as const,
+      target: { repo: "acme/api", number: 7 },
+      head: HEAD,
+      verdict: "approve" as const,
+    };
     // The finish record lands (and the writer tells the registry) while the row
     // is inside its 60 s TTL: the next read is the coordinator's, a second later.
     await store.put(
-      record(run.id, NOW + 40_000, { agent: "review", verdict, reviewHead: HEAD, dispositions, handoff }),
+      record(run.id, NOW + 40_000, { agent: "review", verdict, reviewHead: HEAD, reviewPost, dispositions, handoff }),
     );
     reg.markPersisted(run.id);
     expect(reg.getById(run.id)?.finished).toBe(true);
@@ -244,6 +250,7 @@ describe("RunsService.getRun", () => {
       agent: "review",
       verdict,
       reviewHead: HEAD,
+      reviewPost,
       dispositions,
       handoff,
     });

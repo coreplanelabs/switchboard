@@ -27,6 +27,8 @@ import type { GithubIdentity } from "../execution/githubApp.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
 import {
   COORDINATOR_ADMIN_PREFIX,
+  REVIEW_POSTED_CHECKS,
+  REVIEW_POSTED_RECHECK_MS,
   createAdminCoordinatorHandler,
   handleCoordinatorRequest,
   isCoordinatorAdminPath,
@@ -121,6 +123,8 @@ function harness(
     issues?: IssueSummary[];
     branchError?: Error;
     reviews?: PullRequestReview[];
+    /** GitHub's review list per fetch, in order (the last entry repeats): a list the post reaches late. */
+    reviewsSequence?: Array<PullRequestReview[] | undefined>;
     self?: GithubIdentity;
     ioFor?: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
     /** The merge step's GitHub: the pull request's facts, the checks at the head, the squash's answer. */
@@ -149,6 +153,8 @@ function harness(
   const threadsAsked: Array<{ threadKey: string; userId: string; cardTs?: string }> = [];
   const written: RunRecord[] = [];
   const merges: Array<{ pr: { repo: string; number: number }; opts: { sha: string; title: string } }> = [];
+  const sleeps: number[] = [];
+  let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
   const deps: AdminCoordinatorDeps = {
     tokens: "tokens" in over ? over.tokens : TOKENS,
@@ -178,7 +184,11 @@ function harness(
       branches.push([repo, branch, fromRef]);
       if (over.branchError) throw over.branchError;
     },
-    fetchPrReviews: async () => over.reviews,
+    fetchPrReviews: async () => {
+      const i = reviewFetches++;
+      const seq = over.reviewsSequence;
+      return seq ? seq[Math.min(i, seq.length - 1)] : over.reviews;
+    },
     selfIdentity: async () => over.self ?? { login: "acme-switchboard[bot]", id: 4242 },
     fetchPrFacts: async () => {
       if (over.prFacts instanceof Error) throw over.prFacts;
@@ -200,10 +210,13 @@ function harness(
     } as unknown as RunHistoryWriter,
     channelVisibilityOf: async () => "public",
     clock: () => NOW,
+    sleep: async (ms) => void sleeps.push(ms),
     log: (l) => void logs.push(l),
   };
   return {
     deps,
+    sleeps,
+    reviewFetches: () => reviewFetches,
     registry,
     store,
     ledger,
@@ -1261,6 +1274,143 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       run: { id: fix.id, finished: true, dispositions: [{ findingId: "F1", disposition: "fixed", note: "done" }] },
     });
     expect((await read(coding.id)).body).toMatchObject({ run: { id: coding.id, finished: true, handoff: true } });
+  });
+
+  // docs/reference/specs/http-ingress.md item 9, agent-review.md item 18 — the
+  // review child records its own post; the runner trusts that record and asks
+  // GitHub only when the record is silent, patiently.
+  it("read-record answers reviewPosted from the child's recorded post — true at the reviewed head with the verdict, on the unit's pull request — and never asks GitHub, whose review list may not surface the review yet", async () => {
+    const HEAD = "a".repeat(40);
+    // GitHub shows nothing: the review was posted a second ago.
+    const h = await planHarness({ reviews: [] });
+    await h.instances.putUnits([
+      unitRow("U10", { threadKey: "slack:C1:2.0", pr: { number: 7, url: "https://github.com/acme/api/pull/7" } }),
+    ]);
+    const tag = { parentInstanceId: PLAN_INSTANCE.id, idempotencyKey: "plan-fixture:U10/1/review" };
+    await h.store.put(
+      record("run-r1", {
+        ...tag,
+        agent: "review",
+        threadKey: "slack:C1:2.0",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewHead: HEAD,
+        reviewPost: { posted: true, target: { repo: "acme/api", number: 7 }, head: HEAD, verdict: "approve" },
+        events: [{ type: "answer", text: "LGTM: clean", seq: 1 }],
+      }),
+    );
+    const res = await call(h, "read-record", { parentInstanceId: PLAN_INSTANCE.id, runId: "run-r1", unit: "U10" });
+    expect(res.body).toMatchObject({
+      run: { id: "run-r1", verdict: { verdict: "approve" }, reviewHead: HEAD, reviewPosted: true },
+    });
+    expect("reviewPostReason" in (res.body as { run: Record<string, unknown> }).run).toBe(false);
+    expect(h.reviewFetches()).toBe(0);
+    expect(h.sleeps).toEqual([]);
+  });
+
+  it("read-record answers a recorded skip as reviewPosted: false with the child's reason, GitHub never asked — a skip the child chose is not a post GitHub has yet to surface", async () => {
+    const HEAD = "a".repeat(40);
+    // GitHub even shows a matching review (an older one): the record wins.
+    const h = await planHarness({
+      reviews: [
+        {
+          author: { login: "acme-switchboard[bot]", id: 4242 },
+          state: "COMMENTED",
+          commitId: HEAD,
+          body: "LGTM: clean",
+        },
+      ],
+    });
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0", pr: { number: 7, url: "u" } })]);
+    await h.store.put(
+      record("run-r1", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        idempotencyKey: "plan-fixture:U10/1/review",
+        agent: "review",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewHead: HEAD,
+        reviewPost: { posted: false, reason: "digest covered 3 of 5 files" },
+      }),
+    );
+    const res = await call(h, "read-record", { parentInstanceId: PLAN_INSTANCE.id, runId: "run-r1", unit: "U10" });
+    expect(res.body).toMatchObject({
+      run: { id: "run-r1", reviewPosted: false, reviewPostReason: "digest covered 3 of 5 files" },
+    });
+    expect(h.reviewFetches()).toBe(0);
+  });
+
+  it("a recorded post at another head, with another verdict or on another pull request is not trusted: GitHub decides", async () => {
+    const HEAD = "a".repeat(40);
+    const stale = [
+      { posted: true, target: { repo: "acme/api", number: 7 }, head: "b".repeat(40), verdict: "approve" },
+      { posted: true, target: { repo: "acme/api", number: 7 }, head: HEAD, verdict: "request_changes" },
+      { posted: true, target: { repo: "acme/api", number: 8 }, head: HEAD, verdict: "approve" },
+    ] as const;
+    for (const reviewPost of stale) {
+      const h = await planHarness({
+        reviews: [
+          {
+            author: { login: "acme-switchboard[bot]", id: 4242 },
+            state: "COMMENTED",
+            commitId: HEAD,
+            body: "LGTM: clean",
+          },
+        ],
+      });
+      await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0", pr: { number: 7, url: "u" } })]);
+      await h.store.put(
+        record("run-r1", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          idempotencyKey: "plan-fixture:U10/1/review",
+          agent: "review",
+          verdict: { verdict: "approve", summary: "clean", findings: [] },
+          reviewHead: HEAD,
+          reviewPost,
+        }),
+      );
+      const res = await call(h, "read-record", { parentInstanceId: PLAN_INSTANCE.id, runId: "run-r1", unit: "U10" });
+      expect(res.body, JSON.stringify(reviewPost)).toMatchObject({ run: { reviewPosted: true } });
+      expect(h.reviewFetches(), JSON.stringify(reviewPost)).toBe(1);
+    }
+  });
+
+  it("with no recorded post (an older child) GitHub is asked up to three times, a pause apart, and the first sighting answers true; a review GitHub never shows answers false after the third; a GitHub that stays silent answers nothing", async () => {
+    const HEAD = "a".repeat(40);
+    const standing: PullRequestReview[] = [
+      { author: { login: "acme-switchboard[bot]", id: 4242 }, state: "COMMENTED", commitId: HEAD, body: "LGTM: clean" },
+    ];
+    const seed = async (h: Awaited<ReturnType<typeof planHarness>>) => {
+      await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0", pr: { number: 7, url: "u" } })]);
+      await h.store.put(
+        record("run-r1", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          idempotencyKey: "plan-fixture:U10/1/review",
+          agent: "review",
+          verdict: { verdict: "approve", summary: "clean", findings: [] },
+          reviewHead: HEAD,
+        }),
+      );
+      return call(h, "read-record", { parentInstanceId: PLAN_INSTANCE.id, runId: "run-r1", unit: "U10" });
+    };
+    // The list surfaces the review on the third look.
+    const late = await planHarness({ reviewsSequence: [[], [], standing] });
+    expect((await seed(late)).body).toMatchObject({ run: { reviewPosted: true } });
+    expect(late.reviewFetches()).toBe(3);
+    expect(late.sleeps).toEqual([REVIEW_POSTED_RECHECK_MS, REVIEW_POSTED_RECHECK_MS]);
+    // The first look already sees it: no pause.
+    const prompt = await planHarness({ reviews: standing });
+    expect((await seed(prompt)).body).toMatchObject({ run: { reviewPosted: true } });
+    expect(prompt.reviewFetches()).toBe(1);
+    expect(prompt.sleeps).toEqual([]);
+    // Never shown: false, after every look.
+    const never = await planHarness({ reviews: [] });
+    expect((await seed(never)).body).toMatchObject({ run: { reviewPosted: false } });
+    expect("reviewPostReason" in ((await seed(never)).body as { run: Record<string, unknown> }).run).toBe(false);
+    expect(never.reviewFetches()).toBe(REVIEW_POSTED_CHECKS * 2);
+    // Silent (the fetch answers nothing) on every look: unknown, never a guess.
+    const silent = await planHarness({ reviewsSequence: [undefined] });
+    const body = (await seed(silent)).body as { run: Record<string, unknown> };
+    expect("reviewPosted" in body.run).toBe(false);
+    expect(silent.reviewFetches()).toBe(REVIEW_POSTED_CHECKS);
   });
 
   it("pr-check for a unit looks up the unit's branch and remembers the pull request on the row", async () => {

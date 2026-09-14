@@ -370,7 +370,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   // final answer (`answer`) — are the run's story, not its steps: none counts
   // toward `eventCount`.
   let narrativeEvents = 0;
-  let sideFactEvents = 0; // skill_use / review_artifact / pr_description / pr_opened / ship_round: facts about the run, not steps
+  let sideFactEvents = 0; // skill_use / review_artifact / pr_description / pr_opened / review_posted / ship_round: facts about the run, not steps
   let spanEvents = 0; // span_start / span_end (docs/reference/specs/tracing.md): timing records, not steps
   let wrapUp: { index: number; at?: number } | undefined;
   events.forEach((ev, index) => {
@@ -385,14 +385,15 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     }
     // Side facts about the run, not steps: skill_use rides beside a use_skill
     // call that already produced its own tool pair; review_artifact,
-    // pr_description, pr_opened and the ship_round boundaries are published
-    // by the dispatcher/pipeline outside the model loop entirely. Counting
-    // any of them would distort the story.
+    // pr_description, pr_opened, review_posted and the ship_round boundaries
+    // are published by the dispatcher/pipeline outside the model loop
+    // entirely. Counting any of them would distort the story.
     if (
       ev.type === "skill_use" ||
       ev.type === "review_artifact" ||
       ev.type === "pr_description" ||
       ev.type === "pr_opened" ||
+      ev.type === "review_posted" ||
       ev.type === "ship_round"
     ) {
       sideFactEvents++;
