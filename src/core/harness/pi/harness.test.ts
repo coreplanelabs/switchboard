@@ -25,6 +25,7 @@ import {
   relayedTools,
   runPiHarness,
   settlementResults,
+  splitSeed,
   type PiHarnessFacts,
   type PiHarnessRun,
 } from "./harness.js";
@@ -246,7 +247,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     // The protocol: auto-retry off, the state asked, the first turn as the prompt.
     expect(w.container.commands().map((c) => c.type)).toEqual(["set_auto_retry", "get_state", "prompt"]);
     expect(w.container.commands()[0]).toMatchObject({ enabled: false });
-    expect(w.container.commands()[2]).toMatchObject({ type: "prompt", message: "fix the failing test" });
+    expect(w.container.commands()[2]).toEqual({ id: "prompt", type: "prompt", message: "fix the failing test" });
+    // A seed of one turn (the seed rule): pi starts on a fresh session directory, no session file is written, the prompt is that turn entire.
+    expect(started.args[started.args.indexOf("--session-dir") + 1]).toBe(paths.sessionDir);
+    expect(started.args).not.toContain("--session");
+    expect([...w.container.files.keys()].filter((f) => f.startsWith(paths.sessionDir))).toEqual([]);
     // The stream: what the native loop would have emitted for the same turn.
     expect(w.events.filter((e) => e.type === "tool_call" || e.type === "tool_result")).toEqual([
       expect.objectContaining({
@@ -280,6 +285,87 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.sink.ended("run.agent")?.parentSpanId).toBe(w.root!.id);
     expect(w.sink.ended("tool.bash")?.parentSpanId).toBe(w.sink.ended("run.agent")?.spanId);
     expect(w.bearers.grantOf("run-7")).toBeDefined();
+  });
+
+  it("a seed with the thread's earlier turns starts pi on a session holding them in order — an assistant's tool call and its result as pi's own entries, a document as its note — and prompts it with the request alone, its image along; no resumed note", async () => {
+    const w = world();
+    w.run.messages = [
+      { role: "user", content: [{ type: "text", text: "run the tests" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Running them." },
+          { type: "tool_use", id: "h0", name: "bash", input: { command: "npm test" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", toolUseId: "h0", content: "12 pass, 1 fail" },
+          { type: "document", mediaType: "application/pdf", data: "BBB=", name: "spec.pdf" },
+          { type: "text", text: "here is the spec" },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "12 pass, 1 fails: the redact test." }] },
+      {
+        role: "user",
+        content: [
+          { type: "image", mediaType: "image/png", data: "AAA=" },
+          { type: "text", text: "fix the failing test" },
+        ],
+      },
+    ];
+    scriptedPi(w.container, (n, c) => finalTurn(c, "Fixed."));
+    const answer = await w.start();
+    expect(answer).toBe("Fixed.");
+    // The prompt is the request — the last turn, with its image — and none of the earlier text.
+    expect(w.container.commands()[2]).toEqual({
+      id: "prompt",
+      type: "prompt",
+      message: "fix the failing test",
+      images: [{ type: "image", data: "AAA=", mimeType: "image/png" }],
+    });
+    // pi starts on a session file holding every earlier turn, in order, as pi's own entries.
+    const [started] = w.container.starts;
+    const sessionPath = started.args[started.args.indexOf("--session") + 1];
+    expect(sessionPath).toMatch(new RegExp(`^${paths.sessionDir}/seed-\\d+\\.jsonl$`));
+    expect(started.args).not.toContain("--session-dir");
+    const session = w.container.files
+      .get(sessionPath)!
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(session[0]).toMatchObject({ type: "session", version: 3, cwd: "/workspace/threads/t/main" });
+    const entries = session.slice(1).map((e) => e.message as Record<string, unknown>);
+    expect(entries.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "user", "assistant"]);
+    expect(entries[0]).toMatchObject({ content: [{ type: "text", text: "run the tests" }] });
+    expect(entries[1]).toMatchObject({
+      content: [
+        { type: "text", text: "Running them." },
+        { type: "toolCall", id: "h0", name: "bash", arguments: { command: "npm test" } },
+      ],
+      stopReason: "toolUse",
+    });
+    expect(entries[2]).toMatchObject({
+      toolCallId: "h0",
+      toolName: "bash",
+      content: [{ type: "text", text: "12 pass, 1 fail" }],
+      isError: false,
+    });
+    expect(entries[3]).toMatchObject({
+      content: [
+        { type: "text", text: "[document spec.pdf (application/pdf) — not carried into this session]" },
+        { type: "text", text: "here is the spec" },
+      ],
+    });
+    expect(entries[4]).toMatchObject({
+      content: [{ type: "text", text: "12 pass, 1 fails: the redact test." }],
+      stopReason: "stop",
+    });
+    expect(JSON.stringify(session)).not.toContain("fix the failing test");
+    // The mirror counts from the whole seed, already on the ledger; the run is a fresh one, not a resume.
+    expect(w.steps.map((s) => s.firstIdx)).toEqual([5]);
+    expect(w.events.filter((e) => e.type === "run_note" && e.kind === "resumed")).toEqual([]);
   });
 
   it("the run is on the registry while pi runs: the relay authorizes and runs the run's tools under its context", async () => {
@@ -572,22 +658,33 @@ describe("the small pure pieces", () => {
       ]).map((t) => t.name),
     ).toEqual(["update_status", "web_fetch"]);
   });
-  it("promptOf joins the first user turn's text, carries its images, and names a document it cannot carry", () => {
-    expect(
-      promptOf([
-        {
-          role: "user",
-          content: [
-            { type: "image", mediaType: "image/png", data: "AAA=" },
-            { type: "document", mediaType: "application/pdf", data: "BBB=", name: "spec.pdf" },
-            { type: "text", text: "do it" },
-          ],
-        },
-      ]),
-    ).toEqual({
+  it("splitSeed: the last user turn is the prompt and every turn before it is the session; a one-turn seed has no session; an empty seed has neither", () => {
+    const ask: ChatMessage = { role: "user", content: [{ type: "text", text: "what does CI run?" }] };
+    const told: ChatMessage = { role: "assistant", content: [{ type: "text", text: "`npm run verify`." }] };
+    const request: ChatMessage = { role: "user", content: [{ type: "text", text: "fix the failing test" }] };
+    expect(splitSeed([ask, told, request])).toEqual({ session: [ask, told], prompt: request });
+    expect(splitSeed([request])).toEqual({ session: [], prompt: request });
+    expect(splitSeed([])).toEqual({ session: [] });
+  });
+  it("promptOf is the last user turn as pi's prompt — its text joined, its images carried, a document named since the prompt cannot carry one — and none of the turns before it", () => {
+    const earlier: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "what does CI run?" }] },
+      { role: "assistant", content: [{ type: "text", text: "`npm run verify`." }] },
+    ];
+    const request: ChatMessage = {
+      role: "user",
+      content: [
+        { type: "image", mediaType: "image/png", data: "AAA=" },
+        { type: "document", mediaType: "application/pdf", data: "BBB=", name: "spec.pdf" },
+        { type: "text", text: "do it" },
+      ],
+    };
+    const rendered = {
       message: "[An attached document, spec.pdf (application/pdf), could not be handed to this harness.]\n\ndo it",
       images: [{ type: "image", data: "AAA=", mimeType: "image/png" }],
-    });
+    };
+    expect(promptOf([...earlier, request])).toEqual(rendered);
+    expect(promptOf([request])).toEqual(rendered);
     expect(promptOf([])).toEqual({ message: "" });
   });
   it("settlementResults answers every call in flight with the restart note and nothing for none", () => {
