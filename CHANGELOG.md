@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.216.2](https://github.com/coreplanelabs/switchboard/compare/v1.216.1...v1.216.2) (2026-09-14)
+
+
+### Bug fixes
+
+* **dispatcher:** the ledger row carries the router's decision - a resumed run repaints its routed line and closes with the override footer, and a reclaim reads the route off the row ([#1113](https://github.com/coreplanelabs/switchboard/issues/1113)) ([5a464fa](https://github.com/coreplanelabs/switchboard/commit/5a464fa3aa0a34fffb666614c4c9f2fd5bb762f2))
+* **harness:** a pi run's files live under a root of the thread user's own, so a second pool user on a resident no longer fails at mkdir under the first user's parent ([#1115](https://github.com/coreplanelabs/switchboard/issues/1115)) ([9ca8c21](https://github.com/coreplanelabs/switchboard/commit/9ca8c2196c6bad570eeb59ee1034eb9eb51189ec))
+
+
+### Documentation
+
+* **resident:** correct the idle-gate clause in the stale-mid-flight validation row ([#1106](https://github.com/coreplanelabs/switchboard/issues/1106)) ([fe967ac](https://github.com/coreplanelabs/switchboard/commit/fe967ac76be591031ec2c324c0331392079cb50e))
+
 ## [1.216.1](https://github.com/coreplanelabs/switchboard/compare/v1.216.0...v1.216.1) (2026-09-14)
 
 
