@@ -341,10 +341,14 @@ workspaceDir: ./workspaces
 # preset, the card saying why (`routed: <reason>`) and how to run it another way.
 # `ship` is never routed. The one way off, so every plain message runs
 # `defaults.agent` as before the router: `auto: false`. `model` is the router's
-# model; default `defaults.models.general`.
+# model; default `defaults.models.general`. `answer` is how that model answers:
+# `tool` (default) forces a call to the router's `route` tool, whose schema is
+# the answer, so prose cannot occur; `text` is the one-JSON-object text contract
+# alone — set it for a provider or model that cannot take a forced tool call.
 # routing:
 #   auto: false
 #   model: anthropic/claude-haiku-4-5
+#   answer: text
 
 # Spend reporting: GET /costs (Access-gated). Optional. See docs/reference/specs/costs.md.
 # costs:

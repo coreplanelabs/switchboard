@@ -88,6 +88,12 @@ export interface CompletionRequest {
   system?: string;
   messages: ChatMessage[];
   tools?: ToolDef[];
+  /** Force one of `tools`: the model must answer by calling the named tool,
+   *  so the call's input IS the answer and prose cannot occur (the request
+   *  router's shape, routing-and-config item 21). Anthropic: `tool_choice:
+   *  {type: "tool", name}`; Chat Completions: `tool_choice: {type: "function",
+   *  function: {name}}`. Absent → the model chooses. */
+  toolChoice?: { type: "tool"; name: string };
   maxTokens: number;
   /** model effort hint; providers apply it only where the model supports it */
   effort?: Effort;

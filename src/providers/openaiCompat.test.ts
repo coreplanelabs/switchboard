@@ -1,6 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { toOAIMessages, usageFromOpenAI } from "./openaiCompat.js";
-import type { ChatMessage } from "./types.js";
+import { buildOpenAIBody, toOAIMessages, usageFromOpenAI } from "./openaiCompat.js";
+import type { ChatMessage, CompletionRequest } from "./types.js";
+
+// Feature: docs/reference/specs/routing-and-config.md item 21 — the seam's forced
+// tool choice, in the Chat Completions dialect.
+describe("buildOpenAIBody — tools and the forced tool choice", () => {
+  const base: CompletionRequest = {
+    model: "m",
+    system: "s",
+    maxTokens: 10,
+    messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+    tools: [{ name: "route", description: "d", inputSchema: { type: "object" } }],
+  };
+
+  it("maps a forced choice to tool_choice naming the function; absent, no tool_choice; without tools, neither key", () => {
+    const forced = buildOpenAIBody({ ...base, toolChoice: { type: "tool", name: "route" } });
+    expect(forced.tool_choice).toEqual({ type: "function", function: { name: "route" } });
+    expect(forced.tools).toEqual([
+      { type: "function", function: { name: "route", description: "d", parameters: { type: "object" } } },
+    ]);
+    expect(buildOpenAIBody(base).tool_choice).toBeUndefined();
+    const bare = buildOpenAIBody({ ...base, tools: undefined });
+    expect(bare.tools).toBeUndefined();
+    expect(bare.tool_choice).toBeUndefined();
+    expect(bare.messages).toEqual([
+      { role: "system", content: "s" },
+      { role: "user", content: "go" },
+    ]);
+  });
+});
 
 // Feature: docs/reference/specs/slack-channel.md — attachments seam. OpenAI-compatible chat
 // endpoints have inconsistent binary-PDF support, so a document (PDF) part is

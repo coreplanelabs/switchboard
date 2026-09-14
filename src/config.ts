@@ -36,6 +36,7 @@ import {
   validateMcpServers,
   validateRestrict,
   validateScopeEfforts,
+  type RouteAnswerMode,
 } from "./config/validate.js";
 import {
   intersectBoundaries,
@@ -101,6 +102,11 @@ export interface RoutingConfig {
   auto?: boolean;
   /** The router's model, `<provider>/<model>`; default `defaults.models.general`. */
   model?: string;
+  /** How the router's model answers. `tool` (default): the model is forced to
+   *  call the `route` tool, whose schema is the answer — prose cannot occur.
+   *  `text`: the one-JSON-object text contract alone — the escape hatch for a
+   *  provider or model that cannot take a forced tool call. */
+  answer?: RouteAnswerMode;
 }
 
 /** Whether the request router runs (docs/reference/specs/routing-and-config.md
