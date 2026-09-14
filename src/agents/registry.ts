@@ -493,7 +493,7 @@ const WORK_PRESETS = {
   general: {
     name: "general",
     description:
-      "Default assistant on the configured model: answers directly, reads the org's repos and manages their issues over GitHub, reads URLs. No workspace or shell.",
+      "Default assistant: answers directly, reads URLs, manages issues; the preset for any question the org's GitHub answers. No workspace or shell.",
     system: GENERAL_SYSTEM,
     toolset: "assistant",
     // The GitHub tools are REST in the bot process, so a general ask never
@@ -567,7 +567,7 @@ const WORK_PRESETS = {
   research: {
     name: "research",
     description:
-      "Answers questions with web search, URL reading, and read access to the org's repos and issues over GitHub. No workspace.",
+      "Answers questions that need the web (search, URL reading); GitHub for context, not for a question GitHub alone answers. No workspace.",
     system: RESEARCH_SYSTEM,
     toolset: "web",
     machine: "none", // web I/O only; no workspace is provisioned

@@ -267,7 +267,7 @@ function compoundRules(offer: CompoundOffer): string[] {
  *  the allowlist are untouched by it. */
 function imperativeRule(writers: readonly string[]): string {
   const names = writers.map((w) => `\`${w}\``).join(" or ");
-  return `Short imperatives: one terse order to change something or to make a failure go away — "fix it", "make it pass", "make the tests green", "add X", "rename Y", "bump Z" — is a request to change code even when it names no file, repository or cause: the channel or thread it arrives in is bound to a repository, and the preset that implements changes finds the failure itself. For it, answer ${names}. A question or a read-only ask about the same failure — "why did ci fail?", "check whether ci is red", "tell me why the build failed", "list the failing tests" — changes nothing: answer a read-only preset that covers it, never ${names}. An ask to look at, check or judge a pull request that is named (a link or a number) is a review, not an order to change it; a question about a failure with no pull request named is not a review.`;
+  return `Short imperatives: one terse order to change something or to make a failure go away — "fix it", "make it pass", "make the tests green", "add X", "rename Y", "bump Z" — is a request to change code even when it names no file, repository or cause: the channel or thread it arrives in is bound to a repository, and the preset that implements changes finds the failure itself. For it, answer ${names}. A question or a read-only ask about the same failure — "why did ci fail?", "check whether ci is red", "tell me why the build failed", "list the failing tests" — changes nothing: answer a read-only preset that covers it, never ${names}. An ask to look at, check or judge a pull request — named by a link or a number, or the thread's own ("this PR") — is a review, not an order to change it; a question about a failure with no pull request in view is not a review.`;
 }
 
 /** A reason as the card and the record carry it: one line, redacted, capped. */
@@ -295,8 +295,13 @@ export function parseRouteAnswer(raw: string, allowed: readonly string[], compou
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
     return { preset: undefined, reason: `not a single JSON object: ${tidyReason(trimmed)}` };
   const { preset, reason, parts } = parsed as Record<string, unknown>;
-  if (typeof preset !== "string") return { preset: undefined, reason: "missing preset in the router's answer" };
-  if (typeof reason !== "string") return { preset: undefined, reason: "missing reason in the router's answer" };
+  // The field named AND what came back: a forced tool call once answered
+  // without its required `preset`, and a record that says only "missing" hides
+  // what the model did — the same courtesy the not-JSON case pays.
+  if (typeof preset !== "string")
+    return { preset: undefined, reason: `missing preset in the router's answer: ${tidyReason(trimmed)}` };
+  if (typeof reason !== "string")
+    return { preset: undefined, reason: `missing reason in the router's answer: ${tidyReason(trimmed)}` };
   if (preset === COMPOUND_PRESET) return parseCompound(parts, tidyReason(reason), allowed, compound);
   if (!allowed.includes(preset))
     return { preset: undefined, reason: `router said "${tidyReason(preset)}", not a preset the requester may run` };
