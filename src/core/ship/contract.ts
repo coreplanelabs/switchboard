@@ -79,6 +79,10 @@ export interface ChildContract {
   issue: { repo: string; number: number } | undefined;
 }
 
+/** The PR-title gate's name, exported so another module can name the same
+ *  gate without a copied string (`npm run check:pr-title`; CI's `title` check). */
+export const PR_TITLE_GUARD = "check:pr-title";
+
 /** The guards a child may not weaken (AGENTS.md's Commands table), one line each on what they refuse. */
 export const GUARDS: readonly Guard[] = [
   {
@@ -95,6 +99,11 @@ export const GUARDS: readonly Guard[] = [
     name: "hygiene:check",
     refuses:
       "a new imprint in the public tree (a company, a person, a tracker reference, a plan id, a platform id, a date); the recorded list only shrinks",
+  },
+  {
+    name: PR_TITLE_GUARD,
+    refuses:
+      "a title whose type, scope or grammar is not the changelog line, the scope being one of the code map's Areas",
   },
   {
     name: "decisions:check",

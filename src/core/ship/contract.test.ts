@@ -4,6 +4,7 @@ import {
   CONTRACT_SECTION_HEADINGS,
   DEFAULT_CONTRACT_MAX_CHARS,
   GUARDS,
+  PR_TITLE_GUARD,
   contractFromPlan,
   contractFromTask,
   itemNumbersNamed,
@@ -419,6 +420,17 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     // the guards and the unit's test scenarios are never cut
     expect(tiny.text).toContain("a cold wake restores from the archive");
     for (const g of GUARDS) expect(tiny.text).toContain(`\`${g.name}\``);
+  });
+
+  it("the Guards section names `check:pr-title` and its refusal line, in full even under a tiny budget (guards are never truncated)", () => {
+    const guard = GUARDS.find((g) => g.name === PR_TITLE_GUARD);
+    expect(guard).toBeDefined();
+    const line = `- \`${PR_TITLE_GUARD}\` — ${guard!.refuses}`;
+    const full = renderContract(u10(), {});
+    expect(full.text).toContain(line);
+    expect(guard!.refuses).toContain("the scope being one of the code map's Areas");
+    const tiny = renderContract(u10(), { maxChars: 10 });
+    expect(tiny.text).toContain(line);
   });
 
   it("a part that is not there is not reported as dropped", () => {
