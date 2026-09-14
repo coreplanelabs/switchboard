@@ -7,6 +7,7 @@ import type { ChatMessage, ToolDef } from "../../providers/types.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RunEvent } from "../runEvents.js";
+import type { RunSeed } from "../runRecord.js";
 
 /** How long a generation's claim on a run lasts without a heartbeat. */
 export const LEASE_MS = 30_000;
@@ -69,6 +70,9 @@ export interface LiveRunMeta {
    *  still sends the parent its event and a retried spawn finds its run. */
   parentInstanceId?: string;
   idempotencyKey?: string;
+  /** Where the run's conversation started (item 52), so a reclaimed run's
+   *  record still says so: `parent` for a spawned child, `channel` otherwise. */
+  seed?: RunSeed;
   /** Which executor the run attached: what `makeExecutor` chose. */
   selection?: "resident" | "sandbox" | "local" | "none";
   /** The worktree path the system prompt names. */

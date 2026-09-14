@@ -6,23 +6,29 @@
 // a child is a `dispatch()` run as the requesting user — the parent's user, in
 // the parent's channel — in a thread the parent's channel opens for it, with
 // `DispatchOptions.parent` naming the parent, the child's depth and the wall
-// clock the parent had left. What this stage decides for itself it refuses by
-// name before anything is opened: a child cannot spawn (`spawn_depth`), a
-// parent with under two minutes left has no budget to hand on
-// (`spawn_budget`), a parent at `spawn.maxChildren` live children waits
-// (`spawn_fanout`), a channel with no thread to open has no child
-// (`spawn_unsupported`). Everything else — the agent gate, the profile gate,
-// admission, the repository gates — is the pipeline's, asked of the child as
-// of any request (docs/decisions/0007-authorization-policy-table.md: a child is
-// authorized like any run), and a refusal there reaches the parent as the tool
-// result naming the gate, never as a child.
+// clock the parent had left, and `DispatchOptions.seed` the parent's
+// conversation as text turns — a child is a reader of its parent's
+// conversation, started from what was said so far plus its prompt. What this
+// stage decides for itself it refuses by name before anything is opened: a
+// child cannot spawn (`spawn_depth`), a preset that writes is no child — the
+// registry's identity column is the line (`spawn_identity`) — a parent with
+// under two minutes left has no budget to hand on (`spawn_budget`), a parent
+// at `spawn.maxChildren` live children waits (`spawn_fanout`), a channel with
+// no thread to open has no child (`spawn_unsupported`). Everything else — the
+// agent gate, the profile gate, admission, the repository gates — is the
+// pipeline's, asked of the child as of any request
+// (docs/decisions/0007-authorization-policy-table.md: a child is authorized
+// like any run), and a refusal there reaches the parent as the tool result
+// naming the gate, never as a child.
 //
 // The stage names no orchestrator: `dispatch()` is injected, and the
 // dependency slice it reads is declared here (`SpawnCoreDeps`), so a program
 // that types this file — the dashboard's `vue-tsc` types every core module the
 // run tools reach — never pulls the dispatcher in behind it.
+import { AGENTS } from "../../agents/registry.js";
 import type { ConfigStore } from "../../config.js";
 import { MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
+import type { ChatMessage } from "../../providers/types.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import { resolveChatActor } from "../authz/actor.js";
 import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
@@ -35,6 +41,7 @@ import type { Clock } from "../trace/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import { defaultAdmission, steerRun, type DispatchFollowUp } from "./admission.js";
 import { waitCapabilityFor, type WaitCapability } from "./awaitChildren.js";
+import { textTurnsOf, type TextTurn } from "./textTurns.js";
 import type { DispatchOutcome } from "./outcome.js";
 
 /** The `spawn` block of `config.yaml` (docs/reference/specs/agent-conductor.md item 5). */
@@ -56,8 +63,9 @@ export function maxChildrenOf(cfg: SpawnConfig | undefined): number {
 export const MAX_SPAWN_DEPTH = 1;
 
 /** What a parent asks for: the preset the child runs, the prompt it is
- *  handed (everything it needs — it sees none of the parent's thread), the
- *  repository a repository preset works in, and a narrower budget. */
+ *  handed (what it should do — it starts from the parent's conversation as
+ *  text, and the prompt is its one new turn), the repository a repository
+ *  preset works in, and a narrower budget. */
 export interface SpawnRequest {
   preset: string;
   prompt: string;
@@ -80,18 +88,24 @@ export interface ParentRun {
 
 /** The parent as the spawn sees it: the run's identity and clock, the preset
  *  its thread lead names, the request whose user and channel the child acts as,
- *  and the channel handle the child's thread is opened through. */
+ *  the channel handle the child's thread is opened through, and its
+ *  conversation so far — the runner's own array, read at the spawn — whose
+ *  text turns are the child's seed. `conversation` is absent where the loop
+ *  keeps none in this process (a unit context, a harness that holds the
+ *  transcript elsewhere): the child then starts from its own thread. */
 export interface SpawnParent extends ParentRun {
   agentName: string;
   msg: IncomingMessage;
   io: ChannelIO;
+  conversation?: readonly ChatMessage[];
 }
 
 /** How a spawn ended: the child registered — its run id, its thread and a
  *  link to it — or a refusal by name with the text the child's thread (or the
- *  stage itself) said. `reason` is `spawn_depth`, `spawn_budget`,
- *  `spawn_fanout`, `spawn_unsupported`, `spawn_failed`, or a gate's own
- *  `dispatch.refuse` name (`agent_allowlist`, `profile_bounded`, …) relayed. */
+ *  stage itself) said. `reason` is `spawn_depth`, `spawn_identity`,
+ *  `spawn_budget`, `spawn_fanout`, `spawn_unsupported`, `spawn_failed`, or a
+ *  gate's own `dispatch.refuse` name (`agent_allowlist`, `profile_bounded`, …)
+ *  relayed. */
 export type SpawnOutcome =
   | { kind: "spawned"; runId: string; threadKey: string; url?: string }
   | { kind: "refused"; reason: string; message: string };
@@ -124,7 +138,12 @@ export interface SpawnCoreDeps {
  *  registration is still readable. */
 export interface SpawnDeps<D extends SpawnCoreDeps = SpawnCoreDeps> {
   core: D;
-  dispatch: (deps: D, msg: IncomingMessage, io: ChannelIO, opts?: { parent?: ParentRun }) => Promise<DispatchOutcome>;
+  dispatch: (
+    deps: D,
+    msg: IncomingMessage,
+    io: ChannelIO,
+    opts?: { parent?: ParentRun; seed?: TextTurn[] },
+  ) => Promise<DispatchOutcome>;
   registry: SpawnRegistry;
   clock: () => number;
   onChildEnded?: (child: { runId: string; threadKey: string }, outcome: DispatchOutcome) => void;
@@ -218,6 +237,15 @@ export async function spawnChild<D extends SpawnCoreDeps>(
       `a child run cannot spawn: this run is itself a child, and a tree is ${MAX_SPAWN_DEPTH} level deep — the run that started it is the one to ask`,
     );
   }
+  // A child is a reader (agent-conductor item 3): the registry's identity
+  // column is the line, never a list kept here, so a preset that writes is
+  // refused by name and the requester is pointed at starting it by hand.
+  if (AGENTS[request.preset]?.identity === "write") {
+    return refused(
+      "spawn_identity",
+      `\`${request.preset}\` runs as a \`write\` identity — it pushes branches and opens pull requests — and a spawned child never writes: it reads this conversation and reports; the person who asked starts that work by hand with \`agent:${request.preset}\``,
+    );
+  }
   const minutesLeft = Math.floor(parent.remainingMs / 60_000);
   if (minutesLeft < MIN_BOUNDARY_MINUTES) {
     return refused(
@@ -273,9 +301,13 @@ export async function spawnChild<D extends SpawnCoreDeps>(
       lastReply = text;
     },
   });
+  // The seed (routing-and-config item 20): what the parent's conversation
+  // said up to this call, as text — no tool exchanges, no thinking.
+  const seed = parent.conversation ? textTurnsOf(parent.conversation) : undefined;
   const settled = deps
     .dispatch(deps.core, child, io, {
       parent: { runId: parent.runId, depth: parent.depth + 1, remainingMs: parent.remainingMs },
+      ...(seed ? { seed } : {}),
     })
     .then(
       (outcome) => ({ kind: "ended" as const, outcome }),
@@ -312,26 +344,39 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   return refused(reason, lastReply ?? `the child ended (${first.outcome.status}) before it started`);
 }
 
+/** What a spawn knows of the parent's present, read at the call: the wall
+ *  clock it has left, and its conversation so far — the runner's own array,
+ *  whose text turns become the child's seed. `conversation` is absent where
+ *  the loop keeps none in this process (a unit context, a harness that holds
+ *  the transcript elsewhere): the child then starts from its own thread. */
+export interface SpawnMoment {
+  remainingMs: number;
+  conversation?: readonly ChatMessage[];
+}
+
 /** What a spawning run's tools hold (docs/reference/specs/agent-conductor.md
- *  item 3): a spawn as this run, with the wall clock it has left at the call,
- *  and how a child it spawned ended once its dispatch returned — undefined while
- *  the child runs, and for a run this capability did not spawn. */
+ *  item 3): a spawn as this run at the moment of the call — the wall clock it
+ *  has left, the conversation so far — and how a child it spawned ended once
+ *  its dispatch returned — undefined while the child runs, and for a run this
+ *  capability did not spawn. */
 export interface SpawnCapability {
-  spawn(request: SpawnRequest, remainingMs: number): Promise<SpawnOutcome>;
+  spawn(request: SpawnRequest, at: SpawnMoment): Promise<SpawnOutcome>;
   childOutcome(runId: string): DispatchOutcome | undefined;
 }
 
+/** The run's fixed half of a `SpawnParent`: its identity, preset, request and
+ *  channel — what the dispatcher knows when it builds the capability; the
+ *  moment's half (the clock, the conversation) is read at every call. */
+export type SpawningRun = Omit<SpawnParent, keyof SpawnMoment>;
+
 /** The capability the dispatcher builds for a run once it is registered: the
- *  run's id and depth fixed, the remaining wall clock read at every call. Spawns
- *  are admitted one at a time: the fan-out check counts the registry's live
- *  children, and a child is not in the registry until its dispatch registers
- *  it, so two spawns issued at once would both count the same — the next spawn
- *  waits for the previous to register or refuse, and the cap holds however the
- *  caller batches its calls. */
-export function spawnCapabilityFor<D extends SpawnCoreDeps>(
-  deps: SpawnDeps<D>,
-  parent: Omit<SpawnParent, "remainingMs">,
-): SpawnCapability {
+ *  run's id and depth fixed, the remaining wall clock and the conversation read
+ *  at every call. Spawns are admitted one at a time: the fan-out check counts
+ *  the registry's live children, and a child is not in the registry until its
+ *  dispatch registers it, so two spawns issued at once would both count the
+ *  same — the next spawn waits for the previous to register or refuse, and the
+ *  cap holds however the caller batches its calls. */
+export function spawnCapabilityFor<D extends SpawnCoreDeps>(deps: SpawnDeps<D>, parent: SpawningRun): SpawnCapability {
   const outcomes = new Map<string, DispatchOutcome>();
   const withHook: SpawnDeps<D> = {
     ...deps,
@@ -342,8 +387,8 @@ export function spawnCapabilityFor<D extends SpawnCoreDeps>(
   };
   let previous: Promise<unknown> = Promise.resolve();
   return {
-    spawn: (request, remainingMs) => {
-      const turn = previous.then(() => spawnChild(withHook, { ...parent, remainingMs }, request));
+    spawn: (request, at) => {
+      const turn = previous.then(() => spawnChild(withHook, { ...parent, ...at }, request));
       previous = turn.catch(() => {}); // a failed turn never blocks the next
       return turn;
     },
@@ -368,7 +413,7 @@ export function runToolCapabilities<D extends SpawnCoreDeps>(
   deps: SpawnDeps<D> & {
     registry: SpawnRegistry & Parameters<typeof createRunsService>[0]["registry"] & Pick<RunRegistry, "subscribeIndex">;
   },
-  run: Omit<SpawnParent, "remainingMs"> & {
+  run: SpawningRun & {
     control: Pick<RunControl, "requested">;
     inbox: Pick<FollowUpInbox<DispatchFollowUp>, "size">;
   },

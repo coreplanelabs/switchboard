@@ -1,7 +1,7 @@
 import type { ChannelVisibility } from "../authz/types.js";
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import type { RunEvent, StopMode } from "../runEvents.js";
-import type { RunStatus } from "../runRecord.js";
+import type { RunSeed, RunStatus } from "../runRecord.js";
 import type { RunState, SealedFrame } from "./state.js";
 
 // What a run's state looks like from outside: the read shapes the registry
@@ -64,6 +64,8 @@ export interface RunSummary {
    *  instance a child belongs to and the key its spawn carried (item 48). */
   parentInstanceId?: string;
   idempotencyKey?: string;
+  /** `RunMeta.seed`: where the run's conversation started (run-history item 52). */
+  seed?: RunSeed;
   /** Present only once a stop has been requested. */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -136,6 +138,7 @@ export function summaryOf(run: RunState): RunSummary {
     ...(m?.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
     ...(m?.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
     ...(m?.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
+    ...(m?.seed !== undefined ? { seed: m.seed } : {}),
     finished: run.finished,
     startedAt: run.startedAt,
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),

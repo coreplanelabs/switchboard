@@ -671,6 +671,24 @@ describe("isRunRecord — the parentRunId field", () => {
   });
 });
 
+// docs/reference/specs/run-history.md item 52 — where the run's conversation
+// started: its own thread, or its parent's turns.
+describe("isRunRecord — the seed field", () => {
+  it("accepts `channel` and `parent` — also after a JSON round-trip — and a record without one carries no key", () => {
+    expect(isRunRecord(record({ seed: "channel" }))).toBe(true);
+    expect(isRunRecord(record({ seed: "parent" }))).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record({ seed: "parent" }))))).toBe(true);
+    expect("seed" in record()).toBe(false);
+    expect(isRunRecord(record())).toBe(true);
+  });
+
+  it("refuses a seed outside the vocabulary: another word, an empty string, a non-string", () => {
+    expect(isRunRecord({ ...record(), seed: "thread" })).toBe(false);
+    expect(isRunRecord({ ...record(), seed: "" })).toBe(false);
+    expect(isRunRecord({ ...record(), seed: 1 })).toBe(false);
+  });
+});
+
 // docs/reference/specs/run-history.md item 48: a coordinator's child names the
 // instance it belongs to and the key its spawn carried; every other record
 // carries neither.

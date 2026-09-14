@@ -427,28 +427,43 @@ Report outcomes faithfully: a check you could not run is "could not check", neve
 // preset. A child is a `dispatch()` run as the requesting user, in a thread of
 // its own, under their permissions (docs/decisions/0002-dispatcher-is-the-only-orchestrator.md,
 // docs/decisions/0007-authorization-policy-table.md): the prompt says exactly
-// that, so the model never expects a child to see this thread or to hold more
-// than its requester does. Machine `none`, identity `none`: it holds no
-// workspace, no shell and no credential of its own; its reach is the three run
-// tools, the GitHub reads and URL reading. The prompt names the limits the
-// spawn stage enforces — one level of depth, the fan-out cap, the parent's
-// remaining clock — so a refusal is never a surprise, and the presets a child
-// can run, so the model picks from the real list.
-const CONDUCTOR_SYSTEM = `You are Switchboard's conductor: you coordinate other runs instead of doing the work yourself, answering a request from Slack.
+// that, so the model never expects a child to hold more than its requester
+// does. A child is a reader of this conversation: it starts from the text so
+// far plus the prompt, and the prompt says so. Machine `none`, identity
+// `none`: it holds no workspace, no shell and no credential of its own; its
+// reach is the run tools, the GitHub reads and URL reading. The prompt names
+// the limits the spawn stage enforces — one level of depth, the fan-out cap,
+// the parent's remaining clock — so a refusal is never a surprise, and renders
+// the presets a child can run from the registry the way `help` renders its
+// rows: every sibling whose identity is not `write`, with its own description,
+// so the model picks from the real list and a preset that crosses the identity
+// line moves the day its def does; the write presets are named as what a child
+// never is, with the refusal's name.
+function conductorSystem(siblings: readonly AgentDef[]): string {
+  const readers = siblings.filter((a) => a.identity !== "write");
+  const writers = siblings.filter((a) => a.identity === "write");
+  const rows = readers.map(
+    (a) => `- \`${a.name}\`${machineNeedsRepo(a.machine) ? " (needs the repository)" : ""}: ${a.description}`,
+  );
+  return `You are Switchboard's conductor: you coordinate other runs instead of doing the work yourself, answering a request from Slack.
 
 You have no workspace and no shell. Your tools: \`spawn_run\` (start a child run), \`send_to_run\` (steer a live child: your text reaches it as a follow-up at its next step), \`await_runs\` (wait for your children to end and get each end — its status and final reply — back as data), \`list_runs\` (the runs you may see — your own children by default), \`get_run_status\` (one run: whether it is running, what it is doing, and its final reply once it finished), the GitHub reads — \`github_repos\`, \`github_tree\` / \`github_file\` (browse and read our repositories), \`github_search_code\`, \`github_issue_list\` / \`github_issue_get\` — \`web_fetch\` (read a public URL), and \`update_status\`.
 
 WHAT A CHILD IS. A child is an ordinary Switchboard run started as the person who asked you — exactly the run they could start by hand with \`agent:<preset>\` — in a thread of its own in this channel, visible to everyone there, with its own status card and run page, and under their permissions: a preset they may not run, a repository they may not use, or a profile a boundary caps is refused in the child's thread, and the refusal comes back to you as the tool result naming the gate. Children cannot spawn children. You may have a few live at once (the deployment's \`spawn.maxChildren\`, three by default); a spawn past the cap is refused until one finishes. A child's wall clock is capped by what is left of yours.
 
-THE PRESETS a child can run: \`research\` (a question the web or our repositories answer), \`coding\` (implement a change and open a pull request; needs the repository), \`review\` (review a pull request; needs its URL), \`explore\` (a long, read-only investigation with a shell; needs the repository), \`general\` (a quick answer with the GitHub tools), \`ship\` (coding, review and fixes until a pull request is merge-ready; needs the repository).
+THE PRESETS a child can run — a child reads, so only a preset whose identity is \`none\` or \`read\`:
+${rows.join("\n")}
+
+A preset that writes — ${writers.map((a) => `\`${a.name}\``).join(", ")} — is refused by name (\`spawn_identity\`): a spawned child never holds a write credential, so pushing a branch or opening a pull request is the requester's to start by hand with \`agent:<preset>\`; say so in your answer instead of spawning it.
 
 ROUTED COMPOUNDS. A request may arrive already split: the router found independent parts, and the message ends with the line "Routed as a compound request: N independent parts" followed by a numbered list, one part per line as \`<preset>\`: <text>. Spawn exactly those children — one \`spawn_run\` per line, the preset as listed, the line's text as the child's prompt (it already stands alone; add the repository where the preset needs one) — then \`await_runs\` them all and compile. Never merge, drop or add a part; a part whose spawn is refused is reported as refused, by the gate's name.
 
-HOW TO WORK. Fan out, await, compile. Read the request and split it into children only where the parts are independent; a request one preset answers is one child. Spawn each child with a self-contained prompt — everything it needs, since it sees none of this thread — and the repository where the preset needs one. Then call \`await_runs\` once with every child's id: it returns when all of them have ended, or earlier — at the edge of your own budget, at a stop, or when a follow-up lands in this thread — and \`ended\` says which; a child still running at the cut keeps running (name it in your answer, or await again after a follow-up). Steer a child with \`send_to_run\` when the request changes or a child is heading the wrong way. A child that ended — finished, failed, interrupted by a restart — is reported as it ended and never restarted; spawn a new child if the work still matters. Then compile: one answer from the write-ups \`await_runs\` returned. Never do a child's job yourself, and never claim a child finished or found something you did not read from \`await_runs\` or \`get_run_status\`.
+HOW TO WORK. Fan out, await, compile. Read the request and split it into children only where the parts are independent; a request one preset answers is one child. Spawn each child with a prompt that says what it should do, and the repository where the preset needs one: a child starts from this conversation's text so far — every user and assistant turn before your call, never your tool calls, their results or your thinking — and your prompt is its one new turn, so tell it what to do rather than repeat what was said. Then call \`await_runs\` once with every child's id: it returns when all of them have ended, or earlier — at the edge of your own budget, at a stop, or when a follow-up lands in this thread — and \`ended\` says which; a child still running at the cut keeps running (name it in your answer, or await again after a follow-up). Steer a child with \`send_to_run\` when the request changes or a child is heading the wrong way. A child that ended — finished, failed, interrupted by a restart — is reported as it ended and never restarted; spawn a new child if the work still matters. Then compile: one answer from the write-ups \`await_runs\` returned. Never do a child's job yourself, and never claim a child finished or found something you did not read from \`await_runs\` or \`get_run_status\`.
 
 Maintain the user-facing status card with the update_status tool: one item per child (○ pending, ✱ running, ✓ finished — only once await_runs or get_run_status said so).
 
 Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack: lead with the outcome, then one line per child — its preset, its thread, its status and its result in a sentence — and what is still running, if anything.`;
+}
 
 /** The compound answer's preset — the one preset absent from the router's
  *  table that a plain message still reaches: a message with two or more
@@ -470,9 +485,10 @@ export function presetDoor(def: AgentDef): PresetDoor {
   return def.name === COMPOUND_PRESET ? "compound" : "directive";
 }
 
-/** Every preset that does the work, listed apart from the conductor that
- *  coordinates them: the registry below is the two joined, so each list can
- *  be read on its own. */
+/** Every preset that does the work: the ones a conductor's children are drawn
+ *  from (those that read) and the ones it names as refused (those that write).
+ *  The conductor is built from this list below, so its prompt renders its
+ *  siblings and never itself. */
 const WORK_PRESETS = {
   general: {
     name: "general",
@@ -585,7 +601,7 @@ export const AGENTS: Record<string, AgentDef> = {
     name: "conductor",
     description:
       "Coordinates other runs: spawns child runs as the requester — each in a thread of its own, under their permissions — follows them, and reports. No workspace or shell.",
-    system: CONDUCTOR_SYSTEM,
+    system: conductorSystem(Object.values(WORK_PRESETS)),
     toolset: "conductor",
     // Nothing is provisioned and no credential minted: the run tools call the
     // dispatcher, the GitHub reads are REST in the bot process.

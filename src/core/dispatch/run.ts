@@ -24,6 +24,7 @@ import type { McpToolsForRun } from "../../mcp/source.js";
 import type { RepoContext } from "../repoContext.js";
 import type { PrCommitList } from "../headMoved.js";
 import { REPLAY_EVERYTHING, type RunHandle, type RunRegistry } from "../runRegistry.js";
+import type { RunSeed } from "../runRecord.js";
 import type { RunStore } from "../runStore.js";
 import type { RunsService } from "../runsService.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
@@ -173,6 +174,8 @@ export interface ClaimContext {
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
   coordinator?: CoordinatorTag;
+  /** Where the run's conversation starts (item 52), on the row so a reclaim keeps it. */
+  seed?: RunSeed;
 }
 
 /**
@@ -206,6 +209,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     root,
     parentRunId,
     coordinator,
+    seed,
   } = ctx;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
@@ -247,6 +251,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           profile,
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...coordinatorFields(coordinator),
+          ...(seed !== undefined ? { seed } : {}),
           selection: resident === true ? "resident" : "sandbox",
           ...(binding?.workspace !== undefined ? { workspace: binding.workspace } : {}),
           ...(requestRow !== undefined ? { request: requestRow } : {}),

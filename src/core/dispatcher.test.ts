@@ -9116,9 +9116,10 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   // routing-and-config item 20: a redispatch is a request of its own, but the
   // same message — a spawned child that takes the boot-gap path stays its
   // parent's child.
-  it("a spawned child whose thread the boot-gap map names with a row the ledger no longer has is redispatched WITH its parent: the fresh run carries parentRunId and the parent's clock as its boundary", async () => {
+  it("a spawned child whose thread the boot-gap map names with a row the ledger no longer has is redispatched WITH its parent and its seed: the fresh run carries parentRunId, the parent's clock as its boundary, and starts from the parent's turns", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
-    const { deps, registry, store, writer } = wired(capturingProvider("child answer"), { ledger });
+    const provider = capturingProvider("child answer");
+    const { deps, registry, store, writer } = wired(provider, { ledger });
     const elsewhere = new ThreadsElsewhere();
     // A stale entry for the child's thread: the row is gone, so the durable push
     // is refused and the message runs fresh (the redispatch).
@@ -9132,15 +9133,23 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       deps,
       { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:9.0", text: "agent:research what changed?" },
       io.io,
-      { parent: { runId: "run-p", depth: 1, remainingMs: 5 * 60_000 } },
+      {
+        parent: { runId: "run-p", depth: 1, remainingMs: 5 * 60_000 },
+        seed: [{ role: "user", text: "look into durable objects" }],
+      },
     );
     await writer.settled();
     expect(io.replies.at(-1)).toBe("child answer");
-    expect(registry.getById("run-l")).toMatchObject({ agent: "research", parentRunId: "run-p" });
+    expect(registry.getById("run-l")).toMatchObject({ agent: "research", parentRunId: "run-p", seed: "parent" });
     expect(await store.get("run-l")).toMatchObject({
       parentRunId: "run-p",
+      seed: "parent",
       profile: { preset: "research", machine: "none", identity: "none", minutes: 5, boundedBy: "parent" },
     });
+    // The redispatch carried the seed: the fresh run's model started from the parent's turn, then the request.
+    expect(provider.requests).toHaveLength(1);
+    const opening = provider.requests[0].messages[0].content as Array<{ type: string; text?: string }>;
+    expect(opening.map((p) => p.text)).toEqual(["look into durable objects", "what changed?"]);
     expect(elsewhere.get("slack:CX:9.0")).toBeUndefined();
   });
 
@@ -10187,14 +10196,15 @@ defaults:
     conductor: anthropic/conductor-model
     research: anthropic/research-model
     coding: anthropic/coding-model
+    explore: anthropic/explore-model
 channels:
-  "slack:CREAD":
+  "slack:CNONE":
     boundary:
-      maxIdentity: read
+      maxIdentity: none
 grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 restrict:
-  agents: [coding]
+  agents: [explore]
 routing: { auto: false }
 workspaceDir: __WORKDIR__
 `;
@@ -10340,10 +10350,12 @@ workspaceDir: __WORKDIR__
       threadKey: CHILD_THREAD,
       status: "completed",
       parentRunId: "run-parent",
+      seed: "parent",
       profile: { preset: "research", machine: "none", identity: "none", minutes: childMinutes, boundedBy: "parent" },
     });
     expect(t.registry.getById("run-child")).toMatchObject({ parentRunId: "run-parent", agent: "research" });
     expect("parentRunId" in (await t.store.get("run-parent"))!).toBe(false);
+    expect((await t.store.get("run-parent"))!.seed).toBe("channel");
     // The card and the config block say what clipped the child.
     expect(
       child.statuses
@@ -10364,12 +10376,12 @@ workspaceDir: __WORKDIR__
   });
 
   it("a child for a requester without `agent:run:<preset>` ends at the agent gate: the allowlist refusal in the child's thread, the parent's tool result naming `agent_allowlist`, and the child never reaches the factory", async () => {
-    const { provider } = treeProvider([{ preset: "coding", prompt: "fix the login test", repo: "acme/api" }], "unused");
+    const { provider } = treeProvider([{ preset: "explore", prompt: "time the suite", repo: "acme/api" }], "unused");
     const t = treeDeps(provider);
     const { parent, child } = treeIO();
-    await dispatch(t.deps, inChannel("CX", "agent:conductor fix the login test in acme/api", "slack:UX"), parent.io);
+    await dispatch(t.deps, inChannel("CX", "agent:conductor time the suite in acme/api", "slack:UX"), parent.io);
     expect(child.replies).toHaveLength(1);
-    expect(child.replies[0]).toContain("You're not on the allowlist for the `coding` agent");
+    expect(child.replies[0]).toContain("You're not on the allowlist for the `explore` agent");
     expect(child.statuses).toEqual([]); // refused before any card
     expect(parent.replies[0]).toContain("spawn refused (agent_allowlist)");
     expect(parent.replies[0]).toContain("not on the allowlist");
@@ -10377,17 +10389,97 @@ workspaceDir: __WORKDIR__
     expect(t.registry.getById("run-child")).toBeNull();
   });
 
-  it("a child whose preset needs `write` in a channel bounded to `read` ends at the profile gate — the parent, identity `none`, runs there — and the parent is told by the gate's name", async () => {
-    const { provider } = treeProvider([{ preset: "coding", prompt: "fix the login test", repo: "acme/api" }], "unused");
+  it("a child whose preset needs `read` in a channel bounded to `none` ends at the profile gate — the parent, identity `none`, runs there — and the parent is told by the gate's name", async () => {
+    const { provider } = treeProvider([{ preset: "explore", prompt: "time the suite", repo: "acme/api" }], "unused");
     const t = treeDeps(provider);
     const { parent, child } = treeIO();
-    await dispatch(t.deps, inChannel("CREAD", "agent:conductor fix the login test in acme/api"), parent.io);
+    await dispatch(t.deps, inChannel("CNONE", "agent:conductor time the suite in acme/api"), parent.io);
     expect(child.replies).toHaveLength(1);
-    expect(child.replies[0]).toContain("`coding` needs a `write` credential");
+    expect(child.replies[0]).toContain("`explore` needs a `read` credential");
     expect(child.replies[0]).toContain("this channel's boundary");
     expect(parent.replies[0]).toContain("spawn refused (profile_bounded)");
     expect(agentsProvisioned()).toEqual(["conductor"]);
     expect(t.registry.getById("run-child")).toBeNull();
+  });
+
+  // docs/reference/specs/agent-conductor.md item 3: a child is a reader — a
+  // preset that writes is refused by the stage itself, before the child has
+  // a thread, so nothing in the channel or the registry records the attempt.
+  it("a `coding` child is refused `spawn_identity` before anything is opened — no thread in the channel, no run, the factory never asked — and the parent's tool result names the gate", async () => {
+    const { provider } = treeProvider([{ preset: "coding", prompt: "fix the login test", repo: "acme/api" }], "unused");
+    const t = treeDeps(provider);
+    const { parent, child, leads } = treeIO();
+    await dispatch(t.deps, inChannel("CX", "agent:conductor fix the login test in acme/api"), parent.io);
+    expect(leads).toEqual([]);
+    expect(child.replies).toEqual([]);
+    expect(parent.replies).toHaveLength(1);
+    expect(parent.replies[0]).toContain("spawn refused (spawn_identity)");
+    expect(parent.replies[0]).toContain("`coding`");
+    expect(agentsProvisioned()).toEqual(["conductor"]);
+    expect(t.registry.getById("run-child")).toBeNull();
+  });
+
+  // docs/reference/specs/routing-and-config.md item 20: a spawned child starts
+  // from what its parent's conversation said — every text turn so far, then
+  // its own prompt — and its record says where it started.
+  /** Each message's role and text parts, as the child's model saw them. */
+  const textTurns = (req: CompletionRequest): Array<[string, string[]]> =>
+    req.messages.map((m) => [
+      m.role,
+      typeof m.content === "string"
+        ? [m.content]
+        : (m.content as Array<{ type: string; text?: string }>)
+            .filter((p) => p.type === "text")
+            .map((p) => p.text ?? ""),
+    ]);
+  it("a research child's model sees the parent's text turns — the request and what the conductor said before spawning, never its tool call — then the child's prompt as the one new turn; the child's record names `seed: parent` with those turns as its context, the parent's record `seed: channel`", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        requests.push(req);
+        const conducts = req.tools?.some((t) => t.name === "spawn_run") ?? false;
+        if (conducts && toolResultTexts(req).length === 0)
+          return {
+            content: [
+              { type: "text", text: "Storage first: one research child." },
+              {
+                type: "tool_use",
+                id: "t1",
+                name: "spawn_run",
+                input: { preset: "research", prompt: "what is a Durable Object?" },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        if (conducts)
+          return { content: [{ type: "text", text: toolResultTexts(req).join("\n") }], stopReason: "end_turn" };
+        return { content: [{ type: "text", text: "A single-instance coordination point." }], stopReason: "end_turn" };
+      },
+    };
+    const t = treeDeps(provider);
+    const { parent, child } = treeIO();
+    await dispatch(t.deps, inChannel("CX", "agent:conductor look into durable objects"), parent.io);
+    await vi.waitFor(() => expect(t.registry.getById("run-child")?.finished).toBe(true));
+    await t.writer.settled();
+    expect(child.replies).toEqual(["A single-instance coordination point."]);
+    const childRequest = requests.find((r) => !r.tools?.some((tool) => tool.name === "spawn_run"))!;
+    expect(textTurns(childRequest)).toEqual([
+      ["user", ["look into durable objects"]],
+      ["assistant", ["Storage first: one research child."]],
+      ["user", ["what is a Durable Object?"]],
+    ]);
+    const childRecord = (await t.store.get("run-child"))!;
+    expect(childRecord.seed).toBe("parent");
+    expect(childRecord.events.filter((e) => e.type === "context").map((e) => (e as { text: string }).text)).toEqual([
+      "user: look into durable objects",
+      "assistant: Storage first: one research child.",
+    ]);
+    expect(childRecord.events.filter((e) => e.type === "input").map((e) => (e as { text: string }).text)).toEqual([
+      "what is a Durable Object?",
+    ]);
+    expect((await t.store.get("run-parent"))!.seed).toBe("channel");
+    expect(agentsProvisioned()).toEqual(["conductor", "research"]);
   });
 
   it("a child cannot spawn: a conductor child's own spawn_run is refused `spawn_depth`, and no grandchild exists", async () => {

@@ -6,6 +6,7 @@ import {
   COMPOUND_PRESET,
   getAgent,
   IDENTITIES,
+  machineNeedsRepo,
   presetDoor,
   RUNAWAY_TURNS_PER_MINUTE,
   runawayTurnCap,
@@ -838,8 +839,36 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
     expect(sys).toMatch(/compile/i);
     expect(sys).toMatch(/[Nn]ever do a child's job yourself/);
     expect(sys).toMatch(/never claim a child finished/);
-    // Every preset a child can run is named, so the model picks from the real list.
-    for (const preset of ["research", "coding", "review", "explore", "general"]) expect(sys).toContain(`\`${preset}\``);
+  });
+
+  // docs/reference/specs/agent-conductor.md items 3 and 7: the child list is
+  // rendered from the registry the way `help` renders its rows — a preset
+  // added or moved across the identity line is offered or withheld the day
+  // its def changes — and a child is a reader of this conversation.
+  it("conductor's prompt renders the presets a child can run from the registry — every sibling whose identity is not `write`, in registry order, each with its own description and a repository note where its machine carries a checkout — names the write presets as refused `spawn_identity`, and says a child starts from this conversation's text plus the prompt, never that it sees none of the thread", () => {
+    const sys = AGENTS.conductor.system;
+    const siblings = Object.values(AGENTS).filter((a) => a.name !== "conductor");
+    const readers = siblings.filter((a) => a.identity !== "write");
+    const writers = siblings.filter((a) => a.identity === "write");
+    expect(readers.map((a) => a.name)).toEqual(["general", "review", "research", "explore"]);
+    expect(writers.map((a) => a.name)).toEqual(["coding", "ship"]);
+    const list = sys.split("\n\n").find((p) => p.startsWith("THE PRESETS"))!;
+    expect(list).toBeDefined();
+    const rows = list.split("\n").filter((line) => line.startsWith("- `"));
+    expect(rows.map((line) => /^- `([a-z]+)`/.exec(line)![1])).toEqual(readers.map((a) => a.name));
+    for (const [i, def] of readers.entries()) {
+      expect(rows[i]).toContain(def.description);
+      expect(/needs the repository/.test(rows[i])).toBe(machineNeedsRepo(def.machine));
+    }
+    // The writers are named as what a child never is, with the refusal's name.
+    const refusal = sys.split("\n\n").find((p) => p.includes("spawn_identity"))!;
+    expect(refusal).toBeDefined();
+    for (const def of writers) expect(refusal).toContain(`\`${def.name}\``);
+    expect(refusal).toMatch(/write/);
+    // The child is a reader of this conversation: the old claim is gone.
+    expect(sys).not.toMatch(/sees none of this thread/);
+    expect(sys).toMatch(/this conversation's text/);
+    expect(sys).toMatch(/your prompt/);
   });
 
   it("conductor's prompt knows a routed compound: the brief's heading, the numbered `<preset>`: <text> lines, spawn exactly those and never merge, drop or add one", () => {

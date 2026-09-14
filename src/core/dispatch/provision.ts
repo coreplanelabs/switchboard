@@ -31,7 +31,7 @@ import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import type { RepoContext } from "../repoContext.js";
 import { redactSecrets, type AgentSource } from "../runEvents.js";
-import { MAX_EVENT_BYTES, utf8ByteLength } from "../runRecord.js";
+import { MAX_EVENT_BYTES, utf8ByteLength, type RunSeed } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { LiveRunRow } from "../runLedger/types.js";
@@ -47,7 +47,7 @@ import type { AdmissionDeps, DispatchFollowUp, RestartContext, ResumeContext, Ru
 import type { AuthorizeDeps, GateCard, GateContext } from "./authorize.js";
 import { channelVisibilityOf, type RecordDeps } from "./record.js";
 import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel, liveViewLink } from "./reply.js";
-import { contextMessageTexts } from "./messages.js";
+import { contextMessageTexts, type TextTurn } from "./messages.js";
 import { ROUTED_CARD_FOOTER, routedLabel, routedPartLines, type RouteDecided } from "./route.js";
 
 /** What the provision stage reads off the dispatcher's dependencies. A run's
@@ -278,6 +278,15 @@ export interface RegisterRunContext {
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
   coordinator?: CoordinatorTag;
+  /** Where the run's conversation starts (run-history item 52): `parent` for
+   *  a spawned child, `channel` otherwise — on the registry row's meta from
+   *  the first moment, so the summary and the drain's record carry it. The
+   *  dispatcher always hands it; a hand-built context has none. */
+  seed?: RunSeed;
+  /** A spawned child's seed (`DispatchOptions.seed`): the turns its model
+   *  starts from, recorded as its `context` events in place of the thread its
+   *  lead was posted in — the record shows what the model saw. */
+  seedTurns?: TextTurn[];
   /** How the preset was chosen (`run_meta.agentSource`). */
   agentSource: AgentSource;
   /** The router's answer, when it gave one, as the record's `route` event: the
@@ -314,6 +323,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     admitted,
     parentRunId,
     coordinator,
+    seed,
+    seedTurns,
     agentSource,
     route,
   } = ctx;
@@ -371,6 +382,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       ...(parentRunId !== undefined ? { parentRunId } : {}),
       ...coordinatorFields(coordinator),
+      ...(seed !== undefined ? { seed } : {}),
     },
     // Under the run's id, at the card's start (the reservation's, or the
     // carried row's) — a resume replays its events, a restart starts them
@@ -463,9 +475,11 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   if (!resume && route) registry.publish(run.id, { type: "route", ...route, at: clock() });
   // The thread context fed to the model follows the request as `context`
   // events — text only, attachments as metadata lines, bounded to
-  // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES.
+  // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES. A spawned
+  // child's context is its seed — the parent's turns its model starts from —
+  // not the thread its lead was posted in: the record shows what the model saw.
   if (!resume && deps.config.config.runHistory?.includeContext !== false) {
-    for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
+    for (const text of contextMessageTexts(seedTurns ?? history, humanize)) publishText("context", text);
   }
   return { run, runId, channelVisibility, liveUrl, publishText, publishMeta };
 }
@@ -501,6 +515,8 @@ export interface ReserveContext {
   parentRunId?: string;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
   coordinator?: CoordinatorTag;
+  /** Where the run's conversation starts (item 52), on the row so a reclaim keeps it. */
+  seed?: RunSeed;
 }
 
 /**
@@ -529,6 +545,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     root,
     parentRunId,
     coordinator,
+    seed,
   } = ctx;
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
@@ -555,6 +572,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           profile,
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...coordinatorFields(coordinator),
+          ...(seed !== undefined ? { seed } : {}),
           request: requestRow,
         },
         card: card.handle ?? null,

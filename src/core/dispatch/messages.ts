@@ -30,6 +30,11 @@ export function buildMessages(
   return normalizeAlternation(messages);
 }
 
+// The seed's shape and its reduction live in ./textTurns.ts, a module with no
+// imports of its own, so the spawn stage can reach them without pulling this
+// module's dependencies into the dashboard's typecheck.
+export { textTurnsOf, type TextTurn } from "./textTurns.js";
+
 /**
  * Attachments first (images, then documents), then the user's text — a turn
  * always has at least one part. PDFs become a native `document` part; text/code

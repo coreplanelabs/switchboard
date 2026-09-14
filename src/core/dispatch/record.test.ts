@@ -312,6 +312,58 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect(isRunRecord(record)).toBe(true);
   });
 
+  // docs/reference/specs/run-history.md item 52: every record the one assembly
+  // writes names where the run's conversation started — the finish, the
+  // drain's interrupted record from the registry row, the reclaim's close from
+  // the ledger row; a caller without the fact leaves no key.
+  it("carries the seed — `parent` for a spawned child, `channel` otherwise — and validates; a caller without one leaves no key", () => {
+    const child = assembleRunRecord({ ...base(), parentRunId: "run-parent", seed: "parent" });
+    expect(child.seed).toBe("parent");
+    expect(isRunRecord(child)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(child)))).toBe(true);
+    expect(assembleRunRecord({ ...base(), seed: "channel" }).seed).toBe("channel");
+    expect("seed" in assembleRunRecord(base())).toBe(false);
+  });
+
+  it("the drain deadline's interrupted record and the reclaim's close carry the seed the row names", () => {
+    const registry = new RunRegistry({ genId: () => "run-child", genToken: () => "tok", now: () => 1000 });
+    const run = registry.create("research · child", {
+      agent: "research",
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:2.0",
+      parentRunId: "run-parent",
+      seed: "parent",
+    });
+    const interrupted = interruptedRunRecord(registry.getById(run.id)!, registry.snapshotById(run.id)!, 5000);
+    expect(interrupted).toMatchObject({ id: "run-child", seed: "parent" });
+    expect(isRunRecord(interrupted)).toBe(true);
+    const row: LiveRunRow = {
+      runId: "run-child",
+      threadKey: "slack:CX:2.0",
+      ownerGen: "gen-NEW",
+      leaseUntil: 9_000,
+      startedAt: 1_000,
+      phase: "live",
+      stop: null,
+      meta: {
+        agent: "research",
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:2.0",
+        parentRunId: "run-parent",
+        seed: "parent",
+      },
+      card: null,
+      system: "sys",
+      tools: [],
+      state: {},
+    };
+    const reclaimed = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 5_000 });
+    expect(reclaimed).toMatchObject({ id: "run-child", seed: "parent" });
+    expect(isRunRecord(reclaimed)).toBe(true);
+  });
+
   // docs/reference/specs/run-history.md item 48: a coordinator's child names its
   // instance and its spawn's key on every record the one assembly writes — the
   // finish, the drain's interrupted record from the registry row, the reclaim's
